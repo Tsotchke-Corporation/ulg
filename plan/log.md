@@ -82,7 +82,19 @@ Failures and open questions:
 - peercompute sidecar verified the current branch is clean and core tests/builds pass.
 - ICC/swarm sidecar found ICC indexes for MoonLab and peercompute, but parser refresh
   dependencies are missing until `make install-parsers` runs.
-- Eshkol sidecar is still pending as of this update.
+- Eshkol sidecar completed after the first commit. It found useful surfaces in
+  `exe/eshkol-run.cpp`, `inc/eshkol/llvm_backend.h`,
+  `lib/backend/llvm_codegen.cpp`, `inc/eshkol/backend/gpu/gpu_memory.h`,
+  `lib/backend/vm_gpu_dispatch.h`, `docs/breakdown/GPU_ACCELERATION.md`,
+  `scripts/run_web_tests.sh`, `scripts/check_wasm_imports.py`, and
+  `scripts/run_gpu_tests.sh`.
+- Eshkol sidecar verified `build/eshkol-run --version`,
+  `cmake --build build --target eshkol-run -j2`, native hello compile/run,
+  WASM hello emission, LLVM 21 config, CUDA GPU enabled config, and RTX 3090
+  visibility.
+- Eshkol sidecar found no real WebGPU/WGSL/Dawn/wgpu implementation. It also saw
+  a derivative/JIT command hang, so the service path should avoid JIT until that
+  is profiled.
 
 Additional commands run:
 

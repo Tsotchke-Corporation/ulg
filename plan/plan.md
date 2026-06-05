@@ -35,10 +35,17 @@ physics work:
 
 ### Eshkol
 
-- [ ] Identify compiler/runtime points for ULG closure manifests and WASM exports.
+- [x] Identify compiler/runtime points for ULG closure manifests and WASM exports.
 - [ ] Prototype closure artifact generation using the shared ABI contract.
 - [ ] Add WGSL/table strategy emitter only after descriptor conformance is stable.
-- [ ] Fold in the Eshkol sidecar report when it returns.
+- [x] Fold in the Eshkol sidecar report.
+- [ ] Start from `eshkol-run` CLI `--wasm`/target/export paths, `llvm_backend.h`,
+  `llvm_codegen.cpp`, GPU memory/VM dispatch APIs, and existing web/GPU scripts.
+- [ ] Add `define-ulg-closure`, closure artifact JSON emission, named WASM
+  reference exports, and service-worker-safe import glue.
+- [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
+  general LLVM-to-WGSL compiler.
+- [ ] Avoid JIT service paths until the observed derivative/JIT hang is profiled.
 
 ### MoonLab
 
@@ -51,6 +58,7 @@ physics work:
 ### Tooling
 
 - [x] Use ICC registry/status/architecture summaries for MoonLab and peercompute.
+- [x] Use sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - [ ] Run `make install-parsers` in ICC before refreshing indexes.
 - [ ] Register `eshkol` and `ulg` with ICC when persistent tool artifacts are wanted.
 - [ ] Use swarm lightly for status/context until a ULG-specific profile exists.

@@ -29,6 +29,12 @@ Playwright Chromium binary with `npx playwright install chromium`.
 
 - PeerCompute sidecar verified syntax, unit, Multiscale unit, Multiscale build,
   backend dry-run, and VPN coturn dry-run in `/home/cos/projects/peercompute`.
+- Eshkol sidecar verified `cmake --build build --target eshkol-run -j2`,
+  native hello compile/run, WASM hello emission, LLVM 21 build config, CUDA GPU
+  enabled config, and RTX 3090 visibility. It also found no real WebGPU/WGSL
+  implementation and one JIT derivative hang to avoid in the browser service path.
+- MoonLab sidecar verified native unit binaries and `qsim_test`, while JS unit
+  and integration tests need fixes before real MoonLab service integration.
 - Bring up the peercompute relay-backed local stack after the dummy ULG service
   smoke is stable.
 - Reuse peercompute's existing runtime P2P smoke harness where possible.

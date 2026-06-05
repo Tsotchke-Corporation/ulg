@@ -40,6 +40,12 @@ started consuming the shared service contract builders.
 
 - PeerCompute sidecar verified syntax, unit, Multiscale unit, Multiscale build,
   backend dry-run, and VPN coturn dry-run in `/home/cos/projects/peercompute`.
+- PeerCompute service orchestration checks on 2026-06-05:
+  `node --check` on new modules/tests/index passed,
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js` passed 5/5,
+  targeted ComputeManager/SolverRegistry integration gate passed 28/28,
+  `npm --prefix peercompute run test:unit` passed 121/121, and
+  `git diff --check` passed.
 - Eshkol sidecar verified `cmake --build build --target eshkol-run -j2`,
   native hello compile/run, WASM hello emission, LLVM 21 build config, CUDA GPU
   enabled config, and RTX 3090 visibility. It also found no real WebGPU/WGSL

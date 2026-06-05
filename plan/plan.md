@@ -29,12 +29,14 @@ physics work:
 
 - [x] Review current multiscale runtime and remote-placement branch work.
 - [x] Map existing NodeKernel and ComputeManager surfaces to ULG service hosting.
-- [ ] Add or refactor reusable orchestration modules after the ULG app slice is stable.
+- [x] Add reusable headless service orchestration modules after the ULG app slice is stable.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
+- [ ] Wire real ULG/Eshkol/MoonLab worker services into the new supervisor and
+  adapter layer.
 
 ### Eshkol
 

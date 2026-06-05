@@ -264,6 +264,68 @@ Failures and open questions:
   `@moonlab/quantum-algorithms` package issue.
 - No SSH password was used or logged.
 
+## 2026-06-05 15:39:15 AKDT
+
+Prompt: "big dog, you are the peercompute implementation agent for the ULG effort. Work in /home/cos/projects/peercompute on the current branch only; do not switch branches. Read /home/cos/projects/peercompute/AGENTS.md, /home/cos/projects/ulg/agents.md, /home/cos/projects/AGENTS.md, and /home/cos/projects/ulg/plan/plan.md before editing. Do not use or log any SSH password. Scope: implement the first reusable PeerCompute service-orchestration slice inspired by the ULG demo contract, preferably in vanilla JS under peercompute/src/peercompute or a nearby existing pattern. Target modules: ComputeServiceRegistry, ChildWorkerLeaseManager, WorkerSupervisor or an adapter layer that can be tested without a browser. Reuse existing ComputeManager/SolverRegistry/NodeKernel patterns where reasonable, but keep the patch focused. Add unit tests. Run relevant node tests. Commit locally when you reach a passing, coherent checkpoint if the repo policy allows; otherwise leave changes staged/unstaged and report exact files. Final report must list files changed, tests run, pass/fail, and any follow-up needed."
+
+Actions attempted:
+
+- PeerCompute agent worked on current `multi-scale-physics-sim` branch and
+  committed local checkpoint `975c23e1 Add service orchestration primitives`.
+- Added reusable headless service orchestration primitives:
+  `ComputeServiceRegistry`, `ChildWorkerLeaseManager`, `WorkerSupervisor`, and
+  `ComputeManagerServiceAdapter`.
+- Exported the new package through `peercompute/src/peercompute/index.js`.
+- Added service orchestration unit tests.
+- Updated peercompute README and plan/test/log docs.
+- Coordinator verified peercompute is clean and ahead of origin by one commit.
+
+Commands run:
+
+```bash
+node --check peercompute/src/peercompute/serviceOrchestration/ComputeServiceRegistry.js
+node --check peercompute/src/peercompute/serviceOrchestration/ChildWorkerLeaseManager.js
+node --check peercompute/src/peercompute/serviceOrchestration/WorkerSupervisor.js
+node --check peercompute/src/peercompute/serviceOrchestration/ComputeManagerServiceAdapter.js
+node --check peercompute/src/peercompute/serviceOrchestration/index.js
+node --check peercompute/tests/unit/serviceOrchestration.test.js
+node --check peercompute/src/peercompute/index.js
+node --test peercompute/tests/unit/serviceOrchestration.test.js
+node --test peercompute/tests/unit/serviceOrchestration.test.js peercompute/tests/unit/computeManager.worker.test.js peercompute/tests/unit/solverRegistry.test.js
+npm --prefix peercompute run test:unit
+git diff --check
+```
+
+Files touched in PeerCompute:
+
+- `/home/cos/projects/peercompute/README.md`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/index.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/serviceOrchestration/ComputeServiceRegistry.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/serviceOrchestration/ChildWorkerLeaseManager.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/serviceOrchestration/WorkerSupervisor.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/serviceOrchestration/ComputeManagerServiceAdapter.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/serviceOrchestration/index.js`
+- `/home/cos/projects/peercompute/peercompute/tests/unit/serviceOrchestration.test.js`
+- `/home/cos/projects/peercompute/plan/plan.md`
+- `/home/cos/projects/peercompute/plan/tests.md`
+- `/home/cos/projects/peercompute/plan/log.md`
+
+Test results:
+
+- `node --check` on new modules, test, and public index passed.
+- `node --test peercompute/tests/unit/serviceOrchestration.test.js` passed 5/5.
+- Targeted integrated gate with ComputeManager/SolverRegistry tests passed 28/28.
+- `npm --prefix peercompute run test:unit` passed 121/121.
+- `git diff --check` passed.
+
+Failures and open questions:
+
+- No browser or relay smoke was run for this slice because it is a headless
+  unit-tested orchestration foundation.
+- Next step is wiring real ULG/Eshkol/MoonLab worker services into this
+  supervisor/adapter layer.
+- No SSH password was used or logged.
+
 ## 2026-06-05 15:24:38 AKDT
 
 Prompt: "big dog, you are the ULG app integration agent. Work in /home/cos/projects/ulg on the current branch only; do not switch branches. Read /home/cos/projects/ulg/agents.md, /home/cos/projects/AGENTS.md, /home/cos/projects/ulg/plan/plan.md, /home/cos/projects/ulg/plan/tests.md, and /home/cos/projects/ulg/plan/log.md before editing. Do not stop or restart the existing Vite server unless needed. Scope: improve the ULG app/ABI scaffold without overlapping peercompute/MoonLab/Eshkol repo edits. Add a small service contract export or docs/tests that will make cross-repo integration easier, such as shared manifests/examples, schema fixture tests, or a stable adapter README. Keep the demo vanilla JS/three.js. Run npm test/build/e2e if your changes affect behavior. Commit locally if you reach a passing checkpoint. Final report must list files changed, tests run, and any user-visible demo change."

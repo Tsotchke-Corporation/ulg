@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 15:36:52 AKDT
+Updated: 2026-06-05 15:39:15 AKDT
 
 ## Done
 
@@ -46,6 +46,12 @@ Updated: 2026-06-05 15:36:52 AKDT
   pure-state purity behavior.
 - Verified `bindings/javascript/packages/core/dist/moonlab.js` and
   `moonlab.wasm` exist after the MoonLab core build.
+- PeerCompute `multi-scale-physics-sim` branch now has local commit `975c23e1`
+  adding reusable service orchestration primitives: `ComputeServiceRegistry`,
+  `ChildWorkerLeaseManager`, `WorkerSupervisor`, and
+  `ComputeManagerServiceAdapter`.
+- PeerCompute service orchestration tests passed headlessly and the package is
+  exported through the public peercompute index.
 
 ## In Progress
 
@@ -62,4 +68,5 @@ Updated: 2026-06-05 15:36:52 AKDT
 - Prototype MoonLab quantum response artifact output now that core WASM artifacts
   are loadable from `packages/core/dist`.
 - Add browser/service-worker smoke for MoonLab `locateFile` and WASM MIME loading.
-- Run the full peercompute relay-backed local stack.
+- Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
+  and then run the full peercompute relay-backed local stack.

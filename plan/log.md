@@ -258,6 +258,99 @@ Failures and open questions:
 
 - ULG still needs app-side service-worker cache/copy wiring and browser smoke
   verification for MoonLab core.
+
+## 2026-06-05 15:49:09 AKDT
+
+Prompt: "big dog, second-wave ULG app task. Work in /home/cos/projects/ulg on current branch only; do not switch branches. Read agents.md, plan/plan.md, plan/tests.md, and plan/log.md first. Keep the existing Vite server live on 0.0.0.0; do not restart unless necessary. Do not use or log any SSH password. Scope: add browser-facing service asset/probe glue for real service readiness without copying sibling repo source. Examples: a documented `service-assets/` convention, a MoonLab WASM locateFile/MIME probe that can be pointed at copied artifacts, or tests proving the ULG service contract fixtures can be consumed by a browser worker. Keep vanilla JS/three.js. Run npm test/build/e2e if behavior changes. Commit locally if passing. Final report: files changed, tests, demo impact."
+
+Actions attempted:
+
+- Read `agents.md`, `plan/plan.md`, `plan/tests.md`, and `plan/log.md` first.
+- Confirmed the current ULG worktree was clean on `main` and did not switch
+  branches.
+- Confirmed the existing Vite server stayed live on `0.0.0.0:5173` under PID
+  3893171; did not restart it.
+- Added `public/service-assets/` as the documented browser asset convention for
+  copied service artifacts while ignoring real copied artifacts by default.
+- Added ABI service asset helpers for MoonLab and extended service manifests with
+  `entry.loaderModule`, `entry.wasmModule`, and `entry.serviceAssets`.
+- Added browser/worker service asset probe code that checks loader/WASM
+  fetchability, expected WASM MIME, and MoonLab `locateFile("moonlab.wasm")`
+  resolution.
+- Classified Vite's app-shell `text/html` fallback for declared service assets
+  as `missing`, so absent copied artifacts are reported clearly.
+- Wired probe status through the dummy service worker, supervisor telemetry,
+  `window.__ulgDemo.telemetry`, and the service registry UI.
+- Updated the MoonLab service fixture to declare `/service-assets/moonlab/`
+  artifacts without committing MoonLab source or real build outputs.
+- Added unit tests for asset spec/probe behavior and a Playwright browser-worker
+  smoke that consumes the published MoonLab manifest/task fixtures.
+
+Commands run:
+
+```bash
+sed -n '1,240p' agents.md
+sed -n '1,260p' plan/plan.md
+sed -n '1,260p' plan/tests.md
+sed -n '1,260p' plan/log.md
+git status --short --branch
+ss -ltnp
+npm test
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+Files touched:
+
+- `.gitignore`
+- `README.md`
+- `public/service-assets/README.md`
+- `public/service-assets/eshkol/.gitkeep`
+- `public/service-assets/moonlab/.gitkeep`
+- `src/main.js`
+- `src/runtime/ServiceAssetProbe.js`
+- `src/runtime/WorkerSupervisor.js`
+- `src/runtime/demoRuntime.js`
+- `src/services/dummyService.worker.js`
+- `src/services/serviceContractProbe.worker.js`
+- `src/styles.css`
+- `tests/contract-fixtures.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/service-assets.test.mjs`
+- `ulg-gpu-abi/README.md`
+- `ulg-gpu-abi/examples/moonlab-service-manifest.json`
+- `ulg-gpu-abi/src/schemas/compute_service_manifest.schema.json`
+- `ulg-gpu-abi/src/serviceContract.js`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Test results:
+
+- `npm test` passed 13/13.
+- `npm run build` passed with the existing large three.js chunk warning.
+- `npm run test:e2e` passed 1/1 Chromium test.
+- `git diff --check` passed.
+
+Demo impact:
+
+- The live demo still runs the dummy Eshkol/MoonLab smoke.
+- MoonLab telemetry now reports asset probe status for the conventional
+  `/service-assets/moonlab/moonlab.js` and `.wasm` paths. With no copied
+  artifacts present, the status is expected to report missing; copying real
+  artifacts there turns the same probe into the readiness check.
+- The published MoonLab fixture can now be consumed from a browser worker, and
+  the worker resolves the expected `locateFile("moonlab.wasm")` URL.
+
+Failures and open questions:
+
+- No SSH password was used or logged.
+- All commits for this slice are local-only; no push should be attempted.
+- No real MoonLab or Eshkol artifacts were copied into the ULG app in this slice.
+- A minimal MoonLab core task still needs to be wrapped once artifacts are copied
+  into `public/service-assets/moonlab/`.
 - Verify `moonlab.wasm` MIME type and `locateFile` resolution from the ULG
   service-worker/cache path.
 - Whole MoonLab JS workspace build remains blocked by the separate

@@ -35,7 +35,8 @@ export class WorkerSupervisor {
       worker,
       status: 'spawning',
       heartbeatAt: null,
-      telemetry: {}
+      telemetry: {},
+      assetProbe: null
     };
     worker.addEventListener('message', (event) => this.#handleMessage(handle, event.data));
     worker.addEventListener('error', (event) => {
@@ -104,6 +105,7 @@ export class WorkerSupervisor {
         workerId: handle.workerId,
         status: handle.status,
         heartbeatAt: handle.heartbeatAt,
+        assetProbe: handle.assetProbe,
         telemetry: handle.telemetry,
         capabilities: handle.manifest.capabilities
       })),
@@ -126,10 +128,12 @@ export class WorkerSupervisor {
   async #handleMessage(handle, message) {
     if (message.type === 'ready') {
       handle.status = 'ready';
+      handle.assetProbe = message.assetProbe ?? handle.assetProbe;
     }
     if (message.type === 'heartbeat') {
       handle.heartbeatAt = Date.now();
       handle.telemetry = message.telemetry ?? {};
+      handle.assetProbe = message.telemetry?.assetProbe ?? handle.assetProbe;
     }
     if (message.type === 'task-status') {
       const task = this.tasks.get(message.rootTaskId);

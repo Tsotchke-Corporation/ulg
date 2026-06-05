@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 15:39:15 AKDT
+Updated: 2026-06-05 15:49:09 AKDT
 
 ## Done
 
@@ -52,6 +52,15 @@ Updated: 2026-06-05 15:39:15 AKDT
   `ComputeManagerServiceAdapter`.
 - PeerCompute service orchestration tests passed headlessly and the package is
   exported through the public peercompute index.
+- Added the browser-facing `public/service-assets/` convention for copied
+  MoonLab/Eshkol artifacts without copying sibling repo source.
+- Added MoonLab service asset manifest helpers and worker-side probes for
+  `moonlab.js`, `moonlab.wasm`, expected WASM MIME, and
+  `locateFile("moonlab.wasm")` resolution.
+- Added service telemetry for asset probe status and a browser worker smoke that
+  consumes the published MoonLab service manifest/task fixtures.
+- Verified `npm test`, `npm run build`, `npm run test:e2e`, and
+  `git diff --check` after the asset-probe slice.
 
 ## In Progress
 
@@ -66,7 +75,7 @@ Updated: 2026-06-05 15:39:15 AKDT
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
   real closure tensor descriptors once the descriptor contract is stable.
 - Prototype MoonLab quantum response artifact output now that core WASM artifacts
-  are loadable from `packages/core/dist`.
-- Add browser/service-worker smoke for MoonLab `locateFile` and WASM MIME loading.
+  can be copied into `public/service-assets/moonlab/` and probed by the browser
+  worker.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

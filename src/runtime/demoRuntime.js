@@ -1,4 +1,5 @@
 import {
+  createMoonLabServiceAssetSpec,
   createUlgServiceManifest,
   createUlgTaskCapsule
 } from '../../ulg-gpu-abi/src/serviceContract.js';
@@ -37,7 +38,9 @@ export async function createDemoRuntime() {
   }));
   await registry.register(createUlgServiceManifest({
     serviceId: 'moonlab',
+    runtime: 'wasm',
     workerModule: serviceWorkerModule,
+    serviceAssets: createMoonLabServiceAssetSpec(),
     childWorkerModule,
     validation: {
       toleranceProfile: 'quantum-response-demo'

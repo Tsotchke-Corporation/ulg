@@ -1,16 +1,16 @@
+import { probeManifestServiceAssets } from '../runtime/ServiceAssetProbe.js';
+
 let workerId = null;
 let manifest = null;
 let heartbeat = null;
+let assetProbe = null;
 const activeTasks = new Map();
 const pendingLeaseRequests = new Map();
 
 self.addEventListener('message', (event) => {
   const message = event.data;
   if (message.type === 'init') {
-    workerId = message.workerId;
-    manifest = message.manifest;
-    heartbeat = setInterval(sendHeartbeat, 500);
-    self.postMessage({ type: 'ready', workerId, serviceId: manifest.serviceId });
+    initService(message);
   }
   if (message.type === 'submit-task') {
     startTask(message.task);
@@ -41,6 +41,17 @@ self.addEventListener('message', (event) => {
     self.close();
   }
 });
+
+async function initService(message) {
+  workerId = message.workerId;
+  manifest = message.manifest;
+  assetProbe = await probeManifestServiceAssets(manifest, {
+    fetchImpl: self.fetch?.bind(self),
+    locationHref: self.location?.href
+  });
+  heartbeat = setInterval(sendHeartbeat, 500);
+  self.postMessage({ type: 'ready', workerId, serviceId: manifest.serviceId, assetProbe });
+}
 
 function startTask(taskCapsule) {
   const task = {
@@ -176,7 +187,8 @@ function sendHeartbeat() {
     telemetry: {
       activeTasks: activeTasks.size,
       children: [...activeTasks.values()].reduce((total, task) => total + task.children.length, 0),
-      memoryEstimateBytes: activeTasks.size * 1024 * 1024
+      memoryEstimateBytes: activeTasks.size * 1024 * 1024,
+      assetProbe
     }
   });
 }

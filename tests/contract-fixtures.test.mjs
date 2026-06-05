@@ -31,6 +31,9 @@ test('service-contract builders reproduce fixture defaults', () => {
       version: fixture.version,
       runtime: fixture.runtime,
       workerModule: fixture.entry.workerModule,
+      loaderModule: fixture.entry.loaderModule,
+      wasmModule: fixture.entry.wasmModule,
+      serviceAssets: fixture.entry.serviceAssets,
       childWorkers: {
         allowedModules: fixture.childWorkers.allowedModules
       },
@@ -40,6 +43,7 @@ test('service-contract builders reproduce fixture defaults', () => {
     });
 
     assert.deepEqual(built.capabilities, fixture.capabilities);
+    assert.deepEqual(built.entry, fixture.entry);
     assert.deepEqual(built.taskKinds, fixture.taskKinds);
     assert.deepEqual(built.abi, fixture.abi);
     assert.deepEqual(built.resources, fixture.resources);

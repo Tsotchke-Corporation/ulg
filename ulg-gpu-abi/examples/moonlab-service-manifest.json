@@ -1,9 +1,24 @@
 {
   "serviceId": "moonlab",
   "version": "0.5.0-demo",
-  "runtime": "js",
+  "runtime": "wasm",
   "entry": {
-    "workerModule": "./workers/moonlab.service.worker.js"
+    "workerModule": "./workers/moonlab.service.worker.js",
+    "loaderModule": "/service-assets/moonlab/moonlab.js",
+    "wasmModule": "/service-assets/moonlab/moonlab.wasm",
+    "serviceAssets": {
+      "serviceId": "moonlab",
+      "rootPath": "/service-assets",
+      "baseUrl": "/service-assets/moonlab/",
+      "loaderModule": "/service-assets/moonlab/moonlab.js",
+      "wasmModule": "/service-assets/moonlab/moonlab.wasm",
+      "locateFileProbe": "moonlab.wasm",
+      "required": ["loaderModule", "wasmModule"],
+      "files": {
+        "loaderModule": "moonlab.js",
+        "wasmModule": "moonlab.wasm"
+      }
+    }
   },
   "childWorkers": {
     "allowed": true,

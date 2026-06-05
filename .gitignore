@@ -5,3 +5,8 @@ test-results/
 playwright-report/
 *.log
 *.swp
+public/service-assets/**
+!public/service-assets/
+!public/service-assets/README.md
+!public/service-assets/**/
+!public/service-assets/**/.gitkeep

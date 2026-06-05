@@ -76,12 +76,13 @@ runtime.runSmoke();
 function renderTelemetry(telemetry) {
   gpuStatus.textContent = telemetry.gpu.supported ? 'webgpu ready' : 'wasm/cpu fallback';
   capabilitiesEl.innerHTML = telemetry.services.map((service) => `
-    <div class="terminal-row">
+    <div class="terminal-row service-row">
       <span class="service-name">${service.serviceId}</span>
       <span>${service.status}</span>
+      <span>${formatAssetProbe(service.assetProbe)}</span>
       <span>${service.capabilities.length} caps</span>
     </div>
-    <p class="cap-line">${service.capabilities.join(' / ')}</p>
+    <p class="cap-line">${service.capabilities.join(' / ')}${renderAssetProbeLine(service.assetProbe)}</p>
   `).join('');
 
   taskCount.textContent = `${telemetry.tasks.length} tasks`;
@@ -112,4 +113,25 @@ function renderTelemetry(telemetry) {
     </div>
     <p class="cap-line">${record.ref.uri}</p>
   `).join('');
+}
+
+function formatAssetProbe(probe) {
+  if (!probe) {
+    return 'assets pending';
+  }
+  if (probe.status === 'skipped') {
+    return 'assets n/a';
+  }
+  return `assets ${probe.status}`;
+}
+
+function renderAssetProbeLine(probe) {
+  if (!probe || probe.status === 'skipped') {
+    return '';
+  }
+  const assets = probe.assets
+    .map((asset) => `${asset.kind}:${asset.status}`)
+    .join(' / ');
+  const locateFile = probe.locateFile ? ` :: locateFile(${probe.locateFile.input}) -> ${probe.locateFile.resolved}` : '';
+  return `<br>${assets}${locateFile}`;
 }

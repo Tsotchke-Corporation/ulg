@@ -23,6 +23,8 @@ physics work:
 - [x] Export stable service contract builders and cross-repo JSON fixtures.
 - [x] Implement PeerCompute-style registry, supervisor, leases, GPU probe, and cache.
 - [x] Implement dummy Eshkol and MoonLab service workers.
+- [x] Add browser-facing service asset convention and MoonLab WASM locateFile/MIME
+  probes for copied artifacts.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -61,8 +63,10 @@ physics work:
 - [ ] Add deterministic CPU/WebGPU parity artifact surface.
 - [x] Fix JS unit regressions and WASM dist packaging before real service integration.
 - [ ] Add browser WebGPU complex64/parity kernels with unsupported fallback reporting.
-- [ ] Add ULG/browser smoke that serves `moonlab.wasm`, verifies `locateFile`,
-  and wraps a minimal MoonLab core task in a supervised service worker.
+- [x] Add ULG/browser smoke that verifies MoonLab `locateFile`/WASM asset probe
+  wiring and consumes the published service fixtures in a browser worker.
+- [ ] Wrap a minimal MoonLab core task in a supervised service worker once copied
+  artifacts are available under `public/service-assets/moonlab/`.
 
 ### Tooling
 

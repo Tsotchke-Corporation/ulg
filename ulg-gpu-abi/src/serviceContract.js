@@ -22,6 +22,8 @@ export const ULG_ARTIFACT_KINDS = Object.freeze({
   quantumResponse: 'quantum-response'
 });
 
+export const ULG_SERVICE_ASSET_ROOT = '/service-assets';
+
 export const ULG_DEFAULT_SUPPORTED_DTYPES = Object.freeze(['f32', 'complex64']);
 export const ULG_DEFAULT_SUPPORTED_LAYOUTS = Object.freeze(['soa', 'interleaved', 'row-major']);
 
@@ -98,13 +100,56 @@ export function getUlgServiceContract(serviceId) {
   };
 }
 
+export function createUlgServiceAssetSpec({
+  serviceId,
+  rootPath = ULG_SERVICE_ASSET_ROOT,
+  loaderFile,
+  wasmFile,
+  locateFileProbe,
+  required = []
+}) {
+  if (!serviceId) {
+    throw new Error('serviceId is required for ULG service asset specs');
+  }
+
+  const baseUrl = joinUrl(rootPath, serviceId, '');
+  const files = compact({
+    loaderModule: loaderFile,
+    wasmModule: wasmFile
+  });
+
+  return compact({
+    serviceId,
+    rootPath,
+    baseUrl,
+    loaderModule: loaderFile ? joinUrl(baseUrl, loaderFile) : undefined,
+    wasmModule: wasmFile ? joinUrl(baseUrl, wasmFile) : undefined,
+    locateFileProbe,
+    required,
+    files
+  });
+}
+
+export function createMoonLabServiceAssetSpec(options = {}) {
+  return createUlgServiceAssetSpec({
+    serviceId: ULG_SERVICE_IDS.moonlab,
+    loaderFile: 'moonlab.js',
+    wasmFile: 'moonlab.wasm',
+    locateFileProbe: 'moonlab.wasm',
+    required: ['loaderModule', 'wasmModule'],
+    ...options
+  });
+}
+
 export function createUlgServiceManifest({
   serviceId,
   version = '0.5.0-demo',
   runtime = 'js',
   workerModule,
+  loaderModule,
   wasmModule,
   initExport,
+  serviceAssets,
   childWorkerModule,
   childWorkers = {},
   resources = {},
@@ -118,14 +163,18 @@ export function createUlgServiceManifest({
   }
 
   const contract = getUlgServiceContract(serviceId);
+  const resolvedLoaderModule = loaderModule ?? serviceAssets?.loaderModule;
+  const resolvedWasmModule = wasmModule ?? serviceAssets?.wasmModule;
   const allowedModules = [...(childWorkers.allowedModules ?? [])];
   if (childWorkerModule && !allowedModules.includes(childWorkerModule)) {
     allowedModules.push(childWorkerModule);
   }
   const entry = compact({
     workerModule,
-    wasmModule,
-    initExport
+    loaderModule: resolvedLoaderModule,
+    wasmModule: resolvedWasmModule,
+    initExport,
+    serviceAssets
   });
 
   return {
@@ -221,6 +270,20 @@ export function createUlgTaskCapsule({
 
 function compact(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+function joinUrl(...parts) {
+  const [first = '', ...rest] = parts;
+  let path = String(first).replace(/\/+$/, '');
+  for (const part of rest) {
+    const value = String(part);
+    if (value === '') {
+      path = `${path}/`;
+      continue;
+    }
+    path = `${path}/${value.replace(/^\/+|\/+$/g, '')}`;
+  }
+  return path || '/';
 }
 
 function deepFreeze(value) {

@@ -25,6 +25,8 @@ announcement, and provenance indexing.
 Adapters should provide a compute service manifest with:
 
 - `entry.workerModule`: service worker module URL.
+- `entry.serviceAssets`: browser-facing loader/WASM paths under
+  `/service-assets/<service>/` when real artifacts are copied into the ULG app.
 - `childWorkers.allowedModules`: child worker module URLs approved by the host.
 - `capabilities` and `taskKinds`: copied from `getUlgServiceContract(serviceId)`
   unless an implementation has a narrower supported set.
@@ -47,3 +49,24 @@ The `examples/` directory contains static JSON fixtures for cross-repo tests:
 
 Use them to validate parser/schema compatibility before wiring real PeerCompute,
 Eshkol, or MoonLab adapters into the demo.
+
+## Browser Asset Readiness
+
+The app-level convention is documented in `public/service-assets/README.md`.
+MoonLab browser readiness should use:
+
+```js
+import { createMoonLabServiceAssetSpec } from '@ulg/gpu-abi/service-contract';
+
+createUlgServiceManifest({
+  serviceId: 'moonlab',
+  runtime: 'wasm',
+  workerModule,
+  serviceAssets: createMoonLabServiceAssetSpec()
+});
+```
+
+That declares `/service-assets/moonlab/moonlab.js`,
+`/service-assets/moonlab/moonlab.wasm`, and the expected Emscripten
+`locateFile("moonlab.wasm")` resolution. The ULG app probes those URLs in a
+browser worker and reports asset readiness in service telemetry.

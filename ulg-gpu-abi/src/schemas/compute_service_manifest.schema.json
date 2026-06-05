@@ -15,8 +15,27 @@
       "required": ["workerModule"],
       "properties": {
         "workerModule": { "type": "string", "minLength": 1 },
+        "loaderModule": { "type": "string" },
         "wasmModule": { "type": "string" },
-        "initExport": { "type": "string" }
+        "initExport": { "type": "string" },
+        "serviceAssets": {
+          "type": "object",
+          "required": ["serviceId", "rootPath", "baseUrl"],
+          "additionalProperties": true,
+          "properties": {
+            "serviceId": { "type": "string", "minLength": 1 },
+            "rootPath": { "type": "string", "minLength": 1 },
+            "baseUrl": { "type": "string", "minLength": 1 },
+            "loaderModule": { "type": "string" },
+            "wasmModule": { "type": "string" },
+            "locateFileProbe": { "type": "string" },
+            "required": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "files": { "type": "object" }
+          }
+        }
       }
     },
     "childWorkers": {

@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 10/10 tests on 2026-06-05 after adding adapter fixture
-coverage.
+Current result: pass, 13/13 tests on 2026-06-05 after adding service asset
+probe coverage.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -13,6 +13,10 @@ coverage.
 - Static Eshkol/MoonLab adapter fixtures validate against the shared schemas.
 - Service contract builders reproduce the published manifest defaults and emit a
   schema-compatible default MoonLab task capsule.
+- MoonLab service asset specs resolve `locateFile("moonlab.wasm")` to the
+  `/service-assets/moonlab/moonlab.wasm` convention.
+- Service asset probes classify ready, missing, and wrong-MIME loader/WASM
+  responses.
 - Registry resolution, child-worker lease limits, artifact cache behavior, and
   GPU fallback probe behavior.
 
@@ -21,18 +25,23 @@ coverage.
 Command: `npm run build`
 
 Current result: pass on 2026-06-05 after the service-contract runtime refactor,
-with the existing large three.js chunk warning.
+and again after service asset probes, with the existing large three.js chunk
+warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-05 after the demo runtime
-started consuming the shared service contract builders.
+started consuming the shared service contract builders and after the service
+asset-probe slice.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
 - Verify worker telemetry appears.
+- Verify MoonLab service telemetry includes non-skipped asset probe status.
+- Verify the published MoonLab service/task fixtures can be consumed by a browser
+  worker and resolve the expected `locateFile` WASM URL.
 - Verify the three.js canvas is nonblank at desktop and mobile viewport sizes.
 - Save screenshots into `test-results/`.
 

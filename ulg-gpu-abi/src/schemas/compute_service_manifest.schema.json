@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ULG Compute Service Manifest v0.5",
+  "type": "object",
+  "required": ["serviceId", "version", "runtime", "entry", "childWorkers", "resources", "capabilities", "abi", "validation"],
+  "additionalProperties": true,
+  "properties": {
+    "serviceId": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "minLength": 1 },
+    "runtime": {
+      "enum": ["wasm", "webgpu", "wasm-webgpu", "js", "native-bridge"]
+    },
+    "entry": {
+      "type": "object",
+      "required": ["workerModule"],
+      "properties": {
+        "workerModule": { "type": "string", "minLength": 1 },
+        "wasmModule": { "type": "string" },
+        "initExport": { "type": "string" }
+      }
+    },
+    "childWorkers": {
+      "type": "object",
+      "required": ["allowed", "maxChildren", "allowedModules", "sameOriginOnly"],
+      "properties": {
+        "allowed": { "type": "boolean" },
+        "maxChildren": { "type": "integer", "minimum": 0 },
+        "allowedModules": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "sameOriginOnly": { "const": true }
+      }
+    },
+    "resources": { "type": "object" },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "abi": {
+      "type": "object",
+      "required": ["ulgIrVersion", "gpuAbiVersion", "supportedDTypes", "supportedLayouts"]
+    },
+    "validation": {
+      "type": "object",
+      "required": ["requiresCpuReference", "toleranceProfile", "parityModes"]
+    }
+  }
+}

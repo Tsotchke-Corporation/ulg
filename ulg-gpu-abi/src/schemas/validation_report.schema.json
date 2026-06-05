@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ULG Validation Report v0.5",
+  "type": "object",
+  "required": ["reportId", "status", "mode", "toleranceProfile", "metrics", "provenance"],
+  "additionalProperties": true,
+  "properties": {
+    "reportId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["pass", "warn", "fail", "unsupported"] },
+    "mode": { "enum": ["none", "self", "cpu-reference", "quorum", "spot-check", "physics-invariant"] },
+    "toleranceProfile": { "type": "string", "minLength": 1 },
+    "metrics": { "type": "object" },
+    "provenance": { "type": "object" }
+  }
+}

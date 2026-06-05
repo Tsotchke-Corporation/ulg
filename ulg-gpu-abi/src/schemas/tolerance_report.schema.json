@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ULG Tolerance Report v0.5",
+  "type": "object",
+  "required": ["abiVersion", "status", "toleranceProfile", "metrics", "provenance"],
+  "additionalProperties": true,
+  "properties": {
+    "abiVersion": { "const": "0.5" },
+    "status": { "enum": ["pass", "warn", "fail", "unsupported"] },
+    "toleranceProfile": { "type": "string", "minLength": 1 },
+    "metrics": { "type": "object" },
+    "provenance": { "type": "object" }
+  }
+}

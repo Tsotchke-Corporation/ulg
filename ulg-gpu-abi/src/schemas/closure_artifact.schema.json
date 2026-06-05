@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ULG Closure Artifact v0.5",
+  "type": "object",
+  "required": ["closureId", "sourceService", "closureKind", "inputs", "outputs", "execution", "validity", "provenance"],
+  "additionalProperties": true,
+  "properties": {
+    "closureId": { "type": "string", "minLength": 1 },
+    "sourceService": { "type": "string", "minLength": 1 },
+    "closureKind": { "type": "string", "minLength": 1 },
+    "inputs": { "type": "array" },
+    "outputs": { "type": "array" },
+    "derivatives": { "type": "array" },
+    "execution": { "type": "object" },
+    "validity": { "type": "object" },
+    "uncertainty": { "type": "object" },
+    "validation": { "type": "object" },
+    "provenance": { "type": "object" }
+  }
+}

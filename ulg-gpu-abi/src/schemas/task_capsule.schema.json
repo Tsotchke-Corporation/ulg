@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ULG Task Capsule v0.5",
+  "type": "object",
+  "required": ["taskId", "rootTaskId", "serviceId", "taskKind", "inputHash", "methodHash", "resources", "validation", "provenance"],
+  "additionalProperties": true,
+  "properties": {
+    "taskId": { "type": "string", "minLength": 1 },
+    "rootTaskId": { "type": "string", "minLength": 1 },
+    "serviceId": { "type": "string", "minLength": 1 },
+    "taskKind": { "type": "string", "minLength": 1 },
+    "inputs": { "type": "array" },
+    "outputs": { "type": "array" },
+    "unitsHash": { "type": "string" },
+    "inputHash": { "type": "string", "minLength": 1 },
+    "methodHash": { "type": "string", "minLength": 1 },
+    "deterministicSeed": { "type": "string" },
+    "resources": {
+      "type": "object",
+      "required": ["priority"],
+      "properties": {
+        "childWorkers": { "type": "integer", "minimum": 0 },
+        "gpu": { "enum": ["none", "optional", "required"] },
+        "wasmMemoryBytes": { "type": "integer", "minimum": 0 },
+        "gpuMemoryBytes": { "type": "integer", "minimum": 0 },
+        "priority": {
+          "enum": ["render", "interactive", "simulation", "background", "validation"]
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "required": ["mode", "toleranceProfile"],
+      "properties": {
+        "mode": { "enum": ["none", "self", "cpu-reference", "quorum", "spot-check"] },
+        "toleranceProfile": { "type": "string" }
+      }
+    },
+    "provenance": { "type": "object" }
+  }
+}

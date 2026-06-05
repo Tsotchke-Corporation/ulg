@@ -44,6 +44,11 @@ started consuming the shared service contract builders.
   native hello compile/run, WASM hello emission, LLVM 21 build config, CUDA GPU
   enabled config, and RTX 3090 visibility. It also found no real WebGPU/WGSL
   implementation and one JIT derivative hang to avoid in the browser service path.
+- Eshkol ULG artifact helper checks on 2026-06-05:
+  `ctest --test-dir build -R 'ulg_closure_artifact_test|eshkol_run_profile_cli_test|execution_profile_test' --output-on-failure`
+  passed 3/3; native hello compiled and ran; WASM hello emitted a valid
+  `\0asm` module; generated `hello.ulg.json` validated against
+  `ulg-gpu-abi/src/schemas/closure_artifact.schema.json`.
 - MoonLab sidecar verified native unit binaries and `qsim_test`, while JS unit
   and integration tests need fixes before real MoonLab service integration.
 - Bring up the peercompute relay-backed local stack after the dummy ULG service

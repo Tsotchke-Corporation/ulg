@@ -107,6 +107,98 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
+## 2026-06-05 15:32:53 AKDT
+
+Prompt: "big dog, you are the Eshkol implementation agent for the ULG effort. Work in /home/cos/projects/eshkol on the current branch only; do not switch branches. Read /home/cos/projects/ulg/agents.md and /home/cos/projects/AGENTS.md before editing. Do not use or log any SSH password. The user lacks push rights on Eshkol, so local commits/patches are fine but note they may need manual deployment. Scope: implement the smallest Eshkol-side ULG closure artifact readiness slice. Prefer additive files/tests around a ULG ABI/closure manifest emitter or a service-worker-safe JSON artifact command/helper, using existing examples and WASM export paths. Avoid JIT paths. Run feasible build/test/hello/WASM checks. Commit locally at a coherent checkpoint if appropriate. Final report must list files changed, exact commands, test results, and how to manually deploy/apply the patch elsewhere."
+
+Actions attempted:
+
+- Read `/home/cos/projects/ulg/agents.md` and `/home/cos/projects/AGENTS.md`.
+- Checked Eshkol branch/worktree and stayed on the current `ulg` branch.
+- Reviewed the ULG plan, status, tests, ABI closure schema, and Eshkol
+  `eshkol-run --wasm` path.
+- Added Eshkol helper `scripts/emit_ulg_closure_artifact.py`.
+- Added Eshkol regression test `tests/toolchain/ulg_closure_artifact_test.py`.
+- Wired the test into Eshkol CTest when Python 3 is available.
+- Added `docs/breakdown/ULG_CLOSURE_ARTIFACTS.md` and linked it from
+  `docs/breakdown/README.md`.
+
+Commands run:
+
+```bash
+rg -n "eshkol|ULG|WASM|wasm|LLVM|closure|manifest" /home/cos/.codex/memories/MEMORY.md
+sed -n '1,220p' /home/cos/projects/ulg/agents.md
+sed -n '1,220p' /home/cos/projects/AGENTS.md
+git -C /home/cos/projects/eshkol status --short --branch
+python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo eshkol
+sed -n '1,260p' /home/cos/projects/ulg/plan/plan.md
+sed -n '1,260p' /home/cos/projects/ulg/plan/log.md
+sed -n '1,260p' /home/cos/projects/ulg/ulg-gpu-abi/src/index.js
+sed -n '1,260p' /home/cos/projects/ulg/ulg-gpu-abi/src/schemas/closure_artifact.schema.json
+sed -n '1,260p' /home/cos/projects/eshkol/exe/eshkol-run.cpp
+rg -n "Usage|while \\(|getopt|case '|wasm|emit_object|compile_only|output|run|profile|target|link|eshkol_compile|dump" exe/eshkol-run.cpp
+python3 -m py_compile scripts/emit_ulg_closure_artifact.py tests/toolchain/ulg_closure_artifact_test.py
+scripts/emit_ulg_closure_artifact.py examples/hello.esk --eshkol-run build/eshkol-run --wasm-output /tmp/eshkol-ulg-artifact-smoke/hello.wasm --artifact /tmp/eshkol-ulg-artifact-smoke/hello.ulg.json
+python3 tests/toolchain/ulg_closure_artifact_test.py --repo-root /home/cos/projects/eshkol --eshkol-run /home/cos/projects/eshkol/build/eshkol-run
+cmake -S . -B build
+cmake --build build --target eshkol-run -j2
+ctest --test-dir build -R 'ulg_closure_artifact_test|eshkol_run_profile_cli_test|execution_profile_test' --output-on-failure
+build/eshkol-run examples/hello.esk -o /tmp/eshkol-ulg-final-smoke/hello-native
+/tmp/eshkol-ulg-final-smoke/hello-native
+build/eshkol-run --wasm examples/hello.esk -o /tmp/eshkol-ulg-wasm-smoke/hello.wasm
+scripts/emit_ulg_closure_artifact.py examples/hello.esk --eshkol-run build/eshkol-run --wasm-output /tmp/eshkol-ulg-schema-smoke/hello.wasm --artifact /tmp/eshkol-ulg-schema-smoke/hello.ulg.json
+node --input-type=module - <<'JS'
+import fs from 'node:fs';
+import Ajv2020 from '/home/cos/projects/ulg/node_modules/ajv/dist/2020.js';
+const schema = JSON.parse(fs.readFileSync('/home/cos/projects/ulg/ulg-gpu-abi/src/schemas/closure_artifact.schema.json', 'utf8'));
+const artifact = JSON.parse(fs.readFileSync('/tmp/eshkol-ulg-schema-smoke/hello.ulg.json', 'utf8'));
+const ajv = new Ajv2020({ allErrors: true });
+const validate = ajv.compile(schema);
+if (!validate(artifact)) {
+  console.error(validate.errors);
+  process.exit(1);
+}
+console.log(`schema-ok closureId=${artifact.closureId} entry=${artifact.execution.entryExport}`);
+JS
+```
+
+Files touched:
+
+- `/home/cos/projects/eshkol/CMakeLists.txt`
+- `/home/cos/projects/eshkol/docs/breakdown/README.md`
+- `/home/cos/projects/eshkol/docs/breakdown/ULG_CLOSURE_ARTIFACTS.md`
+- `/home/cos/projects/eshkol/scripts/emit_ulg_closure_artifact.py`
+- `/home/cos/projects/eshkol/tests/toolchain/ulg_closure_artifact_test.py`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Test results:
+
+- `python3 -m py_compile scripts/emit_ulg_closure_artifact.py tests/toolchain/ulg_closure_artifact_test.py` passed.
+- `scripts/emit_ulg_closure_artifact.py examples/hello.esk ...` passed and wrote
+  `/tmp/eshkol-ulg-artifact-smoke/hello.ulg.json`.
+- `python3 tests/toolchain/ulg_closure_artifact_test.py --repo-root /home/cos/projects/eshkol --eshkol-run /home/cos/projects/eshkol/build/eshkol-run` passed.
+- `cmake -S . -B build && cmake --build build --target eshkol-run -j2` passed;
+  existing LLVM deprecation and `fread` warnings were observed.
+- `ctest --test-dir build -R 'ulg_closure_artifact_test|eshkol_run_profile_cli_test|execution_profile_test' --output-on-failure` passed 3/3.
+- Native hello compiled and ran, printing `Hello, Eshkol!` and
+  `Version: v1.2.1-scale`.
+- WASM hello emitted `/tmp/eshkol-ulg-wasm-smoke/hello.wasm` with size 33907 and
+  WASM magic `b'\x00asm'`.
+- Generated `/tmp/eshkol-ulg-schema-smoke/hello.ulg.json` validated against the
+  ULG closure artifact schema and reported `entry=main`.
+
+Failures and open questions:
+
+- ICC registry lookup for `eshkol` returned `Unknown repo: eshkol`, so direct
+  checked-in Eshkol summaries and source inspection were used.
+- The helper is intentionally a readiness slice. It does not implement
+  `define-ulg-closure`, typed closure tensor descriptors, WGSL/table emission,
+  or real service-worker import glue yet.
+- No SSH password was used or logged.
+
 ## 2026-06-05 15:24:38 AKDT
 
 Prompt: "big dog, you are the ULG app integration agent. Work in /home/cos/projects/ulg on the current branch only; do not switch branches. Read /home/cos/projects/ulg/agents.md, /home/cos/projects/AGENTS.md, /home/cos/projects/ulg/plan/plan.md, /home/cos/projects/ulg/plan/tests.md, and /home/cos/projects/ulg/plan/log.md before editing. Do not stop or restart the existing Vite server unless needed. Scope: improve the ULG app/ABI scaffold without overlapping peercompute/MoonLab/Eshkol repo edits. Add a small service contract export or docs/tests that will make cross-repo integration easier, such as shared manifests/examples, schema fixture tests, or a stable adapter README. Keep the demo vanilla JS/three.js. Run npm test/build/e2e if your changes affect behavior. Commit locally if you reach a passing checkpoint. Final report must list files changed, tests run, and any user-visible demo change."

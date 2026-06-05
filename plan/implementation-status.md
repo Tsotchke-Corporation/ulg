@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 15:28:35 AKDT
+Updated: 2026-06-05 15:32:53 AKDT
 
 ## Done
 
@@ -34,18 +34,24 @@ Updated: 2026-06-05 15:28:35 AKDT
 - Eshkol sidecar completed: the compiler can build and emit WASM hello output,
   but browser WebGPU/WGSL support does not exist yet and the service path should
   avoid JIT until the observed derivative hang is understood.
+- Added the Eshkol-side `scripts/emit_ulg_closure_artifact.py` helper on the
+  `ulg` branch. It compiles `.esk` through `eshkol-run --wasm` or inspects an
+  existing `.wasm`, parses WASM imports/exports, and emits a ULG v0.5
+  service-worker-safe closure artifact JSON file.
+- Added Eshkol CTest coverage for the helper and verified the generated artifact
+  against the ULG closure artifact schema.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the published ABI fixtures as the next adapter handshake for PeerCompute,
-  Eshkol, and MoonLab without editing those repos from this ULG checkpoint.
+- Use the published ABI fixtures and the Eshkol ULG closure artifact helper as
+  the next adapter handshake for PeerCompute, Eshkol, and MoonLab.
 
 ## Next
 
 - Add real peercompute service-hosting modules or adapters based on the working ULG
   demo contract.
-- Prototype Eshkol closure artifact output from `--wasm`/LLVM export paths and a
-  service-worker-safe import surface.
+- Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
+  real closure tensor descriptors once the descriptor contract is stable.
 - Prototype MoonLab quantum response artifact output.
 - Run the full peercompute relay-backed local stack.

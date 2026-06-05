@@ -39,13 +39,15 @@ physics work:
 ### Eshkol
 
 - [x] Identify compiler/runtime points for ULG closure manifests and WASM exports.
-- [ ] Prototype closure artifact generation using the shared ABI contract.
+- [x] Prototype closure artifact generation using the shared ABI contract.
 - [ ] Add WGSL/table strategy emitter only after descriptor conformance is stable.
 - [x] Fold in the Eshkol sidecar report.
 - [ ] Start from `eshkol-run` CLI `--wasm`/target/export paths, `llvm_backend.h`,
   `llvm_codegen.cpp`, GPU memory/VM dispatch APIs, and existing web/GPU scripts.
-- [ ] Add `define-ulg-closure`, closure artifact JSON emission, named WASM
-  reference exports, and service-worker-safe import glue.
+- [x] Add closure artifact JSON emission and named WASM reference export/import
+  discovery for the current AOT WASM path.
+- [ ] Add `define-ulg-closure`, typed closure tensor descriptors, and
+  service-worker import glue after the artifact contract stabilizes.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
   general LLVM-to-WGSL compiler.
 - [ ] Avoid JIT service paths until the observed derivative/JIT hang is profiled.

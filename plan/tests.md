@@ -51,6 +51,11 @@ started consuming the shared service contract builders.
   `ulg-gpu-abi/src/schemas/closure_artifact.schema.json`.
 - MoonLab sidecar verified native unit binaries and `qsim_test`, while JS unit
   and integration tests need fixes before real MoonLab service integration.
+- MoonLab core WASM readiness checks on 2026-06-05:
+  `pnpm test:unit` passed 90/90, `pnpm --filter @moonlab/quantum-core build`
+  passed, `pnpm test:integration` passed 41/41, `pnpm build:wasm` passed, and
+  `git diff --check` passed. Full JS workspace `pnpm build` still fails outside
+  core because `@moonlab/quantum-algorithms` lacks `src/index.ts`.
 - Bring up the peercompute relay-backed local stack after the dummy ULG service
   smoke is stable.
 - Reuse peercompute's existing runtime P2P smoke harness where possible.

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 15:32:53 AKDT
+Updated: 2026-06-05 15:36:52 AKDT
 
 ## Done
 
@@ -40,6 +40,12 @@ Updated: 2026-06-05 15:32:53 AKDT
   service-worker-safe closure artifact JSON file.
 - Added Eshkol CTest coverage for the helper and verified the generated artifact
   against the ULG closure artifact schema.
+- MoonLab `ulg` branch now has local commit `2461d15` fixing core JS/WASM
+  readiness blockers: unit regressions, WASM dist packaging, Emscripten runtime
+  readiness, JS/WASM ABI issues, integration-test bit ordering, and documented
+  pure-state purity behavior.
+- Verified `bindings/javascript/packages/core/dist/moonlab.js` and
+  `moonlab.wasm` exist after the MoonLab core build.
 
 ## In Progress
 
@@ -53,5 +59,7 @@ Updated: 2026-06-05 15:32:53 AKDT
   demo contract.
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
   real closure tensor descriptors once the descriptor contract is stable.
-- Prototype MoonLab quantum response artifact output.
+- Prototype MoonLab quantum response artifact output now that core WASM artifacts
+  are loadable from `packages/core/dist`.
+- Add browser/service-worker smoke for MoonLab `locateFile` and WASM MIME loading.
 - Run the full peercompute relay-backed local stack.

@@ -199,6 +199,71 @@ Failures and open questions:
   or real service-worker import glue yet.
 - No SSH password was used or logged.
 
+## 2026-06-05 15:36:52 AKDT
+
+Prompt: "big dog, you are the MoonLab implementation agent for the ULG effort. Work in /home/cos/projects/moonlab on the current branch only; do not switch branches. Read /home/cos/projects/ulg/agents.md and /home/cos/projects/AGENTS.md before editing. Do not use or log any SSH password. Scope: fix the smallest browser/WASM readiness blockers found in the previous report: JS unit regressions around circuit depth including measure and complex conjugate returning -0, then investigate/fix WASM dist packaging so packages/core/dist gets moonlab.js/moonlab.wasm when build:wasm/build runs. Keep changes focused to MoonLab JS/core packaging/tests. Run pnpm unit/integration/build commands that are feasible. Commit locally at a coherent passing checkpoint if appropriate. Final report must list files changed, exact commands, test results, and remaining blockers for ULG service worker integration."
+
+Actions attempted:
+
+- MoonLab agent worked on current `ulg` branch and committed local checkpoint
+  `2461d15 Fix core WASM readiness blockers`.
+- Fixed `conjugate()` so imaginary zero stays `0`, not `-0`.
+- Fixed circuit depth so measurement gates do not add depth.
+- Fixed core build order and explicit WASM artifact copying so
+  `packages/core/dist` keeps `moonlab.js` and `moonlab.wasm`.
+- Fixed Emscripten runtime-ready hook placement, export parsing, link
+  dependencies, missing WASM support sources, `quantum_state_t` amplitude pointer
+  offset, `i64` measurement return conversion, q0-as-LSB integration tests, and
+  `quantum_state_purity()` documented pure-state behavior.
+- Coordinator verified the final dist artifacts exist with `ls -lh`.
+
+Commands run:
+
+```bash
+pnpm test:unit
+pnpm --filter @moonlab/quantum-core build
+pnpm test:integration
+pnpm build:wasm
+git diff --check
+pnpm build
+ls -lh bindings/javascript/packages/core/dist/moonlab.js bindings/javascript/packages/core/dist/moonlab.wasm
+```
+
+Files touched in MoonLab:
+
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/src/complex.ts`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/src/circuit.ts`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/package.json`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/emscripten/CMakeLists.txt`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/emscripten/pre.js`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/emscripten/post.js`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/src/quantum-state.ts`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/src/memory.ts`
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/src/__tests__/quantum-state.integration.test.ts`
+- `/home/cos/projects/moonlab/src/quantum/state.c`
+
+Test results:
+
+- `pnpm test:unit` in `bindings/javascript` passed 90/90.
+- `pnpm --filter @moonlab/quantum-core build` in `bindings/javascript` passed.
+- `pnpm test:integration` in `bindings/javascript` passed 41/41.
+- `pnpm build:wasm` in `bindings/javascript` passed.
+- `git diff --check` passed.
+- `pnpm build` in `bindings/javascript` still fails outside core because
+  `@moonlab/quantum-algorithms` cannot find `src/index.ts`.
+- Coordinator verified `bindings/javascript/packages/core/dist/moonlab.js` and
+  `bindings/javascript/packages/core/dist/moonlab.wasm` both exist.
+
+Failures and open questions:
+
+- ULG still needs app-side service-worker cache/copy wiring and browser smoke
+  verification for MoonLab core.
+- Verify `moonlab.wasm` MIME type and `locateFile` resolution from the ULG
+  service-worker/cache path.
+- Whole MoonLab JS workspace build remains blocked by the separate
+  `@moonlab/quantum-algorithms` package issue.
+- No SSH password was used or logged.
+
 ## 2026-06-05 15:24:38 AKDT
 
 Prompt: "big dog, you are the ULG app integration agent. Work in /home/cos/projects/ulg on the current branch only; do not switch branches. Read /home/cos/projects/ulg/agents.md, /home/cos/projects/AGENTS.md, /home/cos/projects/ulg/plan/plan.md, /home/cos/projects/ulg/plan/tests.md, and /home/cos/projects/ulg/plan/log.md before editing. Do not stop or restart the existing Vite server unless needed. Scope: improve the ULG app/ABI scaffold without overlapping peercompute/MoonLab/Eshkol repo edits. Add a small service contract export or docs/tests that will make cross-repo integration easier, such as shared manifests/examples, schema fixture tests, or a stable adapter README. Keep the demo vanilla JS/three.js. Run npm test/build/e2e if your changes affect behavior. Commit locally if you reach a passing checkpoint. Final report must list files changed, tests run, and any user-visible demo change."

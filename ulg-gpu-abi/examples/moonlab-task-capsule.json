@@ -1,0 +1,45 @@
+{
+  "taskId": "fixture-moonlab-quantum-response-001",
+  "rootTaskId": "fixture-moonlab-quantum-response-001",
+  "serviceId": "moonlab",
+  "taskKind": "moonlab.quantum.response",
+  "inputs": [
+    {
+      "tensorId": "closure-response-grid",
+      "dtype": "complex64",
+      "shape": [8, 2],
+      "layout": "interleaved",
+      "source": "artifact"
+    }
+  ],
+  "outputs": [
+    {
+      "artifactKind": "quantum-response",
+      "artifactSchema": "quantum_response_artifact.schema.json"
+    }
+  ],
+  "unitsHash": "ulg:fixture-units-v0.5",
+  "inputHash": "ulg:fixture-input-moonlab-001",
+  "methodHash": "ulg:fixture-method-moonlab-001",
+  "deterministicSeed": "fixture-seed-v0.5",
+  "resources": {
+    "childWorkers": 2,
+    "gpu": "optional",
+    "wasmMemoryBytes": 8388608,
+    "gpuMemoryBytes": 4194304,
+    "priority": "simulation"
+  },
+  "validation": {
+    "mode": "self",
+    "toleranceProfile": "demo-parity"
+  },
+  "provenance": {
+    "sourceService": "moonlab",
+    "methodHash": "ulg:fixture-method-moonlab-001",
+    "inputHash": "ulg:fixture-input-moonlab-001",
+    "codeVersion": "ulg-service-contract-fixture",
+    "deterministicSeed": "fixture-seed-v0.5",
+    "createdAt": "2026-06-05T00:00:00.000Z",
+    "notes": ["cross-repo fixture"]
+  }
+}

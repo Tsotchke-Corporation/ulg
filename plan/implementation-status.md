@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 15:18:26 AKDT
+Updated: 2026-06-05 15:28:35 AKDT
 
 ## Done
 
@@ -14,6 +14,16 @@ Updated: 2026-06-05 15:18:26 AKDT
   browser telemetry.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
+- Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
+  manifests and task capsules.
+- Added cross-repo adapter README and static Eshkol/MoonLab manifest/task
+  fixtures under `ulg-gpu-abi/examples/`.
+- Refactored the demo runtime to consume the shared service contract builders
+  instead of maintaining private manifest/task construction.
+- Confirmed no copied `peercompute/` source subtree remains in the ULG checkout;
+  PeerCompute-owned service orchestration stays in `/home/cos/projects/peercompute`.
+- Verified `npm test`, `npm run build`, and `npm run test:e2e` after the contract
+  refactor.
 - MoonLab sidecar completed: useful surfaces identified, but JS unit regressions,
   missing WASM dist packaging, and real browser WebGPU parity remain blockers.
 - peercompute sidecar completed: current Multiscale/remote-placement tests and
@@ -28,7 +38,8 @@ Updated: 2026-06-05 15:18:26 AKDT
 ## In Progress
 
 - Keep Vite live for inspection.
-- Choose the next cross-repo slice from the verified sidecar findings.
+- Use the published ABI fixtures as the next adapter handshake for PeerCompute,
+  Eshkol, and MoonLab without editing those repos from this ULG checkpoint.
 
 ## Next
 

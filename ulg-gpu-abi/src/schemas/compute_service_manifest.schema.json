@@ -37,6 +37,10 @@
       "type": "array",
       "items": { "type": "string" }
     },
+    "taskKinds": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "abi": {
       "type": "object",
       "required": ["ulgIrVersion", "gpuAbiVersion", "supportedDTypes", "supportedLayouts"]

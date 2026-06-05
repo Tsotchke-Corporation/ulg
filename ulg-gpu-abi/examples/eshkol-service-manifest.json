@@ -1,0 +1,37 @@
+{
+  "serviceId": "eshkol",
+  "version": "0.5.0-demo",
+  "runtime": "js",
+  "entry": {
+    "workerModule": "./workers/eshkol.service.worker.js"
+  },
+  "childWorkers": {
+    "allowed": true,
+    "maxChildren": 4,
+    "allowedModules": ["./workers/eshkol.child.worker.js"],
+    "sameOriginOnly": true
+  },
+  "resources": {
+    "maxWasmMemoryBytes": 67108864,
+    "maxGpuMemoryBytes": 33554432,
+    "maxCpuWorkers": 4,
+    "maxTaskMs": 30000
+  },
+  "capabilities": [
+    "ulg.closure.derive",
+    "ulg.table.generate",
+    "ulg.validation.reference"
+  ],
+  "taskKinds": ["eshkol.closure.derive"],
+  "abi": {
+    "ulgIrVersion": "0.5",
+    "gpuAbiVersion": "0.5",
+    "supportedDTypes": ["f32", "complex64"],
+    "supportedLayouts": ["soa", "interleaved", "row-major"]
+  },
+  "validation": {
+    "requiresCpuReference": true,
+    "toleranceProfile": "scientific-default",
+    "parityModes": ["wasm-reference", "js-dummy-reference"]
+  }
+}

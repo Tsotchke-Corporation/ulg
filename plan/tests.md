@@ -4,20 +4,31 @@
 
 Command: `npm test`
 
-Current result: pass, 7/7 tests on 2026-06-05.
+Current result: pass, 10/10 tests on 2026-06-05 after adding adapter fixture
+coverage.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
   quantum response artifacts, and tolerance reports.
+- Static Eshkol/MoonLab adapter fixtures validate against the shared schemas.
+- Service contract builders reproduce the published manifest defaults and emit a
+  schema-compatible default MoonLab task capsule.
 - Registry resolution, child-worker lease limits, artifact cache behavior, and
   GPU fallback probe behavior.
+
+## Production Build
+
+Command: `npm run build`
+
+Current result: pass on 2026-06-05 after the service-contract runtime refactor,
+with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-05 after installing the
-Playwright Chromium binary with `npx playwright install chromium`.
+Current result: pass, 1/1 Chromium test on 2026-06-05 after the demo runtime
+started consuming the shared service contract builders.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.

@@ -6,10 +6,12 @@ Build the Milestone 0.6 and 0.7 foundation from the v0.5 spec before deeper
 physics work:
 
 1. Shared ULG ABI descriptors and schemas.
-2. Dummy supervised Eshkol and MoonLab services.
-3. Child-worker leases and cancellation tree.
-4. Browser-visible telemetry and three.js worker-tree visualization.
-5. Tests that prove descriptor validation, lease behavior, and the live demo.
+2. Shared service contract builders, adapter docs, and fixture manifests.
+3. Dummy supervised Eshkol and MoonLab services.
+4. Child-worker leases and cancellation tree.
+5. Browser-visible telemetry and three.js worker-tree visualization.
+6. Tests that prove descriptor validation, fixture conformance, lease behavior,
+   and the live demo.
 
 ## Work Breakdown
 
@@ -18,6 +20,7 @@ physics work:
 - [x] Create vanilla Vite app with three.js visualization.
 - [x] Implement shared ABI package in plain ES modules.
 - [x] Add JSON schemas for the spec artifacts.
+- [x] Export stable service contract builders and cross-repo JSON fixtures.
 - [x] Implement PeerCompute-style registry, supervisor, leases, GPU probe, and cache.
 - [x] Implement dummy Eshkol and MoonLab service workers.
 - [ ] Keep the dev server running for live inspection.

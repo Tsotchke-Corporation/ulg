@@ -1,9 +1,7 @@
 import {
-  ULG_GPU_ABI_VERSION,
-  ULG_IR_VERSION,
-  createProvenanceBlock,
-  hashPayload
-} from '../../ulg-gpu-abi/src/index.js';
+  createUlgServiceManifest,
+  createUlgTaskCapsule
+} from '../../ulg-gpu-abi/src/serviceContract.js';
 import { ArtifactCache } from './ArtifactCache.js';
 import { ChildWorkerLeaseManager } from './ChildWorkerLeaseManager.js';
 import { ComputeServiceRegistry } from './ComputeServiceRegistry.js';
@@ -29,15 +27,21 @@ export async function createDemoRuntime() {
   });
 
   await gpuBroker.probe();
-  await registry.register(createServiceManifest('eshkol', {
-    capabilities: ['ulg.closure.derive', 'ulg.table.generate', 'ulg.validation.reference'],
-    taskKinds: ['eshkol.closure.derive'],
-    toleranceProfile: 'scientific-default'
+  await registry.register(createUlgServiceManifest({
+    serviceId: 'eshkol',
+    workerModule: serviceWorkerModule,
+    childWorkerModule,
+    validation: {
+      toleranceProfile: 'scientific-default'
+    }
   }));
-  await registry.register(createServiceManifest('moonlab', {
-    capabilities: ['ulg.quantum.response', 'ulg.parity.cpu_webgpu', 'ulg.tensor.contract'],
-    taskKinds: ['moonlab.quantum.response'],
-    toleranceProfile: 'quantum-response-demo'
+  await registry.register(createUlgServiceManifest({
+    serviceId: 'moonlab',
+    workerModule: serviceWorkerModule,
+    childWorkerModule,
+    validation: {
+      toleranceProfile: 'quantum-response-demo'
+    }
   }));
   await supervisor.spawnService('eshkol');
   await supervisor.spawnService('moonlab');
@@ -79,57 +83,17 @@ export async function createDemoRuntime() {
   return api;
 }
 
-function createServiceManifest(serviceId, { capabilities, taskKinds, toleranceProfile }) {
-  return {
-    serviceId,
-    version: '0.5.0-demo',
-    runtime: 'js',
-    entry: {
-      workerModule: serviceWorkerModule
-    },
-    childWorkers: {
-      allowed: true,
-      maxChildren: 4,
-      allowedModules: [childWorkerModule],
-      sameOriginOnly: true
-    },
-    resources: {
-      maxWasmMemoryBytes: 64 * 1024 * 1024,
-      maxGpuMemoryBytes: 32 * 1024 * 1024,
-      maxCpuWorkers: 4,
-      maxTaskMs: 30_000
-    },
-    capabilities,
-    taskKinds,
-    abi: {
-      ulgIrVersion: ULG_IR_VERSION,
-      gpuAbiVersion: ULG_GPU_ABI_VERSION,
-      supportedDTypes: ['f32', 'complex64'],
-      supportedLayouts: ['soa', 'interleaved', 'row-major']
-    },
-    validation: {
-      requiresCpuReference: true,
-      toleranceProfile,
-      parityModes: ['wasm-reference', 'js-dummy-reference']
-    }
-  };
-}
-
 function createTask(serviceId, taskKind) {
   const taskId = createId(`task-${serviceId}`);
   const method = { serviceId, taskKind, version: '0.5-demo' };
   const input = { demo: 'supervised-service-smoke', serviceId };
-  return {
+  return createUlgTaskCapsule({
     taskId,
-    rootTaskId: taskId,
     serviceId,
     taskKind,
-    inputs: [],
     outputs: [{ artifactKind: taskKind.includes('moonlab') ? 'quantum-response' : 'closure' }],
-    unitsHash: hashPayload({ units: 'demo' }),
-    inputHash: hashPayload(input),
-    methodHash: hashPayload(method),
-    deterministicSeed: 'ulg-demo-seed',
+    input,
+    method,
     resources: {
       childWorkers: 2,
       gpu: 'optional',
@@ -141,11 +105,6 @@ function createTask(serviceId, taskKind) {
       mode: 'self',
       toleranceProfile: 'demo-parity'
     },
-    provenance: createProvenanceBlock({
-      sourceService: serviceId,
-      methodHash: hashPayload(method),
-      inputHash: hashPayload(input),
-      notes: ['dummy-service-smoke']
-    })
-  };
+    provenanceNotes: ['dummy-service-smoke']
+  });
 }

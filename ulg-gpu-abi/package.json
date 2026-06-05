@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.js",
+    "./service-contract": "./src/serviceContract.js",
+    "./examples/*": "./examples/*",
     "./schemas/*": "./src/schemas/*",
     "./wgsl": "./src/wgsl.js"
   }

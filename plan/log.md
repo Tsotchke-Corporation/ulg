@@ -2522,3 +2522,40 @@ Failures and open questions:
 - Production MoonLab/Eshkol service adapters still need to consume this payload
   shape in place of the current fixture service hosts.
 - No push was attempted.
+
+## 2026-06-06 08:36:18 AKDT - PeerCompute dispatch service adapters
+
+Prompt:
+
+- Continue the overall ULG implementation plan and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `4d45714b`, which exports `UlgDispatchServiceHost`,
+  `createUlgDispatchServiceManifests()`, and MoonLab/Eshkol dispatch manifest
+  helpers.
+- The exported adapters validate materialized
+  `peercompute.ulg.handoff-dispatch-artifact-payload.v0` tasks, preserve
+  artifact bodies/summaries and transferred Eshkol WASM bytes, request/release
+  supervised child leases, and cache typed nested dispatch acceptance artifacts.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` so the next task is wiring those exported adapters to real
+  MoonLab/Eshkol browser worker modules and service assets.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the new adapter module, handoff service
+  host, service exports, package exports, and service-orchestration test file.
+- PASS: PeerCompute focused ULG handoff/fixture test command passed `16/16`.
+- PASS: PeerCompute full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+
+Failures and open questions:
+
+- The exported PeerCompute adapters are deterministic acceptance adapters; they
+  still need real MoonLab/Eshkol execution/probe workers behind their
+  `entry.workerModule` and child-worker entries.
+- No push was attempted.

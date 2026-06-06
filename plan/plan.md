@@ -72,6 +72,8 @@ physics work:
   can be submitted to registered MoonLab/Eshkol service hosts.
 - [x] Materialize normalized ULG artifact payloads in supervisor-submitted
   PeerCompute dispatch service tasks while keeping dispatch plans ref-based.
+- [x] Add exported PeerCompute MoonLab/Eshkol dispatch service adapters that
+  consume those materialized payloads under `WorkerSupervisor`.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
@@ -79,8 +81,8 @@ physics work:
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
-- [ ] Replace the fixture supervisor services with production ULG/Eshkol/MoonLab
-  adapters that consume the same dispatch task shape.
+- [ ] Connect the exported PeerCompute dispatch adapters to real MoonLab/Eshkol
+  browser worker modules and service assets.
 
 ### Eshkol
 

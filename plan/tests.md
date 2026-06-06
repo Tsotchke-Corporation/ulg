@@ -232,6 +232,13 @@ reference-contract asset support.
   `peercompute.ulg.handoff-dispatch-artifact-payload.v0` with MoonLab
   quantum-response summaries and Eshkol closure bodies plus transferred WASM
   bytes for registered service adapters.
+- PeerCompute dispatch service-adapter check on 2026-06-06: after commit
+  `4d45714b`, full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`, proving
+  exported `UlgDispatchServiceHost` MoonLab/Eshkol adapters validate materialized
+  dispatch payloads, request/release supervised child leases, emit typed dispatch
+  service results/artifacts, and cache nested acceptance artifacts beside the
+  parent durable handoff envelope.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

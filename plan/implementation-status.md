@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 08:26:42 AKDT
+Updated: 2026-06-06 08:36:18 AKDT
 
 ## Done
 
@@ -222,6 +222,10 @@ Updated: 2026-06-06 08:26:42 AKDT
   `peercompute.ulg.handoff-dispatch-artifact-payload.v0` with normalized artifact
   bodies/summaries and transferred Eshkol WASM bytes while dispatch plans remain
   ref-based.
+- Added and committed PeerCompute dispatch service adapters locally as commit
+  `4d45714b`. `UlgDispatchServiceHost` and MoonLab/Eshkol manifest helpers now
+  validate and cache materialized dispatch payloads through `WorkerSupervisor`
+  without relying on private fixture service hosts.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable

@@ -771,7 +771,9 @@ async function loadMagnetarReferenceContracts(serviceAssets) {
     const parsed = await response.json();
     const references = Array.isArray(parsed)
       ? parsed
-      : (Array.isArray(parsed?.references) ? parsed.references : []);
+      : (Array.isArray(parsed?.references)
+        ? parsed.references
+        : (Array.isArray(parsed?.outputs?.references) ? parsed.outputs.references : []));
     return {
       status: references.length > 0 ? 'ready' : 'empty',
       url,

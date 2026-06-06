@@ -58,8 +58,11 @@ artifact keeps the legacy `outputs.reference` field and also emits
 `outputs.references[]` as the four-entry calibrated magnetosphere MHD, PIC,
 radiation, and relativistic-reference inventory. The magnetosphere entry now
 carries a scoped analytic dipole-field reference with field maps, tolerances,
-observed deltas, and SHA-256 contract/unit hashes. PIC, radiation, relativity,
-and full MHD/force-free coverage remain blocked; compact artifact-summary
-telemetry reports both the ready Ising reference and the calibrated inventory
-counts so handoff consumers can inventory tolerance inputs without fetching the
-full artifact body.
+observed deltas, and SHA-256 contract/unit hashes. When the optional MoonLab
+reference-contract JSON is staged, the PIC, radiation, and relativity entries
+can also be promoted to ready supplied calibrated references; compact
+artifact-summary telemetry reports both the ready Ising reference and the
+calibrated inventory counts so handoff consumers can inventory tolerance inputs
+without fetching the full artifact body. The staged contracts are reduced scalar
+tolerance plumbing and do not claim full PIC, radiation-transport, GR, GRMHD, or
+magnetar scientific simulation.

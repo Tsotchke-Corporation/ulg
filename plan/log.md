@@ -1710,3 +1710,81 @@ Failures and open questions:
   PIC/radiation/relativity/full-MHD reference contracts are generated,
   validated, staged, and consumed by PeerCompute/Multiscale.
 - No push was attempted.
+
+## 2026-06-06 04:30:51 AKDT - Reduced MoonLab contracts in live ULG handoff
+
+Prompt:
+
+- User asked whether progress remains on track with the overall plan.
+- Standing instruction remains local commits only and no push.
+
+Actions:
+
+- Copied MoonLab's reduced calibrated magnetar reference-contract suite into the
+  ignored manual ULG service-asset directory at
+  `public/service-assets/moonlab/magnetar-reference-contracts.json`.
+- Hardened the MoonLab core-probe worker's optional contract loader so it accepts
+  array assets, suite-shaped `{ references: [...] }` assets, and full-artifact
+  `{ outputs: { references: [...] } }` assets.
+- Updated ULG unit and browser smoke expectations so valid supplied contracts
+  promote PIC, radiation, and relativity entries to ready while absent optional
+  JSON still exercises graceful fallback.
+- Updated README, plan, implementation status, and test-plan notes with the live
+  handoff state and the remaining scientific blocker.
+
+Files touched:
+
+- `/home/cos/projects/ulg/public/workers/moonlab-core-probe.worker.js`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+node --check public/workers/moonlab-core-probe.worker.js
+node --check tests/orchestration.test.mjs
+node --check tests/demo.e2e.mjs
+node --test tests/orchestration.test.mjs tests/service-assets.test.mjs
+npm test
+npm run build
+npm run test:e2e
+curl -sS -I http://100.86.83.35:5173/service-assets/moonlab/magnetar-reference-contracts.json
+node --input-type=module
+# live Playwright ULG handoff and PeerCompute magnetar ingestion probes
+```
+
+Test results:
+
+- PASS: changed-file syntax checks completed.
+- PASS: focused orchestration/service-asset tests passed `11/11`.
+- PASS: `npm test` passed `17/17`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live ULG at `http://100.86.83.35:5173/` served the optional MoonLab
+  contract JSON as `application/json`, length `7932`.
+- PASS: live ULG handoff exported MoonLab with `outputReferenceReadyCount = 5`
+  and `magnetarCalibratedReferenceReadyCount = 4`, plus Eshkol with
+  `closureReady = true` and `wasmByteLength = 33907`.
+- PASS: live PeerCompute at `https://100.86.83.35:5185/?scenario=magnetar`
+  accepted the ULG handoff as `handoff-ready`, `2/2` required handoffs ready,
+  and `scientific-tolerance-suite-ready`.
+- PASS: live PeerCompute bounded runtime evidence produced `5` entries, `5`
+  proxy-validation passes, `5` SHA-256 evidence hashes, `observedCount = 5`,
+  `proxyOnlyCount = 5`, `validatedCount = 0`, and `missingCount = 0`.
+
+Failures and open questions:
+
+- Scientific readiness remains intentionally false because the runtime gate is
+  still `scientific-runtime-blocked` with blocker
+  `proxy-runtime-not-scientific`.
+- The staged MoonLab contracts are reduced scalar tolerance contracts for
+  integration readiness, not full calibrated PIC, radiation-transport, GR,
+  GRMHD, or magnetar scientific simulation.
+- `public/service-assets/**` remains ignored by design, so the staged ULG
+  service assets are manual-deploy state rather than committed source files.
+- No push was attempted.

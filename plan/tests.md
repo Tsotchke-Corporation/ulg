@@ -5,8 +5,8 @@
 Command: `npm test`
 
 Current result: pass, 17/17 tests on 2026-06-06 after adding optional MoonLab
-reference-contract asset probing while leaving PIC/radiation/relativity blocked
-unless valid supplied contracts are staged.
+reference-contract asset probing, staged reduced supplied contracts, and
+four-family ready calibrated-reference summaries.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -49,7 +49,8 @@ unless valid supplied contracts are staged.
   entry does not carry a singular reference.
 - Artifact cache summaries preserve the four-entry MoonLab calibrated
   magnetosphere MHD, PIC kinetic plasma, radiation transport, and relativistic
-  correction inventory with zero ready/scientific-coverage counts.
+  correction inventory with four ready/scientific-coverage calibrated entries
+  when valid supplied contracts are present.
 
 ## Production Build
 
@@ -107,11 +108,12 @@ reference-contract asset support.
   dipole-Ising compatibility contract while `outputs.references[]` carries the
   calibrated family inventory.
 - Runtime calibrated reference inventory check on 2026-06-06: with copied
-  MoonLab assets present, Playwright verifies `outputs.references[]` carries one
-  ready/scientific scoped analytic `magnetosphere-mhd` dipole-field reference
-  with field maps, tolerances, observed deltas, and SHA-256 contract/unit hashes,
-  plus blocked PIC kinetic plasma, radiation transport, and relativistic
-  correction placeholders.
+  MoonLab assets present, Playwright verifies `outputs.references[]` carries the
+  scoped analytic `magnetosphere-mhd` dipole-field reference plus staged reduced
+  PIC kinetic plasma, radiation transport, and relativistic correction supplied
+  contracts. All four calibrated entries report ready/scientific coverage when
+  the optional JSON is present; the test still accepts blocked placeholders when
+  the optional JSON is absent.
 - Runtime optional MoonLab reference-contract asset check on 2026-06-06:
   Playwright verifies the MoonLab service asset probe reports
   `referenceContractModule` for
@@ -123,9 +125,19 @@ reference-contract asset support.
   `http://100.86.83.35:5173/` reported four raw
   `outputs.references[]` entries for magnetosphere MHD, PIC kinetic plasma,
   radiation transport, and relativistic correction, compact
-  `outputReferenceCount = 5`, `outputReferenceReadyCount = 2`,
-  `magnetarCalibratedReferenceCount = 4`, and one calibrated ready/scientific
-  coverage entry.
+  `outputReferenceCount = 5`, `outputReferenceReadyCount = 5`,
+  `magnetarCalibratedReferenceCount = 4`, and four calibrated ready/scientific
+  coverage entries.
+- Live VPN ULG-to-PeerCompute magnetar handoff check on 2026-06-06:
+  ULG exported two handoff artifacts: MoonLab with
+  `outputReferenceReadyCount = 5` and
+  `magnetarCalibratedReferenceReadyCount = 4`, and Eshkol with
+  `closureReady = true`, `wasmByteLength = 33907`. PeerCompute accepted the
+  handoff as `handoff-ready`, `2/2` required handoffs ready,
+  `scientific-tolerance-suite-ready`, and then recorded five proxy-only runtime
+  evidence entries with five SHA-256 evidence hashes, five proxy-validation
+  passes, `observedCount = 5`, `proxyOnlyCount = 5`, `validatedCount = 0`, and
+  the remaining blocker `proxy-runtime-not-scientific`.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

@@ -138,6 +138,9 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     ];
     expect(moonlabArtifact.outputs.references).toHaveLength(4);
     expect(moonlabArtifact.outputs.references.map((reference) => reference.family)).toEqual(calibratedFamilies);
+    const suppliedReferenceContractsReady = moonlabArtifact.runtime.coreProbe.referenceContracts?.status === 'ready';
+    const expectedOutputReferenceReadyCount = suppliedReferenceContractsReady ? 5 : 2;
+    const expectedCalibratedReferenceReadyCount = suppliedReferenceContractsReady ? 4 : 1;
     const magnetosphereReference = moonlabArtifact.outputs.references[0];
     expect(magnetosphereReference.schema).toBe('moonlab.magnetar.calibrated-reference.v0');
     expect(magnetosphereReference.role).toBe('peercompute-scientific-tolerance-input');
@@ -149,21 +152,32 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(magnetosphereReference.scientificCoverage).toBe(true);
     expect(magnetosphereReference.validation.status).toBe('pass');
     expect(magnetosphereReference.blocker).toBe(null);
-    for (const reference of moonlabArtifact.outputs.references.slice(1)) {
+    const suppliedReferences = moonlabArtifact.outputs.references.slice(1);
+    for (const reference of suppliedReferences) {
       expect(reference.schema).toBe('moonlab.magnetar.calibrated-reference.v0');
       expect(reference.role).toBe('peercompute-scientific-tolerance-input');
-      expect(reference.status).toBe('calibrated-reference-missing');
-      expect(reference.ready).toBe(false);
-      expect(reference.scientificCoverage).toBe(false);
-      expect(reference.validation.status).toBe('missing');
-      expect(reference.contractHash).toBe(null);
-      expect(reference.unitsHash).toBe(null);
+      if (suppliedReferenceContractsReady) {
+        expect(reference.status).toBe('calibrated-reference-ready');
+        expect(reference.ready).toBe(true);
+        expect(reference.scientificCoverage).toBe(true);
+        expect(reference.validation.status).toBe('pass');
+        expect(reference.contractHash).toContain('sha256:');
+        expect(reference.unitsHash).toContain('sha256:');
+        expect(reference.blocker).toBe(null);
+      } else {
+        expect(reference.status).toBe('calibrated-reference-missing');
+        expect(reference.ready).toBe(false);
+        expect(reference.scientificCoverage).toBe(false);
+        expect(reference.validation.status).toBe('missing');
+        expect(reference.contractHash).toBe(null);
+        expect(reference.unitsHash).toBe(null);
+      }
     }
     expect(moonlabArtifact.validationMetrics.magnetarMaxEnergyDelta).toBe(0);
     expect(moonlabArtifact.validationMetrics.magnetarEvaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.validationMetrics.outputReferenceCount).toBe(5);
     expect(moonlabArtifact.validationMetrics.magnetarCalibratedReferenceCount).toBe(4);
-    expect(moonlabArtifact.validationMetrics.magnetarCalibratedReferenceReadyCount).toBe(1);
+    expect(moonlabArtifact.validationMetrics.magnetarCalibratedReferenceReadyCount).toBe(expectedCalibratedReferenceReadyCount);
     expect(moonlabArtifact.outputs.magnetarDipoleIsing.evaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.validation.status).toBe('pass');
     expect(moonlabTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
@@ -182,12 +196,12 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceMaxObservedEnergyDelta).toBe(0);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceValidationStatus).toBe('pass');
     expect(moonlabTelemetryRecord.artifactSummary.outputReferenceCount).toBe(5);
-    expect(moonlabTelemetryRecord.artifactSummary.outputReferenceReadyCount).toBe(2);
+    expect(moonlabTelemetryRecord.artifactSummary.outputReferenceReadyCount).toBe(expectedOutputReferenceReadyCount);
     expect(moonlabTelemetryRecord.artifactSummary.outputReferences[0].schema).toBe('moonlab.magnetar-dipole-ising-reference.v0');
     expect(moonlabTelemetryRecord.artifactSummary.outputReferences[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceCount).toBe(4);
-    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceReadyCount).toBe(1);
-    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceScientificCoverageCount).toBe(1);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceReadyCount).toBe(expectedCalibratedReferenceReadyCount);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceScientificCoverageCount).toBe(expectedCalibratedReferenceReadyCount);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences.map((reference) => reference.family)).toEqual(calibratedFamilies);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences[0].blocker).toBe(null);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences[0].ready).toBe(true);
@@ -196,9 +210,9 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabHandoff.artifact.outputs.references.map((reference) => reference.family)).toEqual(calibratedFamilies);
     expect(moonlabHandoff.artifact.outputs.references[0].ready).toBe(true);
     expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(5);
-    expect(moonlabHandoff.artifactSummary.outputReferenceReadyCount).toBe(2);
+    expect(moonlabHandoff.artifactSummary.outputReferenceReadyCount).toBe(expectedOutputReferenceReadyCount);
     expect(moonlabHandoff.artifactSummary.magnetarCalibratedReferenceCount).toBe(4);
-    expect(moonlabHandoff.artifactSummary.magnetarCalibratedReferenceReadyCount).toBe(1);
+    expect(moonlabHandoff.artifactSummary.magnetarCalibratedReferenceReadyCount).toBe(expectedCalibratedReferenceReadyCount);
   }
 });
 

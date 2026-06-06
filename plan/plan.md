@@ -104,14 +104,17 @@ physics work:
 - [x] Preserve MoonLab's calibrated magnetosphere MHD, PIC kinetic plasma,
   radiation transport, and relativistic correction inventory in raw
   `outputs.references[]` while compact summaries count the singular ready Ising
-  reference plus the four non-ready calibrated blockers.
+  reference plus calibrated-family readiness.
 - [x] Promote the magnetosphere MHD inventory entry to a scoped analytic dipole
   field reference with solver id, SHA-256 contract/unit hashes, field maps,
-  tolerances, observed deltas, and pass validation while keeping PIC, radiation,
-  relativity, and full MHD/force-free coverage blocked.
+  tolerances, observed deltas, and pass validation.
 - [x] Declare optional MoonLab calibrated reference-contract JSON assets and
   merge valid supplied reference contracts into the browser core probe inventory
   without blocking loader/WASM readiness when the optional file is absent.
+- [x] Stage the reduced MoonLab PIC, radiation, and relativity reference
+  contracts in the ignored service-asset directory and verify the live
+  ULG-to-PeerCompute magnetar handoff reports `scientific-tolerance-suite-ready`
+  while keeping runtime scientific execution blocked.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

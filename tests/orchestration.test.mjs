@@ -42,64 +42,64 @@ function createCalibratedReferenceInventory() {
       id: 'pic-kinetic-plasma-reference',
       family: 'pic-kinetic-plasma',
       provider: 'moonlab',
-      solverId: null,
+      solverId: 'moonlab-reduced-pic-kinetic-plasma-reference-v0',
       schema: 'moonlab.magnetar.calibrated-reference.v0',
       role: 'peercompute-scientific-tolerance-input',
-      contractHash: null,
-      unitsHash: null,
-      fieldMap: null,
-      fieldTolerances: null,
-      fieldObservedDeltas: null,
-      status: 'calibrated-reference-missing',
-      ready: false,
-      scientificCoverage: false,
-      scope: 'inventory-only-not-scientific-reference',
-      validationStatus: 'missing',
-      validation: { status: 'missing', evidence: [] },
-      blocker: 'calibrated-pic-reference-missing',
-      blockers: ['No calibrated PIC benchmark data is bundled with this artifact.']
+      contractHash: 'sha256:68b239d81e8c3178b7964817528d583e2b84c47a31987d7607f59618cf7f00a1',
+      unitsHash: 'sha256:1a42bc97970912101434b47cd0db6401af477b65c65d97c1d873889d54eb151b',
+      fieldMap: { particleCount: 'peercompute.solar.picPlasmaPatch.particleCount' },
+      fieldTolerances: { particleCountAbs: 0 },
+      fieldObservedDeltas: { particleCountAbs: 0 },
+      status: 'calibrated-reference-ready',
+      ready: true,
+      scientificCoverage: true,
+      scope: 'supplied-calibrated-reference-contract',
+      validationStatus: 'pass',
+      validation: { status: 'pass', evidence: ['Reduced PIC scalar tolerance contract.'] },
+      blocker: null,
+      blockers: []
     },
     {
       id: 'radiation-transport-reference',
       family: 'radiation-transport',
       provider: 'moonlab',
-      solverId: null,
+      solverId: 'moonlab-reduced-grey-radiation-reference-v0',
       schema: 'moonlab.magnetar.calibrated-reference.v0',
       role: 'peercompute-scientific-tolerance-input',
-      contractHash: null,
-      unitsHash: null,
-      fieldMap: null,
-      fieldTolerances: null,
-      fieldObservedDeltas: null,
-      status: 'calibrated-reference-missing',
-      ready: false,
-      scientificCoverage: false,
-      scope: 'inventory-only-not-scientific-reference',
-      validationStatus: 'missing',
-      validation: { status: 'missing', evidence: [] },
-      blocker: 'calibrated-radiation-reference-missing',
-      blockers: ['No calibrated radiation benchmark data is bundled with this artifact.']
+      contractHash: 'sha256:521b40cbfb2fbd6c708b64f87b593f72d887af6dce6a4a6cbd8a717c75c97f6f',
+      unitsHash: 'sha256:eac86c07adc0411e96d6e1ea282f4bd303c785fdff9cdfbb2d9083004f4d6ff2',
+      fieldMap: { totalRadiationEnergy: 'peercompute.solar.radiationOpacity.totalRadiationEnergy' },
+      fieldTolerances: { totalRadiationEnergyRel: 1e-6 },
+      fieldObservedDeltas: { totalRadiationEnergyRel: 0 },
+      status: 'calibrated-reference-ready',
+      ready: true,
+      scientificCoverage: true,
+      scope: 'supplied-calibrated-reference-contract',
+      validationStatus: 'pass',
+      validation: { status: 'pass', evidence: ['Reduced grey-radiation scalar tolerance contract.'] },
+      blocker: null,
+      blockers: []
     },
     {
       id: 'relativistic-correction-reference',
       family: 'relativistic-correction',
       provider: 'moonlab',
-      solverId: null,
+      solverId: 'moonlab-reduced-post-newtonian-reference-v0',
       schema: 'moonlab.magnetar.calibrated-reference.v0',
       role: 'peercompute-scientific-tolerance-input',
-      contractHash: null,
-      unitsHash: null,
-      fieldMap: null,
-      fieldTolerances: null,
-      fieldObservedDeltas: null,
-      status: 'calibrated-reference-missing',
-      ready: false,
-      scientificCoverage: false,
-      scope: 'inventory-only-not-scientific-reference',
-      validationStatus: 'missing',
-      validation: { status: 'missing', evidence: [] },
-      blocker: 'calibrated-relativity-reference-missing',
-      blockers: ['No calibrated relativity benchmark data is bundled with this artifact.']
+      contractHash: 'sha256:a0ecf0be90480f842776d608a2504e7bd2ebb112b0cfcfdb5cc12b6bdfd14fd8',
+      unitsHash: 'sha256:0f66c80a4432a9f187fbdf55c6bd75ce2f1f344702c940ffcaea4c96e44f7035',
+      fieldMap: { meanLorentzFactor: 'peercompute.solar.relativity.meanLorentzFactor' },
+      fieldTolerances: { meanLorentzFactorAbs: 1e-6 },
+      fieldObservedDeltas: { meanLorentzFactorAbs: 0 },
+      status: 'calibrated-reference-ready',
+      ready: true,
+      scientificCoverage: true,
+      scope: 'supplied-calibrated-reference-contract',
+      validationStatus: 'pass',
+      validation: { status: 'pass', evidence: ['Reduced post-Newtonian scalar tolerance contract.'] },
+      blocker: null,
+      blockers: []
     }
   ];
 }
@@ -336,7 +336,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.calibrationArtifactCount, 1);
   assert.equal(summary.calibrationReadyCount, 1);
   assert.equal(summary.outputReferenceCount, 5);
-  assert.equal(summary.outputReferenceReadyCount, 2);
+  assert.equal(summary.outputReferenceReadyCount, 5);
   assert.equal(summary.outputReferences[0].schema, 'moonlab.magnetar-dipole-ising-reference.v0');
   assert.equal(summary.outputReferences[0].contractHash, 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec');
   assert.equal(summary.outputReferences[1].family, 'magnetosphere-mhd');
@@ -345,9 +345,15 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.outputReferences[1].ready, true);
   assert.equal(summary.outputReferences[1].scientificCoverage, true);
   assert.equal(summary.outputReferences[1].solverId, 'moonlab-analytic-dipole-field-v0');
+  assert.deepEqual(summary.outputReferences.slice(1).map((reference) => reference.ready), [
+    true,
+    true,
+    true,
+    true
+  ]);
   assert.equal(summary.magnetarCalibratedReferenceCount, 4);
-  assert.equal(summary.magnetarCalibratedReferenceReadyCount, 1);
-  assert.equal(summary.magnetarCalibratedReferenceScientificCoverageCount, 1);
+  assert.equal(summary.magnetarCalibratedReferenceReadyCount, 4);
+  assert.equal(summary.magnetarCalibratedReferenceScientificCoverageCount, 4);
   assert.deepEqual(summary.magnetarCalibratedReferences.map((reference) => reference.family), [
     'magnetosphere-mhd',
     'pic-kinetic-plasma',
@@ -356,7 +362,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   ]);
   assert.equal(summary.magnetarCalibratedReferences[0].blocker, null);
   assert.equal(summary.calibrationArtifacts[0].referenceCount, 5);
-  assert.equal(summary.calibrationArtifacts[0].referenceReadyCount, 2);
+  assert.equal(summary.calibrationArtifacts[0].referenceReadyCount, 5);
   assert.equal(summary.magnetarDipoleIsingReady, true);
   assert.equal(summary.magnetarDipoleIsingGroundState, '000');
   assert.equal(summary.magnetarDipoleIsingMaxEnergyDelta, 0);

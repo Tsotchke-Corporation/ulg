@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 01:25:01 AKDT
+Updated: 2026-06-06 04:30:51 AKDT
 
 ## Done
 
@@ -152,20 +152,34 @@ Updated: 2026-06-06 01:25:01 AKDT
   reference contracts, merge only contracts that pass readiness validation, and
   treat missing Vite HTML fallback for the optional JSON as a non-blocking
   missing reference asset.
+- Staged the MoonLab reduced calibrated reference-contract suite in the ignored
+  manual service-asset directory and hardened the core probe loader to accept
+  array, suite `references[]`, and full-artifact `outputs.references[]` JSON
+  shapes.
+- Verified the live ULG handoff at `http://100.86.83.35:5173/` now carries two
+  artifacts: MoonLab with `outputReferenceReadyCount = 5` and
+  `magnetarCalibratedReferenceReadyCount = 4`, plus Eshkol with
+  `closureReady = true` and `33907` transferred WASM bytes.
+- Verified the live PeerCompute magnetar page at
+  `https://100.86.83.35:5185/?scenario=magnetar` accepts the ULG handoff as
+  `handoff-ready` with `2/2` required handoffs ready and
+  `scientific-tolerance-suite-ready`. The remaining scientific blocker is
+  `proxy-runtime-not-scientific`.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Continue from the live state where optional MoonLab supplied-reference plumbing
-  is in place, no optional reference JSON is currently staged, and the first
-  ready calibrated `magnetosphere-mhd` analytic reference remains the only
-  calibrated scientific coverage counted by PeerCompute/Multiscale.
+- Continue from the live state where optional MoonLab supplied-reference
+  plumbing is staged in the ignored service-asset directory, ULG/PeerCompute
+  count all four calibrated families ready, and full scientific readiness is
+  blocked only by proxy-only runtime evidence rather than missing handoff or
+  tolerance contracts.
 
 ## Next
 
-- Stage or generate real calibrated MoonLab reference-contract JSON for
-  PIC/radiation/relativity/full-MHD families and verify it through ULG and
-  PeerCompute before clearing any scientific blockers.
+- Replace the reduced MoonLab scalar reference contracts and PeerCompute
+  bounded proxy runtime evidence with real calibrated PIC/radiation/relativity
+  and MHD/force-free solver evidence before clearing scientific blockers.
 - Promote the demo-only ULG handoff packet into a durable PeerCompute service
   adapter path with provenance, content addressing, and relay-safe transfer.
 - Add real peercompute service-hosting modules or adapters based on the working

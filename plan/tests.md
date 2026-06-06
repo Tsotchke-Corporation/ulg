@@ -507,3 +507,29 @@ reference-contract asset support.
   reported the Eshkol tensor runtime contract ready, dispatch adapters returned
   `dispatch-adapters-ready`, calibrated runtime evidence returned
   `runtime-evidence-ready`, `validatedCount = 5`, and blocker count `0`.
+
+## 2026-06-06 Sidecar Staging Refresh Checks
+
+- ULG: `npm run stage:service-assets` should pass after MoonLab/Eshkol local
+  rebuilds and should restage MoonLab JS/WASM, the canonical normalized
+  MoonLab reference suite, and the Eshkol magnetar closure descriptor bundle.
+- ULG: `npm run stage:service-assets -- --dry-run --json` should show MoonLab
+  reference-suite normalization with `--canonical` and the Eshkol
+  `export_ulg_closure_bundle.py` command for `magnetar_closure.esk`.
+- ULG staged hash gate:
+  `sha256sum public/service-assets/moonlab/magnetar-reference-contracts.json public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm`
+  should report MoonLab suite
+  `7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455` and
+  Eshkol WASM
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- ULG staged descriptor gate: the staged Eshkol artifact should preserve source
+  hash
+  `sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052`,
+  MoonLab suite binding
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
+  source metadata path `magnetar_closure.ulg-metadata.json`, tensor runtime
+  status `declared-fixture-contract`, and false scientific/full-physics flags.
+- ULG and live bridge: `npm test`, `npm run test:e2e`, and PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` should pass against the
+  live `5173`/`5185` servers with `handoff-ready`, blocker count `0`, and the
+  visible magnetar proxy on the solar layer.

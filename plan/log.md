@@ -3089,3 +3089,46 @@ Notes:
   ULG-served asset hash includes the CLI file terminator because that is what
   the browser transfers.
 - No push was attempted.
+
+## 2026-06-06 - Sidecar follow-up staging refresh
+
+Changes:
+
+- Recorded sidecar/local commits after the canonical staging checkpoint:
+  PeerCompute `7fc6b7a3` hardens descriptor-aware table binding, PeerCompute
+  `4d90f3b6` adds handler-backed ULG dispatch adapters, Eshkol `ca617e6`
+  accepts `define-ulg-closure` metadata forms, and MoonLab `ff6727a` adds
+  `moonlab.webgpu.complex64-parity-scope.v0` reduced-fixture parity evidence.
+- Rebuilt/restaged ignored ULG service assets from the sibling repos after the
+  Eshkol and MoonLab commits.
+- Confirmed Eshkol source and WASM handoff hashes stayed stable despite the new
+  source metadata parser path.
+
+Validation:
+
+- PASS: `npm run stage:service-assets` copied MoonLab JS/WASM, normalized the
+  MoonLab reference suite, and exported the Eshkol magnetar closure descriptor
+  bundle.
+- PASS: staged MoonLab suite hash remained
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`.
+- PASS: staged Eshkol artifact preserved source hash
+  `sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052`,
+  WASM hash
+  `sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`,
+  source metadata path `magnetar_closure.ulg-metadata.json`, tensor runtime
+  status `declared-fixture-contract`, and false scientific/full-physics flags.
+- PASS: `npm run stage:service-assets -- --dry-run --json` reported the
+  expected MoonLab canonical normalization command and Eshkol export command.
+- PASS: `npm test` passed `20/20`.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff`
+  passed against live ULG `5173` and Multiscale `5185`, with
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, visible magnetar proxy on the solar layer, and
+  expected canonical suite/source/WASM hashes.
+
+Notes:
+
+- MoonLab's new WebGPU parity-scope evidence is still explicitly no-backend
+  reduced-fixture evidence until browser WebGPU kernels execute natively.
+- No push was attempted.

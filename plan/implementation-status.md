@@ -361,6 +361,23 @@ Updated: 2026-06-06 12:55:15 AKDT
   ULG status `handoff ready / blockers 0`, Multiscale `handoff-ready`, blocker
   count `0`, `simulationStatus = scientific-ready`, and the magnetar proxy
   visible on the solar layer.
+- Recorded the next sidecar/local commits: PeerCompute `7fc6b7a3` hardens
+  descriptor-aware table binding, PeerCompute `4d90f3b6` adds handler-backed
+  ULG dispatch adapters, Eshkol `ca617e6` accepts language-level
+  `define-ulg-closure` metadata forms, and MoonLab `ff6727a` adds
+  `moonlab.webgpu.complex64-parity-scope.v0` reduced-fixture parity evidence.
+- Refreshed ignored ULG service assets after the Eshkol/MoonLab commits.
+  Staged artifacts still bind to MoonLab suite
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
+  Eshkol source
+  `sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052`,
+  and Eshkol WASM
+  `sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- Re-verified the refreshed direct live ULG-to-Multiscale bridge after the
+  sidecar commits: `npm test` passed `20/20`, `npm run test:e2e` passed `1/1`,
+  and PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` reported
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, and the visible magnetar proxy on the solar layer.
 
 ## In Progress
 
@@ -368,7 +385,8 @@ Updated: 2026-06-06 12:55:15 AKDT
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
 - Replace the fixture MoonLab/Eshkol service hosts with production adapters that
-  consume the same dispatch task shape.
+  plug concrete MoonLab/Eshkol runtime handlers into PeerCompute's new
+  handler-backed dispatch host.
 - Keep both ULG handoff paths available: magnetar descriptor for descriptor
   binding/table-fixture/runtime-smoke evidence, and `hello` smoke as the smaller
   gated runtime execution proof.
@@ -385,9 +403,8 @@ Updated: 2026-06-06 12:55:15 AKDT
   validation artifacts.
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
-- Extend the Eshkol helper into language-level `define-ulg-closure` metadata now
-  that the descriptor/table/tensor-runtime contract is stable.
-- Add real MoonLab browser WebGPU quantum-response kernels so the current
-  unsupported `moonlab-webgpu` parity entry can become an executed comparison.
+- Add real MoonLab browser WebGPU quantum-response kernels so the reduced
+  `moonlab.webgpu.complex64-parity-scope.v0` no-backend parity evidence can
+  become an executed browser comparison.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

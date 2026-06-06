@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 13:32:02 AKDT
+Updated: 2026-06-06 13:39:59 AKDT
 
 ## Done
 
@@ -398,6 +398,19 @@ Updated: 2026-06-06 13:32:02 AKDT
   `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
   bridge ack `handoff-ready`, visible magnetar proxy, and the expected
   canonical/source/WASM hashes.
+- Wired the optional MoonLab WebGPU complex64 parity-scope asset into the live
+  ULG MoonLab worker artifact, compact artifact summaries, browser handoff
+  packet, and artifact list UI. The artifact remains explicitly no-backend:
+  `backendAvailable = false`, `webgpuParity.executed = false`,
+  `webgpuParity.passed = false`, `fullFidelityMagnetarSimulation = false`, and
+  `fullPhysicsValidation = false`.
+- Verified the live VPN demo after parity-scope runtime wiring:
+  `http://100.86.83.35:5173/` reports
+  `moonlab.webgpu.complex64-parity-scope.v0` ready in the MoonLab handoff,
+  shows `webgpu:no-backend` in the artifact list, and PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` still reports
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, and visible magnetar proxy.
 
 ## In Progress
 

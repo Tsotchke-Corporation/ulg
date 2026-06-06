@@ -22,6 +22,7 @@ let modulePromise = null;
 const MAGNETAR_DIPOLE_ISING_REFERENCE_CONTRACT_HASH = 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec';
 const MAGNETOSPHERE_MHD_ANALYTIC_UNITS_HASH = 'sha256:b9ef2d46ec5f2d0c1fb8a2866012e9340a67f188ebc8a579b93ce61e72f4b4a5';
 const MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA = 'ulg.magnetar.fidelity-runtime-scope.v0';
+const MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA = 'moonlab.webgpu.complex64-parity-scope.v0';
 const REDUCED_MAGNETAR_EXCLUDED_PHYSICS = Object.freeze([
   'charge-conserving-pic',
   'spectral-angular-radiation-transport',
@@ -34,6 +35,7 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   self.postMessage({ type: 'progress', childId, progress: 0.15, sample: 0 });
   const module = await loadMoonLabModule(serviceAssets);
   const referenceContracts = await loadMagnetarReferenceContracts(serviceAssets);
+  const webGpuParityScope = await loadMoonLabWebGpuParityScope(serviceAssets);
   self.postMessage({ type: 'progress', childId, progress: 0.55, sample: 0.5 });
 
   const state = module._quantum_state_create(2);
@@ -89,6 +91,12 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
           url: referenceContracts.url,
           count: referenceContracts.references.length,
           reason: referenceContracts.reason
+        },
+        webGpuParityScope: {
+          status: webGpuParityScope.status,
+          url: webGpuParityScope.url,
+          artifact: webGpuParityScope.artifact,
+          reason: webGpuParityScope.reason
         },
         exports: {
           create: typeof module._quantum_state_create,
@@ -866,6 +874,127 @@ async function loadMagnetarReferenceContracts(serviceAssets) {
       reason: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+async function loadMoonLabWebGpuParityScope(serviceAssets) {
+  const url = serviceAssets.webGpuParityScopeModule
+    ? toAbsoluteUrl(serviceAssets.webGpuParityScopeModule)
+    : null;
+  if (!url) {
+    return {
+      status: 'skipped',
+      url,
+      artifact: null,
+      reason: 'WebGPU parity-scope asset not declared'
+    };
+  }
+  if (typeof fetch !== 'function') {
+    return {
+      status: 'unavailable',
+      url,
+      artifact: null,
+      reason: 'fetch is unavailable in this runtime'
+    };
+  }
+
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      return {
+        status: response.status === 404 ? 'missing' : 'error',
+        url,
+        artifact: null,
+        reason: `HTTP ${response.status}`
+      };
+    }
+    const contentType = String(response.headers?.get?.('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (contentType === 'text/html') {
+      return {
+        status: 'missing',
+        url,
+        artifact: null,
+        reason: 'HTML fallback returned for optional WebGPU parity-scope asset'
+      };
+    }
+    if (!contentType.includes('json')) {
+      return {
+        status: 'error',
+        url,
+        artifact: null,
+        reason: contentType ? `unexpected content type ${contentType}` : 'missing content type'
+      };
+    }
+    const parsed = await response.json();
+    const validation = validateMoonLabWebGpuParityScope(parsed);
+    if (!validation.valid) {
+      return {
+        status: 'error',
+        url,
+        artifact: null,
+        reason: validation.reason
+      };
+    }
+    return {
+      status: 'ready',
+      url,
+      artifact: parsed,
+      reason: null
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      url,
+      artifact: null,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function validateMoonLabWebGpuParityScope(artifact) {
+  if (!isRecord(artifact)) {
+    return { valid: false, reason: 'parity-scope artifact is not an object' };
+  }
+  if (artifact.schema !== MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA) {
+    return { valid: false, reason: 'parity-scope artifact has unexpected schema' };
+  }
+  if (artifact.contractReady !== true || artifact.contractValidation?.valid !== true) {
+    return { valid: false, reason: 'parity-scope contract validation is not ready' };
+  }
+  if (artifact.reducedFixtureOnly !== true
+    || artifact.fullFidelityMagnetarSimulation !== false
+    || artifact.fullPhysicsValidation !== false) {
+    return { valid: false, reason: 'parity-scope artifact overstates fidelity or physics validation' };
+  }
+  if (!webGpuParityFidelityRuntimeScopeReady(artifact.fidelityRuntimeScope)) {
+    return { valid: false, reason: 'parity-scope artifact lacks reduced fidelity/runtime scope' };
+  }
+  if (artifact.backendAvailable !== false
+    || artifact.webgpuParity?.executed !== false
+    || artifact.webgpuParity?.passed !== false) {
+    return { valid: false, reason: 'parity-scope artifact must remain no-backend evidence' };
+  }
+  if (artifact.complex64Preflight?.executed !== true || artifact.complex64Preflight?.passed !== true) {
+    return { valid: false, reason: 'parity-scope complex64 preflight did not pass' };
+  }
+  const blockers = Array.isArray(artifact.blockers) ? artifact.blockers : [];
+  if (!blockers.includes('browser-webgpu-kernel-parity-not-executed')) {
+    return { valid: false, reason: 'parity-scope artifact is missing native kernel parity blocker' };
+  }
+  return { valid: true, reason: null };
+}
+
+function webGpuParityFidelityRuntimeScopeReady(value) {
+  return isRecord(value)
+    && value.schema === MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA
+    && typeof value.fidelityTier === 'string'
+    && value.fidelityTier.length > 0
+    && typeof value.runtimeScope === 'string'
+    && value.runtimeScope.length > 0
+    && typeof value.readinessClaim === 'string'
+    && value.readinessClaim.length > 0
+    && value.reducedCalibratedRuntimeFixture === true
+    && value.fullFidelityMagnetarSimulation === false
+    && value.fullPhysicsValidation === false;
 }
 
 function toAbsoluteUrl(value) {

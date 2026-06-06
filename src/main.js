@@ -288,6 +288,9 @@ function renderArtifactSummaryLine(summary) {
   const parts = [];
   if (summary.validationStatus) parts.push(`validation:${summary.validationStatus}`);
   if (summary.parityStatus) parts.push(`parity:${summary.parityStatus}`);
+  if (summary.moonlabWebGpuParityScopeReady) {
+    parts.push(`webgpu:${summary.moonlabWebGpuParityScopeBackendAvailable ? 'backend' : 'no-backend'}`);
+  }
   if (summary.magnetarDipoleIsingReady) {
     parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);
   }

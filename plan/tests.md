@@ -571,3 +571,31 @@ reference-contract asset support.
   count `0`, `simulationStatus = scientific-ready`, bridge ack
   `handoff-ready`, visible magnetar proxy, and expected canonical/source/WASM
   hashes.
+
+## 2026-06-06 MoonLab WebGPU Parity-Scope Runtime Handoff Checks
+
+- ULG syntax:
+  `node --check public/workers/moonlab-core-probe.worker.js`,
+  `node --check src/services/dummyService.worker.js`,
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check src/main.js`, `node --check tests/orchestration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- ULG regression:
+  `npm test` passed `20/20`, `npm run build` passed with the existing
+  large-chunk warning, and `npm run test:e2e` passed `1/1`.
+- Live ULG runtime:
+  Playwright against `http://100.86.83.35:5173/` reported MoonLab parity-scope
+  schema `moonlab.webgpu.complex64-parity-scope.v0`, status
+  `scope-ready-backend-unavailable`, `backendAvailable = false`,
+  `webgpuParity.executed = false`, `webgpuParity.passed = false`,
+  `complex64Preflight.passed = true`, false full-fidelity/full-physics flags,
+  and blocker `browser-webgpu-kernel-parity-not-executed` in both telemetry and
+  handoff artifact.
+- Live ULG UI:
+  the MoonLab artifact list line includes `webgpu:no-backend` beside
+  `validation:pass`, `parity:pass`, `magnetar:000`, and `refs:5/5`.
+- Live bridge:
+  PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed
+  against live ULG `5173` and Multiscale `5185` with `handoff-ready`, blocker
+  count `0`, `simulationStatus = scientific-ready`, bridge ack
+  `handoff-ready`, and visible magnetar proxy.

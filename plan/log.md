@@ -3181,3 +3181,45 @@ Notes:
   `fullFidelityMagnetarSimulation = false`, and
   `fullPhysicsValidation = false`.
 - No push was attempted.
+
+## 2026-06-06 - MoonLab WebGPU parity-scope runtime handoff
+
+Changes:
+
+- Extended the MoonLab core probe worker to fetch optional
+  `webgpu-complex64-parity-scope.json`, reject invalid or overclaiming payloads,
+  and keep missing/unavailable states non-blocking.
+- Added the validated parity-scope artifact to the ULG MoonLab runtime artifact
+  and browser handoff packet.
+- Added compact artifact-summary fields for the parity-scope schema/status,
+  no-backend readiness, WebGPU execution/pass flags, complex64 preflight result,
+  full-fidelity/full-physics flags, fidelity/runtime scope, and blockers.
+- Added a compact `webgpu:no-backend` marker to the live artifact list UI.
+- Updated unit and Playwright coverage for the optional runtime handoff fields.
+
+Validation:
+
+- PASS: syntax checks for `public/workers/moonlab-core-probe.worker.js`,
+  `src/services/dummyService.worker.js`, `src/runtime/artifactSummary.js`,
+  `src/main.js`, `tests/orchestration.test.mjs`, and `tests/demo.e2e.mjs`.
+- PASS: `npm test` passed `20/20`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live ULG probe at `http://100.86.83.35:5173/` reported
+  `moonlab.webgpu.complex64-parity-scope.v0`, status
+  `scope-ready-backend-unavailable`, `backendAvailable = false`,
+  `webgpuParity.executed = false`, `webgpuParity.passed = false`,
+  `complex64Preflight.passed = true`, and false full-fidelity/full-physics
+  claims in both telemetry and handoff artifact.
+- PASS: live artifact list showed `webgpu:no-backend`.
+- PASS: PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` passed against live ULG
+  `5173` and Multiscale `5185` with `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, bridge ack `handoff-ready`, and visible
+  magnetar proxy.
+
+Notes:
+
+- This makes MoonLab's WebGPU parity blocker visible and relay-safe in ULG
+  handoffs. It still does not claim browser WebGPU kernel execution.
+- No push was attempted.

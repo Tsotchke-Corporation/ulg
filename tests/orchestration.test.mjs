@@ -126,6 +126,48 @@ function createCalibratedReferenceInventory() {
   ];
 }
 
+function createMoonLabWebGpuParityScopeFixture() {
+  return {
+    schema: 'moonlab.webgpu.complex64-parity-scope.v0',
+    status: 'scope-ready-backend-unavailable',
+    contractReady: true,
+    contractValidation: { valid: true },
+    reducedFixtureOnly: true,
+    backendAvailable: false,
+    fullFidelityMagnetarSimulation: false,
+    fullPhysicsValidation: false,
+    blockers: [
+      'browser-webgpu-adapter-unavailable',
+      'native-webgpu-operation-coverage-not-yet-recorded',
+      'browser-webgpu-kernel-parity-not-executed'
+    ],
+    webgpuParity: {
+      executed: false,
+      passed: false,
+      maxProbabilityAbsDiff: null,
+      tolerance: 0.00001,
+      reason: 'browser WebGPU adapter unavailable'
+    },
+    complex64Preflight: {
+      mode: 'cpu-complex64-rounding-preflight',
+      executed: true,
+      passed: true,
+      maxProbabilityAbsDiff: 2.980232227667301e-8,
+      tolerance: 0.00001
+    },
+    fidelityRuntimeScope: {
+      schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+      fidelityTier: 'reduced-calibrated-runtime-fixture',
+      runtimeScope: 'browser-webgpu-complex64-reduced-fixture-parity',
+      readinessClaim: 'integration-tolerance-gate-only',
+      reducedCalibratedRuntimeFixture: true,
+      hostRuntimeSmokeFixture: true,
+      fullFidelityMagnetarSimulation: false,
+      fullPhysicsValidation: false
+    }
+  };
+}
+
 test('registry resolves services by task kind', async () => {
   const registry = new ComputeServiceRegistry();
   await registry.register({
@@ -586,6 +628,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
         { mode: 'moonlab-webgpu', status: 'unsupported' }
       ]
     },
+    webGpuParityScope: createMoonLabWebGpuParityScopeFixture(),
     calibrationArtifacts: {
       magnetarDipoleIsing: {
         schema: 'peercompute.ulg.magnetar-dipole-ising-calibration.v0',
@@ -611,6 +654,27 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.parityReady, true);
   assert.equal(summary.unsupportedParityModeCount, 1);
   assert.deepEqual(summary.unsupportedParityModes, ['moonlab-webgpu']);
+  assert.equal(summary.moonlabWebGpuParityScopeSchema, 'moonlab.webgpu.complex64-parity-scope.v0');
+  assert.equal(summary.moonlabWebGpuParityScopeStatus, 'scope-ready-backend-unavailable');
+  assert.equal(summary.moonlabWebGpuParityScopeReady, true);
+  assert.equal(summary.moonlabWebGpuParityScopeContractReady, true);
+  assert.equal(summary.moonlabWebGpuParityScopeReducedFixtureOnly, true);
+  assert.equal(summary.moonlabWebGpuParityScopeBackendAvailable, false);
+  assert.equal(summary.moonlabWebGpuParityExecuted, false);
+  assert.equal(summary.moonlabWebGpuParityPassed, false);
+  assert.equal(summary.moonlabWebGpuParityMaxProbabilityAbsDiff, null);
+  assert.equal(summary.moonlabWebGpuParityTolerance, 0.00001);
+  assert.equal(summary.moonlabComplex64PreflightPassed, true);
+  assert.equal(summary.moonlabComplex64PreflightMaxProbabilityAbsDiff, 2.980232227667301e-8);
+  assert.equal(summary.moonlabComplex64PreflightTolerance, 0.00001);
+  assert.equal(summary.moonlabWebGpuParityScopeFullFidelityMagnetarSimulation, false);
+  assert.equal(summary.moonlabWebGpuParityScopeFullPhysicsValidation, false);
+  assert.equal(summary.moonlabWebGpuParityScopeFidelityRuntimeScope.runtimeScope, 'browser-webgpu-complex64-reduced-fixture-parity');
+  assert.deepEqual(summary.moonlabWebGpuParityScopeBlockers, [
+    'browser-webgpu-adapter-unavailable',
+    'native-webgpu-operation-coverage-not-yet-recorded',
+    'browser-webgpu-kernel-parity-not-executed'
+  ]);
   assert.equal(summary.calibrationArtifactCount, 1);
   assert.equal(summary.calibrationReadyCount, 1);
   assert.equal(summary.outputReferenceCount, 5);

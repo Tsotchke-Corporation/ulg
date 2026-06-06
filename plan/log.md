@@ -1624,12 +1624,13 @@ Test results:
   `https://100.86.83.35:5185/?scenario=magnetar` reported two source artifacts,
   `transfer-manifest-ready`, tolerance ready `2/5`, tolerance scientific ready
   `1/5`, calibrated reference ready `1/4`, calibrated scientific ready `1/4`,
-  the `magnetosphere-mhd` tolerance entry ready with no blocker, and
-  `scenarioScientificReady: false`.
+  the `magnetosphere-mhd` tolerance entry ready with no blocker, Eshkol
+  host-runtime execution ready with `entryResult = 0`, output-semantics
+  validation ready, and `scenarioScientificReady: false`.
 
 Failures and open questions:
 
-- The remaining live blockers are expected: PIC/radiation/relativity and full
-  MHD/force-free references are still missing, and the scenario remains
-  scientific-blocked.
+- The remaining live blockers are expected:
+  `calibrated-mhd-pic-radiation-relativity-reference-missing` and
+  `scientific-tolerance-suite-missing`.
 - No push was attempted.

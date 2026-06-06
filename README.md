@@ -42,7 +42,11 @@ artifacts there when testing real services, for example
 `public/service-assets/moonlab/moonlab.wasm`. The MoonLab manifest convention
 uses `entry.serviceAssets` plus `locateFile("moonlab.wasm")` so workers can
 probe loader/WASM fetchability and MIME readiness before running the supervised
-MoonLab core probe. When the assets are ready, the MoonLab task artifact records
+MoonLab core probe. The optional
+`public/service-assets/moonlab/magnetar-reference-contracts.json` file can
+provide externally supplied calibrated reference contracts; a missing optional
+file is reported but does not block MoonLab loader/WASM readiness. When the
+assets are ready, the MoonLab task artifact records
 the `bell_phi_plus` basis probabilities from the real WASM module, an analytic
 Bell-state response descriptor, a passing `moonlab-wasm-core` comparison, and an
 explicit `moonlab-webgpu` unsupported parity entry until MoonLab exposes browser

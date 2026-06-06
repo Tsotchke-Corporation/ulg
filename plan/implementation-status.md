@@ -145,17 +145,27 @@ Updated: 2026-06-06 01:25:01 AKDT
   and verified the live ULG-to-Multiscale VPN bridge counts it as one ready
   calibrated/scientific reference while keeping full magnetar scientific
   readiness blocked.
+- Added optional MoonLab `magnetar-reference-contracts.json` service asset
+  support. The service asset probe fetches and reports the optional JSON, but
+  only loader/WASM assets are required for MoonLab readiness.
+- Updated the supervised MoonLab core probe to load optional supplied calibrated
+  reference contracts, merge only contracts that pass readiness validation, and
+  treat missing Vite HTML fallback for the optional JSON as a non-blocking
+  missing reference asset.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Continue from the live state where the first ready MoonLab calibrated
-  `magnetosphere-mhd` reference is now counted by PeerCompute/Multiscale, while
-  full magnetar scientific readiness remains blocked until calibrated
-  PIC/radiation/relativity and full MHD/force-free references exist.
+- Continue from the live state where optional MoonLab supplied-reference plumbing
+  is in place, no optional reference JSON is currently staged, and the first
+  ready calibrated `magnetosphere-mhd` analytic reference remains the only
+  calibrated scientific coverage counted by PeerCompute/Multiscale.
 
 ## Next
 
+- Stage or generate real calibrated MoonLab reference-contract JSON for
+  PIC/radiation/relativity/full-MHD families and verify it through ULG and
+  PeerCompute before clearing any scientific blockers.
 - Promote the demo-only ULG handoff packet into a durable PeerCompute service
   adapter path with provenance, content addressing, and relay-safe transfer.
 - Add real peercompute service-hosting modules or adapters based on the working

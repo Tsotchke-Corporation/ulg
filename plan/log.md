@@ -1634,3 +1634,79 @@ Failures and open questions:
   `calibrated-mhd-pic-radiation-relativity-reference-missing` and
   `scientific-tolerance-suite-missing`.
 - No push was attempted.
+
+## 2026-06-06 02:46:03 AKDT - Optional MoonLab reference-contract asset plumbing
+
+Prompt:
+
+- User asked whether the overall plan remains on track.
+- Standing instruction remains local commits only and no push.
+
+Actions:
+
+- Declared optional MoonLab
+  `/service-assets/moonlab/magnetar-reference-contracts.json` in the shared ULG
+  service asset spec while keeping `loaderModule` and `wasmModule` as the only
+  required MoonLab browser assets.
+- Added per-asset `required` reporting to the service asset probe and changed
+  readiness summaries to evaluate required assets only.
+- Updated the supervised MoonLab core probe worker to fetch optional supplied
+  calibrated reference contracts, merge only locally validated ready/scientific
+  entries into the four-family inventory, and keep invalid/missing entries
+  blocked.
+- Treated Vite's missing-JSON HTML fallback as optional-contract `missing`
+  instead of a JSON parse `error`.
+- Updated README, plan, implementation-status, and test strategy notes.
+
+Files touched:
+
+- `/home/cos/projects/ulg/ulg-gpu-abi/src/serviceContract.js`
+- `/home/cos/projects/ulg/src/runtime/ServiceAssetProbe.js`
+- `/home/cos/projects/ulg/public/workers/moonlab-core-probe.worker.js`
+- `/home/cos/projects/ulg/tests/service-assets.test.mjs`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+node --check ulg-gpu-abi/src/serviceContract.js
+node --check src/runtime/ServiceAssetProbe.js
+node --check public/workers/moonlab-core-probe.worker.js
+node --check tests/service-assets.test.mjs
+node --test tests/service-assets.test.mjs
+npm test
+npm run build
+npm run test:e2e
+node --input-type=module
+# live Playwright ULG optional MoonLab reference-contract asset probe
+```
+
+Test results:
+
+- PASS: changed-file syntax checks completed.
+- PASS: focused `tests/service-assets.test.mjs` passed `5/5`.
+- PASS: `npm test` passed `17/17`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live ULG at `http://100.86.83.35:5173/` reported MoonLab service asset
+  status `ready`, reason `all required service assets are fetchable`, optional
+  `referenceContractModule.required = false`, and optional reference-contract
+  core loader status `missing` when Vite returned its HTML fallback for the
+  absent JSON file.
+
+Failures and open questions:
+
+- First live check showed the core worker classified Vite's absent optional JSON
+  as a JSON parse `error`; this was fixed by detecting `text/html` fallback and
+  reporting optional status `missing`.
+- No optional calibrated reference JSON is staged in ULG yet, so the live demo
+  still reports one ready/scientific calibrated family: the analytic
+  `magnetosphere-mhd` dipole-field reference.
+- Full magnetar scientific readiness remains blocked until real supplied
+  PIC/radiation/relativity/full-MHD reference contracts are generated,
+  validated, staged, and consumed by PeerCompute/Multiscale.
+- No push was attempted.

@@ -25,6 +25,7 @@ const MAGNETOSPHERE_MHD_ANALYTIC_UNITS_HASH = 'sha256:b9ef2d46ec5f2d0c1fb8a28660
 async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   self.postMessage({ type: 'progress', childId, progress: 0.15, sample: 0 });
   const module = await loadMoonLabModule(serviceAssets);
+  const referenceContracts = await loadMagnetarReferenceContracts(serviceAssets);
   self.postMessage({ type: 'progress', childId, progress: 0.55, sample: 0.5 });
 
   const state = module._quantum_state_create(2);
@@ -44,7 +45,7 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
     ), 0);
     const purity = module._quantum_state_purity(state);
     const entropy = module._quantum_state_entropy(state);
-    const magnetarDipoleIsing = createMagnetarDipoleIsingCalibration(module);
+    const magnetarDipoleIsing = createMagnetarDipoleIsingCalibration(module, referenceContracts.references);
 
     self.postMessage({
       type: 'complete',
@@ -75,6 +76,12 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
           maxProbabilityError
         }),
         magnetarDipoleIsing,
+        referenceContracts: {
+          status: referenceContracts.status,
+          url: referenceContracts.url,
+          count: referenceContracts.references.length,
+          reason: referenceContracts.reason
+        },
         exports: {
           create: typeof module._quantum_state_create,
           destroy: typeof module._quantum_state_destroy,
@@ -170,7 +177,7 @@ function createBellPhiPlusParityReport({
   };
 }
 
-function createMagnetarDipoleIsingCalibration(module) {
+function createMagnetarDipoleIsingCalibration(module, suppliedReferences = []) {
   assertIsingExports(module);
   const input = {
     surfaceMagneticFieldTesla: 100000000000,
@@ -305,7 +312,7 @@ function createMagnetarDipoleIsingCalibration(module) {
       isingModel: model,
       evaluations,
       reference: referenceContract,
-      references: createMagnetarReferenceFamilyInventory(),
+      references: createMagnetarReferenceFamilyInventory(suppliedReferences),
       responseDescriptor: {
         schema: 'peercompute.ulg.quantum-response-descriptor.v0',
         sample: 'magnetar_dipole_ising',
@@ -392,8 +399,8 @@ function createMagnetarDipoleIsingCalibration(module) {
   }
 }
 
-function createMagnetarReferenceFamilyInventory() {
-  return [
+function createMagnetarReferenceFamilyInventory(suppliedReferences = []) {
+  const inventory = [
     createAnalyticMagnetosphereMhdReference(),
     {
       id: 'pic-kinetic-plasma-reference',
@@ -483,6 +490,7 @@ function createMagnetarReferenceFamilyInventory() {
       ]
     }
   ];
+  return mergeSuppliedMagnetarReferenceContracts(inventory, suppliedReferences);
 }
 
 function createAnalyticMagnetosphereMhdReference() {
@@ -535,6 +543,123 @@ function createAnalyticMagnetosphereMhdReference() {
     blocker: null,
     blockers: []
   };
+}
+
+function mergeSuppliedMagnetarReferenceContracts(inventory, suppliedReferences = []) {
+  if (!Array.isArray(suppliedReferences) || suppliedReferences.length === 0) {
+    return inventory;
+  }
+  return inventory.map((entry) => {
+    const supplied = suppliedReferences.find((candidate) => (
+      candidate?.id === entry.id || candidate?.family === entry.family
+    ));
+    return supplied ? normalizeSuppliedMagnetarReferenceContract(entry, supplied) : entry;
+  });
+}
+
+function normalizeSuppliedMagnetarReferenceContract(fallback, supplied) {
+  const fieldMap = cloneRecordOrNull(supplied.fieldMap);
+  const fieldTolerances = cloneRecordOrNull(supplied.fieldTolerances);
+  const fieldObservedDeltas = cloneRecordOrNull(supplied.fieldObservedDeltas);
+  const validation = isRecord(supplied.validation) ? supplied.validation : {};
+  const validationStatus = supplied.validationStatus === 'pass' || validation.status === 'pass'
+    ? 'pass'
+    : 'missing';
+  const contractHash = digestOrNull(supplied.contractHash);
+  const unitsHash = digestOrNull(supplied.unitsHash);
+  const solverId = typeof supplied.solverId === 'string' && supplied.solverId.length > 0
+    ? supplied.solverId
+    : null;
+  const evidence = Array.isArray(validation.evidence)
+    ? validation.evidence.map((entry) => String(entry))
+    : [];
+  const ready = supplied.ready === true
+    && supplied.scientificCoverage === true
+    && solverId != null
+    && contractHash != null
+    && unitsHash != null
+    && fieldMap != null
+    && fieldTolerances != null
+    && fieldObservedDeltas != null
+    && validationStatus === 'pass'
+    && fieldDeltasWithinTolerances(fieldObservedDeltas, fieldTolerances);
+
+  if (!ready) {
+    return {
+      ...fallback,
+      blockers: [
+        ...(Array.isArray(fallback.blockers) ? fallback.blockers : []),
+        'Supplied calibrated reference did not satisfy readiness requirements.'
+      ]
+    };
+  }
+
+  return {
+    id: fallback.id,
+    family: fallback.family,
+    provider: 'moonlab',
+    solverId,
+    schema: 'moonlab.magnetar.calibrated-reference.v0',
+    role: 'peercompute-scientific-tolerance-input',
+    contractHash,
+    unitsHash,
+    fieldMap,
+    fieldTolerances,
+    fieldObservedDeltas,
+    label: typeof supplied.label === 'string' && supplied.label.length > 0 ? supplied.label : fallback.label,
+    status: 'calibrated-reference-ready',
+    ready: true,
+    scientificCoverage: true,
+    scope: supplied.scope === 'analytic-dipole-magnetosphere-reference-not-full-mhd'
+      ? supplied.scope
+      : 'supplied-calibrated-reference-contract',
+    validationStatus: 'pass',
+    validation: {
+      status: 'pass',
+      evidence,
+      maxObservedDeltas: fieldObservedDeltas
+    },
+    blocker: null,
+    blockers: []
+  };
+}
+
+function fieldDeltasWithinTolerances(observed, tolerances) {
+  const entries = Object.entries(tolerances);
+  if (entries.length === 0) return false;
+  return entries.every(([key, tolerance]) => {
+    const observedValue = Number(observed[key]);
+    const toleranceValue = normalizeToleranceValue(tolerance);
+    return Number.isFinite(observedValue)
+      && toleranceValue != null
+      && Math.abs(observedValue) <= toleranceValue;
+  });
+}
+
+function normalizeToleranceValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.abs(value);
+  }
+  if (!isRecord(value)) return null;
+  for (const key of ['abs', 'rel', 'value']) {
+    const candidate = Number(value[key]);
+    if (Number.isFinite(candidate)) {
+      return Math.abs(candidate);
+    }
+  }
+  return null;
+}
+
+function cloneRecordOrNull(value) {
+  return isRecord(value) && Object.keys(value).length > 0 ? { ...value } : null;
+}
+
+function digestOrNull(value) {
+  return typeof value === 'string' && value.startsWith('sha256:') ? value : null;
+}
+
+function isRecord(value) {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function assertIsingExports(module) {
@@ -593,6 +718,74 @@ async function loadMoonLabModule(serviceAssets) {
     }).then((module) => module.ready ?? module);
   }
   return modulePromise;
+}
+
+async function loadMagnetarReferenceContracts(serviceAssets) {
+  const url = serviceAssets.referenceContractModule
+    ? toAbsoluteUrl(serviceAssets.referenceContractModule)
+    : null;
+  if (!url) {
+    return {
+      status: 'skipped',
+      url,
+      references: [],
+      reason: 'reference contract asset not declared'
+    };
+  }
+  if (typeof fetch !== 'function') {
+    return {
+      status: 'unavailable',
+      url,
+      references: [],
+      reason: 'fetch is unavailable in this runtime'
+    };
+  }
+
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      return {
+        status: response.status === 404 ? 'missing' : 'error',
+        url,
+        references: [],
+        reason: `HTTP ${response.status}`
+      };
+    }
+    const contentType = String(response.headers?.get?.('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (contentType === 'text/html') {
+      return {
+        status: 'missing',
+        url,
+        references: [],
+        reason: 'HTML fallback returned for optional reference contract asset'
+      };
+    }
+    if (!contentType.includes('json')) {
+      return {
+        status: 'error',
+        url,
+        references: [],
+        reason: contentType ? `unexpected content type ${contentType}` : 'missing content type'
+      };
+    }
+    const parsed = await response.json();
+    const references = Array.isArray(parsed)
+      ? parsed
+      : (Array.isArray(parsed?.references) ? parsed.references : []);
+    return {
+      status: references.length > 0 ? 'ready' : 'empty',
+      url,
+      references,
+      reason: references.length > 0 ? null : 'reference contract asset has no references[] entries'
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      url,
+      references: [],
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 function toAbsoluteUrl(value) {

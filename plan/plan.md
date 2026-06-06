@@ -109,6 +109,9 @@ physics work:
   field reference with solver id, SHA-256 contract/unit hashes, field maps,
   tolerances, observed deltas, and pass validation while keeping PIC, radiation,
   relativity, and full MHD/force-free coverage blocked.
+- [x] Declare optional MoonLab calibrated reference-contract JSON assets and
+  merge valid supplied reference contracts into the browser core probe inventory
+  without blocking loader/WASM readiness when the optional file is absent.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

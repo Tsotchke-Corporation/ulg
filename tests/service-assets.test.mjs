@@ -20,7 +20,14 @@ test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {
 
   assert.equal(assets.loaderModule, '/service-assets/moonlab/moonlab.js');
   assert.equal(assets.wasmModule, '/service-assets/moonlab/moonlab.wasm');
+  assert.equal(assets.referenceContractModule, '/service-assets/moonlab/magnetar-reference-contracts.json');
   assert.equal(assets.coreProbeWorkerModule, '/workers/moonlab-core-probe.worker.js');
+  assert.deepEqual(assets.required, ['loaderModule', 'wasmModule']);
+  assert.deepEqual(assets.files, {
+    loaderModule: 'moonlab.js',
+    wasmModule: 'moonlab.wasm',
+    referenceContractModule: 'magnetar-reference-contracts.json'
+  });
   assert.equal(
     locateFile('moonlab.wasm'),
     'https://ulg.local/service-assets/moonlab/moonlab.wasm'
@@ -86,7 +93,7 @@ test('service asset probe marks declared MoonLab artifacts ready when MIME types
       requests.push(url);
       return fakeResponse({
         status: 200,
-        contentType: url.endsWith('.wasm') ? 'application/wasm' : 'text/javascript'
+        contentType: contentTypeForMoonLabAsset(url)
       });
     }
   });
@@ -94,9 +101,41 @@ test('service asset probe marks declared MoonLab artifacts ready when MIME types
   assert.equal(probe.status, 'ready');
   assert.deepEqual(requests, [
     'https://ulg.local/service-assets/moonlab/moonlab.js',
-    'https://ulg.local/service-assets/moonlab/moonlab.wasm'
+    'https://ulg.local/service-assets/moonlab/moonlab.wasm',
+    'https://ulg.local/service-assets/moonlab/magnetar-reference-contracts.json'
   ]);
+  assert.deepEqual(
+    probe.assets.map((asset) => [asset.kind, asset.expected, asset.status, asset.required]),
+    [
+      ['loaderModule', 'javascript', 'ready', true],
+      ['wasmModule', 'application/wasm', 'ready', true],
+      ['referenceContractModule', 'json', 'ready', false]
+    ]
+  );
   assert.equal(probe.locateFile.resolved, 'https://ulg.local/service-assets/moonlab/moonlab.wasm');
+});
+
+test('service asset probe treats the MoonLab reference contract JSON as optional', async () => {
+  const assets = createMoonLabServiceAssetSpec();
+  const manifest = createUlgServiceManifest({
+    serviceId: 'moonlab',
+    runtime: 'wasm',
+    workerModule: '/workers/moonlab.service.worker.js',
+    serviceAssets: assets
+  });
+  const probe = await probeManifestServiceAssets(manifest, {
+    locationHref: 'https://ulg.local/demo/',
+    fetchImpl: async (url) => fakeResponse({
+      status: url.endsWith('magnetar-reference-contracts.json') ? 404 : 200,
+      contentType: contentTypeForMoonLabAsset(url)
+    })
+  });
+
+  assert.equal(probe.status, 'ready');
+  assert.equal(probe.reason, 'all required service assets are fetchable');
+  const referenceAsset = probe.assets.find((asset) => asset.kind === 'referenceContractModule');
+  assert.equal(referenceAsset.status, 'missing');
+  assert.equal(referenceAsset.required, false);
 });
 
 test('service asset probe distinguishes missing assets from wrong WASM MIME', async () => {
@@ -130,6 +169,12 @@ test('service asset probe distinguishes missing assets from wrong WASM MIME', as
   assert.equal(mimeMismatch.status, 'mime-mismatch');
   assert.equal(mimeMismatch.assets.find((asset) => asset.kind === 'wasmModule').status, 'mime-mismatch');
 });
+
+function contentTypeForMoonLabAsset(url) {
+  if (url.endsWith('.wasm')) return 'application/wasm';
+  if (url.endsWith('.json')) return 'application/json';
+  return 'text/javascript';
+}
 
 function fakeResponse({ status, contentType }) {
   return {

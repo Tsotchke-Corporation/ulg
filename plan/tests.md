@@ -4,9 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 16/16 tests on 2026-06-06 after promoting the first
-MoonLab calibrated `magnetosphere-mhd` inventory entry to a scoped analytic
-dipole-field reference while leaving PIC/radiation/relativity blocked.
+Current result: pass, 17/17 tests on 2026-06-06 after adding optional MoonLab
+reference-contract asset probing while leaving PIC/radiation/relativity blocked
+unless valid supplied contracts are staged.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -16,10 +16,15 @@ dipole-field reference while leaving PIC/radiation/relativity blocked.
   schema-compatible default MoonLab task capsule.
 - MoonLab service asset specs resolve `locateFile("moonlab.wasm")` to the
   `/service-assets/moonlab/moonlab.wasm` convention.
+- MoonLab service asset specs declare optional
+  `/service-assets/moonlab/magnetar-reference-contracts.json` reference-contract
+  JSON while keeping only loader/WASM assets required.
 - Eshkol closure-bundle service asset specs resolve manually staged artifact
   JSON, WASM, schema snapshot, and bundle manifest URLs.
 - Service asset probes classify ready, missing, and wrong-MIME loader/WASM
   responses.
+- Service asset probes report a missing optional MoonLab reference-contract JSON
+  without changing required loader/WASM readiness.
 - MoonLab service asset specs include the classic core probe worker URL and the
   manifest builder approves it for child-worker leasing.
 - Registry resolution, child-worker lease limits, artifact cache behavior,
@@ -50,15 +55,15 @@ dipole-field reference while leaving PIC/radiation/relativity blocked.
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the analytic magnetosphere reference
-propagation update, with the existing large three.js chunk warning.
+Current result: pass on 2026-06-06 after optional MoonLab reference-contract
+asset support, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after the analytic
-magnetosphere reference propagation update.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after optional MoonLab
+reference-contract asset support.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -107,6 +112,13 @@ magnetosphere reference propagation update.
   with field maps, tolerances, observed deltas, and SHA-256 contract/unit hashes,
   plus blocked PIC kinetic plasma, radiation transport, and relativistic
   correction placeholders.
+- Runtime optional MoonLab reference-contract asset check on 2026-06-06:
+  Playwright verifies the MoonLab service asset probe reports
+  `referenceContractModule` for
+  `/service-assets/moonlab/magnetar-reference-contracts.json` as
+  `required: false`; when the file is absent behind Vite's HTML fallback, the
+  service remains `ready` and the core probe records optional
+  `referenceContracts.status = "missing"`.
 - Live VPN calibrated inventory check on 2026-06-06:
   `http://100.86.83.35:5173/` reported four raw
   `outputs.references[]` entries for magnetosphere MHD, PIC kinetic plasma,

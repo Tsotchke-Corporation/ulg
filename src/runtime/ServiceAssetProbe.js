@@ -27,10 +27,11 @@ export async function probeManifestServiceAssets(manifest, {
       status: 'unavailable',
       reason: 'fetch is unavailable in this runtime',
       checkedAt: new Date().toISOString(),
-      assets: checks.map(({ kind, url, expected }) => ({
+      assets: checks.map(({ kind, url, expected, required }) => ({
         kind,
         url,
         expected,
+        required,
         status: 'unavailable'
       }))
     };
@@ -42,7 +43,7 @@ export async function probeManifestServiceAssets(manifest, {
   return {
     serviceId,
     status,
-    reason: status === 'ready' ? 'all declared service assets are fetchable' : 'one or more service assets failed readiness checks',
+    reason: status === 'ready' ? 'all required service assets are fetchable' : 'one or more required service assets failed readiness checks',
     checkedAt: new Date().toISOString(),
     baseUrl: toAbsoluteUrl(serviceAssets.baseUrl, locationHref),
     locateFile: createLocateFileProbe({ serviceAssets, entry, locationHref }),
@@ -72,9 +73,12 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
   const checks = [];
   const loaderModule = serviceAssets.loaderModule ?? entry.loaderModule;
   const wasmModule = serviceAssets.wasmModule ?? entry.wasmModule;
+  const referenceContractModule = serviceAssets.referenceContractModule ?? entry.referenceContractModule;
   const artifactModule = serviceAssets.artifactModule ?? entry.artifactModule;
   const schemaModule = serviceAssets.schemaModule ?? entry.schemaModule;
   const bundleManifest = serviceAssets.bundleManifest ?? entry.bundleManifest;
+  const requiredKinds = Array.isArray(serviceAssets.required) ? new Set(serviceAssets.required) : null;
+  const isRequired = (kind) => requiredKinds == null || requiredKinds.has(kind);
   const locateFile = createMoonLabLocateFile({
     baseUrl: serviceAssets.baseUrl,
     wasmModule,
@@ -87,7 +91,8 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       serviceId,
       kind: 'loaderModule',
       url: toAbsoluteUrl(loaderModule, locationHref),
-      expected: 'javascript'
+      expected: 'javascript',
+      required: isRequired('loaderModule')
     });
   }
 
@@ -96,14 +101,26 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       serviceId,
       kind: 'wasmModule',
       url: toAbsoluteUrl(wasmModule, locationHref),
-      expected: WASM_MIME
+      expected: WASM_MIME,
+      required: isRequired('wasmModule')
     });
   } else if (serviceAssets.locateFileProbe) {
     checks.push({
       serviceId,
       kind: 'wasmModule',
       url: locateFile(serviceAssets.locateFileProbe),
-      expected: WASM_MIME
+      expected: WASM_MIME,
+      required: isRequired('wasmModule')
+    });
+  }
+
+  if (referenceContractModule) {
+    checks.push({
+      serviceId,
+      kind: 'referenceContractModule',
+      url: toAbsoluteUrl(referenceContractModule, locationHref),
+      expected: 'json',
+      required: isRequired('referenceContractModule')
     });
   }
 
@@ -112,7 +129,8 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       serviceId,
       kind: 'artifactModule',
       url: toAbsoluteUrl(artifactModule, locationHref),
-      expected: 'json'
+      expected: 'json',
+      required: isRequired('artifactModule')
     });
   }
 
@@ -121,7 +139,8 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       serviceId,
       kind: 'schemaModule',
       url: toAbsoluteUrl(schemaModule, locationHref),
-      expected: 'json'
+      expected: 'json',
+      required: isRequired('schemaModule')
     });
   }
 
@@ -130,7 +149,8 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       serviceId,
       kind: 'bundleManifest',
       url: toAbsoluteUrl(bundleManifest, locationHref),
-      expected: 'json'
+      expected: 'json',
+      required: isRequired('bundleManifest')
     });
   }
 
@@ -165,6 +185,7 @@ async function probeAsset(check, fetchImpl) {
       kind: check.kind,
       url: check.url,
       expected: check.expected,
+      required: check.required,
       status,
       httpStatus: response.status,
       contentType
@@ -175,6 +196,7 @@ async function probeAsset(check, fetchImpl) {
       kind: check.kind,
       url: check.url,
       expected: check.expected,
+      required: check.required,
       status: 'error',
       error: error instanceof Error ? error.message : String(error)
     };
@@ -208,13 +230,17 @@ function matchesExpectedMime(contentType, expected) {
 }
 
 function summarizeStatus(assets) {
-  if (assets.every((asset) => asset.status === 'ready')) {
+  const requiredAssets = assets.filter((asset) => asset.required !== false);
+  if (requiredAssets.length === 0) {
     return 'ready';
   }
-  if (assets.some((asset) => asset.status === 'missing')) {
+  if (requiredAssets.every((asset) => asset.status === 'ready')) {
+    return 'ready';
+  }
+  if (requiredAssets.some((asset) => asset.status === 'missing')) {
     return 'missing';
   }
-  if (assets.some((asset) => asset.status === 'mime-mismatch')) {
+  if (requiredAssets.some((asset) => asset.status === 'mime-mismatch')) {
     return 'mime-mismatch';
   }
   return 'error';

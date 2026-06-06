@@ -105,6 +105,7 @@ export function createUlgServiceAssetSpec({
   rootPath = ULG_SERVICE_ASSET_ROOT,
   loaderFile,
   wasmFile,
+  referenceContractFile,
   locateFileProbe,
   coreProbeWorkerModule,
   required = []
@@ -116,7 +117,8 @@ export function createUlgServiceAssetSpec({
   const baseUrl = joinUrl(rootPath, serviceId, '');
   const files = compact({
     loaderModule: loaderFile,
-    wasmModule: wasmFile
+    wasmModule: wasmFile,
+    referenceContractModule: referenceContractFile
   });
 
   return compact({
@@ -125,6 +127,7 @@ export function createUlgServiceAssetSpec({
     baseUrl,
     loaderModule: loaderFile ? joinUrl(baseUrl, loaderFile) : undefined,
     wasmModule: wasmFile ? joinUrl(baseUrl, wasmFile) : undefined,
+    referenceContractModule: referenceContractFile ? joinUrl(baseUrl, referenceContractFile) : undefined,
     locateFileProbe,
     coreProbeWorkerModule,
     required,
@@ -137,6 +140,7 @@ export function createMoonLabServiceAssetSpec(options = {}) {
     serviceId: ULG_SERVICE_IDS.moonlab,
     loaderFile: 'moonlab.js',
     wasmFile: 'moonlab.wasm',
+    referenceContractFile: 'magnetar-reference-contracts.json',
     locateFileProbe: 'moonlab.wasm',
     coreProbeWorkerModule: '/workers/moonlab-core-probe.worker.js',
     required: ['loaderModule', 'wasmModule'],

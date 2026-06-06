@@ -1,5 +1,55 @@
 # ULG Implementation Log
 
+## 2026-06-05 18:23:32 AKDT
+
+Prompt: Continue the ULG implementation plan after PeerCompute accepted the MoonLab magnetar calibration summary into the Multiscale scenario. Standing instructions remain: keep commits local only, keep the Vite server reachable on `0.0.0.0`, and do not push.
+
+Actions attempted:
+
+- Added a local `peercompute.ulg.artifact-summary.v0` helper for compact artifact telemetry.
+- Wired `ArtifactCache` to store and list artifact summaries beside content-addressed refs.
+- Exposed cache summaries through `window.__ulgDemo.telemetry.artifacts` so PeerCompute/Multiscale consumers can see descriptor, parity, unsupported parity mode, and magnetar calibration readiness without fetching the full artifact body.
+- Updated the ULG sidebar artifact list to show validation/parity/calibration summary state.
+- Added unit coverage for closure and MoonLab quantum-response artifact summaries.
+- Extended the Playwright smoke to assert the live MoonLab artifact telemetry record carries magnetar calibration readiness, ground state `000`, `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8`.
+- Updated implementation status, plan, and test notes.
+
+Files touched:
+
+- `src/runtime/artifactSummary.js`
+- `src/runtime/ArtifactCache.js`
+- `src/main.js`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands planned/run:
+
+- `node --check src/runtime/artifactSummary.js`
+- `node --check src/runtime/ArtifactCache.js`
+- `node --check src/main.js`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `git diff --check`
+
+Results:
+
+- PASS: syntax checks completed for the artifact summary helper, artifact cache,
+  and app entrypoint.
+- PASS: `npm test` completed with `14/14` tests passing.
+- PASS: `npm run build` completed with the existing large three.js chunk warning.
+- PASS: `npm run test:e2e` completed with `1/1` Chromium test passing.
+
+Failures / open questions:
+
+- No failures in this checkpoint.
+- This exposes compact handoff telemetry only; it does not add MoonLab WebGPU
+  parity or promote the magnetar path beyond the calibration artifact handoff.
+
 ## 2026-06-05 18:04:15 AKDT
 
 Prompt: Continue the ULG implementation plan after the PeerCompute magnetar scenario checkpoint. Standing instructions remain: keep commits local only, keep the Vite server reachable on `0.0.0.0`, and do not push.

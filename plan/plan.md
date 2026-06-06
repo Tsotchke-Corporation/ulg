@@ -27,6 +27,9 @@ physics work:
   probes for copied artifacts.
 - [x] Add a supervised MoonLab classic child worker that instantiates the real
   core WASM runtime and emits Bell-state probabilities into the task artifact.
+- [x] Add compact `peercompute.ulg.artifact-summary.v0` browser telemetry so
+  PeerCompute-style consumers can see descriptor/parity/calibration readiness
+  without fetching full artifact bodies.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -76,6 +79,8 @@ physics work:
 - [x] Surface the MoonLab `magnetar-dipole-ising-calibration` handoff through
   the ULG browser artifact cache as a WASM-vs-JS parity-checked calibration
   sub-artifact.
+- [x] Surface the same handoff through compact ULG artifact-summary telemetry for
+  direct PeerCompute/Multiscale scenario ingestion.
 
 ### Tooling
 

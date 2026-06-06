@@ -60,4 +60,52 @@ test('artifact cache returns content-addressed refs', async () => {
   const ref = await cache.put({ sourceService: 'eshkol', closureKind: 'demo', value: 1 });
   assert.match(ref.uri, /^artifact:\/\/ulg:/);
   assert.equal((await cache.get(ref)).value, 1);
+  assert.equal((await cache.getSummary(ref)).schema, 'peercompute.ulg.artifact-summary.v0');
+  assert.equal(cache.list()[0].artifactSummary.artifactKind, 'closure');
+});
+
+test('artifact cache summarizes MoonLab magnetar calibration metadata', async () => {
+  const cache = new ArtifactCache();
+  const ref = await cache.put({
+    sourceService: 'moonlab',
+    responseDescriptor: {
+      schema: 'peercompute.ulg.quantum-response-descriptor.v0'
+    },
+    parity: {
+      schema: 'peercompute.ulg.quantum-response-parity.v0',
+      status: 'pass',
+      comparisons: [
+        { mode: 'moonlab-wasm-core', status: 'pass' },
+        { mode: 'moonlab-webgpu', status: 'unsupported' }
+      ]
+    },
+    calibrationArtifacts: {
+      magnetarDipoleIsing: {
+        schema: 'peercompute.ulg.magnetar-dipole-ising-calibration.v0',
+        validation: { status: 'pass' },
+        parity: { status: 'pass', metrics: { maxEnergyDelta: 0 } },
+        summary: {
+          groundState: { bitString: '000' },
+          maxEnergyDelta: 0,
+          evaluatedBitstrings: 8
+        }
+      }
+    },
+    validation: {
+      status: 'pass'
+    }
+  });
+  const summary = await cache.getSummary(ref);
+  assert.equal(summary.schema, 'peercompute.ulg.artifact-summary.v0');
+  assert.equal(summary.artifactKind, 'quantum-response');
+  assert.equal(summary.validationStatus, 'pass');
+  assert.equal(summary.parityReady, true);
+  assert.equal(summary.unsupportedParityModeCount, 1);
+  assert.deepEqual(summary.unsupportedParityModes, ['moonlab-webgpu']);
+  assert.equal(summary.calibrationArtifactCount, 1);
+  assert.equal(summary.calibrationReadyCount, 1);
+  assert.equal(summary.magnetarDipoleIsingReady, true);
+  assert.equal(summary.magnetarDipoleIsingGroundState, '000');
+  assert.equal(summary.magnetarDipoleIsingMaxEnergyDelta, 0);
+  assert.equal(summary.magnetarDipoleIsingEvaluatedBitstrings, 8);
 });

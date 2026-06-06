@@ -111,7 +111,7 @@ function renderTelemetry(telemetry) {
       <span>${record.artifactKind}</span>
       <span>${record.ref.sourceService}</span>
     </div>
-    <p class="cap-line">${record.ref.uri}</p>
+    <p class="cap-line">${record.ref.uri}${renderArtifactSummaryLine(record.artifactSummary)}</p>
   `).join('');
 }
 
@@ -134,4 +134,20 @@ function renderAssetProbeLine(probe) {
     .join(' / ');
   const locateFile = probe.locateFile ? ` :: locateFile(${probe.locateFile.input}) -> ${probe.locateFile.resolved}` : '';
   return `<br>${assets}${locateFile}`;
+}
+
+function renderArtifactSummaryLine(summary) {
+  if (!summary) {
+    return '';
+  }
+  const parts = [];
+  if (summary.validationStatus) parts.push(`validation:${summary.validationStatus}`);
+  if (summary.parityStatus) parts.push(`parity:${summary.parityStatus}`);
+  if (summary.magnetarDipoleIsingReady) {
+    parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);
+  }
+  if (summary.calibrationArtifactCount) {
+    parts.push(`cal:${summary.calibrationReadyCount}/${summary.calibrationArtifactCount}`);
+  }
+  return parts.length ? `<br>${parts.join(' / ')}` : '';
 }

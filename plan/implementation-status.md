@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 16:34:33 AKDT
+Updated: 2026-06-05 18:23:32 AKDT
 
 ## Done
 
@@ -86,12 +86,18 @@ Updated: 2026-06-05 16:34:33 AKDT
   now uses MoonLab WASM Ising exports to evaluate the normalized magnetar dipole
   calibration handoff, records eight bitstring energies, reports ground state
   `000`, and passes JavaScript reference parity with `maxEnergyDelta = 0`.
+- Added `peercompute.ulg.artifact-summary.v0` telemetry summaries to the local
+  artifact cache. Browser telemetry now exposes quantum-response descriptor
+  readiness, parity status, unsupported parity modes, and MoonLab magnetar
+  calibration readiness without requiring consumers to fetch the full artifact
+  body.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the published ABI fixtures and the Eshkol ULG closure artifact helper as
-  the next adapter handshake for PeerCompute, Eshkol, and MoonLab.
+- Use the published ABI fixtures, ULG artifact summaries, and the Eshkol ULG
+  closure artifact helper as the next adapter handshake for PeerCompute, Eshkol,
+  and MoonLab.
 
 ## Next
 

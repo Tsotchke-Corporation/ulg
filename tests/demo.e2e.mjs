@@ -29,6 +29,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   expect(fixtureProbe.assetProbe.locateFile.resolved).toContain('/service-assets/moonlab/moonlab.wasm');
 
   const moonlabArtifact = await readMoonLabArtifact(page);
+  const moonlabTelemetryRecord = await readMoonLabArtifactTelemetryRecord(page);
   if (moonlabAssetStatus === 'ready') {
     expect(moonlabArtifact.method).toBe('moonlab-wasm-bell-phi-plus-probe');
     expect(moonlabArtifact.runtime.coreProbe.status).toBe('ready');
@@ -51,6 +52,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabArtifact.validationMetrics.magnetarEvaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.outputs.magnetarDipoleIsing.evaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.validation.status).toBe('pass');
+    expect(moonlabTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarDipoleIsingReady).toBe(true);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarDipoleIsingGroundState).toBe('000');
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarDipoleIsingMaxEnergyDelta).toBe(0);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarDipoleIsingEvaluatedBitstrings).toBe(8);
   }
 });
 
@@ -121,4 +127,15 @@ async function readMoonLabArtifact(page) {
     ));
     return window.__ulgDemo.artifactCache.get(record.ref);
   });
+}
+
+async function readMoonLabArtifactTelemetryRecord(page) {
+  await page.waitForFunction(
+    () => window.__ulgDemo?.telemetry?.artifacts?.some((record) => record.ref.sourceService === 'moonlab'),
+    undefined,
+    { timeout: 8000 }
+  );
+  return page.evaluate(() => window.__ulgDemo.telemetry.artifacts.find((artifact) => (
+    artifact.ref.sourceService === 'moonlab'
+  )));
 }

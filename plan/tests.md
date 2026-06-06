@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 13/13 tests on 2026-06-05 after adding the supervised
-MoonLab core probe worker.
+Current result: pass, 14/14 tests on 2026-06-05 after adding compact
+artifact-summary telemetry.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -19,25 +19,23 @@ MoonLab core probe worker.
   responses.
 - MoonLab service asset specs include the classic core probe worker URL and the
   manifest builder approves it for child-worker leasing.
-- Registry resolution, child-worker lease limits, artifact cache behavior, and
-  GPU fallback probe behavior.
+- Registry resolution, child-worker lease limits, artifact cache behavior,
+  artifact-summary telemetry behavior, and GPU fallback probe behavior.
 - Child-worker leases preserve `classic` vs `module` worker type metadata.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-05 after the service-contract runtime refactor,
-after service asset probes, and after the supervised MoonLab core probe, with
-the existing large three.js chunk warning.
+Current result: pass on 2026-06-05 after compact artifact-summary telemetry,
+with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-05 after the demo runtime
-started consuming the shared service contract builders, after the service
-asset-probe slice, and after the supervised MoonLab core probe.
+Current result: pass, 1/1 Chromium test on 2026-06-05 after compact
+artifact-summary telemetry.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -68,6 +66,11 @@ asset-probe slice, and after the supervised MoonLab core probe.
   artifact's `calibrationArtifacts.magnetarDipoleIsing`, passing WASM-vs-JS
   Ising energy parity with `groundState.bitString = "000"`,
   `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8`.
+- Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
+  MoonLab artifact telemetry record carries
+  `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state
+  `000`, `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8` without fetching
+  the full artifact body.
 - Live artifact-cache check on 2026-06-05: `http://100.86.83.35:5173/`
   returned Bell parity `pass` plus magnetar calibration `pass`, ground state
   `000`, `maxEnergyDelta = 0`, and `calibrationArtifactCount = 1` from

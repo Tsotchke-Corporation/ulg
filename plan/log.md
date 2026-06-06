@@ -3869,3 +3869,52 @@ Failures / open questions:
 - ICC registry/artifacts are ignored or otherwise clean in ICC's git status; no
   ICC commit was made.
 - No push was attempted.
+
+## 2026-06-06 15:12:00 AKDT - Native operation staging overclaim guard
+
+Prompt: Continue working after integrating MoonLab `pauli_z` and while the
+MoonLab `cnot`, Eshkol tensor-offset, and PeerCompute relay sidecars run.
+
+Changes:
+
+- Added `MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS` to
+  `scripts/stage-service-assets.mjs`.
+- Kept `hadamard`, `pauli_x`, and `pauli_z` as required declarations.
+- Added a second staging validation pass over every
+  `browserNativeOperationProbe.operationResults[]` entry so unexpected extra
+  native operations cannot claim `executed`, `passed`, `covered`, or a
+  non-blocked amplitude diff without failing staging.
+
+Files touched:
+
+- `scripts/stage-service-assets.mjs`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check scripts/stage-service-assets.mjs`
+- `npm run stage:service-assets`
+- `npm run stage:service-assets -- --moonlab-only`
+- `npm test`
+- `git diff --check`
+- `git status --short --branch` in `/home/cos/projects/eshkol`
+
+Validation:
+
+- PASS: `node --check scripts/stage-service-assets.mjs`.
+- PASS: `npm run stage:service-assets -- --moonlab-only` regenerated MoonLab
+  assets and validated all native operation probe results as blocked.
+- PASS: `npm test` passed `22/22`.
+- PASS: `git diff --check` passed.
+
+Failures / open questions:
+
+- Full `npm run stage:service-assets` failed while Dalton's Eshkol sidecar has
+  active uncommitted Eshkol edits in `examples/magnetar_closure.esk`,
+  `lib/backend/llvm_codegen.cpp`, and `site/static/eshkol-host-imports.js`.
+  The Eshkol exporter reported `@define-ulg-closure ... entryExport='main'`
+  while artifact execution emitted `scheme_main`. I did not edit or revert
+  those concurrent Eshkol changes.
+- No push was attempted.

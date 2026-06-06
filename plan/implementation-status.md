@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 15:09:30 AKDT
+Updated: 2026-06-06 15:12:00 AKDT
 
 ## Done
 
@@ -504,6 +504,9 @@ Updated: 2026-06-06 15:09:30 AKDT
 - Registered and indexed Eshkol in Infinite Context Coder. ICC now has
   `eshkol`, `ulg`, `moonlab`, and `peercompute` registered; the Eshkol memory
   artifact was built with tree-sitter available at Eshkol head `ad878d0`.
+- Hardened ULG MoonLab staging so every `browserNativeOperationProbe`
+  `operationResults[]` entry must remain blocked/unexecuted/uncovered in the
+  no-adapter environment, not only the currently required operation names.
 
 ## In Progress
 

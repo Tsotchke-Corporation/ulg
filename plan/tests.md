@@ -944,3 +944,21 @@ reference-contract asset support.
   surfaces including `exe/eshkol-server.cpp`,
   `inc/eshkol/bridge/qllm_bridge.h`, `inc/eshkol/core/eval_bridge.h`, and
   tensor/backend paths.
+
+## 2026-06-06 ULG Native Operation Staging Overclaim Guard Checks
+
+- Syntax:
+  `node --check scripts/stage-service-assets.mjs` passed.
+- MoonLab-only staging:
+  `npm run stage:service-assets -- --moonlab-only` passed and regenerated the
+  MoonLab loader, WASM, normalized reference suite, and WebGPU complex64 parity
+  scope with `hadamard`, `pauli_x`, and `pauli_z` blocked/unexecuted/uncovered.
+- Unit tests:
+  `npm test` passed `22/22`.
+- Diff check:
+  `git diff --check` passed.
+- Full staging note:
+  full `npm run stage:service-assets` was not used for this guard checkpoint
+  because the active Eshkol sidecar has uncommitted Eshkol edits that currently
+  make the Eshkol bundle export report `@define-ulg-closure ... entryExport='main'`
+  while generated artifact execution uses `scheme_main`.

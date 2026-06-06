@@ -32,6 +32,11 @@ const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol'
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
+const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
+  'hadamard',
+  'pauli_x',
+  'pauli_z'
+]);
 
 function valueFor(name) {
   const index = args.indexOf(name);
@@ -228,11 +233,14 @@ function stageMoonLabWebGpuParityScope() {
     const nativeOperationResults = Array.isArray(browserNativeOperationProbe.operationResults)
       ? browserNativeOperationProbe.operationResults
       : [];
-    for (const operation of ['hadamard', 'pauli_x', 'pauli_z']) {
+    for (const operation of MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS) {
       const result = nativeOperationResults.find((entry) => entry?.operation === operation);
       if (!result) {
         throw new Error(`MoonLab WebGPU native-operation probe is missing the ${operation} result`);
       }
+    }
+    for (const result of nativeOperationResults) {
+      const operation = String(result?.operation || 'unknown-operation');
       if (result.blocker !== 'native-operation-probe-not-executed'
         || result.covered !== false
         || result.executed !== false

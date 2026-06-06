@@ -142,6 +142,11 @@ reference-contract asset support.
   evidence entries with five SHA-256 evidence hashes, five proxy-validation
   passes, `observedCount = 5`, `proxyOnlyCount = 5`, `validatedCount = 0`, and
   the remaining blocker `proxy-runtime-not-scientific`.
+- Live VPN stricter PeerCompute runtime-gate check on 2026-06-06:
+  after local PeerCompute commit `c0610ca7`, a fresh browser probe still reports
+  `handoff-ready`, `scientific-tolerance-suite-ready`, five proxy-validation
+  passes, five SHA-256 runtime evidence hashes, `validatedCount = 0`, and
+  scientific runtime gate blocker `proxy-runtime-not-scientific`.
 - Service-asset staging command check on 2026-06-06:
   `npm run stage:service-assets` copied MoonLab `moonlab.js`, `moonlab.wasm`,
   and `magnetar-reference-contracts.json`, regenerated the Eshkol `hello`

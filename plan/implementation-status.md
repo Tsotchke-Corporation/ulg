@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 04:44:06 AKDT
+Updated: 2026-06-06 04:45:30 AKDT
 
 ## Done
 
@@ -172,6 +172,13 @@ Updated: 2026-06-06 04:44:06 AKDT
 - Added optional `--created-at` / `ULG_STAGE_CREATED_AT` pass-through for Eshkol
   bundle exports when byte-stable closure artifact and manifest timestamps are
   needed.
+- Recorded sidecar completions: Eshkol commit `f942f31` adds reproducible ULG
+  closure bundle timestamps, and PeerCompute commit `c0610ca7` hardens the
+  magnetar scientific runtime evidence gate.
+- Re-verified the live VPN ULG-to-PeerCompute handoff after the stricter
+  PeerCompute gate: handoff and tolerance suite remain ready, runtime evidence
+  remains five proxy-only entries, and scientific readiness remains correctly
+  blocked by `proxy-runtime-not-scientific`.
 
 ## In Progress
 

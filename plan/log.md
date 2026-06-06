@@ -1867,3 +1867,57 @@ Failures and open questions:
 - The staged files remain ignored under `public/service-assets/**`; the package
   script makes them reproducible but does not make them committed source.
 - No push was attempted.
+
+## 2026-06-06 04:45:30 AKDT - Sidecar completions and stricter runtime gate check
+
+Prompt:
+
+- Sidecar agents completed MoonLab/Eshkol reproducibility and PeerCompute
+  runtime-gate hardening work.
+
+Actions:
+
+- Recorded Eshkol sidecar commit `f942f31`:
+  `Add reproducible ULG closure bundle timestamps`.
+- Recorded PeerCompute sidecar commit `c0610ca7`:
+  `Harden magnetar scientific runtime evidence gate`.
+- Re-ran the live browser ULG-to-PeerCompute magnetar handoff after the stricter
+  PeerCompute gate landed locally.
+
+Files touched:
+
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+node --input-type=module
+# live Playwright ULG handoff and PeerCompute magnetar stricter-gate probe
+```
+
+Test results:
+
+- PASS: live ULG exported MoonLab with `outputReferenceReadyCount = 5` and
+  `magnetarCalibratedReferenceReadyCount = 4`.
+- PASS: live ULG exported Eshkol with `closureReady = true` and
+  `wasmByteLength = 33907`.
+- PASS: live PeerCompute reported `handoff-ready`, `allHandoffsReady = true`,
+  `scientific-tolerance-suite-ready`, `toleranceReadyCount = 5`,
+  `calibratedReferenceReadyCount = 4`, `scientificReady = false`, and
+  `simulationStatus = "proxy-only"`.
+- PASS: live PeerCompute bounded runtime evidence reported five entries, five
+  SHA-256 evidence hashes, five proxy-validation passes, `observedCount = 5`,
+  `proxyOnlyCount = 5`, `validatedCount = 0`, `missingCount = 0`, and runtime
+  status `runtime-evidence-proxy-only`.
+- PASS: live PeerCompute scientific runtime gate reported
+  `scientific-runtime-blocked`, `ready = false`, `proxyOnly = true`, and blocker
+  `proxy-runtime-not-scientific`.
+
+Failures and open questions:
+
+- This is the expected state after gate hardening: proxy runtime evidence is
+  still visible and useful for integration, but it cannot clear scientific
+  readiness without real scientific runtime validation payloads.
+- No push was attempted.

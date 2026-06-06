@@ -616,3 +616,19 @@ reference-contract asset support.
   bridge ack `handoff-ready`, and visible magnetar proxy.
 - Listener check:
   Vite servers remained bound on `0.0.0.0:5173` and `0.0.0.0:5185`.
+
+## 2026-06-06 PeerCompute Relay Smoke Checks
+
+- VPN coturn dry-run:
+  `bash scripts/dev-vpn-coturn.sh --dry-run` selected VPN host
+  `100.86.83.35`, `RELAY_LISTEN_HOST=0.0.0.0`, dynamic relay port, and TURN
+  host `100.86.83.35:3478`.
+- Backend dry-run:
+  `npm run backend:dry-run` reported relay plus coturn launch commands without
+  starting services.
+- Focused runtime P2P smoke:
+  PeerCompute
+  `RUNTIME_P2P_DEMOS=hyperborea DEMO_PORT=4191 RELAY_CONFIG_TIMEOUT_MS=15000 DEMO_TIMEOUT_MS=45000 node demos/tests/runtime-p2p.mjs`
+  started the Go relay on a dynamic localhost port, wrote Hyperborea relay
+  config, connected headless browser peers, disconnected cleanly, and printed
+  `Runtime P2P tests passed`.

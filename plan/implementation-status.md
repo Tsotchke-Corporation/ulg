@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 13:48:50 AKDT
+Updated: 2026-06-06 13:54:22 AKDT
 
 ## Done
 
@@ -418,6 +418,10 @@ Updated: 2026-06-06 13:48:50 AKDT
   `webgpuParityPassed = false`, `fullFidelityMagnetarSimulation = false`, and
   `fullPhysicsValidation = false`, and without relaxing the scientific runtime
   gate.
+- Integrated the PeerCompute relay-smoke checkpoint locally as commit
+  `1e384104`. VPN coturn/backend dry-runs passed, and focused Hyperborea
+  runtime P2P smoke started an isolated Go relay, connected headless browser
+  peers, and exited with `Runtime P2P tests passed`.
 
 ## In Progress
 

@@ -3256,3 +3256,32 @@ Validation:
 Notes:
 
 - No push was attempted.
+
+## 2026-06-06 - PeerCompute relay-smoke checkpoint
+
+Changes:
+
+- Integrated the PeerCompute relay-smoke checkpoint `1e384104` locally.
+- The checkpoint records VPN coturn/backend dry-runs and a focused Hyperborea
+  runtime P2P smoke through PeerCompute's dynamic Go relay.
+- Restored transient generated `docs/hyperborea/relay-config.json` localhost
+  output after the smoke, so PeerCompute retained a clean tree before the
+  plan-note commit.
+
+Validation:
+
+- PASS: `bash scripts/dev-vpn-coturn.sh --dry-run` selected VPN host
+  `100.86.83.35`, `RELAY_LISTEN_HOST=0.0.0.0`, dynamic relay port, and TURN
+  host `100.86.83.35:3478`.
+- PASS: `npm run backend:dry-run` reported relay plus coturn launch commands
+  without starting services.
+- PASS: PeerCompute
+  `RUNTIME_P2P_DEMOS=hyperborea DEMO_PORT=4191 RELAY_CONFIG_TIMEOUT_MS=15000 DEMO_TIMEOUT_MS=45000 node demos/tests/runtime-p2p.mjs`
+  started the Go relay, connected headless browser peers, disconnected cleanly,
+  and printed `Runtime P2P tests passed`.
+
+Notes:
+
+- This is focused relay-backed browser P2P coverage, not yet a full distributed
+  ULG/Multiscale service-room test.
+- No push was attempted.

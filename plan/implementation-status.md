@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 09:04:47 AKDT
+Updated: 2026-06-06 09:13:46 AKDT
 
 ## Done
 
@@ -239,6 +239,11 @@ Updated: 2026-06-06 09:04:47 AKDT
   metadata-only `eshkol.ulg.closure.descriptor-bind` tasks without transferred
   WASM bytes, while closure-artifact ingest still compiles complete modules and
   records descriptor contract readiness.
+- Added and committed PeerCompute Eshkol host-runtime dry probes locally as
+  commit `b00ac043`. The live Eshkol adapter Worker now dry-instantiates the
+  `53066`-byte descriptor WASM module with inert host-import stubs, confirms the
+  `main` export is available, records `30` function stubs plus memory/global/table
+  stubs, and keeps `mainInvoked = false` and `scientificExecution = false`.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable

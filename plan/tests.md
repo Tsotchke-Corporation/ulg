@@ -265,6 +265,13 @@ reference-contract asset support.
   `descriptor-contract-metadata-only`, `moduleCompiled = false`,
   tensor/table contract matches, MoonLab reference count `4`, runtime status
   `declared-not-executed`, and no blockers.
+- Live VPN Eshkol host-runtime dry-probe check on 2026-06-06: after PeerCompute
+  commit `b00ac043`, the live ULG handoff returned `dispatch-adapters-ready`
+  with Eshkol `moduleCompiled = true`, `importCount = 33`, `exportCount = 1`,
+  descriptor contract status `descriptor-contract-ready`, host-runtime probe
+  status `host-runtime-dry-probe-ready`, `instantiated = true`, `30` function
+  stubs plus memory/global/table stubs, `stubCallCount = 0`,
+  `mainInvoked = false`, `scientificExecution = false`, and no blockers.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

@@ -2696,3 +2696,47 @@ Failures and open questions:
 - Descriptor contract metadata is now checked in the adapter path, but table
   computation and runtime execution semantics are still intentionally pending.
 - No push was attempted.
+
+## 2026-06-06 09:13:46 AKDT - Eshkol host-runtime dry probe
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `b00ac043`, which extends the Eshkol dispatch adapter
+  with a dry host-runtime probe for complete transferred WASM modules.
+- The probe refuses modules with a WASM start section, builds inert host-import
+  stubs for function, memory, global, and table imports, instantiates the module,
+  and confirms the `main` export is available without invoking it.
+- Fixed the real Eshkol descriptor module dry-instantiation path by sizing the
+  inert table/memory stubs conservatively while preserving declared import
+  metadata matching.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the local commit and live probe evidence.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the dispatch adapter module and updated
+  service-orchestration test file.
+- PASS: PeerCompute `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `18/18`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+- PASS: live VPN browser probe against ULG `5173` and Multiscale `5185`
+  returned `dispatch-adapters-ready` with Eshkol `moduleCompiled = true`,
+  `importCount = 33`, `exportCount = 1`, descriptor contract status
+  `descriptor-contract-ready`, host-runtime probe status
+  `host-runtime-dry-probe-ready`, `instantiated = true`, `30` function stubs
+  plus memory/global/table stubs, `stubCallCount = 0`, `mainInvoked = false`,
+  `scientificExecution = false`, and no blockers.
+
+Failures and open questions:
+
+- The dry probe proves browser service-worker instantiation shape only. It still
+  does not execute `main`, compute interpolation tables, or validate magnetar
+  closure physics.
+- No push was attempted.

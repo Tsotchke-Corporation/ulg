@@ -3,6 +3,10 @@ import { createDemoRuntime } from './runtime/demoRuntime.js';
 import { createWorkerTreeScene } from './visualization/workerTreeScene.js';
 
 const app = document.querySelector('#app');
+const multiscaleUrl = new URL(
+  '/?scenario=magnetar',
+  `https://${window.location.hostname || '127.0.0.1'}:5185`
+).href;
 
 app.innerHTML = `
   <main class="app-shell">
@@ -13,10 +17,13 @@ app.innerHTML = `
           <h1>PeerCompute</h1>
         </div>
         <div class="controls">
+          <a id="open-multiscale" class="button-link" href="${multiscaleUrl}" target="_blank" rel="noreferrer">Open Multiscale</a>
+          <button id="copy-handoff" type="button">Copy Handoff</button>
           <button id="run-smoke" type="button">Run Smoke</button>
           <button id="cancel-smoke" type="button">Cancel</button>
         </div>
       </div>
+      <div id="handoff-status" class="handoff-status">handoff idle</div>
       <div id="scene"></div>
     </section>
     <aside class="telemetry-pane">
@@ -45,6 +52,8 @@ app.innerHTML = `
 `;
 
 const scene = createWorkerTreeScene(document.querySelector('#scene'));
+const copyHandoffButton = document.querySelector('#copy-handoff');
+const handoffStatus = document.querySelector('#handoff-status');
 const runButton = document.querySelector('#run-smoke');
 const cancelButton = document.querySelector('#cancel-smoke');
 const gpuStatus = document.querySelector('#gpu-status');
@@ -70,8 +79,44 @@ runButton.addEventListener('click', () => {
 cancelButton.addEventListener('click', () => {
   runtime.cancelActive();
 });
+copyHandoffButton.addEventListener('click', async () => {
+  copyHandoffButton.disabled = true;
+  handoffStatus.textContent = 'handoff exporting';
+  try {
+    if (runtime.telemetry.artifacts.length < 2) {
+      handoffStatus.textContent = 'handoff waiting for services';
+      await runtime.runSmoke();
+    }
+    const handoff = await runtime.createPeerComputeHandoff();
+    await copyTextToClipboard(JSON.stringify(handoff, null, 2));
+    handoffStatus.textContent = `handoff copied: ${handoff.artifactCount} artifacts`;
+  } catch (error) {
+    handoffStatus.textContent = `handoff failed: ${error.message}`;
+  } finally {
+    copyHandoffButton.disabled = false;
+  }
+});
 
 runtime.runSmoke();
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error('clipboard unavailable');
+  }
+}
 
 function renderTelemetry(telemetry) {
   gpuStatus.textContent = telemetry.gpu.supported ? 'webgpu ready' : 'wasm/cpu fallback';

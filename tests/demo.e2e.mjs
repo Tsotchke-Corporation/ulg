@@ -4,6 +4,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto('/');
   await expect(page.getByText('PeerCompute')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open Multiscale' })).toHaveAttribute('href', /https:\/\/.*:5185\/\?scenario=magnetar/);
+  await expect(page.getByRole('button', { name: 'Copy Handoff' })).toBeVisible();
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.services?.length === 2);
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.services?.some((service) => service.serviceId === 'moonlab' && service.assetProbe?.status));
   const moonlabAssetStatus = await page.evaluate(() => window.__ulgDemo.telemetry.services.find((service) => service.serviceId === 'moonlab').assetProbe.status);

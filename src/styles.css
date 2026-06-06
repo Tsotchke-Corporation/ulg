@@ -32,8 +32,26 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover,
+.button-link:hover {
   background: #0a241b;
+}
+
+button:disabled {
+  opacity: 0.58;
+  cursor: progress;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  border: 1px solid #58ffba;
+  border-radius: 4px;
+  padding: 0 14px;
+  background: #06110e;
+  color: #d8ffe9;
+  text-decoration: none;
 }
 
 .app-shell {
@@ -52,7 +70,7 @@ button:hover {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .top-bar {
@@ -85,6 +103,16 @@ h1 {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.handoff-status {
+  padding: 8px 24px;
+  border-bottom: 1px solid rgba(88, 255, 186, 0.18);
+  background: rgba(2, 6, 5, 0.86);
+  color: #91a99b;
+  font-size: 11px;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 
 #scene {
@@ -178,7 +206,11 @@ h1 {
   }
 
   .controls {
-    max-width: 148px;
+    max-width: 184px;
+  }
+
+  .handoff-status {
+    padding-inline: 16px;
   }
 
   .terminal-row.service-row {

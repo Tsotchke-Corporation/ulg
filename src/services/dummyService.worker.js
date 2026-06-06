@@ -230,6 +230,7 @@ function createArtifact(task) {
       inputHash: task.inputHash,
       method: coreProbeReady ? 'moonlab-wasm-bell-phi-plus-probe' : 'dummy-lanczos-demo',
       representation: 'state_vector',
+      responseDescriptor: coreProbeReady ? coreProbe.responseDescriptor : createFallbackQuantumResponseDescriptor(),
       outputs: {
         energyLevels: coreProbeReady ? [coreProbe.entropy, coreProbe.purity] : [0, 0.5, 1],
         forceSamples: [0.1, 0.2, 0.1],
@@ -238,11 +239,17 @@ function createArtifact(task) {
       },
       uncertainty: {
         truncationError: coreProbeReady ? coreProbe.maxProbabilityError : 0,
-        parityError: 0
+        parityError: coreProbeReady ? coreProbe.parity?.metrics?.maxProbabilityError ?? 0 : 0
+      },
+      parity: coreProbeReady ? coreProbe.parity : createFallbackQuantumParityReport(),
+      validationMetrics: {
+        maxProbabilityError: coreProbeReady ? coreProbe.maxProbabilityError : 0,
+        normalizationDelta: coreProbeReady ? coreProbe.parity?.metrics?.normalizationDelta ?? 0 : 0,
+        unsupportedParityModeCount: coreProbeReady ? coreProbe.parity?.metrics?.unsupportedModeCount ?? 0 : 1
       },
       validation: {
         status: coreProbeReady && coreProbe.maxProbabilityError <= 1e-9 ? 'pass' : 'warn',
-        validationMode: coreProbeReady ? 'moonlab-wasm-self' : 'self'
+        validationMode: coreProbeReady ? 'moonlab-wasm-analytic-parity' : 'self'
       },
       runtime: {
         assetProbe,
@@ -292,5 +299,66 @@ function selectChildWorkerSpec(taskCapsule) {
   return {
     module: manifest.childWorkers.allowedModules[0],
     workerType: 'module'
+  };
+}
+
+function createFallbackQuantumResponseDescriptor() {
+  return {
+    schema: 'peercompute.ulg.quantum-response-descriptor.v0',
+    sample: 'placeholder',
+    qubitCount: 2,
+    basis: {
+      kind: 'computational',
+      ordering: 'little-endian-basis-index',
+      states: ['00', '01', '10', '11']
+    },
+    representation: {
+      state: 'state_vector',
+      amplitudeDType: 'complex64',
+      probabilityDType: 'f64',
+      probabilityLayout: 'basis-index-vector'
+    },
+    deterministic: false,
+    expectedProbabilities: [0.5, 0, 0, 0.5],
+    observedProbabilities: [0.5, 0, 0, 0.5],
+    invariants: {
+      probabilitySum: 1,
+      normalizationDelta: 0,
+      purity: null,
+      entropy: null
+    }
+  };
+}
+
+function createFallbackQuantumParityReport() {
+  return {
+    schema: 'peercompute.ulg.quantum-response-parity.v0',
+    sample: 'placeholder',
+    status: 'warn',
+    tolerance: 1e-9,
+    reference: {
+      mode: 'placeholder-reference',
+      probabilities: [0.5, 0, 0, 0.5]
+    },
+    comparisons: [
+      {
+        mode: 'moonlab-wasm-core',
+        status: 'unsupported',
+        reason: 'moonlab-assets-unavailable',
+        maxProbabilityError: null
+      },
+      {
+        mode: 'moonlab-webgpu',
+        status: 'unsupported',
+        reason: 'moonlab-webgpu-response-kernel-unavailable',
+        maxProbabilityError: null
+      }
+    ],
+    metrics: {
+      maxProbabilityError: 0,
+      normalizationDelta: 0,
+      parityGap: null,
+      unsupportedModeCount: 2
+    }
   };
 }

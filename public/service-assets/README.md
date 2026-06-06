@@ -37,4 +37,8 @@ When MoonLab assets are present and ready, the ULG demo leases
 `/workers/moonlab-core-probe.worker.js` as a classic child worker. That worker
 loads the Emscripten `MoonlabModule` factory with `importScripts()`, uses
 `locateFile()` to resolve the WASM next to `moonlab.js`, and emits the
-`bell_phi_plus` probability vector into the MoonLab task artifact.
+`bell_phi_plus` probability vector into the MoonLab task artifact. The artifact
+also carries `peercompute.ulg.quantum-response-descriptor.v0` and
+`peercompute.ulg.quantum-response-parity.v0` metadata so consumers can see the
+passing MoonLab WASM/analytic comparison and the currently unsupported MoonLab
+WebGPU parity mode separately.

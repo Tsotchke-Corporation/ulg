@@ -79,8 +79,32 @@ test('schema sketches validate representative artifacts', () => {
     inputHash: 'input',
     method: 'demo',
     representation: 'state_vector',
-    outputs: {},
-    validation: {},
+    responseDescriptor: {
+      schema: 'peercompute.ulg.quantum-response-descriptor.v0',
+      sample: 'bell_phi_plus',
+      qubitCount: 2,
+      basis: { kind: 'computational', states: ['00', '01', '10', '11'] },
+      representation: { state: 'state_vector', amplitudeDType: 'complex64' },
+      deterministic: true,
+      expectedProbabilities: [0.5, 0, 0, 0.5],
+      observedProbabilities: [0.5, 0, 0, 0.5],
+      invariants: { probabilitySum: 1, normalizationDelta: 0 }
+    },
+    outputs: {
+      basisProbabilities: [0.5, 0, 0, 0.5],
+      bellState: 'bell_phi_plus'
+    },
+    parity: {
+      schema: 'peercompute.ulg.quantum-response-parity.v0',
+      status: 'pass',
+      reference: { mode: 'analytic-bell-phi-plus' },
+      comparisons: [
+        { mode: 'moonlab-wasm-core', status: 'pass', maxProbabilityError: 0 },
+        { mode: 'moonlab-webgpu', status: 'unsupported', reason: 'moonlab-webgpu-response-kernel-unavailable' }
+      ],
+      metrics: { maxProbabilityError: 0, unsupportedModeCount: 1 }
+    },
+    validation: { status: 'pass' },
     provenance
   };
   const toleranceReport = createToleranceReport({

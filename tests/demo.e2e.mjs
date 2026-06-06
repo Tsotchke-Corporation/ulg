@@ -35,6 +35,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabArtifact.outputs.bellState).toBe('bell_phi_plus');
     expect(moonlabArtifact.outputs.basisProbabilities[0]).toBeCloseTo(0.5, 9);
     expect(moonlabArtifact.outputs.basisProbabilities[3]).toBeCloseTo(0.5, 9);
+    expect(moonlabArtifact.responseDescriptor.schema).toBe('peercompute.ulg.quantum-response-descriptor.v0');
+    expect(moonlabArtifact.responseDescriptor.invariants.normalizationDelta).toBeLessThan(1e-9);
+    expect(moonlabArtifact.parity.schema).toBe('peercompute.ulg.quantum-response-parity.v0');
+    expect(moonlabArtifact.parity.status).toBe('pass');
+    expect(moonlabArtifact.parity.comparisons.find((entry) => entry.mode === 'moonlab-wasm-core').status).toBe('pass');
+    expect(moonlabArtifact.parity.comparisons.find((entry) => entry.mode === 'moonlab-webgpu').status).toBe('unsupported');
+    expect(moonlabArtifact.validationMetrics.unsupportedParityModeCount).toBe(1);
     expect(moonlabArtifact.validation.status).toBe('pass');
   }
 });

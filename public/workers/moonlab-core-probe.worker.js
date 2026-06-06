@@ -36,9 +36,12 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
       module._quantum_state_get_probability(state, basis)
     ));
     const expected = [0.5, 0, 0, 0.5];
+    const probabilitySum = probabilities.reduce((sum, value) => sum + value, 0);
     const maxProbabilityError = probabilities.reduce((maxError, probability, index) => (
       Math.max(maxError, Math.abs(probability - expected[index]))
     ), 0);
+    const purity = module._quantum_state_purity(state);
+    const entropy = module._quantum_state_entropy(state);
 
     self.postMessage({
       type: 'complete',
@@ -50,8 +53,24 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
         probabilities,
         expectedProbabilities: expected,
         maxProbabilityError,
-        purity: module._quantum_state_purity(state),
-        entropy: module._quantum_state_entropy(state),
+        probabilitySum,
+        purity,
+        entropy,
+        responseDescriptor: createBellPhiPlusResponseDescriptor({
+          probabilities,
+          expected,
+          probabilitySum,
+          purity,
+          entropy
+        }),
+        parity: createBellPhiPlusParityReport({
+          probabilities,
+          expected,
+          probabilitySum,
+          purity,
+          entropy,
+          maxProbabilityError
+        }),
         exports: {
           create: typeof module._quantum_state_create,
           destroy: typeof module._quantum_state_destroy,
@@ -64,6 +83,85 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   } finally {
     module._quantum_state_destroy(state);
   }
+}
+
+function createBellPhiPlusResponseDescriptor({
+  probabilities,
+  expected,
+  probabilitySum,
+  purity,
+  entropy
+}) {
+  return {
+    schema: 'peercompute.ulg.quantum-response-descriptor.v0',
+    sample: 'bell_phi_plus',
+    qubitCount: 2,
+    basis: {
+      kind: 'computational',
+      ordering: 'little-endian-basis-index',
+      states: ['00', '01', '10', '11']
+    },
+    representation: {
+      state: 'state_vector',
+      amplitudeDType: 'complex64',
+      probabilityDType: 'f64',
+      probabilityLayout: 'basis-index-vector'
+    },
+    deterministic: true,
+    expectedProbabilities: expected,
+    observedProbabilities: probabilities,
+    invariants: {
+      probabilitySum,
+      normalizationDelta: Math.abs(probabilitySum - 1),
+      purity,
+      entropy
+    }
+  };
+}
+
+function createBellPhiPlusParityReport({
+  probabilities,
+  expected,
+  probabilitySum,
+  purity,
+  entropy,
+  maxProbabilityError
+}) {
+  const tolerance = 1e-9;
+  const normalizationDelta = Math.abs(probabilitySum - 1);
+  return {
+    schema: 'peercompute.ulg.quantum-response-parity.v0',
+    sample: 'bell_phi_plus',
+    status: maxProbabilityError <= tolerance && normalizationDelta <= tolerance ? 'pass' : 'warn',
+    tolerance,
+    reference: {
+      mode: 'analytic-bell-phi-plus',
+      probabilities: expected
+    },
+    comparisons: [
+      {
+        mode: 'moonlab-wasm-core',
+        status: maxProbabilityError <= tolerance ? 'pass' : 'warn',
+        observedProbabilities: probabilities,
+        maxProbabilityError,
+        normalizationDelta,
+        purity,
+        entropy
+      },
+      {
+        mode: 'moonlab-webgpu',
+        status: 'unsupported',
+        reason: 'moonlab-webgpu-response-kernel-unavailable',
+        maxProbabilityError: null
+      }
+    ],
+    metrics: {
+      maxProbabilityError,
+      normalizationDelta,
+      parityGap: null,
+      unsupportedModeCount: 1
+    }
+  };
 }
 
 async function loadMoonLabModule(serviceAssets) {

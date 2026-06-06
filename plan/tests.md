@@ -53,6 +53,12 @@ asset-probe slice, and after the supervised MoonLab core probe.
   Playwright verified the supervised MoonLab artifact method
   `moonlab-wasm-bell-phi-plus-probe`, `coreProbe.status = ready`, validation
   `pass`, and Bell `phi_plus` probabilities close to `[0.5, 0, 0, 0.5]`.
+- Runtime parity artifact check on 2026-06-05: with copied MoonLab assets
+  present, Playwright verifies
+  `peercompute.ulg.quantum-response-descriptor.v0`,
+  `peercompute.ulg.quantum-response-parity.v0`, a passing
+  `moonlab-wasm-core` comparison, and an explicit unsupported `moonlab-webgpu`
+  comparison for the still-missing browser WebGPU parity kernel.
 - Live VPN check on 2026-06-05: `http://100.86.83.35:5173/` returned the same
   MoonLab artifact method, core probe status, validation status, and Bell
   probability vector through `window.__ulgDemo.artifactCache`.

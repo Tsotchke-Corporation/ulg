@@ -76,6 +76,11 @@ Updated: 2026-06-05 16:34:33 AKDT
 - Verified the live VPN demo at `http://100.86.83.35:5173/` reports MoonLab
   `method = moonlab-wasm-bell-phi-plus-probe`, `coreProbe = ready`, and
   `validation = pass`.
+- Extended the MoonLab task artifact with
+  `peercompute.ulg.quantum-response-descriptor.v0` and
+  `peercompute.ulg.quantum-response-parity.v0`, including a passing
+  `moonlab-wasm-core` comparison against the analytic Bell `phi_plus`
+  probability vector and an explicit unsupported `moonlab-webgpu` parity entry.
 
 ## In Progress
 
@@ -89,7 +94,7 @@ Updated: 2026-06-05 16:34:33 AKDT
   demo contract.
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
   real closure tensor descriptors once the descriptor contract is stable.
-- Extend the MoonLab probe artifact from Bell-state readiness into deterministic
-  quantum response descriptors and CPU/WebGPU parity metadata.
+- Add real MoonLab browser WebGPU quantum-response kernels so the current
+  unsupported `moonlab-webgpu` parity entry can become an executed comparison.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

@@ -1,5 +1,53 @@
 # ULG Implementation Log
 
+## 2026-06-05 17:36:55 AKDT
+
+Prompt: Continued the ULG implementation plan after the PeerCompute remote-solver cadence checkpoint. User standing instructions: keep going, keep commits local, keep the Vite server reachable on `0.0.0.0`, and do not push.
+
+Actions attempted:
+
+- Picked the next ULG-local MoonLab gap from `plan/implementation-status.md`: extend the Bell-state readiness probe into deterministic quantum-response descriptors and CPU/WebGPU parity metadata.
+- Extended `public/workers/moonlab-core-probe.worker.js` so the real MoonLab WASM Bell `phi_plus` probe emits `peercompute.ulg.quantum-response-descriptor.v0` plus `peercompute.ulg.quantum-response-parity.v0`.
+- Added analytic Bell `phi_plus` reference probabilities, MoonLab WASM/core comparison metrics, normalization delta, purity/entropy invariants, and an explicit unsupported `moonlab-webgpu` parity comparison.
+- Threaded the descriptor/parity reports into the persisted MoonLab quantum-response artifact in `src/services/dummyService.worker.js`.
+- Extended ABI and Playwright smoke tests to assert the descriptor/parity surface.
+- Updated README, service-asset docs, plan, implementation status, and test-plan docs.
+
+Files touched:
+
+- `README.md`
+- `public/service-assets/README.md`
+- `public/workers/moonlab-core-probe.worker.js`
+- `src/services/dummyService.worker.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands planned/run:
+
+- `node --check public/workers/moonlab-core-probe.worker.js`
+- `node --check src/services/dummyService.worker.js`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `git diff --check`
+
+Results:
+
+- PASS: `node --check public/workers/moonlab-core-probe.worker.js`
+- PASS: `node --check src/services/dummyService.worker.js`
+- PASS: `npm test` completed with `13/13` tests passing.
+- PASS: `npm run build` completed with the existing large three.js chunk warning.
+- PASS: `npm run test:e2e` completed with `1/1` Chromium test passing.
+- PASS: `git diff --check`
+
+Failures / open questions:
+
+- The artifact truthfully reports MoonLab WebGPU parity as unsupported until MoonLab exposes browser WebGPU response kernels.
+
 ## 2026-06-05 15:05:57 AKDT
 
 Prompt: "read the agents.md file and get to work we are already on relevant branches for moonlab eshkol and peercompute. they're all in ~/projects."

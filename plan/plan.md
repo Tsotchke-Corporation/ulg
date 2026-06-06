@@ -62,9 +62,11 @@ physics work:
 
 - [x] Identify JS/WASM/WebGPU bindings that can emit ULG quantum response artifacts.
 - [x] Prototype service worker bootstrap around existing MoonLab core exports.
-- [ ] Add deterministic CPU/WebGPU parity artifact surface.
+- [x] Add deterministic CPU/WebGPU parity artifact surface with explicit
+  unsupported WebGPU parity reporting.
 - [x] Fix JS unit regressions and WASM dist packaging before real service integration.
-- [ ] Add browser WebGPU complex64/parity kernels with unsupported fallback reporting.
+- [ ] Add browser WebGPU complex64/parity kernels to replace the current
+  unsupported parity report.
 - [x] Add ULG/browser smoke that verifies MoonLab `locateFile`/WASM asset probe
   wiring and consumes the published service fixtures in a browser worker.
 - [x] Copy generated MoonLab core artifacts into ignored local service assets and

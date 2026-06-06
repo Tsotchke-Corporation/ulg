@@ -962,3 +962,19 @@ reference-contract asset support.
   because the active Eshkol sidecar has uncommitted Eshkol edits that currently
   make the Eshkol bundle export report `@define-ulg-closure ... entryExport='main'`
   while generated artifact execution uses `scheme_main`.
+
+## 2026-06-06 ICC ULG Refresh Checks
+
+- ULG index:
+  `.venv/bin/python scripts/codebase_tool.py index --repo ulg` in
+  `/home/cos/projects/infinite_context_coder` indexed `63` files, `25557` lines,
+  and reported `tree_sitter_available = true` at ULG git head
+  `f620e85459f389afd16e9a72134049a8730417cd`.
+- ULG memory:
+  `.venv/bin/python scripts/codebase_tool.py build-memory --repo ulg` wrote
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/ulg/codebase_memory`
+  with `224` chunks.
+- ULG architecture summary:
+  `.venv/bin/python scripts/codebase_tool.py architecture-summary --repo ulg
+  --bundle --include-cheatsheet` succeeded and identified `src/runtime`,
+  `src/services`, `src`, and `src/visualization` as public module roots.

@@ -3918,3 +3918,44 @@ Failures / open questions:
   while artifact execution emitted `scheme_main`. I did not edit or revert
   those concurrent Eshkol changes.
 - No push was attempted.
+
+## 2026-06-06 15:14:10 AKDT - ICC ULG memory refresh
+
+Prompt: Continue working while sidecars run; after several ULG local commits,
+refresh the coordinator repo's ICC memory.
+
+Actions attempted:
+
+- Re-indexed the registered ICC `ulg` repository.
+- Rebuilt the ICC `ulg` codebase memory.
+- Ran a bundled ULG architecture summary as a smoke check.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `.venv/bin/python scripts/codebase_tool.py index --repo ulg`
+- `.venv/bin/python scripts/codebase_tool.py build-memory --repo ulg`
+- `.venv/bin/python scripts/codebase_tool.py architecture-summary --repo ulg --bundle --include-cheatsheet`
+
+Results:
+
+- PASS: ULG index wrote
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/ulg/codebase_index.json`
+  with `63` files, `25557` lines, and `tree_sitter_available = true`.
+- PASS: ULG memory wrote
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/ulg/codebase_memory`
+  with `224` chunks and git head
+  `f620e85459f389afd16e9a72134049a8730417cd`.
+- PASS: ULG architecture summary completed and identified `src/runtime`,
+  `src/services`, `src`, and `src/visualization` as module roots.
+
+Failures / open questions:
+
+- JavaScript function-aware parsing remains limited in this ICC build; ULG's
+  include graph is available but call graph statistics are zero.
+- No push was attempted.

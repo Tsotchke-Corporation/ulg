@@ -1,5 +1,73 @@
 # ULG Implementation Log
 
+## 2026-06-05 18:31:10 AKDT
+
+Prompt: Continue the ULG implementation plan after the Eshkol sidecar added a local closure bundle export helper. Standing instructions remain: keep commits local only, keep the Vite server reachable on `0.0.0.0`, and do not push.
+
+Actions attempted:
+
+- Added `createEshkolClosureBundleAssetSpec()` for Eshkol bundles exported by
+  `scripts/export_ulg_closure_bundle.py`.
+- Extended service asset probing to validate JSON assets in addition to JS and
+  WASM assets.
+- Declared the default Eshkol `hello` closure bundle in the ULG demo runtime.
+- Copied the ignored local Eshkol smoke bundle into
+  `public/service-assets/eshkol/closures/hello/` for live readiness probing.
+- Added unit coverage for Eshkol artifact JSON, WASM, schema snapshot, and
+  bundle manifest URL probing.
+- Extended the browser smoke to verify the Eshkol service declares/probes its
+  bundle assets and reports the four expected asset kinds when ready.
+- Updated service asset docs, implementation status, plan, and test notes.
+
+Files touched:
+
+- `ulg-gpu-abi/src/serviceContract.js`
+- `src/runtime/ServiceAssetProbe.js`
+- `src/runtime/demoRuntime.js`
+- `tests/service-assets.test.mjs`
+- `tests/demo.e2e.mjs`
+- `public/service-assets/README.md`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Ignored local files staged for live demo only:
+
+- `public/service-assets/eshkol/closures/hello/hello.ulg.json`
+- `public/service-assets/eshkol/closures/hello/hello.wasm`
+- `public/service-assets/eshkol/closures/hello/ulg_bundle_manifest.json`
+- `public/service-assets/eshkol/closures/hello/schemas/ulg/closure_artifact.schema.json`
+
+Commands planned/run:
+
+- `node --check ulg-gpu-abi/src/serviceContract.js`
+- `node --check src/runtime/ServiceAssetProbe.js`
+- `node --check src/runtime/demoRuntime.js`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `git diff --check`
+
+Results:
+
+- PASS: syntax checks completed for the service contract builder, asset probe,
+  and demo runtime.
+- PASS: `npm test` completed with `15/15` tests passing.
+- PASS: `npm run build` completed with the existing large three.js chunk warning.
+- PASS: `npm run test:e2e` completed with `1/1` Chromium test passing.
+- PASS: live VPN probe against `http://100.86.83.35:5173/` reported Eshkol
+  asset status `ready`, with the WASM module served as `application/wasm` and
+  the artifact JSON, schema snapshot, and bundle manifest served as
+  `application/json`.
+
+Failures / open questions:
+
+- No failures in this checkpoint.
+- This proves browser-facing readiness for a manually staged Eshkol bundle; real
+  closure tensor semantics and PeerCompute execution of that bundle remain next
+  integration work.
+
 ## 2026-06-05 18:23:32 AKDT
 
 Prompt: Continue the ULG implementation plan after PeerCompute accepted the MoonLab magnetar calibration summary into the Multiscale scenario. Standing instructions remain: keep commits local only, keep the Vite server reachable on `0.0.0.0`, and do not push.

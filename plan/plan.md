@@ -30,6 +30,8 @@ physics work:
 - [x] Add compact `peercompute.ulg.artifact-summary.v0` browser telemetry so
   PeerCompute-style consumers can see descriptor/parity/calibration readiness
   without fetching full artifact bodies.
+- [x] Add an Eshkol closure-bundle service asset convention and browser probe for
+  manually staged `scripts/export_ulg_closure_bundle.py` outputs.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -55,6 +57,8 @@ physics work:
   `llvm_codegen.cpp`, GPU memory/VM dispatch APIs, and existing web/GPU scripts.
 - [x] Add closure artifact JSON emission and named WASM reference export/import
   discovery for the current AOT WASM path.
+- [x] Add manual closure-bundle export/deploy helper support to the ULG
+  browser-facing service asset convention.
 - [ ] Add `define-ulg-closure`, typed closure tensor descriptors, and
   service-worker import glue after the artifact contract stabilizes.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a

@@ -91,12 +91,16 @@ Updated: 2026-06-05 18:23:32 AKDT
   readiness, parity status, unsupported parity modes, and MoonLab magnetar
   calibration readiness without requiring consumers to fetch the full artifact
   body.
+- Added an Eshkol closure-bundle service asset convention and readiness probe
+  for bundles exported by `scripts/export_ulg_closure_bundle.py`. The current
+  live demo can report the ignored local `hello` bundle as ready when copied
+  under `public/service-assets/eshkol/closures/hello/`.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Use the published ABI fixtures, ULG artifact summaries, and the Eshkol ULG
-  closure artifact helper as the next adapter handshake for PeerCompute, Eshkol,
+  closure bundle helper as the next adapter handshake for PeerCompute, Eshkol,
   and MoonLab.
 
 ## Next

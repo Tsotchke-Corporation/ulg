@@ -13,8 +13,11 @@ public/service-assets/
     moonlab.wasm
   eshkol/
     closures/
-      <closure-id>.wasm
-      <closure-id>.ulg.json
+      <bundle-name>/
+        <bundle-name>.wasm
+        <bundle-name>.ulg.json
+        ulg_bundle_manifest.json
+        schemas/ulg/closure_artifact.schema.json
 ```
 
 The app does not require these files for the dummy smoke. When a service
@@ -46,3 +49,23 @@ Ising exports, the same worker also emits
 `peercompute.ulg.magnetar-dipole-ising-calibration.v0` as a calibration
 sub-artifact with normalized dipole fields, eight bitstring energy evaluations,
 ground state `000`, and zero WASM-vs-JS energy delta.
+
+For Eshkol ULG closure bundles, use the sibling repo helper:
+
+```bash
+cd /home/cos/projects/eshkol
+scripts/export_ulg_closure_bundle.py examples/hello.esk \
+  --eshkol-run build/eshkol-run \
+  --output-dir build/ulg/manual-deploy-smoke \
+  --name hello
+```
+
+Then copy the files listed in `ulg_bundle_manifest.json` into:
+
+```text
+public/service-assets/eshkol/closures/hello/
+```
+
+The ULG demo declares that `hello` bundle by default and probes the artifact
+JSON, WASM module, schema snapshot, and bundle manifest. With those ignored
+files present, the Eshkol service telemetry reports asset status `ready`.

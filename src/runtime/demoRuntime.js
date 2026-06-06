@@ -1,4 +1,5 @@
 import {
+  createEshkolClosureBundleAssetSpec,
   createMoonLabServiceAssetSpec,
   createUlgServiceManifest,
   createUlgTaskCapsule
@@ -32,6 +33,7 @@ export async function createDemoRuntime() {
     serviceId: 'eshkol',
     workerModule: serviceWorkerModule,
     childWorkerModule,
+    serviceAssets: createEshkolClosureBundleAssetSpec({ bundleName: 'hello' }),
     validation: {
       toleranceProfile: 'scientific-default'
     }

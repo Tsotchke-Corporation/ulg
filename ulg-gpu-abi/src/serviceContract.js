@@ -144,6 +144,34 @@ export function createMoonLabServiceAssetSpec(options = {}) {
   });
 }
 
+export function createEshkolClosureBundleAssetSpec({
+  bundleName = 'hello',
+  rootPath = ULG_SERVICE_ASSET_ROOT,
+  artifactFile = `${bundleName}.ulg.json`,
+  wasmFile = `${bundleName}.wasm`,
+  schemaFile = 'schemas/ulg/closure_artifact.schema.json',
+  bundleManifestFile = 'ulg_bundle_manifest.json',
+  required = ['artifactModule', 'wasmModule', 'schemaModule', 'bundleManifest']
+} = {}) {
+  const bundleBaseUrl = joinUrl(rootPath, ULG_SERVICE_IDS.eshkol, 'closures', bundleName, '');
+  return {
+    serviceId: ULG_SERVICE_IDS.eshkol,
+    rootPath,
+    baseUrl: bundleBaseUrl,
+    artifactModule: joinUrl(bundleBaseUrl, artifactFile),
+    wasmModule: joinUrl(bundleBaseUrl, wasmFile),
+    schemaModule: joinUrl(bundleBaseUrl, schemaFile),
+    bundleManifest: joinUrl(bundleBaseUrl, bundleManifestFile),
+    required,
+    files: {
+      artifactModule: artifactFile,
+      wasmModule: wasmFile,
+      schemaModule: schemaFile,
+      bundleManifest: bundleManifestFile
+    }
+  };
+}
+
 export function createUlgServiceManifest({
   serviceId,
   version = '0.5.0-demo',

@@ -8,6 +8,16 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.services?.some((service) => service.serviceId === 'moonlab' && service.assetProbe?.status));
   const moonlabAssetStatus = await page.evaluate(() => window.__ulgDemo.telemetry.services.find((service) => service.serviceId === 'moonlab').assetProbe.status);
   expect(moonlabAssetStatus).not.toBe('skipped');
+  const eshkolAssetProbe = await page.evaluate(() => window.__ulgDemo.telemetry.services.find((service) => service.serviceId === 'eshkol').assetProbe);
+  expect(eshkolAssetProbe.status).not.toBe('skipped');
+  if (eshkolAssetProbe.status === 'ready') {
+    expect(eshkolAssetProbe.assets.map((asset) => asset.kind).sort()).toEqual([
+      'artifactModule',
+      'bundleManifest',
+      'schemaModule',
+      'wasmModule'
+    ]);
+  }
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.tasks?.length === 2);
   await page.waitForTimeout(1200);
 

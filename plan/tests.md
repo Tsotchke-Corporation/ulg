@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 14/14 tests on 2026-06-05 after adding compact
-artifact-summary telemetry.
+Current result: pass, 15/15 tests on 2026-06-05 after adding the Eshkol
+closure-bundle service asset probe.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -15,6 +15,8 @@ artifact-summary telemetry.
   schema-compatible default MoonLab task capsule.
 - MoonLab service asset specs resolve `locateFile("moonlab.wasm")` to the
   `/service-assets/moonlab/moonlab.wasm` convention.
+- Eshkol closure-bundle service asset specs resolve manually staged artifact
+  JSON, WASM, schema snapshot, and bundle manifest URLs.
 - Service asset probes classify ready, missing, and wrong-MIME loader/WASM
   responses.
 - MoonLab service asset specs include the classic core probe worker URL and the
@@ -27,15 +29,15 @@ artifact-summary telemetry.
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-05 after compact artifact-summary telemetry,
-with the existing large three.js chunk warning.
+Current result: pass on 2026-06-05 after the Eshkol closure-bundle service
+asset probe, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-05 after compact
-artifact-summary telemetry.
+Current result: pass, 1/1 Chromium test on 2026-06-05 after the Eshkol
+closure-bundle service asset probe.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -71,6 +73,13 @@ artifact-summary telemetry.
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state
   `000`, `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8` without fetching
   the full artifact body.
+- Eshkol bundle asset check on 2026-06-05: when the ignored local `hello` bundle
+  is copied under `public/service-assets/eshkol/closures/hello/`, Playwright
+  verifies the Eshkol service asset probe sees artifact JSON, WASM, schema
+  snapshot, and bundle manifest assets.
+- Live VPN Eshkol bundle check on 2026-06-05: `http://100.86.83.35:5173/`
+  reported Eshkol asset status `ready`, with `application/wasm` for the module
+  and `application/json` for the artifact, schema, and bundle manifest.
 - Live artifact-cache check on 2026-06-05: `http://100.86.83.35:5173/`
   returned Bell parity `pass` plus magnetar calibration `pass`, ground state
   `000`, `maxEnergyDelta = 0`, and `calibrationArtifactCount = 1` from

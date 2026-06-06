@@ -1,5 +1,6 @@
 const JAVASCRIPT_MIME_MARKERS = ['javascript', 'ecmascript'];
 const WASM_MIME = 'application/wasm';
+const JSON_MIME_MARKER = 'json';
 
 export async function probeManifestServiceAssets(manifest, {
   fetchImpl = globalThis.fetch,
@@ -71,6 +72,9 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
   const checks = [];
   const loaderModule = serviceAssets.loaderModule ?? entry.loaderModule;
   const wasmModule = serviceAssets.wasmModule ?? entry.wasmModule;
+  const artifactModule = serviceAssets.artifactModule ?? entry.artifactModule;
+  const schemaModule = serviceAssets.schemaModule ?? entry.schemaModule;
+  const bundleManifest = serviceAssets.bundleManifest ?? entry.bundleManifest;
   const locateFile = createMoonLabLocateFile({
     baseUrl: serviceAssets.baseUrl,
     wasmModule,
@@ -100,6 +104,33 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       kind: 'wasmModule',
       url: locateFile(serviceAssets.locateFileProbe),
       expected: WASM_MIME
+    });
+  }
+
+  if (artifactModule) {
+    checks.push({
+      serviceId,
+      kind: 'artifactModule',
+      url: toAbsoluteUrl(artifactModule, locationHref),
+      expected: 'json'
+    });
+  }
+
+  if (schemaModule) {
+    checks.push({
+      serviceId,
+      kind: 'schemaModule',
+      url: toAbsoluteUrl(schemaModule, locationHref),
+      expected: 'json'
+    });
+  }
+
+  if (bundleManifest) {
+    checks.push({
+      serviceId,
+      kind: 'bundleManifest',
+      url: toAbsoluteUrl(bundleManifest, locationHref),
+      expected: 'json'
     });
   }
 
@@ -169,6 +200,9 @@ function matchesExpectedMime(contentType, expected) {
   }
   if (expected === 'javascript') {
     return JAVASCRIPT_MIME_MARKERS.some((marker) => contentType.includes(marker));
+  }
+  if (expected === 'json') {
+    return contentType.includes(JSON_MIME_MARKER);
   }
   return contentType === expected;
 }

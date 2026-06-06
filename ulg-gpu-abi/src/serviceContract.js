@@ -106,6 +106,7 @@ export function createUlgServiceAssetSpec({
   loaderFile,
   wasmFile,
   referenceContractFile,
+  webGpuParityScopeFile,
   locateFileProbe,
   coreProbeWorkerModule,
   required = []
@@ -118,7 +119,8 @@ export function createUlgServiceAssetSpec({
   const files = compact({
     loaderModule: loaderFile,
     wasmModule: wasmFile,
-    referenceContractModule: referenceContractFile
+    referenceContractModule: referenceContractFile,
+    webGpuParityScopeModule: webGpuParityScopeFile
   });
 
   return compact({
@@ -128,6 +130,7 @@ export function createUlgServiceAssetSpec({
     loaderModule: loaderFile ? joinUrl(baseUrl, loaderFile) : undefined,
     wasmModule: wasmFile ? joinUrl(baseUrl, wasmFile) : undefined,
     referenceContractModule: referenceContractFile ? joinUrl(baseUrl, referenceContractFile) : undefined,
+    webGpuParityScopeModule: webGpuParityScopeFile ? joinUrl(baseUrl, webGpuParityScopeFile) : undefined,
     locateFileProbe,
     coreProbeWorkerModule,
     required,
@@ -141,6 +144,7 @@ export function createMoonLabServiceAssetSpec(options = {}) {
     loaderFile: 'moonlab.js',
     wasmFile: 'moonlab.wasm',
     referenceContractFile: 'magnetar-reference-contracts.json',
+    webGpuParityScopeFile: 'webgpu-complex64-parity-scope.json',
     locateFileProbe: 'moonlab.wasm',
     coreProbeWorkerModule: '/workers/moonlab-core-probe.worker.js',
     required: ['loaderModule', 'wasmModule'],

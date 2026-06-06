@@ -3132,3 +3132,52 @@ Notes:
 - MoonLab's new WebGPU parity-scope evidence is still explicitly no-backend
   reduced-fixture evidence until browser WebGPU kernels execute natively.
 - No push was attempted.
+
+## 2026-06-06 - MoonLab WebGPU parity-scope staging
+
+Changes:
+
+- Added optional MoonLab `webgpu-complex64-parity-scope.json` service-asset
+  support to the ULG service asset spec and browser asset probe. The asset is
+  fetched and reported as optional JSON; MoonLab readiness still requires only
+  `moonlab.js` and `moonlab.wasm`.
+- Extended `npm run stage:service-assets` to call MoonLab's
+  `pnpm webgpu:complex64:parity -- --out ...` CLI and reject staged parity
+  evidence that overclaims full-fidelity magnetar simulation, full physics
+  validation, browser WebGPU execution, or backend availability.
+- Updated ULG service-asset tests and docs to cover the new optional parity
+  asset and its explicit no-backend reduced-fixture scope.
+
+Validation:
+
+- PASS: `node --check scripts/stage-service-assets.mjs`.
+- PASS: `node --check src/runtime/ServiceAssetProbe.js`.
+- PASS: `node --check ulg-gpu-abi/src/serviceContract.js`.
+- PASS: `node --check tests/service-assets.test.mjs`.
+- PASS: `npm run stage:service-assets` generated
+  `public/service-assets/moonlab/webgpu-complex64-parity-scope.json`.
+- PASS: staged parity-scope hash is
+  `sha256:8c10f99aaa0dc0f13c6bb3242befbe65bf8ff2d5acad610829017fb548dc83bc`.
+- PASS: staged MoonLab suite hash remained
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`.
+- PASS: staged Eshkol WASM hash remained
+  `sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- PASS: `npm run stage:service-assets -- --dry-run --json` included the
+  would-generate MoonLab WebGPU complex64 parity-scope command.
+- PASS: `npm test` passed `20/20`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` reported
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, visible magnetar proxy, and the expected
+  canonical/source/WASM hashes.
+
+Notes:
+
+- This checkpoint records reduced-fixture parity scope only. Browser WebGPU
+  complex64 parity is still not executed, and the artifact keeps
+  `backendAvailable = false`, `webgpuParity.executed = false`,
+  `fullFidelityMagnetarSimulation = false`, and
+  `fullPhysicsValidation = false`.
+- No push was attempted.

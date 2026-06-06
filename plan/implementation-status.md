@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 12:55:15 AKDT
+Updated: 2026-06-06 13:32:02 AKDT
 
 ## Done
 
@@ -378,6 +378,26 @@ Updated: 2026-06-06 12:55:15 AKDT
   and PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` reported
   `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
   bridge ack `handoff-ready`, and the visible magnetar proxy on the solar layer.
+- Added optional MoonLab `webgpu-complex64-parity-scope.json` service-asset
+  staging. The ULG staging command now generates and validates MoonLab's
+  `moonlab.webgpu.complex64-parity-scope.v0` reduced-fixture no-backend
+  evidence while keeping the MoonLab loader/WASM assets as the only required
+  runtime readiness assets.
+- Verified the new parity-scope staging guard: `npm run stage:service-assets`
+  generated parity-scope hash
+  `sha256:8c10f99aaa0dc0f13c6bb3242befbe65bf8ff2d5acad610829017fb548dc83bc`,
+  kept the MoonLab suite hash
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
+  kept the Eshkol WASM hash
+  `sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`,
+  and preserved false full-fidelity/full-physics/WebGPU-executed claims.
+- Re-verified the ULG checkpoint after parity-scope staging: `npm test` passed
+  `20/20`, `npm run build` passed with the existing large-chunk warning,
+  `npm run test:e2e` passed `1/1`, and PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` still reported
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, visible magnetar proxy, and the expected
+  canonical/source/WASM hashes.
 
 ## In Progress
 

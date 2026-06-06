@@ -11,6 +11,8 @@ public/service-assets/
   moonlab/
     moonlab.js
     moonlab.wasm
+    magnetar-reference-contracts.json
+    webgpu-complex64-parity-scope.json
   eshkol/
     closures/
       <bundle-name>/
@@ -50,6 +52,12 @@ Ising exports, the same worker also emits
 sub-artifact with normalized dipole fields, eight bitstring energy evaluations,
 ground state `000`, and zero WASM-vs-JS energy delta.
 
+The optional `webgpu-complex64-parity-scope.json` asset records MoonLab's
+`moonlab.webgpu.complex64-parity-scope.v0` reduced-fixture parity scope. In the
+current Node-generated staging path this is explicit no-backend evidence:
+`backendAvailable = false`, browser WebGPU parity has not executed, and
+`fullFidelityMagnetarSimulation` / `fullPhysicsValidation` remain false.
+
 To refresh the local ignored service assets from the sibling repos, run:
 
 ```bash
@@ -57,9 +65,10 @@ npm run stage:service-assets
 ```
 
 The command copies `moonlab.js` and `moonlab.wasm`, generates the normalized
-MoonLab magnetar reference suite from `/home/cos/projects/moonlab`, then exports
-the Eshkol `magnetar-closure` descriptor bundle directly into this tree with
-descriptor-only metadata required by the ULG handoff tests. Use
+MoonLab magnetar reference suite and WebGPU complex64 parity-scope asset from
+`/home/cos/projects/moonlab`, then exports the Eshkol `magnetar-closure`
+descriptor bundle directly into this tree with descriptor-only metadata
+required by the ULG handoff tests. Use
 `ULG_PROJECTS_ROOT=/path/to/projects` when the sibling repos are not under
 `/home/cos/projects`. Use `--created-at <iso-timestamp>` or
 `ULG_STAGE_CREATED_AT=<iso-timestamp>` with an Eshkol helper that supports

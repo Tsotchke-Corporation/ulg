@@ -533,3 +533,41 @@ reference-contract asset support.
   `npm --prefix demos/multiscale run test:ulg-handoff` should pass against the
   live `5173`/`5185` servers with `handoff-ready`, blocker count `0`, and the
   visible magnetar proxy on the solar layer.
+
+## 2026-06-06 MoonLab WebGPU Parity-Scope Staging Checks
+
+- ULG syntax:
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check src/runtime/ServiceAssetProbe.js`,
+  `node --check ulg-gpu-abi/src/serviceContract.js`, and
+  `node --check tests/service-assets.test.mjs` passed.
+- ULG staging:
+  `npm run stage:service-assets` passed and generated optional
+  `public/service-assets/moonlab/webgpu-complex64-parity-scope.json`.
+- ULG dry-run staging:
+  `npm run stage:service-assets -- --dry-run --json` passed and listed the
+  MoonLab WebGPU complex64 parity-scope generation command.
+- ULG staged parity-scope gate:
+  `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` reports
+  schema `moonlab.webgpu.complex64-parity-scope.v0`, status
+  `scope-ready-backend-unavailable`, `contractReady = true`,
+  `contractValidation.valid = true`, `reducedFixtureOnly = true`,
+  `backendAvailable = false`, `webgpuParity.executed = false`,
+  `webgpuParity.passed = false`, `complex64Preflight.passed = true`, and the
+  blocker `browser-webgpu-kernel-parity-not-executed`.
+- ULG staged hashes:
+  parity scope
+  `8c10f99aaa0dc0f13c6bb3242befbe65bf8ff2d5acad610829017fb548dc83bc`,
+  MoonLab suite
+  `7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
+  and Eshkol WASM
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- ULG regression:
+  `npm test` passed `20/20`, `npm run build` passed with the existing
+  large-chunk warning, and `npm run test:e2e` passed `1/1`.
+- Live bridge:
+  PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed
+  against live ULG `5173` and Multiscale `5185` with `handoff-ready`, blocker
+  count `0`, `simulationStatus = scientific-ready`, bridge ack
+  `handoff-ready`, visible magnetar proxy, and expected canonical/source/WASM
+  hashes.

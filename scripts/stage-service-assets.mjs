@@ -26,6 +26,7 @@ const moonlabCoreRoot = path.join(projectsRoot, 'moonlab', 'bindings', 'javascri
 const eshkolRoot = path.join(projectsRoot, 'eshkol');
 const moonlabTargetDir = path.join(repoRoot, 'public', 'service-assets', 'moonlab');
 const moonlabReferenceSuiteTarget = path.join(moonlabTargetDir, 'magnetar-reference-contracts.json');
+const moonlabWebGpuParityScopeTarget = path.join(moonlabTargetDir, 'webgpu-complex64-parity-scope.json');
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
@@ -138,6 +139,75 @@ function stageMoonLabReferenceSuite() {
   };
 }
 
+function stageMoonLabWebGpuParityScope() {
+  const target = moonlabWebGpuParityScopeTarget;
+  const command = [
+    'pnpm',
+    'webgpu:complex64:parity',
+    '--',
+    '--out',
+    target
+  ];
+  if (createdAt != null) {
+    command.push('--generated-at', createdAt);
+  }
+
+  if (!dryRun) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    const result = spawnSync(command[0], command.slice(1), {
+      cwd: moonlabCoreRoot,
+      encoding: 'utf8'
+    });
+    if (result.status !== 0) {
+      throw new Error([
+        `MoonLab WebGPU complex64 parity scope generation failed with status ${result.status}`,
+        result.stdout.trim(),
+        result.stderr.trim()
+      ].filter(Boolean).join('\n'));
+    }
+
+    const artifact = JSON.parse(readFileSync(target, 'utf8'));
+    if (artifact.schema !== 'moonlab.webgpu.complex64-parity-scope.v0') {
+      throw new Error('MoonLab WebGPU parity scope asset is missing expected schema');
+    }
+    if (artifact.contractReady !== true || artifact.contractValidation?.valid !== true) {
+      throw new Error('MoonLab WebGPU parity scope contract did not validate');
+    }
+    if (artifact.reducedFixtureOnly !== true
+      || artifact.fullFidelityMagnetarSimulation !== false
+      || artifact.fullPhysicsValidation !== false) {
+      throw new Error('MoonLab WebGPU parity scope overstates fidelity or physics validation');
+    }
+    if (artifact.fidelityRuntimeScope?.schema !== 'ulg.magnetar.fidelity-runtime-scope.v0'
+      || artifact.fidelityRuntimeScope.fullFidelityMagnetarSimulation !== false
+      || artifact.fidelityRuntimeScope.fullPhysicsValidation !== false) {
+      throw new Error('MoonLab WebGPU parity scope is missing reduced fidelity/runtime scope metadata');
+    }
+    if (artifact.backendAvailable !== false
+      || artifact.webgpuParity?.executed !== false
+      || artifact.webgpuParity?.passed !== false) {
+      throw new Error('MoonLab WebGPU parity scope must remain no-backend evidence in ULG staging');
+    }
+    const blockers = Array.isArray(artifact.blockers) ? artifact.blockers : [];
+    if (!blockers.includes('browser-webgpu-kernel-parity-not-executed')) {
+      throw new Error('MoonLab WebGPU parity scope is missing the native kernel parity blocker');
+    }
+    if (artifact.complex64Preflight?.passed !== true) {
+      throw new Error('MoonLab WebGPU parity scope complex64 preflight did not pass');
+    }
+  }
+
+  return {
+    label: 'MoonLab WebGPU complex64 parity scope',
+    source: path.join(moonlabCoreRoot, 'scripts', 'webgpu-complex64-parity.mjs'),
+    target,
+    command,
+    contentHash: dryRun ? null : sha256File(target),
+    byteLength: dryRun ? null : statSync(target).size,
+    action: dryRun ? 'would-generate' : 'generated'
+  };
+}
+
 function stageMoonLabAssets() {
   const staged = [
     copyAsset(
@@ -152,6 +222,7 @@ function stageMoonLabAssets() {
     )
   ];
   staged.push(stageMoonLabReferenceSuite());
+  staged.push(stageMoonLabWebGpuParityScope());
   return staged;
 }
 

@@ -74,6 +74,8 @@ physics work:
   PeerCompute dispatch service tasks while keeping dispatch plans ref-based.
 - [x] Add exported PeerCompute MoonLab/Eshkol dispatch service adapters that
   consume those materialized payloads under `WorkerSupervisor`.
+- [x] Expose and verify Multiscale browser Worker execution for the exported
+  dispatch adapters through `runUlgDispatchServiceAdapterProbe()`.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
@@ -81,8 +83,8 @@ physics work:
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
-- [ ] Connect the exported PeerCompute dispatch adapters to real MoonLab/Eshkol
-  browser worker modules and service assets.
+- [ ] Replace deterministic dispatch acceptance in the Multiscale adapter
+  workers with MoonLab/Eshkol execution/probe logic.
 
 ### Eshkol
 

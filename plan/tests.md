@@ -239,6 +239,16 @@ reference-contract asset support.
   dispatch payloads, request/release supervised child leases, emit typed dispatch
   service results/artifacts, and cache nested acceptance artifacts beside the
   parent durable handoff envelope.
+- Live VPN Multiscale dispatch adapter-worker check on 2026-06-06: after
+  PeerCompute commit `c198326c`, `window.__multiscaleDemo.runUlgDispatchServiceAdapterProbe(handoff)`
+  on `https://100.86.83.35:5185/?scenario=magnetar` returned
+  `peercompute.multiscale.ulg-dispatch-service-adapter-probe.v0`,
+  `dispatch-adapters-ready`, `ready = true`, `dispatchCount = 2`,
+  `executedDispatchCount = 2`, `acceptedDispatchCount = 2`,
+  `failedDispatchCount = 0`, nested dispatch artifact refs for
+  `moonlab-ulg-fixture` and `eshkol-ulg-fixture`, MoonLab
+  `magnetarDipoleIsingReady = true`, Eshkol `wasmByteLength = 53066`, and no
+  blockers.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

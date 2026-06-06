@@ -2559,3 +2559,47 @@ Failures and open questions:
   still need real MoonLab/Eshkol execution/probe workers behind their
   `entry.workerModule` and child-worker entries.
 - No push was attempted.
+
+## 2026-06-06 08:44:50 AKDT - Multiscale dispatch adapter-worker probe
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `c198326c`, which builds Multiscale browser
+  module-worker shims for the exported MoonLab/Eshkol dispatch adapters.
+- Multiscale now exposes
+  `window.__multiscaleDemo.runUlgDispatchServiceAdapterProbe()` and
+  `executeUlgHandoffDispatchServices()` to run a ULG handoff through the
+  dispatch plan, `WorkerSupervisor`, and the browser adapter Workers.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the live probe evidence.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the new worker shims, Multiscale main,
+  Vite config, and dispatch adapter module.
+- PASS: PeerCompute full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning and emitted
+  `assets/ulgMoonLabDispatchServiceHost.js` plus
+  `assets/ulgEshkolDispatchServiceHost.js`.
+- PASS: live VPN browser probe exported ULG MoonLab `quantum-response` and
+  Eshkol `closure` with `wasmByteLength = 53066`, then Multiscale returned
+  `peercompute.multiscale.ulg-dispatch-service-adapter-probe.v0`,
+  `dispatch-adapters-ready`, `ready = true`, `2/2` accepted dispatches, nested
+  dispatch artifact refs for MoonLab/Eshkol, MoonLab
+  `magnetarDipoleIsingReady = true`, Eshkol ingest `wasmByteLength = 53066`,
+  telemetry schema `peercompute.ulg.dispatch-service-telemetry.v0`, and no
+  blockers.
+
+Failures and open questions:
+
+- The browser adapter Workers still run deterministic dispatch acceptance. The
+  next step is MoonLab/Eshkol execution/probe logic behind the same worker
+  contract.
+- No push was attempted.

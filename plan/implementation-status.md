@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 08:36:18 AKDT
+Updated: 2026-06-06 08:44:50 AKDT
 
 ## Done
 
@@ -226,6 +226,10 @@ Updated: 2026-06-06 08:36:18 AKDT
   `4d45714b`. `UlgDispatchServiceHost` and MoonLab/Eshkol manifest helpers now
   validate and cache materialized dispatch payloads through `WorkerSupervisor`
   without relying on private fixture service hosts.
+- Added and committed Multiscale dispatch adapter worker execution locally as
+  PeerCompute commit `c198326c`. The live `5185` API now runs ULG handoffs
+  through browser MoonLab/Eshkol adapter Workers and caches nested dispatch
+  acceptance artifacts.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable

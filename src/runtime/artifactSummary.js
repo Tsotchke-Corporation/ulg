@@ -36,6 +36,12 @@ export function summarizeUlgArtifact(artifact = {}) {
     ? artifact.responseDescriptor
     : null;
   const parity = artifact.parity && typeof artifact.parity === 'object' ? artifact.parity : null;
+  const execution = artifact.execution && typeof artifact.execution === 'object' ? artifact.execution : {};
+  const module = execution.module && typeof execution.module === 'object' ? execution.module : {};
+  const validity = artifact.validity && typeof artifact.validity === 'object' ? artifact.validity : {};
+  const bundleManifest = artifact.runtime?.bundleManifest && typeof artifact.runtime.bundleManifest === 'object'
+    ? artifact.runtime.bundleManifest
+    : null;
   const parityComparisons = Array.isArray(parity?.comparisons) ? parity.comparisons : [];
   const calibrationArtifacts = artifact.calibrationArtifacts && typeof artifact.calibrationArtifacts === 'object'
     ? artifact.calibrationArtifacts
@@ -51,8 +57,22 @@ export function summarizeUlgArtifact(artifact = {}) {
   return {
     schema: ULG_ARTIFACT_SUMMARY_SCHEMA,
     artifactKind: inferArtifactKind(artifact),
+    artifactId: artifact.artifactId || artifact.closureId || null,
     sourceService: artifact.sourceService || null,
     validationStatus: artifact.validation?.status || null,
+    closureKind: artifact.closureKind || null,
+    closureModuleUrl: module.url || null,
+    closureModuleSha256: module.sha256 || null,
+    closureServiceWorkerSafe: execution.serviceWorkerSafe === true,
+    closureRequiresDynamicCode: validity.requiresDynamicCode ?? null,
+    closureRequiresHostImports: validity.requiresHostImports ?? null,
+    closureBundleManifestSchema: bundleManifest?.schema || null,
+    closureBundleCopyFileCount: Array.isArray(bundleManifest?.copyFiles) ? bundleManifest.copyFiles.length : 0,
+    closureBundlePreserveRelativeUrls: bundleManifest?.preserveRelativeUrls === true,
+    closureReady: inferArtifactKind(artifact) === 'closure'
+      && (artifact.validation?.status || null) === 'pass'
+      && execution.serviceWorkerSafe === true
+      && validity.requiresDynamicCode === false,
     responseDescriptorSchema: responseDescriptor?.schema || null,
     responseDescriptorReady: responseDescriptor?.schema === ULG_QUANTUM_RESPONSE_DESCRIPTOR_SCHEMA,
     paritySchema: parity?.schema || null,

@@ -52,6 +52,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.artifactKind).toBe('closure');
     expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('pass');
+    expect(eshkolTelemetryRecord.artifactSummary.closureKind).toBe('wasm-reference');
+    expect(eshkolTelemetryRecord.artifactSummary.closureModuleUrl).toBe('hello.wasm');
+    expect(eshkolTelemetryRecord.artifactSummary.closureServiceWorkerSafe).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureBundlePreserveRelativeUrls).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
   }
   if (moonlabAssetStatus === 'ready') {
     expect(moonlabArtifact.method).toBe('moonlab-wasm-bell-phi-plus-probe');

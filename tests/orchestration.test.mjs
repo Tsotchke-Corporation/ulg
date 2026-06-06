@@ -57,10 +57,40 @@ test('GPU broker reports CPU fallback when WebGPU is unavailable', async () => {
 
 test('artifact cache returns content-addressed refs', async () => {
   const cache = new ArtifactCache();
-  const ref = await cache.put({ sourceService: 'eshkol', closureKind: 'demo', value: 1 });
+  const ref = await cache.put({
+    sourceService: 'eshkol',
+    closureKind: 'wasm-reference',
+    execution: {
+      serviceWorkerSafe: true,
+      module: { url: 'hello.wasm', sha256: 'sha256:abc' }
+    },
+    validity: {
+      requiresDynamicCode: false,
+      requiresHostImports: true
+    },
+    runtime: {
+      bundleManifest: {
+        schema: 'eshkol.ulg.closure-bundle.v0',
+        copyFiles: ['hello.ulg.json', 'hello.wasm', 'schemas/ulg/closure_artifact.schema.json'],
+        preserveRelativeUrls: true
+      }
+    },
+    validation: { status: 'pass' },
+    value: 1
+  });
   assert.match(ref.uri, /^artifact:\/\/ulg:/);
   assert.equal((await cache.get(ref)).value, 1);
-  assert.equal((await cache.getSummary(ref)).schema, 'peercompute.ulg.artifact-summary.v0');
+  const summary = await cache.getSummary(ref);
+  assert.equal(summary.schema, 'peercompute.ulg.artifact-summary.v0');
+  assert.equal(summary.artifactKind, 'closure');
+  assert.equal(summary.closureKind, 'wasm-reference');
+  assert.equal(summary.closureModuleUrl, 'hello.wasm');
+  assert.equal(summary.closureServiceWorkerSafe, true);
+  assert.equal(summary.closureRequiresDynamicCode, false);
+  assert.equal(summary.closureRequiresHostImports, true);
+  assert.equal(summary.closureBundlePreserveRelativeUrls, true);
+  assert.equal(summary.closureBundleCopyFileCount, 3);
+  assert.equal(summary.closureReady, true);
   assert.equal(cache.list()[0].artifactSummary.artifactKind, 'closure');
 });
 

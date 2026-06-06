@@ -15,6 +15,9 @@ Actions attempted:
   `public/service-assets/eshkol/closures/hello/` for live readiness probing.
 - Updated the supervised Eshkol worker to load the ready bundle artifact at init
   time and return it for closure tasks instead of the dummy fallback.
+- Extended compact artifact-summary telemetry with Eshkol closure-specific
+  readiness fields for module URL/hash, service-worker safety, dynamic-code
+  flags, bundle manifest metadata, and `closureReady`.
 - Added unit coverage for Eshkol artifact JSON, WASM, schema snapshot, and
   bundle manifest URL probing.
 - Extended the browser smoke to verify the Eshkol service declares/probes its
@@ -28,6 +31,8 @@ Files touched:
 - `src/runtime/ServiceAssetProbe.js`
 - `src/runtime/demoRuntime.js`
 - `src/services/dummyService.worker.js`
+- `src/runtime/artifactSummary.js`
+- `tests/orchestration.test.mjs`
 - `tests/service-assets.test.mjs`
 - `tests/demo.e2e.mjs`
 - `public/service-assets/README.md`
@@ -72,6 +77,9 @@ Results:
   `wasm-reference`, module URL `hello.wasm`, service-worker-safe execution,
   validation status `pass`, artifact-summary validation status `pass`, and
   bundle manifest `preserveRelativeUrls: true`.
+- PASS: live VPN artifact-summary probe reported `closureReady: true`,
+  `closureModuleUrl: "hello.wasm"`, `closureServiceWorkerSafe: true`, and
+  `closureBundlePreserveRelativeUrls: true`.
 
 Failures / open questions:
 

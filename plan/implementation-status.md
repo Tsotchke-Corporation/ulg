@@ -98,6 +98,9 @@ Updated: 2026-06-05 18:23:32 AKDT
 - Updated the supervised Eshkol worker to return the staged closure bundle
   artifact when the bundle is ready, with dummy closure output kept as the
   missing-asset fallback.
+- Extended compact artifact-summary telemetry with Eshkol closure-bundle fields:
+  closure kind, module URL/hash, service-worker safety, dynamic-code flags,
+  bundle manifest metadata, and `closureReady`.
 
 ## In Progress
 

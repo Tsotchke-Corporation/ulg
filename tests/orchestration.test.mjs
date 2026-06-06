@@ -269,6 +269,115 @@ test('artifact cache returns content-addressed refs', async () => {
   assert.equal(cache.list()[0].artifactSummary.artifactKind, 'closure');
 });
 
+test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', async () => {
+  const cache = new ArtifactCache();
+  const ref = await cache.put({
+    sourceService: 'eshkol',
+    closureId: 'eshkol:magnetar-fixture',
+    closureKind: 'magnetar-closure-descriptor-fixture',
+    execution: {
+      serviceWorkerSafe: true,
+      entryExport: 'main',
+      entrySignature: { parameters: ['i32', 'i32'], results: ['i32'] },
+      hasStartSection: false,
+      imports: Array.from({ length: 33 }, (_, index) => ({
+        module: 'env',
+        name: `import_${index}`,
+        kind: index < 9 ? 'function' : 'global'
+      })),
+      exports: [{ name: 'main', kind: 'function' }],
+      wasmMetadata: {
+        functionCount: 41,
+        types: [
+          { parameters: [], results: [] },
+          { parameters: ['i32', 'i32'], results: ['i32'] }
+        ]
+      },
+      module: {
+        url: 'magnetar-closure.wasm',
+        sha256: 'sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947'
+      }
+    },
+    validity: {
+      requiresDynamicCode: false,
+      requiresHostImports: true
+    },
+    runtime: {
+      bundleManifest: {
+        schema: 'eshkol.ulg.closure-bundle.v0',
+        manualDeploy: {
+          copyFiles: [
+            'magnetar-closure.ulg.json',
+            'magnetar-closure.wasm',
+            'eshkol-host-imports.js',
+            'schemas/ulg/closure_artifact.schema.json'
+          ],
+          preserveRelativeUrls: true
+        },
+        hostImports: {
+          path: 'eshkol-host-imports.js',
+          sha256: 'sha256:host',
+          factory: 'createEshkolHostImportObject',
+          global: 'EshkolHostImports',
+          domFree: true
+        }
+      }
+    },
+    validation: {
+      status: 'descriptor-only',
+      validationMode: 'eshkol-static-magnetar-closure-descriptor',
+      closureDescriptor: {
+        schema: 'eshkol.ulg.magnetar-closure-descriptor.v0',
+        descriptorRole: 'magnetar-closure-contract-seed',
+        entryExport: 'main',
+        fixtureChecksum: 50,
+        scientificValidation: false,
+        tensorContract: {
+          coordinateSystem: 'normalized-radial-cell',
+          interpolation: 'not-declared',
+          inputIds: ['magnetar-state-vector', 'closure-control-vector'],
+          outputIds: ['magnetar-closure-update', 'closure-residual']
+        },
+        nextContractFields: [
+          'ulgInterpolationTableId',
+          'moonlabClosureSurfaceSampleIds',
+          'peercomputeProductTopologyBinding'
+        ]
+      }
+    }
+  });
+  const summary = await cache.getSummary(ref);
+  assert.equal(summary.artifactKind, 'closure');
+  assert.equal(summary.validationStatus, 'descriptor-only');
+  assert.equal(summary.closureKind, 'magnetar-closure-descriptor-fixture');
+  assert.equal(summary.closureModuleUrl, 'magnetar-closure.wasm');
+  assert.equal(summary.closureServiceWorkerSafe, true);
+  assert.equal(summary.closureRequiresDynamicCode, false);
+  assert.equal(summary.closureImportCount, 33);
+  assert.equal(summary.closureRuntimeFunctionImportCount, 9);
+  assert.equal(summary.closureWasmFunctionCount, 41);
+  assert.equal(summary.closureBundleCopyFileCount, 4);
+  assert.equal(summary.closureBundlePreserveRelativeUrls, true);
+  assert.equal(summary.closureDescriptorSchema, 'eshkol.ulg.magnetar-closure-descriptor.v0');
+  assert.equal(summary.closureDescriptorReady, true);
+  assert.equal(summary.closureDescriptorRole, 'magnetar-closure-contract-seed');
+  assert.equal(summary.closureDescriptorEntryExport, 'main');
+  assert.equal(summary.closureDescriptorFixtureChecksum, 50);
+  assert.equal(summary.closureDescriptorScientificValidation, false);
+  assert.equal(summary.closureDescriptorCoordinateSystem, 'normalized-radial-cell');
+  assert.equal(summary.closureDescriptorInterpolation, 'not-declared');
+  assert.deepEqual(summary.closureDescriptorInputIds, ['magnetar-state-vector', 'closure-control-vector']);
+  assert.deepEqual(summary.closureDescriptorOutputIds, ['magnetar-closure-update', 'closure-residual']);
+  assert.deepEqual(summary.closureDescriptorNextContractFields, [
+    'ulgInterpolationTableId',
+    'moonlabClosureSurfaceSampleIds',
+    'peercomputeProductTopologyBinding'
+  ]);
+  assert.equal(summary.closureOutputSemanticsSchema, null);
+  assert.equal(summary.closureOutputSemanticsReady, false);
+  assert.equal(summary.closureReady, true);
+});
+
 test('artifact cache summarizes MoonLab magnetar calibration metadata', async () => {
   const cache = new ArtifactCache();
   const calibratedReferenceInventory = createCalibratedReferenceInventory();

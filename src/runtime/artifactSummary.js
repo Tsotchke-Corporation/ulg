@@ -3,6 +3,7 @@ export const ULG_QUANTUM_RESPONSE_DESCRIPTOR_SCHEMA = 'peercompute.ulg.quantum-r
 export const ULG_QUANTUM_RESPONSE_PARITY_SCHEMA = 'peercompute.ulg.quantum-response-parity.v0';
 export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.magnetar-dipole-ising-calibration.v0';
 export const ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA = 'eshkol.ulg.closure-output-semantics.v0';
+export const ESHKOL_MAGNETAR_CLOSURE_DESCRIPTOR_SCHEMA = 'eshkol.ulg.magnetar-closure-descriptor.v0';
 export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
 export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-input';
 export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA = 'moonlab.magnetar.calibrated-reference.v0';
@@ -201,12 +202,21 @@ export function summarizeUlgArtifact(artifact = {}) {
   const outputSemantics = artifact.validation?.outputSemantics && typeof artifact.validation.outputSemantics === 'object'
     ? artifact.validation.outputSemantics
     : null;
+  const closureDescriptor = artifact.validation?.closureDescriptor && typeof artifact.validation.closureDescriptor === 'object'
+    ? artifact.validation.closureDescriptor
+    : null;
+  const closureDescriptorTensorContract = closureDescriptor?.tensorContract && typeof closureDescriptor.tensorContract === 'object'
+    ? closureDescriptor.tensorContract
+    : {};
   const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
     ? outputSemantics.stdout
     : {};
   const bundleManifest = artifact.runtime?.bundleManifest && typeof artifact.runtime.bundleManifest === 'object'
     ? artifact.runtime.bundleManifest
     : (artifact.bundleManifest && typeof artifact.bundleManifest === 'object' ? artifact.bundleManifest : null);
+  const bundleCopyFiles = Array.isArray(bundleManifest?.copyFiles)
+    ? bundleManifest.copyFiles
+    : (Array.isArray(bundleManifest?.manualDeploy?.copyFiles) ? bundleManifest.manualDeploy.copyFiles : []);
   const hostImports = bundleManifest?.hostImports && typeof bundleManifest.hostImports === 'object'
     ? bundleManifest.hostImports
     : (artifact.runtime?.hostImports && typeof artifact.runtime.hostImports === 'object' ? artifact.runtime.hostImports : null);
@@ -228,6 +238,15 @@ export function summarizeUlgArtifact(artifact = {}) {
     reference.schema === MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA
     && reference.role === MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_ROLE
   ));
+  const closureDescriptorReady = closureDescriptor?.schema === ESHKOL_MAGNETAR_CLOSURE_DESCRIPTOR_SCHEMA
+    && closureDescriptor.scientificValidation === false
+    && closureDescriptor.entryExport === execution.entryExport
+    && Array.isArray(closureDescriptorTensorContract.inputIds)
+    && closureDescriptorTensorContract.inputIds.length > 0
+    && Array.isArray(closureDescriptorTensorContract.outputIds)
+    && closureDescriptorTensorContract.outputIds.length > 0;
+  const closureHandoffReady = (artifact.validation?.status || null) === 'pass'
+    || closureDescriptorReady;
 
   return {
     schema: ULG_ARTIFACT_SUMMARY_SCHEMA,
@@ -256,8 +275,9 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureWasmFunctionCount: finiteNumberOrNull(wasmMetadata.functionCount),
     closureWasmTypeCount: Array.isArray(wasmMetadata.types) ? wasmMetadata.types.length : 0,
     closureBundleManifestSchema: bundleManifest?.schema || null,
-    closureBundleCopyFileCount: Array.isArray(bundleManifest?.copyFiles) ? bundleManifest.copyFiles.length : 0,
-    closureBundlePreserveRelativeUrls: bundleManifest?.preserveRelativeUrls === true,
+    closureBundleCopyFileCount: bundleCopyFiles.length,
+    closureBundlePreserveRelativeUrls: bundleManifest?.preserveRelativeUrls === true
+      || bundleManifest?.manualDeploy?.preserveRelativeUrls === true,
     closureHostImportsPath: hostImports?.path || null,
     closureHostImportsSha256: hostImports?.sha256 || null,
     closureHostImportsFactory: hostImports?.factory || null,
@@ -277,8 +297,27 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureOutputExpectedEntryResult: outputSemantics?.expectedEntryResult ?? null,
     closureOutputExpectedStdoutSha256: outputSemanticsStdout.sha256 || null,
     closureOutputExpectedStdoutByteLength: finiteNumberOrNull(outputSemanticsStdout.byteLength),
+    closureDescriptorSchema: closureDescriptor?.schema || null,
+    closureDescriptorReady,
+    closureDescriptorRole: closureDescriptor?.descriptorRole || null,
+    closureDescriptorEntryExport: closureDescriptor?.entryExport || null,
+    closureDescriptorFixtureChecksum: finiteNumberOrNull(closureDescriptor?.fixtureChecksum),
+    closureDescriptorScientificValidation: typeof closureDescriptor?.scientificValidation === 'boolean'
+      ? closureDescriptor.scientificValidation
+      : null,
+    closureDescriptorCoordinateSystem: closureDescriptorTensorContract.coordinateSystem || null,
+    closureDescriptorInterpolation: closureDescriptorTensorContract.interpolation || null,
+    closureDescriptorInputIds: clonePlain(Array.isArray(closureDescriptorTensorContract.inputIds)
+      ? closureDescriptorTensorContract.inputIds
+      : []),
+    closureDescriptorOutputIds: clonePlain(Array.isArray(closureDescriptorTensorContract.outputIds)
+      ? closureDescriptorTensorContract.outputIds
+      : []),
+    closureDescriptorNextContractFields: clonePlain(Array.isArray(closureDescriptor?.nextContractFields)
+      ? closureDescriptor.nextContractFields
+      : []),
     closureReady: inferArtifactKind(artifact) === 'closure'
-      && (artifact.validation?.status || null) === 'pass'
+      && closureHandoffReady
       && execution.serviceWorkerSafe === true
       && validity.requiresDynamicCode === false,
     responseDescriptorSchema: responseDescriptor?.schema || null,

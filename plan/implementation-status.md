@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 05:27:08 AKDT
+Updated: 2026-06-06 05:40:30 AKDT
 
 ## Done
 
@@ -184,6 +184,11 @@ Updated: 2026-06-06 05:27:08 AKDT
   path instead of raw-copying reference JSON. The staged browser asset now has
   schema `moonlab.magnetar.normalized-reference-suite.v0`, status
   `reference-contract-suite-ready`, and four ready calibrated families.
+- Replaced the staged Eshkol `hello` smoke bundle in ULG with Eshkol's
+  `magnetar-closure` descriptor fixture. The ULG service manifest now targets
+  `/service-assets/eshkol/closures/magnetar-closure/`, staging exports
+  `magnetar-closure.wasm`, and artifact summaries expose
+  `closureDescriptorReady` separately from smoke `closureOutputSemanticsReady`.
 - Re-verified the live VPN ULG-to-PeerCompute handoff after normalized-suite
   staging: ULG exported MoonLab `5/5` ready output references and Eshkol
   `33907` transferred WASM bytes; PeerCompute reported `handoff-ready`,
@@ -193,11 +198,9 @@ Updated: 2026-06-06 05:27:08 AKDT
 ## In Progress
 
 - Keep Vite live for inspection.
-- Continue from the live state where the normalized MoonLab reference suite is
-  staged in the ignored service-asset directory, ULG/PeerCompute count all four
-  calibrated families ready, and full scientific readiness is blocked only by
-  proxy-only runtime evidence rather than missing handoff or tolerance
-  contracts.
+- Review and integrate the PeerCompute descriptor-closure acceptance sidecar.
+  The descriptor should clear closure handoff packaging only; it must not clear
+  scientific readiness.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
 

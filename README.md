@@ -13,7 +13,7 @@ This repo currently implements the first executable slice:
 - GPU capability probing with CPU/WASM fallback status;
 - browser-facing service asset probes for real MoonLab/Eshkol readiness;
 - a supervised MoonLab WASM Bell-state probe with deterministic response/parity metadata and a magnetar dipole Ising calibration sub-artifact when copied core artifacts are available;
-- dummy Eshkol service output and MoonLab fallback output for Demo A;
+- a staged Eshkol magnetar closure descriptor fixture for Demo A handoff wiring;
 - a three.js worker-tree visualization.
 
 ## Commands
@@ -71,3 +71,13 @@ calibrated inventory counts so handoff consumers can inventory tolerance inputs
 without fetching the full artifact body. The staged suite contains reduced scalar
 tolerance plumbing and do not claim full PIC, radiation-transport, GR, GRMHD, or
 magnetar scientific simulation.
+
+For Eshkol, the default staged bundle is
+`public/service-assets/eshkol/closures/magnetar-closure/`. It packages
+`magnetar-closure.wasm` with descriptor-only metadata under
+`validation.closureDescriptor.schema =
+"eshkol.ulg.magnetar-closure-descriptor.v0"`, including typed magnetar
+input/output tensor ids, derivative placeholders, and an explicit
+`scientificValidation: false` flag. This advances the handoff beyond hello-only
+smoke while still making clear that the closure is a contract seed, not a
+validated magnetar physics result.

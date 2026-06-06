@@ -24,31 +24,8 @@ const createdAt = valueFor('--created-at') || process.env.ULG_STAGE_CREATED_AT |
 const moonlabCoreRoot = path.join(projectsRoot, 'moonlab', 'bindings', 'javascript', 'packages', 'core');
 const eshkolRoot = path.join(projectsRoot, 'eshkol');
 const moonlabTargetDir = path.join(repoRoot, 'public', 'service-assets', 'moonlab');
-const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', 'hello');
-
-const ESHKOL_HELLO_VALIDATION = {
-  status: 'pass',
-  validationMode: 'eshkol-static-closure-smoke',
-  outputSemantics: {
-    schema: 'eshkol.ulg.closure-output-semantics.v0',
-    semanticScope: 'smoke-fixture',
-    scientificScope: 'none',
-    scientificValidation: false,
-    entryExport: 'main',
-    entryArgs: [0, 0],
-    expectedEntryResult: 0,
-    stdout: {
-      encoding: 'utf-8',
-      expectedText: '1048560\n1048544\n',
-      sha256: 'sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d',
-      byteLength: 16
-    },
-    notes: [
-      'Validates deterministic Eshkol hello runtime output only.',
-      'Does not validate magnetar closure physics.'
-    ]
-  }
-};
+const eshkolClosureBundleName = 'magnetar-closure';
+const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
 
 function valueFor(name) {
   const index = args.indexOf(name);
@@ -148,10 +125,12 @@ function stageMoonLabAssets() {
 
 function stageEshkolAssets() {
   const helper = path.join(eshkolRoot, 'scripts', 'export_ulg_closure_bundle.py');
-  const input = path.join(eshkolRoot, 'examples', 'hello.esk');
+  const input = path.join(eshkolRoot, 'examples', 'magnetar_closure.esk');
+  const metadata = path.join(eshkolRoot, 'examples', 'magnetar_closure.ulg-metadata.json');
   const eshkolRun = valueFor('--eshkol-run') || process.env.ESHKOL_RUN || path.join(eshkolRoot, 'build', 'eshkol-run');
   ensureFile(helper, 'Eshkol closure bundle helper');
-  ensureFile(input, 'Eshkol hello source');
+  ensureFile(input, 'Eshkol magnetar closure source');
+  ensureFile(metadata, 'Eshkol magnetar closure metadata');
   ensureFile(eshkolRun, 'eshkol-run binary');
 
   const command = [
@@ -163,9 +142,11 @@ function stageEshkolAssets() {
     '--output-dir',
     eshkolTargetDir,
     '--name',
-    'hello',
-    '--validation-json',
-    JSON.stringify(ESHKOL_HELLO_VALIDATION)
+    eshkolClosureBundleName,
+    '--metadata-json',
+    metadata,
+    '--require-export',
+    'main'
   ];
   if (createdAt != null) {
     command.push('--created-at', createdAt);
@@ -185,15 +166,27 @@ function stageEshkolAssets() {
       ].filter(Boolean).join('\n'));
     }
 
-    const artifactPath = path.join(eshkolTargetDir, 'hello.ulg.json');
+    const artifactPath = path.join(eshkolTargetDir, `${eshkolClosureBundleName}.ulg.json`);
     const artifact = JSON.parse(readFileSync(artifactPath, 'utf8'));
-    if (artifact.validation?.outputSemantics?.schema !== 'eshkol.ulg.closure-output-semantics.v0') {
-      throw new Error('Eshkol staged artifact is missing output-semantics metadata');
+    if (artifact.closureKind !== 'magnetar-closure-descriptor-fixture') {
+      throw new Error(`Eshkol staged artifact has unexpected closure kind: ${artifact.closureKind || 'unknown'}`);
+    }
+    if (artifact.validation?.closureDescriptor?.schema !== 'eshkol.ulg.magnetar-closure-descriptor.v0') {
+      throw new Error('Eshkol staged artifact is missing magnetar closure descriptor metadata');
+    }
+    if (artifact.validation?.closureDescriptor?.scientificValidation !== false) {
+      throw new Error('Eshkol staged magnetar descriptor must not claim scientific validation');
+    }
+    if (artifact.execution?.module?.url !== `${eshkolClosureBundleName}.wasm`) {
+      throw new Error(`Eshkol staged artifact has unexpected module URL: ${artifact.execution?.module?.url || 'unknown'}`);
+    }
+    if (artifact.execution?.serviceWorkerSafe !== true || artifact.validity?.requiresDynamicCode !== false) {
+      throw new Error('Eshkol staged magnetar closure must remain service-worker-safe and dynamic-code-free');
     }
   }
 
   return {
-    label: 'Eshkol hello closure bundle',
+    label: 'Eshkol magnetar closure descriptor bundle',
     source: input,
     target: eshkolTargetDir,
     command,

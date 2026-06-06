@@ -35,12 +35,12 @@ test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {
 });
 
 test('Eshkol closure bundle asset spec declares deployable JSON and WASM files', async () => {
-  const assets = createEshkolClosureBundleAssetSpec({ bundleName: 'hello' });
-  assert.equal(assets.baseUrl, '/service-assets/eshkol/closures/hello/');
-  assert.equal(assets.artifactModule, '/service-assets/eshkol/closures/hello/hello.ulg.json');
-  assert.equal(assets.wasmModule, '/service-assets/eshkol/closures/hello/hello.wasm');
-  assert.equal(assets.schemaModule, '/service-assets/eshkol/closures/hello/schemas/ulg/closure_artifact.schema.json');
-  assert.equal(assets.bundleManifest, '/service-assets/eshkol/closures/hello/ulg_bundle_manifest.json');
+  const assets = createEshkolClosureBundleAssetSpec({ bundleName: 'magnetar-closure' });
+  assert.equal(assets.baseUrl, '/service-assets/eshkol/closures/magnetar-closure/');
+  assert.equal(assets.artifactModule, '/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json');
+  assert.equal(assets.wasmModule, '/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm');
+  assert.equal(assets.schemaModule, '/service-assets/eshkol/closures/magnetar-closure/schemas/ulg/closure_artifact.schema.json');
+  assert.equal(assets.bundleManifest, '/service-assets/eshkol/closures/magnetar-closure/ulg_bundle_manifest.json');
 
   const manifest = createUlgServiceManifest({
     serviceId: 'eshkol',
@@ -61,10 +61,10 @@ test('Eshkol closure bundle asset spec declares deployable JSON and WASM files',
 
   assert.equal(probe.status, 'ready');
   assert.deepEqual(requests, [
-    'https://ulg.local/service-assets/eshkol/closures/hello/hello.wasm',
-    'https://ulg.local/service-assets/eshkol/closures/hello/hello.ulg.json',
-    'https://ulg.local/service-assets/eshkol/closures/hello/schemas/ulg/closure_artifact.schema.json',
-    'https://ulg.local/service-assets/eshkol/closures/hello/ulg_bundle_manifest.json'
+    'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm',
+    'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json',
+    'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/schemas/ulg/closure_artifact.schema.json',
+    'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/ulg_bundle_manifest.json'
   ]);
   assert.deepEqual(
     probe.assets.map((asset) => [asset.kind, asset.expected, asset.status]),

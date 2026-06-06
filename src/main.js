@@ -170,5 +170,8 @@ function renderArtifactSummaryLine(summary) {
   if (summary.closureOutputSemanticsReady) {
     parts.push(`output:${summary.closureOutputSemanticScope}`);
   }
+  if (summary.closureDescriptorReady) {
+    parts.push(`descriptor:${summary.closureDescriptorRole || 'ready'}`);
+  }
   return parts.length ? `<br>${parts.join(' / ')}` : '';
 }

@@ -57,15 +57,34 @@ npm run stage:service-assets
 ```
 
 The command copies `moonlab.js` and `moonlab.wasm`, generates the normalized
-MoonLab magnetar reference suite from `/home/cos/projects/moonlab`, then exports the
-Eshkol `hello` closure bundle directly into this tree with the deterministic
-smoke output-semantics metadata required by the ULG handoff tests. Use
+MoonLab magnetar reference suite from `/home/cos/projects/moonlab`, then exports
+the Eshkol `magnetar-closure` descriptor bundle directly into this tree with
+descriptor-only metadata required by the ULG handoff tests. Use
 `ULG_PROJECTS_ROOT=/path/to/projects` when the sibling repos are not under
 `/home/cos/projects`. Use `--created-at <iso-timestamp>` or
 `ULG_STAGE_CREATED_AT=<iso-timestamp>` with an Eshkol helper that supports
 `--created-at` when byte-stable artifact and manifest timestamps are needed.
 
 For manual Eshkol ULG closure bundle exports, use the sibling repo helper:
+
+```bash
+cd /home/cos/projects/eshkol
+scripts/export_ulg_closure_bundle.py examples/magnetar_closure.esk \
+  --eshkol-run build/eshkol-run \
+  --output-dir build/ulg/manual-deploy-magnetar-closure \
+  --name magnetar-closure \
+  --metadata-json examples/magnetar_closure.ulg-metadata.json \
+  --require-export main \
+  --created-at 2026-06-06T12:34:56Z
+```
+
+The magnetar descriptor metadata uses
+`validation.closureDescriptor.schema =
+"eshkol.ulg.magnetar-closure-descriptor.v0"` and keeps
+`scientificValidation = false`. It is a contract seed for tensor/closure
+handoff integration, not validated magnetar closure physics.
+
+For the older hello smoke fixture, attach output semantics explicitly:
 
 ```bash
 cd /home/cos/projects/eshkol
@@ -77,12 +96,15 @@ scripts/export_ulg_closure_bundle.py examples/hello.esk \
   --validation-json '{"status":"pass","validationMode":"eshkol-static-closure-smoke","outputSemantics":{"schema":"eshkol.ulg.closure-output-semantics.v0","semanticScope":"smoke-fixture","scientificScope":"none","scientificValidation":false,"entryExport":"main","entryArgs":[0,0],"expectedEntryResult":0,"stdout":{"encoding":"utf-8","expectedText":"1048560\n1048544\n","sha256":"sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d","byteLength":16}}}'
 ```
 
-Then copy the files listed in `ulg_bundle_manifest.json` into:
+Then copy the files listed in `ulg_bundle_manifest.json` into the matching
+bundle directory, for example:
 
 ```text
+public/service-assets/eshkol/closures/magnetar-closure/
 public/service-assets/eshkol/closures/hello/
 ```
 
-The ULG demo declares that `hello` bundle by default and probes the artifact
-JSON, WASM module, schema snapshot, and bundle manifest. With those ignored
-files present, the Eshkol service telemetry reports asset status `ready`.
+The ULG demo declares the `magnetar-closure` bundle by default and probes the
+artifact JSON, WASM module, schema snapshot, and bundle manifest. With those
+ignored files present, the Eshkol service telemetry reports asset status
+`ready`.

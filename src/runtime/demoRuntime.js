@@ -13,6 +13,7 @@ import { createId } from './ids.js';
 
 const serviceWorkerModule = new URL('../services/dummyService.worker.js', import.meta.url).href;
 const childWorkerModule = new URL('../services/dummyChild.worker.js', import.meta.url).href;
+const eshkolClosureBundleName = 'magnetar-closure';
 
 export async function createDemoRuntime() {
   const registry = new ComputeServiceRegistry();
@@ -33,7 +34,7 @@ export async function createDemoRuntime() {
     serviceId: 'eshkol',
     workerModule: serviceWorkerModule,
     childWorkerModule,
-    serviceAssets: createEshkolClosureBundleAssetSpec({ bundleName: 'hello' }),
+    serviceAssets: createEshkolClosureBundleAssetSpec({ bundleName: eshkolClosureBundleName }),
     validation: {
       toleranceProfile: 'scientific-default'
     }

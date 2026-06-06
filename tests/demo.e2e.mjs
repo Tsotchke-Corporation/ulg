@@ -45,59 +45,68 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   const handoff = await page.evaluate(() => window.__ulgDemo.createPeerComputeHandoff());
   expect(handoff.schema).toBe('peercompute.ulg.demo-handoff.v0');
   if (eshkolAssetProbe.status === 'ready') {
-    expect(eshkolArtifact.closureKind).toBe('wasm-reference');
-    expect(eshkolArtifact.execution.module.url).toBe('hello.wasm');
+    expect(eshkolArtifact.closureKind).toBe('magnetar-closure-descriptor-fixture');
+    expect(eshkolArtifact.execution.module.url).toBe('magnetar-closure.wasm');
     expect(eshkolArtifact.execution.serviceWorkerSafe).toBe(true);
-    expect(eshkolArtifact.validation.status).toBe('pass');
-    expect(eshkolArtifact.validation.validationMode).toBe('eshkol-static-closure-smoke');
+    expect(eshkolArtifact.validation.status).toBe('descriptor-only');
+    expect(eshkolArtifact.validation.validationMode).toBe('eshkol-static-magnetar-closure-descriptor');
     expect(eshkolArtifact.runtime.bundleManifest.preserveRelativeUrls).toBe(true);
-    expect(eshkolArtifact.validation.outputSemantics.schema).toBe('eshkol.ulg.closure-output-semantics.v0');
-    expect(eshkolArtifact.validation.outputSemantics.semanticScope).toBe('smoke-fixture');
-    expect(eshkolArtifact.validation.outputSemantics.scientificScope).toBe('none');
-    expect(eshkolArtifact.validation.outputSemantics.scientificValidation).toBe(false);
-    expect(eshkolArtifact.validation.outputSemantics.entryExport).toBe('main');
-    expect(eshkolArtifact.validation.outputSemantics.entryArgs).toEqual([0, 0]);
-    expect(eshkolArtifact.validation.outputSemantics.expectedEntryResult).toBe(0);
-    expect(eshkolArtifact.validation.outputSemantics.stdout.sha256).toBe('sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
-    expect(eshkolArtifact.validation.outputSemantics.stdout.byteLength).toBe(16);
+    expect(eshkolArtifact.validation.outputSemantics).toBeUndefined();
+    expect(eshkolArtifact.validation.closureDescriptor.schema).toBe('eshkol.ulg.magnetar-closure-descriptor.v0');
+    expect(eshkolArtifact.validation.closureDescriptor.descriptorRole).toBe('magnetar-closure-contract-seed');
+    expect(eshkolArtifact.validation.closureDescriptor.scientificValidation).toBe(false);
+    expect(eshkolArtifact.validation.closureDescriptor.fixtureChecksum).toBe(50);
+    expect(eshkolArtifact.validation.closureDescriptor.tensorContract.inputIds).toEqual([
+      'magnetar-state-vector',
+      'closure-control-vector'
+    ]);
+    expect(eshkolArtifact.validation.closureDescriptor.tensorContract.outputIds).toEqual([
+      'magnetar-closure-update',
+      'closure-residual'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.artifactKind).toBe('closure');
-    expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('pass');
-    expect(eshkolTelemetryRecord.artifactSummary.closureKind).toBe('wasm-reference');
-    expect(eshkolTelemetryRecord.artifactSummary.closureModuleUrl).toBe('hello.wasm');
+    expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('descriptor-only');
+    expect(eshkolTelemetryRecord.artifactSummary.closureKind).toBe('magnetar-closure-descriptor-fixture');
+    expect(eshkolTelemetryRecord.artifactSummary.closureModuleUrl).toBe('magnetar-closure.wasm');
     expect(eshkolTelemetryRecord.artifactSummary.closureServiceWorkerSafe).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureEntryExport).toBe('main');
     expect(eshkolTelemetryRecord.artifactSummary.closureEntrySignature.parameters).toEqual(['i32', 'i32']);
     expect(eshkolTelemetryRecord.artifactSummary.closureEntrySignature.results).toEqual(['i32']);
     expect(eshkolTelemetryRecord.artifactSummary.closureHasStartSection).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureStartFunctionIndex).toBe(null);
-    expect(eshkolTelemetryRecord.artifactSummary.closureImportCount).toBe(12);
+    expect(eshkolTelemetryRecord.artifactSummary.closureImportCount).toBe(33);
     expect(eshkolTelemetryRecord.artifactSummary.closureExportCount).toBe(1);
-    expect(eshkolTelemetryRecord.artifactSummary.closureRuntimeFunctionImportCount).toBe(9);
-    expect(eshkolTelemetryRecord.artifactSummary.closureWasmFunctionCount).toBe(18);
-    expect(eshkolTelemetryRecord.artifactSummary.closureWasmTypeCount).toBe(104);
+    expect(eshkolTelemetryRecord.artifactSummary.closureRuntimeFunctionImportCount).toBe(30);
+    expect(eshkolTelemetryRecord.artifactSummary.closureWasmFunctionCount).toBe(41);
+    expect(eshkolTelemetryRecord.artifactSummary.closureWasmTypeCount).toBe(109);
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsFactory).toBe('createEshkolHostImportObject');
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsDomFree).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureBundlePreserveRelativeUrls).toBe(true);
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticsSchema).toBe('eshkol.ulg.closure-output-semantics.v0');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticsReady).toBe(true);
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticScope).toBe('smoke-fixture');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputScientificScope).toBe('none');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputScientificValidation).toBe(false);
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryExport).toBe('main');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryArgs).toEqual([0, 0]);
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryResult).toBe(0);
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(16);
+    expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticsSchema).toBe(null);
+    expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticsReady).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorSchema).toBe('eshkol.ulg.magnetar-closure-descriptor.v0');
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorRole).toBe('magnetar-closure-contract-seed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorFixtureChecksum).toBe(50);
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorScientificValidation).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorInputIds).toEqual([
+      'magnetar-state-vector',
+      'closure-control-vector'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorOutputIds).toEqual([
+      'magnetar-closure-update',
+      'closure-residual'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');
     expect(closureHandoff.artifactSummary.closureHostImportsDomFree).toBe(true);
-    expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
-    expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(16);
-    expect(closureHandoff.wasmByteLength).toBe(33907);
-    expect(closureHandoff.wasmBytes.length).toBe(33907);
-    expect(closureHandoff.wasmSourceUrl).toContain('/service-assets/eshkol/closures/hello/hello.wasm');
+    expect(closureHandoff.artifactSummary.closureDescriptorReady).toBe(true);
+    expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(false);
+    expect(closureHandoff.wasmByteLength).toBe(53066);
+    expect(closureHandoff.wasmBytes.length).toBe(53066);
+    expect(closureHandoff.wasmSourceUrl).toContain('/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm');
   }
   if (moonlabAssetStatus === 'ready') {
     expect(moonlabArtifact.method).toBe('moonlab-wasm-bell-phi-plus-probe');

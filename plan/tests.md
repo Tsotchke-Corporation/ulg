@@ -4,9 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 17/17 tests on 2026-06-06 after adding optional MoonLab
-reference-contract asset probing, normalized supplied reference staging, and
-four-family ready calibrated-reference summaries.
+Current result: pass, 18/18 tests on 2026-06-06 after adding optional MoonLab
+reference-contract asset probing, normalized supplied reference staging,
+four-family ready calibrated-reference summaries, and Eshkol magnetar closure
+descriptor summaries.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -186,6 +187,21 @@ reference-contract asset support.
   is copied under `public/service-assets/eshkol/closures/hello/`, Playwright
   verifies the Eshkol service asset probe sees artifact JSON, WASM, schema
   snapshot, and bundle manifest assets.
+- Eshkol magnetar closure descriptor summary check on 2026-06-06:
+  unit coverage verifies descriptor-only Eshkol artifacts expose
+  `closureDescriptorReady = true`, schema
+  `eshkol.ulg.magnetar-closure-descriptor.v0`, typed magnetar input/output ids,
+  fixture checksum `50`, and `closureOutputSemanticsReady = false` while still
+  staying service-worker-safe and dynamic-code-free.
+- Eshkol magnetar closure browser handoff check on 2026-06-06:
+  `npm run stage:service-assets -- --eshkol-only`,
+  `npm run stage:service-assets -- --dry-run --json`,
+  `npm run stage:service-assets`, `npm test`, `npm run build`, and
+  `npm run test:e2e` passed after switching the ULG Eshkol service manifest to
+  `magnetar-closure`. The live 5173 handoff exports
+  `closureKind = "magnetar-closure-descriptor-fixture"`,
+  `closureDescriptorReady = true`, `closureOutputSemanticsReady = false`,
+  `scientificValidation = false`, and `wasmByteLength = 53066`.
 - Eshkol closure artifact handoff check on 2026-06-05: Playwright verifies the
   ready Eshkol service returns the staged `wasm-reference` closure artifact,
   preserves `hello.wasm` as the relative module URL, marks it service-worker

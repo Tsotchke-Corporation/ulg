@@ -2005,3 +2005,98 @@ Failures and open questions:
   scientific readiness remains correctly blocked until the five required
   runtime evidence entries are backed by real scientific validation payloads.
 - No push was attempted.
+
+## 2026-06-06 05:40:30 AKDT - Eshkol magnetar closure descriptor staged in ULG
+
+Prompt:
+
+- Continue the ULG implementation plan and move beyond Eshkol `hello` smoke
+  wiring toward the magnetar closure fixture.
+
+Actions:
+
+- Switched the ULG Eshkol service manifest from the `hello` bundle to
+  `magnetar-closure` under
+  `/service-assets/eshkol/closures/magnetar-closure/`.
+- Updated `npm run stage:service-assets` so the Eshkol phase exports
+  `examples/magnetar_closure.esk` with
+  `examples/magnetar_closure.ulg-metadata.json`, `--name magnetar-closure`, and
+  `--require-export main`.
+- Added staging-time validation that the exported artifact has closure kind
+  `magnetar-closure-descriptor-fixture`, descriptor schema
+  `eshkol.ulg.magnetar-closure-descriptor.v0`,
+  `scientificValidation = false`, module URL `magnetar-closure.wasm`, and a
+  service-worker-safe, dynamic-code-free closure surface.
+- Extended artifact-summary telemetry with closure descriptor fields:
+  `closureDescriptorReady`, role, entry export, fixture checksum, tensor input
+  and output ids, coordinate system, interpolation mode, and next contract
+  fields.
+- Kept `closureOutputSemanticsReady` as the separate hello/smoke proof; the
+  magnetar descriptor does not emit or claim smoke output semantics.
+- Updated README, service-asset docs, unit tests, browser e2e, and status/test
+  notes for the descriptor-only Eshkol bundle.
+- Probed the live VPN ULG demo at `http://100.86.83.35:5173/` after staging.
+
+Files touched:
+
+- `/home/cos/projects/ulg/scripts/stage-service-assets.mjs`
+- `/home/cos/projects/ulg/src/runtime/demoRuntime.js`
+- `/home/cos/projects/ulg/src/runtime/artifactSummary.js`
+- `/home/cos/projects/ulg/src/main.js`
+- `/home/cos/projects/ulg/tests/service-assets.test.mjs`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/public/service-assets/README.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+python3 scripts/export_ulg_closure_bundle.py examples/magnetar_closure.esk --eshkol-run build/eshkol-run --output-dir /tmp/ulg-magnetar-closure-probe --name magnetar-closure --metadata-json examples/magnetar_closure.ulg-metadata.json --require-export main --created-at 2026-06-06T12:34:56Z
+node --check scripts/stage-service-assets.mjs
+node --check src/runtime/artifactSummary.js
+node --check src/runtime/demoRuntime.js
+node --check src/main.js
+npm run stage:service-assets -- --eshkol-only --dry-run --json
+npm run stage:service-assets -- --eshkol-only
+npm test
+npm run build
+npm run test:e2e
+npm run stage:service-assets -- --dry-run --json
+npm run stage:service-assets
+git diff --check
+node --input-type=module
+# inspected generated closure artifacts and live 5173 handoff exports
+```
+
+Test results:
+
+- PASS: staged Eshkol `magnetar-closure` artifact reports
+  `closureKind = "magnetar-closure-descriptor-fixture"`, module URL
+  `magnetar-closure.wasm`, byte length `53066`, validation status
+  `descriptor-only`, and descriptor schema
+  `eshkol.ulg.magnetar-closure-descriptor.v0`.
+- PASS: ULG summary marks the descriptor `closureReady = true` and
+  `closureDescriptorReady = true`, while keeping
+  `closureOutputSemanticsReady = false` and
+  `closureDescriptorScientificValidation = false`.
+- PASS: `npm test` passed `18/18`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: full `npm run stage:service-assets` copied MoonLab JS/WASM, generated
+  the normalized MoonLab reference suite, and exported the Eshkol
+  `magnetar-closure` descriptor bundle.
+- PASS: live ULG at `http://100.86.83.35:5173/` exported two handoff artifacts:
+  MoonLab with `outputReferenceReadyCount = 5` and
+  `magnetarCalibratedReferenceReadyCount = 4`, plus Eshkol with descriptor
+  ready, `scientificValidation = false`, and `wasmByteLength = 53066`.
+
+Failures and open questions:
+
+- PeerCompute still needs the matching descriptor-closure acceptance path so the
+  live cross-page bridge does not treat the descriptor as missing smoke output
+  semantics. A sidecar agent is working that repo.
+- No push was attempted.

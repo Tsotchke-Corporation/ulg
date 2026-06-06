@@ -69,6 +69,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsDomFree).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureBundlePreserveRelativeUrls).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
+    const handoff = await page.evaluate(() => window.__ulgDemo.createPeerComputeHandoff());
+    const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
+    expect(handoff.schema).toBe('peercompute.ulg.demo-handoff.v0');
+    expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');
+    expect(closureHandoff.artifactSummary.closureHostImportsDomFree).toBe(true);
+    expect(closureHandoff.wasmByteLength).toBe(33907);
+    expect(closureHandoff.wasmBytes.length).toBe(33907);
+    expect(closureHandoff.wasmSourceUrl).toContain('/service-assets/eshkol/closures/hello/hello.wasm');
   }
   if (moonlabAssetStatus === 'ready') {
     expect(moonlabArtifact.method).toBe('moonlab-wasm-bell-phi-plus-probe');

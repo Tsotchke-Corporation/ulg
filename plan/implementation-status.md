@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 23:24:36 AKDT
+Updated: 2026-06-05 23:31:11 AKDT
 
 ## Done
 
@@ -110,18 +110,26 @@ Updated: 2026-06-05 23:24:36 AKDT
 - Verified `npm test`, `npm run build`, `npm run test:e2e`, and a live
   `http://100.86.83.35:5173/` artifact-cache probe after the Eshkol closure
   metadata telemetry update.
+- Added `window.__ulgDemo.createPeerComputeHandoff()` to export the current ULG
+  browser artifact cache as `peercompute.ulg.demo-handoff.v0`, including full
+  artifact bodies, compact summaries, refs, and same-origin transferred Eshkol
+  closure WASM bytes.
+- Verified a live ULG-to-PeerCompute/Multiscale handoff: ULG exported four
+  artifacts, transferred the 33,907-byte Eshkol `hello.wasm`, Multiscale ingested
+  the MoonLab magnetar calibration and Eshkol closure bundle, executed
+  `main(0, 0)` with result `0`, and kept `scenarioScientificReady: false` with
+  only the expected scientific validation blockers.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the published ABI fixtures, ULG artifact summaries, transferred WASM
-  bytes, and the Eshkol ULG closure bundle helper as the next adapter handshake
-  for PeerCompute, Eshkol, and MoonLab.
+- Use the working ULG handoff packet and transferred closure bytes as the next
+  adapter handshake for durable PeerCompute service-hosted ingestion.
 
 ## Next
 
-- Add a same-origin/proxied or HTTPS artifact-transfer path so HTTPS
-  PeerCompute/Multiscale can consume ULG WASM without mixed-content fetches.
+- Promote the demo-only ULG handoff packet into a durable PeerCompute service
+  adapter path with provenance, content addressing, and relay-safe transfer.
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and

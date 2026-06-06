@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 15/15 tests on 2026-06-05 after adding Eshkol closure
-execution metadata to artifact-summary telemetry.
+Current result: pass, 15/15 tests on 2026-06-05 after adding the ULG
+PeerCompute handoff exporter.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -27,20 +27,23 @@ execution metadata to artifact-summary telemetry.
 - Artifact cache summaries preserve Eshkol closure entry signature,
   start-section, import/export, WASM metadata count, and DOM-free host-import
   bundle metadata.
+- The browser demo handoff exporter returns `peercompute.ulg.demo-handoff.v0`
+  records with full closure artifacts, compact summaries, refs, and transferred
+  Eshkol WASM bytes.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-05 after the Eshkol closure metadata telemetry
+Current result: pass on 2026-06-05 after the ULG PeerCompute handoff exporter
 update, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-05 after the Eshkol
-closure metadata telemetry update.
+Current result: pass, 1/1 Chromium test on 2026-06-05 after the ULG
+PeerCompute handoff exporter update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -100,6 +103,18 @@ closure metadata telemetry update.
   `http://100.86.83.35:5173/` reported `entry:main`, `imports:12`, and
   `host:createEshkolHostImportObject` in the artifact list after
   `window.__ulgDemo.runSmoke()`.
+- ULG handoff exporter check on 2026-06-05: Playwright verifies
+  `window.__ulgDemo.createPeerComputeHandoff()` returns schema
+  `peercompute.ulg.demo-handoff.v0`, preserves the Eshkol closure summary entry
+  `main`, marks DOM-free host imports, and transfers `33,907` WASM bytes from
+  `/service-assets/eshkol/closures/hello/hello.wasm`.
+- Live ULG-to-Multiscale bridge check on 2026-06-05:
+  `http://100.86.83.35:5173/` exported MoonLab and Eshkol artifacts to
+  `https://100.86.83.35:5185/?scenario=magnetar`; Multiscale ingested the
+  MoonLab magnetar calibration, executed the Eshkol closure from transferred
+  bytes with `entryResult = 0`, reported output preview `1048560\n1048544\n`,
+  set `scenarioHandoffReady` and `scenarioClosureHostRuntimeExecutionReady` to
+  `true`, and kept `scenarioScientificReady` false.
 - Live artifact-cache check on 2026-06-05: `http://100.86.83.35:5173/`
   returned Bell parity `pass` plus magnetar calibration `pass`, ground state
   `000`, `maxEnergyDelta = 0`, and `calibrationArtifactCount = 1` from

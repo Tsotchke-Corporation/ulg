@@ -37,6 +37,9 @@ physics work:
 - [x] Preserve Eshkol closure entry signature, start-section, import/export,
   WASM metadata count, and DOM-free host-import bundle metadata in compact
   artifact-summary telemetry and the live artifact list.
+- [x] Export `peercompute.ulg.demo-handoff.v0` packets from the browser demo
+  artifact cache, including same-origin transferred Eshkol WASM bytes for
+  PeerCompute/Multiscale ingestion without mixed-content fetches.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

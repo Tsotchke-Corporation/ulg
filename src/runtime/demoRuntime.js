@@ -83,6 +83,37 @@ export async function createDemoRuntime() {
         autoCancelTimer = null;
       }
       await Promise.all(activeRootTasks.map((task) => supervisor.cancelTree(task.rootTaskId)));
+    },
+    async createPeerComputeHandoff(options = {}) {
+      const artifacts = [];
+      for (const record of artifactCache.list()) {
+        const artifact = await artifactCache.get(record.ref);
+        const handoff = {
+          ref: record.ref,
+          artifactKind: record.artifactKind,
+          artifactSummary: record.artifactSummary,
+          artifact
+        };
+        if (record.artifactKind === 'closure' && options.includeWasmBytes !== false) {
+          const wasmAsset = artifact?.runtime?.assetProbe?.assets?.find((asset) => asset.kind === 'wasmModule');
+          if (wasmAsset?.url) {
+            const response = await fetch(wasmAsset.url, { cache: 'no-store' });
+            if (response.ok) {
+              const wasmBytes = new Uint8Array(await response.arrayBuffer());
+              handoff.wasmBytes = Array.from(wasmBytes);
+              handoff.wasmByteLength = wasmBytes.byteLength;
+              handoff.wasmSourceUrl = wasmAsset.url;
+            }
+          }
+        }
+        artifacts.push(handoff);
+      }
+      return {
+        schema: 'peercompute.ulg.demo-handoff.v0',
+        createdAt: new Date().toISOString(),
+        artifactCount: artifacts.length,
+        artifacts
+      };
     }
   };
 

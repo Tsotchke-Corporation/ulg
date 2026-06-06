@@ -1107,3 +1107,90 @@ Failures and open questions:
 - The real MoonLab runtime files and Eshkol closure bundle under
   `public/service-assets/` remain ignored local service assets.
 - No push was attempted; all commits remain local per user instruction.
+
+## 2026-06-05 23:31:11 AKDT - ULG PeerCompute handoff exporter
+
+Prompt:
+
+- Continued the long-running ULG/PeerCompute/Eshkol/MoonLab implementation plan
+  after the ULG closure metadata and PeerCompute transferred-byte execution
+  slices.
+- User asked why work was not still continuing; resumed from the dirty ULG
+  handoff-exporter worktree state.
+- Local commits only; no push.
+
+Actions:
+
+- Added `window.__ulgDemo.createPeerComputeHandoff()` to the ULG browser runtime.
+- The exporter walks the current artifact cache and returns
+  `peercompute.ulg.demo-handoff.v0` with each artifact ref, kind, compact
+  summary, full artifact body, and closure WASM bytes fetched same-origin from
+  the ULG service-asset URL.
+- Extended the Chromium smoke test so the demo handoff exporter proves the
+  staged Eshkol closure summary and transfers the expected 33,907-byte WASM
+  module.
+- Ran a live bridge probe from `http://100.86.83.35:5173/` into
+  `https://100.86.83.35:5185/?scenario=magnetar` using the exported ULG
+  MoonLab and Eshkol artifacts.
+- Updated plan, implementation status, and test-plan docs.
+
+Commands run:
+
+```bash
+pwd && git status --short --branch
+sed -n '1,220p' agents.md
+git status --short --branch
+git diff -- src/runtime/demoRuntime.js tests/demo.e2e.mjs
+git diff --check
+pgrep -af 'vite|node.*5173|node.*5185'
+node --input-type=module
+# live Playwright ULG-to-Multiscale handoff probe using createPeerComputeHandoff()
+sed -n '1,240p' plan/plan.md
+sed -n '1,240p' plan/implementation-status.md
+sed -n '1,260p' plan/tests.md
+tail -n 120 plan/log.md
+date '+%Y-%m-%d %H:%M:%S %Z'
+node --check src/runtime/demoRuntime.js && node --check tests/demo.e2e.mjs
+git diff --check
+git status --short --branch
+npm test
+npm run build
+npm run test:e2e
+curl -sS -o /dev/null -w 'ulg %{http_code} %{url_effective}\n' 'http://100.86.83.35:5173/'
+curl -k -sS -o /dev/null -w 'multiscale %{http_code} %{url_effective}\n' 'https://100.86.83.35:5185/?scenario=magnetar'
+git diff --check && git status --short --branch
+git diff --stat
+git diff -- src/runtime/demoRuntime.js tests/demo.e2e.mjs plan/plan.md plan/implementation-status.md plan/tests.md plan/log.md
+```
+
+Test results:
+
+- PASS: syntax checks completed for the changed runtime and e2e test.
+- PASS: `npm test` passed `15/15`.
+- PASS: `git diff --check` reported no whitespace errors before doc updates.
+- PASS: live ULG-to-Multiscale bridge exported four ULG artifacts and the
+  33,907-byte Eshkol WASM module.
+- PASS: Multiscale ingested the MoonLab magnetar calibration and Eshkol closure
+  artifact from the ULG handoff packet.
+- PASS: Multiscale instantiated the transferred Eshkol WASM bytes, executed
+  `main(0, 0)`, returned `entryResult = 0`, and captured output preview
+  `1048560\n1048544\n`.
+- PASS: packet boundary conditions reported `scenarioHandoffReady: true`,
+  `scenarioClosureHostRuntimeExecutionReady: true`, and
+  `scenarioScientificReady: false`.
+- PASS: old readiness blockers for missing MoonLab calibration summary, missing
+  Eshkol closure bundle summary, required host runtime execution, and unvalidated
+  closure execution were absent; remaining blockers were the expected output
+  semantics/scientific tolerance/reference validation gaps.
+- PASS: `npm run build` completed with the existing large bundle warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: final ULG and Multiscale endpoint checks returned HTTP `200`.
+- PASS: final `git diff --check` reported no whitespace errors.
+
+Failures and open questions:
+
+- The handoff exporter is still demo-runtime API surface, not yet a durable
+  PeerCompute service adapter with content addressing or relay-safe transfer.
+- The real MoonLab runtime files and Eshkol closure bundle under
+  `public/service-assets/` remain ignored local service assets.
+- No push was attempted; all commits remain local per user instruction.

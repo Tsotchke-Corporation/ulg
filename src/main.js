@@ -146,6 +146,9 @@ function renderArtifactSummaryLine(summary) {
   if (summary.magnetarDipoleIsingReady) {
     parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);
   }
+  if (summary.magnetarReferenceReady) {
+    parts.push(`ref:${summary.magnetarReferenceEnergyUnits || 'ready'}`);
+  }
   if (summary.calibrationArtifactCount) {
     parts.push(`cal:${summary.calibrationReadyCount}/${summary.calibrationArtifactCount}`);
   }

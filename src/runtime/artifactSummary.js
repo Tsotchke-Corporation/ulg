@@ -3,6 +3,8 @@ export const ULG_QUANTUM_RESPONSE_DESCRIPTOR_SCHEMA = 'peercompute.ulg.quantum-r
 export const ULG_QUANTUM_RESPONSE_PARITY_SCHEMA = 'peercompute.ulg.quantum-response-parity.v0';
 export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.magnetar-dipole-ising-calibration.v0';
 export const ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA = 'eshkol.ulg.closure-output-semantics.v0';
+export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
+export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-input';
 
 function inferArtifactKind(artifact = {}) {
   if (artifact.responseDescriptor || artifact.parity || artifact.calibrationArtifacts) return 'quantum-response';
@@ -14,6 +16,20 @@ function normalizeCalibrationEntry(entry = {}, fallbackId = '') {
   const schema = entry.schema || null;
   const status = entry.validation?.status || entry.status || null;
   const parityStatus = entry.parity?.status || entry.parityStatus || null;
+  const reference = entry.reference && typeof entry.reference === 'object' ? entry.reference : null;
+  const referenceGroundState = reference?.observables?.groundState && typeof reference.observables.groundState === 'object'
+    ? reference.observables.groundState
+    : {};
+  const referenceTolerances = reference?.tolerances && typeof reference.tolerances === 'object'
+    ? reference.tolerances
+    : {};
+  const referenceValidation = reference?.validation && typeof reference.validation === 'object'
+    ? reference.validation
+    : {};
+  const referenceEnergyAbs = finiteNumberOrNull(referenceTolerances.energyAbs);
+  const referenceMaxObservedEnergyDelta = finiteNumberOrNull(referenceTolerances.maxObservedEnergyDelta);
+  const referenceGroundStateEnergy = finiteNumberOrNull(referenceGroundState.referenceEnergy);
+  const referenceGroundStateBitString = referenceGroundState.bitString || referenceGroundState.bitstring || null;
   return {
     id: entry.id || fallbackId || null,
     schema,
@@ -23,6 +39,26 @@ function normalizeCalibrationEntry(entry = {}, fallbackId = '') {
     groundStateBitString: entry.summary?.groundState?.bitString || entry.groundStateBitString || null,
     maxEnergyDelta: entry.summary?.maxEnergyDelta ?? entry.parity?.metrics?.maxEnergyDelta ?? entry.maxEnergyDelta ?? null,
     evaluatedBitstrings: entry.summary?.evaluatedBitstrings ?? entry.evaluatedBitstrings ?? null,
+    referenceSchema: reference?.schema || null,
+    referenceRole: reference?.role || null,
+    referenceContractHash: reference?.contractHash || null,
+    referenceEnergyUnits: reference?.energyUnits || entry.summary?.groundState?.energyUnits || null,
+    referenceGroundStateBitString,
+    referenceGroundStateEnergy,
+    referenceToleranceEnergyAbs: referenceEnergyAbs,
+    referenceMaxObservedEnergyDelta,
+    referenceValidationStatus: referenceValidation.parityPassed === true ? 'pass' : null,
+    referenceReady: reference?.schema === MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA
+      && reference.role === MOONLAB_MAGNETAR_REFERENCE_ROLE
+      && typeof reference.contractHash === 'string'
+      && reference.contractHash.startsWith('sha256:')
+      && reference.energyUnits === 'normalized-ising'
+      && referenceGroundStateBitString != null
+      && referenceGroundStateEnergy != null
+      && referenceEnergyAbs != null
+      && referenceMaxObservedEnergyDelta != null
+      && referenceValidation.parityPassed === true
+      && referenceMaxObservedEnergyDelta <= referenceEnergyAbs,
     ready: entry.ready === true
       || (
         schema === ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA
@@ -154,6 +190,16 @@ export function summarizeUlgArtifact(artifact = {}) {
     magnetarDipoleIsingParityStatus: magnetarDipoleIsing?.parityStatus || null,
     magnetarDipoleIsingGroundState: magnetarDipoleIsing?.groundStateBitString || null,
     magnetarDipoleIsingMaxEnergyDelta: magnetarDipoleIsing?.maxEnergyDelta ?? null,
-    magnetarDipoleIsingEvaluatedBitstrings: magnetarDipoleIsing?.evaluatedBitstrings ?? null
+    magnetarDipoleIsingEvaluatedBitstrings: magnetarDipoleIsing?.evaluatedBitstrings ?? null,
+    magnetarReferenceReady: magnetarDipoleIsing?.referenceReady === true,
+    magnetarReferenceSchema: magnetarDipoleIsing?.referenceSchema || null,
+    magnetarReferenceRole: magnetarDipoleIsing?.referenceRole || null,
+    magnetarReferenceContractHash: magnetarDipoleIsing?.referenceContractHash || null,
+    magnetarReferenceEnergyUnits: magnetarDipoleIsing?.referenceEnergyUnits || null,
+    magnetarReferenceGroundStateBitString: magnetarDipoleIsing?.referenceGroundStateBitString || null,
+    magnetarReferenceGroundStateEnergy: magnetarDipoleIsing?.referenceGroundStateEnergy ?? null,
+    magnetarReferenceToleranceEnergyAbs: magnetarDipoleIsing?.referenceToleranceEnergyAbs ?? null,
+    magnetarReferenceMaxObservedEnergyDelta: magnetarDipoleIsing?.referenceMaxObservedEnergyDelta ?? null,
+    magnetarReferenceValidationStatus: magnetarDipoleIsing?.referenceValidationStatus || null
   };
 }

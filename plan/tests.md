@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 15/15 tests on 2026-06-05 after adding compact Eshkol
-closure output-semantics telemetry.
+Current result: pass, 15/15 tests on 2026-06-06 after adding compact MoonLab
+magnetar reference telemetry.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -33,20 +33,24 @@ closure output-semantics telemetry.
 - Artifact cache summaries preserve Eshkol closure output-semantics metadata for
   the deterministic smoke fixture, including schema, scope, entry export/args,
   expected result, stdout hash/length, and `scientificValidation: false`.
+- Artifact cache summaries preserve MoonLab magnetar reference/tolerance
+  metadata, including schema, role, contract hash, normalized energy units,
+  ground-state bitstring/reference energy, energy tolerance, observed energy
+  delta, and validation status.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-05 after the ULG output-semantics summary
+Current result: pass on 2026-06-06 after the ULG MoonLab reference summary
 update, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-05 after the ULG
-output-semantics summary update.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after the ULG MoonLab
+reference summary update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -77,11 +81,23 @@ output-semantics summary update.
   artifact's `calibrationArtifacts.magnetarDipoleIsing`, passing WASM-vs-JS
   Ising energy parity with `groundState.bitString = "000"`,
   `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8`.
+- Runtime magnetar reference check on 2026-06-06: with copied MoonLab assets
+  present, Playwright verifies `outputs.reference` carries
+  `moonlab.magnetar-dipole-ising-reference.v0`, role
+  `peercompute-reference-tolerance-input`, contract hash
+  `sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec`,
+  energy units `normalized-ising`, ground state `000`, reference energy
+  `-1.6712962962963`, tolerance `1e-9`, zero observed energy delta, and passing
+  reference validation.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state
   `000`, `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8` without fetching
   the full artifact body.
+- MoonLab reference artifact-summary check on 2026-06-06: Playwright verifies
+  `peercompute.ulg.artifact-summary.v0` exposes the same reference schema, hash,
+  units, ground-state reference energy, tolerance, observed energy delta, and
+  pass status without fetching the full artifact body.
 - Eshkol bundle asset check on 2026-06-05: when the ignored local `hello` bundle
   is copied under `public/service-assets/eshkol/closures/hello/`, Playwright
   verifies the Eshkol service asset probe sees artifact JSON, WASM, schema

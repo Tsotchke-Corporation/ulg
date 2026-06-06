@@ -1290,3 +1290,80 @@ Failures and open questions:
   async `createPeerComputeHandoff()` function inside the browser context. The
   corrected probe passed.
 - No push was attempted; all commits remain local per user instruction.
+
+## 2026-06-06 00:20:49 AKDT - MoonLab magnetar reference summary
+
+Prompt:
+
+- Continued after the ULG/Eshkol/PeerCompute output-semantics validation slice.
+- Standing instruction remains local commits only and no push.
+- Started the next blocker path by surfacing MoonLab reference/tolerance
+  metadata for PeerCompute and Multiscale consumers.
+
+Actions:
+
+- Inspected MoonLab commit `c39118c` and its emitted
+  `outputs.reference` contract shape.
+- Ran the MoonLab ULG artifact CLI to capture the default magnetar dipole Ising
+  reference contract hash:
+  `sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec`.
+- Mirrored MoonLab's `moonlab.magnetar-dipole-ising-reference.v0` contract in
+  the ULG MoonLab browser worker.
+- Added `outputs.reference` to the live ULG MoonLab artifact and preserved the
+  same reference inside `calibrationArtifacts.magnetarDipoleIsing`.
+- Extended compact artifact-summary telemetry with MoonLab reference readiness,
+  schema, role, contract hash, energy units, ground-state bitstring/reference
+  energy, tolerance, observed energy delta, and validation status.
+- Added a compact `ref:normalized-ising` live artifact-list hint.
+- Extended unit and Playwright smoke coverage for the reference contract body,
+  telemetry summary, and browser handoff packet.
+
+Files touched:
+
+- `/home/cos/projects/ulg/public/workers/moonlab-core-probe.worker.js`
+- `/home/cos/projects/ulg/src/services/dummyService.worker.js`
+- `/home/cos/projects/ulg/src/runtime/artifactSummary.js`
+- `/home/cos/projects/ulg/src/main.js`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+git show --stat --oneline c39118c
+git show c39118c:bindings/javascript/packages/core/src/ulg-quantum-response-artifact.ts
+pnpm --filter @moonlab/quantum-core ulg:artifact -- --probe magnetar-dipole-ising --out /tmp/moonlab-ulg-magnetar.json
+node --check public/workers/moonlab-core-probe.worker.js && node --check src/services/dummyService.worker.js && node --check src/runtime/artifactSummary.js && node --check src/main.js && node --check tests/orchestration.test.mjs && node --check tests/demo.e2e.mjs
+npm test
+npm run build
+npm run test:e2e
+git diff --check
+node --input-type=module
+# live Playwright ULG reference probe against http://100.86.83.35:5173/
+```
+
+Test results:
+
+- PASS: changed-file syntax checks completed.
+- PASS: `npm test` passed `15/15`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `git diff --check` reported no whitespace errors.
+- PASS: live VPN probe against `http://100.86.83.35:5173/` reported
+  `moonlab.magnetar-dipole-ising-reference.v0`, contract hash
+  `sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec`,
+  energy units `normalized-ising`, ground state `000`, reference energy
+  `-1.6712962962962963`, tolerance `1e-9`, zero observed energy delta,
+  compact summary readiness `true`, validation `pass`, and handoff readiness
+  `true`.
+
+Failures and open questions:
+
+- This adds a reference/tolerance contract for the MoonLab dipole Ising
+  calibration only. It does not provide calibrated MHD, PIC, radiation, or
+  relativistic magnetar references.
+- No push was attempted; all commits remain local per user instruction.

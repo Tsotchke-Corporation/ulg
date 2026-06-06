@@ -190,8 +190,27 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
         schema: 'peercompute.ulg.magnetar-dipole-ising-calibration.v0',
         validation: { status: 'pass' },
         parity: { status: 'pass', metrics: { maxEnergyDelta: 0 } },
+        reference: {
+          schema: 'moonlab.magnetar-dipole-ising-reference.v0',
+          role: 'peercompute-reference-tolerance-input',
+          contractHash: 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec',
+          energyUnits: 'normalized-ising',
+          observables: {
+            groundState: {
+              bitString: '000',
+              referenceEnergy: -1.6712962962963
+            }
+          },
+          tolerances: {
+            energyAbs: 1e-9,
+            maxObservedEnergyDelta: 0
+          },
+          validation: {
+            parityPassed: true
+          }
+        },
         summary: {
-          groundState: { bitString: '000' },
+          groundState: { bitString: '000', referenceEnergy: -1.6712962962963, energyUnits: 'normalized-ising' },
           maxEnergyDelta: 0,
           evaluatedBitstrings: 8
         }
@@ -214,4 +233,14 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.magnetarDipoleIsingGroundState, '000');
   assert.equal(summary.magnetarDipoleIsingMaxEnergyDelta, 0);
   assert.equal(summary.magnetarDipoleIsingEvaluatedBitstrings, 8);
+  assert.equal(summary.magnetarReferenceReady, true);
+  assert.equal(summary.magnetarReferenceSchema, 'moonlab.magnetar-dipole-ising-reference.v0');
+  assert.equal(summary.magnetarReferenceRole, 'peercompute-reference-tolerance-input');
+  assert.equal(summary.magnetarReferenceContractHash, 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec');
+  assert.equal(summary.magnetarReferenceEnergyUnits, 'normalized-ising');
+  assert.equal(summary.magnetarReferenceGroundStateBitString, '000');
+  assert.equal(summary.magnetarReferenceGroundStateEnergy, -1.6712962962963);
+  assert.equal(summary.magnetarReferenceToleranceEnergyAbs, 1e-9);
+  assert.equal(summary.magnetarReferenceMaxObservedEnergyDelta, 0);
+  assert.equal(summary.magnetarReferenceValidationStatus, 'pass');
 });

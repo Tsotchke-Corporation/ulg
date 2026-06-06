@@ -94,6 +94,9 @@ physics work:
 - [x] Surface the MoonLab `magnetar-dipole-ising-calibration` handoff through
   the ULG browser artifact cache as a WASM-vs-JS parity-checked calibration
   sub-artifact.
+- [x] Surface the MoonLab `moonlab.magnetar-dipole-ising-reference.v0`
+  tolerance/reference contract through the ULG artifact body, compact
+  artifact-summary telemetry, and demo handoff packet.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

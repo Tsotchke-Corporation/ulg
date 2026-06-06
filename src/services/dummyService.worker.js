@@ -289,6 +289,7 @@ function createArtifact(task) {
         forceSamples: [0.1, 0.2, 0.1],
         basisProbabilities: coreProbeReady ? coreProbe.probabilities : [0.5, 0, 0, 0.5],
         bellState: coreProbeReady ? coreProbe.sample : 'placeholder',
+        reference: magnetarDipoleIsing?.reference ?? null,
         magnetarDipoleIsing: magnetarDipoleIsing?.summary ?? null
       },
       calibrationArtifacts: magnetarDipoleIsing ? {

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 23:51:33 AKDT
+Updated: 2026-06-06 00:20:49 AKDT
 
 ## Done
 
@@ -123,13 +123,18 @@ Updated: 2026-06-05 23:51:33 AKDT
   telemetry and the browser handoff packet. The summary carries the deterministic
   `main(0, 0)` smoke-fixture expectation, stdout SHA-256/byte length, and
   `scientificValidation: false`.
+- Added MoonLab magnetar dipole Ising reference/tolerance contract fields to the
+  live ULG artifact, compact telemetry, and handoff packet. The summary now
+  carries the MoonLab reference schema, contract hash, normalized energy units,
+  ground-state reference energy, energy tolerance, observed energy delta, and
+  pass status.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the ULG output-semantics summary as the next PeerCompute/Multiscale
-  adapter signal so executed Eshkol smoke output can clear only the
-  output-semantics blocker.
+- Use the ULG MoonLab reference summary as the next PeerCompute/Multiscale
+  adapter signal for reference/tolerance inventory, while keeping full magnetar
+  scientific readiness blocked until calibrated multiphysics references exist.
 
 ## Next
 

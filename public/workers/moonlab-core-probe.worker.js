@@ -19,6 +19,7 @@ self.addEventListener('message', (event) => {
 });
 
 let modulePromise = null;
+const MAGNETAR_DIPOLE_ISING_REFERENCE_CONTRACT_HASH = 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec';
 
 async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   self.postMessage({ type: 'progress', childId, progress: 0.15, sample: 0 });
@@ -246,6 +247,51 @@ function createMagnetarDipoleIsingCalibration(module) {
       index === 0 || sample.magneticFieldTesla <= radialSamples[index - 1].magneticFieldTesla
     ));
     const tolerance = 1e-9;
+    const energyUnits = 'normalized-ising';
+    const referenceContract = {
+      schema: 'moonlab.magnetar-dipole-ising-reference.v0',
+      role: 'peercompute-reference-tolerance-input',
+      target: 'magnetar-dipole-normalized-ising',
+      contractHash: MAGNETAR_DIPOLE_ISING_REFERENCE_CONTRACT_HASH,
+      energyUnits,
+      hamiltonian: {
+        form: 'H=sum_i localFields[i]*spins[i]+sum_c couplings[c].value*spins[c.qubit1]*spins[c.qubit2]',
+        localFields: model.localFields,
+        couplings: model.couplings,
+        fieldScaleTesla: model.fieldScaleTesla,
+        physicalModel: model.physicalModel,
+        spinConvention: model.spinConvention,
+        input: {
+          surfaceMagneticFieldTesla: input.surfaceMagneticFieldTesla,
+          stellarRadiusMeters: input.stellarRadiusMeters,
+          radialSamplesMeters: input.radialSamplesMeters,
+          couplingStrength: input.couplingStrength
+        }
+      },
+      observables: {
+        groundState: {
+          bitstring: groundState.bitstring,
+          bitString: groundState.bitString,
+          referenceEnergy: groundState.referenceEnergy
+        },
+        energySpectrum: evaluations.map((evaluation) => ({
+          bitstring: evaluation.bitstring,
+          bitString: evaluation.bitString,
+          spins: evaluation.spins,
+          referenceEnergy: evaluation.referenceEnergy
+        }))
+      },
+      tolerances: {
+        energyAbs: tolerance,
+        maxObservedEnergyDelta: maxEnergyDelta,
+        numericPrecision: 'float64'
+      },
+      validation: {
+        parityPassed: maxEnergyDelta <= tolerance,
+        maxEnergyDelta,
+        evaluatedBitstrings: evaluations.length
+      }
+    };
 
     return {
       schema: 'peercompute.ulg.magnetar-dipole-ising-calibration.v0',
@@ -257,6 +303,7 @@ function createMagnetarDipoleIsingCalibration(module) {
       radialSamples,
       isingModel: model,
       evaluations,
+      reference: referenceContract,
       responseDescriptor: {
         schema: 'peercompute.ulg.quantum-response-descriptor.v0',
         sample: 'magnetar_dipole_ising',
@@ -330,7 +377,9 @@ function createMagnetarDipoleIsingCalibration(module) {
         groundState: {
           bitstring: groundState.bitstring,
           bitString: groundState.bitString,
-          observedEnergy: groundState.observedEnergy
+          observedEnergy: groundState.observedEnergy,
+          referenceEnergy: groundState.referenceEnergy,
+          energyUnits
         },
         maxEnergyDelta,
         scope: 'calibration-probe-not-full-magnetar-simulation'

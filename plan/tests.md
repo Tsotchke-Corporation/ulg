@@ -218,6 +218,13 @@ reference-contract asset support.
   refs and transferred Eshkol WASM metadata, optionally execute through an
   injected service executor, and cache dispatch plan/result metadata beside the
   durable envelope.
+- PeerCompute registry-backed dispatch executor check on 2026-06-06: after
+  commit `ae67d31e`, full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`, proving
+  `createUlgHandoffSupervisorServiceExecutor()` can submit dispatch tasks to
+  registered `moonlab-ulg-fixture` and `eshkol-ulg-fixture` service hosts under
+  the same `WorkerSupervisor`, preserve nested service task/result metadata,
+  and still cache the parent durable envelope plus dispatch plan/result.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

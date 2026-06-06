@@ -65,13 +65,15 @@ physics work:
 - [x] Add PeerCompute's first envelope-backed dispatch plan so durable handoff
   envelope refs become concrete Eshkol/MoonLab service tasks with relay-safe
   artifact refs and transferred WASM metadata.
+- [x] Add PeerCompute's registry-backed supervisor executor so dispatch tasks
+  can be submitted to registered MoonLab/Eshkol service hosts.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
-- [ ] Wire the new dispatch plan to real ULG/Eshkol/MoonLab worker services
-  inside the supervisor and adapter layer.
+- [ ] Replace the fixture supervisor services with production ULG/Eshkol/MoonLab
+  adapters that consume the same dispatch task shape.
 
 ### Eshkol
 

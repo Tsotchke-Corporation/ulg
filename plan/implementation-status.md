@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 07:57:15 AKDT
+Updated: 2026-06-06 08:03:36 AKDT
 
 ## Done
 
@@ -236,14 +236,20 @@ Updated: 2026-06-06 07:57:15 AKDT
   closure refs to `eshkol.ulg.closure-artifact.ingest` or descriptor-bind tasks,
   and can optionally execute those dispatches through an injected service
   executor while preserving relay-safe/content-addressed/WASM-transfer metadata.
+- Added and committed PeerCompute's registry-backed dispatch executor locally as
+  commit `ae67d31e`. `createUlgHandoffSupervisorServiceExecutor()` submits
+  dispatch tasks to registered MoonLab/Eshkol services through
+  `WorkerSupervisor`, preserves nested service results in the handoff dispatch
+  result, and proves fixture service hosts can execute behind the durable
+  envelope boundary.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
-- Extend the envelope-backed PeerCompute host from injected dispatch execution
-  into real Eshkol and MoonLab worker-service execution paths.
+- Replace the fixture MoonLab/Eshkol service hosts with production adapters that
+  consume the same dispatch task shape.
 
 ## Next
 

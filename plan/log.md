@@ -2368,3 +2368,43 @@ Failures and open questions:
   implementation step is to wire dispatches to actual registered Eshkol and
   MoonLab service hosts or equivalent adapters.
 - No push was attempted.
+
+## 2026-06-06 08:03:36 AKDT - PeerCompute registry-backed handoff dispatch executor
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keeping commits local only.
+
+Actions:
+
+- Added PeerCompute commit `ae67d31e`, which introduces
+  `peercompute.ulg.handoff-supervisor-service-executor.v0` and
+  `createUlgHandoffSupervisorServiceExecutor()`.
+- The executor converts dispatch-plan entries into WorkerSupervisor tasks,
+  submits them to the dispatch's registered service id, and preserves nested
+  service task/result metadata inside the handoff dispatch result.
+- Added a PeerCompute regression with one supervisor hosting
+  `UlgHandoffServiceHost`, `moonlab-ulg-fixture`, and `eshkol-ulg-fixture`.
+  The handoff host now submits nested MoonLab/Eshkol dispatch tasks through the
+  same supervisor and records the fixture service results in the parent handoff
+  artifact.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` so the next target is replacing fixture service hosts with
+  production Eshkol/MoonLab adapters that consume the same dispatch task shape.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the service host, service exports, package
+  exports, and service-orchestration test file.
+- PASS: PeerCompute focused ULG handoff/fixture test command passed `16/16`.
+- PASS: PeerCompute full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+
+Failures and open questions:
+
+- The registered target services are still fixture hosts, not production
+  Eshkol/MoonLab service adapters.
+- No push was attempted.

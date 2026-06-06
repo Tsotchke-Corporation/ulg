@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 15/15 tests on 2026-06-05 after adding the Eshkol
-closure-bundle service asset probe.
+Current result: pass, 15/15 tests on 2026-06-05 after adding Eshkol closure
+execution metadata to artifact-summary telemetry.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -24,20 +24,23 @@ closure-bundle service asset probe.
 - Registry resolution, child-worker lease limits, artifact cache behavior,
   artifact-summary telemetry behavior, and GPU fallback probe behavior.
 - Child-worker leases preserve `classic` vs `module` worker type metadata.
+- Artifact cache summaries preserve Eshkol closure entry signature,
+  start-section, import/export, WASM metadata count, and DOM-free host-import
+  bundle metadata.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-05 after the Eshkol closure-bundle service
-asset probe, with the existing large three.js chunk warning.
+Current result: pass on 2026-06-05 after the Eshkol closure metadata telemetry
+update, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-05 after the Eshkol
-closure-bundle service asset probe.
+closure metadata telemetry update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -82,12 +85,21 @@ closure-bundle service asset probe.
   preserves `hello.wasm` as the relative module URL, marks it service-worker
   safe, and exposes closure artifact-summary validation status `pass`,
   `closureReady: true`, and bundle relative-URL preservation.
+- Eshkol closure execution metadata check on 2026-06-05: Playwright verifies
+  the closure artifact-summary telemetry reports `entryExport = "main"`,
+  signature `i32,i32 -> i32`, no start section, import count `12`,
+  runtime function import count `9`, WASM function/type counts `18/104`, and
+  DOM-free host import factory `createEshkolHostImportObject`.
 - Live VPN Eshkol bundle check on 2026-06-05: `http://100.86.83.35:5173/`
   reported Eshkol asset status `ready`, with `application/wasm` for the module
   and `application/json` for the artifact, schema, and bundle manifest. A live
   artifact-cache probe also reported closure kind `wasm-reference`, module URL
   `hello.wasm`, validation status `pass`, and bundle manifest
   `preserveRelativeUrls: true`.
+- Live VPN Eshkol closure metadata check on 2026-06-05:
+  `http://100.86.83.35:5173/` reported `entry:main`, `imports:12`, and
+  `host:createEshkolHostImportObject` in the artifact list after
+  `window.__ulgDemo.runSmoke()`.
 - Live artifact-cache check on 2026-06-05: `http://100.86.83.35:5173/`
   returned Bell parity `pass` plus magnetar calibration `pass`, ground state
   `000`, `maxEnergyDelta = 0`, and `calibrationArtifactCount = 1` from

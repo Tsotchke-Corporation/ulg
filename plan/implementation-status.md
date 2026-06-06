@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 18:23:32 AKDT
+Updated: 2026-06-05 23:24:36 AKDT
 
 ## Done
 
@@ -101,18 +101,29 @@ Updated: 2026-06-05 18:23:32 AKDT
 - Extended compact artifact-summary telemetry with Eshkol closure-bundle fields:
   closure kind, module URL/hash, service-worker safety, dynamic-code flags,
   bundle manifest metadata, and `closureReady`.
+- Extended compact artifact-summary telemetry with Eshkol closure execution
+  handoff metadata: entry export/signature, start-section state, import/export
+  counts, WASM metadata counts, and DOM-free host-import bundle metadata.
+- Preserved `ulg_bundle_manifest.json.hostImports` through the supervised
+  Eshkol worker artifact runtime and rendered `entry`, `imports`, and host
+  factory details in the live artifact list.
+- Verified `npm test`, `npm run build`, `npm run test:e2e`, and a live
+  `http://100.86.83.35:5173/` artifact-cache probe after the Eshkol closure
+  metadata telemetry update.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the published ABI fixtures, ULG artifact summaries, and the Eshkol ULG
-  closure bundle helper as the next adapter handshake for PeerCompute, Eshkol,
-  and MoonLab.
+- Use the published ABI fixtures, ULG artifact summaries, transferred WASM
+  bytes, and the Eshkol ULG closure bundle helper as the next adapter handshake
+  for PeerCompute, Eshkol, and MoonLab.
 
 ## Next
 
-- Add real peercompute service-hosting modules or adapters based on the working ULG
-  demo contract.
+- Add a same-origin/proxied or HTTPS artifact-transfer path so HTTPS
+  PeerCompute/Multiscale can consume ULG WASM without mixed-content fetches.
+- Add real peercompute service-hosting modules or adapters based on the working
+  ULG demo contract.
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
   real closure tensor descriptors once the descriptor contract is stable.
 - Add real MoonLab browser WebGPU quantum-response kernels so the current

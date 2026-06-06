@@ -149,5 +149,17 @@ function renderArtifactSummaryLine(summary) {
   if (summary.calibrationArtifactCount) {
     parts.push(`cal:${summary.calibrationReadyCount}/${summary.calibrationArtifactCount}`);
   }
+  if (summary.closureKind) {
+    parts.push(`closure:${summary.closureKind}`);
+  }
+  if (summary.closureEntryExport) {
+    parts.push(`entry:${summary.closureEntryExport}`);
+  }
+  if (summary.closureImportCount) {
+    parts.push(`imports:${summary.closureImportCount}`);
+  }
+  if (summary.closureHostImportsDomFree) {
+    parts.push(`host:${summary.closureHostImportsFactory || 'dom-free'}`);
+  }
   return parts.length ? `<br>${parts.join(' / ')}` : '';
 }

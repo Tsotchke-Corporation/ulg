@@ -55,6 +55,18 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureKind).toBe('wasm-reference');
     expect(eshkolTelemetryRecord.artifactSummary.closureModuleUrl).toBe('hello.wasm');
     expect(eshkolTelemetryRecord.artifactSummary.closureServiceWorkerSafe).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureEntryExport).toBe('main');
+    expect(eshkolTelemetryRecord.artifactSummary.closureEntrySignature.parameters).toEqual(['i32', 'i32']);
+    expect(eshkolTelemetryRecord.artifactSummary.closureEntrySignature.results).toEqual(['i32']);
+    expect(eshkolTelemetryRecord.artifactSummary.closureHasStartSection).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureStartFunctionIndex).toBe(null);
+    expect(eshkolTelemetryRecord.artifactSummary.closureImportCount).toBe(12);
+    expect(eshkolTelemetryRecord.artifactSummary.closureExportCount).toBe(1);
+    expect(eshkolTelemetryRecord.artifactSummary.closureRuntimeFunctionImportCount).toBe(9);
+    expect(eshkolTelemetryRecord.artifactSummary.closureWasmFunctionCount).toBe(18);
+    expect(eshkolTelemetryRecord.artifactSummary.closureWasmTypeCount).toBe(104);
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsFactory).toBe('createEshkolHostImportObject');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsDomFree).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureBundlePreserveRelativeUrls).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
   }

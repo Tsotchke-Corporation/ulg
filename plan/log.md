@@ -1021,3 +1021,89 @@ Failures and open questions:
   next quantum-response expansion, but the current committed ULG path uses the
   simpler exported Bell helper and direct probability reads.
 - No push was attempted; all commits remain local per user instruction.
+
+## 2026-06-05 23:24:36 AKDT - Eshkol closure metadata telemetry
+
+Prompt:
+
+- Continued the long-running ULG/PeerCompute/Eshkol/MoonLab implementation plan
+  after PeerCompute could consume transferred Eshkol closure bytes and execute
+  `main(0, 0)` in Multiscale.
+- Local commits only; no push.
+
+Actions:
+
+- Extended `src/runtime/artifactSummary.js` so ULG artifact-cache summaries
+  preserve Eshkol closure entry export/signature, start-section state,
+  import/export counts, WASM metadata counts, and DOM-free host-import bundle
+  metadata.
+- Updated `src/services/dummyService.worker.js` to preserve
+  `ulg_bundle_manifest.json.hostImports` when returning the staged Eshkol
+  closure artifact.
+- Updated the live artifact list in `src/main.js` to render compact closure
+  metadata: `closure`, `entry`, `imports`, and host-import factory.
+- Updated unit and e2e coverage for the new summary fields.
+- Updated plan, implementation status, and test-plan docs.
+
+Commands run:
+
+```bash
+rg --files -g 'AGENTS.md' -g 'agents.md'
+git status --short --branch
+sed -n '1,240p' src/runtime/artifactSummary.js
+rg -n "artifactSummary|closureBundle|closureReady|magnetarDipole|Eshkol" src tests package.json
+sed -n '1,220p' agents.md
+sed -n '1,160p' tests/orchestration.test.mjs
+sed -n '1,105p' tests/demo.e2e.mjs
+node --check src/runtime/artifactSummary.js && node --check src/main.js && node --check tests/orchestration.test.mjs && node --check tests/demo.e2e.mjs
+npm test
+node --input-type=module
+# live Playwright probe against http://100.86.83.35:5173/ checking window.__ulgDemo.runSmoke() and artifactCache.list()
+rg -n "bundleManifest|hostImports|artifactModule|eshkol" src/services/dummyService.worker.js src/runtime/WorkerSupervisor.js src/runtime/ArtifactCache.js
+node --check src/runtime/artifactSummary.js && node --check src/services/dummyService.worker.js && node --check src/main.js && node --check tests/orchestration.test.mjs && node --check tests/demo.e2e.mjs
+npm test
+node --input-type=module
+# live Playwright probe against http://100.86.83.35:5173/ confirming host import metadata and UI line
+npm run build
+npm run test:e2e
+curl -sS -o /dev/null -w 'ulg %{http_code} %{url_effective}\n' 'http://100.86.83.35:5173/'
+curl -k -sS -o /dev/null -w 'multiscale %{http_code} %{url_effective}\n' 'https://100.86.83.35:5185/?scenario=magnetar'
+git diff --check
+```
+
+Files touched:
+
+- `/home/cos/projects/ulg/src/runtime/artifactSummary.js`
+- `/home/cos/projects/ulg/src/services/dummyService.worker.js`
+- `/home/cos/projects/ulg/src/main.js`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Test results:
+
+- PASS: syntax checks completed for changed ULG source and tests.
+- PASS: `npm test` passed `15/15`.
+- PASS: live VPN probe reported closure summary metadata:
+  `entryExport = "main"`, signature `i32,i32 -> i32`, no start section,
+  import/export counts `12/1`, runtime function import count `9`, WASM
+  function/type counts `18/104`, host import factory
+  `createEshkolHostImportObject`, and `closureReady: true`.
+- PASS: live artifact list includes `entry:main`, `imports:12`, and
+  `host:createEshkolHostImportObject`.
+- PASS: `npm run build` completed with the existing large bundle warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: final ULG and Multiscale endpoint checks returned HTTP `200`.
+- PASS: `git diff --check` reported no whitespace errors.
+
+Failures and open questions:
+
+- The first live probe showed host-import metadata missing because the worker
+  preserved only the bundle manifest schema/copy-file fields. This was fixed by
+  copying the `hostImports` block into the returned closure artifact runtime.
+- The real MoonLab runtime files and Eshkol closure bundle under
+  `public/service-assets/` remain ignored local service assets.
+- No push was attempted; all commits remain local per user instruction.

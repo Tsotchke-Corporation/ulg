@@ -335,6 +335,13 @@ function createArtifact(task) {
         bundleManifest: serviceBundleManifest ? {
           schema: serviceBundleManifest.schema || null,
           copyFiles: serviceBundleManifest.manualDeploy?.copyFiles || [],
+          hostImports: serviceBundleManifest.hostImports ? {
+            path: serviceBundleManifest.hostImports.path || null,
+            sha256: serviceBundleManifest.hostImports.sha256 || null,
+            factory: serviceBundleManifest.hostImports.factory || null,
+            global: serviceBundleManifest.hostImports.global || null,
+            domFree: serviceBundleManifest.hostImports.domFree === true
+          } : null,
           preserveRelativeUrls: serviceBundleManifest.manualDeploy?.preserveRelativeUrls === true
         } : null
       },

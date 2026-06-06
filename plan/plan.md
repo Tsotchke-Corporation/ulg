@@ -34,6 +34,9 @@ physics work:
   manually staged `scripts/export_ulg_closure_bundle.py` outputs.
 - [x] Return staged Eshkol closure bundle artifacts from the supervised service
   worker when the bundle is ready.
+- [x] Preserve Eshkol closure entry signature, start-section, import/export,
+  WASM metadata count, and DOM-free host-import bundle metadata in compact
+  artifact-summary telemetry and the live artifact list.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -87,6 +90,9 @@ physics work:
   sub-artifact.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
+- [x] Surface staged Eshkol closure execution metadata through compact ULG
+  artifact-summary telemetry for direct PeerCompute/Multiscale scenario
+  execution handoff.
 
 ### Tooling
 

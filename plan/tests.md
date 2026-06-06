@@ -917,3 +917,30 @@ reference-contract asset support.
   PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed with
   `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
   `handoff-ready`.
+
+## 2026-06-06 ICC Eshkol Registration Checks
+
+- Parser dependency handling:
+  `make install-parsers` in `/home/cos/projects/infinite_context_coder` hit the
+  Ubuntu PEP 668 externally-managed system-pip guard, so the same parser package
+  check/install was run through ICC's existing `.venv`. The packages were
+  already present: `tree-sitter`, `tree-sitter-cpp`, and `tree-sitter-c`.
+- Registry:
+  `.venv/bin/python scripts/codebase_tool.py register --name eshkol --path
+  /home/cos/projects/eshkol ...` succeeded with skips for `.git`, `build`,
+  `node_modules`, `dist`, `.venv`, `__pycache__`, `.pytest_cache`, and `site`.
+- Index:
+  `.venv/bin/python scripts/codebase_tool.py index --repo eshkol` indexed
+  `1578` files, `451140` lines, and `14294` symbol records with
+  `tree_sitter_available = true`.
+- Memory:
+  `.venv/bin/python scripts/codebase_tool.py build-memory --repo eshkol` wrote
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/eshkol/codebase_memory`
+  with `21334` chunks and Eshkol git head
+  `ad878d0ab182b238b85e2acb89b329b52566464a`.
+- Architecture summary:
+  `.venv/bin/python scripts/codebase_tool.py architecture-summary --repo eshkol
+  --bundle --include-cheatsheet` succeeded and identified Eshkol integration
+  surfaces including `exe/eshkol-server.cpp`,
+  `inc/eshkol/bridge/qllm_bridge.h`, `inc/eshkol/core/eval_bridge.h`, and
+  tensor/backend paths.

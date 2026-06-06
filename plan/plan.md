@@ -242,8 +242,8 @@ physics work:
 
 - [x] Use ICC registry/status/architecture summaries for MoonLab and peercompute.
 - [x] Use sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
-- [ ] Run `make install-parsers` in ICC before refreshing indexes.
-- [ ] Register `eshkol` and `ulg` with ICC when persistent tool artifacts are wanted.
+- [x] Ensure ICC parser dependencies are available before refreshing indexes.
+- [x] Register `eshkol` and `ulg` with ICC when persistent tool artifacts are wanted.
 - [ ] Use swarm lightly for status/context until a ULG-specific profile exists.
 
 ## Integration Rule

@@ -3808,3 +3808,64 @@ Failures / open questions:
   `cnot` remains the next missing declared native-operation probe, and real
   hardware WebGPU parity coverage remains blocked.
 - No push was attempted.
+
+## 2026-06-06 15:09:30 AKDT - ICC Eshkol registration and memory build
+
+Prompt: Continue working while sidecar agents run; ULG's tooling plan still
+listed ICC parser setup and Eshkol/ULG registration as open.
+
+Actions attempted:
+
+- Inspected `/home/cos/projects/infinite_context_coder` Makefile and README.
+- Listed ICC registry entries and confirmed `ulg`, `moonlab`, and
+  `peercompute` were already registered, while `eshkol` was not.
+- Ran `make install-parsers`; Ubuntu's PEP 668 guard blocked system-wide pip
+  installation.
+- Used ICC's existing `.venv` instead and confirmed `tree-sitter`,
+  `tree-sitter-cpp`, and `tree-sitter-c` are installed there.
+- Registered `/home/cos/projects/eshkol` as ICC repo `eshkol`, skipping
+  generated/cache trees.
+- Indexed Eshkol and built Eshkol codebase memory.
+- Ran an Eshkol architecture summary bundle as a smoke check.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `make install-parsers`
+- `.venv/bin/pip install --upgrade tree-sitter tree-sitter-cpp tree-sitter-c`
+- `.venv/bin/python scripts/codebase_tool.py list`
+- `.venv/bin/python scripts/codebase_tool.py register --name eshkol --path /home/cos/projects/eshkol --skip-dir .git --skip-dir build --skip-dir node_modules --skip-dir dist --skip-dir .venv --skip-dir __pycache__ --skip-dir .pytest_cache --skip-dir site`
+- `.venv/bin/python scripts/codebase_tool.py index --repo eshkol`
+- `.venv/bin/python scripts/codebase_tool.py build-memory --repo eshkol`
+- `.venv/bin/python scripts/codebase_tool.py architecture-summary --repo eshkol --bundle --include-cheatsheet`
+
+Results:
+
+- PASS: ICC `.venv` already had the parser packages available.
+- PASS: Eshkol registered in ICC with artifact root
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/eshkol`.
+- PASS: Eshkol index wrote
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/eshkol/codebase_index.json`.
+  It indexed `1578` files, `451140` lines, `14294` symbol records, and reported
+  `tree_sitter_available = true`.
+- PASS: Eshkol memory build wrote
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/eshkol/codebase_memory`,
+  with `21334` chunks and git head
+  `ad878d0ab182b238b85e2acb89b329b52566464a`.
+- PASS: Architecture summary bundle completed and identified Eshkol compiler,
+  bridge, backend, tensor, and integration surfaces for future work.
+
+Failures / open questions:
+
+- `make install-parsers` itself failed under system Python because Kubuntu's
+  system pip is externally managed. The local `.venv` path is the working ICC
+  parser environment.
+- ICC registry/artifacts are ignored or otherwise clean in ICC's git status; no
+  ICC commit was made.
+- No push was attempted.

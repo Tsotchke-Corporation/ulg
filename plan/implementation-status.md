@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 15:07:49 AKDT
+Updated: 2026-06-06 15:09:30 AKDT
 
 ## Done
 
@@ -501,6 +501,9 @@ Updated: 2026-06-06 15:07:49 AKDT
   `e9bc324` into ULG staging, summaries, UI, handoffs, and live status. ULG now
   requires `hadamard`, `pauli_x`, and `pauli_z` native probes to remain
   declared but unexecuted/uncovered unless real browser WebGPU evidence exists.
+- Registered and indexed Eshkol in Infinite Context Coder. ICC now has
+  `eshkol`, `ulg`, `moonlab`, and `peercompute` registered; the Eshkol memory
+  artifact was built with tree-sitter available at Eshkol head `ad878d0`.
 
 ## In Progress
 

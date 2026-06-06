@@ -13,7 +13,9 @@ This repo currently implements the first executable slice:
 - GPU capability probing with CPU/WASM fallback status;
 - browser-facing service asset probes for real MoonLab/Eshkol readiness;
 - a supervised MoonLab WASM Bell-state probe with deterministic response/parity metadata and a magnetar dipole Ising calibration sub-artifact when copied core artifacts are available;
-- a staged Eshkol magnetar closure descriptor fixture for Demo A handoff wiring;
+- a staged Eshkol magnetar closure descriptor fixture with explicit tensor-runtime and production-handler boundary metadata for Demo A handoff wiring;
+- an optional MoonLab WebGPU complex64 parity-scope handoff artifact that records the current no-backend/probe-only state without claiming browser parity execution;
+- a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
 ## Commands
@@ -69,15 +71,22 @@ to ready reference entries; compact
 artifact-summary telemetry reports both the ready Ising reference and the
 calibrated inventory counts so handoff consumers can inventory tolerance inputs
 without fetching the full artifact body. The staged suite contains reduced scalar
-tolerance plumbing and do not claim full PIC, radiation-transport, GR, GRMHD, or
-magnetar scientific simulation.
+tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, or
+magnetar scientific simulation. The optional
+`public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
+currently records MoonLab's declared browser WebGPU `compute_probabilities`
+probe, but preserves `executed: false`, `passed: false`, empty native operation
+coverage, and blockers until the remaining WebGPU kernels are actually covered.
 
 For Eshkol, the default staged bundle is
 `public/service-assets/eshkol/closures/magnetar-closure/`. It packages
 `magnetar-closure.wasm` with descriptor-only metadata under
 `validation.closureDescriptor.schema =
 "eshkol.ulg.magnetar-closure-descriptor.v0"`, including typed magnetar
-input/output tensor ids, derivative placeholders, and an explicit
-`scientificValidation: false` flag. This advances the handoff beyond hello-only
-smoke while still making clear that the closure is a contract seed, not a
-validated magnetar physics result.
+input/output tensor ids, a declared tensor-runtime contract, derivative
+placeholders, and explicit non-scientific/full-physics flags. The descriptor
+also carries `eshkol.ulg.production-handler-boundary.v0`, which identifies the
+intended PeerCompute handler boundary while keeping `handlerReady: false` and
+`runtimeExecution: false`. This advances the handoff beyond hello-only smoke
+while still making clear that the closure is a contract seed, not a validated
+magnetar physics result.

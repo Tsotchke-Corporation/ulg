@@ -59,6 +59,14 @@ physics work:
   artifact summaries and staging guards, including tensor ids, contract hash,
   interpolation-table binding, sample-shape validation, and explicit
   non-scientific/full-physics flags.
+- [x] Surface Eshkol's `eshkol.ulg.production-handler-boundary.v0` through ULG
+  staging guards, compact summaries, browser handoffs, and artifact-list status
+  while preserving `handlerReady = false` and `runtimeExecution = false`.
+- [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
+  declared `compute_probabilities` browser-kernel probe through ULG staging,
+  summaries, UI, and handoffs while preserving no-backend/no-execution flags.
+- [x] Add direct Multiscale launch status detail for scenario/readiness acks
+  while preserving the `handoff ready / blockers 0` compatibility prefix.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -106,6 +114,11 @@ physics work:
   browser API for VPN inspection.
 - [x] Validate Eshkol descriptor tensor-runtime contracts in dispatch adapter
   probes and service summaries without promoting them to scientific execution.
+- [x] Surface Eshkol production-handler boundary metadata in PeerCompute
+  dispatch adapters, supervisor summaries, Multiscale ingestion, and browser UI
+  without promoting handler/runtime/scientific readiness.
+- [x] Run relay-backed focused PeerCompute runtime P2P smoke and preserve
+  generated relay configs after the test.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
@@ -130,6 +143,8 @@ physics work:
   magnetar descriptor artifact without claiming validated physics.
 - [x] Add metadata-level typed closure tensor runtime descriptors to the
   magnetar fixture, including sample-shape validation and contract hash.
+- [x] Add declared-not-executed production-handler boundary metadata to the
+  magnetar closure fixture and reject runtime/full-physics overclaims.
 - [ ] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
@@ -190,6 +205,9 @@ physics work:
   PeerCompute handoff envelope, MoonLab normalized reference-suite hash, closure
   surface sample ids, and product-topology binding without claiming scientific
   validation.
+- [x] Add a reduced MoonLab WebGPU complex64 parity-scope artifact with an
+  explicit no-backend state and declared `compute_probabilities` browser-kernel
+  probe.
 
 ### Tooling
 

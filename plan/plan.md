@@ -70,6 +70,8 @@ physics work:
   artifact refs and transferred WASM metadata.
 - [x] Add PeerCompute's registry-backed supervisor executor so dispatch tasks
   can be submitted to registered MoonLab/Eshkol service hosts.
+- [x] Materialize normalized ULG artifact payloads in supervisor-submitted
+  PeerCompute dispatch service tasks while keeping dispatch plans ref-based.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,

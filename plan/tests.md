@@ -225,6 +225,13 @@ reference-contract asset support.
   registered `moonlab-ulg-fixture` and `eshkol-ulg-fixture` service hosts under
   the same `WorkerSupervisor`, preserve nested service task/result metadata,
   and still cache the parent durable envelope plus dispatch plan/result.
+- PeerCompute materialized dispatch payload check on 2026-06-06: after commit
+  `697f8d8b`, full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`, proving
+  supervisor-submitted dispatch tasks carry
+  `peercompute.ulg.handoff-dispatch-artifact-payload.v0` with MoonLab
+  quantum-response summaries and Eshkol closure bodies plus transferred WASM
+  bytes for registered service adapters.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

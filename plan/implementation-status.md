@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 08:18:23 AKDT
+Updated: 2026-06-06 08:26:42 AKDT
 
 ## Done
 
@@ -217,6 +217,11 @@ Updated: 2026-06-06 08:18:23 AKDT
   manifest, relay-safe counts, source/provenance metadata, and blockers; the
   live VPN bridge reports envelope ready with two relay-safe/content-addressed
   artifacts and no blockers.
+- Added and committed PeerCompute materialized dispatch artifact payload support
+  locally as commit `697f8d8b`. Registered service-host dispatch tasks now carry
+  `peercompute.ulg.handoff-dispatch-artifact-payload.v0` with normalized artifact
+  bodies/summaries and transferred Eshkol WASM bytes while dispatch plans remain
+  ref-based.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable

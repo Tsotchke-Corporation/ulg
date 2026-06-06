@@ -2486,3 +2486,39 @@ Failures and open questions:
 - The SHA-256 refs harden local artifact addressing but do not by themselves add
   remote relay storage or signature verification.
 - No push was attempted.
+
+## 2026-06-06 08:26:42 AKDT - PeerCompute materialized dispatch payloads
+
+Prompt:
+
+- Continue the overall ULG implementation plan and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `697f8d8b`, which introduces
+  `peercompute.ulg.handoff-dispatch-artifact-payload.v0`.
+- `createUlgHandoffSupervisorServiceExecutor()` now includes the materialized
+  normalized ULG artifact body, artifact summary, validation metadata, and
+  transferred Eshkol WASM bytes in each default supervisor-submitted service
+  task while leaving `peercompute.ulg.handoff-service-dispatch-plan.v0` compact
+  and ref-oriented.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` so the next production-adapter task can target the exact
+  service-task payload now proven by PeerCompute fixtures.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the service host, service exports, package
+  exports, and service-orchestration test file.
+- PASS: PeerCompute focused ULG handoff/fixture test command passed `16/16`.
+- PASS: PeerCompute full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+
+Failures and open questions:
+
+- Production MoonLab/Eshkol service adapters still need to consume this payload
+  shape in place of the current fixture service hosts.
+- No push was attempted.

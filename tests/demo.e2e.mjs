@@ -42,6 +42,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   const moonlabTelemetryRecord = await readMoonLabArtifactTelemetryRecord(page);
   const eshkolArtifact = await readServiceArtifact(page, 'eshkol');
   const eshkolTelemetryRecord = await readServiceArtifactTelemetryRecord(page, 'eshkol');
+  const handoff = await page.evaluate(() => window.__ulgDemo.createPeerComputeHandoff());
+  expect(handoff.schema).toBe('peercompute.ulg.demo-handoff.v0');
   if (eshkolAssetProbe.status === 'ready') {
     expect(eshkolArtifact.closureKind).toBe('wasm-reference');
     expect(eshkolArtifact.execution.module.url).toBe('hello.wasm');
@@ -88,9 +90,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(16);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
-    const handoff = await page.evaluate(() => window.__ulgDemo.createPeerComputeHandoff());
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
-    expect(handoff.schema).toBe('peercompute.ulg.demo-handoff.v0');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');
     expect(closureHandoff.artifactSummary.closureHostImportsDomFree).toBe(true);
     expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
@@ -130,8 +130,12 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabArtifact.outputs.reference.tolerances.maxObservedEnergyDelta).toBe(0);
     expect(moonlabArtifact.outputs.reference.validation.parityPassed).toBe(true);
     expect(moonlabArtifact.outputs.reference.validation.evaluatedBitstrings).toBe(8);
+    expect(moonlabArtifact.outputs.references).toHaveLength(1);
+    expect(moonlabArtifact.outputs.references[0].schema).toBe('moonlab.magnetar-dipole-ising-reference.v0');
+    expect(moonlabArtifact.outputs.references[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
     expect(moonlabArtifact.validationMetrics.magnetarMaxEnergyDelta).toBe(0);
     expect(moonlabArtifact.validationMetrics.magnetarEvaluatedBitstrings).toBe(8);
+    expect(moonlabArtifact.validationMetrics.outputReferenceCount).toBe(1);
     expect(moonlabArtifact.outputs.magnetarDipoleIsing.evaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.validation.status).toBe('pass');
     expect(moonlabTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
@@ -149,6 +153,15 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceToleranceEnergyAbs).toBe(1e-9);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceMaxObservedEnergyDelta).toBe(0);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceValidationStatus).toBe('pass');
+    expect(moonlabTelemetryRecord.artifactSummary.outputReferenceCount).toBe(1);
+    expect(moonlabTelemetryRecord.artifactSummary.outputReferenceReadyCount).toBe(1);
+    expect(moonlabTelemetryRecord.artifactSummary.outputReferences[0].schema).toBe('moonlab.magnetar-dipole-ising-reference.v0');
+    expect(moonlabTelemetryRecord.artifactSummary.outputReferences[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
+    const moonlabHandoff = handoff.artifacts.find((artifact) => artifact.ref.sourceService === 'moonlab');
+    expect(moonlabHandoff.artifact.outputs.references).toHaveLength(1);
+    expect(moonlabHandoff.artifact.outputs.references[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
+    expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(1);
+    expect(moonlabHandoff.artifactSummary.outputReferenceReadyCount).toBe(1);
   }
 });
 

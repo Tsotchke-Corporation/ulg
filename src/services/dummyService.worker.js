@@ -274,6 +274,8 @@ function createArtifact(task) {
     const coreProbe = task.coreProbe ?? null;
     const coreProbeReady = coreProbe?.status === 'ready';
     const magnetarDipoleIsing = coreProbe?.magnetarDipoleIsing ?? null;
+    const magnetarReference = magnetarDipoleIsing?.reference ?? null;
+    const magnetarReferences = magnetarReference ? [magnetarReference] : [];
     const magnetarReady = magnetarDipoleIsing?.validation?.status === 'pass'
       && magnetarDipoleIsing?.parity?.status === 'pass';
     return {
@@ -289,7 +291,8 @@ function createArtifact(task) {
         forceSamples: [0.1, 0.2, 0.1],
         basisProbabilities: coreProbeReady ? coreProbe.probabilities : [0.5, 0, 0, 0.5],
         bellState: coreProbeReady ? coreProbe.sample : 'placeholder',
-        reference: magnetarDipoleIsing?.reference ?? null,
+        reference: magnetarReference,
+        references: magnetarReferences,
         magnetarDipoleIsing: magnetarDipoleIsing?.summary ?? null
       },
       calibrationArtifacts: magnetarDipoleIsing ? {
@@ -307,6 +310,7 @@ function createArtifact(task) {
         unsupportedParityModeCount: coreProbeReady ? coreProbe.parity?.metrics?.unsupportedModeCount ?? 0 : 1,
         magnetarMaxEnergyDelta: magnetarDipoleIsing?.summary?.maxEnergyDelta ?? null,
         magnetarEvaluatedBitstrings: magnetarDipoleIsing?.summary?.evaluatedBitstrings ?? 0,
+        outputReferenceCount: magnetarReferences.length,
         calibrationArtifactCount: magnetarDipoleIsing ? 1 : 0
       },
       validation: {

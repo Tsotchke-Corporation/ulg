@@ -149,6 +149,9 @@ function renderArtifactSummaryLine(summary) {
   if (summary.magnetarReferenceReady) {
     parts.push(`ref:${summary.magnetarReferenceEnergyUnits || 'ready'}`);
   }
+  if (summary.outputReferenceCount) {
+    parts.push(`refs:${summary.outputReferenceReadyCount}/${summary.outputReferenceCount}`);
+  }
   if (summary.calibrationArtifactCount) {
     parts.push(`cal:${summary.calibrationReadyCount}/${summary.calibrationArtifactCount}`);
   }

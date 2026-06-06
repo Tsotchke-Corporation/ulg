@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 00:20:49 AKDT
+Updated: 2026-06-06 01:14:57 AKDT
 
 ## Done
 
@@ -128,13 +128,18 @@ Updated: 2026-06-06 00:20:49 AKDT
   carries the MoonLab reference schema, contract hash, normalized energy units,
   ground-state reference energy, energy tolerance, observed energy delta, and
   pass status.
+- Added plural `outputs.references[]` propagation for MoonLab reference/tolerance
+  contracts while preserving the legacy `outputs.reference` alias. Compact
+  artifact-summary telemetry now counts ready output references and the browser
+  handoff packet carries the plural reference list.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the ULG MoonLab reference summary as the next PeerCompute/Multiscale
-  adapter signal for reference/tolerance inventory, while keeping full magnetar
-  scientific readiness blocked until calibrated multiphysics references exist.
+- Use the ULG MoonLab `outputs.references[]` summary as the next
+  PeerCompute/Multiscale adapter signal for reference/tolerance inventory, while
+  keeping full magnetar scientific readiness blocked until calibrated
+  multiphysics references exist.
 
 ## Next
 

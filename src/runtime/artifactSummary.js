@@ -12,11 +12,42 @@ function inferArtifactKind(artifact = {}) {
   return artifact.taskKind || 'artifact';
 }
 
-function normalizeCalibrationEntry(entry = {}, fallbackId = '') {
-  const schema = entry.schema || null;
-  const status = entry.validation?.status || entry.status || null;
-  const parityStatus = entry.parity?.status || entry.parityStatus || null;
-  const reference = entry.reference && typeof entry.reference === 'object' ? entry.reference : null;
+function isPlainObject(value) {
+  return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function referenceKey(reference = {}) {
+  if (!reference.contractHash && !reference.id) {
+    return JSON.stringify(reference);
+  }
+  const stableParts = [
+    reference.id || '',
+    reference.schema || '',
+    reference.role || '',
+    reference.contractHash || '',
+    reference.energyUnits || ''
+  ];
+  return stableParts.join('|');
+}
+
+function collectReferenceEntries(source = {}) {
+  const candidates = [];
+  if (isPlainObject(source.reference)) {
+    candidates.push(source.reference);
+  }
+  if (Array.isArray(source.references)) {
+    candidates.push(...source.references.filter(isPlainObject));
+  }
+  const seen = new Set();
+  return candidates.filter((reference) => {
+    const key = referenceKey(reference);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeReferenceEntry(reference = {}, fallbackId = '') {
   const referenceGroundState = reference?.observables?.groundState && typeof reference.observables.groundState === 'object'
     ? reference.observables.groundState
     : {};
@@ -30,6 +61,48 @@ function normalizeCalibrationEntry(entry = {}, fallbackId = '') {
   const referenceMaxObservedEnergyDelta = finiteNumberOrNull(referenceTolerances.maxObservedEnergyDelta);
   const referenceGroundStateEnergy = finiteNumberOrNull(referenceGroundState.referenceEnergy);
   const referenceGroundStateBitString = referenceGroundState.bitString || referenceGroundState.bitstring || null;
+  const ready = reference?.schema === MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA
+    && reference.role === MOONLAB_MAGNETAR_REFERENCE_ROLE
+    && typeof reference.contractHash === 'string'
+    && reference.contractHash.startsWith('sha256:')
+    && reference.energyUnits === 'normalized-ising'
+    && referenceGroundStateBitString != null
+    && referenceGroundStateEnergy != null
+    && referenceEnergyAbs != null
+    && referenceMaxObservedEnergyDelta != null
+    && referenceValidation.parityPassed === true
+    && referenceMaxObservedEnergyDelta <= referenceEnergyAbs;
+  return {
+    id: reference.id || fallbackId || null,
+    schema: reference?.schema || null,
+    role: reference?.role || null,
+    contractHash: reference?.contractHash || null,
+    energyUnits: reference?.energyUnits || null,
+    groundStateBitString: referenceGroundStateBitString,
+    groundStateEnergy: referenceGroundStateEnergy,
+    toleranceEnergyAbs: referenceEnergyAbs,
+    maxObservedEnergyDelta: referenceMaxObservedEnergyDelta,
+    validationStatus: referenceValidation.parityPassed === true ? 'pass' : null,
+    ready
+  };
+}
+
+function findMoonLabReferenceSummary(references = []) {
+  return references.find((reference) => reference.ready)
+    || references.find((reference) => (
+      reference.schema === MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA
+      && reference.role === MOONLAB_MAGNETAR_REFERENCE_ROLE
+    ))
+    || null;
+}
+
+function normalizeCalibrationEntry(entry = {}, fallbackId = '') {
+  const schema = entry.schema || null;
+  const status = entry.validation?.status || entry.status || null;
+  const parityStatus = entry.parity?.status || entry.parityStatus || null;
+  const references = collectReferenceEntries(entry)
+    .map((reference, index) => normalizeReferenceEntry(reference, `${fallbackId || 'reference'}-${index}`));
+  const reference = findMoonLabReferenceSummary(references);
   return {
     id: entry.id || fallbackId || null,
     schema,
@@ -39,26 +112,19 @@ function normalizeCalibrationEntry(entry = {}, fallbackId = '') {
     groundStateBitString: entry.summary?.groundState?.bitString || entry.groundStateBitString || null,
     maxEnergyDelta: entry.summary?.maxEnergyDelta ?? entry.parity?.metrics?.maxEnergyDelta ?? entry.maxEnergyDelta ?? null,
     evaluatedBitstrings: entry.summary?.evaluatedBitstrings ?? entry.evaluatedBitstrings ?? null,
+    referenceCount: references.length,
+    referenceReadyCount: references.filter((item) => item.ready).length,
+    references,
     referenceSchema: reference?.schema || null,
     referenceRole: reference?.role || null,
     referenceContractHash: reference?.contractHash || null,
     referenceEnergyUnits: reference?.energyUnits || entry.summary?.groundState?.energyUnits || null,
-    referenceGroundStateBitString,
-    referenceGroundStateEnergy,
-    referenceToleranceEnergyAbs: referenceEnergyAbs,
-    referenceMaxObservedEnergyDelta,
-    referenceValidationStatus: referenceValidation.parityPassed === true ? 'pass' : null,
-    referenceReady: reference?.schema === MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA
-      && reference.role === MOONLAB_MAGNETAR_REFERENCE_ROLE
-      && typeof reference.contractHash === 'string'
-      && reference.contractHash.startsWith('sha256:')
-      && reference.energyUnits === 'normalized-ising'
-      && referenceGroundStateBitString != null
-      && referenceGroundStateEnergy != null
-      && referenceEnergyAbs != null
-      && referenceMaxObservedEnergyDelta != null
-      && referenceValidation.parityPassed === true
-      && referenceMaxObservedEnergyDelta <= referenceEnergyAbs,
+    referenceGroundStateBitString: reference?.groundStateBitString || null,
+    referenceGroundStateEnergy: reference?.groundStateEnergy ?? null,
+    referenceToleranceEnergyAbs: reference?.toleranceEnergyAbs ?? null,
+    referenceMaxObservedEnergyDelta: reference?.maxObservedEnergyDelta ?? null,
+    referenceValidationStatus: reference?.validationStatus || null,
+    referenceReady: reference?.ready === true,
     ready: entry.ready === true
       || (
         schema === ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA
@@ -85,6 +151,9 @@ function countWasmEntries(entries = [], kind) {
 }
 
 export function summarizeUlgArtifact(artifact = {}) {
+  const outputs = artifact.outputs && typeof artifact.outputs === 'object' && !Array.isArray(artifact.outputs)
+    ? artifact.outputs
+    : {};
   const responseDescriptor = artifact.responseDescriptor && typeof artifact.responseDescriptor === 'object'
     ? artifact.responseDescriptor
     : null;
@@ -118,6 +187,9 @@ export function summarizeUlgArtifact(artifact = {}) {
     entry.id === 'magnetarDipoleIsing'
     || entry.schema === ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA
   )) || null;
+  const outputReferences = collectReferenceEntries(outputs)
+    .map((reference, index) => normalizeReferenceEntry(reference, `output-reference-${index}`));
+  const outputMoonLabReference = findMoonLabReferenceSummary(outputReferences);
 
   return {
     schema: ULG_ARTIFACT_SUMMARY_SCHEMA,
@@ -185,21 +257,24 @@ export function summarizeUlgArtifact(artifact = {}) {
     calibrationArtifactCount: calibrationSummaries.length,
     calibrationReadyCount: calibrationSummaries.filter((entry) => entry.ready).length,
     calibrationArtifacts: calibrationSummaries,
+    outputReferenceCount: outputReferences.length,
+    outputReferenceReadyCount: outputReferences.filter((entry) => entry.ready).length,
+    outputReferences,
     magnetarDipoleIsingReady: magnetarDipoleIsing?.ready === true,
     magnetarDipoleIsingStatus: magnetarDipoleIsing?.status || null,
     magnetarDipoleIsingParityStatus: magnetarDipoleIsing?.parityStatus || null,
     magnetarDipoleIsingGroundState: magnetarDipoleIsing?.groundStateBitString || null,
     magnetarDipoleIsingMaxEnergyDelta: magnetarDipoleIsing?.maxEnergyDelta ?? null,
     magnetarDipoleIsingEvaluatedBitstrings: magnetarDipoleIsing?.evaluatedBitstrings ?? null,
-    magnetarReferenceReady: magnetarDipoleIsing?.referenceReady === true,
-    magnetarReferenceSchema: magnetarDipoleIsing?.referenceSchema || null,
-    magnetarReferenceRole: magnetarDipoleIsing?.referenceRole || null,
-    magnetarReferenceContractHash: magnetarDipoleIsing?.referenceContractHash || null,
-    magnetarReferenceEnergyUnits: magnetarDipoleIsing?.referenceEnergyUnits || null,
-    magnetarReferenceGroundStateBitString: magnetarDipoleIsing?.referenceGroundStateBitString || null,
-    magnetarReferenceGroundStateEnergy: magnetarDipoleIsing?.referenceGroundStateEnergy ?? null,
-    magnetarReferenceToleranceEnergyAbs: magnetarDipoleIsing?.referenceToleranceEnergyAbs ?? null,
-    magnetarReferenceMaxObservedEnergyDelta: magnetarDipoleIsing?.referenceMaxObservedEnergyDelta ?? null,
-    magnetarReferenceValidationStatus: magnetarDipoleIsing?.referenceValidationStatus || null
+    magnetarReferenceReady: magnetarDipoleIsing?.referenceReady === true || outputMoonLabReference?.ready === true,
+    magnetarReferenceSchema: magnetarDipoleIsing?.referenceSchema || outputMoonLabReference?.schema || null,
+    magnetarReferenceRole: magnetarDipoleIsing?.referenceRole || outputMoonLabReference?.role || null,
+    magnetarReferenceContractHash: magnetarDipoleIsing?.referenceContractHash || outputMoonLabReference?.contractHash || null,
+    magnetarReferenceEnergyUnits: magnetarDipoleIsing?.referenceEnergyUnits || outputMoonLabReference?.energyUnits || null,
+    magnetarReferenceGroundStateBitString: magnetarDipoleIsing?.referenceGroundStateBitString || outputMoonLabReference?.groundStateBitString || null,
+    magnetarReferenceGroundStateEnergy: magnetarDipoleIsing?.referenceGroundStateEnergy ?? outputMoonLabReference?.groundStateEnergy ?? null,
+    magnetarReferenceToleranceEnergyAbs: magnetarDipoleIsing?.referenceToleranceEnergyAbs ?? outputMoonLabReference?.toleranceEnergyAbs ?? null,
+    magnetarReferenceMaxObservedEnergyDelta: magnetarDipoleIsing?.referenceMaxObservedEnergyDelta ?? outputMoonLabReference?.maxObservedEnergyDelta ?? null,
+    magnetarReferenceValidationStatus: magnetarDipoleIsing?.referenceValidationStatus || outputMoonLabReference?.validationStatus || null
   };
 }

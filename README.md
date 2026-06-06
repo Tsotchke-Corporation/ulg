@@ -27,6 +27,9 @@ npm run test:e2e
 ```
 
 The Vite demo exports `window.__ulgDemo` for smoke tests and browser inspection.
+`window.__ulgDemo.createPeerComputeHandoff()` exports the current artifact cache
+as `peercompute.ulg.demo-handoff.v0` packets for PeerCompute/Multiscale
+ingestion.
 
 The cross-repo adapter contract lives in `ulg-gpu-abi/README.md` with fixture
 manifests and task capsules in `ulg-gpu-abi/examples/`.
@@ -46,4 +49,8 @@ explicit `moonlab-webgpu` unsupported parity entry until MoonLab exposes browser
 WebGPU response kernels. The same core probe also evaluates the
 `magnetar-dipole-ising-calibration` handoff through MoonLab WASM Ising exports,
 recording normalized dipole fields, eight bitstring energies, ground state
-`000`, and `maxEnergyDelta = 0` against the JavaScript reference.
+`000`, and `maxEnergyDelta = 0` against the JavaScript reference. The MoonLab
+artifact keeps the legacy `outputs.reference` field and also emits
+`outputs.references[]`; compact artifact-summary telemetry reports plural
+reference counts and readiness so handoff consumers can inventory tolerance
+inputs without fetching the full artifact body.

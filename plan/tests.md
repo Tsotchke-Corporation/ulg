@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 15/15 tests on 2026-06-06 after adding compact MoonLab
-magnetar reference telemetry.
+Current result: pass, 16/16 tests on 2026-06-06 after adding MoonLab
+`outputs.references[]` propagation and summary telemetry.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -37,20 +37,25 @@ magnetar reference telemetry.
   metadata, including schema, role, contract hash, normalized energy units,
   ground-state bitstring/reference energy, energy tolerance, observed energy
   delta, and validation status.
+- Artifact cache summaries de-duplicate legacy `outputs.reference` plus plural
+  `outputs.references[]`, count ready output references, and can derive the
+  MoonLab magnetar reference summary from the plural array when the calibration
+  entry does not carry a singular reference.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the ULG MoonLab reference summary
-update, with the existing large three.js chunk warning.
+Current result: pass on 2026-06-06 after the ULG MoonLab
+`outputs.references[]` propagation update, with the existing large three.js
+chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-06 after the ULG MoonLab
-reference summary update.
+`outputs.references[]` propagation update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -89,6 +94,9 @@ reference summary update.
   energy units `normalized-ising`, ground state `000`, reference energy
   `-1.6712962962963`, tolerance `1e-9`, zero observed energy delta, and passing
   reference validation.
+- Runtime plural reference check on 2026-06-06: with copied MoonLab assets
+  present, Playwright verifies `outputs.references[]` carries the same MoonLab
+  magnetar reference contract as the compatibility `outputs.reference` alias.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state
@@ -98,6 +106,9 @@ reference summary update.
   `peercompute.ulg.artifact-summary.v0` exposes the same reference schema, hash,
   units, ground-state reference energy, tolerance, observed energy delta, and
   pass status without fetching the full artifact body.
+- MoonLab plural reference artifact-summary check on 2026-06-06: Playwright
+  verifies compact telemetry reports output reference count/ready count and a
+  compact plural reference summary.
 - Eshkol bundle asset check on 2026-06-05: when the ignored local `hello` bundle
   is copied under `public/service-assets/eshkol/closures/hello/`, Playwright
   verifies the Eshkol service asset probe sees artifact JSON, WASM, schema
@@ -127,6 +138,10 @@ reference summary update.
   `peercompute.ulg.demo-handoff.v0`, preserves the Eshkol closure summary entry
   `main`, marks DOM-free host imports, and transfers `33,907` WASM bytes from
   `/service-assets/eshkol/closures/hello/hello.wasm`.
+- ULG MoonLab reference handoff check on 2026-06-06: Playwright verifies
+  `window.__ulgDemo.createPeerComputeHandoff()` preserves the MoonLab
+  `outputs.references[]` list and compact output reference counts in the
+  exported packet.
 - ULG output-semantics check on 2026-06-05: Playwright verifies the staged
   Eshkol closure artifact, compact artifact-summary telemetry, and demo handoff
   packet all carry `eshkol.ulg.closure-output-semantics.v0`,

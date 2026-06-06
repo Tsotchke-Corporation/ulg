@@ -97,6 +97,10 @@ physics work:
 - [x] Surface the MoonLab `moonlab.magnetar-dipole-ising-reference.v0`
   tolerance/reference contract through the ULG artifact body, compact
   artifact-summary telemetry, and demo handoff packet.
+- [x] Preserve MoonLab tolerance/reference contracts as plural
+  `outputs.references[]` entries in the ULG artifact body, compact summary, UI
+  status line, and demo handoff packet while keeping `outputs.reference` as a
+  compatibility alias.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

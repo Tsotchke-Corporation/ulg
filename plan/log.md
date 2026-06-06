@@ -1,5 +1,70 @@
 # ULG Implementation Log
 
+## 2026-06-06 01:14:57 AKDT
+
+Prompt: Inspect the ULG demo/artifact/handoff path for MoonLab
+`outputs.references[]` propagation, make a bounded ULG-only change if clear,
+run focused checks, and commit locally without pushing.
+
+Actions attempted:
+
+- Confirmed the current ULG path already preserved the full MoonLab artifact in
+  `window.__ulgDemo.createPeerComputeHandoff()` and summarized the legacy
+  singular `outputs.reference` contract through compact artifact telemetry.
+- Added plural `outputs.references[]` emission to the supervised MoonLab task
+  artifact while preserving `outputs.reference` as a compatibility alias.
+- Refactored artifact-summary reference handling so both singular and plural
+  reference shapes are de-duplicated and normalized through the same compact
+  summary path.
+- Added compact output reference count/ready-count fields and compact plural
+  reference summaries to `peercompute.ulg.artifact-summary.v0`.
+- Updated the artifact status line to show ready plural reference counts.
+- Extended unit coverage for plural reference summaries, including the case
+  where the calibration entry lacks its own singular reference.
+- Extended Playwright coverage to verify the browser artifact, compact telemetry,
+  and PeerCompute handoff packet preserve MoonLab `outputs.references[]`.
+
+Files touched:
+
+- `README.md`
+- `src/runtime/artifactSummary.js`
+- `src/services/dummyService.worker.js`
+- `src/main.js`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/artifactSummary.js`
+- `node --check src/services/dummyService.worker.js`
+- `node --check src/main.js`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `git diff --check`
+
+Results:
+
+- PASS: changed JavaScript files passed syntax checks.
+- PASS: `npm test` completed with `16/16` tests passing.
+- PASS: `npm run build` completed with the existing large three.js chunk
+  warning.
+- PASS: `npm run test:e2e` completed with `1/1` Chromium test passing.
+- PASS: `git diff --check` completed cleanly.
+
+Failures / open questions:
+
+- No ULG blockers in this checkpoint.
+- Full magnetar scientific readiness still depends on calibrated multiphysics
+  MoonLab references and PeerCompute adapter work outside this bounded ULG
+  change.
+
 ## 2026-06-05 18:31:10 AKDT
 
 Prompt: Continue the ULG implementation plan after the Eshkol sidecar added a local closure bundle export helper. Standing instructions remain: keep commits local only, keep the Vite server reachable on `0.0.0.0`, and do not push.

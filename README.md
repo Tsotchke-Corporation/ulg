@@ -23,6 +23,9 @@ This repo currently implements the first executable slice:
 ```bash
 npm install
 npm run dev
+npm run stage:service-assets
+npm run status:live
+npm run status:live -- --bridge
 npm test
 npm run build
 npm run test:e2e
@@ -32,6 +35,9 @@ The Vite demo exports `window.__ulgDemo` for smoke tests and browser inspection.
 `window.__ulgDemo.createPeerComputeHandoff()` exports the current artifact cache
 as `peercompute.ulg.demo-handoff.v0` packets for PeerCompute/Multiscale
 ingestion.
+`npm run status:live` probes the live VPN-served demo and prints a compact JSON
+readiness report. Add `-- --bridge` to also launch/post the handoff to
+PeerCompute Multiscale and report the browser ack.
 
 The cross-repo adapter contract lives in `ulg-gpu-abi/README.md` with fixture
 manifests and task capsules in `ulg-gpu-abi/examples/`.

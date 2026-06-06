@@ -457,6 +457,10 @@ Updated: 2026-06-06 13:54:22 AKDT
   evidence. The live bridge now reports
   `handoff ready / blockers 0 / scenario magnetar / scientific ready / 2 artifacts`
   while Multiscale still reports `magnetarVisible = true`.
+- Added `npm run status:live` as a reusable live VPN status probe. Default mode
+  reports service/artifact readiness and current MoonLab/Eshkol boundary flags;
+  `npm run status:live -- --bridge` also posts the handoff to Multiscale and
+  reports the browser ack.
 
 ## In Progress
 

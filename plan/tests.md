@@ -714,3 +714,18 @@ reference-contract asset support.
   Multiscale `handoff-ready`, blocker count `0`,
   `simulationStatus = scientific-ready`, bridge ack `handoff-ready`, and
   `magnetarVisible = true`.
+
+## 2026-06-06 ULG Live Status Script Checks
+
+- Script syntax:
+  `node --check scripts/live-status.mjs` passed.
+- Default live status:
+  `npm run status:live` passed against `http://100.86.83.35:5173/`, reporting
+  two ready services, two handoff artifacts, MoonLab WebGPU parity scope ready,
+  `compute_probabilities` probe declared but unexecuted, MoonLab calibrated
+  reference ready count `4`, Eshkol descriptor/tensor runtime ready, and Eshkol
+  production-handler boundary declared with handler/runtime execution false.
+- Bridge live status:
+  `npm run status:live -- --bridge` passed and reported Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  and artifact count `2`.

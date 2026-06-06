@@ -3422,3 +3422,32 @@ Notes:
 - This is UI/status clarity only; it does not change handoff contents or
   readiness gates.
 - No push was attempted.
+
+## 2026-06-06 14:35:00 AKDT - Live status probe script
+
+Changes:
+
+- Added `scripts/live-status.mjs` and npm script `status:live`.
+- Default mode opens the live ULG URL, waits for both services and artifacts,
+  and prints compact JSON with service asset status, handoff count, MoonLab
+  WebGPU/probe state, and Eshkol descriptor/tensor/handler-boundary state.
+- Optional `--bridge` mode calls the existing browser launch path and reports
+  the Multiscale ack.
+- Updated the README command list with the new status probe.
+
+Validation:
+
+- PASS: `node --check scripts/live-status.mjs`.
+- PASS: `npm run status:live` against `http://100.86.83.35:5173/` reported two
+  ready services, two artifacts, MoonLab `compute_probabilities` probe declared
+  but unexecuted, and Eshkol production-handler boundary declared but not
+  runtime-ready.
+- PASS: `npm run status:live -- --bridge` reported Multiscale ack
+  `status = handoff-ready`, `blockerCount = 0`,
+  `simulationStatus = scientific-ready`, and `artifactCount = 2`.
+
+Notes:
+
+- This is a coordinator/debugging command. It does not alter runtime gates or
+  staged assets.
+- No push was attempted.

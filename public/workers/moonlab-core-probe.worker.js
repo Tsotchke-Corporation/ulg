@@ -42,6 +42,7 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
     ), 0);
     const purity = module._quantum_state_purity(state);
     const entropy = module._quantum_state_entropy(state);
+    const magnetarDipoleIsing = createMagnetarDipoleIsingCalibration(module);
 
     self.postMessage({
       type: 'complete',
@@ -71,10 +72,13 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
           entropy,
           maxProbabilityError
         }),
+        magnetarDipoleIsing,
         exports: {
           create: typeof module._quantum_state_create,
           destroy: typeof module._quantum_state_destroy,
-          bellPhiPlus: typeof module._create_bell_state_phi_plus
+          bellPhiPlus: typeof module._create_bell_state_phi_plus,
+          isingModelCreate: typeof module._ising_model_create,
+          isingModelEvaluate: typeof module._ising_model_evaluate
         },
         loaderModule: serviceAssets.loaderModule,
         wasmModule: serviceAssets.wasmModule
@@ -162,6 +166,214 @@ function createBellPhiPlusParityReport({
       unsupportedModeCount: 1
     }
   };
+}
+
+function createMagnetarDipoleIsingCalibration(module) {
+  assertIsingExports(module);
+  const input = {
+    surfaceMagneticFieldTesla: 100000000000,
+    stellarRadiusMeters: 10000,
+    radialSamplesMeters: [10000, 15000, 20000],
+    couplingStrength: 0.125,
+    bitstrings: [0, 1, 2, 3, 4, 5, 6, 7]
+  };
+  const fieldScaleTesla = input.surfaceMagneticFieldTesla;
+  const localFields = input.radialSamplesMeters.map((radiusMeters) => (
+    -magnetarDipoleFieldTesla(input, radiusMeters) / fieldScaleTesla
+  ));
+  const couplings = [
+    { qubit1: 0, qubit2: 1, value: -input.couplingStrength },
+    { qubit1: 1, qubit2: 2, value: -input.couplingStrength }
+  ];
+  const model = {
+    localFields,
+    couplings,
+    fieldScaleTesla,
+    physicalModel: 'axisymmetric-dipole-falloff',
+    spinConvention: 'bit-0-plus-one-bit-1-minus-one'
+  };
+  const modelPtr = module._ising_model_create(localFields.length);
+  if (!modelPtr) {
+    throw new Error('ising_model_create returned null');
+  }
+
+  try {
+    localFields.forEach((field, qubit) => {
+      const result = module._ising_model_set_field(modelPtr, qubit, field);
+      if (result !== 0) throw new Error(`ising_model_set_field failed for qubit ${qubit}`);
+    });
+    couplings.forEach((coupling) => {
+      const result = module._ising_model_set_coupling(
+        modelPtr,
+        coupling.qubit1,
+        coupling.qubit2,
+        coupling.value
+      );
+      if (result !== 0) {
+        throw new Error(`ising_model_set_coupling failed for qubits ${coupling.qubit1}/${coupling.qubit2}`);
+      }
+    });
+
+    const radialSamples = input.radialSamplesMeters.map((radiusMeters, qubit) => {
+      const magneticFieldTesla = magnetarDipoleFieldTesla(input, radiusMeters);
+      return {
+        qubit,
+        radiusMeters,
+        magneticFieldTesla,
+        normalizedField: magneticFieldTesla / fieldScaleTesla,
+        localField: localFields[qubit]
+      };
+    });
+    const evaluations = input.bitstrings.map((bitstring) => {
+      const observedEnergy = module._ising_model_evaluate(modelPtr, BigInt(bitstring));
+      const referenceEnergy = evaluateIsingReferenceEnergy(model, bitstring);
+      return {
+        bitstring,
+        bitString: bitstring.toString(2).padStart(localFields.length, '0'),
+        spins: bitstringToSpins(bitstring, localFields.length),
+        observedEnergy,
+        referenceEnergy,
+        energyDelta: observedEnergy - referenceEnergy
+      };
+    });
+    const maxEnergyDelta = evaluations.reduce((maxDelta, evaluation) => (
+      Math.max(maxDelta, Math.abs(evaluation.energyDelta))
+    ), 0);
+    const groundState = evaluations.reduce((best, evaluation) => (
+      evaluation.observedEnergy < best.observedEnergy ? evaluation : best
+    ), evaluations[0]);
+    const monotonicDipoleField = radialSamples.every((sample, index) => (
+      index === 0 || sample.magneticFieldTesla <= radialSamples[index - 1].magneticFieldTesla
+    ));
+    const tolerance = 1e-9;
+
+    return {
+      schema: 'peercompute.ulg.magnetar-dipole-ising-calibration.v0',
+      sample: 'magnetar_dipole_ising',
+      taskKind: 'magnetar-dipole-ising-calibration',
+      method: 'moonlab-wasm-ising-evaluator',
+      representation: 'magnetar-dipole-normalized-ising-calibration',
+      input,
+      radialSamples,
+      isingModel: model,
+      evaluations,
+      responseDescriptor: {
+        schema: 'peercompute.ulg.quantum-response-descriptor.v0',
+        sample: 'magnetar_dipole_ising',
+        qubitCount: localFields.length,
+        basis: {
+          kind: 'ising-bitstring',
+          ordering: 'little-endian-spin-index',
+          states: input.bitstrings.map((bitstring) => bitstring.toString(2).padStart(localFields.length, '0'))
+        },
+        representation: {
+          state: 'ising-energy-landscape',
+          energyDType: 'f64',
+          fieldDType: 'f64',
+          couplingDType: 'f64'
+        },
+        deterministic: true,
+        expectedEnergies: evaluations.map((evaluation) => evaluation.referenceEnergy),
+        observedEnergies: evaluations.map((evaluation) => evaluation.observedEnergy),
+        invariants: {
+          maxEnergyDelta,
+          groundStateBitString: groundState.bitString,
+          monotonicDipoleField
+        }
+      },
+      parity: {
+        schema: 'peercompute.ulg.quantum-response-parity.v0',
+        sample: 'magnetar_dipole_ising',
+        status: maxEnergyDelta <= tolerance && monotonicDipoleField ? 'pass' : 'warn',
+        tolerance,
+        reference: {
+          mode: 'javascript-ising-energy-reference',
+          energies: evaluations.map((evaluation) => evaluation.referenceEnergy)
+        },
+        comparisons: [
+          {
+            mode: 'moonlab-wasm-ising',
+            status: maxEnergyDelta <= tolerance ? 'pass' : 'warn',
+            observedEnergies: evaluations.map((evaluation) => evaluation.observedEnergy),
+            maxEnergyDelta
+          }
+        ],
+        metrics: {
+          maxEnergyDelta,
+          parityGap: maxEnergyDelta,
+          unsupportedModeCount: 0
+        }
+      },
+      validation: {
+        status: maxEnergyDelta <= tolerance && monotonicDipoleField ? 'pass' : 'warn',
+        checks: [
+          {
+            name: 'ising-energy-parity',
+            passed: maxEnergyDelta <= tolerance,
+            details: { maxEnergyDelta, tolerance }
+          },
+          {
+            name: 'dipole-field-monotonicity',
+            passed: monotonicDipoleField,
+            details: {
+              radialSamples: radialSamples.map(({ radiusMeters, magneticFieldTesla }) => ({
+                radiusMeters,
+                magneticFieldTesla
+              }))
+            }
+          }
+        ]
+      },
+      summary: {
+        numQubits: localFields.length,
+        evaluatedBitstrings: evaluations.length,
+        groundState: {
+          bitstring: groundState.bitstring,
+          bitString: groundState.bitString,
+          observedEnergy: groundState.observedEnergy
+        },
+        maxEnergyDelta,
+        scope: 'calibration-probe-not-full-magnetar-simulation'
+      }
+    };
+  } finally {
+    module._ising_model_free(modelPtr);
+  }
+}
+
+function assertIsingExports(module) {
+  for (const name of [
+    '_ising_model_create',
+    '_ising_model_free',
+    '_ising_model_set_coupling',
+    '_ising_model_set_field',
+    '_ising_model_evaluate'
+  ]) {
+    if (typeof module[name] !== 'function') {
+      throw new Error(`MoonLab runtime missing ${name}`);
+    }
+  }
+}
+
+function magnetarDipoleFieldTesla(input, radiusMeters) {
+  return input.surfaceMagneticFieldTesla * (input.stellarRadiusMeters / radiusMeters) ** 3;
+}
+
+function bitstringToSpins(bitstring, numQubits) {
+  return Array.from({ length: numQubits }, (_, qubit) => (
+    ((bitstring >> qubit) & 1) === 0 ? 1 : -1
+  ));
+}
+
+function evaluateIsingReferenceEnergy(model, bitstring) {
+  const spins = bitstringToSpins(bitstring, model.localFields.length);
+  const fieldEnergy = model.localFields.reduce((total, field, qubit) => (
+    total + field * spins[qubit]
+  ), 0);
+  const couplingEnergy = model.couplings.reduce((total, coupling) => (
+    total + coupling.value * spins[coupling.qubit1] * spins[coupling.qubit2]
+  ), 0);
+  return fieldEnergy + couplingEnergy;
 }
 
 async function loadMoonLabModule(serviceAssets) {

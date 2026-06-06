@@ -81,6 +81,11 @@ Updated: 2026-06-05 16:34:33 AKDT
   `peercompute.ulg.quantum-response-parity.v0`, including a passing
   `moonlab-wasm-core` comparison against the analytic Bell `phi_plus`
   probability vector and an explicit unsupported `moonlab-webgpu` parity entry.
+- Extended the same supervised MoonLab core probe with
+  `peercompute.ulg.magnetar-dipole-ising-calibration.v0`. The browser worker
+  now uses MoonLab WASM Ising exports to evaluate the normalized magnetar dipole
+  calibration handoff, records eight bitstring energies, reports ground state
+  `000`, and passes JavaScript reference parity with `maxEnergyDelta = 0`.
 
 ## In Progress
 

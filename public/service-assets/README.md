@@ -41,4 +41,8 @@ loads the Emscripten `MoonlabModule` factory with `importScripts()`, uses
 also carries `peercompute.ulg.quantum-response-descriptor.v0` and
 `peercompute.ulg.quantum-response-parity.v0` metadata so consumers can see the
 passing MoonLab WASM/analytic comparison and the currently unsupported MoonLab
-WebGPU parity mode separately.
+WebGPU parity mode separately. When the copied MoonLab runtime includes the
+Ising exports, the same worker also emits
+`peercompute.ulg.magnetar-dipole-ising-calibration.v0` as a calibration
+sub-artifact with normalized dipole fields, eight bitstring energy evaluations,
+ground state `000`, and zero WASM-vs-JS energy delta.

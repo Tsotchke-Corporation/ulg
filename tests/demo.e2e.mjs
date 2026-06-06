@@ -42,6 +42,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabArtifact.parity.comparisons.find((entry) => entry.mode === 'moonlab-wasm-core').status).toBe('pass');
     expect(moonlabArtifact.parity.comparisons.find((entry) => entry.mode === 'moonlab-webgpu').status).toBe('unsupported');
     expect(moonlabArtifact.validationMetrics.unsupportedParityModeCount).toBe(1);
+    expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.schema).toBe('peercompute.ulg.magnetar-dipole-ising-calibration.v0');
+    expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.validation.status).toBe('pass');
+    expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.parity.status).toBe('pass');
+    expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.summary.scope).toBe('calibration-probe-not-full-magnetar-simulation');
+    expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.summary.groundState.bitString).toBe('000');
+    expect(moonlabArtifact.validationMetrics.magnetarMaxEnergyDelta).toBe(0);
+    expect(moonlabArtifact.validationMetrics.magnetarEvaluatedBitstrings).toBe(8);
+    expect(moonlabArtifact.outputs.magnetarDipoleIsing.evaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.validation.status).toBe('pass');
   }
 });

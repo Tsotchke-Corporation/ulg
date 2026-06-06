@@ -62,6 +62,16 @@ asset-probe slice, and after the supervised MoonLab core probe.
 - Live VPN check on 2026-06-05: `http://100.86.83.35:5173/` returned the same
   MoonLab artifact method, core probe status, validation status, and Bell
   probability vector through `window.__ulgDemo.artifactCache`.
+- Runtime magnetar calibration check on 2026-06-05: with copied MoonLab assets
+  present, Playwright verifies
+  `peercompute.ulg.magnetar-dipole-ising-calibration.v0` under the MoonLab
+  artifact's `calibrationArtifacts.magnetarDipoleIsing`, passing WASM-vs-JS
+  Ising energy parity with `groundState.bitString = "000"`,
+  `maxEnergyDelta = 0`, and `evaluatedBitstrings = 8`.
+- Live artifact-cache check on 2026-06-05: `http://100.86.83.35:5173/`
+  returned Bell parity `pass` plus magnetar calibration `pass`, ground state
+  `000`, `maxEnergyDelta = 0`, and `calibrationArtifactCount = 1` from
+  `window.__ulgDemo.artifactCache`.
 - Verify the three.js canvas is nonblank at desktop and mobile viewport sizes.
 - Save screenshots into `test-results/`.
 

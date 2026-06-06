@@ -223,6 +223,9 @@ function createArtifact(task) {
   if (manifest.serviceId === 'moonlab') {
     const coreProbe = task.coreProbe ?? null;
     const coreProbeReady = coreProbe?.status === 'ready';
+    const magnetarDipoleIsing = coreProbe?.magnetarDipoleIsing ?? null;
+    const magnetarReady = magnetarDipoleIsing?.validation?.status === 'pass'
+      && magnetarDipoleIsing?.parity?.status === 'pass';
     return {
       artifactId: `${task.rootTaskId}.quantum-response`,
       sourceService: 'moonlab',
@@ -235,20 +238,28 @@ function createArtifact(task) {
         energyLevels: coreProbeReady ? [coreProbe.entropy, coreProbe.purity] : [0, 0.5, 1],
         forceSamples: [0.1, 0.2, 0.1],
         basisProbabilities: coreProbeReady ? coreProbe.probabilities : [0.5, 0, 0, 0.5],
-        bellState: coreProbeReady ? coreProbe.sample : 'placeholder'
+        bellState: coreProbeReady ? coreProbe.sample : 'placeholder',
+        magnetarDipoleIsing: magnetarDipoleIsing?.summary ?? null
       },
+      calibrationArtifacts: magnetarDipoleIsing ? {
+        magnetarDipoleIsing
+      } : {},
       uncertainty: {
         truncationError: coreProbeReady ? coreProbe.maxProbabilityError : 0,
-        parityError: coreProbeReady ? coreProbe.parity?.metrics?.maxProbabilityError ?? 0 : 0
+        parityError: coreProbeReady ? coreProbe.parity?.metrics?.maxProbabilityError ?? 0 : 0,
+        magnetarEnergyTolerance: magnetarDipoleIsing?.parity?.tolerance ?? null
       },
       parity: coreProbeReady ? coreProbe.parity : createFallbackQuantumParityReport(),
       validationMetrics: {
         maxProbabilityError: coreProbeReady ? coreProbe.maxProbabilityError : 0,
         normalizationDelta: coreProbeReady ? coreProbe.parity?.metrics?.normalizationDelta ?? 0 : 0,
-        unsupportedParityModeCount: coreProbeReady ? coreProbe.parity?.metrics?.unsupportedModeCount ?? 0 : 1
+        unsupportedParityModeCount: coreProbeReady ? coreProbe.parity?.metrics?.unsupportedModeCount ?? 0 : 1,
+        magnetarMaxEnergyDelta: magnetarDipoleIsing?.summary?.maxEnergyDelta ?? null,
+        magnetarEvaluatedBitstrings: magnetarDipoleIsing?.summary?.evaluatedBitstrings ?? 0,
+        calibrationArtifactCount: magnetarDipoleIsing ? 1 : 0
       },
       validation: {
-        status: coreProbeReady && coreProbe.maxProbabilityError <= 1e-9 ? 'pass' : 'warn',
+        status: coreProbeReady && coreProbe.maxProbabilityError <= 1e-9 && (!magnetarDipoleIsing || magnetarReady) ? 'pass' : 'warn',
         validationMode: coreProbeReady ? 'moonlab-wasm-analytic-parity' : 'self'
       },
       runtime: {

@@ -1,5 +1,52 @@
 # ULG Implementation Log
 
+## 2026-06-05 18:04:15 AKDT
+
+Prompt: Continue the ULG implementation plan after the PeerCompute magnetar scenario checkpoint. Standing instructions remain: keep commits local only, keep the Vite server reachable on `0.0.0.0`, and do not push.
+
+Actions attempted:
+
+- Extended `public/workers/moonlab-core-probe.worker.js` so the supervised MoonLab browser worker also evaluates the MoonLab WASM Ising exports.
+- Added `peercompute.ulg.magnetar-dipole-ising-calibration.v0` as a calibration sub-artifact with normalized dipole fields, nearest-neighbor Ising couplings, eight bitstring energy evaluations, JavaScript reference parity, dipole monotonicity validation, and ground state `000`.
+- Threaded the calibration object into the persisted MoonLab artifact under `calibrationArtifacts.magnetarDipoleIsing`, plus summary fields in `outputs.magnetarDipoleIsing` and validation metrics.
+- Extended Playwright e2e coverage to assert the magnetar calibration schema, validation status, parity status, ground state, zero max energy delta, and evaluated-bitstring count when MoonLab assets are ready.
+- Verified the live `5173` demo artifact cache reports Bell parity pass plus magnetar calibration pass.
+- Updated README, service-asset docs, implementation status, plan, and test notes.
+
+Files touched:
+
+- `README.md`
+- `public/service-assets/README.md`
+- `public/workers/moonlab-core-probe.worker.js`
+- `src/services/dummyService.worker.js`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check public/workers/moonlab-core-probe.worker.js`
+- `node --check src/services/dummyService.worker.js`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- Playwright live artifact-cache probe against `http://127.0.0.1:5173/`
+
+Results:
+
+- PASS: syntax checks completed for the worker and dummy service.
+- PASS: `npm test` completed with `13/13` tests passing.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` completed with `1/1` Chromium test passing.
+- PASS: live artifact-cache probe reported `magnetarStatus = pass`, `magnetarParityStatus = pass`, `groundState = "000"`, `maxEnergyDelta = 0`, `evaluatedBitstrings = 8`, and `calibrationArtifactCount = 1`.
+
+Failures / open questions:
+
+- This is a calibration handoff primitive, not a full magnetar simulation. It does not include plasma, radiation, relativistic, or MHD evolution.
+- MoonLab WebGPU parity remains unsupported until browser WebGPU quantum-response kernels exist.
+
 ## 2026-06-05 17:36:55 AKDT
 
 Prompt: Continued the ULG implementation plan after the PeerCompute remote-solver cadence checkpoint. User standing instructions: keep going, keep commits local, keep the Vite server reachable on `0.0.0.0`, and do not push.

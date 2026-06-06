@@ -73,6 +73,9 @@ physics work:
   verify live browser asset probe readiness.
 - [x] Wrap a minimal MoonLab core task in a supervised service worker using the
   ready asset path.
+- [x] Surface the MoonLab `magnetar-dipole-ising-calibration` handoff through
+  the ULG browser artifact cache as a WASM-vs-JS parity-checked calibration
+  sub-artifact.
 
 ### Tooling
 

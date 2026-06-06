@@ -217,16 +217,22 @@ Updated: 2026-06-06 06:18:00 AKDT
   manifest, relay-safe counts, source/provenance metadata, and blockers; the
   live VPN bridge reports envelope ready with two relay-safe/content-addressed
   artifacts and no blockers.
+- Added and committed Eshkol magnetar descriptor binding metadata locally as
+  commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
+  `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable
+  PeerCompute envelope schema, binds to the MoonLab normalized reference suite
+  hash `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
+  declares four MoonLab closure-surface samples, and keeps runtime/derivatives
+  declared-not-executed/computed with `scientificValidation = false`.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
-- Add Eshkol descriptor binding metadata that names the durable PeerCompute
-  envelope schema, tensor ids, MoonLab normalized reference suite identity/hash,
-  and PeerCompute product-topology binding while keeping
-  `scientificValidation: false`.
+- Begin wiring real ULG/Eshkol/MoonLab service-hosting modules into the
+  PeerCompute supervisor and adapter layer, using the durable handoff envelope
+  as the relay/provenance boundary.
 
 ## Next
 

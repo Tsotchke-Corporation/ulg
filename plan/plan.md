@@ -135,6 +135,10 @@ physics work:
 - [x] Verify PeerCompute/Multiscale accepts descriptor-only Eshkol magnetar
   closure handoffs as packaging/probe prerequisites while preserving
   `proxy-runtime-not-scientific`.
+- [x] Bind Eshkol's descriptor-only magnetar closure metadata to the durable
+  PeerCompute handoff envelope, MoonLab normalized reference-suite hash, closure
+  surface sample ids, and product-topology binding without claiming scientific
+  validation.
 
 ### Tooling
 

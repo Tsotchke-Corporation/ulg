@@ -2233,3 +2233,54 @@ Failures and open questions:
   metadata that names the durable envelope schema and keeps
   `scientificValidation: false`.
 - No push was attempted.
+
+## 2026-06-06 06:44:00 AKDT - Eshkol descriptor binding staged through ULG
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos up, and keep
+  commits local only.
+
+Actions:
+
+- Added Eshkol commit `31cbbfc`, which replaces the magnetar descriptor fixture's
+  placeholder `nextContractFields` with explicit
+  `eshkol.ulg.magnetar-closure-descriptor-binding.v0` metadata.
+- The binding names PeerCompute's
+  `peercompute.ulg.handoff-service-envelope.v0`, the handoff transfer-manifest
+  schema, the declared ULG interpolation table id, MoonLab's normalized
+  reference-suite hash
+  `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
+  four MoonLab closure-surface sample ids, and the reduced PeerCompute
+  product-topology binding.
+- Kept descriptor runtime and derivative statuses declared, not executed or
+  computed, with `scientificValidation = false`.
+- Regenerated ULG's ignored Eshkol `magnetar-closure` service asset via
+  `npm run stage:service-assets -- --eshkol-only`.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` to record the descriptor binding milestone and move the active
+  work back to real PeerCompute service-hosting modules.
+
+Validation:
+
+- PASS: Eshkol `node -e` JSON parse check for
+  `examples/magnetar_closure.ulg-metadata.json`.
+- PASS: Eshkol `python3 -m py_compile tests/toolchain/ulg_magnetar_closure_fixture_test.py`.
+- PASS: Eshkol manual bundle export to `/tmp/eshkol-magnetar-envelope-probe`.
+- PASS: Eshkol `ctest --test-dir build -R '^(ulg_magnetar_closure_fixture_test|ulg_closure_bundle_export_test|eshkol_host_imports_smoke_test)$' --output-on-failure` passed `3/3`.
+- PASS: ULG `npm run stage:service-assets -- --eshkol-only --dry-run --json`.
+- PASS: ULG `npm run stage:service-assets -- --eshkol-only`.
+- PASS: live VPN browser probe reported the handoff carried
+  `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, the durable PeerCompute
+  envelope schema, MoonLab suite hash, four closure-surface sample ids,
+  `descriptor-bound-not-executed`, `declared-not-executed`,
+  `scientificValidation = false`, Eshkol WASM length `53066`, and PeerCompute
+  still reported `service-envelope-ready`, `runtime-evidence-ready`,
+  `validatedCount = 5`, `scientific-runtime-ready`,
+  `scenarioScientificReady = true`, and no blockers.
+
+Failures and open questions:
+
+- Descriptor binding is still metadata/contract packaging. It does not execute
+  real Eshkol closure tensors or compute derivative tables.
+- No push was attempted.

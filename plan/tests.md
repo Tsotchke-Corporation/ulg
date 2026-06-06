@@ -193,6 +193,16 @@ reference-contract asset support.
   `validatedCount = 5`, `scientific-runtime-ready`,
   `scenarioScientificReady = true`, and no blockers after awaited calibrated
   runtime refresh.
+- Live VPN Eshkol descriptor-binding check on 2026-06-06: after Eshkol commit
+  `31cbbfc` and `npm run stage:service-assets -- --eshkol-only`, the live ULG
+  handoff preserved `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, named
+  `peercompute.ulg.handoff-service-envelope.v0`, carried MoonLab suite hash
+  `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
+  reported four closure-surface sample ids, kept
+  `descriptor-bound-not-executed` / `declared-not-executed`, preserved
+  `scientificValidation = false`, and still gave PeerCompute
+  `service-envelope-ready`, `runtime-evidence-ready`, `validatedCount = 5`,
+  `scientific-runtime-ready`, `scenarioScientificReady = true`, and no blockers.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

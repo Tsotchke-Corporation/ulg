@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 13:54:22 AKDT
+Updated: 2026-06-06 14:58:03 AKDT
 
 ## Done
 
@@ -487,6 +487,12 @@ Updated: 2026-06-06 13:54:22 AKDT
   `main(i32,i32)->i32` can be called with declared offsets, but stdout is
   invariant and `changedBytesInDeclaredTensorRange = 0`, so tensor closure ABI
   execution remains blocked.
+- Recorded PeerCompute relay dispatch diagnostic sidecar commit `16fe9296`.
+  Adapter-enabled relay handoff smoke no longer fails as an unstructured
+  Playwright crash; it records `dispatchAdapterStatus =
+  dispatch-adapter-popup-context-reset`, proves stages reach
+  `dispatch-plan-created` and first MoonLab `dispatch-start`, and keeps
+  `runtimeGateRelaxed = false` plus `scientificGateRelaxed = false`.
 
 ## In Progress
 
@@ -504,6 +510,8 @@ Updated: 2026-06-06 13:54:22 AKDT
 - Keep the MoonLab canonical body digest and ULG-served file digest distinct:
   MoonLab's pinned `canonicalJson()` hash excludes the trailing newline, while
   ULG's cross-repo handoff hash covers the served file bytes.
+- Keep the relay-served dispatch adapter reset as an explicit blocker until the
+  popup path reaches `dispatch-complete` without context destruction.
 
 ## Next
 

@@ -824,3 +824,34 @@ reference-contract asset support.
   `outputTensorsProducedByEntryExport = false`,
   `changedBytesInDeclaredTensorRange = 0`, and blocker
   `main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets`.
+
+## 2026-06-06 PeerCompute Relay Dispatch Adapter Diagnostic Checks
+
+- PeerCompute syntax/build:
+  sidecar verification reported `node --check demos/multiscale/src/main.js`,
+  `node --check demos/multiscale/tests/ulgRelayHandoffSmoke.mjs`, and
+  `npm --prefix demos/multiscale run build` passed with the existing large-chunk
+  warning.
+- Default relay smoke:
+  sidecar verification reported
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff` passed.
+- Adapter-enabled relay diagnostic:
+  sidecar verification reported
+  `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 npm --prefix demos/multiscale run
+  test:ulg-relay-handoff` now exits cleanly with structured diagnostic status
+  `dispatchAdapterStatus = dispatch-adapter-popup-context-reset`, reaches
+  `start`, `dispatch-plan-created`, and MoonLab `dispatch-start`, and records
+  `runtimeGateRelaxed = false` plus `scientificGateRelaxed = false`.
+- Strict failure mode:
+  sidecar verification reported `ULG_RELAY_HANDOFF_REQUIRE_DISPATCH=1` is
+  available to force this diagnostic blocker to fail while debugging adapter
+  execution itself.
+- Cleanup:
+  sidecar verification reported relay config restore diff was empty for
+  `docs/multiscale/relay-config*.json`, no test-owned `4196` listener or relay
+  process remained, and `git diff --check` passed.
+- Coordinator live status:
+  `npm run status:live -- --bridge` on 2026-06-06 14:58:03 AKDT reported live
+  ULG `5173` and Multiscale `5185` ready, with Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  and artifact count `2`.

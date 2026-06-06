@@ -3607,3 +3607,66 @@ Notes:
 - The next real Eshkol step remains a tensor closure ABI export that explicitly
   reads input offsets and writes output offsets.
 - No push was attempted.
+
+## 2026-06-06 14:58:03 AKDT - PeerCompute relay dispatch diagnostic checkpoint
+
+Prompt: User told me to keep working. Huygens reported the PeerCompute relay
+dispatch diagnostic checkpoint while local commits remain local-only.
+
+Changes:
+
+- Recorded PeerCompute sidecar commit `16fe9296` in the ULG coordinator plan.
+- The PeerCompute relay smoke now has compact `includeResults: false`
+  dispatch-probe mode and structured stage diagnostics for
+  `runUlgDispatchServiceAdapterProbe()`.
+- Adapter-enabled relay smoke no longer dies as a raw Playwright failure. It
+  records `dispatchAdapterStatus = dispatch-adapter-popup-context-reset` and
+  blocker `relay-popup-dispatch-execution-context-destroyed`.
+- The diagnostic narrows the remaining relay blocker to the popup path after
+  `dispatch-plan-created` and first MoonLab `dispatch-start`, before
+  `dispatch-complete`.
+- The diagnostic keeps `runtimeGateRelaxed = false` and
+  `scientificGateRelaxed = false`; `ULG_RELAY_HANDOFF_REQUIRE_DISPATCH=1` can
+  still force the blocker to fail when debugging adapter execution.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `npm run status:live -- --bridge`
+- `ss -ltnp 'sport = :5173'`
+- `ss -ltnp 'sport = :5185'`
+
+Validation:
+
+- PASS: sidecar verification reported `node --check demos/multiscale/src/main.js`
+  and `node --check demos/multiscale/tests/ulgRelayHandoffSmoke.mjs` passed.
+- PASS: sidecar verification reported
+  `npm --prefix demos/multiscale run build` passed with the existing large-chunk
+  warning.
+- PASS: sidecar verification reported default
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff` passed.
+- PASS: sidecar verification reported
+  `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 npm --prefix demos/multiscale run
+  test:ulg-relay-handoff` exits cleanly with
+  `dispatchAdapterStatus = dispatch-adapter-popup-context-reset`.
+- PASS: sidecar verification reported `npm --prefix demos/multiscale run
+  test:ulg-handoff` passed and `git diff --check` passed.
+- PASS: coordinator `npm run status:live -- --bridge` reported two ready
+  services, two artifacts, MoonLab native `hadamard`/`pauli_x` probes declared
+  but unexecuted, Eshkol tensor offset ABI blocker preserved, and Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  artifact count `2`.
+- PASS: `5173` and `5185` are both listening on `0.0.0.0`.
+
+Failures / open questions:
+
+- Real relay-served popup dispatch-adapter execution still does not pass. The
+  popup context resets after first MoonLab `dispatch-start` and before
+  `dispatch-complete`.
+- No push was attempted.

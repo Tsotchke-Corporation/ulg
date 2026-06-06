@@ -128,6 +128,12 @@ physics work:
   without promoting handler/runtime/scientific readiness.
 - [x] Run relay-backed focused PeerCompute runtime P2P smoke and preserve
   generated relay configs after the test.
+- [x] Add relay-backed ULG handoff dispatch diagnostics so adapter-enabled relay
+  smoke records the popup context reset instead of failing as an unstructured
+  Playwright crash.
+- [ ] Fix relay-served popup dispatch adapter execution so the optional relay
+  smoke reaches adapter `dispatch-complete` without relaxing runtime or
+  scientific gates.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service

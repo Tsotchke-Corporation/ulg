@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 13:39:59 AKDT
+Updated: 2026-06-06 13:48:50 AKDT
 
 ## Done
 
@@ -411,6 +411,13 @@ Updated: 2026-06-06 13:39:59 AKDT
   `npm --prefix demos/multiscale run test:ulg-handoff` still reports
   `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
   bridge ack `handoff-ready`, and visible magnetar proxy.
+- Integrated the PeerCompute parity-scope consumer sidecar locally as commit
+  `c0a6d1af`. Multiscale and the handler-backed dispatch summaries now surface
+  MoonLab WebGPU complex64 parity-scope evidence while preserving
+  `backendAvailable = false`, `webgpuParityExecuted = false`,
+  `webgpuParityPassed = false`, `fullFidelityMagnetarSimulation = false`, and
+  `fullPhysicsValidation = false`, and without relaxing the scientific runtime
+  gate.
 
 ## In Progress
 

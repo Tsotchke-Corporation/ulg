@@ -3223,3 +3223,36 @@ Notes:
 - This makes MoonLab's WebGPU parity blocker visible and relay-safe in ULG
   handoffs. It still does not claim browser WebGPU kernel execution.
 - No push was attempted.
+
+## 2026-06-06 - PeerCompute parity-scope consumer sidecar
+
+Changes:
+
+- Integrated the PeerCompute sidecar commit `c0a6d1af` locally. The commit
+  surfaces MoonLab `moonlab.webgpu.complex64-parity-scope.v0` evidence in
+  service artifact/dispatch summaries, Multiscale ingestion/readiness summaries,
+  and the browser UI.
+- The PeerCompute consumer preserves the no-backend evidence state:
+  `backendAvailable = false`, `webgpuParityExecuted = false`,
+  `webgpuParityPassed = false`, `fullFidelityMagnetarSimulation = false`, and
+  `fullPhysicsValidation = false`.
+- The new WebGPU parity-scope evidence remains an evidence limitation and does
+  not feed or relax PeerCompute's scientific runtime gate.
+
+Validation:
+
+- PASS: PeerCompute
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js` passed
+  `24/24`.
+- PASS: PeerCompute `npm --prefix demos/multiscale test` passed `196/196`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` passed with the
+  existing large-chunk warning.
+- PASS: PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` passed with
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, and visible magnetar proxy.
+- PASS: Vite servers remained bound on `0.0.0.0:5173` and `0.0.0.0:5185`.
+
+Notes:
+
+- No push was attempted.

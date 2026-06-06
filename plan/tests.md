@@ -599,3 +599,20 @@ reference-contract asset support.
   against live ULG `5173` and Multiscale `5185` with `handoff-ready`, blocker
   count `0`, `simulationStatus = scientific-ready`, bridge ack
   `handoff-ready`, and visible magnetar proxy.
+
+## 2026-06-06 PeerCompute Parity-Scope Consumer Checks
+
+- PeerCompute service orchestration:
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js` passed
+  `24/24`.
+- PeerCompute Multiscale:
+  `npm --prefix demos/multiscale test` passed `196/196`.
+- PeerCompute Multiscale build:
+  `npm --prefix demos/multiscale run build` passed with the existing
+  large-chunk warning.
+- Live bridge:
+  `npm --prefix demos/multiscale run test:ulg-handoff` passed with
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, and visible magnetar proxy.
+- Listener check:
+  Vite servers remained bound on `0.0.0.0:5173` and `0.0.0.0:5185`.

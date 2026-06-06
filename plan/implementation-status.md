@@ -137,14 +137,22 @@ Updated: 2026-06-06 01:25:01 AKDT
   relativistic correction inventory in raw `outputs.references[]`. Compact
   telemetry now reports calibrated inventory counts separately while preserving
   the singular ready dipole-Ising reference as `outputs.reference`.
+- Promoted the first calibrated-family entry to a scoped analytic
+  `magnetosphere-mhd` dipole-field reference with solver id, field maps,
+  tolerances, observed deltas, pass validation, and SHA-256 contract/unit hashes.
+  PIC, radiation, relativity, and full MHD/force-free coverage remain blocked.
+- Aligned the analytic reference's observed-delta keys with its tolerance keys
+  and verified the live ULG-to-Multiscale VPN bridge counts it as one ready
+  calibrated/scientific reference while keeping full magnetar scientific
+  readiness blocked.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the ULG MoonLab calibrated `outputs.references[]` inventory as the next
-  PeerCompute/Multiscale adapter signal for reference/tolerance inventory, while
-  keeping full magnetar scientific readiness blocked until calibrated
-  multiphysics references exist.
+- Continue from the live state where the first ready MoonLab calibrated
+  `magnetosphere-mhd` reference is now counted by PeerCompute/Multiscale, while
+  full magnetar scientific readiness remains blocked until calibrated
+  PIC/radiation/relativity and full MHD/force-free references exist.
 
 ## Next
 

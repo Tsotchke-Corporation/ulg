@@ -11,22 +11,32 @@ function createCalibratedReferenceInventory() {
       id: 'magnetosphere-mhd-reference',
       family: 'magnetosphere-mhd',
       provider: 'moonlab',
-      solverId: null,
+      solverId: 'moonlab-analytic-dipole-field-v0',
       schema: 'moonlab.magnetar.calibrated-reference.v0',
       role: 'peercompute-scientific-tolerance-input',
-      contractHash: null,
-      unitsHash: null,
-      fieldMap: null,
-      fieldTolerances: null,
-      fieldObservedDeltas: null,
-      status: 'calibrated-reference-missing',
-      ready: false,
-      scientificCoverage: false,
-      scope: 'inventory-only-not-scientific-reference',
-      validationStatus: 'missing',
-      validation: { status: 'missing', evidence: [] },
-      blocker: 'calibrated-mhd-reference-missing',
-      blockers: ['No calibrated MHD benchmark data is bundled with this artifact.']
+      contractHash: 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec',
+      unitsHash: 'sha256:b9ef2d46ec5f2d0c1fb8a2866012e9340a67f188ebc8a579b93ce61e72f4b4a5',
+      fieldMap: {
+        radiusMeters: 'outputs.radialSamples[].radiusMeters',
+        magneticFieldTesla: 'outputs.radialSamples[].magneticFieldTesla',
+        normalizedField: 'outputs.radialSamples[].normalizedField'
+      },
+      fieldTolerances: {
+        magneticFieldTeslaRel: 1e-12,
+        normalizedFieldAbs: 1e-12
+      },
+      fieldObservedDeltas: {
+        magneticFieldTeslaRel: 0,
+        normalizedFieldAbs: 0
+      },
+      status: 'calibrated-reference-ready',
+      ready: true,
+      scientificCoverage: true,
+      scope: 'analytic-dipole-magnetosphere-reference-not-full-mhd',
+      validationStatus: 'pass',
+      validation: { status: 'pass', evidence: ['Analytic dipole radial field reference.'] },
+      blocker: null,
+      blockers: []
     },
     {
       id: 'pic-kinetic-plasma-reference',
@@ -326,25 +336,27 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.calibrationArtifactCount, 1);
   assert.equal(summary.calibrationReadyCount, 1);
   assert.equal(summary.outputReferenceCount, 5);
-  assert.equal(summary.outputReferenceReadyCount, 1);
+  assert.equal(summary.outputReferenceReadyCount, 2);
   assert.equal(summary.outputReferences[0].schema, 'moonlab.magnetar-dipole-ising-reference.v0');
   assert.equal(summary.outputReferences[0].contractHash, 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec');
   assert.equal(summary.outputReferences[1].family, 'magnetosphere-mhd');
-  assert.equal(summary.outputReferences[1].status, 'calibrated-reference-missing');
-  assert.equal(summary.outputReferences[1].validationStatus, 'missing');
-  assert.equal(summary.outputReferences[1].ready, false);
+  assert.equal(summary.outputReferences[1].status, 'calibrated-reference-ready');
+  assert.equal(summary.outputReferences[1].validationStatus, 'pass');
+  assert.equal(summary.outputReferences[1].ready, true);
+  assert.equal(summary.outputReferences[1].scientificCoverage, true);
+  assert.equal(summary.outputReferences[1].solverId, 'moonlab-analytic-dipole-field-v0');
   assert.equal(summary.magnetarCalibratedReferenceCount, 4);
-  assert.equal(summary.magnetarCalibratedReferenceReadyCount, 0);
-  assert.equal(summary.magnetarCalibratedReferenceScientificCoverageCount, 0);
+  assert.equal(summary.magnetarCalibratedReferenceReadyCount, 1);
+  assert.equal(summary.magnetarCalibratedReferenceScientificCoverageCount, 1);
   assert.deepEqual(summary.magnetarCalibratedReferences.map((reference) => reference.family), [
     'magnetosphere-mhd',
     'pic-kinetic-plasma',
     'radiation-transport',
     'relativistic-correction'
   ]);
-  assert.equal(summary.magnetarCalibratedReferences[0].blocker, 'calibrated-mhd-reference-missing');
+  assert.equal(summary.magnetarCalibratedReferences[0].blocker, null);
   assert.equal(summary.calibrationArtifacts[0].referenceCount, 5);
-  assert.equal(summary.calibrationArtifacts[0].referenceReadyCount, 1);
+  assert.equal(summary.calibrationArtifacts[0].referenceReadyCount, 2);
   assert.equal(summary.magnetarDipoleIsingReady, true);
   assert.equal(summary.magnetarDipoleIsingGroundState, '000');
   assert.equal(summary.magnetarDipoleIsingMaxEnergyDelta, 0);

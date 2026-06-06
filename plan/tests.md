@@ -4,9 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 16/16 tests on 2026-06-06 after switching MoonLab
-`outputs.references[]` from a singular-reference wrapper to the four-entry
-calibrated reference-family inventory.
+Current result: pass, 16/16 tests on 2026-06-06 after promoting the first
+MoonLab calibrated `magnetosphere-mhd` inventory entry to a scoped analytic
+dipole-field reference while leaving PIC/radiation/relativity blocked.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -50,16 +50,15 @@ calibrated reference-family inventory.
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the ULG MoonLab calibrated
-reference-family inventory propagation update, with the existing large three.js
-chunk warning.
+Current result: pass on 2026-06-06 after the analytic magnetosphere reference
+propagation update, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after the ULG MoonLab
-calibrated reference-family inventory propagation update.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after the analytic
+magnetosphere reference propagation update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -103,17 +102,18 @@ calibrated reference-family inventory propagation update.
   dipole-Ising compatibility contract while `outputs.references[]` carries the
   calibrated family inventory.
 - Runtime calibrated reference inventory check on 2026-06-06: with copied
-  MoonLab assets present, Playwright verifies `outputs.references[]` carries the
-  four calibrated magnetosphere MHD, PIC kinetic plasma, radiation transport,
-  and relativistic correction placeholders with `ready: false`,
-  `scientificCoverage: false`, null contract/unit hashes, and missing validation.
+  MoonLab assets present, Playwright verifies `outputs.references[]` carries one
+  ready/scientific scoped analytic `magnetosphere-mhd` dipole-field reference
+  with field maps, tolerances, observed deltas, and SHA-256 contract/unit hashes,
+  plus blocked PIC kinetic plasma, radiation transport, and relativistic
+  correction placeholders.
 - Live VPN calibrated inventory check on 2026-06-06:
   `http://100.86.83.35:5173/` reported four raw
   `outputs.references[]` entries for magnetosphere MHD, PIC kinetic plasma,
   radiation transport, and relativistic correction, compact
-  `outputReferenceCount = 5`, `outputReferenceReadyCount = 1`,
-  `magnetarCalibratedReferenceCount = 4`, and zero calibrated ready/scientific
-  coverage entries.
+  `outputReferenceCount = 5`, `outputReferenceReadyCount = 2`,
+  `magnetarCalibratedReferenceCount = 4`, and one calibrated ready/scientific
+  coverage entry.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state
@@ -159,6 +159,12 @@ calibrated reference-family inventory propagation update.
   `window.__ulgDemo.createPeerComputeHandoff()` preserves the MoonLab
   `outputs.references[]` list and compact output reference counts in the
   exported packet.
+- Live ULG-to-Multiscale analytic reference check on 2026-06-06:
+  `http://100.86.83.35:5173/` exported MoonLab and Eshkol artifacts to
+  `https://100.86.83.35:5185/?scenario=magnetar`; Multiscale reported
+  `transfer-manifest-ready`, tolerance ready `2/5`, calibrated reference ready
+  `1/4`, calibrated scientific ready `1/4`, the `magnetosphere-mhd` entry ready
+  with no blocker, and `scenarioScientificReady: false`.
 - ULG output-semantics check on 2026-06-05: Playwright verifies the staged
   Eshkol closure artifact, compact artifact-summary telemetry, and demo handoff
   packet all carry `eshkol.ulg.closure-output-semantics.v0`,

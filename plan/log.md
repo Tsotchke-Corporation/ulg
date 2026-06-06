@@ -1518,3 +1518,118 @@ Failures and open questions:
   calibration only. It does not provide calibrated MHD, PIC, radiation, or
   relativistic magnetar references.
 - No push was attempted; all commits remain local per user instruction.
+
+## 2026-06-06 02:06:14 AKDT - Analytic magnetosphere reference propagation
+
+Prompt:
+
+- Continued from the status prompt after the PeerCompute transfer-manifest
+  checkpoint.
+- Standing instruction remains local commits only and no push.
+
+Actions:
+
+- Mirrored MoonLab's scoped analytic `magnetosphere-mhd` dipole-field reference
+  into the copied ULG MoonLab core probe worker.
+- Preserved the existing singular Ising reference contract and kept
+  PIC/radiation/relativity calibrated entries blocked.
+- Updated ULG artifact-summary unit coverage and Playwright expectations so the
+  compact summary counts one calibrated ready/scientific entry and two ready
+  output references total.
+- Updated README, plan, implementation-status, and test strategy notes to
+  distinguish this scoped reference from full magnetar scientific readiness.
+
+Files touched:
+
+- `/home/cos/projects/ulg/public/workers/moonlab-core-probe.worker.js`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+node --check public/workers/moonlab-core-probe.worker.js
+node --check tests/orchestration.test.mjs
+node --check tests/demo.e2e.mjs
+npm test
+npm run build
+npm run test:e2e
+git diff --check
+```
+
+Test results:
+
+- PASS: changed-file syntax checks completed.
+- PASS: `npm test` passed `16/16`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `git diff --check` reported no whitespace errors.
+
+Failures and open questions:
+
+- Live VPN handoff verification was completed in the follow-up
+  `Analytic magnetosphere reference live bridge` checkpoint.
+- The ready calibrated reference is an analytic dipole-field benchmark only.
+  PIC, radiation, relativity, full MHD/force-free coverage, and full magnetar
+  scientific readiness remain blocked.
+- No push was attempted.
+
+## 2026-06-06 02:16:20 AKDT - Analytic magnetosphere reference live bridge
+
+Prompt:
+
+- User asked how things were going and whether the overall plan remained on
+  track.
+- Standing instruction remains local commits only and no push.
+
+Actions:
+
+- Aligned the copied ULG MoonLab probe's analytic `magnetosphere-mhd`
+  `fieldObservedDeltas` keys with its `fieldTolerances` keys.
+- Re-ran ULG syntax, unit, build, e2e, and live VPN bridge checks.
+- Verified the live ULG handoff now gives PeerCompute/Multiscale one ready
+  calibrated scientific reference without clearing the remaining magnetar
+  blockers.
+
+Commands run:
+
+```bash
+node --check public/workers/moonlab-core-probe.worker.js
+node --check tests/orchestration.test.mjs
+node --check tests/demo.e2e.mjs
+npm test
+npm run build
+npm run test:e2e
+git diff --check
+node --input-type=module
+# live Playwright ULG probe and ULG-to-Multiscale bridge check
+```
+
+Test results:
+
+- PASS: changed-file syntax checks completed.
+- PASS: `npm test` passed `16/16`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `git diff --check` reported no whitespace errors.
+- PASS: live ULG at `http://100.86.83.35:5173/` exported four calibrated
+  reference-family entries, with `magnetosphere-mhd` ready/scientific, zero
+  observed deltas keyed to tolerances, and two total ready output references.
+- PASS: live ULG-to-Multiscale bridge into
+  `https://100.86.83.35:5185/?scenario=magnetar` reported two source artifacts,
+  `transfer-manifest-ready`, tolerance ready `2/5`, tolerance scientific ready
+  `1/5`, calibrated reference ready `1/4`, calibrated scientific ready `1/4`,
+  the `magnetosphere-mhd` tolerance entry ready with no blocker, and
+  `scenarioScientificReady: false`.
+
+Failures and open questions:
+
+- The remaining live blockers are expected: PIC/radiation/relativity and full
+  MHD/force-free references are still missing, and the scenario remains
+  scientific-blocked.
+- No push was attempted.

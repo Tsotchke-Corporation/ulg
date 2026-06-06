@@ -105,6 +105,10 @@ physics work:
   radiation transport, and relativistic correction inventory in raw
   `outputs.references[]` while compact summaries count the singular ready Ising
   reference plus the four non-ready calibrated blockers.
+- [x] Promote the magnetosphere MHD inventory entry to a scoped analytic dipole
+  field reference with solver id, SHA-256 contract/unit hashes, field maps,
+  tolerances, observed deltas, and pass validation while keeping PIC, radiation,
+  relativity, and full MHD/force-free coverage blocked.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

@@ -52,9 +52,10 @@ recording normalized dipole fields, eight bitstring energies, ground state
 `000`, and `maxEnergyDelta = 0` against the JavaScript reference. The MoonLab
 artifact keeps the legacy `outputs.reference` field and also emits
 `outputs.references[]` as the four-entry calibrated magnetosphere MHD, PIC,
-radiation, and relativistic-reference inventory. Those calibrated entries remain
-`ready: false` and `scientificCoverage: false` blockers until MoonLab provides
-real calibrated multiphysics references; compact artifact-summary telemetry
-reports both the ready Ising reference and the calibrated inventory counts so
-handoff consumers can inventory tolerance inputs without fetching the full
-artifact body.
+radiation, and relativistic-reference inventory. The magnetosphere entry now
+carries a scoped analytic dipole-field reference with field maps, tolerances,
+observed deltas, and SHA-256 contract/unit hashes. PIC, radiation, relativity,
+and full MHD/force-free coverage remain blocked; compact artifact-summary
+telemetry reports both the ready Ising reference and the calibrated inventory
+counts so handoff consumers can inventory tolerance inputs without fetching the
+full artifact body.

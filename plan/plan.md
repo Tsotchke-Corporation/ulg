@@ -43,6 +43,10 @@ physics work:
 - [x] Surface Eshkol `validation.outputSemantics` smoke-fixture metadata through
   compact artifact-summary telemetry and the browser handoff packet without
   marking the closure scientifically validated.
+- [x] Surface Eshkol `validation.closureDescriptor` magnetar fixture metadata
+  through compact artifact-summary telemetry and the browser handoff packet,
+  preserving transferred WASM bytes while keeping descriptor-only closures out
+  of host-runtime/output-smoke execution.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -123,6 +127,9 @@ physics work:
 - [x] Surface staged Eshkol closure execution metadata through compact ULG
   artifact-summary telemetry for direct PeerCompute/Multiscale scenario
   execution handoff.
+- [x] Verify PeerCompute/Multiscale accepts descriptor-only Eshkol magnetar
+  closure handoffs as packaging/probe prerequisites while preserving
+  `proxy-runtime-not-scientific`.
 
 ### Tooling
 

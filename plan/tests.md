@@ -162,15 +162,16 @@ reference-contract asset support.
   schema `moonlab.magnetar.normalized-reference-suite.v0`, status
   `reference-contract-suite-ready`, top-level `ready: true`, and four ready
   calibrated references.
-- Live VPN normalized-suite handoff check on 2026-06-06:
-  after generated-suite staging, ULG exported MoonLab
-  `outputReferenceReadyCount = 5`,
+- Live VPN normalized-suite and descriptor-closure handoff check on 2026-06-06:
+  after generated-suite staging and Eshkol `magnetar-closure` descriptor
+  staging, ULG exported MoonLab `outputReferenceReadyCount = 5`,
   `magnetarCalibratedReferenceReadyCount = 4`, and Eshkol
-  `wasmByteLength = 33907`. PeerCompute accepted the handoff as `handoff-ready`,
-  reported
-  `scientific-tolerance-suite-ready`, `transferredWasmByteLength = 33907`,
-  host runtime execution ready, five proxy-only runtime evidence entries after
-  refresh, and the intended blocker `proxy-runtime-not-scientific`.
+  `wasmByteLength = 53066`. PeerCompute accepted the handoff as `handoff-ready`,
+  reported `scientific-tolerance-suite-ready`,
+  `transferredWasmByteLength = 53066`, descriptor probe ready, no host-runtime or
+  output-semantics execution claim for the descriptor path, five proxy-only
+  runtime evidence entries after refresh, and the intended blocker
+  `proxy-runtime-not-scientific`.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

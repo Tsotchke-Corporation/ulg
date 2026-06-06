@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 05:40:30 AKDT
+Updated: 2026-06-06 05:58:30 AKDT
 
 ## Done
 
@@ -190,19 +190,26 @@ Updated: 2026-06-06 05:40:30 AKDT
   `magnetar-closure.wasm`, and artifact summaries expose
   `closureDescriptorReady` separately from smoke `closureOutputSemanticsReady`.
 - Re-verified the live VPN ULG-to-PeerCompute handoff after normalized-suite
-  staging: ULG exported MoonLab `5/5` ready output references and Eshkol
-  `33907` transferred WASM bytes; PeerCompute reported `handoff-ready`,
-  `scientific-tolerance-suite-ready`, host runtime execution ready, and only the
-  intended `proxy-runtime-not-scientific` scientific blocker.
+  staging and Eshkol magnetar descriptor staging: ULG exported MoonLab `5/5`
+  ready output references and Eshkol `53066` transferred WASM bytes for the
+  `magnetar-closure` descriptor fixture; PeerCompute reported `handoff-ready`,
+  `scientific-tolerance-suite-ready`, descriptor probe ready, no host-runtime or
+  output-semantics execution claim for the descriptor path, and only the intended
+  `proxy-runtime-not-scientific` scientific blocker.
+- Integrated and committed the PeerCompute descriptor-closure acceptance sidecar
+  locally as commit `2f694522`. Descriptor-ready Eshkol closure fixtures now
+  clear closure packaging/probe prerequisites with or without transferred WASM
+  bytes, preserve those bytes in the transfer manifest, and do not clear
+  scientific readiness.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Review and integrate the PeerCompute descriptor-closure acceptance sidecar.
-  The descriptor should clear closure handoff packaging only; it must not clear
-  scientific readiness.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
+- Start the next runtime-evidence slice: replace proxy-only PeerCompute runtime
+  evidence with validated, hash-backed reduced solver evidence only where the
+  solver output and reference contract justify it.
 
 ## Next
 

@@ -2100,3 +2100,50 @@ Failures and open questions:
   live cross-page bridge does not treat the descriptor as missing smoke output
   semantics. A sidecar agent is working that repo.
 - No push was attempted.
+
+## 2026-06-06 05:58:30 AKDT - PeerCompute descriptor handoff accepted
+
+Prompt:
+
+- Continue the overall ULG plan after the PeerCompute descriptor-closure
+  sidecar stalled, keep commits local only, and keep the VPN demos live.
+
+Actions:
+
+- Took over the PeerCompute descriptor-only closure handoff changes from the
+  stalled sidecar and fixed the live ULG bridge path so descriptor-ready Eshkol
+  magnetar closures route through descriptor probe readiness even when
+  transferred WASM bytes are present.
+- Preserved the transferred Eshkol `magnetar-closure.wasm` bytes in the
+  PeerCompute transfer manifest while avoiding host-runtime execution and smoke
+  output-semantics claims for the descriptor-only path.
+- Verified the live ULG-to-PeerCompute handoff across
+  `http://100.86.83.35:5173/` and
+  `https://100.86.83.35:5185/?scenario=magnetar`.
+- Committed the PeerCompute slice locally as `2f694522` with no push.
+- Updated this ULG status/test/plan checkpoint to reflect the accepted
+  descriptor handoff and current runtime-evidence blocker.
+
+Validation:
+
+- PASS: PeerCompute focused unit tests for descriptor-only closure summaries,
+  closure bundle readiness, and ULG demo handoff adapter passed `12/12`.
+- PASS: PeerCompute focused Multiscale tests for descriptor-only Eshkol closure,
+  closure bundle handling, proxy readiness manifest, and closure module paths
+  passed `194/194`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  the existing large chunk warning.
+- PASS: ULG exported MoonLab `outputReferenceReadyCount = 5`,
+  `magnetarCalibratedReferenceReadyCount = 4`, and Eshkol
+  `magnetar-closure` descriptor bytes length `53066`.
+- PASS: PeerCompute accepted the descriptor handoff as `handoff-ready`,
+  `scientific-tolerance-suite-ready`, and `closureDescriptorProbeReady = true`;
+  after bounded proxy evidence refresh, `proxy-runtime-not-scientific` remained
+  the only scenario blocker.
+
+Failures and open questions:
+
+- Descriptor handoff packaging is now accepted. The remaining blocker is real
+  validated magnetar runtime solver evidence, not ULG/PeerCompute transfer or
+  closure packaging.
+- No push was attempted.

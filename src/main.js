@@ -1,5 +1,6 @@
 import './styles.css';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
+import { formatHandoffAckStatus } from './runtime/handoffStatus.js';
 import { createWorkerTreeScene } from './visualization/workerTreeScene.js';
 
 const app = document.querySelector('#app');
@@ -190,13 +191,6 @@ function postPeerComputeHandoffToMultiscale(targetWindow, handoff) {
 
 function createBrowserHandoffId() {
   return `ulg-browser-handoff-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function formatHandoffAckStatus(ack = {}) {
-  const status = String(ack.status || 'sent').replace(/[-_]+/g, ' ');
-  const label = status.startsWith('handoff ') ? status : `handoff ${status}`;
-  const blockerCount = ack.blockerCount ?? '?';
-  return `${label} / blockers ${blockerCount}`;
 }
 
 async function copyTextToClipboard(text) {

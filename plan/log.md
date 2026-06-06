@@ -3390,3 +3390,35 @@ Validation:
 Notes:
 
 - PeerCompute branch is local-ahead only; no push was attempted.
+
+## 2026-06-06 14:29:00 AKDT - ULG launch status readiness detail
+
+Changes:
+
+- Moved Multiscale handoff-ack status formatting into
+  `src/runtime/handoffStatus.js` so it can be unit-tested.
+- Preserved PeerCompute smoke-test compatibility by keeping the status prefix
+  as `handoff ready / blockers 0`.
+- Added scenario, simulation readiness, and artifact count details after the
+  compatibility prefix when the Multiscale ack provides them.
+
+Validation:
+
+- PASS: `node --check src/runtime/handoffStatus.js`, `node --check src/main.js`,
+  and `node --check tests/handoffStatus.test.mjs`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` passed and reported ULG
+  status
+  `handoff ready / blockers 0 / scenario magnetar / scientific ready / 2 artifacts`,
+  Multiscale readiness `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, bridge ack `handoff-ready`, and
+  `magnetarVisible = true`.
+
+Notes:
+
+- This is UI/status clarity only; it does not change handoff contents or
+  readiness gates.
+- No push was attempted.

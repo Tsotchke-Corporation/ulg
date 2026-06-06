@@ -452,6 +452,11 @@ Updated: 2026-06-06 13:54:22 AKDT
   after `cd85fd9e`: ULG handoff was ready with blockers `0`, Multiscale was
   `handoff-ready`, `simulationStatus = scientific-ready`, and
   `magnetarVisible = true`.
+- Improved ULG's launch-status line so Multiscale browser acks preserve the
+  existing `handoff ready / blockers 0` prefix and append scenario/readiness
+  evidence. The live bridge now reports
+  `handoff ready / blockers 0 / scenario magnetar / scientific ready / 2 artifacts`
+  while Multiscale still reports `magnetarVisible = true`.
 
 ## In Progress
 

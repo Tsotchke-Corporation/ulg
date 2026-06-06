@@ -693,3 +693,24 @@ reference-contract asset support.
   `cd85fd9e`, reporting ULG `handoff ready / blockers 0`, Multiscale
   `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
   bridge ack `handoff-ready`, and `magnetarVisible = true`.
+
+## 2026-06-06 ULG Launch Status Checks
+
+- ULG syntax:
+  `node --check src/runtime/handoffStatus.js`, `node --check src/main.js`, and
+  `node --check tests/handoffStatus.test.mjs` passed.
+- ULG unit tests:
+  `npm test` passed `22/22`, including the handoff-status formatter preserving
+  the `handoff ready / blockers 0` compatibility prefix while surfacing scenario
+  and simulation readiness fields.
+- ULG browser smoke:
+  `npm run test:e2e` passed `1/1`.
+- ULG production build:
+  `npm run build` passed with the existing large-chunk warning.
+- Live bridge:
+  PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed and
+  reported ULG status
+  `handoff ready / blockers 0 / scenario magnetar / scientific ready / 2 artifacts`,
+  Multiscale `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, bridge ack `handoff-ready`, and
+  `magnetarVisible = true`.

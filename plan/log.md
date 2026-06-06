@@ -4202,3 +4202,68 @@ Failures / open questions:
 - MoonLab browser WebGPU operation probes remain declared but unexecuted because
   the current headless/VPN runtime has no WebGPU adapter.
 - No push was attempted.
+
+## 2026-06-06 15:45:59 AKDT - Eshkol runtime smoke blocker visibility
+
+Prompt: Continue work after the Eshkol runtime-smoke handoff checkpoint; keep
+progress visible in the live demo while sidecars work on the next
+production-handler/host-import blockers.
+
+Changes:
+
+- Expanded `npm run status:live` Eshkol output with validation status, tensor
+  runtime status, output tensor production flag, output entry args, output
+  stdout hash, production handler validation flags, exact production blocker
+  list, and allowed execution claims.
+- Updated the visible artifact summary line to show
+  `tensor-runtime:deterministic-runtime-smoke-executed`,
+  `tensor-probe:runtime-smoke-passed:offsets-consumed:64b`, and
+  `handler:declared-not-executed:3-blockers`.
+- Added Playwright assertions so those visible strings stay covered.
+- Spawned PeerCompute sidecar `019e9f51-9427-7ef1-950e-5f4ba465d8b4` to work on
+  deterministic Eshkol tensor-runtime execution/candidate probes without
+  relaxing production or physics gates.
+- Spawned Eshkol sidecar `019e9f51-e261-7711-b232-77587f19719b` to improve the
+  smoke-stub versus production-host-import contract distinction without
+  overclaiming production readiness.
+
+Files touched:
+
+- `scripts/live-status.mjs`
+- `src/main.js`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check scripts/live-status.mjs`
+- `node --check src/main.js`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+
+Validation:
+
+- PASS: syntax checks passed for touched JavaScript files.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`, including the new visible artifact-row
+  assertions.
+- PASS: `npm run status:live -- --bridge` reported the exact three Eshkol
+  production blockers, `tensorEntryExportOutputTensorsProduced = true`, expected
+  entry args `[131072, 131136]`, empty stdout hash
+  `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+  Multiscale ack `handoff-ready`, blocker count `0`, and
+  `simulationStatus = scientific-ready`.
+
+Failures / open questions:
+
+- No new runtime or scientific gate was relaxed. Production handler
+  implementation, production host imports, and full physics validation remain
+  the active Eshkol-side blockers.
+- No push was attempted.

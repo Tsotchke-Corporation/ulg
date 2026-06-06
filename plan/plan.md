@@ -69,6 +69,8 @@ physics work:
   runtime smoke, including consumed declared offsets, produced output tensors,
   `64` changed declared tensor bytes, and explicit non-production/full-physics
   blockers.
+- [x] Surface exact Eshkol tensor-runtime smoke evidence and production blocker
+  counts in the visible demo artifact row and `npm run status:live` output.
 - [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
   declared `compute_probabilities` browser-kernel probe through ULG staging,
   summaries, UI, and handoffs while preserving no-backend/no-execution flags.

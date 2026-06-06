@@ -326,8 +326,21 @@ function renderArtifactSummaryLine(summary) {
   if (summary.closureDescriptorReady) {
     parts.push(`descriptor:${summary.closureDescriptorRole || 'ready'}`);
   }
+  if (summary.closureTensorRuntimeRuntimeStatus) {
+    parts.push(`tensor-runtime:${summary.closureTensorRuntimeRuntimeStatus}`);
+  }
+  if (summary.closureTensorEntryExportOffsetProbeStatus) {
+    const changedBytes = Number.isFinite(summary.closureTensorEntryExportChangedBytesInDeclaredTensorRange)
+      ? `:${summary.closureTensorEntryExportChangedBytesInDeclaredTensorRange}b`
+      : '';
+    const offsetStatus = summary.closureTensorEntryExportConsumesOffsets ? 'offsets-consumed' : 'offsets-blocked';
+    parts.push(`tensor-probe:${summary.closureTensorEntryExportOffsetProbeStatus}:${offsetStatus}${changedBytes}`);
+  }
   if (summary.closureProductionHandlerBoundaryDeclared) {
-    parts.push('handler:declared-not-executed');
+    const blockerCount = Array.isArray(summary.closureProductionHandlerBoundaryBlockers)
+      ? summary.closureProductionHandlerBoundaryBlockers.length
+      : 0;
+    parts.push(`handler:declared-not-executed:${blockerCount}-blockers`);
   } else if (summary.closureProductionHandlerBoundarySchema) {
     parts.push(`handler:${summary.closureProductionHandlerBoundaryStatus || 'not-ready'}`);
   }

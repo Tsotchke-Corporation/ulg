@@ -1108,3 +1108,24 @@ reference-contract asset support.
   `npm --prefix demos/multiscale run test:ulg-handoff`,
   `npm --prefix demos/multiscale run test:ulg-relay-handoff`, relay config
   cleanup checks, and `git diff --check`.
+
+## 2026-06-06 Eshkol Runtime Smoke Visibility Checks
+
+- UI visibility:
+  Playwright now asserts the visible artifact row includes
+  `tensor-probe:runtime-smoke-passed:offsets-consumed:64b` and
+  `handler:declared-not-executed:3-blockers`.
+- Live status:
+  `npm run status:live -- --bridge` now reports Eshkol
+  `validationStatus = runtime-smoke`,
+  `tensorRuntimeStatus = deterministic-runtime-smoke-executed`,
+  `tensorEntryExportOutputTensorsProduced = true`, expected entry args
+  `[131072, 131136]`, stdout hash
+  `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+  `productionHandlerScientificValidation = false`,
+  `productionHandlerFullPhysicsValidation = false`, and the exact three
+  production blockers.
+- Validation:
+  `node --check scripts/live-status.mjs`, `node --check src/main.js`,
+  `node --check tests/demo.e2e.mjs`, `npm test`, `npm run build`,
+  `npm run test:e2e`, and `npm run status:live -- --bridge` passed.

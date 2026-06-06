@@ -27,6 +27,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   }
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.tasks?.length === 2);
   await page.waitForTimeout(1200);
+  await expect(page.getByText(/tensor-probe:runtime-smoke-passed:offsets-consumed:64b/)).toBeVisible();
+  await expect(page.getByText(/handler:declared-not-executed:3-blockers/)).toBeVisible();
 
   const desktopPixels = await sampledCanvasPixels(page);
   expect(desktopPixels.nonBlank).toBeGreaterThan(80);

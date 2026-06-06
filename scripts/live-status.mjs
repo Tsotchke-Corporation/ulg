@@ -97,8 +97,10 @@ try {
         magnetarCalibratedReferenceReadyCount: moonlab?.magnetarCalibratedReferenceReadyCount ?? null
       },
       eshkol: {
+        validationStatus: eshkol?.validationStatus ?? null,
         descriptorReady: eshkol?.closureDescriptorReady ?? null,
         tensorRuntimeContractReady: eshkol?.closureTensorRuntimeContractReady ?? null,
+        tensorRuntimeStatus: eshkol?.closureTensorRuntimeRuntimeStatus ?? null,
         tensorLinearMemoryBindingReady: eshkol?.closureTensorLinearMemoryBindingReady ?? null,
         tensorLinearMemoryStatus: eshkol?.closureTensorLinearMemoryBindingStatus ?? null,
         tensorLinearMemoryExecutionClaim: eshkol?.closureTensorLinearMemoryExecutionClaim ?? null,
@@ -112,11 +114,23 @@ try {
           eshkol?.closureTensorEntryExportOffsetProbeBlocker ?? null,
         tensorEntryExportChangedBytesInDeclaredTensorRange:
           eshkol?.closureTensorEntryExportChangedBytesInDeclaredTensorRange ?? null,
+        tensorEntryExportOutputTensorsProduced:
+          eshkol?.closureTensorEntryExportOutputTensorsProduced ?? null,
         tensorEntryExportObservedStdoutInvariantAcrossArgs:
           eshkol?.closureTensorEntryExportObservedStdoutInvariantAcrossArgs ?? null,
+        outputExpectedEntryArgs: eshkol?.closureOutputExpectedEntryArgs ?? null,
+        outputExpectedStdoutSha256: eshkol?.closureOutputExpectedStdoutSha256 ?? null,
         productionHandlerBoundaryDeclared: eshkol?.closureProductionHandlerBoundaryDeclared ?? null,
         productionHandlerReady: eshkol?.closureProductionHandlerReady ?? null,
-        productionHandlerRuntimeExecution: eshkol?.closureProductionHandlerRuntimeExecution ?? null
+        productionHandlerRuntimeExecution: eshkol?.closureProductionHandlerRuntimeExecution ?? null,
+        productionHandlerScientificValidation:
+          eshkol?.closureProductionHandlerScientificValidation ?? null,
+        productionHandlerFullPhysicsValidation:
+          eshkol?.closureProductionHandlerFullPhysicsValidation ?? null,
+        productionHandlerBoundaryBlockers:
+          eshkol?.closureProductionHandlerBoundaryBlockers ?? [],
+        productionHandlerAllowedExecutionClaims:
+          eshkol?.closureProductionHandlerAllowedExecutionClaims ?? []
       },
       bridge: bridgeRequested ? {
         ack: bridgeAck,

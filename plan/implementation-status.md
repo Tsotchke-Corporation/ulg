@@ -535,6 +535,12 @@ Updated: 2026-06-06 15:22:17 AKDT
 - Recorded PeerCompute sidecar commit `dc497229`, which refreshed Multiscale
   browser and relay handoff smoke expectations for the same Eshkol deterministic
   tensor-offset runtime-smoke artifact without pushing.
+- Added live/demo visibility for the current Eshkol runtime-smoke evidence and
+  production blockers. The artifact row now shows
+  `tensor-probe:runtime-smoke-passed:offsets-consumed:64b` and
+  `handler:declared-not-executed:3-blockers`; `npm run status:live -- --bridge`
+  prints the exact blocker list, expected entry args, stdout hash, output tensor
+  production flag, and production validation flags.
 
 ## In Progress
 

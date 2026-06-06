@@ -2603,3 +2603,47 @@ Failures and open questions:
   next step is MoonLab/Eshkol execution/probe logic behind the same worker
   contract.
 - No push was attempted.
+
+## 2026-06-06 08:54:07 AKDT - Dispatch adapter payload probes
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `0eae0a68`, which extends the exported dispatch
+  adapters with source-specific payload probes.
+- The MoonLab adapter probe records response, parity, calibration, reference,
+  and calibrated-reference readiness from the materialized quantum-response
+  payload.
+- The Eshkol adapter probe normalizes transferred WASM bytes, compiles complete
+  modules in the worker, records import/export counts and `main` export
+  availability, and preserves service-worker/dynamic-code descriptor metadata.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the local commit and live probe evidence.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the dispatch adapter module and updated
+  service-orchestration test file.
+- PASS: PeerCompute focused and full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: live VPN browser probe exported ULG MoonLab `quantum-response` and
+  Eshkol `closure` with `wasmByteLength = 53066`, then Multiscale returned
+  `dispatch-adapters-ready`, `ready = true`, `2/2` accepted dispatches, MoonLab
+  probe schema `peercompute.ulg.moonlab-dispatch-payload-probe.v0` with
+  `probeStatus = pass`, Eshkol probe schema
+  `peercompute.ulg.eshkol-dispatch-wasm-probe.v0` with `moduleCompiled = true`,
+  `importCount = 33`, `exportCount = 1`, `hasEntryExport = true`, and no
+  blockers.
+
+Failures and open questions:
+
+- The Eshkol probe now confirms descriptor WASM transfer and compile shape, but
+  it still does not execute the closure or validate descriptor table/runtime
+  semantics.
+- No push was attempted.

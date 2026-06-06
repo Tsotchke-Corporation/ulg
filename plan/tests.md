@@ -249,6 +249,12 @@ reference-contract asset support.
   `moonlab-ulg-fixture` and `eshkol-ulg-fixture`, MoonLab
   `magnetarDipoleIsingReady = true`, Eshkol `wasmByteLength = 53066`, and no
   blockers.
+- Live VPN dispatch adapter-probe check on 2026-06-06: after PeerCompute commit
+  `0eae0a68`, the same adapter-worker probe returned MoonLab probe schema
+  `peercompute.ulg.moonlab-dispatch-payload-probe.v0` with `probeStatus = pass`
+  and Eshkol probe schema `peercompute.ulg.eshkol-dispatch-wasm-probe.v0` with
+  `moduleCompiled = true`, `importCount = 33`, `exportCount = 1`,
+  `hasEntryExport = true`, Eshkol `wasmByteLength = 53066`, and no blockers.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

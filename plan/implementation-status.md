@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 08:44:50 AKDT
+Updated: 2026-06-06 08:51:56 AKDT
 
 ## Done
 
@@ -230,6 +230,10 @@ Updated: 2026-06-06 08:44:50 AKDT
   PeerCompute commit `c198326c`. The live `5185` API now runs ULG handoffs
   through browser MoonLab/Eshkol adapter Workers and caches nested dispatch
   acceptance artifacts.
+- Added and committed PeerCompute dispatch adapter probe logic locally as commit
+  `0eae0a68`. The live Eshkol adapter Worker now compiles the transferred
+  `53066`-byte descriptor WASM module and records `33` imports, `1` export, and
+  `main` export availability without clearing scientific validation.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable

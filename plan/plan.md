@@ -59,6 +59,9 @@ physics work:
 - [x] Promote the browser demo handoff into
   `peercompute.ulg.handoff-service-envelope.v0` with content-addressed refs,
   relay-safe counts, transfer manifest preservation, and provenance.
+- [x] Add PeerCompute's first envelope-backed ULG service host so
+  `WorkerSupervisor` can normalize/store durable handoff envelopes through its
+  artifact cache.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service

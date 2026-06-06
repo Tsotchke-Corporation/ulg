@@ -2284,3 +2284,42 @@ Failures and open questions:
 - Descriptor binding is still metadata/contract packaging. It does not execute
   real Eshkol closure tensors or compute derivative tables.
 - No push was attempted.
+
+## 2026-06-06 06:55:30 AKDT - PeerCompute envelope-backed service host
+
+Prompt:
+
+- Continue the overall ULG plan after the durable envelope and Eshkol descriptor
+  binding slices, keeping commits local only.
+
+Actions:
+
+- Added PeerCompute commit `2776682d`, which introduces
+  `UlgHandoffServiceHost` and `createUlgHandoffServiceManifest()`.
+- The new host runs under `WorkerSupervisor`, accepts raw ULG demo handoff tasks
+  or prebuilt envelopes, normalizes them into
+  `peercompute.ulg.handoff-service-envelope.v0`, emits
+  `peercompute.ulg.handoff-service-result.v0`, and stores the durable envelope
+  artifact through the supervisor artifact cache.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` so the coordination state now points at the next remaining
+  PeerCompute service-hosting gap: real Eshkol/MoonLab worker execution from the
+  envelope boundary.
+
+Validation:
+
+- PASS: PeerCompute syntax checks passed for
+  `UlgHandoffServiceHost.js`, service-orchestration exports, package exports,
+  and `serviceOrchestration.test.js`.
+- PASS: PeerCompute focused service-orchestration command
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js --test-name-pattern 'ULG handoff service host|ULG handoff service envelope|ULG demo handoff adapter'`
+  passed `14/14`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  the existing large chunk warning.
+- PASS: PeerCompute `git diff --check`.
+
+Failures and open questions:
+
+- The host normalizes/stores durable envelopes. It does not yet launch real
+  Eshkol or MoonLab worker services from those envelopes.
+- No push was attempted.

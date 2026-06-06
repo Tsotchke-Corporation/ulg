@@ -203,6 +203,12 @@ reference-contract asset support.
   `scientificValidation = false`, and still gave PeerCompute
   `service-envelope-ready`, `runtime-evidence-ready`, `validatedCount = 5`,
   `scientific-runtime-ready`, `scenarioScientificReady = true`, and no blockers.
+- PeerCompute envelope-backed service-host check on 2026-06-06: after commit
+  `2776682d`, focused service-orchestration coverage passed `14/14`, proving
+  `UlgHandoffServiceHost` can run under `WorkerSupervisor`, accept a raw ULG
+  handoff task, emit `peercompute.ulg.handoff-service-result.v0`, and store the
+  durable `peercompute.ulg.handoff-service-envelope.v0` artifact through the
+  supervisor artifact cache.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

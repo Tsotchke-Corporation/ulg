@@ -224,15 +224,19 @@ Updated: 2026-06-06 06:18:00 AKDT
   hash `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
   declares four MoonLab closure-surface samples, and keeps runtime/derivatives
   declared-not-executed/computed with `scientificValidation = false`.
+- Added and committed PeerCompute's first envelope-backed service host locally
+  as commit `2776682d`. `UlgHandoffServiceHost` runs under
+  `WorkerSupervisor`, accepts raw ULG demo handoff tasks, normalizes them to
+  durable handoff envelopes, emits `peercompute.ulg.handoff-service-result.v0`,
+  and stores the envelope artifact through the supervisor artifact cache.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
-- Begin wiring real ULG/Eshkol/MoonLab service-hosting modules into the
-  PeerCompute supervisor and adapter layer, using the durable handoff envelope
-  as the relay/provenance boundary.
+- Extend the envelope-backed PeerCompute host from normalization/storage into
+  real Eshkol and MoonLab worker-service execution paths.
 
 ## Next
 

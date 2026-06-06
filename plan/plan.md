@@ -136,7 +136,7 @@ physics work:
 - [x] Add relay-backed ULG handoff dispatch diagnostics so adapter-enabled relay
   smoke records the popup context reset instead of failing as an unstructured
   Playwright crash.
-- [ ] Fix relay-served popup dispatch adapter execution so the optional relay
+- [x] Fix relay-served popup dispatch adapter execution so the optional relay
   smoke reaches adapter `dispatch-complete` without relaxing runtime or
   scientific gates.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
@@ -236,6 +236,8 @@ physics work:
 - [x] Add a declared native WebGPU `pauli_x` complex64 operation probe while
   keeping coverage blocked until hardware execution evidence exists.
 - [x] Add a declared native WebGPU `pauli_z` complex64 operation probe while
+  keeping coverage blocked until hardware execution evidence exists.
+- [x] Add a declared native WebGPU `cnot` complex64 operation probe while
   keeping coverage blocked until hardware execution evidence exists.
 
 ### Tooling

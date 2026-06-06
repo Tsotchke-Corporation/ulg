@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 15:14:10 AKDT
+Updated: 2026-06-06 15:22:17 AKDT
 
 ## Done
 
@@ -510,6 +510,16 @@ Updated: 2026-06-06 15:14:10 AKDT
 - Refreshed the ICC ULG index and memory at local ULG commit `f620e85`, so the
   coordinator repo's latest staging and live-status code is available in
   persistent codebase memory.
+- Added ULG target-operation visibility for MoonLab native WebGPU probes. The
+  live status now reports target operations `hadamard`, `pauli_x`, `pauli_z`,
+  and `cnot`.
+- Recorded PeerCompute relay dispatch fix sidecar commit `631b202`. The
+  relay-served popup dispatch adapter now reaches `dispatch-adapters-ready` with
+  two accepted dispatches and no relaxed runtime/scientific gates.
+- Integrated MoonLab's `cnot` native-operation probe sidecar commit `fbc2ddf`
+  into ULG staging, summaries, UI, handoffs, and live status. The current live
+  handoff reports no missing native-operation target declarations, while all
+  four operations remain blocked/unexecuted/uncovered.
 
 ## In Progress
 
@@ -538,8 +548,9 @@ Updated: 2026-06-06 15:14:10 AKDT
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
 - Complete real MoonLab browser WebGPU quantum-response kernels beyond the
-  declared `compute_probabilities` probe, especially hadamard, pauli_x,
-  pauli_z, and cnot coverage, so the reduced
+  declared `compute_probabilities` probe: hadamard, pauli_x, pauli_z, cnot,
+  and compute_probabilities now have declared probes, but still need executed
+  browser WebGPU coverage so the reduced
   `moonlab.webgpu.complex64-parity-scope.v0` evidence can become an executed
   browser comparison.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor

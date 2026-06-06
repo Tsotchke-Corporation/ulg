@@ -978,3 +978,80 @@ reference-contract asset support.
   `.venv/bin/python scripts/codebase_tool.py architecture-summary --repo ulg
   --bundle --include-cheatsheet` succeeded and identified `src/runtime`,
   `src/services`, `src`, and `src/visualization` as public module roots.
+
+## 2026-06-06 MoonLab Native Operation Target Visibility Checks
+
+- Syntax:
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check scripts/live-status.mjs`,
+  `node --check tests/orchestration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Unit tests:
+  `npm test` passed `22/22`.
+- Live status:
+  `npm run status:live -- --bridge` reported
+  `nativeOperationTargetOperations = ["hadamard", "pauli_x", "pauli_z", "cnot"]`
+  and `nativeOperationMissingTargetOperations = ["cnot"]`, while Multiscale
+  ack stayed `handoff-ready` with blocker count `0` and
+  `simulationStatus = scientific-ready`.
+
+## 2026-06-06 PeerCompute Relay Dispatch Fix Checks
+
+- PeerCompute sidecar validation:
+  sidecar verification reported local PeerCompute commit `631b202` passed
+  syntax checks for `demos/multiscale/src/main.js` and
+  `demos/multiscale/tests/ulgRelayHandoffSmoke.mjs`, built
+  `demos/multiscale` with the existing large-chunk warning, and passed both
+  default and adapter-enabled relay handoff smokes.
+- Adapter-enabled relay smoke:
+  sidecar verification reported
+  `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 npm --prefix demos/multiscale run
+  test:ulg-relay-handoff` now passes with `dispatch-adapters-ready`,
+  `acceptedDispatchCount = 2`, and scientific scope flags all `false`.
+- Coordinator handoff regression:
+  `npm --prefix demos/multiscale run test:ulg-handoff` passed after
+  PeerCompute `631b202`, reporting `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, and `magnetarVisible = true`.
+
+## 2026-06-06 MoonLab cnot Native Probe Handoff Checks
+
+- MoonLab sidecar validation:
+  sidecar verification reported local MoonLab commit `fbc2ddf` passed
+  `pnpm --dir bindings/javascript/packages/core build:ts` with the existing
+  export-order warning, focused `webgpu-complex64-parity.test.ts` with `14/14`,
+  CLI parity artifact generation/inspection for blocked `cnot`,
+  `ulg-quantum-response-artifact.test.ts` with `14/14`, `build:wasm`, and
+  `git diff --check`.
+- ULG MoonLab-only staging:
+  `npm run stage:service-assets -- --moonlab-only` passed after requiring
+  `hadamard`, `pauli_x`, `pauli_z`, and `cnot` native-operation declarations.
+- Staged MoonLab hashes:
+  parity-scope JSON
+  `dc391fa82a5e384c2b419e78c4066a88d6fbb76255867fbebd5d3b6a6a4a42d0`,
+  browser loader
+  `4272298c649ad4141057cb7dc4ccc27dec5a8a79036ddf2a70a6dd76e84a7cfe`, and
+  WASM
+  `df924d4c907ace13caf58c6c15ba49bd97aadd351fce768bb936875d14475d78`.
+- Eshkol asset consistency:
+  after the failed full staging attempt from active Eshkol sidecar edits, the
+  ignored ULG `magnetar-closure.wasm` was restored from committed Eshkol source
+  bytes to `53066` bytes with hash
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- ULG validations:
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check scripts/live-status.mjs`,
+  `node --check tests/orchestration.test.mjs`,
+  `node --check tests/demo.e2e.mjs`, `npm test`, `npm run build`, and
+  `npm run test:e2e` passed.
+- Live status:
+  `npm run status:live -- --bridge` reported
+  `nativeOperationDeclaredOperations = ["hadamard", "pauli_x", "pauli_z", "cnot"]`,
+  `nativeOperationBlockedOperations = ["hadamard", "pauli_x", "pauli_z", "cnot"]`,
+  `nativeOperationMissingTargetOperations = []`, Multiscale ack
+  `handoff-ready`, blocker count `0`, and
+  `simulationStatus = scientific-ready`.
+- Multiscale handoff:
+  PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed with
+  `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
+  `handoff-ready`.

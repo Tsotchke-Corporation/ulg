@@ -29,7 +29,14 @@ const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'hadamard',
   'pauli_x',
-  'pauli_z'
+  'pauli_z',
+  'cnot'
+]);
+const MOONLAB_NATIVE_OPERATION_TARGET_DECLARATIONS = Object.freeze([
+  'hadamard',
+  'pauli_x',
+  'pauli_z',
+  'cnot'
 ]);
 
 function inferArtifactKind(artifact = {}) {
@@ -316,6 +323,9 @@ export function summarizeUlgArtifact(artifact = {}) {
     moonlabWebGpuNativeOperationResults
       .filter((entry) => entry.operation && entry.covered !== true)
       .map((entry) => entry.operation);
+  const moonlabWebGpuNativeOperationMissingTargetOperations =
+    MOONLAB_NATIVE_OPERATION_TARGET_DECLARATIONS
+      .filter((operation) => !moonlabWebGpuNativeOperationResultByOperation.has(operation));
   const moonlabWebGpuHadamardNativeOperationResult = moonlabWebGpuNativeOperationResults
     .find((entry) => entry.operation === 'hadamard') || null;
   const moonlabWebGpuPauliXNativeOperationResult = moonlabWebGpuNativeOperationResults
@@ -793,6 +803,10 @@ export function summarizeUlgArtifact(artifact = {}) {
       clonePlain(moonlabWebGpuNativeOperationDeclaredOperations),
     moonlabWebGpuNativeOperationProbeBlockedOperations:
       clonePlain(moonlabWebGpuNativeOperationBlockedOperations),
+    moonlabWebGpuNativeOperationProbeTargetOperations:
+      clonePlain(MOONLAB_NATIVE_OPERATION_TARGET_DECLARATIONS),
+    moonlabWebGpuNativeOperationProbeMissingTargetOperations:
+      clonePlain(moonlabWebGpuNativeOperationMissingTargetOperations),
     moonlabWebGpuNativeOperationProbeOperationResults:
       clonePlain(moonlabWebGpuNativeOperationResults),
     moonlabWebGpuNativeOperationProbeMaxAmplitudeAbsDiff:

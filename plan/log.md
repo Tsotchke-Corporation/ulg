@@ -3959,3 +3959,148 @@ Failures / open questions:
 - JavaScript function-aware parsing remains limited in this ICC build; ULG's
   include graph is available but call graph statistics are zero.
 - No push was attempted.
+
+## 2026-06-06 15:16:46 AKDT - MoonLab target-operation visibility and PeerCompute relay fix
+
+Prompt: Banach reported PeerCompute commit `631b202` fixing the relay-served
+popup dispatch-adapter execution path; continue coordinating ULG while Gauss
+works on MoonLab `cnot` and Dalton works on Eshkol tensor offsets.
+
+Changes:
+
+- Added target-operation summary fields for MoonLab native WebGPU probes:
+  `moonlabWebGpuNativeOperationProbeTargetOperations` and
+  `moonlabWebGpuNativeOperationProbeMissingTargetOperations`.
+- Updated `scripts/live-status.mjs` so the live status output shows the target
+  operation set and current missing declarations.
+- Updated unit/e2e assertions so the current ULG handoff reports
+  `cnot` as the only missing target operation after `hadamard`, `pauli_x`, and
+  `pauli_z` are declared.
+- Recorded PeerCompute sidecar commit `631b202`. It fixes relay-served dispatch
+  worker asset URLs, adds browser-owned async dispatch polling, and makes the
+  adapter-enabled relay smoke pass with `dispatch-adapters-ready`.
+
+Files touched:
+
+- `src/runtime/artifactSummary.js`
+- `scripts/live-status.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run status:live -- --bridge`
+- `npm --prefix demos/multiscale run test:ulg-handoff`
+
+Validation:
+
+- PASS: syntax checks passed for changed JavaScript files.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run status:live -- --bridge` reported
+  `nativeOperationTargetOperations = ["hadamard", "pauli_x", "pauli_z", "cnot"]`,
+  `nativeOperationMissingTargetOperations = ["cnot"]`, Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  and artifact count `2`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff`
+  reported `handoff-ready`, blocker count `0`, `simulationStatus =
+  scientific-ready`, `magnetarVisible = true`, and bridge ack `handoff-ready`.
+- PASS: sidecar verification reported
+  `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 npm --prefix demos/multiscale run
+  test:ulg-relay-handoff` passed with `dispatch-adapters-ready`,
+  `acceptedDispatchCount = 2`, and scientific scope flags all `false`.
+
+Failures / open questions:
+
+- `cnot` remains missing until the MoonLab sidecar produces the next declared
+  native-operation probe.
+- Eshkol full staging is still deferred while Dalton resolves the active
+  `main` versus `scheme_main` export mismatch.
+- No push was attempted.
+
+## 2026-06-06 15:22:17 AKDT - MoonLab cnot native probe handoff
+
+Prompt: Gauss sidecar reported MoonLab commit `fbc2ddf` adding the `cnot`
+WebGPU complex64 native-operation probe; integrate the result into ULG while
+keeping all commits local.
+
+Changes:
+
+- Updated ULG staging so the MoonLab native-operation probe must now include
+  `hadamard`, `pauli_x`, `pauli_z`, and `cnot`.
+- Updated artifact summaries, e2e expectations, README, and plan entries so the
+  current target operation set is complete and no native operation declarations
+  are missing.
+- Staged MoonLab-only service assets from local MoonLab commit `fbc2ddf`.
+- Restored the ignored ULG Eshkol `magnetar-closure.wasm` to the committed
+  `53066`-byte `38902bb4...` artifact after a failed full staging attempt had
+  overwritten the ignored WASM with Dalton's in-progress Eshkol sidecar output.
+
+Files touched:
+
+- `README.md`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `scripts/live-status.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm run stage:service-assets -- --moonlab-only`
+- `sha256sum public/service-assets/moonlab/webgpu-complex64-parity-scope.json public/service-assets/moonlab/moonlab.js public/service-assets/moonlab/moonlab.wasm`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `npm --prefix demos/multiscale run test:ulg-handoff`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks passed for changed JavaScript files.
+- PASS: MoonLab-only staging generated native operation results for
+  `hadamard`, `pauli_x`, `pauli_z`, and `cnot`, all with `executed = false`,
+  `passed = false`, `covered = false`, and blocker
+  `native-operation-probe-not-executed`.
+- PASS: staged MoonLab parity-scope hash
+  `dc391fa82a5e384c2b419e78c4066a88d6fbb76255867fbebd5d3b6a6a4a42d0`,
+  loader hash `4272298c649ad4141057cb7dc4ccc27dec5a8a79036ddf2a70a6dd76e84a7cfe`,
+  and WASM hash `df924d4c907ace13caf58c6c15ba49bd97aadd351fce768bb936875d14475d78`.
+- PASS: restored ignored Eshkol WASM hash
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1` after the ignored Eshkol WASM restore.
+- PASS: `npm run status:live -- --bridge` reported all four target operations
+  declared and blocked, no missing target operations, Multiscale ack
+  `handoff-ready`, blocker count `0`, and `simulationStatus = scientific-ready`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff`
+  reported `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
+  `handoff-ready`.
+- PASS: `git diff --check` passed.
+
+Failures / open questions:
+
+- Full `npm run stage:service-assets` is still deferred while Dalton resolves
+  the active Eshkol tensor-offset source/export changes.
+- No browser WebGPU adapter executed the MoonLab operations; all four operation
+  probes remain declared but blocked.
+- No push was attempted.

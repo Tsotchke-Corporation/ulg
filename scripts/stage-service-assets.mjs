@@ -35,7 +35,8 @@ const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-se
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'hadamard',
   'pauli_x',
-  'pauli_z'
+  'pauli_z',
+  'cnot'
 ]);
 
 function valueFor(name) {

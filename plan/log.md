@@ -3009,3 +3009,37 @@ Notes:
   surfaces. It still does not claim full GRMHD, production PIC, spectral
   radiation transport, or validated full magnetar physics.
 - No push was attempted.
+
+## 2026-06-06 - Browser handoff launch bridge
+
+Changes:
+
+- Added a ULG `Launch Magnetar` control that opens the PeerCompute Multiscale
+  magnetar scenario and sends the existing `peercompute.ulg.demo-handoff.v0`
+  bundle over a local browser `postMessage` bridge.
+- Added a retry/ack wrapper around the existing handoff payload so the ULG page
+  can keep posting while the Multiscale popup loads, then stop once Multiscale
+  reports `peercompute.multiscale.browser-handoff-ack.v0`.
+- Preserved the manual `Open Multiscale` and `Copy Handoff` flows as fallback
+  controls and exposed `window.__ulgDemo.launchPeerComputeMagnetarDemo()` for
+  live probes.
+- Updated Playwright smoke coverage to assert the direct launch control is
+  present.
+
+Validation:
+
+- PASS: `node --check src/main.js`.
+- PASS: `npm test` passed `19/19`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live browser bridge probe from ULG `http://127.0.0.1:5173/` to
+  PeerCompute `https://127.0.0.1:5185/?scenario=magnetar` reported ULG status
+  `handoff ready / blockers 0`, PeerCompute `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, visible magnetar proxy visual on the
+  solar layer, and Multiscale HUD status `status handoff ready / blockers 0`.
+
+Notes:
+
+- The bridge transports the same reduced calibrated runtime handoff; it does
+  not add a new full-fidelity magnetar physics claim.
+- No push was attempted.

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 11:45:02 AKDT
+Updated: 2026-06-06 12:46:50 AKDT
 
 ## Done
 
@@ -338,6 +338,15 @@ Updated: 2026-06-06 11:45:02 AKDT
   the tensor runtime contract ready, PeerCompute dispatch adapters are ready,
   calibrated runtime evidence remains `runtime-evidence-ready` with
   `validatedCount = 5`, and blocker count remains `0`.
+- Added a direct browser launch bridge in ULG. The `Launch Magnetar` control
+  opens PeerCompute Multiscale at `/?scenario=magnetar`, sends the existing ULG
+  handoff over `postMessage`, retries during popup load, and stops once the
+  Multiscale page acknowledges the import.
+- Verified the direct live bridge from `http://127.0.0.1:5173/` to
+  `https://127.0.0.1:5185/?scenario=magnetar`: ULG status
+  `handoff ready / blockers 0`, Multiscale `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, and the magnetar proxy visual visible
+  on the solar layer.
 
 ## In Progress
 
@@ -349,6 +358,8 @@ Updated: 2026-06-06 11:45:02 AKDT
 - Keep both ULG handoff paths available: magnetar descriptor for descriptor
   binding/table-fixture/runtime-smoke evidence, and `hello` smoke as the smaller
   gated runtime execution proof.
+- Keep the new direct launch bridge and the manual copy/paste path in sync
+  until the Multiscale receiver has formal UI-test coverage.
 
 ## Next
 

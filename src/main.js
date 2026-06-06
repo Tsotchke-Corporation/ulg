@@ -7,6 +7,10 @@ const multiscaleUrl = new URL(
   '/?scenario=magnetar',
   `https://${window.location.hostname || '127.0.0.1'}:5185`
 ).href;
+const MULTISCALE_HANDOFF_POST_SCHEMA = 'ulg.peercompute.browser-handoff-post.v0';
+const MULTISCALE_HANDOFF_ACK_SCHEMA = 'peercompute.multiscale.browser-handoff-ack.v0';
+const MULTISCALE_HANDOFF_POST_INTERVAL_MS = 750;
+const MULTISCALE_HANDOFF_ACK_TIMEOUT_MS = 30000;
 
 app.innerHTML = `
   <main class="app-shell">
@@ -18,6 +22,7 @@ app.innerHTML = `
         </div>
         <div class="controls">
           <a id="open-multiscale" class="button-link" href="${multiscaleUrl}" target="_blank" rel="noreferrer">Open Multiscale</a>
+          <button id="launch-magnetar" type="button">Launch Magnetar</button>
           <button id="copy-handoff" type="button">Copy Handoff</button>
           <button id="run-smoke" type="button">Run Smoke</button>
           <button id="cancel-smoke" type="button">Cancel</button>
@@ -52,6 +57,7 @@ app.innerHTML = `
 `;
 
 const scene = createWorkerTreeScene(document.querySelector('#scene'));
+const launchMagnetarButton = document.querySelector('#launch-magnetar');
 const copyHandoffButton = document.querySelector('#copy-handoff');
 const handoffStatus = document.querySelector('#handoff-status');
 const runButton = document.querySelector('#run-smoke');
@@ -66,6 +72,8 @@ const leaseCount = document.querySelector('#lease-count');
 const artifactCount = document.querySelector('#artifact-count');
 
 const runtime = await createDemoRuntime();
+runtime.launchPeerComputeMagnetarDemo = launchPeerComputeMagnetarDemo;
+runtime.sendPeerComputeHandoffToMultiscale = launchPeerComputeMagnetarDemo;
 window.__ulgDemo = runtime;
 
 runtime.subscribe((_event, telemetry) => {
@@ -79,25 +87,117 @@ runButton.addEventListener('click', () => {
 cancelButton.addEventListener('click', () => {
   runtime.cancelActive();
 });
+launchMagnetarButton.addEventListener('click', async () => {
+  launchMagnetarButton.disabled = true;
+  handoffStatus.textContent = 'handoff preparing for Multiscale';
+  try {
+    const ack = await launchPeerComputeMagnetarDemo();
+    handoffStatus.textContent = formatHandoffAckStatus(ack);
+  } catch (error) {
+    handoffStatus.textContent = `handoff launch failed: ${String(error?.message || error)}`;
+  } finally {
+    launchMagnetarButton.disabled = false;
+  }
+});
 copyHandoffButton.addEventListener('click', async () => {
   copyHandoffButton.disabled = true;
   handoffStatus.textContent = 'handoff exporting';
   try {
-    if (runtime.telemetry.artifacts.length < 2) {
-      handoffStatus.textContent = 'handoff waiting for services';
-      await runtime.runSmoke();
-    }
-    const handoff = await runtime.createPeerComputeHandoff();
+    const handoff = await createReadyPeerComputeHandoff();
     await copyTextToClipboard(JSON.stringify(handoff, null, 2));
     handoffStatus.textContent = `handoff copied: ${handoff.artifactCount} artifacts`;
   } catch (error) {
-    handoffStatus.textContent = `handoff failed: ${error.message}`;
+    handoffStatus.textContent = `handoff failed: ${String(error?.message || error)}`;
   } finally {
     copyHandoffButton.disabled = false;
   }
 });
 
 runtime.runSmoke();
+
+async function launchPeerComputeMagnetarDemo() {
+  const handoff = await createReadyPeerComputeHandoff();
+  const targetWindow = window.open(multiscaleUrl, 'peercompute-multiscale-magnetar');
+  if (!targetWindow) {
+    throw new Error('Multiscale popup blocked');
+  }
+  handoffStatus.textContent = `handoff sending: ${handoff.artifactCount} artifacts`;
+  return postPeerComputeHandoffToMultiscale(targetWindow, handoff);
+}
+
+async function createReadyPeerComputeHandoff() {
+  if (runtime.telemetry.artifacts.length < 2) {
+    handoffStatus.textContent = 'handoff waiting for services';
+    await runtime.runSmoke();
+  }
+  return runtime.createPeerComputeHandoff();
+}
+
+function postPeerComputeHandoffToMultiscale(targetWindow, handoff) {
+  const targetOrigin = new URL(multiscaleUrl).origin;
+  const handoffId = createBrowserHandoffId();
+  const payload = {
+    schema: MULTISCALE_HANDOFF_POST_SCHEMA,
+    handoffId,
+    source: 'ulg-demo',
+    createdAt: new Date().toISOString(),
+    handoff
+  };
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let postTimer = null;
+    let timeoutTimer = null;
+
+    const cleanup = () => {
+      window.removeEventListener('message', onMessage);
+      window.clearInterval(postTimer);
+      window.clearTimeout(timeoutTimer);
+    };
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    const post = () => {
+      if (targetWindow.closed) {
+        settle(reject, new Error('Multiscale window closed'));
+        return;
+      }
+      targetWindow.postMessage(payload, targetOrigin);
+    };
+    const onMessage = (event) => {
+      const message = event.data || {};
+      if (
+        event.origin !== targetOrigin
+        || message.schema !== MULTISCALE_HANDOFF_ACK_SCHEMA
+        || message.handoffId !== handoffId
+      ) {
+        return;
+      }
+      settle(resolve, message);
+    };
+
+    window.addEventListener('message', onMessage);
+    post();
+    postTimer = window.setInterval(post, MULTISCALE_HANDOFF_POST_INTERVAL_MS);
+    timeoutTimer = window.setTimeout(() => {
+      settle(reject, new Error('Multiscale handoff ack timed out'));
+    }, MULTISCALE_HANDOFF_ACK_TIMEOUT_MS);
+  });
+}
+
+function createBrowserHandoffId() {
+  return `ulg-browser-handoff-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function formatHandoffAckStatus(ack = {}) {
+  const status = String(ack.status || 'sent').replace(/[-_]+/g, ' ');
+  const label = status.startsWith('handoff ') ? status : `handoff ${status}`;
+  const blockerCount = ack.blockerCount ?? '?';
+  return `${label} / blockers ${blockerCount}`;
+}
 
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {

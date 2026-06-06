@@ -2408,3 +2408,42 @@ Failures and open questions:
 - The registered target services are still fixture hosts, not production
   Eshkol/MoonLab service adapters.
 - No push was attempted.
+
+## 2026-06-06 08:12:39 AKDT - PeerCompute live Multiscale dispatch-plan API
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `fa33b97f`, which imports
+  `createUlgHandoffServiceDispatchPlan()` into Multiscale's browser entrypoint.
+- `window.__multiscaleDemo.applyUlgDemoHandoffForScenario()` now returns
+  `serviceDispatchPlan` beside the durable service envelope.
+- Added direct browser API
+  `window.__multiscaleDemo.createUlgHandoffServiceDispatchPlan()` for deriving
+  MoonLab/Eshkol dispatch tasks from a raw ULG handoff or prebuilt service
+  envelope.
+- Rebuilt the checked-in Multiscale docs bundle.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the live API checkpoint.
+
+Validation:
+
+- PASS: PeerCompute `node --check demos/multiscale/src/main.js`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: live VPN browser probe waited for ULG
+  `artifactCache.list().length >= 2`, exported a two-artifact ULG handoff, then
+  verified Multiscale's applied and direct dispatch-plan APIs returned
+  `dispatch-ready`, two ready dispatches, MoonLab/Eshkol fixture service ids,
+  MoonLab/Eshkol task kinds, Eshkol WASM length `53066`, and no blockers.
+- PASS: PeerCompute `git diff --check`.
+
+Failures and open questions:
+
+- The browser API exposes planning only. Production service execution still
+  needs real Eshkol/MoonLab adapters behind the supervisor.
+- No push was attempted.

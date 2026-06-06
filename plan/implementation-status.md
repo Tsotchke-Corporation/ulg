@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 08:03:36 AKDT
+Updated: 2026-06-06 08:12:39 AKDT
 
 ## Done
 
@@ -242,6 +242,11 @@ Updated: 2026-06-06 08:03:36 AKDT
   `WorkerSupervisor`, preserves nested service results in the handoff dispatch
   result, and proves fixture service hosts can execute behind the durable
   envelope boundary.
+- Added and committed PeerCompute's Multiscale live dispatch-plan API locally as
+  commit `fa33b97f`. `applyUlgDemoHandoffForScenario()` now returns
+  `serviceDispatchPlan`, and
+  `window.__multiscaleDemo.createUlgHandoffServiceDispatchPlan()` exposes the
+  derived MoonLab/Eshkol service tasks for live VPN inspection.
 
 ## In Progress
 

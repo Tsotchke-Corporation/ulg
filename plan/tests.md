@@ -225,6 +225,19 @@ reference-contract asset support.
   registered `moonlab-ulg-fixture` and `eshkol-ulg-fixture` service hosts under
   the same `WorkerSupervisor`, preserve nested service task/result metadata,
   and still cache the parent durable envelope plus dispatch plan/result.
+- Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
+  commit `fa33b97f`, a browser probe waited for ULG
+  `artifactCache.list().length >= 2`, exported
+  `peercompute.ulg.demo-handoff.v0` with `quantum-response` and `closure`
+  artifacts plus Eshkol `wasmByteLength = 53066`, then verified
+  `window.__multiscaleDemo.applyUlgDemoHandoffForScenario(handoff)` and direct
+  `window.__multiscaleDemo.createUlgHandoffServiceDispatchPlan(handoff)` both
+  returned `peercompute.ulg.handoff-service-dispatch-plan.v0`,
+  `dispatch-ready`, `dispatchCount = 2`, `readyDispatchCount = 2`, service ids
+  `moonlab-ulg-fixture` and `eshkol-ulg-fixture`, task kinds
+  `moonlab.ulg.quantum-response.ingest` and
+  `eshkol.ulg.closure-artifact.ingest`, Eshkol dispatch WASM byte length
+  `53066`, and no dispatch blockers.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

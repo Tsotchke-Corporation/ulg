@@ -115,6 +115,9 @@ physics work:
   contracts in the ignored service-asset directory and verify the live
   ULG-to-PeerCompute magnetar handoff reports `scientific-tolerance-suite-ready`
   while keeping runtime scientific execution blocked.
+- [x] Add a reproducible `npm run stage:service-assets` command for refreshing
+  ignored MoonLab browser assets and the Eshkol `hello` closure bundle from the
+  sibling repos.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

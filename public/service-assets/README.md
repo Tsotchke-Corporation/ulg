@@ -50,14 +50,31 @@ Ising exports, the same worker also emits
 sub-artifact with normalized dipole fields, eight bitstring energy evaluations,
 ground state `000`, and zero WASM-vs-JS energy delta.
 
-For Eshkol ULG closure bundles, use the sibling repo helper:
+To refresh the local ignored service assets from the sibling repos, run:
+
+```bash
+npm run stage:service-assets
+```
+
+The command copies `moonlab.js`, `moonlab.wasm`, and the reduced MoonLab
+magnetar reference contracts from `/home/cos/projects/moonlab`, then exports the
+Eshkol `hello` closure bundle directly into this tree with the deterministic
+smoke output-semantics metadata required by the ULG handoff tests. Use
+`ULG_PROJECTS_ROOT=/path/to/projects` when the sibling repos are not under
+`/home/cos/projects`. Use `--created-at <iso-timestamp>` or
+`ULG_STAGE_CREATED_AT=<iso-timestamp>` with an Eshkol helper that supports
+`--created-at` when byte-stable artifact and manifest timestamps are needed.
+
+For manual Eshkol ULG closure bundle exports, use the sibling repo helper:
 
 ```bash
 cd /home/cos/projects/eshkol
 scripts/export_ulg_closure_bundle.py examples/hello.esk \
   --eshkol-run build/eshkol-run \
   --output-dir build/ulg/manual-deploy-smoke \
-  --name hello
+  --name hello \
+  --created-at 2026-06-06T12:34:56Z \
+  --validation-json '{"status":"pass","validationMode":"eshkol-static-closure-smoke","outputSemantics":{"schema":"eshkol.ulg.closure-output-semantics.v0","semanticScope":"smoke-fixture","scientificScope":"none","scientificValidation":false,"entryExport":"main","entryArgs":[0,0],"expectedEntryResult":0,"stdout":{"encoding":"utf-8","expectedText":"1048560\n1048544\n","sha256":"sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d","byteLength":16}}}'
 ```
 
 Then copy the files listed in `ulg_bundle_manifest.json` into:

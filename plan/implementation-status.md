@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 04:30:51 AKDT
+Updated: 2026-06-06 04:44:06 AKDT
 
 ## Done
 
@@ -165,6 +165,13 @@ Updated: 2026-06-06 04:30:51 AKDT
   `handoff-ready` with `2/2` required handoffs ready and
   `scientific-tolerance-suite-ready`. The remaining scientific blocker is
   `proxy-runtime-not-scientific`.
+- Added `npm run stage:service-assets` to refresh ignored MoonLab and Eshkol
+  browser assets from sibling repos. The command copies MoonLab JS/WASM plus the
+  reduced reference contracts and regenerates the Eshkol `hello` closure bundle
+  with deterministic smoke output-semantics metadata.
+- Added optional `--created-at` / `ULG_STAGE_CREATED_AT` pass-through for Eshkol
+  bundle exports when byte-stable closure artifact and manifest timestamps are
+  needed.
 
 ## In Progress
 
@@ -174,6 +181,8 @@ Updated: 2026-06-06 04:30:51 AKDT
   count all four calibrated families ready, and full scientific readiness is
   blocked only by proxy-only runtime evidence rather than missing handoff or
   tolerance contracts.
+- Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
+  ignored live asset tree does not drift from sibling source outputs.
 
 ## Next
 

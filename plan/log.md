@@ -1788,3 +1788,82 @@ Failures and open questions:
 - `public/service-assets/**` remains ignored by design, so the staged ULG
   service assets are manual-deploy state rather than committed source files.
 - No push was attempted.
+
+## 2026-06-06 04:37:35 AKDT - Reproducible local service-asset staging
+
+Prompt:
+
+- Continue advancing the ULG implementation plan while keeping commits local.
+
+Actions:
+
+- Added `scripts/stage-service-assets.mjs` and the package script
+  `npm run stage:service-assets`.
+- Added optional `--created-at` / `ULG_STAGE_CREATED_AT` pass-through so ULG can
+  use Eshkol's reproducible timestamp support without requiring that option on
+  older helper versions.
+- The staging command copies MoonLab `moonlab.js`, `moonlab.wasm`, and
+  `references/magnetar-calibrated-reference-contracts.json` from the sibling
+  MoonLab repo into ULG's ignored `public/service-assets/moonlab/` tree.
+- The staging command regenerates the Eshkol `hello` closure bundle directly
+  into ULG's ignored `public/service-assets/eshkol/closures/hello/` tree with
+  deterministic smoke output-semantics validation metadata.
+- Updated README and service-asset docs to prefer the package script while
+  keeping manual Eshkol helper commands documented.
+
+Files touched:
+
+- `/home/cos/projects/ulg/scripts/stage-service-assets.mjs`
+- `/home/cos/projects/ulg/package.json`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/public/service-assets/README.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+node --check scripts/stage-service-assets.mjs
+npm run stage:service-assets -- --dry-run --json
+node -e "JSON.parse(require('node:fs').readFileSync('package.json','utf8'))"
+npm run stage:service-assets
+npm run stage:service-assets -- --dry-run --created-at 2026-06-06T12:34:56Z --json
+npm run stage:service-assets -- --eshkol-only --created-at 2026-06-06T12:34:56Z
+npm test
+npm run build
+npm run test:e2e
+```
+
+Test results:
+
+- PASS: staging script syntax check completed.
+- PASS: dry-run staging plan reported MoonLab JS/WASM/reference contracts and
+  the Eshkol hello closure export command.
+- PASS: package JSON parsed successfully. A prior `node --check package.json`
+  command failed because `--check` validates JavaScript, not JSON.
+- PASS: `npm run stage:service-assets` copied MoonLab assets and regenerated the
+  Eshkol `hello` closure bundle. The regenerated closure artifact reports
+  `validationMode = "eshkol-static-closure-smoke"`,
+  `outputSemantics.schema = "eshkol.ulg.closure-output-semantics.v0"`, and
+  WASM byte length `33907`.
+- PASS: fixed-timestamp dry-run included
+  `--created-at 2026-06-06T12:34:56Z` in the Eshkol export command, and
+  `--eshkol-only --created-at 2026-06-06T12:34:56Z` regenerated the ignored
+  bundle with matching artifact/manifest timestamps.
+- PASS: `npm test` passed `17/17`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: post-staging live VPN probe still reported ULG handoff artifacts for
+  MoonLab (`outputReferenceReadyCount = 5`,
+  `magnetarCalibratedReferenceReadyCount = 4`) and Eshkol
+  (`closureReady = true`, `wasmByteLength = 33907`), PeerCompute
+  `handoff-ready`, `scientific-tolerance-suite-ready`, five SHA-256 runtime
+  evidence hashes, and the expected blocker `proxy-runtime-not-scientific`.
+
+Failures and open questions:
+
+- The staged files remain ignored under `public/service-assets/**`; the package
+  script makes them reproducible but does not make them committed source.
+- No push was attempted.

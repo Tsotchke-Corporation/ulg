@@ -25,6 +25,10 @@ four-family ready calibrated-reference summaries.
   responses.
 - Service asset probes report a missing optional MoonLab reference-contract JSON
   without changing required loader/WASM readiness.
+- `npm run stage:service-assets -- --dry-run --json` reports the MoonLab and
+  Eshkol source/target plan without mutating the ignored service-asset tree.
+- `npm run stage:service-assets -- --eshkol-only --created-at ...` forwards a
+  fixed timestamp to Eshkol helpers that support reproducible bundle metadata.
 - MoonLab service asset specs include the classic core probe worker URL and the
   manifest builder approves it for child-worker leasing.
 - Registry resolution, child-worker lease limits, artifact cache behavior,
@@ -138,6 +142,11 @@ reference-contract asset support.
   evidence entries with five SHA-256 evidence hashes, five proxy-validation
   passes, `observedCount = 5`, `proxyOnlyCount = 5`, `validatedCount = 0`, and
   the remaining blocker `proxy-runtime-not-scientific`.
+- Service-asset staging command check on 2026-06-06:
+  `npm run stage:service-assets` copied MoonLab `moonlab.js`, `moonlab.wasm`,
+  and `magnetar-reference-contracts.json`, regenerated the Eshkol `hello`
+  closure bundle with `eshkol.ulg.closure-output-semantics.v0`, and
+  `npm run test:e2e` stayed green afterward.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

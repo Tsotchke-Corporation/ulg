@@ -36,10 +36,15 @@ manifests and task capsules in `ulg-gpu-abi/examples/`.
 
 ## Service Assets
 
-Vite serves `public/service-assets/` at `/service-assets/`. Copy browser-facing
-artifacts there when testing real services, for example
+Vite serves `public/service-assets/` at `/service-assets/`. Run
+`npm run stage:service-assets` to refresh the ignored browser-facing artifacts
+from the sibling MoonLab and Eshkol repos, or copy individual artifacts there
+when testing real services, for example
 `public/service-assets/moonlab/moonlab.js` and
-`public/service-assets/moonlab/moonlab.wasm`. The MoonLab manifest convention
+`public/service-assets/moonlab/moonlab.wasm`. Pass
+`--created-at <iso-timestamp>` to make the regenerated Eshkol closure artifact
+and bundle manifest timestamps byte-stable when the sibling Eshkol helper
+supports that option. The MoonLab manifest convention
 uses `entry.serviceAssets` plus `locateFile("moonlab.wasm")` so workers can
 probe loader/WASM fetchability and MIME readiness before running the supervised
 MoonLab core probe. The optional

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 15:02:07 AKDT
+Updated: 2026-06-06 15:07:49 AKDT
 
 ## Done
 
@@ -497,6 +497,10 @@ Updated: 2026-06-06 15:02:07 AKDT
   Artifact summaries now expose generic declared/blocked native operation lists
   and the UI/live-status script render `operationResults[]`, while compatibility
   fields for `hadamard` and `pauli_x` remain intact.
+- Integrated MoonLab's `pauli_z` native-operation probe sidecar commit
+  `e9bc324` into ULG staging, summaries, UI, handoffs, and live status. ULG now
+  requires `hadamard`, `pauli_x`, and `pauli_z` native probes to remain
+  declared but unexecuted/uncovered unless real browser WebGPU evidence exists.
 
 ## In Progress
 
@@ -525,8 +529,8 @@ Updated: 2026-06-06 15:02:07 AKDT
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
 - Complete real MoonLab browser WebGPU quantum-response kernels beyond the
-  declared `compute_probabilities` probe, especially hadamard, pauli_x, pauli_z,
-  and cnot coverage, so the reduced
+  declared `compute_probabilities` probe, especially hadamard, pauli_x,
+  pauli_z, and cnot coverage, so the reduced
   `moonlab.webgpu.complex64-parity-scope.v0` evidence can become an executed
   browser comparison.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor

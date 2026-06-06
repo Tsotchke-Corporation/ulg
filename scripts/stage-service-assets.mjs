@@ -228,7 +228,7 @@ function stageMoonLabWebGpuParityScope() {
     const nativeOperationResults = Array.isArray(browserNativeOperationProbe.operationResults)
       ? browserNativeOperationProbe.operationResults
       : [];
-    for (const operation of ['hadamard', 'pauli_x']) {
+    for (const operation of ['hadamard', 'pauli_x', 'pauli_z']) {
       const result = nativeOperationResults.find((entry) => entry?.operation === operation);
       if (!result) {
         throw new Error(`MoonLab WebGPU native-operation probe is missing the ${operation} result`);

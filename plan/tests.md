@@ -882,3 +882,38 @@ reference-contract asset support.
 - Current live artifact path:
   `tests/demo.e2e.mjs` still expects the staged live MoonLab artifact to report
   the current two declared blocked native operations: `hadamard` and `pauli_x`.
+
+## 2026-06-06 MoonLab pauli_z Native Probe Handoff Checks
+
+- MoonLab sidecar validation:
+  sidecar verification reported MoonLab local commit `e9bc324` passed
+  `pnpm --dir bindings/javascript/packages/core build:ts`, focused
+  `webgpu-complex64-parity.test.ts` with `13/13`, CLI parity artifact
+  generation, `ulg-quantum-response-artifact.test.ts` with `14/14`,
+  `pnpm --dir bindings/javascript/packages/core build:wasm`, and
+  `git diff --check HEAD~1..HEAD`.
+- ULG staging:
+  `npm run stage:service-assets` passed after requiring `hadamard`, `pauli_x`,
+  and `pauli_z` in the MoonLab native-operation probe.
+- Staged MoonLab hashes:
+  parity-scope JSON
+  `5542be2ba09be9541666472a993c4c06e80ecb790cb57ec9cea3191aa3d02f27`,
+  browser loader
+  `4272298c649ad4141057cb7dc4ccc27dec5a8a79036ddf2a70a6dd76e84a7cfe`, and
+  WASM
+  `df924d4c907ace13caf58c6c15ba49bd97aadd351fce768bb936875d14475d78`.
+- ULG validations:
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check tests/demo.e2e.mjs`, `npm test`, `npm run build`, and
+  `npm run test:e2e` passed.
+- Live status:
+  `npm run status:live -- --bridge` reported
+  `nativeOperationDeclaredOperations = ["hadamard", "pauli_x", "pauli_z"]`,
+  `nativeOperationBlockedOperations = ["hadamard", "pauli_x", "pauli_z"]`,
+  Multiscale ack `handoff-ready`, blocker count `0`, and
+  `simulationStatus = scientific-ready`.
+- Multiscale handoff:
+  PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed with
+  `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
+  `handoff-ready`.

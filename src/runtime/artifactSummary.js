@@ -26,7 +26,11 @@ const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
   'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
   'full-physics-validation-not-run'
 ]);
-const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze(['hadamard', 'pauli_x']);
+const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
+  'hadamard',
+  'pauli_x',
+  'pauli_z'
+]);
 
 function inferArtifactKind(artifact = {}) {
   if (artifact.responseDescriptor || artifact.parity || artifact.calibrationArtifacts) return 'quantum-response';

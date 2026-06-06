@@ -442,6 +442,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
         covered: false,
         blocker: 'native-operation-probe-not-executed'
       });
+      expect(moonlabArtifact.webGpuParityScope.browserNativeOperationProbe.operationResults[2]).toMatchObject({
+        operation: 'pauli_z',
+        executed: false,
+        passed: false,
+        covered: false,
+        blocker: 'native-operation-probe-not-executed'
+      });
       expect(moonlabArtifact.webGpuParityScope.complex64Preflight.passed).toBe(true);
       expect(moonlabArtifact.webGpuParityScope.fullFidelityMagnetarSimulation).toBe(false);
       expect(moonlabArtifact.webGpuParityScope.fullPhysicsValidation).toBe(false);
@@ -535,15 +542,17 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeExecuted).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbePassed).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationCoveredOperations).toEqual([]);
-      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeOperationCount).toBe(2);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeOperationCount).toBe(3);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeCoveredOperationCount).toBe(0);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeDeclaredOperations).toEqual([
         'hadamard',
-        'pauli_x'
+        'pauli_x',
+        'pauli_z'
       ]);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeBlockedOperations).toEqual([
         'hadamard',
-        'pauli_x'
+        'pauli_x',
+        'pauli_z'
       ]);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuHadamardNativeOperationDeclared).toBe(true);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuHadamardNativeOperationExecuted).toBe(false);
@@ -603,6 +612,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuNativeOperationProbeDeclared).toBe(true);
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuHadamardNativeOperationCovered).toBe(false);
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuPauliXNativeOperationCovered).toBe(false);
+      expect(moonlabHandoff.artifactSummary.moonlabWebGpuNativeOperationProbeBlockedOperations).toContain('pauli_z');
       expect(moonlabHandoff.artifact.webGpuParityScope.fullPhysicsValidation).toBe(false);
     }
     expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(5);

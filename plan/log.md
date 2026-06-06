@@ -3733,3 +3733,78 @@ Failures / open questions:
 - This ULG hardening does not create new MoonLab WebGPU execution evidence. It
   only keeps future declared operation blockers visible and strict.
 - No push was attempted.
+
+## 2026-06-06 15:07:49 AKDT - MoonLab pauli_z native probe handoff
+
+Prompt: Lorentz sidecar reported MoonLab commit `e9bc324` adding the
+`pauli_z` WebGPU complex64 native-operation probe; continue integrating the
+finished sidecar work into ULG while commits remain local-only.
+
+Changes:
+
+- Rebuilt/staged MoonLab browser service assets from local MoonLab commit
+  `e9bc324`.
+- Updated ULG staging so the MoonLab native-operation probe must now include
+  `hadamard`, `pauli_x`, and `pauli_z`, all blocked/unexecuted/uncovered in the
+  current no-adapter environment.
+- Updated ULG artifact-summary readiness requirements to require the same three
+  blocked native operations.
+- Updated browser/e2e expectations, README, and plan entries to reflect
+  `pauli_z` as declared but not executed.
+
+Files touched:
+
+- `README.md`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check tests/demo.e2e.mjs`
+- `npm run stage:service-assets`
+- `sha256sum public/service-assets/moonlab/webgpu-complex64-parity-scope.json public/service-assets/moonlab/moonlab.js public/service-assets/moonlab/moonlab.wasm`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `npm --prefix demos/multiscale run test:ulg-handoff`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks passed for changed JavaScript test/runtime files.
+- PASS: `npm run stage:service-assets` generated MoonLab parity-scope JSON with
+  `hadamard`, `pauli_x`, and `pauli_z` all `executed = false`,
+  `covered = false`, and blocker `native-operation-probe-not-executed`.
+- PASS: staged parity-scope hash
+  `5542be2ba09be9541666472a993c4c06e80ecb790cb57ec9cea3191aa3d02f27`,
+  MoonLab loader hash
+  `4272298c649ad4141057cb7dc4ccc27dec5a8a79036ddf2a70a6dd76e84a7cfe`, and
+  MoonLab WASM hash
+  `df924d4c907ace13caf58c6c15ba49bd97aadd351fce768bb936875d14475d78`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live -- --bridge` reported
+  `nativeOperationDeclaredOperations = ["hadamard", "pauli_x", "pauli_z"]`,
+  `nativeOperationBlockedOperations = ["hadamard", "pauli_x", "pauli_z"]`,
+  Multiscale ack `handoff-ready`, blocker count `0`, and
+  `simulationStatus = scientific-ready`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff`
+  reported `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
+  `handoff-ready`.
+- PASS: `git diff --check` passed.
+
+Failures / open questions:
+
+- No browser WebGPU adapter executed any native operation in this environment.
+  `cnot` remains the next missing declared native-operation probe, and real
+  hardware WebGPU parity coverage remains blocked.
+- No push was attempted.

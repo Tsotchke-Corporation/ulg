@@ -2647,3 +2647,52 @@ Failures and open questions:
   it still does not execute the closure or validate descriptor table/runtime
   semantics.
 - No push was attempted.
+
+## 2026-06-06 09:04:47 AKDT - Descriptor-aware Eshkol adapter probes
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `7cae7660`, which adds descriptor-aware Eshkol
+  dispatch probes to the exported adapter path.
+- Descriptor-ready closures now bypass WASM byte and SHA requirements in the
+  PeerCompute transfer manifest when they remain content-addressed and
+  relay-safe.
+- `eshkol.ulg.closure.descriptor-bind` dispatch tasks now run a metadata-only
+  descriptor contract probe that checks tensor IDs, handoff binding fields,
+  interpolation table declarations, MoonLab reference-suite metadata, product
+  topology binding, and runtime non-execution guardrails without invoking
+  `WebAssembly.compile()` or `main`.
+- Closure-artifact ingest still compiles complete transferred WASM modules and
+  now records module metadata matches plus nested descriptor contract readiness.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the local commit and live probe evidence.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the dispatch adapter module, ULG manifest
+  adapter, and updated service-orchestration test file.
+- PASS: PeerCompute `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `17/17`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+- PASS: live VPN browser probe against ULG `5173` and Multiscale `5185`
+  returned `dispatch-adapters-ready` for the real ULG handoff with Eshkol
+  `moduleCompiled = true`, `importCount = 33`, `exportCount = 1`, and
+  descriptor contract status `descriptor-contract-ready`.
+- PASS: live VPN browser probe of a synthetic descriptor-only handoff returned
+  `eshkol.ulg.closure.descriptor-bind`, `hasTransferredWasmBytes = false`,
+  probe mode `descriptor-contract-metadata-only`, `moduleCompiled = false`,
+  tensor/table contract matches, MoonLab reference count `4`, runtime status
+  `declared-not-executed`, and no blockers.
+
+Failures and open questions:
+
+- Descriptor contract metadata is now checked in the adapter path, but table
+  computation and runtime execution semantics are still intentionally pending.
+- No push was attempted.

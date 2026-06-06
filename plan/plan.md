@@ -78,6 +78,8 @@ physics work:
   dispatch adapters through `runUlgDispatchServiceAdapterProbe()`.
 - [x] Add MoonLab payload and Eshkol WASM compile probes behind the dispatch
   adapter Worker contract.
+- [x] Add metadata-only Eshkol descriptor contract probes so descriptor-ready
+  closures can dispatch without requiring transferred WASM bytes.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
@@ -85,8 +87,8 @@ physics work:
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
-- [ ] Extend Eshkol descriptor probing from WASM compile/import-export checks to
-  descriptor-aware table/runtime probes once the closure runtime contract is ready.
+- [ ] Extend Eshkol descriptor probing from metadata-only contract checks to
+  table/runtime execution probes once the closure runtime contract is ready.
 
 ### Eshkol
 

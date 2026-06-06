@@ -255,6 +255,16 @@ reference-contract asset support.
   and Eshkol probe schema `peercompute.ulg.eshkol-dispatch-wasm-probe.v0` with
   `moduleCompiled = true`, `importCount = 33`, `exportCount = 1`,
   `hasEntryExport = true`, Eshkol `wasmByteLength = 53066`, and no blockers.
+- Live VPN descriptor-contract adapter check on 2026-06-06: after PeerCompute
+  commit `7cae7660`, the live ULG handoff still returned
+  `dispatch-adapters-ready` with Eshkol `moduleCompiled = true`,
+  `importCount = 33`, `exportCount = 1`, and descriptor contract status
+  `descriptor-contract-ready`. A synthetic descriptor-only handoff through the
+  same browser Worker API returned `eshkol.ulg.closure.descriptor-bind`,
+  `hasTransferredWasmBytes = false`, probe mode
+  `descriptor-contract-metadata-only`, `moduleCompiled = false`,
+  tensor/table contract matches, MoonLab reference count `4`, runtime status
+  `declared-not-executed`, and no blockers.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

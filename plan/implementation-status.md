@@ -441,6 +441,17 @@ Updated: 2026-06-06 13:54:22 AKDT
   with handler/runtime execution still false, MoonLab WebGPU probability-kernel
   probe declared but unexecuted, and the handoff packet preserved the same
   flags.
+- Integrated the PeerCompute production-handler boundary consumer sidecar
+  locally as commit `cd85fd9e`. Multiscale ingestion, dispatch-adapter probes,
+  supervisor summaries, and browser UI now surface Eshkol
+  `eshkol.ulg.production-handler-boundary.v0` while preserving
+  `handlerReady = false`, `runtimeExecution = false`,
+  `scientificValidation = false`, `fullPhysicsValidation = false`, and
+  `fullFidelityMagnetarSimulation = false`.
+- Re-ran PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff`
+  after `cd85fd9e`: ULG handoff was ready with blockers `0`, Multiscale was
+  `handoff-ready`, `simulationStatus = scientific-ready`, and
+  `magnetarVisible = true`.
 
 ## In Progress
 

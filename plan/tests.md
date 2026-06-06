@@ -671,3 +671,25 @@ reference-contract asset support.
   `moonlabWebGpuProbabilityKernelProbeDeclared = true` for
   `compute_probabilities` with `executed = false`, `passed = false`, and the
   native-operation-coverage blocker preserved.
+
+## 2026-06-06 PeerCompute Production Handler Boundary Consumer Checks
+
+- PeerCompute focused service orchestration:
+  sidecar verification reported
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js --test-name-pattern 'production handler boundary|descriptor-only Eshkol closures without WASM bytes'`
+  passed `26/26`.
+- PeerCompute focused Multiscale model:
+  sidecar verification reported
+  `node --test demos/multiscale/tests/multiscaleModel.test.mjs --test-name-pattern 'production handler boundary|descriptor-only Eshkol closure'`
+  passed `197/197`.
+- PeerCompute Multiscale build:
+  sidecar verification reported `npm --prefix demos/multiscale run build`
+  passed with the existing large-chunk warning.
+- PeerCompute diff/worktree:
+  sidecar verification reported `git diff --check` passed and the post-commit
+  PeerCompute worktree was clean at local commit `cd85fd9e`.
+- Coordinator live bridge:
+  `npm --prefix demos/multiscale run test:ulg-handoff` passed after
+  `cd85fd9e`, reporting ULG `handoff ready / blockers 0`, Multiscale
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, and `magnetarVisible = true`.

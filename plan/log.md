@@ -3351,3 +3351,42 @@ Notes:
   or MoonLab browser WebGPU parity kernel. It makes the next missing runtime
   boundaries explicit and handoff-safe.
 - No push was attempted.
+
+## 2026-06-06 14:17:00 AKDT - PeerCompute production-handler boundary consumer
+
+Changes:
+
+- Integrated PeerCompute sidecar commit `cd85fd9e` locally. The commit consumes
+  Eshkol `eshkol.ulg.production-handler-boundary.v0` metadata in
+  `ulgManifestAdapter`, dispatch-adapter probes, the ULG handoff service host,
+  Multiscale ingestion summaries, and the browser UI.
+- PeerCompute preserves the boundary as non-executable evidence:
+  `handlerReady = false`, `runtimeExecution = false`,
+  `scientificValidation = false`, `fullPhysicsValidation = false`, and
+  `fullFidelityMagnetarSimulation = false`.
+- The boundary is surfaced for operator visibility and overclaim blocking; it
+  does not relax PeerCompute's scientific runtime gate.
+
+Validation:
+
+- PASS: sidecar verification reported syntax checks passing for changed
+  PeerCompute source/tests.
+- PASS: sidecar verification reported
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js --test-name-pattern 'production handler boundary|descriptor-only Eshkol closures without WASM bytes'`
+  passed `26/26`.
+- PASS: sidecar verification reported
+  `node --test demos/multiscale/tests/multiscaleModel.test.mjs --test-name-pattern 'production handler boundary|descriptor-only Eshkol closure'`
+  passed `197/197`.
+- PASS: sidecar verification reported `npm --prefix demos/multiscale run build`
+  passed with the existing large-chunk warning.
+- PASS: sidecar verification reported `git diff --check` passed and
+  PeerCompute worktree was clean after local commit.
+- PASS: coordinator reran
+  `npm --prefix demos/multiscale run test:ulg-handoff`; output reported ULG
+  status `handoff ready / blockers 0`, Multiscale readiness
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  bridge ack `handoff-ready`, and `magnetarVisible = true`.
+
+Notes:
+
+- PeerCompute branch is local-ahead only; no push was attempted.

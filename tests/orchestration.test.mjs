@@ -148,6 +148,18 @@ function createMoonLabWebGpuParityScopeFixture() {
       tolerance: 0.00001,
       reason: 'browser WebGPU adapter unavailable'
     },
+    browserKernelProbe: {
+      schema: 'moonlab.webgpu.complex64-probability-kernel-probe.v0',
+      probeKind: 'browser-webgpu-complex64-probability-kernel',
+      kernel: 'compute_probabilities',
+      executed: false,
+      passed: false,
+      coveredNativeOperations: [],
+      fixtureResults: [],
+      maxProbabilityAbsDiff: null,
+      tolerance: 0.00001,
+      reason: 'browser WebGPU adapter unavailable'
+    },
     complex64Preflight: {
       mode: 'cpu-complex64-rounding-preflight',
       executed: true,
@@ -488,6 +500,40 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
             runtimeStatus: 'declared-not-executed',
             scientificValidation: false,
             fullPhysicsValidation: false
+          },
+          productionHandlerBoundary: {
+            schema: 'eshkol.ulg.production-handler-boundary.v0',
+            handlerId: 'eshkol:magnetar-closure:main:v0',
+            handlerKind: 'wasm-export-tensor-closure',
+            dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
+            status: 'declared-not-executed',
+            handlerReady: false,
+            runtimeExecution: false,
+            entryExport: 'main',
+            runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+            tensorMemoryModel: 'host-managed-linear-f64',
+            inputTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
+            outputTensorIds: ['magnetar-closure-update', 'closure-residual'],
+            moduleRef: {
+              source: 'artifact.execution.module',
+              contentAddressing: 'required',
+              sha256Field: 'artifact.execution.module.sha256'
+            },
+            hostImports: {
+              source: 'bundle.hostImports',
+              required: true,
+              factory: 'createEshkolHostImportObject'
+            },
+            allowedExecutionClaims: ['metadata-and-smoke-output-only'],
+            blockers: [
+              'production-magnetar-handler-not-implemented',
+              'wasm-tensor-memory-binding-not-executed',
+              'full-physics-validation-not-run'
+            ],
+            derivativeStatus: 'declared-not-computed',
+            scientificValidation: false,
+            fullPhysicsValidation: false,
+            fullFidelityMagnetarSimulation: false
           }
         },
         nextContractFields: [
@@ -576,6 +622,29 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureTensorRuntimeSampleShapeValidatedSampleCount, 4);
   assert.equal(summary.closureTensorRuntimeScientificValidation, false);
   assert.equal(summary.closureTensorRuntimeFullPhysicsValidation, false);
+  assert.equal(summary.closureProductionHandlerBoundarySchema, 'eshkol.ulg.production-handler-boundary.v0');
+  assert.equal(summary.closureProductionHandlerBoundaryStatus, 'declared-not-executed');
+  assert.equal(summary.closureProductionHandlerBoundaryDeclared, true);
+  assert.equal(summary.closureProductionHandlerBoundaryHandlerId, 'eshkol:magnetar-closure:main:v0');
+  assert.equal(summary.closureProductionHandlerBoundaryHandlerKind, 'wasm-export-tensor-closure');
+  assert.equal(summary.closureProductionHandlerBoundaryDispatchSchema, 'peercompute.ulg.dispatch-service-handler-context.v0');
+  assert.equal(summary.closureProductionHandlerReady, false);
+  assert.equal(summary.closureProductionHandlerRuntimeExecution, false);
+  assert.equal(summary.closureProductionHandlerEntryExport, 'main');
+  assert.equal(summary.closureProductionHandlerRuntimeAbi, 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
+  assert.equal(summary.closureProductionHandlerTensorMemoryModel, 'host-managed-linear-f64');
+  assert.deepEqual(summary.closureProductionHandlerInputTensorIds, ['magnetar-state-vector', 'closure-control-vector']);
+  assert.deepEqual(summary.closureProductionHandlerOutputTensorIds, ['magnetar-closure-update', 'closure-residual']);
+  assert.equal(summary.closureProductionHandlerDerivativeStatus, 'declared-not-computed');
+  assert.equal(summary.closureProductionHandlerScientificValidation, false);
+  assert.equal(summary.closureProductionHandlerFullPhysicsValidation, false);
+  assert.equal(summary.closureProductionHandlerFullFidelityMagnetarSimulation, false);
+  assert.deepEqual(summary.closureProductionHandlerAllowedExecutionClaims, ['metadata-and-smoke-output-only']);
+  assert.deepEqual(summary.closureProductionHandlerBoundaryBlockers, [
+    'production-magnetar-handler-not-implemented',
+    'wasm-tensor-memory-binding-not-executed',
+    'full-physics-validation-not-run'
+  ]);
   assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
   assert.equal(summary.closureOutputSemanticsReady, true);
   assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');
@@ -664,6 +733,15 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.moonlabWebGpuParityPassed, false);
   assert.equal(summary.moonlabWebGpuParityMaxProbabilityAbsDiff, null);
   assert.equal(summary.moonlabWebGpuParityTolerance, 0.00001);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelProbeSchema, 'moonlab.webgpu.complex64-probability-kernel-probe.v0');
+  assert.equal(summary.moonlabWebGpuProbabilityKernelProbeDeclared, true);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelProbeKind, 'browser-webgpu-complex64-probability-kernel');
+  assert.equal(summary.moonlabWebGpuProbabilityKernel, 'compute_probabilities');
+  assert.equal(summary.moonlabWebGpuProbabilityKernelExecuted, false);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelPassed, false);
+  assert.deepEqual(summary.moonlabWebGpuProbabilityKernelCoveredNativeOperations, []);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelMaxProbabilityAbsDiff, null);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelTolerance, 0.00001);
   assert.equal(summary.moonlabComplex64PreflightPassed, true);
   assert.equal(summary.moonlabComplex64PreflightMaxProbabilityAbsDiff, 2.980232227667301e-8);
   assert.equal(summary.moonlabComplex64PreflightTolerance, 0.00001);

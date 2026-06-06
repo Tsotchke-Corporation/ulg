@@ -291,6 +291,9 @@ function renderArtifactSummaryLine(summary) {
   if (summary.moonlabWebGpuParityScopeReady) {
     parts.push(`webgpu:${summary.moonlabWebGpuParityScopeBackendAvailable ? 'backend' : 'no-backend'}`);
   }
+  if (summary.moonlabWebGpuProbabilityKernelProbeDeclared) {
+    parts.push(`wgsl:${summary.moonlabWebGpuProbabilityKernel || 'probe'}-declared`);
+  }
   if (summary.magnetarDipoleIsingReady) {
     parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);
   }
@@ -320,6 +323,11 @@ function renderArtifactSummaryLine(summary) {
   }
   if (summary.closureDescriptorReady) {
     parts.push(`descriptor:${summary.closureDescriptorRole || 'ready'}`);
+  }
+  if (summary.closureProductionHandlerBoundaryDeclared) {
+    parts.push('handler:declared-not-executed');
+  } else if (summary.closureProductionHandlerBoundarySchema) {
+    parts.push(`handler:${summary.closureProductionHandlerBoundaryStatus || 'not-ready'}`);
   }
   return parts.length ? `<br>${parts.join(' / ')}` : '';
 }

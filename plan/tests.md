@@ -632,3 +632,42 @@ reference-contract asset support.
   started the Go relay on a dynamic localhost port, wrote Hyperborea relay
   config, connected headless browser peers, disconnected cleanly, and printed
   `Runtime P2P tests passed`.
+
+## 2026-06-06 Eshkol Handler Boundary and MoonLab Probe Checks
+
+- ULG syntax:
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check src/runtime/artifactSummary.js`, `node --check src/main.js`,
+  `node --check tests/orchestration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- MoonLab WASM rebuild:
+  `pnpm build:wasm` in
+  `/home/cos/projects/moonlab/bindings/javascript/packages/core` recreated
+  `dist/moonlab.js` and `dist/moonlab.wasm` after MoonLab's TypeScript build
+  cleaned the browser loader.
+- ULG staging:
+  `npm run stage:service-assets` passed after stricter validation for Eshkol
+  `eshkol.ulg.production-handler-boundary.v0` metadata and MoonLab
+  `moonlab.webgpu.complex64-probability-kernel-probe.v0` metadata.
+- Staged artifact hashes:
+  MoonLab parity scope
+  `27b87fcdbd13574df63d83d4fe6aac5a31a740a0f77879c3e70a1a097c27c0bb`,
+  MoonLab reference suite
+  `7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
+  Eshkol WASM
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`,
+  and Eshkol artifact JSON
+  `9532159bae058a193fc982113cca781e82182740e82e3f0b5ddbafe8b346b4c1`.
+- ULG regression:
+  `npm test` passed `20/20`, `npm run build` passed with the existing
+  large-chunk warning, and `npm run test:e2e` passed `1/1`.
+- Live listener check:
+  `ss -ltnp 'sport = :5173'` and `ss -ltnp 'sport = :5185'` showed the ULG and
+  PeerCompute Multiscale Vite servers bound to `0.0.0.0`.
+- Live ULG runtime:
+  Playwright against `http://100.86.83.35:5173/` reported two handoff
+  artifacts, Eshkol `closureProductionHandlerBoundaryDeclared = true` with
+  `handlerReady = false` and `runtimeExecution = false`, and MoonLab
+  `moonlabWebGpuProbabilityKernelProbeDeclared = true` for
+  `compute_probabilities` with `executed = false`, `passed = false`, and the
+  native-operation-coverage blocker preserved.

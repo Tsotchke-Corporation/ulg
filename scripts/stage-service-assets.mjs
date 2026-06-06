@@ -30,6 +30,8 @@ const moonlabWebGpuParityScopeTarget = path.join(moonlabTargetDir, 'webgpu-compl
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
+const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 
 function valueFor(name) {
   const index = args.indexOf(name);
@@ -192,8 +194,24 @@ function stageMoonLabWebGpuParityScope() {
     if (!blockers.includes('browser-webgpu-kernel-parity-not-executed')) {
       throw new Error('MoonLab WebGPU parity scope is missing the native kernel parity blocker');
     }
+    if (!blockers.includes('native-webgpu-operation-coverage-not-yet-recorded')) {
+      throw new Error('MoonLab WebGPU parity scope is missing the native operation coverage blocker');
+    }
     if (artifact.complex64Preflight?.passed !== true) {
       throw new Error('MoonLab WebGPU parity scope complex64 preflight did not pass');
+    }
+    const browserKernelProbe = artifact.browserKernelProbe;
+    if (browserKernelProbe?.schema !== 'moonlab.webgpu.complex64-probability-kernel-probe.v0'
+      || browserKernelProbe.probeKind !== 'browser-webgpu-complex64-probability-kernel'
+      || browserKernelProbe.kernel !== 'compute_probabilities') {
+      throw new Error('MoonLab WebGPU parity scope is missing the browser probability-kernel probe');
+    }
+    if (browserKernelProbe.executed !== false
+      || browserKernelProbe.passed !== false
+      || browserKernelProbe.maxProbabilityAbsDiff !== null
+      || !Array.isArray(browserKernelProbe.coveredNativeOperations)
+      || browserKernelProbe.coveredNativeOperations.length !== 0) {
+      throw new Error('MoonLab browser WebGPU kernel probe must remain declared but unexecuted in ULG staging');
     }
   }
 
@@ -311,6 +329,7 @@ function stageEshkolAssets() {
     const tensorRuntimeContract = descriptorBinding?.closureTensorRuntimeContract;
     const tensorRuntimeSampleShapeValidation = tensorRuntimeContract?.sampleShapeValidation;
     const tensorRuntimeInterpolationTable = tensorRuntimeContract?.interpolationTable;
+    const productionHandlerBoundary = descriptorBinding?.productionHandlerBoundary;
     if (tensorRuntimeContract?.schema !== 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0') {
       throw new Error('Eshkol staged magnetar descriptor is missing tensor runtime contract metadata');
     }
@@ -339,6 +358,53 @@ function stageEshkolAssets() {
       || tensorRuntimeSampleShapeValidation.validatedSampleCount !== interpolationTable?.sampleCount
       || tensorRuntimeSampleShapeValidation.scientificValidation !== false) {
       throw new Error('Eshkol staged tensor runtime sample-shape validation is not ready');
+    }
+    if (productionHandlerBoundary?.schema !== ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
+      || productionHandlerBoundary.dispatchSchema !== PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA) {
+      throw new Error('Eshkol staged magnetar descriptor is missing production handler boundary metadata');
+    }
+    if (productionHandlerBoundary.status !== 'declared-not-executed'
+      || productionHandlerBoundary.handlerReady !== false
+      || productionHandlerBoundary.runtimeExecution !== false
+      || productionHandlerBoundary.derivativeStatus !== 'declared-not-computed'
+      || productionHandlerBoundary.scientificValidation !== false
+      || productionHandlerBoundary.fullPhysicsValidation !== false
+      || productionHandlerBoundary.fullFidelityMagnetarSimulation !== false) {
+      throw new Error('Eshkol staged production handler boundary overstates runtime readiness or physics validation');
+    }
+    if (productionHandlerBoundary.entryExport !== artifact.validation?.closureDescriptor?.entryExport
+      || productionHandlerBoundary.runtimeAbi !== tensorRuntimeContract.runtimeAbi
+      || productionHandlerBoundary.tensorMemoryModel !== tensorRuntimeContract.tensorMemoryModel
+      || !arraysEqual(productionHandlerBoundary.inputTensorIds, tensorRuntimeContract.inputTensorIds)
+      || !arraysEqual(productionHandlerBoundary.outputTensorIds, tensorRuntimeContract.outputTensorIds)) {
+      throw new Error('Eshkol staged production handler boundary does not match tensor runtime contract');
+    }
+    if (productionHandlerBoundary.moduleRef?.source !== 'artifact.execution.module'
+      || productionHandlerBoundary.moduleRef?.contentAddressing !== 'required'
+      || productionHandlerBoundary.moduleRef?.sha256Field !== 'artifact.execution.module.sha256') {
+      throw new Error('Eshkol staged production handler boundary has invalid module reference metadata');
+    }
+    if (productionHandlerBoundary.hostImports?.required !== artifact.validity?.requiresHostImports
+      || productionHandlerBoundary.hostImports?.factory !== 'createEshkolHostImportObject') {
+      throw new Error('Eshkol staged production handler boundary has invalid host import metadata');
+    }
+    const allowedExecutionClaims = Array.isArray(productionHandlerBoundary.allowedExecutionClaims)
+      ? productionHandlerBoundary.allowedExecutionClaims
+      : [];
+    if (!allowedExecutionClaims.includes(tensorRuntimeContract.executionClaim)) {
+      throw new Error('Eshkol staged production handler boundary does not allow the tensor runtime execution claim');
+    }
+    const handlerBoundaryBlockers = Array.isArray(productionHandlerBoundary.blockers)
+      ? productionHandlerBoundary.blockers
+      : [];
+    for (const blocker of [
+      'production-magnetar-handler-not-implemented',
+      'wasm-tensor-memory-binding-not-executed',
+      'full-physics-validation-not-run'
+    ]) {
+      if (!handlerBoundaryBlockers.includes(blocker)) {
+        throw new Error(`Eshkol staged production handler boundary is missing blocker: ${blocker}`);
+      }
     }
     if (artifact.execution?.module?.url !== `${eshkolClosureBundleName}.wasm`) {
       throw new Error(`Eshkol staged artifact has unexpected module URL: ${artifact.execution?.module?.url || 'unknown'}`);

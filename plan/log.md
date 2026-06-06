@@ -3285,3 +3285,69 @@ Notes:
 - This is focused relay-backed browser P2P coverage, not yet a full distributed
   ULG/Multiscale service-room test.
 - No push was attempted.
+
+## 2026-06-06 14:10:52 AKDT - Eshkol handler boundary and MoonLab browser-kernel probe
+
+Changes:
+
+- Consumed Eshkol sidecar commit `f06973c`, which adds
+  `eshkol.ulg.production-handler-boundary.v0` metadata to the staged magnetar
+  closure descriptor fixture.
+- Added ULG staging guards for the production handler boundary so staged Eshkol
+  artifacts fail if they overclaim handler readiness, runtime execution,
+  derivative computation, scientific validation, full-physics validation, or
+  full-fidelity magnetar simulation.
+- Added compact artifact-summary and handoff fields for the Eshkol boundary:
+  handler id/kind, dispatch schema, status, handler/runtime flags, tensor ids,
+  allowed execution claims, derivative status, blockers, and validation flags.
+- Added an artifact-list marker for declared but unexecuted production handler
+  boundaries.
+- Consumed MoonLab sidecar commit `17765f4`, which adds a browser WebGPU
+  `compute_probabilities` probability-kernel probe under
+  `moonlab.webgpu.complex64-probability-kernel-probe.v0`.
+- Rebuilt MoonLab's browser loader/WASM with `pnpm build:wasm` because the
+  earlier MoonLab `build:ts` pass cleaned `dist/moonlab.js`.
+- Tightened ULG MoonLab parity-scope staging and summaries around the new probe:
+  ULG now records the declared probability kernel while preserving
+  `executed = false`, `passed = false`, empty native operation coverage, and the
+  `native-webgpu-operation-coverage-not-yet-recorded` blocker.
+
+Validation:
+
+- PASS: syntax checks for `scripts/stage-service-assets.mjs`,
+  `src/runtime/artifactSummary.js`, `src/main.js`,
+  `tests/orchestration.test.mjs`, and `tests/demo.e2e.mjs`.
+- PASS: `npm run stage:service-assets` generated/copied MoonLab assets,
+  normalized the canonical MoonLab reference suite, generated the WebGPU
+  parity-scope JSON, and exported the Eshkol magnetar closure bundle.
+- PASS: staged MoonLab parity-scope hash
+  `27b87fcdbd13574df63d83d4fe6aac5a31a740a0f77879c3e70a1a097c27c0bb`
+  includes the no-backend probability-kernel probe.
+- PASS: staged MoonLab reference suite stayed
+  `7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
+  staged Eshkol WASM stayed
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`,
+  and staged Eshkol artifact JSON hash became
+  `9532159bae058a193fc982113cca781e82182740e82e3f0b5ddbafe8b346b4c1`.
+- PASS: `npm test` passed `20/20`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `http://100.86.83.35:5173/` returned HTTP 200, with ULG still bound to
+  `0.0.0.0:5173`; PeerCompute Multiscale remained bound to `0.0.0.0:5185`.
+- PASS: live Playwright probe against `http://100.86.83.35:5173/` reported two
+  artifacts; Eshkol boundary declared with `handlerReady = false`,
+  `runtimeExecution = false`, `derivativeStatus = declared-not-computed`,
+  `fullPhysicsValidation = false`, and
+  `fullFidelityMagnetarSimulation = false`; MoonLab probability-kernel probe
+  declared for `compute_probabilities` with `executed = false`,
+  `passed = false`, and blockers
+  `browser-webgpu-adapter-unavailable`,
+  `native-webgpu-operation-coverage-not-yet-recorded`, and
+  `browser-webgpu-kernel-parity-not-executed`.
+
+Notes:
+
+- This checkpoint still does not execute the Eshkol magnetar production handler
+  or MoonLab browser WebGPU parity kernel. It makes the next missing runtime
+  boundaries explicit and handoff-safe.
+- No push was attempted.

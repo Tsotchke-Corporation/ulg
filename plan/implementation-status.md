@@ -422,6 +422,25 @@ Updated: 2026-06-06 13:54:22 AKDT
   `1e384104`. VPN coturn/backend dry-runs passed, and focused Hyperborea
   runtime P2P smoke started an isolated Go relay, connected headless browser
   peers, and exited with `Runtime P2P tests passed`.
+- Integrated Eshkol's production-handler boundary sidecar commit `f06973c` into
+  ULG staging, compact artifact summaries, browser handoff packets, and the
+  artifact list UI. ULG now reports
+  `closureProductionHandlerBoundaryDeclared = true` only when the boundary
+  remains explicitly non-executable: `handlerReady = false`,
+  `runtimeExecution = false`, `derivativeStatus = declared-not-computed`,
+  `scientificValidation = false`, `fullPhysicsValidation = false`, and
+  `fullFidelityMagnetarSimulation = false`.
+- Integrated MoonLab's browser WebGPU probability-kernel probe sidecar commit
+  `17765f4` into ULG staging and summaries. The staged parity-scope artifact now
+  exposes `moonlab.webgpu.complex64-probability-kernel-probe.v0` for
+  `compute_probabilities`, while ULG preserves
+  `executed = false`, `passed = false`, empty native operation coverage, and the
+  `native-webgpu-operation-coverage-not-yet-recorded` blocker.
+- Verified the live VPN ULG demo at `http://100.86.83.35:5173/` after the
+  boundary/probe checkpoint: two artifacts exported, Eshkol boundary declared
+  with handler/runtime execution still false, MoonLab WebGPU probability-kernel
+  probe declared but unexecuted, and the handoff packet preserved the same
+  flags.
 
 ## In Progress
 
@@ -447,8 +466,10 @@ Updated: 2026-06-06 13:54:22 AKDT
   validation artifacts.
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
-- Add real MoonLab browser WebGPU quantum-response kernels so the reduced
-  `moonlab.webgpu.complex64-parity-scope.v0` no-backend parity evidence can
-  become an executed browser comparison.
+- Complete real MoonLab browser WebGPU quantum-response kernels beyond the
+  declared `compute_probabilities` probe, especially hadamard, pauli_x, pauli_z,
+  and cnot coverage, so the reduced
+  `moonlab.webgpu.complex64-parity-scope.v0` evidence can become an executed
+  browser comparison.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

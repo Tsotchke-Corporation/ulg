@@ -13,10 +13,13 @@ Actions attempted:
 - Declared the default Eshkol `hello` closure bundle in the ULG demo runtime.
 - Copied the ignored local Eshkol smoke bundle into
   `public/service-assets/eshkol/closures/hello/` for live readiness probing.
+- Updated the supervised Eshkol worker to load the ready bundle artifact at init
+  time and return it for closure tasks instead of the dummy fallback.
 - Added unit coverage for Eshkol artifact JSON, WASM, schema snapshot, and
   bundle manifest URL probing.
 - Extended the browser smoke to verify the Eshkol service declares/probes its
-  bundle assets and reports the four expected asset kinds when ready.
+  bundle assets, reports the four expected asset kinds when ready, and returns
+  the staged `wasm-reference` closure artifact with validation status `pass`.
 - Updated service asset docs, implementation status, plan, and test notes.
 
 Files touched:
@@ -24,6 +27,7 @@ Files touched:
 - `ulg-gpu-abi/src/serviceContract.js`
 - `src/runtime/ServiceAssetProbe.js`
 - `src/runtime/demoRuntime.js`
+- `src/services/dummyService.worker.js`
 - `tests/service-assets.test.mjs`
 - `tests/demo.e2e.mjs`
 - `public/service-assets/README.md`
@@ -44,9 +48,13 @@ Commands planned/run:
 - `node --check ulg-gpu-abi/src/serviceContract.js`
 - `node --check src/runtime/ServiceAssetProbe.js`
 - `node --check src/runtime/demoRuntime.js`
+- `node --check src/services/dummyService.worker.js`
+- `node --check tests/demo.e2e.mjs`
+- `node --check tests/service-assets.test.mjs`
 - `npm test`
 - `npm run build`
 - `npm run test:e2e`
+- Live VPN artifact-cache probe against `http://100.86.83.35:5173/`
 - `git diff --check`
 
 Results:
@@ -60,6 +68,10 @@ Results:
   asset status `ready`, with the WASM module served as `application/wasm` and
   the artifact JSON, schema snapshot, and bundle manifest served as
   `application/json`.
+- PASS: live VPN artifact-cache probe reported Eshkol closure kind
+  `wasm-reference`, module URL `hello.wasm`, service-worker-safe execution,
+  validation status `pass`, artifact-summary validation status `pass`, and
+  bundle manifest `preserveRelativeUrls: true`.
 
 Failures / open questions:
 

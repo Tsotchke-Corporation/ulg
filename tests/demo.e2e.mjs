@@ -40,6 +40,19 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
 
   const moonlabArtifact = await readMoonLabArtifact(page);
   const moonlabTelemetryRecord = await readMoonLabArtifactTelemetryRecord(page);
+  const eshkolArtifact = await readServiceArtifact(page, 'eshkol');
+  const eshkolTelemetryRecord = await readServiceArtifactTelemetryRecord(page, 'eshkol');
+  if (eshkolAssetProbe.status === 'ready') {
+    expect(eshkolArtifact.closureKind).toBe('wasm-reference');
+    expect(eshkolArtifact.execution.module.url).toBe('hello.wasm');
+    expect(eshkolArtifact.execution.serviceWorkerSafe).toBe(true);
+    expect(eshkolArtifact.validation.status).toBe('pass');
+    expect(eshkolArtifact.validation.validationMode).toBe('eshkol-static-closure-bundle');
+    expect(eshkolArtifact.runtime.bundleManifest.preserveRelativeUrls).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
+    expect(eshkolTelemetryRecord.artifactSummary.artifactKind).toBe('closure');
+    expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('pass');
+  }
   if (moonlabAssetStatus === 'ready') {
     expect(moonlabArtifact.method).toBe('moonlab-wasm-bell-phi-plus-probe');
     expect(moonlabArtifact.runtime.coreProbe.status).toBe('ready');
@@ -126,26 +139,34 @@ async function consumeMoonLabFixturesInBrowserWorker(page) {
 }
 
 async function readMoonLabArtifact(page) {
+  return readServiceArtifact(page, 'moonlab');
+}
+
+async function readServiceArtifact(page, serviceId) {
   await page.waitForFunction(
-    () => window.__ulgDemo?.telemetry?.artifacts?.some((record) => record.ref.sourceService === 'moonlab'),
-    undefined,
+    (sourceService) => window.__ulgDemo?.telemetry?.artifacts?.some((record) => record.ref.sourceService === sourceService),
+    serviceId,
     { timeout: 8000 }
   );
-  return page.evaluate(async () => {
+  return page.evaluate(async (sourceService) => {
     const record = window.__ulgDemo.telemetry.artifacts.find((artifact) => (
-      artifact.ref.sourceService === 'moonlab'
+      artifact.ref.sourceService === sourceService
     ));
     return window.__ulgDemo.artifactCache.get(record.ref);
-  });
+  }, serviceId);
 }
 
 async function readMoonLabArtifactTelemetryRecord(page) {
+  return readServiceArtifactTelemetryRecord(page, 'moonlab');
+}
+
+async function readServiceArtifactTelemetryRecord(page, serviceId) {
   await page.waitForFunction(
-    () => window.__ulgDemo?.telemetry?.artifacts?.some((record) => record.ref.sourceService === 'moonlab'),
-    undefined,
+    (sourceService) => window.__ulgDemo?.telemetry?.artifacts?.some((record) => record.ref.sourceService === sourceService),
+    serviceId,
     { timeout: 8000 }
   );
-  return page.evaluate(() => window.__ulgDemo.telemetry.artifacts.find((artifact) => (
-    artifact.ref.sourceService === 'moonlab'
-  )));
+  return page.evaluate((sourceService) => window.__ulgDemo.telemetry.artifacts.find((artifact) => (
+    artifact.ref.sourceService === sourceService
+  )), serviceId);
 }

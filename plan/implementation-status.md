@@ -95,6 +95,9 @@ Updated: 2026-06-05 18:23:32 AKDT
   for bundles exported by `scripts/export_ulg_closure_bundle.py`. The current
   live demo can report the ignored local `hello` bundle as ready when copied
   under `public/service-assets/eshkol/closures/hello/`.
+- Updated the supervised Eshkol worker to return the staged closure bundle
+  artifact when the bundle is ready, with dummy closure output kept as the
+  missing-asset fallback.
 
 ## In Progress
 

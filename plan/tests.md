@@ -77,9 +77,16 @@ closure-bundle service asset probe.
   is copied under `public/service-assets/eshkol/closures/hello/`, Playwright
   verifies the Eshkol service asset probe sees artifact JSON, WASM, schema
   snapshot, and bundle manifest assets.
+- Eshkol closure artifact handoff check on 2026-06-05: Playwright verifies the
+  ready Eshkol service returns the staged `wasm-reference` closure artifact,
+  preserves `hello.wasm` as the relative module URL, marks it service-worker
+  safe, and exposes closure artifact-summary validation status `pass`.
 - Live VPN Eshkol bundle check on 2026-06-05: `http://100.86.83.35:5173/`
   reported Eshkol asset status `ready`, with `application/wasm` for the module
-  and `application/json` for the artifact, schema, and bundle manifest.
+  and `application/json` for the artifact, schema, and bundle manifest. A live
+  artifact-cache probe also reported closure kind `wasm-reference`, module URL
+  `hello.wasm`, validation status `pass`, and bundle manifest
+  `preserveRelativeUrls: true`.
 - Live artifact-cache check on 2026-06-05: `http://100.86.83.35:5173/`
   returned Bell parity `pass` plus magnetar calibration `pass`, ground state
   `000`, `maxEnergyDelta = 0`, and `calibrationArtifactCount = 1` from

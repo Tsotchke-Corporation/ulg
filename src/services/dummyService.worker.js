@@ -5,6 +5,9 @@ let manifest = null;
 let heartbeat = null;
 let assetProbe = null;
 let initPromise = null;
+let serviceBundleArtifact = null;
+let serviceBundleManifest = null;
+let serviceBundleStatus = 'skipped';
 const activeTasks = new Map();
 const pendingLeaseRequests = new Map();
 
@@ -50,8 +53,54 @@ async function initService(message) {
     fetchImpl: self.fetch?.bind(self),
     locationHref: self.location?.href
   });
+  await loadServiceBundleAssets();
   heartbeat = setInterval(sendHeartbeat, 500);
   self.postMessage({ type: 'ready', workerId, serviceId: manifest.serviceId, assetProbe });
+}
+
+async function loadServiceBundleAssets() {
+  const serviceAssets = manifest?.entry?.serviceAssets ?? {};
+  if (!serviceAssets.artifactModule || assetProbe?.status !== 'ready' || typeof self.fetch !== 'function') {
+    serviceBundleStatus = serviceAssets.artifactModule ? 'unavailable' : 'skipped';
+    return;
+  }
+  try {
+    const artifactUrl = new URL(serviceAssets.artifactModule, self.location?.href).href;
+    const artifactResponse = await self.fetch(artifactUrl, { cache: 'no-store' });
+    if (!artifactResponse.ok) {
+      serviceBundleStatus = 'missing-artifact';
+      return;
+    }
+    serviceBundleArtifact = await artifactResponse.json();
+    if (serviceAssets.bundleManifest) {
+      const manifestUrl = new URL(serviceAssets.bundleManifest, self.location?.href).href;
+      const manifestResponse = await self.fetch(manifestUrl, { cache: 'no-store' });
+      if (manifestResponse.ok) {
+        serviceBundleManifest = await manifestResponse.json();
+      }
+    }
+    serviceBundleStatus = 'ready';
+    assetProbe = {
+      ...assetProbe,
+      bundleArtifact: {
+        status: serviceBundleStatus,
+        artifactModule: serviceAssets.artifactModule,
+        bundleManifest: serviceAssets.bundleManifest ?? null,
+        closureId: serviceBundleArtifact.closureId ?? null,
+        closureKind: serviceBundleArtifact.closureKind ?? null,
+        moduleUrl: serviceBundleArtifact.execution?.module?.url ?? null
+      }
+    };
+  } catch (error) {
+    serviceBundleStatus = 'error';
+    assetProbe = {
+      ...assetProbe,
+      bundleArtifact: {
+        status: serviceBundleStatus,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
 }
 
 async function startTaskAfterInit(taskCapsule) {
@@ -214,7 +263,8 @@ function sendHeartbeat() {
       activeTasks: activeTasks.size,
       children: [...activeTasks.values()].reduce((total, task) => total + task.children.length, 0),
       memoryEstimateBytes: activeTasks.size * 1024 * 1024,
-      assetProbe
+      assetProbe,
+      serviceBundleStatus
     }
   });
 }
@@ -267,6 +317,29 @@ function createArtifact(task) {
         coreProbe
       },
       provenance: task.provenance
+    };
+  }
+  if (manifest.serviceId === 'eshkol' && serviceBundleArtifact) {
+    return {
+      ...serviceBundleArtifact,
+      sourceService: serviceBundleArtifact.sourceService || 'eshkol',
+      taskKind: task.taskKind,
+      inputHash: task.inputHash,
+      validation: {
+        ...(serviceBundleArtifact.validation || {}),
+        status: serviceBundleArtifact.validation?.status || 'pass',
+        validationMode: serviceBundleArtifact.validation?.validationMode || 'eshkol-static-closure-bundle'
+      },
+      runtime: {
+        assetProbe,
+        bundleManifest: serviceBundleManifest ? {
+          schema: serviceBundleManifest.schema || null,
+          copyFiles: serviceBundleManifest.manualDeploy?.copyFiles || [],
+          preserveRelativeUrls: serviceBundleManifest.manualDeploy?.preserveRelativeUrls === true
+        } : null
+      },
+      taskProvenance: task.provenance,
+      provenance: serviceBundleArtifact.provenance || task.provenance
     };
   }
   return {

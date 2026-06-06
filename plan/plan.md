@@ -32,6 +32,8 @@ physics work:
   without fetching full artifact bodies.
 - [x] Add an Eshkol closure-bundle service asset convention and browser probe for
   manually staged `scripts/export_ulg_closure_bundle.py` outputs.
+- [x] Return staged Eshkol closure bundle artifacts from the supervised service
+  worker when the bundle is ready.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

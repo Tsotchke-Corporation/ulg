@@ -327,6 +327,22 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     validation: {
       status: 'descriptor-only',
       validationMode: 'eshkol-static-magnetar-closure-descriptor',
+      outputSemantics: {
+        schema: 'eshkol.ulg.closure-output-semantics.v0',
+        semanticRole: 'expected-output-smoke',
+        semanticScope: 'smoke-fixture',
+        scientificScope: 'none',
+        entryExport: 'main',
+        entryArgs: [0, 0],
+        expectedEntryResult: 0,
+        stdout: {
+          encoding: 'utf-8',
+          expectedText: '1048560\n10485441048528\n',
+          sha256: 'sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768',
+          byteLength: 23
+        },
+        scientificValidation: false
+      },
       closureDescriptor: {
         schema: 'eshkol.ulg.magnetar-closure-descriptor.v0',
         descriptorRole: 'magnetar-closure-contract-seed',
@@ -412,8 +428,16 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     'moonlab:relativistic-correction-reference'
   ]);
   assert.equal(summary.closureInterpolationTableContentHash, 'sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
-  assert.equal(summary.closureOutputSemanticsSchema, null);
-  assert.equal(summary.closureOutputSemanticsReady, false);
+  assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
+  assert.equal(summary.closureOutputSemanticsReady, true);
+  assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');
+  assert.equal(summary.closureOutputScientificScope, 'none');
+  assert.equal(summary.closureOutputScientificValidation, false);
+  assert.equal(summary.closureOutputExpectedEntryExport, 'main');
+  assert.deepEqual(summary.closureOutputExpectedEntryArgs, [0, 0]);
+  assert.equal(summary.closureOutputExpectedEntryResult, 0);
+  assert.equal(summary.closureOutputExpectedStdoutSha256, 'sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768');
+  assert.equal(summary.closureOutputExpectedStdoutByteLength, 23);
   assert.equal(summary.closureReady, true);
 });
 

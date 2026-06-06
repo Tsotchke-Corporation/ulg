@@ -94,6 +94,9 @@ physics work:
 - [x] Surface the Eshkol magnetar descriptor's reduced interpolation-table
   fixture through ULG artifact summaries and PeerCompute adapter probes while
   keeping `scientificValidation = false`.
+- [x] Add guarded runtime-smoke output semantics to the default Eshkol magnetar
+  descriptor handoff and verify PeerCompute validates stdout without promoting
+  it to scientific execution.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,

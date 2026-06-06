@@ -322,7 +322,8 @@ reference-contract asset support.
   unit coverage verifies descriptor-only Eshkol artifacts expose
   `closureDescriptorReady = true`, schema
   `eshkol.ulg.magnetar-closure-descriptor.v0`, typed magnetar input/output ids,
-  fixture checksum `50`, and `closureOutputSemanticsReady = false` while still
+  fixture checksum `50`, and guarded smoke `closureOutputSemanticsReady = true`
+  while still
   staying service-worker-safe and dynamic-code-free.
 - Eshkol magnetar closure browser handoff check on 2026-06-06:
   `npm run stage:service-assets -- --eshkol-only`,
@@ -331,7 +332,7 @@ reference-contract asset support.
   `npm run test:e2e` passed after switching the ULG Eshkol service manifest to
   `magnetar-closure`. The live 5173 handoff exports
   `closureKind = "magnetar-closure-descriptor-fixture"`,
-  `closureDescriptorReady = true`, `closureOutputSemanticsReady = false`,
+  `closureDescriptorReady = true`, `closureOutputSemanticsReady = true`,
   `scientificValidation = false`, and `wasmByteLength = 53066`.
 - Eshkol magnetar interpolation-table fixture check on 2026-06-06:
   `npm run stage:service-assets -- --eshkol-only`, `npm test`,
@@ -343,6 +344,17 @@ reference-contract asset support.
   adapter probe returned `dispatch-adapters-ready`, `acceptedDispatchCount = 2`,
   Eshkol descriptor probe `ready = true`, table status `computed-fixture`,
   no blockers, and service-summary table sample count `4`.
+- Eshkol magnetar runtime-smoke check on 2026-06-06:
+  `npm run stage:service-assets -- --eshkol-only`, `npm test`,
+  `npm run build`, and `npm run test:e2e` passed after the default staged
+  magnetar descriptor gained `eshkol.ulg.closure-output-semantics.v0` for
+  `main(0, 0) -> 0`, stdout text `1048560\n10485441048528\n`, stdout hash
+  `sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768`,
+  byte length `23`, and `scientificValidation = false`. A live ULG `5173` to
+  Multiscale `5185` dispatch probe returned
+  `host-runtime-output-semantics-validated`, `entryInvoked = true`,
+  `mainInvoked = true`, `entryResult = 0`, no output-semantics blockers, and
+  `scientificExecution = false`.
 - Eshkol closure artifact handoff check on 2026-06-05: Playwright verifies the
   ready Eshkol service returns the staged `wasm-reference` closure artifact,
   preserves `hello.wasm` as the relative module URL, marks it service-worker

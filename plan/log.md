@@ -2886,3 +2886,37 @@ Notes:
 - This is deterministic fixture/table evidence for handoff plumbing, not a
   validated magnetar closure table.
 - No push was attempted.
+
+## 2026-06-06 - Eshkol magnetar runtime-smoke output semantics
+
+Changes:
+
+- Staged Eshkol's default `magnetar-closure` descriptor artifact with
+  `eshkol.ulg.closure-output-semantics.v0` smoke metadata.
+- Updated ULG unit and Playwright coverage so compact artifact summaries expose
+  `closureOutputSemanticsReady = true`, expected `main(0, 0) -> 0`, stdout hash
+  `sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768`,
+  stdout byte length `23`, and `scientificValidation = false`.
+
+Validation:
+
+- PASS: `node --check tests/orchestration.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `npm test` passed `19/19`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live ULG-to-PeerCompute probe from `5173` to
+  `https://127.0.0.1:5185/?scenario=magnetar` returned
+  `dispatch-adapters-ready`, blocker count `0`, accepted dispatch count `2`,
+  Eshkol probe status `pass`,
+  `host-runtime-output-semantics-validated`, `entryInvoked = true`,
+  `mainInvoked = true`, `entryResult = 0`, output preview
+  `1048560\n10485441048528\n`, stdout byte length `23`, observed stdout SHA-256
+  `sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768`,
+  no output-semantics blockers, and `scientificExecution = false`.
+
+Notes:
+
+- This is controlled runtime-smoke evidence for the browser host-import path,
+  not magnetar physics validation.
+- No push was attempted.

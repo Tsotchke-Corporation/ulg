@@ -82,6 +82,8 @@ physics work:
   closures can dispatch without requiring transferred WASM bytes.
 - [x] Add Eshkol host-runtime dry probes that instantiate complete descriptor
   WASM with inert imports while keeping `main` uninvoked.
+- [x] Add gated Eshkol smoke runtime execution behind explicit output-semantics
+  preflight without promoting descriptor handoffs to scientific execution.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
@@ -89,9 +91,9 @@ physics work:
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
-- [ ] Extend Eshkol descriptor probing from dry host-runtime readiness to table
-  computation and controlled runtime execution once the closure runtime contract
-  is ready.
+- [ ] Extend Eshkol descriptor probing from dry/smoke runtime readiness to table
+  computation and controlled magnetar closure execution once the runtime
+  contract is ready.
 
 ### Eshkol
 

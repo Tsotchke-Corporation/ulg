@@ -2740,3 +2740,52 @@ Failures and open questions:
   does not execute `main`, compute interpolation tables, or validate magnetar
   closure physics.
 - No push was attempted.
+
+## 2026-06-06 09:23:52 AKDT - Gated Eshkol smoke runtime execution
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `8259ecb6`, which adds a controlled Eshkol
+  host-runtime execution path behind explicit smoke output semantics.
+- The adapter now preflights `eshkol.ulg.closure-output-semantics.v0` before
+  invoking `main`, requiring smoke scope, non-scientific scope, entry args,
+  expected result/stdout expectations, no start section, service-worker safety,
+  no dynamic-code requirement, available entry export, and matching import/export
+  metadata.
+- Malformed output semantics block before `main` invocation and report
+  preflight blockers.
+- The live magnetar descriptor handoff remains dry-probe only; a synthetic
+  smoke-output-semantics handoff can execute `main`, validate the expected
+  result, and still report `scientificExecution = false`.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the local commit and live probe evidence.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the dispatch adapter module and updated
+  service-orchestration test file.
+- PASS: PeerCompute `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `20/20`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+- PASS: live VPN browser probe against ULG `5173` and Multiscale `5185`
+  confirmed the live magnetar descriptor handoff is `dispatch-adapters-ready`
+  with host-runtime dry probe ready, `hostRuntimeExecution = null`,
+  `mainInvoked = false`, and `scientificExecution = false`.
+- PASS: live VPN browser probe of a synthetic smoke-output-semantics handoff
+  returned `dispatch-adapters-ready`, host-runtime execution status
+  `host-runtime-output-semantics-validated`, `entryInvoked = true`,
+  `entryResult = 0`, output-semantics validation ready, and
+  `scientificExecution = false`.
+
+Failures and open questions:
+
+- This enables smoke execution only. Controlled magnetar table computation and
+  physics closure execution remain pending.
+- No push was attempted.

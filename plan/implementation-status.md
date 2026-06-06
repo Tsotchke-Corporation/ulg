@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 09:13:46 AKDT
+Updated: 2026-06-06 09:23:52 AKDT
 
 ## Done
 
@@ -244,6 +244,12 @@ Updated: 2026-06-06 09:13:46 AKDT
   `53066`-byte descriptor WASM module with inert host-import stubs, confirms the
   `main` export is available, records `30` function stubs plus memory/global/table
   stubs, and keeps `mainInvoked = false` and `scientificExecution = false`.
+- Added and committed PeerCompute gated Eshkol smoke runtime execution locally as
+  commit `8259ecb6`. The adapter now invokes `main` only after an explicit
+  `eshkol.ulg.closure-output-semantics.v0` smoke preflight passes; the live
+  magnetar descriptor handoff remains dry-only, while a browser smoke fixture
+  executes `main`, returns `0`, validates output semantics, and still reports
+  `scientificExecution = false`.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable

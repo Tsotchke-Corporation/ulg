@@ -272,6 +272,15 @@ reference-contract asset support.
   status `host-runtime-dry-probe-ready`, `instantiated = true`, `30` function
   stubs plus memory/global/table stubs, `stubCallCount = 0`,
   `mainInvoked = false`, `scientificExecution = false`, and no blockers.
+- Live VPN gated smoke-execution check on 2026-06-06: after PeerCompute commit
+  `8259ecb6`, the live magnetar descriptor handoff still returned
+  `dispatch-adapters-ready` with host-runtime dry probe ready and
+  `hostRuntimeExecution = null`, `mainInvoked = false`, and
+  `scientificExecution = false`. A synthetic smoke-output-semantics handoff
+  returned `dispatch-adapters-ready`, host-runtime execution status
+  `host-runtime-output-semantics-validated`, `entryInvoked = true`,
+  `entryResult = 0`, output-semantics validation ready, and
+  `scientificExecution = false`.
 - Live VPN Multiscale dispatch-plan API check on 2026-06-06: after PeerCompute
   commit `fa33b97f`, a browser probe waited for ULG
   `artifactCache.list().length >= 2`, exported

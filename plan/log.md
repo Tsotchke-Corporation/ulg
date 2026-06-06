@@ -2447,3 +2447,42 @@ Failures and open questions:
 - The browser API exposes planning only. Production service execution still
   needs real Eshkol/MoonLab adapters behind the supervisor.
 - No push was attempted.
+
+## 2026-06-06 08:18:23 AKDT - ULG digest-addressed artifact refs
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep live VPN demos inspectable,
+  and keep commits local only.
+
+Actions:
+
+- Hardened `src/runtime/ArtifactCache.js` so artifact refs use `sha256:` hashes
+  instead of short `ulg:` hashes.
+- Kept the existing Web Crypto path when `crypto.subtle` is available and added
+  a browser-safe deterministic SHA-256 fallback for the non-secure HTTP VPN demo
+  at `http://100.86.83.35:5173/`.
+- Updated the artifact-cache unit test to require `artifact://sha256:<64 hex>`
+  URIs and matching `artifactHash` values.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the digest-addressed handoff checkpoint.
+
+Validation:
+
+- PASS: ULG `npm test` passed `18/18`.
+- PASS: ULG `npm run build` completed with only the existing large-chunk
+  warning.
+- PASS: ULG `npm run test:e2e` passed `1/1`.
+- PASS: live VPN browser probe waited for ULG
+  `artifactCache.list().length >= 2`, exported a two-artifact ULG handoff with
+  both refs shaped as `artifact://sha256:<64 hex>`, and verified Multiscale's
+  dispatch plan stayed `dispatch-ready` with two ready dispatches,
+  `digestAddressed = true` for MoonLab and Eshkol, Eshkol WASM length `53066`,
+  and no blockers.
+- PASS: ULG `git diff --check`.
+
+Failures and open questions:
+
+- The SHA-256 refs harden local artifact addressing but do not by themselves add
+  remote relay storage or signature verification.
+- No push was attempted.

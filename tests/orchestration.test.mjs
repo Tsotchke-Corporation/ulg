@@ -225,7 +225,8 @@ test('artifact cache returns content-addressed refs', async () => {
     },
     value: 1
   });
-  assert.match(ref.uri, /^artifact:\/\/ulg:/);
+  assert.match(ref.uri, /^artifact:\/\/sha256:[0-9a-f]{64}$/);
+  assert.match(ref.artifactHash, /^sha256:[0-9a-f]{64}$/);
   assert.equal((await cache.get(ref)).value, 1);
   const summary = await cache.getSummary(ref);
   assert.equal(summary.schema, 'peercompute.ulg.artifact-summary.v0');

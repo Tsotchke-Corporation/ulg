@@ -238,6 +238,14 @@ reference-contract asset support.
   `moonlab.ulg.quantum-response.ingest` and
   `eshkol.ulg.closure-artifact.ingest`, Eshkol dispatch WASM byte length
   `53066`, and no dispatch blockers.
+- Live VPN digest-addressed artifact-ref check on 2026-06-06: after hardening
+  ULG `ArtifactCache`, `npm test` passed `18/18`, `npm run build` passed with
+  the existing large chunk warning, `npm run test:e2e` passed `1/1`, and a live
+  browser probe showed both exported handoff refs as
+  `artifact://sha256:<64 hex>` with matching `artifactHash` values. The
+  Multiscale dispatch plan stayed `dispatch-ready`, `dispatchCount = 2`,
+  `readyDispatchCount = 2`, and reported `digestAddressed = true` for both
+  MoonLab and Eshkol dispatches with no blockers.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

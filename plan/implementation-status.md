@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 08:12:39 AKDT
+Updated: 2026-06-06 08:18:23 AKDT
 
 ## Done
 
@@ -247,6 +247,10 @@ Updated: 2026-06-06 08:12:39 AKDT
   `serviceDispatchPlan`, and
   `window.__multiscaleDemo.createUlgHandoffServiceDispatchPlan()` exposes the
   derived MoonLab/Eshkol service tasks for live VPN inspection.
+- Hardened ULG artifact refs so `ArtifactCache` emits `sha256:` artifact URIs
+  even on the non-secure HTTP VPN demo where `crypto.subtle` is unavailable.
+  Live Multiscale dispatch plans now report `digestAddressed = true` for both
+  MoonLab and Eshkol refs.
 
 ## In Progress
 

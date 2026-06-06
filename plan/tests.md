@@ -209,6 +209,15 @@ reference-contract asset support.
   handoff task, emit `peercompute.ulg.handoff-service-result.v0`, and store the
   durable `peercompute.ulg.handoff-service-envelope.v0` artifact through the
   supervisor artifact cache.
+- PeerCompute envelope-backed service-dispatch check on 2026-06-06: after
+  commit `22feae0b`, `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `15/15`, proving
+  durable ULG handoff envelopes derive
+  `peercompute.ulg.handoff-service-dispatch-plan.v0`, map MoonLab and Eshkol
+  artifact refs to concrete service tasks, preserve relay-safe/content-addressed
+  refs and transferred Eshkol WASM metadata, optionally execute through an
+  injected service executor, and cache dispatch plan/result metadata beside the
+  durable envelope.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

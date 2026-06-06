@@ -2323,3 +2323,48 @@ Failures and open questions:
 - The host normalizes/stores durable envelopes. It does not yet launch real
   Eshkol or MoonLab worker services from those envelopes.
 - No push was attempted.
+
+## 2026-06-06 07:57:15 AKDT - PeerCompute handoff service dispatch plan
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keeping commits local only.
+
+Actions:
+
+- Added PeerCompute commit `22feae0b`, which introduces
+  `peercompute.ulg.handoff-service-dispatch-plan.v0`,
+  `peercompute.ulg.handoff-service-dispatch-result.v0`, and
+  `createUlgHandoffServiceDispatchPlan()`.
+- The durable envelope host now derives concrete dispatch tasks from each
+  envelope artifact ref. MoonLab `quantum-response` refs map to
+  `moonlab.ulg.quantum-response.ingest`; Eshkol closure refs map to
+  `eshkol.ulg.closure-artifact.ingest`, with descriptor-only refs reserved for
+  `eshkol.ulg.closure.descriptor-bind`.
+- Dispatch tasks preserve relay-safe/content-addressed refs, content hashes,
+  transferred Eshkol WASM byte length/SHA/transfer mode, closure descriptor
+  readiness, output-semantics readiness, and MoonLab calibration readiness.
+- `UlgHandoffServiceHost` now returns a dispatch plan on every result and can
+  explicitly execute dispatches through an injected `serviceExecutor`. The
+  default remains non-executing/deterministic.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` so the next target is real Eshkol/MoonLab worker execution
+  behind the dispatch plan.
+
+Validation:
+
+- PASS: PeerCompute syntax checks for the service host, service exports, package
+  exports, and service-orchestration test file.
+- PASS: PeerCompute focused ULG service-orchestration test command passed.
+- PASS: PeerCompute full `node --test
+  peercompute/tests/unit/serviceOrchestration.test.js` passed `15/15`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  only the existing large-chunk warning.
+- PASS: PeerCompute `git diff --check`.
+
+Failures and open questions:
+
+- The dispatch executor is still a local injected function in tests. The next
+  implementation step is to wire dispatches to actual registered Eshkol and
+  MoonLab service hosts or equivalent adapters.
+- No push was attempted.

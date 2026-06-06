@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 06:18:00 AKDT
+Updated: 2026-06-06 07:57:15 AKDT
 
 ## Done
 
@@ -229,14 +229,21 @@ Updated: 2026-06-06 06:18:00 AKDT
   `WorkerSupervisor`, accepts raw ULG demo handoff tasks, normalizes them to
   durable handoff envelopes, emits `peercompute.ulg.handoff-service-result.v0`,
   and stores the envelope artifact through the supervisor artifact cache.
+- Added and committed PeerCompute's first envelope-backed service dispatch plan
+  locally as commit `22feae0b`. Durable handoff envelopes now produce
+  `peercompute.ulg.handoff-service-dispatch-plan.v0`, map MoonLab
+  quantum-response refs to `moonlab.ulg.quantum-response.ingest`, map Eshkol
+  closure refs to `eshkol.ulg.closure-artifact.ingest` or descriptor-bind tasks,
+  and can optionally execute those dispatches through an injected service
+  executor while preserving relay-safe/content-addressed/WASM-transfer metadata.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
-- Extend the envelope-backed PeerCompute host from normalization/storage into
-  real Eshkol and MoonLab worker-service execution paths.
+- Extend the envelope-backed PeerCompute host from injected dispatch execution
+  into real Eshkol and MoonLab worker-service execution paths.
 
 ## Next
 

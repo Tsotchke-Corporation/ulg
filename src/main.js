@@ -291,6 +291,9 @@ function renderArtifactSummaryLine(summary) {
   if (summary.moonlabWebGpuHadamardNativeOperationDeclared) {
     parts.push(`native:hadamard-${summary.moonlabWebGpuHadamardNativeOperationCovered ? 'covered' : 'blocked'}`);
   }
+  if (summary.moonlabWebGpuPauliXNativeOperationDeclared) {
+    parts.push(`native:pauli_x-${summary.moonlabWebGpuPauliXNativeOperationCovered ? 'covered' : 'blocked'}`);
+  }
   if (summary.magnetarDipoleIsingReady) {
     parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);
   }

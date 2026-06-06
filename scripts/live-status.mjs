@@ -79,6 +79,10 @@ try {
         hadamardNativeOperationExecuted: moonlab?.moonlabWebGpuHadamardNativeOperationExecuted ?? null,
         hadamardNativeOperationCovered: moonlab?.moonlabWebGpuHadamardNativeOperationCovered ?? null,
         hadamardNativeOperationBlocker: moonlab?.moonlabWebGpuHadamardNativeOperationBlocker ?? null,
+        pauliXNativeOperationDeclared: moonlab?.moonlabWebGpuPauliXNativeOperationDeclared ?? null,
+        pauliXNativeOperationExecuted: moonlab?.moonlabWebGpuPauliXNativeOperationExecuted ?? null,
+        pauliXNativeOperationCovered: moonlab?.moonlabWebGpuPauliXNativeOperationCovered ?? null,
+        pauliXNativeOperationBlocker: moonlab?.moonlabWebGpuPauliXNativeOperationBlocker ?? null,
         magnetarReferenceReady: moonlab?.magnetarReferenceReady ?? null,
         magnetarCalibratedReferenceReadyCount: moonlab?.magnetarCalibratedReferenceReadyCount ?? null
       },
@@ -92,6 +96,14 @@ try {
           eshkol?.closureTensorLinearMemoryEntryExportConsumesOffsets ?? null,
         tensorLinearMemoryBaseOffset: eshkol?.closureTensorLinearMemoryBaseOffset ?? null,
         tensorLinearMemoryTotalByteLength: eshkol?.closureTensorLinearMemoryTotalByteLength ?? null,
+        tensorEntryExportOffsetProbeStatus:
+          eshkol?.closureTensorEntryExportOffsetProbeStatus ?? null,
+        tensorEntryExportOffsetProbeBlocker:
+          eshkol?.closureTensorEntryExportOffsetProbeBlocker ?? null,
+        tensorEntryExportChangedBytesInDeclaredTensorRange:
+          eshkol?.closureTensorEntryExportChangedBytesInDeclaredTensorRange ?? null,
+        tensorEntryExportObservedStdoutInvariantAcrossArgs:
+          eshkol?.closureTensorEntryExportObservedStdoutInvariantAcrossArgs ?? null,
         productionHandlerBoundaryDeclared: eshkol?.closureProductionHandlerBoundaryDeclared ?? null,
         productionHandlerReady: eshkol?.closureProductionHandlerReady ?? null,
         productionHandlerRuntimeExecution: eshkol?.closureProductionHandlerRuntimeExecution ?? null

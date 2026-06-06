@@ -177,6 +177,17 @@ function createMoonLabWebGpuParityScopeFixture() {
           tolerance: 0.00001,
           blocker: 'native-operation-probe-not-executed',
           reason: 'browser WebGPU adapter unavailable'
+        },
+        {
+          operation: 'pauli_x',
+          executed: false,
+          passed: false,
+          covered: false,
+          fixtureResults: [],
+          maxAmplitudeAbsDiff: null,
+          tolerance: 0.00001,
+          blocker: 'native-operation-probe-not-executed',
+          reason: 'browser WebGPU adapter unavailable'
         }
       ],
       maxAmplitudeAbsDiff: null,
@@ -598,11 +609,45 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                 outputInitialization: 'host-smoke-only-not-entry-export-produced',
                 scientificValidation: false
               },
+              entryExportOffsetProbe: {
+                schema: 'eshkol.ulg.tensor-entry-export-offset-probe.v0',
+                status: 'abi-blocked',
+                entryExport: 'main',
+                entrySignature: {
+                  parameters: ['i32', 'i32'],
+                  results: ['i32']
+                },
+                attemptedEntryArgs: [
+                  {
+                    label: 'zero-runtime-entry-args',
+                    args: [0, 0],
+                    expectedEntryResult: 0
+                  },
+                  {
+                    label: 'declared-input-byte-offsets',
+                    args: [131072, 131136],
+                    expectedEntryResult: 0
+                  }
+                ],
+                entryExportConsumesOffsets: false,
+                outputTensorsProducedByEntryExport: false,
+                changedBytesInDeclaredTensorRange: 0,
+                observedStdoutInvariantAcrossArgs: true,
+                runtimeScope: 'deterministic-host-runtime-smoke-stubs',
+                hostImportOptions: {
+                  factory: 'createEshkolHostImportObject',
+                  runtimeSmokeStubs: true,
+                  stubScope: 'deterministic-instantiation-only'
+                },
+                blocker: 'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets',
+                scientificValidation: false,
+                fullPhysicsValidation: false
+              },
               scientificValidation: false,
               fullPhysicsValidation: false,
               fullFidelityMagnetarSimulation: false
             },
-            contractHash: 'sha256:e1b4c9e5c8f71aa1fbe57042ce5b38f87f826290b29dd8af04f321b643449c55',
+            contractHash: 'sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f',
             runtimeStatus: 'declared-not-executed',
             scientificValidation: false,
             fullPhysicsValidation: false
@@ -635,6 +680,8 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               'production-magnetar-handler-not-implemented',
               'wasm-tensor-memory-binding-not-executed',
               'wasm-entry-export-does-not-consume-tensor-offsets',
+              'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
+              'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
               'full-physics-validation-not-run'
             ],
             tensorMemoryBinding: {
@@ -719,7 +766,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureTensorRuntimeContractId, 'eshkol:magnetar-closure-tensor-runtime-contract:v0');
   assert.equal(summary.closureTensorRuntimeContractStatus, 'declared-fixture-contract');
   assert.equal(summary.closureTensorRuntimeContractReady, true);
-  assert.equal(summary.closureTensorRuntimeContractHash, 'sha256:e1b4c9e5c8f71aa1fbe57042ce5b38f87f826290b29dd8af04f321b643449c55');
+  assert.equal(summary.closureTensorRuntimeContractHash, 'sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f');
   assert.equal(summary.closureTensorRuntimeRuntimeAbi, 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
   assert.equal(summary.closureTensorRuntimeExecutionClaim, 'metadata-and-smoke-output-only');
   assert.equal(summary.closureTensorRuntimeEntryExport, 'main');
@@ -776,6 +823,17 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureTensorLinearMemorySmokeBindingSchema, 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0');
   assert.equal(summary.closureTensorLinearMemorySmokeBindingStatus, 'host-layout-smoke-passed');
   assert.equal(summary.closureTensorLinearMemorySmokeBindingOutputInitialization, 'host-smoke-only-not-entry-export-produced');
+  assert.equal(summary.closureTensorEntryExportOffsetProbeSchema, 'eshkol.ulg.tensor-entry-export-offset-probe.v0');
+  assert.equal(summary.closureTensorEntryExportOffsetProbeStatus, 'abi-blocked');
+  assert.equal(summary.closureTensorEntryExportOffsetProbeEntryExport, 'main');
+  assert.equal(summary.closureTensorEntryExportConsumesOffsets, false);
+  assert.equal(summary.closureTensorEntryExportOutputTensorsProduced, false);
+  assert.equal(summary.closureTensorEntryExportChangedBytesInDeclaredTensorRange, 0);
+  assert.equal(summary.closureTensorEntryExportObservedStdoutInvariantAcrossArgs, true);
+  assert.equal(
+    summary.closureTensorEntryExportOffsetProbeBlocker,
+    'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets'
+  );
   assert.equal(summary.closureProductionHandlerBoundarySchema, 'eshkol.ulg.production-handler-boundary.v0');
   assert.equal(summary.closureProductionHandlerBoundaryStatus, 'declared-not-executed');
   assert.equal(summary.closureProductionHandlerBoundaryDeclared, true);
@@ -798,6 +856,8 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     'production-magnetar-handler-not-implemented',
     'wasm-tensor-memory-binding-not-executed',
     'wasm-entry-export-does-not-consume-tensor-offsets',
+    'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
+    'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
     'full-physics-validation-not-run'
   ]);
   assert.deepEqual(summary.closureProductionHandlerTensorMemoryBinding, {
@@ -909,18 +969,28 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.moonlabWebGpuNativeOperationProbeExecuted, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbePassed, false);
   assert.deepEqual(summary.moonlabWebGpuNativeOperationCoveredOperations, []);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationCount, 1);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationCount, 2);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeCoveredOperationCount, 0);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].operation, 'hadamard');
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].executed, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].passed, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].covered, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].blocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].operation, 'pauli_x');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].executed, false);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].passed, false);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].covered, false);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].blocker, 'native-operation-probe-not-executed');
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationDeclared, true);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationExecuted, false);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationPassed, false);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationCovered, false);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationBlocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationDeclared, true);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationExecuted, false);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationPassed, false);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationCovered, false);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationBlocker, 'native-operation-probe-not-executed');
   assert.equal(summary.moonlabComplex64PreflightPassed, true);
   assert.equal(summary.moonlabComplex64PreflightMaxProbabilityAbsDiff, 2.980232227667301e-8);
   assert.equal(summary.moonlabComplex64PreflightTolerance, 0.00001);

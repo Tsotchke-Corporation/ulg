@@ -478,6 +478,15 @@ Updated: 2026-06-06 13:54:22 AKDT
   imports the live ULG handoff via `postMessage`, and verifies handoff,
   service-envelope, relay-safe artifact, and dispatch-plan readiness without
   relaxing runtime or scientific gates.
+- Integrated MoonLab's `pauli_x` native-operation probe sidecar commit
+  `dc43106` into ULG staging, compact summaries, UI, handoffs, and live status.
+  ULG now reports both `hadamard` and `pauli_x` native probes as declared but
+  unexecuted/uncovered in the no-adapter environment.
+- Integrated Eshkol's tensor-offset ABI blocker sidecar commit `ad878d0`. ULG
+  now validates and summarizes `eshkol.ulg.tensor-entry-export-offset-probe.v0`:
+  `main(i32,i32)->i32` can be called with declared offsets, but stdout is
+  invariant and `changedBytesInDeclaredTensorRange = 0`, so tensor closure ABI
+  execution remains blocked.
 
 ## In Progress
 

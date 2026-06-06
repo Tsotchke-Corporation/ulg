@@ -71,6 +71,9 @@ physics work:
 - [x] Surface MoonLab's declared `hadamard` native WebGPU operation probe
   through ULG staging, summaries, UI, handoffs, and live status while preserving
   no-adapter/no-execution flags.
+- [x] Surface MoonLab's declared `pauli_x` native WebGPU operation probe through
+  ULG staging, summaries, UI, handoffs, and live status while preserving
+  no-adapter/no-execution flags.
 - [x] Add direct Multiscale launch status detail for scenario/readiness acks
   while preserving the `handoff ready / blockers 0` compatibility prefix.
 - [ ] Keep the dev server running for live inspection.
@@ -218,6 +221,8 @@ physics work:
   explicit no-backend state and declared `compute_probabilities` browser-kernel
   probe.
 - [x] Add a declared native WebGPU `hadamard` complex64 operation probe while
+  keeping coverage blocked until hardware execution evidence exists.
+- [x] Add a declared native WebGPU `pauli_x` complex64 operation probe while
   keeping coverage blocked until hardware execution evidence exists.
 
 ### Tooling

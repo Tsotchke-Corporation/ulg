@@ -3554,3 +3554,56 @@ Notes:
   `ULG_RELAY_HANDOFF_RUN_DISPATCH=1` for that path, but it currently destroys
   the popup execution context during `runUlgDispatchServiceAdapterProbe()`.
 - No push was attempted.
+
+## 2026-06-06 14:54:00 AKDT - MoonLab pauli_x native probe handoff
+
+Changes:
+
+- Integrated MoonLab sidecar commit `dc43106`. The staged MoonLab parity-scope
+  artifact now includes declared native WebGPU operation results for both
+  `hadamard` and `pauli_x`.
+- ULG staging rejects either native operation result if it claims execution,
+  pass, or coverage in the current no-adapter environment.
+- ULG artifact summaries, handoffs, artifact-list UI, and live-status output now
+  surface the `pauli_x` native-operation blocker alongside hadamard.
+
+Validation:
+
+- PASS: MoonLab browser loader/WASM rebuilt with `pnpm build:wasm`.
+- PASS: `npm run stage:service-assets` passed after generating the new MoonLab
+  WebGPU parity-scope asset.
+- PASS: staged MoonLab parity-scope hash
+  `61d04ad9eb66aa7804b64e063e7653acb76f4b0683a5035136ecff1e9d0d2bb2`.
+
+Notes:
+
+- `pauli_z` and `cnot` remain missing native-operation probes, and no browser
+  WebGPU adapter executed the declared probes in this environment.
+- No push was attempted.
+
+## 2026-06-06 14:58:00 AKDT - Eshkol tensor offset ABI blocker handoff
+
+Changes:
+
+- Integrated Eshkol sidecar commit `ad878d0`. The staged tensor linear-memory
+  binding now includes `eshkol.ulg.tensor-entry-export-offset-probe.v0`.
+- ULG staging now validates the exact ABI blocker: `main(i32,i32)->i32` accepts
+  declared tensor offsets `[131072, 131136]`, but stdout is invariant,
+  `entryExportConsumesOffsets = false`, `outputTensorsProducedByEntryExport =
+  false`, and `changedBytesInDeclaredTensorRange = 0`.
+- ULG artifact summaries, handoffs, and live-status output now surface the
+  offset-probe blocker alongside the linear-memory layout.
+
+Validation:
+
+- PASS: Eshkol sidecar verification reported fixture, host-import smoke,
+  closure artifact, closure bundle, ctest, and diff-check validations passing.
+- PASS: `npm run stage:service-assets` regenerated the Eshkol magnetar closure
+  artifact with tensor runtime contract hash
+  `sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f`.
+
+Notes:
+
+- The next real Eshkol step remains a tensor closure ABI export that explicitly
+  reads input offsets and writes output offsets.
+- No push was attempted.

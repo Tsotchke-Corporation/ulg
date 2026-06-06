@@ -791,3 +791,36 @@ reference-contract asset support.
   sidecar verification reported `git diff --check` passed, relay configs were
   preserved with no diff in `docs/multiscale/relay-config*.json`, and no
   test-owned `4196` server or relay process remained.
+
+## 2026-06-06 MoonLab pauli_x Native Probe Handoff Checks
+
+- MoonLab sidecar validation:
+  sidecar verification reported focused WebGPU parity tests passed `12/12`,
+  MoonLab unit tests passed `116/116`, `pnpm build:ts` passed with the existing
+  package export-order warning, CLI parity artifact generation passed, and
+  `git diff --check` passed.
+- MoonLab browser assets:
+  `pnpm build:wasm` in
+  `/home/cos/projects/moonlab/bindings/javascript/packages/core` rebuilt
+  `dist/moonlab.js` and `dist/moonlab.wasm`.
+- ULG staging:
+  `npm run stage:service-assets` passed with `hadamard` and `pauli_x` native
+  operation probes both declared but unexecuted/uncovered.
+- Staged MoonLab parity-scope hash:
+  `61d04ad9eb66aa7804b64e063e7653acb76f4b0683a5035136ecff1e9d0d2bb2`.
+
+## 2026-06-06 Eshkol Tensor Offset ABI Blocker Checks
+
+- Eshkol sidecar validation:
+  sidecar verification reported `ulg_magnetar_closure_fixture_test.py`,
+  `eshkol_host_imports_smoke_test.js`, `ulg_closure_artifact_test.py`, focused
+  `ctest`, and `git diff --check` all passed.
+- ULG staging:
+  `npm run stage:service-assets` regenerated the Eshkol magnetar artifact with
+  `eshkol.ulg.tensor-entry-export-offset-probe.v0` and tensor runtime contract
+  hash `sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f`.
+- Offset ABI blocker:
+  staged ULG artifact reports `entryExportConsumesOffsets = false`,
+  `outputTensorsProducedByEntryExport = false`,
+  `changedBytesInDeclaredTensorRange = 0`, and blocker
+  `main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets`.

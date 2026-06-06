@@ -7,6 +7,7 @@ export const ESHKOL_MAGNETAR_CLOSURE_DESCRIPTOR_SCHEMA = 'eshkol.ulg.magnetar-cl
 export const ESHKOL_MAGNETAR_CLOSURE_TENSOR_RUNTIME_CONTRACT_SCHEMA = 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0';
 export const ESHKOL_TENSOR_LINEAR_MEMORY_BINDING_SCHEMA = 'eshkol.ulg.tensor-linear-memory-binding.v0';
 export const ESHKOL_TENSOR_LINEAR_MEMORY_SMOKE_BINDING_SCHEMA = 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0';
+export const ESHKOL_TENSOR_ENTRY_EXPORT_OFFSET_PROBE_SCHEMA = 'eshkol.ulg.tensor-entry-export-offset-probe.v0';
 export const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 export const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
@@ -21,6 +22,8 @@ const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
   'production-magnetar-handler-not-implemented',
   'wasm-tensor-memory-binding-not-executed',
   'wasm-entry-export-does-not-consume-tensor-offsets',
+  'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
+  'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
   'full-physics-validation-not-run'
 ]);
 
@@ -249,6 +252,7 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureTensorLinearMemoryBinding = objectOrNull(closureTensorRuntimeContract?.linearMemoryBinding);
   const closureTensorLinearMemoryImport = objectOrNull(closureTensorLinearMemoryBinding?.memoryImport);
   const closureTensorLinearMemorySmokeBinding = objectOrNull(closureTensorLinearMemoryBinding?.smokeBinding);
+  const closureTensorEntryExportOffsetProbe = objectOrNull(closureTensorLinearMemoryBinding?.entryExportOffsetProbe);
   const closureProductionHandlerBoundary = objectOrNull(closureDescriptorBinding.productionHandlerBoundary);
   const closureProductionHandlerTensorMemoryBinding = objectOrNull(closureProductionHandlerBoundary?.tensorMemoryBinding);
   const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
@@ -298,6 +302,8 @@ export function summarizeUlgArtifact(artifact = {}) {
       : [];
   const moonlabWebGpuHadamardNativeOperationResult = moonlabWebGpuNativeOperationResults
     .find((entry) => entry.operation === 'hadamard') || null;
+  const moonlabWebGpuPauliXNativeOperationResult = moonlabWebGpuNativeOperationResults
+    .find((entry) => entry.operation === 'pauli_x') || null;
   const moonlabComplex64Preflight = objectOrNull(moonlabWebGpuParityScope?.complex64Preflight);
   const moonlabWebGpuParityFidelityRuntimeScope = objectOrNull(moonlabWebGpuParityScope?.fidelityRuntimeScope);
   const moonlabWebGpuProbabilityKernelProbeDeclared =
@@ -318,7 +324,11 @@ export function summarizeUlgArtifact(artifact = {}) {
     && moonlabWebGpuHadamardNativeOperationResult?.executed === false
     && moonlabWebGpuHadamardNativeOperationResult?.passed === false
     && moonlabWebGpuHadamardNativeOperationResult?.covered === false
-    && moonlabWebGpuHadamardNativeOperationResult?.blocker === 'native-operation-probe-not-executed';
+    && moonlabWebGpuHadamardNativeOperationResult?.blocker === 'native-operation-probe-not-executed'
+    && moonlabWebGpuPauliXNativeOperationResult?.executed === false
+    && moonlabWebGpuPauliXNativeOperationResult?.passed === false
+    && moonlabWebGpuPauliXNativeOperationResult?.covered === false
+    && moonlabWebGpuPauliXNativeOperationResult?.blocker === 'native-operation-probe-not-executed';
   const moonlabWebGpuParityScopeReady = moonlabWebGpuParityScope?.schema === MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA
     && moonlabWebGpuParityScope.contractReady === true
     && moonlabWebGpuParityScope.contractValidation?.valid === true
@@ -451,7 +461,18 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureTensorLinearMemorySmokeBinding.outputInitialization === 'host-smoke-only-not-entry-export-produced'
     && arraysEqual(closureTensorLinearMemorySmokeBinding.writeTensorIds, closureTensorRuntimeInputIds)
     && arraysEqual(closureTensorLinearMemorySmokeBinding.readbackTensorIds, closureTensorRuntimeInputIds)
-    && arraysEqual(closureTensorLinearMemorySmokeBinding.outputTensorIds, closureTensorRuntimeOutputIds);
+    && arraysEqual(closureTensorLinearMemorySmokeBinding.outputTensorIds, closureTensorRuntimeOutputIds)
+    && closureTensorEntryExportOffsetProbe?.schema === ESHKOL_TENSOR_ENTRY_EXPORT_OFFSET_PROBE_SCHEMA
+    && closureTensorEntryExportOffsetProbe.status === 'abi-blocked'
+    && closureTensorEntryExportOffsetProbe.entryExport === closureDescriptor?.entryExport
+    && closureTensorEntryExportOffsetProbe.entryExportConsumesOffsets === false
+    && closureTensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport === false
+    && finiteNumberOrNull(closureTensorEntryExportOffsetProbe.changedBytesInDeclaredTensorRange) === 0
+    && closureTensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs === true
+    && closureTensorEntryExportOffsetProbe.scientificValidation === false
+    && closureTensorEntryExportOffsetProbe.fullPhysicsValidation === false
+    && closureTensorEntryExportOffsetProbe.blocker
+      === 'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets';
   const closureProductionHandlerBoundaryDeclared =
     closureProductionHandlerBoundary?.schema === ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
     && textOrNull(closureProductionHandlerBoundary.handlerId) != null
@@ -630,6 +651,24 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureTensorLinearMemorySmokeBindingStatus: closureTensorLinearMemorySmokeBinding?.status || null,
     closureTensorLinearMemorySmokeBindingOutputInitialization:
       closureTensorLinearMemorySmokeBinding?.outputInitialization || null,
+    closureTensorEntryExportOffsetProbeSchema: closureTensorEntryExportOffsetProbe?.schema || null,
+    closureTensorEntryExportOffsetProbeStatus: closureTensorEntryExportOffsetProbe?.status || null,
+    closureTensorEntryExportOffsetProbeBlocker: closureTensorEntryExportOffsetProbe?.blocker || null,
+    closureTensorEntryExportOffsetProbeEntryExport: closureTensorEntryExportOffsetProbe?.entryExport || null,
+    closureTensorEntryExportConsumesOffsets:
+      typeof closureTensorEntryExportOffsetProbe?.entryExportConsumesOffsets === 'boolean'
+        ? closureTensorEntryExportOffsetProbe.entryExportConsumesOffsets
+        : null,
+    closureTensorEntryExportOutputTensorsProduced:
+      typeof closureTensorEntryExportOffsetProbe?.outputTensorsProducedByEntryExport === 'boolean'
+        ? closureTensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport
+        : null,
+    closureTensorEntryExportChangedBytesInDeclaredTensorRange:
+      finiteNumberOrNull(closureTensorEntryExportOffsetProbe?.changedBytesInDeclaredTensorRange),
+    closureTensorEntryExportObservedStdoutInvariantAcrossArgs:
+      typeof closureTensorEntryExportOffsetProbe?.observedStdoutInvariantAcrossArgs === 'boolean'
+        ? closureTensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs
+        : null,
     closureProductionHandlerBoundarySchema: closureProductionHandlerBoundary?.schema || null,
     closureProductionHandlerBoundaryStatus: closureProductionHandlerBoundary?.status || null,
     closureProductionHandlerBoundaryDeclared,
@@ -750,6 +789,16 @@ export function summarizeUlgArtifact(artifact = {}) {
       moonlabWebGpuHadamardNativeOperationResult?.covered ?? null,
     moonlabWebGpuHadamardNativeOperationBlocker:
       moonlabWebGpuHadamardNativeOperationResult?.blocker || null,
+    moonlabWebGpuPauliXNativeOperationDeclared:
+      moonlabWebGpuPauliXNativeOperationResult != null,
+    moonlabWebGpuPauliXNativeOperationExecuted:
+      moonlabWebGpuPauliXNativeOperationResult?.executed ?? null,
+    moonlabWebGpuPauliXNativeOperationPassed:
+      moonlabWebGpuPauliXNativeOperationResult?.passed ?? null,
+    moonlabWebGpuPauliXNativeOperationCovered:
+      moonlabWebGpuPauliXNativeOperationResult?.covered ?? null,
+    moonlabWebGpuPauliXNativeOperationBlocker:
+      moonlabWebGpuPauliXNativeOperationResult?.blocker || null,
     moonlabComplex64PreflightPassed:
       typeof moonlabComplex64Preflight?.passed === 'boolean' ? moonlabComplex64Preflight.passed : null,
     moonlabComplex64PreflightMaxProbabilityAbsDiff:

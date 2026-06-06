@@ -81,7 +81,7 @@ tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, 
 magnetar scientific simulation. The optional
 `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
 currently records MoonLab's declared browser WebGPU `compute_probabilities`
-probe and a declared native `hadamard` operation probe, but preserves
+probe plus declared native `hadamard` and `pauli_x` operation probes, but preserves
 `executed: false`, `passed: false`, empty native operation coverage, and
 blockers until the remaining WebGPU kernels are actually covered.
 
@@ -96,6 +96,8 @@ also carries `eshkol.ulg.production-handler-boundary.v0`, which identifies the
 intended PeerCompute handler boundary while keeping `handlerReady: false` and
 `runtimeExecution: false`. Its tensor-runtime contract now includes a concrete
 smoke-only f64 linear-memory layout at byte range `131072..131240`; the staged
-metadata explicitly says the `main` export does not consume those offsets. This
-advances the handoff beyond hello-only smoke while still making clear that the
-closure is a contract seed, not a validated magnetar physics result.
+metadata explicitly says the `main` export does not consume those offsets, and
+the offset probe records that calling `main` with declared input offsets changes
+zero bytes in the tensor range. This advances the handoff beyond hello-only
+smoke while still making clear that the closure is a contract seed, not a
+validated magnetar physics result.

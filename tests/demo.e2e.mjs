@@ -211,7 +211,16 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     ]);
     expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.status).toBe('host-layout-smoke-passed');
     expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.outputInitialization).toBe('host-smoke-only-not-entry-export-produced');
-    expect(tensorRuntimeContract.contractHash).toBe('sha256:e1b4c9e5c8f71aa1fbe57042ce5b38f87f826290b29dd8af04f321b643449c55');
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.schema).toBe('eshkol.ulg.tensor-entry-export-offset-probe.v0');
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.status).toBe('abi-blocked');
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.entryExportConsumesOffsets).toBe(false);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.outputTensorsProducedByEntryExport).toBe(false);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.changedBytesInDeclaredTensorRange).toBe(0);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.observedStdoutInvariantAcrossArgs).toBe(true);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.blocker).toBe(
+      'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets'
+    );
+    expect(tensorRuntimeContract.contractHash).toBe('sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f');
     expect(tensorRuntimeContract.scientificValidation).toBe(false);
     expect(tensorRuntimeContract.fullPhysicsValidation).toBe(false);
     const productionHandlerBoundary = descriptorBinding.productionHandlerBoundary;
@@ -242,6 +251,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'production-magnetar-handler-not-implemented',
       'wasm-tensor-memory-binding-not-executed',
       'wasm-entry-export-does-not-consume-tensor-offsets',
+      'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
+      'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
       'full-physics-validation-not-run'
     ]);
     expect(productionHandlerBoundary.tensorMemoryBinding).toMatchObject({
@@ -313,7 +324,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractSchema).toBe('eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractStatus).toBe('declared-fixture-contract');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractReady).toBe(true);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractHash).toBe('sha256:e1b4c9e5c8f71aa1fbe57042ce5b38f87f826290b29dd8af04f321b643449c55');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractHash).toBe('sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeRuntimeAbi).toBe('wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeExecutionClaim).toBe('metadata-and-smoke-output-only');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeSampleShapeValidationStatus).toBe('pass');
@@ -340,6 +351,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       131232
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemorySmokeBindingStatus).toBe('host-layout-smoke-passed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOffsetProbeStatus).toBe('abi-blocked');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportConsumesOffsets).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOutputTensorsProduced).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportChangedBytesInDeclaredTensorRange).toBe(0);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportObservedStdoutInvariantAcrossArgs).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOffsetProbeBlocker).toBe(
+      'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets'
+    );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundarySchema).toBe('eshkol.ulg.production-handler-boundary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryStatus).toBe('declared-not-executed');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryDeclared).toBe(true);
@@ -357,6 +376,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'production-magnetar-handler-not-implemented',
       'wasm-tensor-memory-binding-not-executed',
       'wasm-entry-export-does-not-consume-tensor-offsets',
+      'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
+      'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
       'full-physics-validation-not-run'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerTensorMemoryBinding.status).toBe('host-layout-smoke-bound-not-consumed');
@@ -409,6 +430,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabArtifact.webGpuParityScope.browserNativeOperationProbe.coveredNativeOperations).toEqual([]);
       expect(moonlabArtifact.webGpuParityScope.browserNativeOperationProbe.operationResults[0]).toMatchObject({
         operation: 'hadamard',
+        executed: false,
+        passed: false,
+        covered: false,
+        blocker: 'native-operation-probe-not-executed'
+      });
+      expect(moonlabArtifact.webGpuParityScope.browserNativeOperationProbe.operationResults[1]).toMatchObject({
+        operation: 'pauli_x',
         executed: false,
         passed: false,
         covered: false,
@@ -507,12 +535,16 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeExecuted).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbePassed).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationCoveredOperations).toEqual([]);
-      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeOperationCount).toBe(1);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeOperationCount).toBe(2);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuNativeOperationProbeCoveredOperationCount).toBe(0);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuHadamardNativeOperationDeclared).toBe(true);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuHadamardNativeOperationExecuted).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuHadamardNativeOperationCovered).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuHadamardNativeOperationBlocker).toBe('native-operation-probe-not-executed');
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuPauliXNativeOperationDeclared).toBe(true);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuPauliXNativeOperationExecuted).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuPauliXNativeOperationCovered).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuPauliXNativeOperationBlocker).toBe('native-operation-probe-not-executed');
       expect(moonlabTelemetryRecord.artifactSummary.moonlabComplex64PreflightPassed).toBe(true);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeFullFidelityMagnetarSimulation).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeFullPhysicsValidation).toBe(false);
@@ -562,6 +594,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuProbabilityKernelExecuted).toBe(false);
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuNativeOperationProbeDeclared).toBe(true);
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuHadamardNativeOperationCovered).toBe(false);
+      expect(moonlabHandoff.artifactSummary.moonlabWebGpuPauliXNativeOperationCovered).toBe(false);
       expect(moonlabHandoff.artifact.webGpuParityScope.fullPhysicsValidation).toBe(false);
     }
     expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(5);

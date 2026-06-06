@@ -228,16 +228,18 @@ function stageMoonLabWebGpuParityScope() {
     const nativeOperationResults = Array.isArray(browserNativeOperationProbe.operationResults)
       ? browserNativeOperationProbe.operationResults
       : [];
-    const hadamardResult = nativeOperationResults.find((entry) => entry?.operation === 'hadamard');
-    if (!hadamardResult) {
-      throw new Error('MoonLab WebGPU native-operation probe is missing the hadamard result');
-    }
-    if (hadamardResult.blocker !== 'native-operation-probe-not-executed'
-      || hadamardResult.covered !== false
-      || hadamardResult.executed !== false
-      || hadamardResult.passed !== false
-      || hadamardResult.maxAmplitudeAbsDiff !== null) {
-      throw new Error('MoonLab hadamard native-operation probe must remain unexecuted and uncovered in ULG staging');
+    for (const operation of ['hadamard', 'pauli_x']) {
+      const result = nativeOperationResults.find((entry) => entry?.operation === operation);
+      if (!result) {
+        throw new Error(`MoonLab WebGPU native-operation probe is missing the ${operation} result`);
+      }
+      if (result.blocker !== 'native-operation-probe-not-executed'
+        || result.covered !== false
+        || result.executed !== false
+        || result.passed !== false
+        || result.maxAmplitudeAbsDiff !== null) {
+        throw new Error(`MoonLab ${operation} native-operation probe must remain unexecuted and uncovered in ULG staging`);
+      }
     }
   }
 
@@ -357,6 +359,7 @@ function stageEshkolAssets() {
     const tensorRuntimeInterpolationTable = tensorRuntimeContract?.interpolationTable;
     const tensorLinearMemoryBinding = tensorRuntimeContract?.linearMemoryBinding;
     const tensorLinearMemorySmokeBinding = tensorLinearMemoryBinding?.smokeBinding;
+    const tensorEntryExportOffsetProbe = tensorLinearMemoryBinding?.entryExportOffsetProbe;
     const productionHandlerBoundary = descriptorBinding?.productionHandlerBoundary;
     if (tensorRuntimeContract?.schema !== 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0') {
       throw new Error('Eshkol staged magnetar descriptor is missing tensor runtime contract metadata');
@@ -443,6 +446,18 @@ function stageEshkolAssets() {
       || !arraysEqual(tensorLinearMemorySmokeBinding.outputTensorIds, tensorRuntimeContract.outputTensorIds)) {
       throw new Error('Eshkol staged tensor linear-memory smoke binding is not ready');
     }
+    if (tensorEntryExportOffsetProbe?.schema !== 'eshkol.ulg.tensor-entry-export-offset-probe.v0'
+      || tensorEntryExportOffsetProbe.status !== 'abi-blocked'
+      || tensorEntryExportOffsetProbe.entryExport !== artifact.validation?.closureDescriptor?.entryExport
+      || tensorEntryExportOffsetProbe.entryExportConsumesOffsets !== false
+      || tensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport !== false
+      || tensorEntryExportOffsetProbe.changedBytesInDeclaredTensorRange !== 0
+      || tensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs !== true
+      || tensorEntryExportOffsetProbe.scientificValidation !== false
+      || tensorEntryExportOffsetProbe.fullPhysicsValidation !== false
+      || tensorEntryExportOffsetProbe.blocker !== 'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets') {
+      throw new Error('Eshkol staged tensor entry-export offset probe does not preserve the ABI blocker');
+    }
     if (productionHandlerBoundary?.schema !== ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
       || productionHandlerBoundary.dispatchSchema !== PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA) {
       throw new Error('Eshkol staged magnetar descriptor is missing production handler boundary metadata');
@@ -491,6 +506,8 @@ function stageEshkolAssets() {
       'production-magnetar-handler-not-implemented',
       'wasm-tensor-memory-binding-not-executed',
       'wasm-entry-export-does-not-consume-tensor-offsets',
+      'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
+      'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
       'full-physics-validation-not-run'
     ]) {
       if (!handlerBoundaryBlockers.includes(blocker)) {

@@ -2185,3 +2185,51 @@ Failures and open questions:
   fidelity GRMHD, production PIC, and spectral radiation transport validation
   remain future work.
 - No push was attempted.
+
+## 2026-06-06 06:32:17 AKDT - PeerCompute durable handoff envelope ready
+
+Prompt:
+
+- User asked how progress was going, whether the overall plan was still on
+  track, and previously instructed to keep going with local commits only.
+
+Actions:
+
+- Added PeerCompute commit `fbcc4f17`, which introduces
+  `peercompute.ulg.handoff-service-envelope.v0`.
+- The new PeerCompute envelope wraps normalized ULG demo handoffs with the
+  transfer manifest, content-addressed artifact refs, relay-safe counts, ready
+  counts, source/provenance metadata, and blockers.
+- Multiscale now exposes
+  `window.__multiscaleDemo.createUlgHandoffServiceEnvelope()` /
+  `normalizeUlgHandoffServiceEnvelope()`, and
+  `applyUlgDemoHandoffForScenario()` returns `serviceEnvelope` beside the
+  scenario ingest result.
+- Updated ULG `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` to mark the durable PeerCompute handoff envelope complete and
+  move the next active slice to Eshkol descriptor binding metadata.
+
+Validation:
+
+- PASS: PeerCompute syntax checks passed for the touched core, test, and
+  Multiscale browser files.
+- PASS: PeerCompute focused service-orchestration test command
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js --test-name-pattern 'ULG handoff service envelope|ULG demo handoff adapter'`
+  passed `13/13`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  the existing large chunk warning.
+- PASS: live VPN ULG-to-PeerCompute probe reported
+  `service-envelope-ready`, `artifactCount = 2`,
+  `relaySafeArtifactCount = 2`, `contentAddressedArtifactCount = 2`, no
+  envelope blockers, Eshkol transferred WASM length `53066`,
+  `runtime-evidence-ready`, `validatedCount = 5`,
+  `scientific-runtime-ready`, `scenarioScientificReady = true`, and no blockers.
+
+Failures and open questions:
+
+- The durable envelope is relay/provenance packaging for the working ULG
+  handoff; it is not a higher-fidelity magnetar physics claim.
+- The next non-conflicting implementation slice is Eshkol descriptor binding
+  metadata that names the durable envelope schema and keeps
+  `scientificValidation: false`.
+- No push was attempted.

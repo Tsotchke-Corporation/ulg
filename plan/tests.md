@@ -181,6 +181,18 @@ reference-contract asset support.
   `validatedCount = 5`, `missingCount = 0`, `proxyOnlyCount = 0`,
   `scientific-runtime-ready`, `scenarioScientificReady = true`, and no blockers
   after applying the live ULG handoff from `http://100.86.83.35:5173/`.
+- Live VPN durable service-envelope check on 2026-06-06: after PeerCompute
+  commit `fbcc4f17`, the live ULG handoff from
+  `http://100.86.83.35:5173/` and PeerCompute
+  `https://100.86.83.35:5185/?scenario=magnetar` returned
+  `peercompute.ulg.handoff-service-envelope.v0` with `ready = true`,
+  `status = service-envelope-ready`, `artifactCount = 2`,
+  `relaySafeArtifactCount = 2`, `contentAddressedArtifactCount = 2`, no
+  envelope blockers, Eshkol transferred WASM length `53066`, and the reduced
+  calibrated runtime gate still at `runtime-evidence-ready`,
+  `validatedCount = 5`, `scientific-runtime-ready`,
+  `scenarioScientificReady = true`, and no blockers after awaited calibrated
+  runtime refresh.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

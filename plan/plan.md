@@ -56,6 +56,9 @@ physics work:
 - [x] Add reusable headless service orchestration modules after the ULG app slice is stable.
 - [x] Accept ULG MoonLab/Eshkol magnetar handoffs in Multiscale and clear the
   reduced calibrated runtime evidence gate with five hash-backed entries.
+- [x] Promote the browser demo handoff into
+  `peercompute.ulg.handoff-service-envelope.v0` with content-addressed refs,
+  relay-safe counts, transfer manifest preservation, and provenance.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service

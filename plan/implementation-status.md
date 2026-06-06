@@ -211,14 +211,22 @@ Updated: 2026-06-06 06:18:00 AKDT
   `validatedCount = 5`, `scientific-runtime-ready`,
   `scenarioScientificReady = true`, and no blockers after
   `refreshScenarioCalibratedRuntimeEvidence()`.
+- Added and committed PeerCompute durable handoff service-envelope support
+  locally as commit `fbcc4f17`. `peercompute.ulg.handoff-service-envelope.v0`
+  wraps the ULG demo handoff with content-addressed artifact refs, transfer
+  manifest, relay-safe counts, source/provenance metadata, and blockers; the
+  live VPN bridge reports envelope ready with two relay-safe/content-addressed
+  artifacts and no blockers.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
-- Promote the demo-only ULG handoff packet into a durable PeerCompute service
-  adapter path with provenance, content addressing, and relay-safe transfer.
+- Add Eshkol descriptor binding metadata that names the durable PeerCompute
+  envelope schema, tensor ids, MoonLab normalized reference suite identity/hash,
+  and PeerCompute product-topology binding while keeping
+  `scientificValidation: false`.
 
 ## Next
 

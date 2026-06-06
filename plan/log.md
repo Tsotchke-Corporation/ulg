@@ -2250,7 +2250,7 @@ Actions:
   `peercompute.ulg.handoff-service-envelope.v0`, the handoff transfer-manifest
   schema, the declared ULG interpolation table id, MoonLab's normalized
   reference-suite hash
-  `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
   four MoonLab closure-surface sample ids, and the reduced PeerCompute
   product-topology binding.
 - Kept descriptor runtime and derivative statuses declared, not executed or
@@ -2936,7 +2936,7 @@ Changes:
   service assets must carry the scope and cannot claim full-fidelity or
   full-physics validation. The Eshkol descriptor binding must also match the
   raw staged MoonLab normalized-suite hash
-  `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`.
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`.
 - Extended unit and Playwright coverage for the ULG telemetry and handoff
   fields.
 
@@ -2953,7 +2953,7 @@ Validation:
 - PASS: strict live browser probe from ULG `http://127.0.0.1:5173/` to
   PeerCompute `https://127.0.0.1:5185/?scenario=magnetar` reported two handoff
   artifacts, MoonLab and Eshkol fidelity scope metadata, Eshkol MoonLab suite
-  hash `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
+  hash `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
   `runtime-evidence-ready`, `validatedCount = 5`, `proxyOnlyCount = 0`,
   `missingCount = 0`, `scientificReady = true`, no blockers, tolerance-scope
   readiness for `pic-kinetic-plasma`, and top-level calibrated runtime scope
@@ -3042,4 +3042,50 @@ Notes:
 
 - The bridge transports the same reduced calibrated runtime handoff; it does
   not add a new full-fidelity magnetar physics claim.
+- No push was attempted.
+
+## 2026-06-06 - Canonical MoonLab suite staging
+
+Changes:
+
+- Updated `npm run stage:service-assets` so the MoonLab reference-suite
+  normalization call passes MoonLab's new `--canonical` flag.
+- Aligned the Eshkol magnetar descriptor binding with the canonical suite file
+  served by ULG:
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`.
+- Added ULG browser smoke assertions for the served canonical suite hash,
+  Eshkol source SHA-256, Eshkol WASM SHA-256, and
+  `@define-ulg-closure` source-contract marker metadata.
+
+Validation:
+
+- PASS: `npm run stage:service-assets -- --dry-run --json` showed
+  `--canonical` in the MoonLab normalization command.
+- PASS: `npm run stage:service-assets` copied MoonLab JS/WASM, wrote the
+  canonical normalized reference-suite asset, and exported the Eshkol magnetar
+  closure descriptor bundle.
+- PASS: staged MoonLab suite file hash is
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`
+  with byte length `15083`.
+- PASS: staged Eshkol artifact carries source hash
+  `sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052`,
+  WASM hash
+  `sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`,
+  and source marker metadata path `magnetar_closure.ulg-metadata.json`.
+- PASS: `node --check` for `scripts/stage-service-assets.mjs`,
+  `tests/service-assets.test.mjs`, and `tests/demo.e2e.mjs`.
+- PASS: `npm test` passed `20/20`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live browser bridge probe reported ULG status
+  `handoff ready / blockers 0`, Multiscale `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, visible magnetar proxy visual on the
+  solar layer, and the expected canonical suite/source/WASM hashes in the ULG
+  handoff.
+
+Notes:
+
+- MoonLab's pinned `canonicalJson()` digest excludes the trailing newline; the
+  ULG-served asset hash includes the CLI file terminator because that is what
+  the browser transfers.
 - No push was attempted.

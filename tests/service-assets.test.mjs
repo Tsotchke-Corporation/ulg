@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
 import {
   createEshkolClosureBundleAssetSpec,
@@ -9,6 +11,17 @@ import {
   createMoonLabLocateFile,
   probeManifestServiceAssets
 } from '../src/runtime/ServiceAssetProbe.js';
+
+test('service asset staging canonicalizes the MoonLab normalized reference suite', () => {
+  const source = readFileSync(resolve('scripts/stage-service-assets.mjs'), 'utf8');
+  const normalizeIndex = source.indexOf("'--normalize-references'");
+  const canonicalIndex = source.indexOf("'--canonical'", normalizeIndex);
+  const strictIndex = source.indexOf("'--strict'", normalizeIndex);
+
+  assert.ok(normalizeIndex > 0);
+  assert.ok(canonicalIndex > normalizeIndex);
+  assert.ok(strictIndex > canonicalIndex);
+});
 
 test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {
   const assets = createMoonLabServiceAssetSpec();

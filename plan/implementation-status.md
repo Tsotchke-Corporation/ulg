@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 12:46:50 AKDT
+Updated: 2026-06-06 12:55:15 AKDT
 
 ## Done
 
@@ -268,7 +268,7 @@ Updated: 2026-06-06 12:46:50 AKDT
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable
   PeerCompute envelope schema, binds to the MoonLab normalized reference suite
-  hash `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
+  hash `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
   declares four MoonLab closure-surface samples, and keeps runtime/derivatives
   declared-not-executed/computed with `scientificValidation = false`.
 - Added Eshkol reduced interpolation-table fixture evidence to the staged
@@ -347,6 +347,20 @@ Updated: 2026-06-06 12:46:50 AKDT
   `handoff ready / blockers 0`, Multiscale `handoff-ready`, blocker count `0`,
   `simulationStatus = scientific-ready`, and the magnetar proxy visual visible
   on the solar layer.
+- Updated `npm run stage:service-assets` to call MoonLab normalized reference
+  suite generation with `--canonical`.
+- Aligned the Eshkol descriptor binding to the canonical MoonLab suite bytes
+  ULG serves:
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`.
+- Verified staged Eshkol provenance now carries source hash
+  `sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052`,
+  WASM hash
+  `sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`,
+  and the `magnetar_closure.ulg-metadata.json` source marker path.
+- Re-verified the direct live ULG-to-Multiscale bridge after canonical staging:
+  ULG status `handoff ready / blockers 0`, Multiscale `handoff-ready`, blocker
+  count `0`, `simulationStatus = scientific-ready`, and the magnetar proxy
+  visible on the solar layer.
 
 ## In Progress
 
@@ -360,6 +374,9 @@ Updated: 2026-06-06 12:46:50 AKDT
   gated runtime execution proof.
 - Keep the new direct launch bridge and the manual copy/paste path in sync
   until the Multiscale receiver has formal UI-test coverage.
+- Keep the MoonLab canonical body digest and ULG-served file digest distinct:
+  MoonLab's pinned `canonicalJson()` hash excludes the trailing newline, while
+  ULG's cross-repo handoff hash covers the served file bytes.
 
 ## Next
 

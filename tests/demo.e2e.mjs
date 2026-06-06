@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test';
 
+const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
+const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052';
+const ESHKOL_MAGNETAR_WASM_SHA256 = 'sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947';
+
 test('supervised service smoke renders desktop and mobile worker trees', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto('/');
@@ -128,14 +132,26 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'closure-residual'
     ]);
     expect(eshkolArtifact.validation.closureDescriptor.tensorContract.interpolation).toBe('reduced-fixture-table-contract');
-    expect(eshkolArtifact.validation.closureDescriptor.descriptorBinding.fidelityRuntimeScope).toMatchObject({
+    const descriptorBinding = eshkolArtifact.validation.closureDescriptor.descriptorBinding;
+    expect(descriptorBinding.fidelityRuntimeScope).toMatchObject({
       schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
       runtimeScope: 'eshkol-host-runtime-smoke-fixture',
       hostRuntimeSmokeFixture: true,
       fullFidelityMagnetarSimulation: false,
       fullPhysicsValidation: false
     });
-    const interpolationTable = eshkolArtifact.validation.closureDescriptor.descriptorBinding.ulgInterpolationTable;
+    expect(descriptorBinding.moonlabNormalizedReferenceSuite.contentHash).toBe(MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256);
+    expect(descriptorBinding.moonlabNormalizedReferenceSuite.ready).toBe(true);
+    expect(eshkolArtifact.provenance.sourceSha256).toBe(ESHKOL_MAGNETAR_SOURCE_SHA256);
+    expect(eshkolArtifact.provenance.wasmSha256).toBe(ESHKOL_MAGNETAR_WASM_SHA256);
+    expect(eshkolArtifact.provenance.sourceContracts[0]).toMatchObject({
+      schema: 'eshkol.ulg.define-ulg-closure-source.v0',
+      metadataPath: 'magnetar_closure.ulg-metadata.json',
+      tensorRuntimeContract: 'eshkol:magnetar-closure-tensor-runtime-contract:v0',
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    });
+    const interpolationTable = descriptorBinding.ulgInterpolationTable;
     expect(interpolationTable.schema).toBe('eshkol.ulg.magnetar-closure-interpolation-table.v0');
     expect(interpolationTable.status).toBe('computed-fixture');
     expect(interpolationTable.fixtureScope).toBe('reduced-smoke-fixture-not-magnetar-physics');

@@ -197,7 +197,7 @@ reference-contract asset support.
   `31cbbfc` and `npm run stage:service-assets -- --eshkol-only`, the live ULG
   handoff preserved `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, named
   `peercompute.ulg.handoff-service-envelope.v0`, carried MoonLab suite hash
-  `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
+  `sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455`,
   reported four closure-surface sample ids, kept
   `descriptor-bound-not-executed` / `declared-not-executed`, preserved
   `scientificValidation = false`, and still gave PeerCompute

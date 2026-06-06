@@ -78,6 +78,7 @@ function stageMoonLabReferenceSuite() {
     '--',
     '--normalize-references',
     input,
+    '--canonical',
     '--strict',
     '--out',
     target

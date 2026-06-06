@@ -56,8 +56,8 @@ To refresh the local ignored service assets from the sibling repos, run:
 npm run stage:service-assets
 ```
 
-The command copies `moonlab.js`, `moonlab.wasm`, and the reduced MoonLab
-magnetar reference contracts from `/home/cos/projects/moonlab`, then exports the
+The command copies `moonlab.js` and `moonlab.wasm`, generates the normalized
+MoonLab magnetar reference suite from `/home/cos/projects/moonlab`, then exports the
 Eshkol `hello` closure bundle directly into this tree with the deterministic
 smoke output-semantics metadata required by the ULG handoff tests. Use
 `ULG_PROJECTS_ROOT=/path/to/projects` when the sibling repos are not under

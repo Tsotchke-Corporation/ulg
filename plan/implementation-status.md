@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 04:45:30 AKDT
+Updated: 2026-06-06 05:27:08 AKDT
 
 ## Done
 
@@ -166,9 +166,9 @@ Updated: 2026-06-06 04:45:30 AKDT
   `scientific-tolerance-suite-ready`. The remaining scientific blocker is
   `proxy-runtime-not-scientific`.
 - Added `npm run stage:service-assets` to refresh ignored MoonLab and Eshkol
-  browser assets from sibling repos. The command copies MoonLab JS/WASM plus the
-  reduced reference contracts and regenerates the Eshkol `hello` closure bundle
-  with deterministic smoke output-semantics metadata.
+  browser assets from sibling repos. The command copies MoonLab JS/WASM,
+  generates the normalized MoonLab reference suite, and regenerates the Eshkol
+  `hello` closure bundle with deterministic smoke output-semantics metadata.
 - Added optional `--created-at` / `ULG_STAGE_CREATED_AT` pass-through for Eshkol
   bundle exports when byte-stable closure artifact and manifest timestamps are
   needed.
@@ -179,15 +179,25 @@ Updated: 2026-06-06 04:45:30 AKDT
   PeerCompute gate: handoff and tolerance suite remain ready, runtime evidence
   remains five proxy-only entries, and scientific readiness remains correctly
   blocked by `proxy-runtime-not-scientific`.
+- Updated the ULG staging command to generate MoonLab's normalized calibrated
+  reference suite through MoonLab's `pnpm ulg:artifact -- --normalize-references`
+  path instead of raw-copying reference JSON. The staged browser asset now has
+  schema `moonlab.magnetar.normalized-reference-suite.v0`, status
+  `reference-contract-suite-ready`, and four ready calibrated families.
+- Re-verified the live VPN ULG-to-PeerCompute handoff after normalized-suite
+  staging: ULG exported MoonLab `5/5` ready output references and Eshkol
+  `33907` transferred WASM bytes; PeerCompute reported `handoff-ready`,
+  `scientific-tolerance-suite-ready`, host runtime execution ready, and only the
+  intended `proxy-runtime-not-scientific` scientific blocker.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Continue from the live state where optional MoonLab supplied-reference
-  plumbing is staged in the ignored service-asset directory, ULG/PeerCompute
-  count all four calibrated families ready, and full scientific readiness is
-  blocked only by proxy-only runtime evidence rather than missing handoff or
-  tolerance contracts.
+- Continue from the live state where the normalized MoonLab reference suite is
+  staged in the ignored service-asset directory, ULG/PeerCompute count all four
+  calibrated families ready, and full scientific readiness is blocked only by
+  proxy-only runtime evidence rather than missing handoff or tolerance
+  contracts.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
 

@@ -76,6 +76,59 @@ function copyAsset(source, target, label) {
   };
 }
 
+function stageMoonLabReferenceSuite() {
+  const input = path.join(moonlabCoreRoot, 'references', 'magnetar-calibrated-reference-contracts.json');
+  const target = path.join(moonlabTargetDir, 'magnetar-reference-contracts.json');
+  ensureFile(input, 'MoonLab magnetar reference contracts');
+
+  const command = [
+    'pnpm',
+    'ulg:artifact',
+    '--',
+    '--normalize-references',
+    input,
+    '--strict',
+    '--out',
+    target
+  ];
+
+  if (!dryRun) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    const result = spawnSync(command[0], command.slice(1), {
+      cwd: moonlabCoreRoot,
+      encoding: 'utf8'
+    });
+    if (result.status !== 0) {
+      throw new Error([
+        `MoonLab reference suite normalization failed with status ${result.status}`,
+        result.stdout.trim(),
+        result.stderr.trim()
+      ].filter(Boolean).join('\n'));
+    }
+
+    const suite = JSON.parse(readFileSync(target, 'utf8'));
+    const references = Array.isArray(suite.references) ? suite.references : [];
+    if (suite.schema !== 'moonlab.magnetar.normalized-reference-suite.v0') {
+      throw new Error('MoonLab staged reference asset is missing normalized reference-suite schema');
+    }
+    if (suite.status !== 'reference-contract-suite-ready' || suite.ready !== true) {
+      throw new Error(`MoonLab staged reference suite is not ready: ${suite.status || 'unknown'}`);
+    }
+    if (references.length !== 4 || references.some((reference) => reference.ready !== true)) {
+      throw new Error(`expected 4 ready MoonLab references, found ${references.filter((reference) => reference.ready === true).length}/${references.length}`);
+    }
+  }
+
+  return {
+    label: 'MoonLab normalized magnetar reference suite',
+    source: input,
+    target,
+    command,
+    byteLength: dryRun ? null : statSync(target).size,
+    action: dryRun ? 'would-normalize' : 'normalized'
+  };
+}
+
 function stageMoonLabAssets() {
   const staged = [
     copyAsset(
@@ -87,22 +140,9 @@ function stageMoonLabAssets() {
       path.join(moonlabCoreRoot, 'dist', 'moonlab.wasm'),
       path.join(moonlabTargetDir, 'moonlab.wasm'),
       'MoonLab WASM module'
-    ),
-    copyAsset(
-      path.join(moonlabCoreRoot, 'references', 'magnetar-calibrated-reference-contracts.json'),
-      path.join(moonlabTargetDir, 'magnetar-reference-contracts.json'),
-      'MoonLab magnetar reference contracts'
     )
   ];
-
-  if (!dryRun) {
-    const contractPath = path.join(moonlabTargetDir, 'magnetar-reference-contracts.json');
-    const suite = JSON.parse(readFileSync(contractPath, 'utf8'));
-    const references = Array.isArray(suite.references) ? suite.references : [];
-    if (references.length !== 3) {
-      throw new Error(`expected 3 supplied MoonLab references, found ${references.length}`);
-    }
-  }
+  staged.push(stageMoonLabReferenceSuite());
   return staged;
 }
 

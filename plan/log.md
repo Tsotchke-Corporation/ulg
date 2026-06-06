@@ -1921,3 +1921,87 @@ Failures and open questions:
   still visible and useful for integration, but it cannot clear scientific
   readiness without real scientific runtime validation payloads.
 - No push was attempted.
+
+## 2026-06-06 05:27:08 AKDT - Generated MoonLab normalized suite in ULG staging
+
+Prompt:
+
+- Continue the overall ULG/MoonLab/Eshkol/PeerCompute implementation plan while
+  keeping commits local and the VPN Vite demos live.
+
+Actions:
+
+- Updated `scripts/stage-service-assets.mjs` so MoonLab staging no longer
+  raw-copies the reference JSON. It now runs MoonLab's own
+  `pnpm ulg:artifact -- --normalize-references ... --strict --out ...` command
+  from the MoonLab core package.
+- Added staging-time validation for the generated browser asset:
+  `moonlab.magnetar.normalized-reference-suite.v0`,
+  `reference-contract-suite-ready`, top-level `ready: true`, and four ready
+  `references[]` entries.
+- Updated README/service-asset/status/test docs to describe the generated
+  normalized suite.
+- Re-ran the live ULG-to-PeerCompute browser handoff probe with readiness waits
+  against `window.__ulgDemo.telemetry.artifacts` before exporting the handoff.
+- Confirmed PeerCompute's runtime requirements export shape is
+  `{ requirements: { ... } }`; the nested requirements object carries schema
+  `peercompute.multiscale.scenario-runtime-evidence-requirements.v0`, five
+  entries, scientific validation schema
+  `peercompute.multiscale.scenario-scientific-runtime-validation.v0`, scope
+  `magnetar-scientific-runtime-reference-validation`, and required hash fields
+  `evidenceHash`, `scientificReferenceHash`, `scientificToleranceHash`, and
+  `scientificRuntimeOutputHash`.
+
+Files touched:
+
+- `/home/cos/projects/ulg/scripts/stage-service-assets.mjs`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/public/service-assets/README.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+node --check scripts/stage-service-assets.mjs
+npm run stage:service-assets -- --moonlab-only --dry-run --json
+npm run stage:service-assets -- --moonlab-only
+npm run stage:service-assets -- --dry-run --json
+npm test
+npm run stage:service-assets
+npm run build
+npm run test:e2e
+node --input-type=module
+# inspected staged MoonLab/Eshkol assets and ran live Playwright ULG-to-PeerCompute handoff probes
+```
+
+Test results:
+
+- PASS: generated `public/service-assets/moonlab/magnetar-reference-contracts.json`
+  has schema `moonlab.magnetar.normalized-reference-suite.v0`, status
+  `reference-contract-suite-ready`, top-level `ready = true`, and four ready
+  calibrated references for magnetosphere MHD, PIC kinetic plasma, radiation
+  transport, and relativistic correction.
+- PASS: `npm test` passed `17/17`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live ULG at `http://100.86.83.35:5173/` exported two handoff artifacts:
+  MoonLab with `outputReferenceReadyCount = 5` and
+  `magnetarCalibratedReferenceReadyCount = 4`, plus Eshkol with
+  `closureOutputSemanticsReady = true` and `wasmByteLength = 33907`.
+- PASS: live PeerCompute at `https://100.86.83.35:5185/?scenario=magnetar`
+  accepted the packet as `handoff-ready`, `2/2` required handoffs ready,
+  `scientific-tolerance-suite-ready`, transfer ready with `33907` WASM bytes,
+  and host runtime execution ready.
+- PASS: after refreshing bounded proxy runtime evidence, PeerCompute reported
+  five observed proxy-only entries, zero missing entries, zero validated
+  scientific runtime entries, and the expected blocker
+  `proxy-runtime-not-scientific`.
+
+Failures and open questions:
+
+- The generated suite clears handoff/tolerance readiness only. Magnetar
+  scientific readiness remains correctly blocked until the five required
+  runtime evidence entries are backed by real scientific validation payloads.
+- No push was attempted.

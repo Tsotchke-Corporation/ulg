@@ -49,7 +49,7 @@ uses `entry.serviceAssets` plus `locateFile("moonlab.wasm")` so workers can
 probe loader/WASM fetchability and MIME readiness before running the supervised
 MoonLab core probe. The optional
 `public/service-assets/moonlab/magnetar-reference-contracts.json` file can
-provide externally supplied calibrated reference contracts; a missing optional
+provide MoonLab's normalized calibrated reference suite; a missing optional
 file is reported but does not block MoonLab loader/WASM readiness. When the
 assets are ready, the MoonLab task artifact records
 the `bell_phi_plus` basis probabilities from the real WASM module, an analytic
@@ -63,11 +63,11 @@ artifact keeps the legacy `outputs.reference` field and also emits
 `outputs.references[]` as the four-entry calibrated magnetosphere MHD, PIC,
 radiation, and relativistic-reference inventory. The magnetosphere entry now
 carries a scoped analytic dipole-field reference with field maps, tolerances,
-observed deltas, and SHA-256 contract/unit hashes. When the optional MoonLab
-reference-contract JSON is staged, the PIC, radiation, and relativity entries
-can also be promoted to ready supplied calibrated references; compact
+observed deltas, and SHA-256 contract/unit hashes. When the optional normalized
+MoonLab reference suite is staged, all four calibrated families can be promoted
+to ready reference entries; compact
 artifact-summary telemetry reports both the ready Ising reference and the
 calibrated inventory counts so handoff consumers can inventory tolerance inputs
-without fetching the full artifact body. The staged contracts are reduced scalar
+without fetching the full artifact body. The staged suite contains reduced scalar
 tolerance plumbing and do not claim full PIC, radiation-transport, GR, GRMHD, or
 magnetar scientific simulation.

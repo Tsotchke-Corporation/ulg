@@ -5,7 +5,7 @@
 Command: `npm test`
 
 Current result: pass, 17/17 tests on 2026-06-06 after adding optional MoonLab
-reference-contract asset probing, staged reduced supplied contracts, and
+reference-contract asset probing, normalized supplied reference staging, and
 four-family ready calibrated-reference summaries.
 
 - ABI descriptor construction and complex64 round trip.
@@ -149,9 +149,27 @@ reference-contract asset support.
   scientific runtime gate blocker `proxy-runtime-not-scientific`.
 - Service-asset staging command check on 2026-06-06:
   `npm run stage:service-assets` copied MoonLab `moonlab.js`, `moonlab.wasm`,
-  and `magnetar-reference-contracts.json`, regenerated the Eshkol `hello`
-  closure bundle with `eshkol.ulg.closure-output-semantics.v0`, and
-  `npm run test:e2e` stayed green afterward.
+  generated the normalized `magnetar-reference-contracts.json` suite,
+  regenerated the Eshkol `hello` closure bundle with
+  `eshkol.ulg.closure-output-semantics.v0`, and `npm run test:e2e` stayed green
+  afterward.
+- Normalized MoonLab reference suite staging check on 2026-06-06:
+  `npm run stage:service-assets -- --moonlab-only --dry-run --json`,
+  `npm run stage:service-assets -- --moonlab-only`,
+  `npm run stage:service-assets -- --dry-run --json`, and
+  `npm run stage:service-assets` passed. The generated browser asset reports
+  schema `moonlab.magnetar.normalized-reference-suite.v0`, status
+  `reference-contract-suite-ready`, top-level `ready: true`, and four ready
+  calibrated references.
+- Live VPN normalized-suite handoff check on 2026-06-06:
+  after generated-suite staging, ULG exported MoonLab
+  `outputReferenceReadyCount = 5`,
+  `magnetarCalibratedReferenceReadyCount = 4`, and Eshkol
+  `wasmByteLength = 33907`. PeerCompute accepted the handoff as `handoff-ready`,
+  reported
+  `scientific-tolerance-suite-ready`, `transferredWasmByteLength = 33907`,
+  host runtime execution ready, five proxy-only runtime evidence entries after
+  refresh, and the intended blocker `proxy-runtime-not-scientific`.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

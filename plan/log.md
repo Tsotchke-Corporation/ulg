@@ -572,3 +572,78 @@ Failures and open questions:
 
 - `find peercompute` reported `No such file or directory`, which is the desired
   final state for this ULG-scoped checkpoint.
+
+## 2026-06-05 16:20:34 AKDT
+
+Prompt: "keep going until i tell you to stop. youre doing great"
+
+Actions attempted:
+
+- Kept the existing Vite server running on `0.0.0.0:5173`.
+- Inspected the ULG service asset convention and confirmed real artifacts are
+  ignored by git under `public/service-assets/`.
+- Copied generated MoonLab core artifacts from
+  `/home/cos/projects/moonlab/bindings/javascript/packages/core/dist/` into
+  the ignored local runtime path `public/service-assets/moonlab/`.
+- Checked HTTP response headers for both copied artifacts through the live Vite
+  server.
+- Used Playwright against the running app to inspect `window.__ulgDemo` service
+  telemetry and verify the MoonLab browser worker asset probe reports `ready`.
+
+Commands run:
+
+```bash
+find public -maxdepth 4 -type f -o -type d | sort
+sed -n '1,220p' .gitignore
+sed -n '1,260p' src/runtime/ServiceAssetProbe.js
+sed -n '1,220p' public/service-assets/README.md
+ls -lh /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.js /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.wasm
+cp /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.js public/service-assets/moonlab/moonlab.js
+cp /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.wasm public/service-assets/moonlab/moonlab.wasm
+curl -sI http://100.86.83.35:5173/service-assets/moonlab/moonlab.js
+curl -sI http://100.86.83.35:5173/service-assets/moonlab/moonlab.wasm
+node --input-type=module - <<'JS'
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+await page.goto('http://127.0.0.1:5173/');
+await page.waitForFunction(() => window.__ulgDemo?.telemetry?.services?.some((service) => service.serviceId === 'moonlab' && service.assetProbe?.status));
+const telemetry = await page.evaluate(() => {
+  const moonlab = window.__ulgDemo.telemetry.services.find((service) => service.serviceId === 'moonlab');
+  return {
+    status: moonlab.assetProbe.status,
+    reason: moonlab.assetProbe.reason,
+    locateFile: moonlab.assetProbe.locateFile,
+    assets: moonlab.assetProbe.assets.map((asset) => ({ kind: asset.kind, status: asset.status, contentType: asset.contentType, httpStatus: asset.httpStatus }))
+  };
+});
+console.log(JSON.stringify(telemetry, null, 2));
+await browser.close();
+JS
+```
+
+Files touched:
+
+- `/home/cos/projects/ulg/public/service-assets/moonlab/moonlab.js` ignored runtime artifact.
+- `/home/cos/projects/ulg/public/service-assets/moonlab/moonlab.wasm` ignored runtime artifact.
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Test results:
+
+- `curl -I` for `/service-assets/moonlab/moonlab.js` returned `200` with
+  `Content-Type: text/javascript`.
+- `curl -I` for `/service-assets/moonlab/moonlab.wasm` returned `200` with
+  `Content-Type: application/wasm`.
+- Playwright telemetry inspection reported `assetProbe.status = ready`,
+  `loaderModule.status = ready`, and `wasmModule.status = ready`.
+
+Failures and open questions:
+
+- The real MoonLab artifacts are intentionally ignored local runtime files, not
+  committed source artifacts.
+- Next step is loading the MoonLab module in a supervised worker and running a
+  minimal core task or quantum response artifact path.
+- No push was attempted; all commits remain local per user instruction.

@@ -65,8 +65,10 @@ physics work:
 - [ ] Add browser WebGPU complex64/parity kernels with unsupported fallback reporting.
 - [x] Add ULG/browser smoke that verifies MoonLab `locateFile`/WASM asset probe
   wiring and consumes the published service fixtures in a browser worker.
-- [ ] Wrap a minimal MoonLab core task in a supervised service worker once copied
-  artifacts are available under `public/service-assets/moonlab/`.
+- [x] Copy generated MoonLab core artifacts into ignored local service assets and
+  verify live browser asset probe readiness.
+- [ ] Wrap a minimal MoonLab core task in a supervised service worker using the
+  ready asset path.
 
 ### Tooling
 

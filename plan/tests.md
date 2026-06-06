@@ -42,6 +42,10 @@ asset-probe slice.
 - Verify MoonLab service telemetry includes non-skipped asset probe status.
 - Verify the published MoonLab service/task fixtures can be consumed by a browser
   worker and resolve the expected `locateFile` WASM URL.
+- Runtime artifact readiness check on 2026-06-05: copied generated MoonLab core
+  `moonlab.js` and `moonlab.wasm` into ignored `public/service-assets/moonlab/`;
+  `curl -I` returned `text/javascript` for JS and `application/wasm` for WASM;
+  a Playwright telemetry probe reported MoonLab `assetProbe.status = ready`.
 - Verify the three.js canvas is nonblank at desktop and mobile viewport sizes.
 - Save screenshots into `test-results/`.
 

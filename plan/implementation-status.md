@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 15:49:09 AKDT
+Updated: 2026-06-05 16:20:34 AKDT
 
 ## Done
 
@@ -61,6 +61,10 @@ Updated: 2026-06-05 15:49:09 AKDT
   consumes the published MoonLab service manifest/task fixtures.
 - Verified `npm test`, `npm run build`, `npm run test:e2e`, and
   `git diff --check` after the asset-probe slice.
+- Copied generated MoonLab core artifacts into the ignored local runtime
+  directory `public/service-assets/moonlab/`. The live browser worker now reports
+  MoonLab asset probe status `ready`, with JS served as `text/javascript` and
+  WASM served as `application/wasm`.
 
 ## In Progress
 
@@ -77,5 +81,7 @@ Updated: 2026-06-05 15:49:09 AKDT
 - Prototype MoonLab quantum response artifact output now that core WASM artifacts
   can be copied into `public/service-assets/moonlab/` and probed by the browser
   worker.
+- Wrap a minimal MoonLab core task in a supervised service worker using the now
+  ready browser asset path.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

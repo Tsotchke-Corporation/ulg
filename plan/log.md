@@ -2250,7 +2250,7 @@ Actions:
   `peercompute.ulg.handoff-service-envelope.v0`, the handoff transfer-manifest
   schema, the declared ULG interpolation table id, MoonLab's normalized
   reference-suite hash
-  `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
+  `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
   four MoonLab closure-surface sample ids, and the reduced PeerCompute
   product-topology binding.
 - Kept descriptor runtime and derivative statuses declared, not executed or
@@ -2919,4 +2919,50 @@ Notes:
 
 - This is controlled runtime-smoke evidence for the browser host-import path,
   not magnetar physics validation.
+- No push was attempted.
+
+## 2026-06-06 - Magnetar fidelity/runtime scope propagation
+
+Changes:
+
+- Added `ulg.magnetar.fidelity-runtime-scope.v0` preservation to compact ULG
+  artifact summaries for MoonLab calibrated references and Eshkol magnetar
+  descriptor bindings.
+- Updated the public MoonLab core probe worker to require and emit the scope on
+  supplied calibrated references, keep inventory-only references explicitly not
+  ready, and force `fullFidelityMagnetarSimulation = false` plus
+  `fullPhysicsValidation = false`.
+- Hardened `npm run stage:service-assets` so staged ignored MoonLab/Eshkol
+  service assets must carry the scope and cannot claim full-fidelity or
+  full-physics validation. The Eshkol descriptor binding must also match the
+  raw staged MoonLab normalized-suite hash
+  `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`.
+- Extended unit and Playwright coverage for the ULG telemetry and handoff
+  fields.
+
+Validation:
+
+- PASS: `npm run stage:service-assets`.
+- PASS: `node --check public/workers/moonlab-core-probe.worker.js`.
+- PASS: `node --check src/runtime/artifactSummary.js`.
+- PASS: `node --check tests/orchestration.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `npm test` passed `19/19`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: strict live browser probe from ULG `http://127.0.0.1:5173/` to
+  PeerCompute `https://127.0.0.1:5185/?scenario=magnetar` reported two handoff
+  artifacts, MoonLab and Eshkol fidelity scope metadata, Eshkol MoonLab suite
+  hash `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
+  `runtime-evidence-ready`, `validatedCount = 5`, `proxyOnlyCount = 0`,
+  `missingCount = 0`, `scientificReady = true`, no blockers, tolerance-scope
+  readiness for `pic-kinetic-plasma`, and top-level calibrated runtime scope
+  flags `fullFidelityMagnetarSimulation = false` and
+  `fullPhysicsValidation = false`.
+
+Notes:
+
+- This is reduced calibrated runtime fixture readiness. It still does not claim
+  full GRMHD, production PIC, spectral radiation transport, or full magnetar
+  physics validation.
 - No push was attempted.

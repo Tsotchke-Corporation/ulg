@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 18:35:00 AKDT
+Updated: 2026-06-06 11:06:16 AKDT
 
 ## Done
 
@@ -268,7 +268,7 @@ Updated: 2026-06-06 18:35:00 AKDT
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable
   PeerCompute envelope schema, binds to the MoonLab normalized reference suite
-  hash `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
+  hash `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
   declares four MoonLab closure-surface samples, and keeps runtime/derivatives
   declared-not-executed/computed with `scientificValidation = false`.
 - Added Eshkol reduced interpolation-table fixture evidence to the staged
@@ -311,6 +311,19 @@ Updated: 2026-06-06 18:35:00 AKDT
   even on the non-secure HTTP VPN demo where `crypto.subtle` is unavailable.
   Live Multiscale dispatch plans now report `digestAddressed = true` for both
   MoonLab and Eshkol refs.
+- Added end-to-end `ulg.magnetar.fidelity-runtime-scope.v0` propagation through
+  ULG. MoonLab calibrated reference summaries and Eshkol descriptor-binding
+  summaries now preserve fidelity/runtime scope metadata with
+  `fullFidelityMagnetarSimulation = false` and `fullPhysicsValidation = false`.
+- Hardened `npm run stage:service-assets` so ignored MoonLab/Eshkol browser
+  assets fail staging when fidelity/runtime scope metadata is missing or
+  overclaims full-fidelity/full-physics validation.
+- Verified the strict live ULG-to-PeerCompute probe from `5173` to `5185`:
+  ULG exported two scoped artifacts, PeerCompute returned
+  `runtime-evidence-ready`, `validatedCount = 5`, `proxyOnlyCount = 0`,
+  `missingCount = 0`, `scientificReady = true`, no blockers, tolerance-scope
+  readiness for `pic-kinetic-plasma`, and explicit non-full-fidelity runtime
+  scope flags.
 
 ## In Progress
 

@@ -25,6 +25,10 @@ function textOrNull(value) {
   return text || null;
 }
 
+function objectOrNull(value) {
+  return isPlainObject(value) ? value : null;
+}
+
 function referenceKey(reference = {}) {
   if (!reference.contractHash && !reference.id) {
     return JSON.stringify(reference);
@@ -114,6 +118,7 @@ function normalizeReferenceEntry(reference = {}, fallbackId = '') {
     maxObservedEnergyDelta: referenceMaxObservedEnergyDelta,
     status: textOrNull(reference.status),
     scientificCoverage: typeof reference.scientificCoverage === 'boolean' ? reference.scientificCoverage : null,
+    fidelityRuntimeScope: clonePlain(objectOrNull(reference.fidelityRuntimeScope)),
     scope: textOrNull(reference.scope),
     validationStatus,
     blocker: textOrNull(reference.blocker),
@@ -211,6 +216,7 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureDescriptorBinding = closureDescriptor?.descriptorBinding && typeof closureDescriptor.descriptorBinding === 'object'
     ? closureDescriptor.descriptorBinding
     : {};
+  const closureDescriptorFidelityRuntimeScope = objectOrNull(closureDescriptorBinding.fidelityRuntimeScope);
   const closureInterpolationTable = closureDescriptorBinding.ulgInterpolationTable
     && typeof closureDescriptorBinding.ulgInterpolationTable === 'object'
     ? closureDescriptorBinding.ulgInterpolationTable
@@ -312,6 +318,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureDescriptorScientificValidation: typeof closureDescriptor?.scientificValidation === 'boolean'
       ? closureDescriptor.scientificValidation
       : null,
+    closureDescriptorFidelityRuntimeScope: clonePlain(closureDescriptorFidelityRuntimeScope),
     closureDescriptorCoordinateSystem: closureDescriptorTensorContract.coordinateSystem || null,
     closureDescriptorInterpolation: closureDescriptorTensorContract.interpolation || null,
     closureDescriptorInputIds: clonePlain(Array.isArray(closureDescriptorTensorContract.inputIds)

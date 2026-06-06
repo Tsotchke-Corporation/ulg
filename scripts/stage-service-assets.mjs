@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
@@ -24,8 +25,10 @@ const createdAt = valueFor('--created-at') || process.env.ULG_STAGE_CREATED_AT |
 const moonlabCoreRoot = path.join(projectsRoot, 'moonlab', 'bindings', 'javascript', 'packages', 'core');
 const eshkolRoot = path.join(projectsRoot, 'eshkol');
 const moonlabTargetDir = path.join(repoRoot, 'public', 'service-assets', 'moonlab');
+const moonlabReferenceSuiteTarget = path.join(moonlabTargetDir, 'magnetar-reference-contracts.json');
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
+const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 function valueFor(name) {
   const index = args.indexOf(name);
@@ -53,9 +56,13 @@ function copyAsset(source, target, label) {
   };
 }
 
+function sha256File(filePath) {
+  return `sha256:${createHash('sha256').update(readFileSync(filePath)).digest('hex')}`;
+}
+
 function stageMoonLabReferenceSuite() {
   const input = path.join(moonlabCoreRoot, 'references', 'magnetar-calibrated-reference-contracts.json');
-  const target = path.join(moonlabTargetDir, 'magnetar-reference-contracts.json');
+  const target = moonlabReferenceSuiteTarget;
   ensureFile(input, 'MoonLab magnetar reference contracts');
 
   const command = [
@@ -94,6 +101,22 @@ function stageMoonLabReferenceSuite() {
     if (references.length !== 4 || references.some((reference) => reference.ready !== true)) {
       throw new Error(`expected 4 ready MoonLab references, found ${references.filter((reference) => reference.ready === true).length}/${references.length}`);
     }
+    if (suite.fidelityRuntimeScope?.schema !== 'ulg.magnetar.fidelity-runtime-scope.v0') {
+      throw new Error('MoonLab staged reference suite is missing fidelity/runtime scope metadata');
+    }
+    if (suite.fidelityRuntimeScope.fullFidelityMagnetarSimulation !== false
+      || suite.fidelityRuntimeScope.fullPhysicsValidation !== false) {
+      throw new Error('MoonLab staged reference suite overstates full-fidelity physics validation');
+    }
+    if (references.some((reference) => reference.fidelityRuntimeScope?.schema !== 'ulg.magnetar.fidelity-runtime-scope.v0')) {
+      throw new Error('MoonLab staged references are missing fidelity/runtime scope metadata');
+    }
+    if (references.some((reference) => (
+      reference.fidelityRuntimeScope.fullFidelityMagnetarSimulation !== false
+      || reference.fidelityRuntimeScope.fullPhysicsValidation !== false
+    ))) {
+      throw new Error('MoonLab staged references overstate full-fidelity physics validation');
+    }
   }
 
   return {
@@ -101,6 +124,7 @@ function stageMoonLabReferenceSuite() {
     source: input,
     target,
     command,
+    contentHash: dryRun ? null : sha256File(target),
     byteLength: dryRun ? null : statSync(target).size,
     action: dryRun ? 'would-normalize' : 'normalized'
   };
@@ -176,6 +200,32 @@ function stageEshkolAssets() {
     }
     if (artifact.validation?.closureDescriptor?.scientificValidation !== false) {
       throw new Error('Eshkol staged magnetar descriptor must not claim scientific validation');
+    }
+    const descriptorBinding = artifact.validation?.closureDescriptor?.descriptorBinding;
+    const fidelityRuntimeScope = descriptorBinding?.fidelityRuntimeScope;
+    if (fidelityRuntimeScope?.schema !== 'ulg.magnetar.fidelity-runtime-scope.v0') {
+      throw new Error('Eshkol staged magnetar descriptor is missing fidelity/runtime scope metadata');
+    }
+    if (fidelityRuntimeScope.hostRuntimeSmokeFixture !== true
+      || fidelityRuntimeScope.fullFidelityMagnetarSimulation !== false
+      || fidelityRuntimeScope.fullPhysicsValidation !== false) {
+      throw new Error('Eshkol staged magnetar descriptor overstates runtime or full-physics validation');
+    }
+    const moonlabSuite = descriptorBinding?.moonlabNormalizedReferenceSuite;
+    const moonlabSuiteScope = moonlabSuite?.fidelityRuntimeScope;
+    if (moonlabSuite?.schema !== 'moonlab.magnetar.normalized-reference-suite.v0') {
+      throw new Error('Eshkol staged magnetar descriptor is missing MoonLab normalized reference suite binding');
+    }
+    if (!SHA256_DIGEST_PATTERN.test(String(moonlabSuite.contentHash || ''))) {
+      throw new Error('Eshkol staged magnetar descriptor has invalid MoonLab reference suite hash');
+    }
+    if (existsSync(moonlabReferenceSuiteTarget) && moonlabSuite.contentHash !== sha256File(moonlabReferenceSuiteTarget)) {
+      throw new Error('Eshkol staged magnetar descriptor MoonLab reference suite hash does not match staged MoonLab asset');
+    }
+    if (moonlabSuiteScope?.schema !== 'ulg.magnetar.fidelity-runtime-scope.v0'
+      || moonlabSuiteScope.fullFidelityMagnetarSimulation !== false
+      || moonlabSuiteScope.fullPhysicsValidation !== false) {
+      throw new Error('Eshkol staged MoonLab reference suite binding is missing reduced fidelity/runtime scope metadata');
     }
     if (artifact.execution?.module?.url !== `${eshkolClosureBundleName}.wasm`) {
       throw new Error(`Eshkol staged artifact has unexpected module URL: ${artifact.execution?.module?.url || 'unknown'}`);

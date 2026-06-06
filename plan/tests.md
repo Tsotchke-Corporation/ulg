@@ -197,7 +197,7 @@ reference-contract asset support.
   `31cbbfc` and `npm run stage:service-assets -- --eshkol-only`, the live ULG
   handoff preserved `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, named
   `peercompute.ulg.handoff-service-envelope.v0`, carried MoonLab suite hash
-  `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
+  `sha256:87e078026a9c2233afcccfd5c13f4ceb5d46cd301eb51fa7d0c15ef106a8e029`,
   reported four closure-surface sample ids, kept
   `descriptor-bound-not-executed` / `declared-not-executed`, preserved
   `scientificValidation = false`, and still gave PeerCompute
@@ -218,6 +218,16 @@ reference-contract asset support.
   refs and transferred Eshkol WASM metadata, optionally execute through an
   injected service executor, and cache dispatch plan/result metadata beside the
   durable envelope.
+- Magnetar fidelity/runtime scope gate on 2026-06-06:
+  `npm run stage:service-assets`, `npm test`, `npm run build`, and
+  `npm run test:e2e` passed after adding
+  `ulg.magnetar.fidelity-runtime-scope.v0` to MoonLab reference summaries and
+  Eshkol descriptor-binding summaries. A strict live ULG `5173` to PeerCompute
+  `5185` browser probe then reported `runtime-evidence-ready`,
+  `validatedCount = 5`, `proxyOnlyCount = 0`, `missingCount = 0`,
+  `scientificReady = true`, no blockers, tolerance-scope readiness for
+  `pic-kinetic-plasma`, and explicit `fullFidelityMagnetarSimulation = false`
+  plus `fullPhysicsValidation = false` in the calibrated runtime scope.
 - PeerCompute registry-backed dispatch executor check on 2026-06-06: after
   commit `ae67d31e`, full `node --test
   peercompute/tests/unit/serviceOrchestration.test.js` passed `16/16`, proving

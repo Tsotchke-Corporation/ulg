@@ -5,6 +5,24 @@ import { ChildWorkerLeaseManager } from '../src/runtime/ChildWorkerLeaseManager.
 import { ComputeServiceRegistry } from '../src/runtime/ComputeServiceRegistry.js';
 import { GpuBroker } from '../src/runtime/GpuBroker.js';
 
+const REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE = Object.freeze({
+  schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+  fidelityTier: 'reduced-calibrated-runtime-fixture',
+  runtimeScope: 'reduced-scalar-reference-contract',
+  readinessClaim: 'integration-tolerance-gate-only',
+  reducedCalibratedRuntimeFixture: true,
+  hostRuntimeSmokeFixture: false,
+  fullFidelityMagnetarSimulation: false,
+  fullPhysicsValidation: false,
+  excludedPhysics: [
+    'charge-conserving-pic',
+    'spectral-angular-radiation-transport',
+    'gr-or-grmhd-spacetime-solve',
+    'full-resistive-mhd-or-force-free-magnetosphere',
+    'validated-production-magnetar-closure'
+  ]
+});
+
 function createCalibratedReferenceInventory() {
   return [
     {
@@ -32,6 +50,7 @@ function createCalibratedReferenceInventory() {
       status: 'calibrated-reference-ready',
       ready: true,
       scientificCoverage: true,
+      fidelityRuntimeScope: REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE,
       scope: 'analytic-dipole-magnetosphere-reference-not-full-mhd',
       validationStatus: 'pass',
       validation: { status: 'pass', evidence: ['Analytic dipole radial field reference.'] },
@@ -53,6 +72,7 @@ function createCalibratedReferenceInventory() {
       status: 'calibrated-reference-ready',
       ready: true,
       scientificCoverage: true,
+      fidelityRuntimeScope: REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE,
       scope: 'supplied-calibrated-reference-contract',
       validationStatus: 'pass',
       validation: { status: 'pass', evidence: ['Reduced PIC scalar tolerance contract.'] },
@@ -74,6 +94,7 @@ function createCalibratedReferenceInventory() {
       status: 'calibrated-reference-ready',
       ready: true,
       scientificCoverage: true,
+      fidelityRuntimeScope: REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE,
       scope: 'supplied-calibrated-reference-contract',
       validationStatus: 'pass',
       validation: { status: 'pass', evidence: ['Reduced grey-radiation scalar tolerance contract.'] },
@@ -95,6 +116,7 @@ function createCalibratedReferenceInventory() {
       status: 'calibrated-reference-ready',
       ready: true,
       scientificCoverage: true,
+      fidelityRuntimeScope: REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE,
       scope: 'supplied-calibrated-reference-contract',
       validationStatus: 'pass',
       validation: { status: 'pass', evidence: ['Reduced post-Newtonian scalar tolerance contract.'] },
@@ -357,6 +379,23 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
         },
         descriptorBinding: {
           schema: 'eshkol.ulg.magnetar-closure-descriptor-binding.v0',
+          fidelityRuntimeScope: {
+            schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+            fidelityTier: 'host-runtime-smoke-fixture',
+            runtimeScope: 'eshkol-host-runtime-smoke-fixture',
+            readinessClaim: 'host-runtime-output-semantics-only',
+            reducedCalibratedRuntimeFixture: false,
+            hostRuntimeSmokeFixture: true,
+            fullFidelityMagnetarSimulation: false,
+            fullPhysicsValidation: false,
+            excludedPhysics: [
+              'charge-conserving-pic',
+              'spectral-angular-radiation-transport',
+              'gr-or-grmhd-spacetime-solve',
+              'full-resistive-mhd-or-force-free-magnetosphere',
+              'validated-production-magnetar-closure'
+            ]
+          },
           ulgInterpolationTable: {
             schema: 'eshkol.ulg.magnetar-closure-interpolation-table.v0',
             id: 'ulg:magnetar-radial-cell-interpolation-table:v0',
@@ -405,6 +444,23 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureDescriptorEntryExport, 'main');
   assert.equal(summary.closureDescriptorFixtureChecksum, 50);
   assert.equal(summary.closureDescriptorScientificValidation, false);
+  assert.deepEqual(summary.closureDescriptorFidelityRuntimeScope, {
+    schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+    fidelityTier: 'host-runtime-smoke-fixture',
+    runtimeScope: 'eshkol-host-runtime-smoke-fixture',
+    readinessClaim: 'host-runtime-output-semantics-only',
+    reducedCalibratedRuntimeFixture: false,
+    hostRuntimeSmokeFixture: true,
+    fullFidelityMagnetarSimulation: false,
+    fullPhysicsValidation: false,
+    excludedPhysics: [
+      'charge-conserving-pic',
+      'spectral-angular-radiation-transport',
+      'gr-or-grmhd-spacetime-solve',
+      'full-resistive-mhd-or-force-free-magnetosphere',
+      'validated-production-magnetar-closure'
+    ]
+  });
   assert.equal(summary.closureDescriptorCoordinateSystem, 'normalized-radial-cell');
   assert.equal(summary.closureDescriptorInterpolation, 'not-declared');
   assert.deepEqual(summary.closureDescriptorInputIds, ['magnetar-state-vector', 'closure-control-vector']);
@@ -516,6 +572,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.outputReferences[1].validationStatus, 'pass');
   assert.equal(summary.outputReferences[1].ready, true);
   assert.equal(summary.outputReferences[1].scientificCoverage, true);
+  assert.deepEqual(summary.outputReferences[1].fidelityRuntimeScope, REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE);
   assert.equal(summary.outputReferences[1].solverId, 'moonlab-analytic-dipole-field-v0');
   assert.deepEqual(summary.outputReferences.slice(1).map((reference) => reference.ready), [
     true,
@@ -533,6 +590,8 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
     'relativistic-correction'
   ]);
   assert.equal(summary.magnetarCalibratedReferences[0].blocker, null);
+  assert.equal(summary.magnetarCalibratedReferences[0].fidelityRuntimeScope.fullFidelityMagnetarSimulation, false);
+  assert.equal(summary.magnetarCalibratedReferences[0].fidelityRuntimeScope.fullPhysicsValidation, false);
   assert.equal(summary.calibrationArtifacts[0].referenceCount, 5);
   assert.equal(summary.calibrationArtifacts[0].referenceReadyCount, 5);
   assert.equal(summary.magnetarDipoleIsingReady, true);

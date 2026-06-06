@@ -21,6 +21,14 @@ self.addEventListener('message', (event) => {
 let modulePromise = null;
 const MAGNETAR_DIPOLE_ISING_REFERENCE_CONTRACT_HASH = 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec';
 const MAGNETOSPHERE_MHD_ANALYTIC_UNITS_HASH = 'sha256:b9ef2d46ec5f2d0c1fb8a2866012e9340a67f188ebc8a579b93ce61e72f4b4a5';
+const MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA = 'ulg.magnetar.fidelity-runtime-scope.v0';
+const REDUCED_MAGNETAR_EXCLUDED_PHYSICS = Object.freeze([
+  'charge-conserving-pic',
+  'spectral-angular-radiation-transport',
+  'gr-or-grmhd-spacetime-solve',
+  'full-resistive-mhd-or-force-free-magnetosphere',
+  'validated-production-magnetar-closure'
+]);
 
 async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   self.postMessage({ type: 'progress', childId, progress: 0.15, sample: 0 });
@@ -418,6 +426,10 @@ function createMagnetarReferenceFamilyInventory(suppliedReferences = []) {
       status: 'calibrated-reference-missing',
       ready: false,
       scientificCoverage: false,
+      fidelityRuntimeScope: createMagnetarFidelityRuntimeScope({
+        readinessClaim: 'inventory-only-not-ready',
+        reducedCalibratedRuntimeFixture: false
+      }),
       scope: 'inventory-only-not-scientific-reference',
       validationStatus: 'missing',
       validation: {
@@ -447,6 +459,10 @@ function createMagnetarReferenceFamilyInventory(suppliedReferences = []) {
       status: 'calibrated-reference-missing',
       ready: false,
       scientificCoverage: false,
+      fidelityRuntimeScope: createMagnetarFidelityRuntimeScope({
+        readinessClaim: 'inventory-only-not-ready',
+        reducedCalibratedRuntimeFixture: false
+      }),
       scope: 'inventory-only-not-scientific-reference',
       validationStatus: 'missing',
       validation: {
@@ -476,6 +492,10 @@ function createMagnetarReferenceFamilyInventory(suppliedReferences = []) {
       status: 'calibrated-reference-missing',
       ready: false,
       scientificCoverage: false,
+      fidelityRuntimeScope: createMagnetarFidelityRuntimeScope({
+        readinessClaim: 'inventory-only-not-ready',
+        reducedCalibratedRuntimeFixture: false
+      }),
       scope: 'inventory-only-not-scientific-reference',
       validationStatus: 'missing',
       validation: {
@@ -529,6 +549,7 @@ function createAnalyticMagnetosphereMhdReference() {
     status: 'calibrated-reference-ready',
     ready: true,
     scientificCoverage: true,
+    fidelityRuntimeScope: createMagnetarFidelityRuntimeScope(),
     scope: 'analytic-dipole-magnetosphere-reference-not-full-mhd',
     validationStatus: 'pass',
     validation: {
@@ -570,11 +591,13 @@ function normalizeSuppliedMagnetarReferenceContract(fallback, supplied) {
   const solverId = typeof supplied.solverId === 'string' && supplied.solverId.length > 0
     ? supplied.solverId
     : null;
+  const fidelityRuntimeScope = normalizeMagnetarFidelityRuntimeScope(supplied.fidelityRuntimeScope);
   const evidence = Array.isArray(validation.evidence)
     ? validation.evidence.map((entry) => String(entry))
     : [];
   const ready = supplied.ready === true
     && supplied.scientificCoverage === true
+    && fidelityRuntimeScope != null
     && solverId != null
     && contractHash != null
     && unitsHash != null
@@ -610,6 +633,7 @@ function normalizeSuppliedMagnetarReferenceContract(fallback, supplied) {
     status: 'calibrated-reference-ready',
     ready: true,
     scientificCoverage: true,
+    fidelityRuntimeScope,
     scope: supplied.scope === 'analytic-dipole-magnetosphere-reference-not-full-mhd'
       ? supplied.scope
       : 'supplied-calibrated-reference-contract',
@@ -622,6 +646,60 @@ function normalizeSuppliedMagnetarReferenceContract(fallback, supplied) {
     blocker: null,
     blockers: []
   };
+}
+
+function createMagnetarFidelityRuntimeScope(overrides = {}) {
+  const excludedPhysics = Array.isArray(overrides.excludedPhysics)
+    ? overrides.excludedPhysics.map((entry) => String(entry)).filter(Boolean)
+    : [...REDUCED_MAGNETAR_EXCLUDED_PHYSICS];
+  return {
+    schema: MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA,
+    fidelityTier: typeof overrides.fidelityTier === 'string' && overrides.fidelityTier.length > 0
+      ? overrides.fidelityTier
+      : 'reduced-calibrated-runtime-fixture',
+    runtimeScope: typeof overrides.runtimeScope === 'string' && overrides.runtimeScope.length > 0
+      ? overrides.runtimeScope
+      : 'reduced-scalar-reference-contract',
+    readinessClaim: typeof overrides.readinessClaim === 'string' && overrides.readinessClaim.length > 0
+      ? overrides.readinessClaim
+      : 'integration-tolerance-gate-only',
+    reducedCalibratedRuntimeFixture: overrides.reducedCalibratedRuntimeFixture === false ? false : true,
+    hostRuntimeSmokeFixture: overrides.hostRuntimeSmokeFixture === true,
+    fullFidelityMagnetarSimulation: false,
+    fullPhysicsValidation: false,
+    excludedPhysics
+  };
+}
+
+function normalizeMagnetarFidelityRuntimeScope(value) {
+  if (!magnetarFidelityRuntimeScopeReady(value)) {
+    return null;
+  }
+  return createMagnetarFidelityRuntimeScope({
+    fidelityTier: value.fidelityTier,
+    runtimeScope: value.runtimeScope,
+    readinessClaim: value.readinessClaim,
+    reducedCalibratedRuntimeFixture: value.reducedCalibratedRuntimeFixture === true,
+    hostRuntimeSmokeFixture: value.hostRuntimeSmokeFixture === true,
+    excludedPhysics: value.excludedPhysics
+  });
+}
+
+function magnetarFidelityRuntimeScopeReady(value) {
+  return isRecord(value)
+    && value.schema === MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA
+    && typeof value.fidelityTier === 'string'
+    && value.fidelityTier.length > 0
+    && typeof value.runtimeScope === 'string'
+    && value.runtimeScope.length > 0
+    && typeof value.readinessClaim === 'string'
+    && value.readinessClaim.length > 0
+    && typeof value.reducedCalibratedRuntimeFixture === 'boolean'
+    && typeof value.hostRuntimeSmokeFixture === 'boolean'
+    && value.fullFidelityMagnetarSimulation === false
+    && value.fullPhysicsValidation === false
+    && Array.isArray(value.excludedPhysics)
+    && value.excludedPhysics.length > 0;
 }
 
 function fieldDeltasWithinTolerances(observed, tolerances) {

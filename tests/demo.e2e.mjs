@@ -124,6 +124,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'magnetar-closure-update',
       'closure-residual'
     ]);
+    expect(eshkolArtifact.validation.closureDescriptor.descriptorBinding.fidelityRuntimeScope).toMatchObject({
+      schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+      runtimeScope: 'eshkol-host-runtime-smoke-fixture',
+      hostRuntimeSmokeFixture: true,
+      fullFidelityMagnetarSimulation: false,
+      fullPhysicsValidation: false
+    });
     const interpolationTable = eshkolArtifact.validation.closureDescriptor.descriptorBinding.ulgInterpolationTable;
     expect(interpolationTable.schema).toBe('eshkol.ulg.magnetar-closure-interpolation-table.v0');
     expect(interpolationTable.status).toBe('computed-fixture');
@@ -172,6 +179,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorRole).toBe('magnetar-closure-contract-seed');
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorFixtureChecksum).toBe(50);
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorScientificValidation).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorFidelityRuntimeScope).toMatchObject({
+      schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+      runtimeScope: 'eshkol-host-runtime-smoke-fixture',
+      hostRuntimeSmokeFixture: true,
+      fullFidelityMagnetarSimulation: false,
+      fullPhysicsValidation: false
+    });
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorInputIds).toEqual([
       'magnetar-state-vector',
       'closure-control-vector'
@@ -305,6 +319,12 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences.map((reference) => reference.family)).toEqual(calibratedFamilies);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences[0].blocker).toBe(null);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences[0].ready).toBe(true);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences[0].fidelityRuntimeScope).toMatchObject({
+      schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
+      reducedCalibratedRuntimeFixture: true,
+      fullFidelityMagnetarSimulation: false,
+      fullPhysicsValidation: false
+    });
     const moonlabHandoff = handoff.artifacts.find((artifact) => artifact.ref.sourceService === 'moonlab');
     expect(moonlabHandoff.artifact.outputs.references).toHaveLength(4);
     expect(moonlabHandoff.artifact.outputs.references.map((reference) => reference.family)).toEqual(calibratedFamilies);

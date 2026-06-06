@@ -1194,3 +1194,99 @@ Failures and open questions:
 - The real MoonLab runtime files and Eshkol closure bundle under
   `public/service-assets/` remain ignored local service assets.
 - No push was attempted; all commits remain local per user instruction.
+
+## 2026-06-05 23:51:33 AKDT - Eshkol closure output-semantics telemetry
+
+Prompt:
+
+- User asked why work was not still continuing; resumed after context
+  compaction.
+- Continued the cross-repo ULG/PeerCompute/Eshkol/MoonLab plan with local
+  commits only and no push.
+- Focused on the next readiness blocker:
+  `eshkol-closure-output-semantics-unvalidated`.
+
+Actions:
+
+- Rechecked `agents.md`, `plan/agents.md`, running Vite processes, ULG status,
+  and the regenerated ignored Eshkol service asset under
+  `public/service-assets/eshkol/closures/hello/`.
+- Confirmed both live Vite servers are still bound to `0.0.0.0`:
+  ULG on `5173` and Multiscale on `5185`.
+- Added Eshkol closure output-semantics fields to
+  `peercompute.ulg.artifact-summary.v0`:
+  schema, readiness, smoke/scientific scopes, `scientificValidation`, expected
+  entry export/args/result, and stdout hash/byte length.
+- Added `output:smoke-fixture` to the compact live artifact line when a staged
+  closure declares the deterministic smoke output contract.
+- Extended unit and Playwright smoke assertions so ULG verifies the staged
+  Eshkol artifact body, compact artifact-summary telemetry, and demo handoff
+  packet all carry the output-semantics declaration.
+- Recorded sidecar completions: MoonLab locally committed reference-contract
+  metadata, and Eshkol prepared uncommitted validation/schema/docs/test changes
+  for closure output semantics.
+
+Files touched:
+
+- `/home/cos/projects/ulg/src/runtime/artifactSummary.js`
+- `/home/cos/projects/ulg/src/main.js`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Commands run:
+
+```bash
+git status --short --branch && rg --files -g 'AGENTS.md' -g 'agents.md'
+ps -eo pid,cmd | rg 'vite|5173|5185'
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5173/
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5185/?scenario=magnetar
+sed -n '1,220p' agents.md
+sed -n '1,180p' plan/agents.md
+python3 - <<'PY'
+import json
+from pathlib import Path
+p=Path('public/service-assets/eshkol/closures/hello/hello.ulg.json')
+a=json.loads(p.read_text())
+print(json.dumps(a.get('validation'), indent=2))
+PY
+node --check src/runtime/artifactSummary.js && node --check src/main.js && node --check tests/orchestration.test.mjs && node --check tests/demo.e2e.mjs
+npm test
+```
+
+Test results so far:
+
+- PASS: syntax checks completed for changed ULG source and tests.
+- PASS: `npm test` passed `15/15`.
+- PASS: the ignored live Eshkol closure artifact now includes
+  `validation.outputSemantics` with `smoke-fixture`, `scientificValidation:
+  false`, `entryExport: main`, `entryArgs: [0, 0]`, stdout byte length `16`, and
+  SHA-256
+  `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- FAIL then fixed: the first `npm run test:e2e` rerun expected
+  `validationMode = "eshkol-static-closure-bundle"`, but the regenerated
+  Eshkol artifact correctly reports
+  `validationMode = "eshkol-static-closure-smoke"` with output semantics. The
+  test expectation was updated.
+- PASS: rerun `npm run test:e2e` passed `1/1`.
+- PASS: final `git diff --check` reported no whitespace errors.
+- PASS: live VPN probe against `http://100.86.83.35:5173/` returned
+  `peercompute.ulg.demo-handoff.v0`, output semantics ready,
+  `semanticScope = "smoke-fixture"`, `scientificValidation = false`,
+  `entryExport = "main"`, `entryArgs = [0, 0]`, `expectedEntryResult = 0`,
+  stdout byte length `16`, stdout hash
+  `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`,
+  and transferred WASM byte length `33,907`.
+
+Failures and open questions:
+
+- `curl` to local Multiscale without TLS returned `000`; the active live
+  Multiscale check remains the HTTPS VPN endpoint.
+- The first live VPN probe failed because the probe script forgot to await the
+  async `createPeerComputeHandoff()` function inside the browser context. The
+  corrected probe passed.
+- No push was attempted; all commits remain local per user instruction.

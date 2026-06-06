@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 15/15 tests on 2026-06-05 after adding the ULG
-PeerCompute handoff exporter.
+Current result: pass, 15/15 tests on 2026-06-05 after adding compact Eshkol
+closure output-semantics telemetry.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -30,12 +30,15 @@ PeerCompute handoff exporter.
 - The browser demo handoff exporter returns `peercompute.ulg.demo-handoff.v0`
   records with full closure artifacts, compact summaries, refs, and transferred
   Eshkol WASM bytes.
+- Artifact cache summaries preserve Eshkol closure output-semantics metadata for
+  the deterministic smoke fixture, including schema, scope, entry export/args,
+  expected result, stdout hash/length, and `scientificValidation: false`.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-05 after the ULG PeerCompute handoff exporter
+Current result: pass on 2026-06-05 after the ULG output-semantics summary
 update, with the existing large three.js chunk warning.
 
 ## Browser Smoke
@@ -43,7 +46,7 @@ update, with the existing large three.js chunk warning.
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-05 after the ULG
-PeerCompute handoff exporter update.
+output-semantics summary update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -108,6 +111,14 @@ PeerCompute handoff exporter update.
   `peercompute.ulg.demo-handoff.v0`, preserves the Eshkol closure summary entry
   `main`, marks DOM-free host imports, and transfers `33,907` WASM bytes from
   `/service-assets/eshkol/closures/hello/hello.wasm`.
+- ULG output-semantics check on 2026-06-05: Playwright verifies the staged
+  Eshkol closure artifact, compact artifact-summary telemetry, and demo handoff
+  packet all carry `eshkol.ulg.closure-output-semantics.v0`,
+  `semanticScope = "smoke-fixture"`, `scientificScope = "none"`,
+  `scientificValidation = false`, `entryExport = "main"`, `entryArgs = [0, 0]`,
+  `expectedEntryResult = 0`, stdout SHA-256
+  `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`,
+  and byte length `16`.
 - Live ULG-to-Multiscale bridge check on 2026-06-05:
   `http://100.86.83.35:5173/` exported MoonLab and Eshkol artifacts to
   `https://100.86.83.35:5185/?scenario=magnetar`; Multiscale ingested the

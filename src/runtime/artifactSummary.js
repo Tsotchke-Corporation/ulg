@@ -2,6 +2,7 @@ export const ULG_ARTIFACT_SUMMARY_SCHEMA = 'peercompute.ulg.artifact-summary.v0'
 export const ULG_QUANTUM_RESPONSE_DESCRIPTOR_SCHEMA = 'peercompute.ulg.quantum-response-descriptor.v0';
 export const ULG_QUANTUM_RESPONSE_PARITY_SCHEMA = 'peercompute.ulg.quantum-response-parity.v0';
 export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.magnetar-dipole-ising-calibration.v0';
+export const ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA = 'eshkol.ulg.closure-output-semantics.v0';
 
 function inferArtifactKind(artifact = {}) {
   if (artifact.responseDescriptor || artifact.parity || artifact.calibrationArtifacts) return 'quantum-response';
@@ -58,6 +59,12 @@ export function summarizeUlgArtifact(artifact = {}) {
   const executionExports = Array.isArray(execution.exports) ? execution.exports : [];
   const wasmMetadata = execution.wasmMetadata && typeof execution.wasmMetadata === 'object' ? execution.wasmMetadata : {};
   const validity = artifact.validity && typeof artifact.validity === 'object' ? artifact.validity : {};
+  const outputSemantics = artifact.validation?.outputSemantics && typeof artifact.validation.outputSemantics === 'object'
+    ? artifact.validation.outputSemantics
+    : null;
+  const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
+    ? outputSemantics.stdout
+    : {};
   const bundleManifest = artifact.runtime?.bundleManifest && typeof artifact.runtime.bundleManifest === 'object'
     ? artifact.runtime.bundleManifest
     : (artifact.bundleManifest && typeof artifact.bundleManifest === 'object' ? artifact.bundleManifest : null);
@@ -110,6 +117,20 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureHostImportsFactory: hostImports?.factory || null,
     closureHostImportsGlobal: hostImports?.global || null,
     closureHostImportsDomFree: hostImports?.domFree === true,
+    closureOutputSemanticsSchema: outputSemantics?.schema || null,
+    closureOutputSemanticsReady: outputSemantics?.schema === ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA
+      && outputSemantics?.semanticScope === 'smoke-fixture'
+      && outputSemantics?.scientificValidation === false,
+    closureOutputSemanticScope: outputSemantics?.semanticScope || null,
+    closureOutputScientificScope: outputSemantics?.scientificScope || null,
+    closureOutputScientificValidation: typeof outputSemantics?.scientificValidation === 'boolean'
+      ? outputSemantics.scientificValidation
+      : null,
+    closureOutputExpectedEntryExport: outputSemantics?.entryExport || null,
+    closureOutputExpectedEntryArgs: clonePlain(Array.isArray(outputSemantics?.entryArgs) ? outputSemantics.entryArgs : null),
+    closureOutputExpectedEntryResult: outputSemantics?.expectedEntryResult ?? null,
+    closureOutputExpectedStdoutSha256: outputSemanticsStdout.sha256 || null,
+    closureOutputExpectedStdoutByteLength: finiteNumberOrNull(outputSemanticsStdout.byteLength),
     closureReady: inferArtifactKind(artifact) === 'closure'
       && (artifact.validation?.status || null) === 'pass'
       && execution.serviceWorkerSafe === true

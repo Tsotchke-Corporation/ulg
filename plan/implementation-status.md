@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 23:31:11 AKDT
+Updated: 2026-06-05 23:51:33 AKDT
 
 ## Done
 
@@ -119,12 +119,17 @@ Updated: 2026-06-05 23:31:11 AKDT
   the MoonLab magnetar calibration and Eshkol closure bundle, executed
   `main(0, 0)` with result `0`, and kept `scenarioScientificReady: false` with
   only the expected scientific validation blockers.
+- Added compact Eshkol closure output-semantics summary fields to ULG artifact
+  telemetry and the browser handoff packet. The summary carries the deterministic
+  `main(0, 0)` smoke-fixture expectation, stdout SHA-256/byte length, and
+  `scientificValidation: false`.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the working ULG handoff packet and transferred closure bytes as the next
-  adapter handshake for durable PeerCompute service-hosted ingestion.
+- Use the ULG output-semantics summary as the next PeerCompute/Multiscale
+  adapter signal so executed Eshkol smoke output can clear only the
+  output-semantics blocker.
 
 ## Next
 

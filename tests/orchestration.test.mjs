@@ -108,7 +108,22 @@ test('artifact cache returns content-addressed refs', async () => {
         preserveRelativeUrls: true
       }
     },
-    validation: { status: 'pass' },
+    validation: {
+      status: 'pass',
+      outputSemantics: {
+        schema: 'eshkol.ulg.closure-output-semantics.v0',
+        semanticScope: 'smoke-fixture',
+        scientificScope: 'none',
+        entryExport: 'main',
+        entryArgs: [0, 0],
+        expectedEntryResult: 0,
+        stdout: {
+          sha256: 'sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d',
+          byteLength: 16
+        },
+        scientificValidation: false
+      }
+    },
     value: 1
   });
   assert.match(ref.uri, /^artifact:\/\/ulg:/);
@@ -141,6 +156,16 @@ test('artifact cache returns content-addressed refs', async () => {
   assert.equal(summary.closureHostImportsPath, 'eshkol-host-imports.js');
   assert.equal(summary.closureHostImportsFactory, 'createEshkolHostImportObject');
   assert.equal(summary.closureHostImportsDomFree, true);
+  assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
+  assert.equal(summary.closureOutputSemanticsReady, true);
+  assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');
+  assert.equal(summary.closureOutputScientificScope, 'none');
+  assert.equal(summary.closureOutputScientificValidation, false);
+  assert.equal(summary.closureOutputExpectedEntryExport, 'main');
+  assert.deepEqual(summary.closureOutputExpectedEntryArgs, [0, 0]);
+  assert.equal(summary.closureOutputExpectedEntryResult, 0);
+  assert.equal(summary.closureOutputExpectedStdoutSha256, 'sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
+  assert.equal(summary.closureOutputExpectedStdoutByteLength, 16);
   assert.equal(summary.closureReady, true);
   assert.equal(cache.list()[0].artifactSummary.artifactKind, 'closure');
 });

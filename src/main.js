@@ -161,5 +161,8 @@ function renderArtifactSummaryLine(summary) {
   if (summary.closureHostImportsDomFree) {
     parts.push(`host:${summary.closureHostImportsFactory || 'dom-free'}`);
   }
+  if (summary.closureOutputSemanticsReady) {
+    parts.push(`output:${summary.closureOutputSemanticScope}`);
+  }
   return parts.length ? `<br>${parts.join(' / ')}` : '';
 }

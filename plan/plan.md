@@ -40,6 +40,9 @@ physics work:
 - [x] Export `peercompute.ulg.demo-handoff.v0` packets from the browser demo
   artifact cache, including same-origin transferred Eshkol WASM bytes for
   PeerCompute/Multiscale ingestion without mixed-content fetches.
+- [x] Surface Eshkol `validation.outputSemantics` smoke-fixture metadata through
+  compact artifact-summary telemetry and the browser handoff packet without
+  marking the closure scientifically validated.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

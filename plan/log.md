@@ -3451,3 +3451,106 @@ Notes:
 - This is a coordinator/debugging command. It does not alter runtime gates or
   staged assets.
 - No push was attempted.
+
+## 2026-06-06 14:34:30 AKDT - MoonLab hadamard probe and Eshkol tensor layout handoff
+
+Changes:
+
+- Integrated MoonLab sidecar commit `69c5f47`. The staged MoonLab parity-scope
+  artifact now includes
+  `moonlab.webgpu.complex64-native-operation-probe.v0` with a declared
+  `hadamard` native WebGPU operation probe.
+- ULG staging now rejects MoonLab native-operation probe overclaims. In the
+  current no-adapter environment, hadamard must remain `executed = false`,
+  `passed = false`, `covered = false`, with blocker
+  `native-operation-probe-not-executed`.
+- ULG artifact summaries, handoffs, artifact-list UI, and live-status output now
+  surface the native-operation probe and hadamard blocker.
+- Integrated Eshkol sidecar commit `6146520`. The staged Eshkol magnetar tensor
+  runtime contract now includes `eshkol.ulg.tensor-linear-memory-binding.v0`.
+- ULG staging now validates the smoke-only f64 linear-memory layout:
+  `magnetar-state-vector` at `131072..131136`, `closure-control-vector` at
+  `131136..131168`, `magnetar-closure-update` at `131168..131232`, and
+  `closure-residual` at `131232..131240`.
+- ULG artifact summaries, handoffs, artifact-list UI, and live-status output now
+  surface the linear-memory binding while preserving
+  `entryExportConsumesOffsets = false`, `handlerReady = false`, and
+  `runtimeExecution = false`.
+
+Validation:
+
+- PASS: MoonLab browser loader/WASM rebuilt with `pnpm build:wasm` after the
+  sidecar TypeScript build cleaned `dist/moonlab.js`.
+- PASS: `npm run stage:service-assets` copied MoonLab assets, generated the
+  parity-scope JSON, normalized the MoonLab reference suite, and exported the
+  Eshkol magnetar closure bundle.
+- PASS: staged MoonLab parity-scope hash
+  `7a4430a3ffa1a0a21807d36fefd1e465ecbad24ad7bfa725d7be4768fecd9f6b`.
+- PASS: staged Eshkol artifact JSON hash
+  `a7d77d237dcb9130030f1ea1a3357c0c30cf49932e5e6df978492e928d252841`;
+  Eshkol WASM hash remains
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- PASS: syntax checks for `scripts/stage-service-assets.mjs`,
+  `src/runtime/artifactSummary.js`, `src/main.js`,
+  `scripts/live-status.mjs`, `tests/orchestration.test.mjs`, and
+  `tests/demo.e2e.mjs`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live` reported MoonLab native-operation probe declared,
+  hadamard declared but unexecuted/uncovered, Eshkol tensor linear-memory
+  binding ready, and production handler runtime execution false.
+- PASS: `npm run status:live -- --bridge` reported Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  and artifact count `2`.
+- PASS: PeerCompute
+  `npm --prefix demos/multiscale run test:ulg-handoff` still reported ULG
+  `handoff ready / blockers 0 / scenario magnetar / scientific ready / 2 artifacts`,
+  Multiscale readiness `handoff-ready`, blocker count `0`,
+  `simulationStatus = scientific-ready`, bridge ack `handoff-ready`, and
+  `magnetarVisible = true`.
+
+Notes:
+
+- This checkpoint still does not execute MoonLab WebGPU native operations on
+  hardware and does not execute the Eshkol magnetar handler. It narrows the
+  next missing runtime evidence while keeping the handoff honest.
+- No push was attempted.
+
+## 2026-06-06 14:42:00 AKDT - PeerCompute relay-backed ULG handoff smoke
+
+Changes:
+
+- Integrated PeerCompute sidecar commit `ab88a62c` locally. The commit adds
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff`.
+- The relay smoke starts a dynamic Go relay, generates STUN/TURN ICE config,
+  connects two Multiscale browser peers in one relay room, imports the live ULG
+  handoff through the existing browser `postMessage` path, and verifies durable
+  ULG handoff readiness.
+- The smoke proves relay/STUN/TURN-configured room connectivity plus
+  `handoff-ready`, `service-envelope-ready`, `relaySafeArtifactCount = 2`, and
+  `dispatch-ready` without relaxing runtime or scientific gates.
+
+Validation:
+
+- PASS: sidecar verification reported
+  `node --check demos/multiscale/tests/ulgRelayHandoffSmoke.mjs` passed.
+- PASS: sidecar verification reported
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff` passed with
+  `iceServerCount = 2`, `hasStun = true`, `hasTurn = true`, two connected
+  Multiscale browser peers, live ULG handoff import, `handoff-ready`,
+  `service-envelope-ready`, `relaySafeArtifactCount = 2`, and `dispatch-ready`.
+- PASS: sidecar verification reported
+  `npm --prefix demos/multiscale run test:ulg-handoff` still passed against live
+  ULG `5173` and Multiscale `5185`.
+- PASS: sidecar verification reported `git diff --check` passed, relay configs
+  were preserved with no diff in `docs/multiscale/relay-config*.json`, and no
+  test-owned `4196` server or relay process remained.
+
+Notes:
+
+- Full browser dispatch-adapter execution over the relay-served popup is still
+  not in the default gate. PeerCompute exposes
+  `ULG_RELAY_HANDOFF_RUN_DISPATCH=1` for that path, but it currently destroys
+  the popup execution context during `runUlgDispatchServiceAdapterProbe()`.
+- No push was attempted.

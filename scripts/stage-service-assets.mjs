@@ -213,6 +213,32 @@ function stageMoonLabWebGpuParityScope() {
       || browserKernelProbe.coveredNativeOperations.length !== 0) {
       throw new Error('MoonLab browser WebGPU kernel probe must remain declared but unexecuted in ULG staging');
     }
+    const browserNativeOperationProbe = artifact.browserNativeOperationProbe;
+    if (browserNativeOperationProbe?.schema !== 'moonlab.webgpu.complex64-native-operation-probe.v0'
+      || browserNativeOperationProbe.probeKind !== 'browser-webgpu-complex64-native-operation-probe') {
+      throw new Error('MoonLab WebGPU parity scope is missing the browser native-operation probe');
+    }
+    if (browserNativeOperationProbe.executed !== false
+      || browserNativeOperationProbe.passed !== false
+      || browserNativeOperationProbe.maxAmplitudeAbsDiff !== null
+      || !Array.isArray(browserNativeOperationProbe.coveredNativeOperations)
+      || browserNativeOperationProbe.coveredNativeOperations.length !== 0) {
+      throw new Error('MoonLab browser WebGPU native-operation probe must remain declared but unexecuted in ULG staging');
+    }
+    const nativeOperationResults = Array.isArray(browserNativeOperationProbe.operationResults)
+      ? browserNativeOperationProbe.operationResults
+      : [];
+    const hadamardResult = nativeOperationResults.find((entry) => entry?.operation === 'hadamard');
+    if (!hadamardResult) {
+      throw new Error('MoonLab WebGPU native-operation probe is missing the hadamard result');
+    }
+    if (hadamardResult.blocker !== 'native-operation-probe-not-executed'
+      || hadamardResult.covered !== false
+      || hadamardResult.executed !== false
+      || hadamardResult.passed !== false
+      || hadamardResult.maxAmplitudeAbsDiff !== null) {
+      throw new Error('MoonLab hadamard native-operation probe must remain unexecuted and uncovered in ULG staging');
+    }
   }
 
   return {
@@ -329,6 +355,8 @@ function stageEshkolAssets() {
     const tensorRuntimeContract = descriptorBinding?.closureTensorRuntimeContract;
     const tensorRuntimeSampleShapeValidation = tensorRuntimeContract?.sampleShapeValidation;
     const tensorRuntimeInterpolationTable = tensorRuntimeContract?.interpolationTable;
+    const tensorLinearMemoryBinding = tensorRuntimeContract?.linearMemoryBinding;
+    const tensorLinearMemorySmokeBinding = tensorLinearMemoryBinding?.smokeBinding;
     const productionHandlerBoundary = descriptorBinding?.productionHandlerBoundary;
     if (tensorRuntimeContract?.schema !== 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0') {
       throw new Error('Eshkol staged magnetar descriptor is missing tensor runtime contract metadata');
@@ -358,6 +386,62 @@ function stageEshkolAssets() {
       || tensorRuntimeSampleShapeValidation.validatedSampleCount !== interpolationTable?.sampleCount
       || tensorRuntimeSampleShapeValidation.scientificValidation !== false) {
       throw new Error('Eshkol staged tensor runtime sample-shape validation is not ready');
+    }
+    if (tensorLinearMemoryBinding?.schema !== 'eshkol.ulg.tensor-linear-memory-binding.v0'
+      || tensorLinearMemoryBinding.status !== 'host-layout-smoke-bound-not-consumed'
+      || tensorLinearMemoryBinding.runtimeStatus !== 'host-layout-smoke-only'
+      || tensorLinearMemoryBinding.executionClaim !== 'tensor-buffer-layout-only'
+      || tensorLinearMemoryBinding.entryExportConsumesOffsets !== false
+      || tensorLinearMemoryBinding.scientificValidation !== false
+      || tensorLinearMemoryBinding.fullPhysicsValidation !== false
+      || tensorLinearMemoryBinding.fullFidelityMagnetarSimulation !== false) {
+      throw new Error('Eshkol staged tensor linear-memory binding overstates execution or physics validation');
+    }
+    if (tensorLinearMemoryBinding.elementType !== 'f64'
+      || tensorLinearMemoryBinding.elementByteLength !== 8
+      || tensorLinearMemoryBinding.alignmentBytes !== 8) {
+      throw new Error('Eshkol staged tensor linear-memory binding has unexpected element layout');
+    }
+    if (tensorLinearMemoryBinding.memoryImport?.module !== 'env'
+      || tensorLinearMemoryBinding.memoryImport?.name !== '__linear_memory'
+      || tensorLinearMemoryBinding.memoryImport?.baseOffset !== 131072
+      || tensorLinearMemoryBinding.memoryImport?.totalByteLength !== 168
+      || tensorLinearMemoryBinding.memoryImport?.minimumPages !== 3) {
+      throw new Error('Eshkol staged tensor linear-memory binding has unexpected memory import layout');
+    }
+    const linearMemoryTensors = Array.isArray(tensorLinearMemoryBinding.tensors)
+      ? tensorLinearMemoryBinding.tensors
+      : [];
+    const expectedLinearMemoryTensors = [
+      ['magnetar-state-vector', 'input', 131072, 64, 8],
+      ['closure-control-vector', 'input', 131136, 32, 4],
+      ['magnetar-closure-update', 'output', 131168, 64, 8],
+      ['closure-residual', 'output', 131232, 8, 1]
+    ];
+    if (linearMemoryTensors.length !== expectedLinearMemoryTensors.length) {
+      throw new Error(`Eshkol staged tensor linear-memory binding has unexpected tensor count: ${linearMemoryTensors.length}`);
+    }
+    for (const [index, [id, direction, byteOffset, byteLength, elementCount]] of expectedLinearMemoryTensors.entries()) {
+      const tensor = linearMemoryTensors[index] || {};
+      if (tensor.id !== id
+        || tensor.direction !== direction
+        || tensor.dtype !== 'f64'
+        || tensor.layout !== 'dense-row-major'
+        || tensor.byteOffset !== byteOffset
+        || tensor.byteLength !== byteLength
+        || tensor.elementCount !== elementCount
+        || tensor.consumedByEntryExport !== false) {
+        throw new Error(`Eshkol staged tensor linear-memory binding has unexpected tensor layout for ${id}`);
+      }
+    }
+    if (tensorLinearMemorySmokeBinding?.schema !== 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0'
+      || tensorLinearMemorySmokeBinding.status !== 'host-layout-smoke-passed'
+      || tensorLinearMemorySmokeBinding.scientificValidation !== false
+      || tensorLinearMemorySmokeBinding.outputInitialization !== 'host-smoke-only-not-entry-export-produced'
+      || !arraysEqual(tensorLinearMemorySmokeBinding.writeTensorIds, tensorRuntimeContract.inputTensorIds)
+      || !arraysEqual(tensorLinearMemorySmokeBinding.readbackTensorIds, tensorRuntimeContract.inputTensorIds)
+      || !arraysEqual(tensorLinearMemorySmokeBinding.outputTensorIds, tensorRuntimeContract.outputTensorIds)) {
+      throw new Error('Eshkol staged tensor linear-memory smoke binding is not ready');
     }
     if (productionHandlerBoundary?.schema !== ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
       || productionHandlerBoundary.dispatchSchema !== PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA) {
@@ -394,12 +478,19 @@ function stageEshkolAssets() {
     if (!allowedExecutionClaims.includes(tensorRuntimeContract.executionClaim)) {
       throw new Error('Eshkol staged production handler boundary does not allow the tensor runtime execution claim');
     }
+    if (productionHandlerBoundary.tensorMemoryBinding?.source !== 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
+      || productionHandlerBoundary.tensorMemoryBinding?.status !== tensorLinearMemoryBinding.status
+      || productionHandlerBoundary.tensorMemoryBinding?.executionClaim !== tensorLinearMemoryBinding.executionClaim
+      || productionHandlerBoundary.tensorMemoryBinding?.entryExportConsumesOffsets !== false) {
+      throw new Error('Eshkol staged production handler boundary does not match tensor memory binding metadata');
+    }
     const handlerBoundaryBlockers = Array.isArray(productionHandlerBoundary.blockers)
       ? productionHandlerBoundary.blockers
       : [];
     for (const blocker of [
       'production-magnetar-handler-not-implemented',
       'wasm-tensor-memory-binding-not-executed',
+      'wasm-entry-export-does-not-consume-tensor-offsets',
       'full-physics-validation-not-run'
     ]) {
       if (!handlerBoundaryBlockers.includes(blocker)) {

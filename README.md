@@ -81,8 +81,9 @@ tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, 
 magnetar scientific simulation. The optional
 `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
 currently records MoonLab's declared browser WebGPU `compute_probabilities`
-probe, but preserves `executed: false`, `passed: false`, empty native operation
-coverage, and blockers until the remaining WebGPU kernels are actually covered.
+probe and a declared native `hadamard` operation probe, but preserves
+`executed: false`, `passed: false`, empty native operation coverage, and
+blockers until the remaining WebGPU kernels are actually covered.
 
 For Eshkol, the default staged bundle is
 `public/service-assets/eshkol/closures/magnetar-closure/`. It packages
@@ -93,6 +94,8 @@ input/output tensor ids, a declared tensor-runtime contract, derivative
 placeholders, and explicit non-scientific/full-physics flags. The descriptor
 also carries `eshkol.ulg.production-handler-boundary.v0`, which identifies the
 intended PeerCompute handler boundary while keeping `handlerReady: false` and
-`runtimeExecution: false`. This advances the handoff beyond hello-only smoke
-while still making clear that the closure is a contract seed, not a validated
-magnetar physics result.
+`runtimeExecution: false`. Its tensor-runtime contract now includes a concrete
+smoke-only f64 linear-memory layout at byte range `131072..131240`; the staged
+metadata explicitly says the `main` export does not consume those offsets. This
+advances the handoff beyond hello-only smoke while still making clear that the
+closure is a contract seed, not a validated magnetar physics result.

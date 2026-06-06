@@ -71,12 +71,27 @@ try {
         probabilityKernel: moonlab?.moonlabWebGpuProbabilityKernel ?? null,
         probabilityKernelExecuted: moonlab?.moonlabWebGpuProbabilityKernelExecuted ?? null,
         probabilityKernelPassed: moonlab?.moonlabWebGpuProbabilityKernelPassed ?? null,
+        nativeOperationProbeDeclared: moonlab?.moonlabWebGpuNativeOperationProbeDeclared ?? null,
+        nativeOperationProbeExecuted: moonlab?.moonlabWebGpuNativeOperationProbeExecuted ?? null,
+        nativeOperationProbePassed: moonlab?.moonlabWebGpuNativeOperationProbePassed ?? null,
+        nativeOperationCoveredOperations: moonlab?.moonlabWebGpuNativeOperationCoveredOperations ?? [],
+        hadamardNativeOperationDeclared: moonlab?.moonlabWebGpuHadamardNativeOperationDeclared ?? null,
+        hadamardNativeOperationExecuted: moonlab?.moonlabWebGpuHadamardNativeOperationExecuted ?? null,
+        hadamardNativeOperationCovered: moonlab?.moonlabWebGpuHadamardNativeOperationCovered ?? null,
+        hadamardNativeOperationBlocker: moonlab?.moonlabWebGpuHadamardNativeOperationBlocker ?? null,
         magnetarReferenceReady: moonlab?.magnetarReferenceReady ?? null,
         magnetarCalibratedReferenceReadyCount: moonlab?.magnetarCalibratedReferenceReadyCount ?? null
       },
       eshkol: {
         descriptorReady: eshkol?.closureDescriptorReady ?? null,
         tensorRuntimeContractReady: eshkol?.closureTensorRuntimeContractReady ?? null,
+        tensorLinearMemoryBindingReady: eshkol?.closureTensorLinearMemoryBindingReady ?? null,
+        tensorLinearMemoryStatus: eshkol?.closureTensorLinearMemoryBindingStatus ?? null,
+        tensorLinearMemoryExecutionClaim: eshkol?.closureTensorLinearMemoryExecutionClaim ?? null,
+        tensorLinearMemoryEntryExportConsumesOffsets:
+          eshkol?.closureTensorLinearMemoryEntryExportConsumesOffsets ?? null,
+        tensorLinearMemoryBaseOffset: eshkol?.closureTensorLinearMemoryBaseOffset ?? null,
+        tensorLinearMemoryTotalByteLength: eshkol?.closureTensorLinearMemoryTotalByteLength ?? null,
         productionHandlerBoundaryDeclared: eshkol?.closureProductionHandlerBoundaryDeclared ?? null,
         productionHandlerReady: eshkol?.closureProductionHandlerReady ?? null,
         productionHandlerRuntimeExecution: eshkol?.closureProductionHandlerRuntimeExecution ?? null

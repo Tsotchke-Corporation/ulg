@@ -62,9 +62,15 @@ physics work:
 - [x] Surface Eshkol's `eshkol.ulg.production-handler-boundary.v0` through ULG
   staging guards, compact summaries, browser handoffs, and artifact-list status
   while preserving `handlerReady = false` and `runtimeExecution = false`.
+- [x] Surface Eshkol's smoke-only f64 tensor linear-memory layout through ULG
+  staging guards, compact summaries, browser handoffs, and live status while
+  preserving `entryExportConsumesOffsets = false`.
 - [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
   declared `compute_probabilities` browser-kernel probe through ULG staging,
   summaries, UI, and handoffs while preserving no-backend/no-execution flags.
+- [x] Surface MoonLab's declared `hadamard` native WebGPU operation probe
+  through ULG staging, summaries, UI, handoffs, and live status while preserving
+  no-adapter/no-execution flags.
 - [x] Add direct Multiscale launch status detail for scenario/readiness acks
   while preserving the `handoff ready / blockers 0` compatibility prefix.
 - [ ] Keep the dev server running for live inspection.
@@ -145,6 +151,9 @@ physics work:
   magnetar fixture, including sample-shape validation and contract hash.
 - [x] Add declared-not-executed production-handler boundary metadata to the
   magnetar closure fixture and reject runtime/full-physics overclaims.
+- [x] Add concrete smoke-only tensor linear-memory layout metadata and
+  host-import validation while keeping the WASM entry export disconnected from
+  tensor offsets.
 - [ ] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
@@ -208,6 +217,8 @@ physics work:
 - [x] Add a reduced MoonLab WebGPU complex64 parity-scope artifact with an
   explicit no-backend state and declared `compute_probabilities` browser-kernel
   probe.
+- [x] Add a declared native WebGPU `hadamard` complex64 operation probe while
+  keeping coverage blocked until hardware execution evidence exists.
 
 ### Tooling
 

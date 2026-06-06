@@ -288,6 +288,9 @@ function renderArtifactSummaryLine(summary) {
   if (summary.moonlabWebGpuProbabilityKernelProbeDeclared) {
     parts.push(`wgsl:${summary.moonlabWebGpuProbabilityKernel || 'probe'}-declared`);
   }
+  if (summary.moonlabWebGpuHadamardNativeOperationDeclared) {
+    parts.push(`native:hadamard-${summary.moonlabWebGpuHadamardNativeOperationCovered ? 'covered' : 'blocked'}`);
+  }
   if (summary.magnetarDipoleIsingReady) {
     parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);
   }

@@ -729,3 +729,65 @@ reference-contract asset support.
   `npm run status:live -- --bridge` passed and reported Multiscale ack
   `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
   and artifact count `2`.
+
+## 2026-06-06 MoonLab Hadamard Probe and Eshkol Tensor Layout Checks
+
+- MoonLab browser assets:
+  `pnpm build:wasm` in
+  `/home/cos/projects/moonlab/bindings/javascript/packages/core` rebuilt
+  `dist/moonlab.js` and `dist/moonlab.wasm`.
+- ULG syntax:
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check src/runtime/artifactSummary.js`, `node --check src/main.js`,
+  `node --check scripts/live-status.mjs`,
+  `node --check tests/orchestration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- ULG staging:
+  `npm run stage:service-assets` passed with guards for MoonLab
+  `moonlab.webgpu.complex64-native-operation-probe.v0` and Eshkol
+  `eshkol.ulg.tensor-linear-memory-binding.v0`.
+- Staged hashes:
+  MoonLab WebGPU parity-scope JSON
+  `7a4430a3ffa1a0a21807d36fefd1e465ecbad24ad7bfa725d7be4768fecd9f6b`,
+  Eshkol magnetar closure artifact JSON
+  `a7d77d237dcb9130030f1ea1a3357c0c30cf49932e5e6df978492e928d252841`,
+  and Eshkol WASM
+  `38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947`.
+- ULG unit tests:
+  `npm test` passed `22/22`.
+- ULG production build:
+  `npm run build` passed with the existing large-chunk warning.
+- ULG browser smoke:
+  `npm run test:e2e` passed `1/1`.
+- Live status:
+  `npm run status:live` reported MoonLab native-operation probe declared,
+  hadamard declared with `executed = false`, `covered = false`, blocker
+  `native-operation-probe-not-executed`, Eshkol tensor linear-memory binding
+  ready, base offset `131072`, total byte length `168`, and handler/runtime
+  execution false.
+- Live bridge:
+  `npm run status:live -- --bridge` passed and reported Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  and artifact count `2`.
+
+## 2026-06-06 PeerCompute Relay-Backed ULG Handoff Checks
+
+- PeerCompute relay smoke syntax:
+  sidecar verification reported
+  `node --check demos/multiscale/tests/ulgRelayHandoffSmoke.mjs` passed.
+- PeerCompute relay smoke:
+  sidecar verification reported
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff` passed. The smoke
+  started a dynamic Go relay, generated STUN/TURN ICE config with
+  `iceServerCount = 2`, `hasStun = true`, and `hasTurn = true`, connected two
+  Multiscale browser peers in one relay room, imported the live ULG handoff via
+  `ulg-post-message`, and verified `handoff-ready`,
+  `service-envelope-ready`, `relaySafeArtifactCount = 2`, and `dispatch-ready`.
+- PeerCompute live handoff regression:
+  sidecar verification reported
+  `npm --prefix demos/multiscale run test:ulg-handoff` still passed against live
+  ULG `5173` and Multiscale `5185`.
+- PeerCompute cleanup:
+  sidecar verification reported `git diff --check` passed, relay configs were
+  preserved with no diff in `docs/multiscale/relay-config*.json`, and no
+  test-owned `4196` server or relay process remained.

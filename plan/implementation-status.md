@@ -461,6 +461,23 @@ Updated: 2026-06-06 13:54:22 AKDT
   reports service/artifact readiness and current MoonLab/Eshkol boundary flags;
   `npm run status:live -- --bridge` also posts the handoff to Multiscale and
   reports the browser ack.
+- Integrated MoonLab's hadamard native-operation probe sidecar commit `69c5f47`
+  into ULG staging, compact summaries, UI, handoffs, and live status. ULG now
+  reports `moonlab.webgpu.complex64-native-operation-probe.v0` with `hadamard`
+  declared, but preserves `executed = false`, `passed = false`,
+  `covered = false`, and blocker `native-operation-probe-not-executed`.
+- Integrated Eshkol's smoke tensor layout sidecar commit `6146520` into ULG
+  staging, compact summaries, UI, handoffs, and live status. ULG now validates
+  the f64 linear-memory binding at byte range `131072..131240`, reports
+  `closureTensorLinearMemoryBindingReady = true`, and keeps
+  `entryExportConsumesOffsets = false`, `handlerReady = false`, and
+  `runtimeExecution = false`.
+- Integrated PeerCompute's relay-backed ULG handoff smoke sidecar commit
+  `ab88a62c`. The new PeerCompute smoke starts a dynamic relay, generates
+  STUN/TURN ICE config, connects two Multiscale browser peers in a relay room,
+  imports the live ULG handoff via `postMessage`, and verifies handoff,
+  service-envelope, relay-safe artifact, and dispatch-plan readiness without
+  relaxing runtime or scientific gates.
 
 ## In Progress
 

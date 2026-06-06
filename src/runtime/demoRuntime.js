@@ -14,6 +14,7 @@ import { createId } from './ids.js';
 const serviceWorkerModule = new URL('../services/dummyService.worker.js', import.meta.url).href;
 const childWorkerModule = new URL('../services/dummyChild.worker.js', import.meta.url).href;
 const eshkolClosureBundleName = 'magnetar-closure';
+const eshkolSmokeBundleName = 'hello';
 
 export async function createDemoRuntime() {
   const registry = new ComputeServiceRegistry();
@@ -86,39 +87,130 @@ export async function createDemoRuntime() {
       await Promise.all(activeRootTasks.map((task) => supervisor.cancelTree(task.rootTaskId)));
     },
     async createPeerComputeHandoff(options = {}) {
-      const artifacts = [];
-      for (const record of artifactCache.list()) {
-        const artifact = await artifactCache.get(record.ref);
-        const handoff = {
-          ref: record.ref,
-          artifactKind: record.artifactKind,
-          artifactSummary: record.artifactSummary,
-          artifact
-        };
-        if (record.artifactKind === 'closure' && options.includeWasmBytes !== false) {
-          const wasmAsset = artifact?.runtime?.assetProbe?.assets?.find((asset) => asset.kind === 'wasmModule');
-          if (wasmAsset?.url) {
-            const response = await fetch(wasmAsset.url, { cache: 'no-store' });
-            if (response.ok) {
-              const wasmBytes = new Uint8Array(await response.arrayBuffer());
-              handoff.wasmBytes = Array.from(wasmBytes);
-              handoff.wasmByteLength = wasmBytes.byteLength;
-              handoff.wasmSourceUrl = wasmAsset.url;
-            }
-          }
-        }
-        artifacts.push(handoff);
-      }
-      return {
-        schema: 'peercompute.ulg.demo-handoff.v0',
-        createdAt: new Date().toISOString(),
-        artifactCount: artifacts.length,
-        artifacts
-      };
+      return createPeerComputeHandoffEnvelope(
+        await createCachedArtifactHandoffs(artifactCache, options)
+      );
+    },
+    async createPeerComputeEshkolSmokeHandoff(options = {}) {
+      const cachedArtifacts = await createCachedArtifactHandoffs(artifactCache, {
+        ...options,
+        sourceServices: ['moonlab']
+      });
+      const smokeClosure = await createEshkolSmokeClosureHandoff(options);
+      return createPeerComputeHandoffEnvelope([...cachedArtifacts, smokeClosure], {
+        handoffKind: 'eshkol-smoke-output-semantics',
+        notes: [
+          'Uses the staged Eshkol hello closure bundle to prove gated runtime output semantics.',
+          'Does not claim magnetar closure scientific validation.'
+        ]
+      });
     }
   };
 
   return api;
+}
+
+function createPeerComputeHandoffEnvelope(artifacts, extra = {}) {
+  return {
+    schema: 'peercompute.ulg.demo-handoff.v0',
+    createdAt: new Date().toISOString(),
+    artifactCount: artifacts.length,
+    artifacts,
+    ...extra
+  };
+}
+
+async function createCachedArtifactHandoffs(artifactCache, options = {}) {
+  const allowedSourceServices = Array.isArray(options.sourceServices)
+    ? new Set(options.sourceServices)
+    : null;
+  const artifacts = [];
+  for (const record of artifactCache.list()) {
+    if (allowedSourceServices && !allowedSourceServices.has(record.ref.sourceService)) {
+      continue;
+    }
+    const artifact = await artifactCache.get(record.ref);
+    const handoff = {
+      ref: record.ref,
+      artifactKind: record.artifactKind,
+      artifactSummary: record.artifactSummary,
+      artifact
+    };
+    if (record.artifactKind === 'closure' && options.includeWasmBytes !== false) {
+      const wasmAsset = artifact?.runtime?.assetProbe?.assets?.find((asset) => asset.kind === 'wasmModule');
+      if (wasmAsset?.url) {
+        await attachWasmBytes(handoff, wasmAsset.url);
+      }
+    }
+    artifacts.push(handoff);
+  }
+  return artifacts;
+}
+
+async function createEshkolSmokeClosureHandoff(options = {}) {
+  const assets = createEshkolClosureBundleAssetSpec({ bundleName: eshkolSmokeBundleName });
+  const [artifact, bundleManifest] = await Promise.all([
+    fetchJsonAsset(assets.artifactModule),
+    fetchJsonAsset(assets.bundleManifest)
+  ]);
+  const smokeArtifact = {
+    ...artifact,
+    sourceService: artifact.sourceService || 'eshkol',
+    taskKind: 'eshkol.closure.derive',
+    runtime: {
+      ...(artifact.runtime || {}),
+      assetProbe: createEshkolSmokeAssetProbe(assets),
+      bundleManifest
+    }
+  };
+  const cache = new ArtifactCache();
+  const ref = await cache.put(smokeArtifact);
+  const handoff = {
+    ref,
+    artifactKind: cache.list()[0].artifactKind,
+    artifactSummary: await cache.getSummary(ref),
+    artifact: smokeArtifact
+  };
+  if (options.includeWasmBytes !== false) {
+    await attachWasmBytes(handoff, assets.wasmModule);
+    const expectedByteLength = smokeArtifact.execution?.module?.byteLength;
+    if (Number.isFinite(expectedByteLength) && expectedByteLength !== handoff.wasmByteLength) {
+      throw new Error(`Eshkol smoke WASM byte length mismatch: expected ${expectedByteLength}, got ${handoff.wasmByteLength}`);
+    }
+  }
+  return handoff;
+}
+
+function createEshkolSmokeAssetProbe(assets) {
+  return {
+    status: 'ready',
+    baseUrl: assets.baseUrl,
+    assets: [
+      { kind: 'artifactModule', url: assets.artifactModule, status: 'ready' },
+      { kind: 'wasmModule', url: assets.wasmModule, status: 'ready' },
+      { kind: 'schemaModule', url: assets.schemaModule, status: 'ready' },
+      { kind: 'bundleManifest', url: assets.bundleManifest, status: 'ready' }
+    ]
+  };
+}
+
+async function fetchJsonAsset(url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Unable to fetch ${url}: ${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
+async function attachWasmBytes(handoff, url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Unable to fetch ${url}: ${response.status} ${response.statusText}`);
+  }
+  const wasmBytes = new Uint8Array(await response.arrayBuffer());
+  handoff.wasmBytes = Array.from(wasmBytes);
+  handoff.wasmByteLength = wasmBytes.byteLength;
+  handoff.wasmSourceUrl = url;
 }
 
 function createTask(serviceId, taskKind) {

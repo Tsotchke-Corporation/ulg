@@ -43,7 +43,58 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   const eshkolArtifact = await readServiceArtifact(page, 'eshkol');
   const eshkolTelemetryRecord = await readServiceArtifactTelemetryRecord(page, 'eshkol');
   const handoff = await page.evaluate(() => window.__ulgDemo.createPeerComputeHandoff());
+  const smokeHandoff = await page.evaluate(() => window.__ulgDemo.createPeerComputeEshkolSmokeHandoff());
+  const hasSmokeHandoffApi = await page.evaluate(() => (
+    typeof window.__ulgDemo.createPeerComputeEshkolSmokeHandoff === 'function'
+  ));
+  expect(hasSmokeHandoffApi).toBe(true);
   expect(handoff.schema).toBe('peercompute.ulg.demo-handoff.v0');
+  expect(smokeHandoff.schema).toBe('peercompute.ulg.demo-handoff.v0');
+  expect(smokeHandoff.handoffKind).toBe('eshkol-smoke-output-semantics');
+  expect(smokeHandoff.artifactCount).toBe(2);
+  expect(smokeHandoff.artifacts.map((artifact) => artifact.artifactKind).sort()).toEqual([
+    'closure',
+    'quantum-response'
+  ]);
+  const smokeClosureHandoff = smokeHandoff.artifacts.find((artifact) => (
+    artifact.ref.sourceService === 'eshkol'
+    && artifact.artifactKind === 'closure'
+  ));
+  expect(smokeClosureHandoff.ref.uri).toMatch(/^artifact:\/\/sha256:[0-9a-f]{64}$/);
+  expect(smokeClosureHandoff.artifact.closureKind).toBe('wasm-reference');
+  expect(smokeClosureHandoff.artifact.execution.module.url).toBe('hello.wasm');
+  expect(smokeClosureHandoff.artifact.execution.module.sha256).toBe('sha256:1a4699680cc14ba3cefa78634c1d52425c4d4158e590aa2e3658d3c7cae9f79c');
+  expect(smokeClosureHandoff.artifact.execution.serviceWorkerSafe).toBe(true);
+  expect(smokeClosureHandoff.artifact.runtime.bundleManifest.schema).toBe('eshkol.ulg.closure-bundle.v0');
+  expect(smokeClosureHandoff.artifact.runtime.bundleManifest.hostImports.domFree).toBe(true);
+  expect(smokeClosureHandoff.artifact.validation.status).toBe('pass');
+  expect(smokeClosureHandoff.artifact.validation.validationMode).toBe('eshkol-static-closure-smoke');
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.schema).toBe('eshkol.ulg.closure-output-semantics.v0');
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.semanticScope).toBe('smoke-fixture');
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.scientificScope).toBe('none');
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.scientificValidation).toBe(false);
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.entryExport).toBe('main');
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.entryArgs).toEqual([0, 0]);
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.expectedEntryResult).toBe(0);
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.stdout.expectedText).toBe('1048560\n1048544\n');
+  expect(smokeClosureHandoff.artifact.validation.outputSemantics.stdout.sha256).toBe('sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
+  expect(smokeClosureHandoff.artifactSummary.validationStatus).toBe('pass');
+  expect(smokeClosureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
+  expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedEntryExport).toBe('main');
+  expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedEntryArgs).toEqual([0, 0]);
+  expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedEntryResult).toBe(0);
+  expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
+  expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(16);
+  expect(smokeClosureHandoff.artifactSummary.closureHostImportsDomFree).toBe(true);
+  expect(smokeClosureHandoff.artifactSummary.closureDescriptorReady).toBe(false);
+  expect(smokeClosureHandoff.wasmByteLength).toBe(33907);
+  expect(smokeClosureHandoff.wasmBytes.length).toBe(33907);
+  expect(smokeClosureHandoff.wasmSourceUrl).toContain('/service-assets/eshkol/closures/hello/hello.wasm');
+  const smokeMoonLabHandoff = smokeHandoff.artifacts.find((artifact) => artifact.ref.sourceService === 'moonlab');
+  expect(smokeMoonLabHandoff.artifactKind).toBe('quantum-response');
+  expect(smokeMoonLabHandoff.artifactSummary.magnetarReferenceReady).toBe(true);
+  expect(smokeMoonLabHandoff.artifactSummary.magnetarDipoleIsingReady).toBe(true);
+  expect(smokeMoonLabHandoff.artifactSummary.outputReferenceCount).toBe(5);
   if (eshkolAssetProbe.status === 'ready') {
     expect(eshkolArtifact.closureKind).toBe('magnetar-closure-descriptor-fixture');
     expect(eshkolArtifact.execution.module.url).toBe('magnetar-closure.wasm');

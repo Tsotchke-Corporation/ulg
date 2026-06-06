@@ -50,6 +50,10 @@ physics work:
   through compact artifact-summary telemetry and the browser handoff packet,
   preserving transferred WASM bytes while keeping descriptor-only closures out
   of host-runtime/output-smoke execution.
+- [x] Expose a separate `createPeerComputeEshkolSmokeHandoff()` browser API that
+  keeps the default magnetar descriptor service unchanged while exporting the
+  staged `hello` closure bundle with real output semantics and transferred WASM
+  bytes for PeerCompute's gated runtime execution proof.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -84,6 +88,9 @@ physics work:
   WASM with inert imports while keeping `main` uninvoked.
 - [x] Add gated Eshkol smoke runtime execution behind explicit output-semantics
   preflight without promoting descriptor handoffs to scientific execution.
+- [x] Verify PeerCompute adapter Workers execute the real ULG-staged Eshkol
+  `hello` smoke closure handoff, validate stdout semantics, and keep
+  `scientificExecution = false`.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,

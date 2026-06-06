@@ -77,6 +77,22 @@ test('Eshkol closure bundle asset spec declares deployable JSON and WASM files',
   );
 });
 
+test('Eshkol hello closure bundle asset spec points at smoke output-semantics assets', () => {
+  const assets = createEshkolClosureBundleAssetSpec({ bundleName: 'hello' });
+
+  assert.equal(assets.baseUrl, '/service-assets/eshkol/closures/hello/');
+  assert.equal(assets.artifactModule, '/service-assets/eshkol/closures/hello/hello.ulg.json');
+  assert.equal(assets.wasmModule, '/service-assets/eshkol/closures/hello/hello.wasm');
+  assert.equal(assets.schemaModule, '/service-assets/eshkol/closures/hello/schemas/ulg/closure_artifact.schema.json');
+  assert.equal(assets.bundleManifest, '/service-assets/eshkol/closures/hello/ulg_bundle_manifest.json');
+  assert.deepEqual(assets.required, [
+    'artifactModule',
+    'wasmModule',
+    'schemaModule',
+    'bundleManifest'
+  ]);
+});
+
 test('service asset probe marks declared MoonLab artifacts ready when MIME types match', async () => {
   const assets = createMoonLabServiceAssetSpec();
   const manifest = createUlgServiceManifest({

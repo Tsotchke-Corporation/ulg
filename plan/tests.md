@@ -376,6 +376,23 @@ reference-contract asset support.
   `expectedEntryResult = 0`, stdout SHA-256
   `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`,
   and byte length `16`.
+- ULG separate Eshkol smoke handoff check on 2026-06-06: Playwright verifies
+  `window.__ulgDemo.createPeerComputeEshkolSmokeHandoff()` returns
+  `peercompute.ulg.demo-handoff.v0` with exactly MoonLab `quantum-response` and
+  Eshkol `closure` artifacts, keeps the default magnetar descriptor handoff
+  unchanged, carries `hello.wasm` with module SHA-256
+  `sha256:1a4699680cc14ba3cefa78634c1d52425c4d4158e590aa2e3658d3c7cae9f79c`,
+  transfers `33,907` WASM bytes, merges the DOM-free host-import bundle
+  manifest, and marks output semantics ready with scientific validation false.
+- Live ULG-to-PeerCompute smoke execution check on 2026-06-06:
+  `http://100.86.83.35:5173/` exported the new smoke handoff to
+  `https://100.86.83.35:5185/?scenario=magnetar`; Multiscale returned
+  `dispatch-adapters-ready`, `acceptedDispatchCount = 2`,
+  `host-runtime-output-semantics-validated`, `entryInvoked = true`,
+  `entryResult = 0`, stdout SHA-256
+  `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`,
+  stdout byte length `16`, no output-semantics blockers, and
+  `scientificExecution = false`.
 - Live ULG-to-Multiscale bridge check on 2026-06-05:
   `http://100.86.83.35:5173/` exported MoonLab and Eshkol artifacts to
   `https://100.86.83.35:5185/?scenario=magnetar`; Multiscale ingested the

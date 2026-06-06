@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 09:23:52 AKDT
+Updated: 2026-06-06 09:49:48 AKDT
 
 ## Done
 
@@ -250,6 +250,20 @@ Updated: 2026-06-06 09:23:52 AKDT
   magnetar descriptor handoff remains dry-only, while a browser smoke fixture
   executes `main`, returns `0`, validates output semantics, and still reports
   `scientificExecution = false`.
+- Added a separate ULG browser handoff API,
+  `window.__ulgDemo.createPeerComputeEshkolSmokeHandoff()`, that keeps the
+  default Eshkol service on the magnetar descriptor fixture while exporting the
+  staged `hello` closure bundle plus the current MoonLab artifact as a real
+  `peercompute.ulg.demo-handoff.v0` smoke packet. The packet carries the
+  `33,907`-byte `hello.wasm`, merged bundle manifest/DOM-free host-import
+  metadata, and explicit non-scientific output semantics.
+- Verified the live ULG-to-PeerCompute smoke handoff on the VPN: ULG `5173`
+  exports exactly two artifacts, PeerCompute Multiscale `5185` dispatches both
+  through adapter Workers, Eshkol reports
+  `host-runtime-output-semantics-validated`, invokes `main`, returns `0`,
+  validates stdout hash
+  `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`,
+  and keeps `scientificExecution = false`.
 - Added and committed Eshkol magnetar descriptor binding metadata locally as
   commit `31cbbfc`. The staged Eshkol `magnetar-closure` artifact now carries
   `eshkol.ulg.magnetar-closure-descriptor-binding.v0`, names the durable
@@ -292,6 +306,9 @@ Updated: 2026-06-06 09:23:52 AKDT
   ignored live asset tree does not drift from sibling source outputs.
 - Replace the fixture MoonLab/Eshkol service hosts with production adapters that
   consume the same dispatch task shape.
+- Keep both ULG handoff paths available: magnetar descriptor for descriptor
+  binding/dry runtime evidence, and `hello` smoke for gated runtime execution
+  proof.
 
 ## Next
 

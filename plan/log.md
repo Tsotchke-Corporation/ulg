@@ -2789,3 +2789,61 @@ Failures and open questions:
 - This enables smoke execution only. Controlled magnetar table computation and
   physics closure execution remain pending.
 - No push was attempted.
+
+## 2026-06-06 09:49:48 AKDT - Real ULG Eshkol smoke handoff bridge
+
+Prompt:
+
+- Continue the overall ULG implementation plan, keep demos live, and keep all
+  commits local.
+
+Actions:
+
+- Added a separate ULG runtime API,
+  `window.__ulgDemo.createPeerComputeEshkolSmokeHandoff()`.
+- Kept the default supervised Eshkol service pointed at the
+  `magnetar-closure` descriptor fixture so existing descriptor-only e2e
+  assertions and live magnetar handoffs are unchanged.
+- The new API fetches the staged `hello.ulg.json`, `hello.wasm`, and
+  `ulg_bundle_manifest.json` assets, merges bundle/DOM-free host-import metadata
+  into the artifact runtime, summarizes it through `ArtifactCache`, transfers
+  the `33,907` WASM bytes, and returns a
+  `peercompute.ulg.demo-handoff.v0` packet with the current MoonLab artifact
+  plus the Eshkol smoke closure.
+- Added Playwright coverage for the separate smoke handoff API, exact module
+  hash, output-semantics metadata, stdout expectation, transferred WASM bytes,
+  and MoonLab reference preservation.
+- Added unit coverage for the `hello` Eshkol closure bundle asset spec.
+- Updated `plan/implementation-status.md`, `plan/plan.md`, and
+  `plan/tests.md` with the new bridge status and verification evidence.
+
+Validation:
+
+- PASS: `node --check src/runtime/demoRuntime.js`.
+- PASS: `node --check tests/demo.e2e.mjs && node --check
+  tests/service-assets.test.mjs`.
+- PASS: `npm test` passed `19/19`.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `git diff --check`.
+- PASS: live VPN ULG probe at `http://100.86.83.35:5173/` returned smoke
+  handoff schema `peercompute.ulg.demo-handoff.v0`, handoff kind
+  `eshkol-smoke-output-semantics`, artifact count `2`, MoonLab
+  `quantum-response`, Eshkol `closure`, module `hello.wasm`,
+  `wasmByteLength = 33907`, `closureOutputSemanticsReady = true`, and
+  `scientificValidation = false`.
+- PASS: live VPN PeerCompute probe at
+  `https://100.86.83.35:5185/?scenario=magnetar` consumed that handoff through
+  adapter Workers and returned `dispatch-adapters-ready`, blocker count `0`,
+  accepted dispatch count `2`, Eshkol service status `accepted`,
+  host-runtime execution status `host-runtime-output-semantics-validated`,
+  `entryInvoked = true`, `mainInvoked = true`, `entryResult = 0`,
+  output-semantics status `output-semantics-validated`, stdout SHA-256
+  `sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d`,
+  stdout byte length `16`, and `scientificExecution = false`.
+
+Failures and open questions:
+
+- This proves controlled Eshkol smoke execution from a real ULG-staged bundle.
+  Magnetar descriptor binding still remains descriptor/dry-runtime evidence
+  only until the closure tensor/table runtime contract is implemented.
+- No push was attempted.

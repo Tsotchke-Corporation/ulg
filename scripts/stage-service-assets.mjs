@@ -60,6 +60,13 @@ function sha256File(filePath) {
   return `sha256:${createHash('sha256').update(readFileSync(filePath)).digest('hex')}`;
 }
 
+function arraysEqual(left = [], right = []) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
 function stageMoonLabReferenceSuite() {
   const input = path.join(moonlabCoreRoot, 'references', 'magnetar-calibrated-reference-contracts.json');
   const target = moonlabReferenceSuiteTarget;
@@ -202,6 +209,7 @@ function stageEshkolAssets() {
       throw new Error('Eshkol staged magnetar descriptor must not claim scientific validation');
     }
     const descriptorBinding = artifact.validation?.closureDescriptor?.descriptorBinding;
+    const tensorContract = artifact.validation?.closureDescriptor?.tensorContract;
     const fidelityRuntimeScope = descriptorBinding?.fidelityRuntimeScope;
     if (fidelityRuntimeScope?.schema !== 'ulg.magnetar.fidelity-runtime-scope.v0') {
       throw new Error('Eshkol staged magnetar descriptor is missing fidelity/runtime scope metadata');
@@ -226,6 +234,39 @@ function stageEshkolAssets() {
       || moonlabSuiteScope.fullFidelityMagnetarSimulation !== false
       || moonlabSuiteScope.fullPhysicsValidation !== false) {
       throw new Error('Eshkol staged MoonLab reference suite binding is missing reduced fidelity/runtime scope metadata');
+    }
+    const interpolationTable = descriptorBinding?.ulgInterpolationTable;
+    const tensorRuntimeContract = descriptorBinding?.closureTensorRuntimeContract;
+    const tensorRuntimeSampleShapeValidation = tensorRuntimeContract?.sampleShapeValidation;
+    const tensorRuntimeInterpolationTable = tensorRuntimeContract?.interpolationTable;
+    if (tensorRuntimeContract?.schema !== 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0') {
+      throw new Error('Eshkol staged magnetar descriptor is missing tensor runtime contract metadata');
+    }
+    if (tensorRuntimeContract.status !== 'declared-fixture-contract'
+      || tensorRuntimeContract.runtimeStatus !== 'declared-not-executed'
+      || tensorRuntimeContract.scientificValidation !== false
+      || tensorRuntimeContract.fullPhysicsValidation !== false) {
+      throw new Error('Eshkol staged tensor runtime contract overstates execution or physics validation');
+    }
+    if (!SHA256_DIGEST_PATTERN.test(String(tensorRuntimeContract.contractHash || ''))) {
+      throw new Error('Eshkol staged tensor runtime contract hash is invalid');
+    }
+    if (tensorRuntimeContract.entryExport !== artifact.validation?.closureDescriptor?.entryExport
+      || tensorRuntimeContract.coordinateSystem !== tensorContract?.coordinateSystem
+      || !arraysEqual(tensorRuntimeContract.inputTensorIds, tensorContract?.inputIds)
+      || !arraysEqual(tensorRuntimeContract.outputTensorIds, tensorContract?.outputIds)) {
+      throw new Error('Eshkol staged tensor runtime contract does not match descriptor tensor ids');
+    }
+    if (tensorRuntimeInterpolationTable?.id !== interpolationTable?.id
+      || tensorRuntimeInterpolationTable?.contentHash !== interpolationTable?.contentHash
+      || tensorRuntimeInterpolationTable?.sampleCount !== interpolationTable?.sampleCount) {
+      throw new Error('Eshkol staged tensor runtime contract does not match interpolation table metadata');
+    }
+    if (tensorRuntimeSampleShapeValidation?.schema !== 'eshkol.ulg.tensor-sample-shape-validation.v0'
+      || tensorRuntimeSampleShapeValidation.status !== 'pass'
+      || tensorRuntimeSampleShapeValidation.validatedSampleCount !== interpolationTable?.sampleCount
+      || tensorRuntimeSampleShapeValidation.scientificValidation !== false) {
+      throw new Error('Eshkol staged tensor runtime sample-shape validation is not ready');
     }
     if (artifact.execution?.module?.url !== `${eshkolClosureBundleName}.wasm`) {
       throw new Error(`Eshkol staged artifact has unexpected module URL: ${artifact.execution?.module?.url || 'unknown'}`);

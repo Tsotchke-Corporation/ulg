@@ -124,6 +124,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'magnetar-closure-update',
       'closure-residual'
     ]);
+    expect(eshkolArtifact.validation.closureDescriptor.tensorContract.interpolation).toBe('reduced-fixture-table-contract');
     expect(eshkolArtifact.validation.closureDescriptor.descriptorBinding.fidelityRuntimeScope).toMatchObject({
       schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
       runtimeScope: 'eshkol-host-runtime-smoke-fixture',
@@ -145,6 +146,28 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     ]);
     expect(interpolationTable.contentHash).toBe('sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
     expect(interpolationTable.samples.length).toBe(4);
+    const tensorRuntimeContract = eshkolArtifact.validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract;
+    expect(tensorRuntimeContract.schema).toBe('eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0');
+    expect(tensorRuntimeContract.status).toBe('declared-fixture-contract');
+    expect(tensorRuntimeContract.runtimeAbi).toBe('wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
+    expect(tensorRuntimeContract.executionClaim).toBe('metadata-and-smoke-output-only');
+    expect(tensorRuntimeContract.entryExport).toBe('main');
+    expect(tensorRuntimeContract.tensorMemoryModel).toBe('host-managed-linear-f64');
+    expect(tensorRuntimeContract.inputTensorIds).toEqual([
+      'magnetar-state-vector',
+      'closure-control-vector'
+    ]);
+    expect(tensorRuntimeContract.outputTensorIds).toEqual([
+      'magnetar-closure-update',
+      'closure-residual'
+    ]);
+    expect(tensorRuntimeContract.interpolationTable.contentHash).toBe(interpolationTable.contentHash);
+    expect(tensorRuntimeContract.sampleShapeValidation.status).toBe('pass');
+    expect(tensorRuntimeContract.sampleShapeValidation.validatedSampleCount).toBe(4);
+    expect(tensorRuntimeContract.sampleShapeValidation.scientificValidation).toBe(false);
+    expect(tensorRuntimeContract.contractHash).toBe('sha256:4b0d9c61ae83f1695978fd2f6b918bdbcab1ccca550b520c0467e7159c805d28');
+    expect(tensorRuntimeContract.scientificValidation).toBe(false);
+    expect(tensorRuntimeContract.fullPhysicsValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.artifactKind).toBe('closure');
     expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('descriptor-only');
@@ -201,6 +224,16 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableSampleCount).toBe(4);
     expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTablePayloadSampleCount).toBe(4);
     expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableContentHash).toBe('sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractSchema).toBe('eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractStatus).toBe('declared-fixture-contract');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractHash).toBe('sha256:4b0d9c61ae83f1695978fd2f6b918bdbcab1ccca550b520c0467e7159c805d28');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeRuntimeAbi).toBe('wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeExecutionClaim).toBe('metadata-and-smoke-output-only');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeSampleShapeValidationStatus).toBe('pass');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeSampleShapeValidatedSampleCount).toBe(4);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeScientificValidation).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeFullPhysicsValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');

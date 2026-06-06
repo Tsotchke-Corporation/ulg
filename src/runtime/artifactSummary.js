@@ -4,6 +4,7 @@ export const ULG_QUANTUM_RESPONSE_PARITY_SCHEMA = 'peercompute.ulg.quantum-respo
 export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.magnetar-dipole-ising-calibration.v0';
 export const ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA = 'eshkol.ulg.closure-output-semantics.v0';
 export const ESHKOL_MAGNETAR_CLOSURE_DESCRIPTOR_SCHEMA = 'eshkol.ulg.magnetar-closure-descriptor.v0';
+export const ESHKOL_MAGNETAR_CLOSURE_TENSOR_RUNTIME_CONTRACT_SCHEMA = 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0';
 export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
 export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-input';
 export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA = 'moonlab.magnetar.calibrated-reference.v0';
@@ -190,6 +191,13 @@ function countWasmEntries(entries = [], kind) {
     : 0;
 }
 
+function arraysEqual(left = [], right = []) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
 export function summarizeUlgArtifact(artifact = {}) {
   const outputs = artifact.outputs && typeof artifact.outputs === 'object' && !Array.isArray(artifact.outputs)
     ? artifact.outputs
@@ -221,6 +229,9 @@ export function summarizeUlgArtifact(artifact = {}) {
     && typeof closureDescriptorBinding.ulgInterpolationTable === 'object'
     ? closureDescriptorBinding.ulgInterpolationTable
     : null;
+  const closureTensorRuntimeContract = objectOrNull(closureDescriptorBinding.closureTensorRuntimeContract);
+  const closureTensorRuntimeInterpolationTable = objectOrNull(closureTensorRuntimeContract?.interpolationTable);
+  const closureTensorRuntimeSampleShapeValidation = objectOrNull(closureTensorRuntimeContract?.sampleShapeValidation);
   const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
     ? outputSemantics.stdout
     : {};
@@ -258,6 +269,30 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureDescriptorTensorContract.inputIds.length > 0
     && Array.isArray(closureDescriptorTensorContract.outputIds)
     && closureDescriptorTensorContract.outputIds.length > 0;
+  const closureTensorRuntimeInputIds = Array.isArray(closureTensorRuntimeContract?.inputTensorIds)
+    ? closureTensorRuntimeContract.inputTensorIds
+    : [];
+  const closureTensorRuntimeOutputIds = Array.isArray(closureTensorRuntimeContract?.outputTensorIds)
+    ? closureTensorRuntimeContract.outputTensorIds
+    : [];
+  const closureTensorRuntimeContractReady =
+    closureTensorRuntimeContract?.schema === ESHKOL_MAGNETAR_CLOSURE_TENSOR_RUNTIME_CONTRACT_SCHEMA
+    && closureTensorRuntimeContract.status === 'declared-fixture-contract'
+    && typeof closureTensorRuntimeContract.contractHash === 'string'
+    && closureTensorRuntimeContract.contractHash.startsWith('sha256:')
+    && closureTensorRuntimeContract.entryExport === closureDescriptor?.entryExport
+    && closureTensorRuntimeContract.coordinateSystem === closureDescriptorTensorContract.coordinateSystem
+    && arraysEqual(closureTensorRuntimeInputIds, closureDescriptorTensorContract.inputIds)
+    && arraysEqual(closureTensorRuntimeOutputIds, closureDescriptorTensorContract.outputIds)
+    && closureTensorRuntimeInterpolationTable?.id === closureInterpolationTable?.id
+    && closureTensorRuntimeInterpolationTable?.contentHash === closureInterpolationTable?.contentHash
+    && finiteNumberOrNull(closureTensorRuntimeInterpolationTable?.sampleCount) === finiteNumberOrNull(closureInterpolationTable?.sampleCount)
+    && closureTensorRuntimeSampleShapeValidation?.status === 'pass'
+    && closureTensorRuntimeSampleShapeValidation?.scientificValidation === false
+    && finiteNumberOrNull(closureTensorRuntimeSampleShapeValidation?.validatedSampleCount) === finiteNumberOrNull(closureInterpolationTable?.sampleCount)
+    && closureTensorRuntimeContract.runtimeStatus === 'declared-not-executed'
+    && closureTensorRuntimeContract.scientificValidation === false
+    && closureTensorRuntimeContract.fullPhysicsValidation === false;
   const closureHandoffReady = (artifact.validation?.status || null) === 'pass'
     || closureDescriptorReady;
 
@@ -346,6 +381,34 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureInterpolationTablePayloadSampleCount: Array.isArray(closureInterpolationTable?.samples)
       ? closureInterpolationTable.samples.length
       : 0,
+    closureTensorRuntimeContractSchema: closureTensorRuntimeContract?.schema || null,
+    closureTensorRuntimeContractId: closureTensorRuntimeContract?.contractId || null,
+    closureTensorRuntimeContractStatus: closureTensorRuntimeContract?.status || null,
+    closureTensorRuntimeContractReady,
+    closureTensorRuntimeContractHash: closureTensorRuntimeContract?.contractHash || null,
+    closureTensorRuntimeRuntimeAbi: closureTensorRuntimeContract?.runtimeAbi || null,
+    closureTensorRuntimeExecutionClaim: closureTensorRuntimeContract?.executionClaim || null,
+    closureTensorRuntimeEntryExport: closureTensorRuntimeContract?.entryExport || null,
+    closureTensorRuntimeMemoryModel: closureTensorRuntimeContract?.tensorMemoryModel || null,
+    closureTensorRuntimeCoordinateSystem: closureTensorRuntimeContract?.coordinateSystem || null,
+    closureTensorRuntimeInputTensorIds: clonePlain(closureTensorRuntimeInputIds),
+    closureTensorRuntimeOutputTensorIds: clonePlain(closureTensorRuntimeOutputIds),
+    closureTensorRuntimeInterpolationTableId: closureTensorRuntimeInterpolationTable?.id || null,
+    closureTensorRuntimeInterpolationTableContentHash: closureTensorRuntimeInterpolationTable?.contentHash || null,
+    closureTensorRuntimeInterpolationTableSampleCount: finiteNumberOrNull(closureTensorRuntimeInterpolationTable?.sampleCount),
+    closureTensorRuntimeSampleShapeValidationSchema: closureTensorRuntimeSampleShapeValidation?.schema || null,
+    closureTensorRuntimeSampleShapeValidationStatus: closureTensorRuntimeSampleShapeValidation?.status || null,
+    closureTensorRuntimeSampleShapeValidatedSampleCount: finiteNumberOrNull(
+      closureTensorRuntimeSampleShapeValidation?.validatedSampleCount
+    ),
+    closureTensorRuntimeScientificValidation:
+      typeof closureTensorRuntimeContract?.scientificValidation === 'boolean'
+        ? closureTensorRuntimeContract.scientificValidation
+        : null,
+    closureTensorRuntimeFullPhysicsValidation:
+      typeof closureTensorRuntimeContract?.fullPhysicsValidation === 'boolean'
+        ? closureTensorRuntimeContract.fullPhysicsValidation
+        : null,
     closureReady: inferArtifactKind(artifact) === 'closure'
       && closureHandoffReady
       && execution.serviceWorkerSafe === true

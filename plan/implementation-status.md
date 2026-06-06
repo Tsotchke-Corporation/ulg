@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 11:06:16 AKDT
+Updated: 2026-06-06 11:45:02 AKDT
 
 ## Done
 
@@ -324,6 +324,20 @@ Updated: 2026-06-06 11:06:16 AKDT
   `missingCount = 0`, `scientificReady = true`, no blockers, tolerance-scope
   readiness for `pic-kinetic-plasma`, and explicit non-full-fidelity runtime
   scope flags.
+- Recorded the next sidecar/local commits: Eshkol commit `6188573` adds
+  `eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0` to the magnetar
+  descriptor fixture, PeerCompute commit `d5acd481` validates and summarizes
+  that contract in dispatch adapter probes, and MoonLab commit `bf5d1d1`
+  documents the remaining browser WebGPU complex64 parity blocker.
+- Added ULG compact artifact-summary and staging guards for Eshkol tensor
+  runtime contracts. ULG reports `closureTensorRuntimeContractReady = true`
+  only when the contract schema, hash, tensor ids, interpolation-table binding,
+  sample-shape validation, and non-scientific/full-physics flags line up.
+- Verified the live ULG-to-PeerCompute path at `http://127.0.0.1:5173/` and
+  `https://127.0.0.1:5185/?scenario=magnetar`: ULG and PeerCompute both report
+  the tensor runtime contract ready, PeerCompute dispatch adapters are ready,
+  calibrated runtime evidence remains `runtime-evidence-ready` with
+  `validatedCount = 5`, and blocker count remains `0`.
 
 ## In Progress
 
@@ -343,8 +357,8 @@ Updated: 2026-06-06 11:06:16 AKDT
   validation artifacts.
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
-- Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
-  real closure tensor descriptors once the descriptor contract is stable.
+- Extend the Eshkol helper into language-level `define-ulg-closure` metadata now
+  that the descriptor/table/tensor-runtime contract is stable.
 - Add real MoonLab browser WebGPU quantum-response kernels so the current
   unsupported `moonlab-webgpu` parity entry can become an executed comparison.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor

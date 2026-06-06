@@ -2966,3 +2966,46 @@ Notes:
   full GRMHD, production PIC, spectral radiation transport, or full magnetar
   physics validation.
 - No push was attempted.
+
+## 2026-06-06 - Eshkol tensor runtime contract propagation
+
+Changes:
+
+- Recorded sidecar/local commits for the tensor-contract slice:
+  Eshkol `6188573`, PeerCompute `d5acd481`, and MoonLab `bf5d1d1`.
+- Added ULG compact summary fields for
+  `eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0`, including contract
+  id/status/hash, runtime ABI, execution claim, tensor ids, interpolation-table
+  binding, sample-shape validation status, and explicit
+  `scientificValidation = false` / `fullPhysicsValidation = false`.
+- Hardened `npm run stage:service-assets` so the staged Eshkol magnetar
+  descriptor must carry a valid tensor runtime contract matching its tensor
+  contract and interpolation table before the browser service asset is accepted.
+- Updated ULG unit and Playwright coverage for the new contract fields.
+
+Validation:
+
+- PASS: Eshkol `ctest --test-dir build -R '^ulg_magnetar_closure_fixture_test$' --output-on-failure`.
+- PASS: ULG syntax checks for `src/runtime/artifactSummary.js`,
+  `scripts/stage-service-assets.mjs`, `tests/orchestration.test.mjs`, and
+  `tests/demo.e2e.mjs`.
+- PASS: `npm run stage:service-assets`.
+- PASS: `npm test` passed `19/19`.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: PeerCompute `node --test peercompute/tests/unit/serviceOrchestration.test.js`
+  passed `22/22`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` passed with the
+  existing large-chunk warning.
+- PASS: strict live browser probe from ULG `http://127.0.0.1:5173/` to
+  PeerCompute `https://127.0.0.1:5185/?scenario=magnetar` reported
+  `ulgTensorContractReady = true`, `peercomputeTensorContractReady = true`,
+  `dispatch-adapters-ready`, `handoff-ready`, `runtime-evidence-ready`,
+  `validatedCount = 5`, and blocker count `0`.
+
+Notes:
+
+- This is a runtime tensor contract for descriptor/table fixture execution
+  surfaces. It still does not claim full GRMHD, production PIC, spectral
+  radiation transport, or validated full magnetar physics.
+- No push was attempted.

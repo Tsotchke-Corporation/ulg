@@ -373,7 +373,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
         scientificValidation: false,
         tensorContract: {
           coordinateSystem: 'normalized-radial-cell',
-          interpolation: 'not-declared',
+          interpolation: 'reduced-fixture-table-contract',
           inputIds: ['magnetar-state-vector', 'closure-control-vector'],
           outputIds: ['magnetar-closure-update', 'closure-residual']
         },
@@ -416,6 +416,36 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               { id: 'moonlab:radiation-transport-reference' },
               { id: 'moonlab:relativistic-correction-reference' }
             ]
+          },
+          closureTensorRuntimeContract: {
+            schema: 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0',
+            contractId: 'eshkol:magnetar-closure-tensor-runtime-contract:v0',
+            status: 'declared-fixture-contract',
+            runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+            executionClaim: 'metadata-and-smoke-output-only',
+            entryExport: 'main',
+            tensorMemoryModel: 'host-managed-linear-f64',
+            coordinateSystem: 'normalized-radial-cell',
+            inputTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
+            outputTensorIds: ['magnetar-closure-update', 'closure-residual'],
+            interpolationTable: {
+              id: 'ulg:magnetar-radial-cell-interpolation-table:v0',
+              schema: 'eshkol.ulg.magnetar-closure-interpolation-table.v0',
+              contentHash: 'sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165',
+              sampleCount: 4
+            },
+            sampleShapeValidation: {
+              schema: 'eshkol.ulg.tensor-sample-shape-validation.v0',
+              status: 'pass',
+              validatedSampleCount: 4,
+              validatedInputTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
+              validatedOutputTensorIds: ['magnetar-closure-update', 'closure-residual'],
+              scientificValidation: false
+            },
+            contractHash: 'sha256:4b0d9c61ae83f1695978fd2f6b918bdbcab1ccca550b520c0467e7159c805d28',
+            runtimeStatus: 'declared-not-executed',
+            scientificValidation: false,
+            fullPhysicsValidation: false
           }
         },
         nextContractFields: [
@@ -462,7 +492,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     ]
   });
   assert.equal(summary.closureDescriptorCoordinateSystem, 'normalized-radial-cell');
-  assert.equal(summary.closureDescriptorInterpolation, 'not-declared');
+  assert.equal(summary.closureDescriptorInterpolation, 'reduced-fixture-table-contract');
   assert.deepEqual(summary.closureDescriptorInputIds, ['magnetar-state-vector', 'closure-control-vector']);
   assert.deepEqual(summary.closureDescriptorOutputIds, ['magnetar-closure-update', 'closure-residual']);
   assert.deepEqual(summary.closureDescriptorNextContractFields, [
@@ -484,6 +514,26 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     'moonlab:relativistic-correction-reference'
   ]);
   assert.equal(summary.closureInterpolationTableContentHash, 'sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
+  assert.equal(summary.closureTensorRuntimeContractSchema, 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0');
+  assert.equal(summary.closureTensorRuntimeContractId, 'eshkol:magnetar-closure-tensor-runtime-contract:v0');
+  assert.equal(summary.closureTensorRuntimeContractStatus, 'declared-fixture-contract');
+  assert.equal(summary.closureTensorRuntimeContractReady, true);
+  assert.equal(summary.closureTensorRuntimeContractHash, 'sha256:4b0d9c61ae83f1695978fd2f6b918bdbcab1ccca550b520c0467e7159c805d28');
+  assert.equal(summary.closureTensorRuntimeRuntimeAbi, 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
+  assert.equal(summary.closureTensorRuntimeExecutionClaim, 'metadata-and-smoke-output-only');
+  assert.equal(summary.closureTensorRuntimeEntryExport, 'main');
+  assert.equal(summary.closureTensorRuntimeMemoryModel, 'host-managed-linear-f64');
+  assert.equal(summary.closureTensorRuntimeCoordinateSystem, 'normalized-radial-cell');
+  assert.deepEqual(summary.closureTensorRuntimeInputTensorIds, ['magnetar-state-vector', 'closure-control-vector']);
+  assert.deepEqual(summary.closureTensorRuntimeOutputTensorIds, ['magnetar-closure-update', 'closure-residual']);
+  assert.equal(summary.closureTensorRuntimeInterpolationTableId, 'ulg:magnetar-radial-cell-interpolation-table:v0');
+  assert.equal(summary.closureTensorRuntimeInterpolationTableContentHash, 'sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
+  assert.equal(summary.closureTensorRuntimeInterpolationTableSampleCount, 4);
+  assert.equal(summary.closureTensorRuntimeSampleShapeValidationSchema, 'eshkol.ulg.tensor-sample-shape-validation.v0');
+  assert.equal(summary.closureTensorRuntimeSampleShapeValidationStatus, 'pass');
+  assert.equal(summary.closureTensorRuntimeSampleShapeValidatedSampleCount, 4);
+  assert.equal(summary.closureTensorRuntimeScientificValidation, false);
+  assert.equal(summary.closureTensorRuntimeFullPhysicsValidation, false);
   assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
   assert.equal(summary.closureOutputSemanticsReady, true);
   assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');

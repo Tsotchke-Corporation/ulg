@@ -474,3 +474,36 @@ reference-contract asset support.
 - Reuse peercompute's existing runtime P2P smoke harness where possible.
 - Add STUN/TURN/ICE/relay coverage once the service registry integration lands
   in peercompute proper.
+
+## 2026-06-06 Tensor Runtime Contract Checks
+
+- Eshkol:
+  `python3 -m json.tool examples/magnetar_closure.ulg-metadata.json >/dev/null`
+  and `python3 -m py_compile tests/toolchain/ulg_magnetar_closure_fixture_test.py`
+  passed.
+- Eshkol:
+  `ctest --test-dir build -R '^ulg_magnetar_closure_fixture_test$' --output-on-failure`
+  passed `1/1`.
+- ULG:
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check tests/orchestration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- ULG: `npm run stage:service-assets`, `npm test` (`19/19`),
+  `npm run test:e2e` (`1/1`), and `npm run build` passed. Build still emits
+  the existing large-chunk warning.
+- PeerCompute:
+  `node --check peercompute/src/peercompute/serviceOrchestration/UlgDispatchServiceAdapters.js`,
+  `node --check peercompute/src/peercompute/serviceOrchestration/UlgHandoffServiceHost.js`,
+  and `node --check peercompute/tests/unit/serviceOrchestration.test.js`
+  passed.
+- PeerCompute:
+  `node --test peercompute/tests/unit/serviceOrchestration.test.js` passed
+  `22/22`.
+- PeerCompute: `npm --prefix demos/multiscale run build` passed with the
+  existing large-chunk warning.
+- Strict live browser probe from `http://127.0.0.1:5173/` to
+  `https://127.0.0.1:5185/?scenario=magnetar` passed: ULG and PeerCompute both
+  reported the Eshkol tensor runtime contract ready, dispatch adapters returned
+  `dispatch-adapters-ready`, calibrated runtime evidence returned
+  `runtime-evidence-ready`, `validatedCount = 5`, and blocker count `0`.

@@ -54,6 +54,11 @@ physics work:
   keeps the default magnetar descriptor service unchanged while exporting the
   staged `hello` closure bundle with real output semantics and transferred WASM
   bytes for PeerCompute's gated runtime execution proof.
+- [x] Surface Eshkol's
+  `eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0` through compact
+  artifact summaries and staging guards, including tensor ids, contract hash,
+  interpolation-table binding, sample-shape validation, and explicit
+  non-scientific/full-physics flags.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -99,6 +104,8 @@ physics work:
   it to scientific execution.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
+- [x] Validate Eshkol descriptor tensor-runtime contracts in dispatch adapter
+  probes and service summaries without promoting them to scientific execution.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
@@ -121,8 +128,10 @@ physics work:
   browser-facing service asset convention.
 - [x] Add deterministic reduced interpolation-table fixture metadata to the
   magnetar descriptor artifact without claiming validated physics.
-- [ ] Add `define-ulg-closure`, typed closure tensor descriptors, and
-  service-worker import glue after the artifact contract stabilizes.
+- [x] Add metadata-level typed closure tensor runtime descriptors to the
+  magnetar fixture, including sample-shape validation and contract hash.
+- [ ] Add language-level `define-ulg-closure` syntax and service-worker import
+  glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
   general LLVM-to-WGSL compiler.
 - [ ] Avoid JIT service paths until the observed derivative/JIT hang is profiled.

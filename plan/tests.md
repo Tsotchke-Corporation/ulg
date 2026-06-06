@@ -333,6 +333,16 @@ reference-contract asset support.
   `closureKind = "magnetar-closure-descriptor-fixture"`,
   `closureDescriptorReady = true`, `closureOutputSemanticsReady = false`,
   `scientificValidation = false`, and `wasmByteLength = 53066`.
+- Eshkol magnetar interpolation-table fixture check on 2026-06-06:
+  `npm run stage:service-assets -- --eshkol-only`, `npm test`,
+  `npm run build`, and `npm run test:e2e` passed after the staged descriptor
+  gained `eshkol.ulg.magnetar-closure-interpolation-table.v0`,
+  `status = computed-fixture`, `sampleCount = 4`, content hash
+  `sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165`,
+  and `scientificValidation = false`. A live `5173` to Multiscale `5185`
+  adapter probe returned `dispatch-adapters-ready`, `acceptedDispatchCount = 2`,
+  Eshkol descriptor probe `ready = true`, table status `computed-fixture`,
+  no blockers, and service-summary table sample count `4`.
 - Eshkol closure artifact handoff check on 2026-06-05: Playwright verifies the
   ready Eshkol service returns the staged `wasm-reference` closure artifact,
   preserves `hello.wasm` as the relative module URL, marks it service-worker

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 09:49:48 AKDT
+Updated: 2026-06-06 18:13:00 AKDT
 
 ## Done
 
@@ -271,6 +271,13 @@ Updated: 2026-06-06 09:49:48 AKDT
   hash `sha256:5cef4349b2bdbfe619ca60a00de91297f4b0b3c050cc1a82858f61f6c2941de3`,
   declares four MoonLab closure-surface samples, and keeps runtime/derivatives
   declared-not-executed/computed with `scientificValidation = false`.
+- Added Eshkol reduced interpolation-table fixture evidence to the staged
+  magnetar descriptor handoff. The browser-served `magnetar-closure` artifact
+  now exposes `eshkol.ulg.magnetar-closure-interpolation-table.v0`,
+  `status = computed-fixture`, four MoonLab-aligned sample ids, sample payload
+  hash `sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165`,
+  and `scientificValidation = false`; ULG artifact summaries surface the same
+  table status/count/hash for PeerCompute consumers.
 - Added and committed PeerCompute's first envelope-backed service host locally
   as commit `2776682d`. `UlgHandoffServiceHost` runs under
   `WorkerSupervisor`, accepts raw ULG demo handoff tasks, normalizes them to
@@ -307,8 +314,8 @@ Updated: 2026-06-06 09:49:48 AKDT
 - Replace the fixture MoonLab/Eshkol service hosts with production adapters that
   consume the same dispatch task shape.
 - Keep both ULG handoff paths available: magnetar descriptor for descriptor
-  binding/dry runtime evidence, and `hello` smoke for gated runtime execution
-  proof.
+  binding/dry runtime/table-fixture evidence, and `hello` smoke for gated
+  runtime execution proof.
 
 ## Next
 

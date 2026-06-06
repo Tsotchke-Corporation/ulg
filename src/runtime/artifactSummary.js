@@ -208,6 +208,13 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureDescriptorTensorContract = closureDescriptor?.tensorContract && typeof closureDescriptor.tensorContract === 'object'
     ? closureDescriptor.tensorContract
     : {};
+  const closureDescriptorBinding = closureDescriptor?.descriptorBinding && typeof closureDescriptor.descriptorBinding === 'object'
+    ? closureDescriptor.descriptorBinding
+    : {};
+  const closureInterpolationTable = closureDescriptorBinding.ulgInterpolationTable
+    && typeof closureDescriptorBinding.ulgInterpolationTable === 'object'
+    ? closureDescriptorBinding.ulgInterpolationTable
+    : null;
   const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
     ? outputSemantics.stdout
     : {};
@@ -316,6 +323,22 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureDescriptorNextContractFields: clonePlain(Array.isArray(closureDescriptor?.nextContractFields)
       ? closureDescriptor.nextContractFields
       : []),
+    closureInterpolationTableSchema: closureInterpolationTable?.schema || null,
+    closureInterpolationTableId: closureInterpolationTable?.id || null,
+    closureInterpolationTableStatus: closureInterpolationTable?.status || null,
+    closureInterpolationTableFixtureScope: closureInterpolationTable?.fixtureScope || null,
+    closureInterpolationTableScientificValidation:
+      typeof closureInterpolationTable?.scientificValidation === 'boolean'
+        ? closureInterpolationTable.scientificValidation
+        : null,
+    closureInterpolationTableSampleCount: finiteNumberOrNull(closureInterpolationTable?.sampleCount),
+    closureInterpolationTableSampleIds: clonePlain(Array.isArray(closureInterpolationTable?.sampleIds)
+      ? closureInterpolationTable.sampleIds
+      : []),
+    closureInterpolationTableContentHash: closureInterpolationTable?.contentHash || null,
+    closureInterpolationTablePayloadSampleCount: Array.isArray(closureInterpolationTable?.samples)
+      ? closureInterpolationTable.samples.length
+      : 0,
     closureReady: inferArtifactKind(artifact) === 'closure'
       && closureHandoffReady
       && execution.serviceWorkerSafe === true

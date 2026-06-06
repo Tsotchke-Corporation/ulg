@@ -339,6 +339,30 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
           inputIds: ['magnetar-state-vector', 'closure-control-vector'],
           outputIds: ['magnetar-closure-update', 'closure-residual']
         },
+        descriptorBinding: {
+          schema: 'eshkol.ulg.magnetar-closure-descriptor-binding.v0',
+          ulgInterpolationTable: {
+            schema: 'eshkol.ulg.magnetar-closure-interpolation-table.v0',
+            id: 'ulg:magnetar-radial-cell-interpolation-table:v0',
+            status: 'computed-fixture',
+            fixtureScope: 'reduced-smoke-fixture-not-magnetar-physics',
+            scientificValidation: false,
+            sampleCount: 4,
+            sampleIds: [
+              'moonlab:magnetosphere-mhd-reference',
+              'moonlab:pic-kinetic-plasma-reference',
+              'moonlab:radiation-transport-reference',
+              'moonlab:relativistic-correction-reference'
+            ],
+            contentHash: 'sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165',
+            samples: [
+              { id: 'moonlab:magnetosphere-mhd-reference' },
+              { id: 'moonlab:pic-kinetic-plasma-reference' },
+              { id: 'moonlab:radiation-transport-reference' },
+              { id: 'moonlab:relativistic-correction-reference' }
+            ]
+          }
+        },
         nextContractFields: [
           'ulgInterpolationTableId',
           'moonlabClosureSurfaceSampleIds',
@@ -374,6 +398,20 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     'moonlabClosureSurfaceSampleIds',
     'peercomputeProductTopologyBinding'
   ]);
+  assert.equal(summary.closureInterpolationTableSchema, 'eshkol.ulg.magnetar-closure-interpolation-table.v0');
+  assert.equal(summary.closureInterpolationTableId, 'ulg:magnetar-radial-cell-interpolation-table:v0');
+  assert.equal(summary.closureInterpolationTableStatus, 'computed-fixture');
+  assert.equal(summary.closureInterpolationTableFixtureScope, 'reduced-smoke-fixture-not-magnetar-physics');
+  assert.equal(summary.closureInterpolationTableScientificValidation, false);
+  assert.equal(summary.closureInterpolationTableSampleCount, 4);
+  assert.equal(summary.closureInterpolationTablePayloadSampleCount, 4);
+  assert.deepEqual(summary.closureInterpolationTableSampleIds, [
+    'moonlab:magnetosphere-mhd-reference',
+    'moonlab:pic-kinetic-plasma-reference',
+    'moonlab:radiation-transport-reference',
+    'moonlab:relativistic-correction-reference'
+  ]);
+  assert.equal(summary.closureInterpolationTableContentHash, 'sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
   assert.equal(summary.closureOutputSemanticsSchema, null);
   assert.equal(summary.closureOutputSemanticsReady, false);
   assert.equal(summary.closureReady, true);

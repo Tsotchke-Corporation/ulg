@@ -2847,3 +2847,42 @@ Failures and open questions:
   Magnetar descriptor binding still remains descriptor/dry-runtime evidence
   only until the closure tensor/table runtime contract is implemented.
 - No push was attempted.
+
+## 2026-06-06 - Eshkol magnetar interpolation-table fixture handoff
+
+Changes:
+
+- Updated ULG artifact summaries to surface
+  `validation.closureDescriptor.descriptorBinding.ulgInterpolationTable`
+  fields: schema, id, status, fixture scope, scientific-validation flag,
+  sample count, sample ids, payload sample count, and content hash.
+- Updated unit and Playwright coverage so the staged Eshkol `magnetar-closure`
+  browser artifact exposes `eshkol.ulg.magnetar-closure-interpolation-table.v0`,
+  `status = computed-fixture`, `sampleCount = 4`, content hash
+  `sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165`,
+  and `scientificValidation = false`.
+- Refreshed the ignored live service asset via
+  `npm run stage:service-assets -- --eshkol-only`.
+
+Validation:
+
+- PASS: `node --check src/runtime/artifactSummary.js`.
+- PASS: `node --check tests/orchestration.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `npm test` passed `19/19`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: live ULG `http://127.0.0.1:5173/` served the updated descriptor table
+  with `computed-fixture`, sample count `4`, and the expected content hash.
+- PASS: live ULG-to-PeerCompute probe from `5173` to
+  `https://127.0.0.1:5185/?scenario=magnetar` returned
+  `dispatch-adapters-ready`, blocker count `0`, accepted dispatch count `2`,
+  Eshkol probe status `pass`, descriptor ready `true`, table status
+  `computed-fixture`, service-summary table sample count `4`, and
+  host-runtime scientific execution `false`.
+
+Notes:
+
+- This is deterministic fixture/table evidence for handoff plumbing, not a
+  validated magnetar closure table.
+- No push was attempted.

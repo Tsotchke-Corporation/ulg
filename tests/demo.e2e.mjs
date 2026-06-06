@@ -115,6 +115,20 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'magnetar-closure-update',
       'closure-residual'
     ]);
+    const interpolationTable = eshkolArtifact.validation.closureDescriptor.descriptorBinding.ulgInterpolationTable;
+    expect(interpolationTable.schema).toBe('eshkol.ulg.magnetar-closure-interpolation-table.v0');
+    expect(interpolationTable.status).toBe('computed-fixture');
+    expect(interpolationTable.fixtureScope).toBe('reduced-smoke-fixture-not-magnetar-physics');
+    expect(interpolationTable.scientificValidation).toBe(false);
+    expect(interpolationTable.sampleCount).toBe(4);
+    expect(interpolationTable.sampleIds).toEqual([
+      'moonlab:magnetosphere-mhd-reference',
+      'moonlab:pic-kinetic-plasma-reference',
+      'moonlab:radiation-transport-reference',
+      'moonlab:relativistic-correction-reference'
+    ]);
+    expect(interpolationTable.contentHash).toBe('sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
+    expect(interpolationTable.samples.length).toBe(4);
     expect(eshkolTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.artifactKind).toBe('closure');
     expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('descriptor-only');
@@ -149,6 +163,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'magnetar-closure-update',
       'closure-residual'
     ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableSchema).toBe('eshkol.ulg.magnetar-closure-interpolation-table.v0');
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableStatus).toBe('computed-fixture');
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableFixtureScope).toBe('reduced-smoke-fixture-not-magnetar-physics');
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableScientificValidation).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableSampleCount).toBe(4);
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTablePayloadSampleCount).toBe(4);
+    expect(eshkolTelemetryRecord.artifactSummary.closureInterpolationTableContentHash).toBe('sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165');
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');

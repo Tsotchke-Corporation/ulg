@@ -91,6 +91,9 @@ physics work:
 - [x] Verify PeerCompute adapter Workers execute the real ULG-staged Eshkol
   `hello` smoke closure handoff, validate stdout semantics, and keep
   `scientificExecution = false`.
+- [x] Surface the Eshkol magnetar descriptor's reduced interpolation-table
+  fixture through ULG artifact summaries and PeerCompute adapter probes while
+  keeping `scientificValidation = false`.
 - [x] Expose the derived handoff dispatch plan through the live Multiscale
   browser API for VPN inspection.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
@@ -98,9 +101,8 @@ physics work:
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
   lifecycle, child-worker leases, GPU leases, cancellation trees, content-addressed
   artifacts, and provenance indexes.
-- [ ] Extend Eshkol descriptor probing from dry/smoke runtime readiness to table
-  computation and controlled magnetar closure execution once the runtime
-  contract is ready.
+- [ ] Extend Eshkol descriptor probing from deterministic table-fixture evidence
+  to controlled magnetar closure execution once the runtime contract is ready.
 
 ### Eshkol
 
@@ -114,6 +116,8 @@ physics work:
   discovery for the current AOT WASM path.
 - [x] Add manual closure-bundle export/deploy helper support to the ULG
   browser-facing service asset convention.
+- [x] Add deterministic reduced interpolation-table fixture metadata to the
+  magnetar descriptor artifact without claiming validated physics.
 - [ ] Add `define-ulg-closure`, typed closure tensor descriptors, and
   service-worker import glue after the artifact contract stabilizes.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a

@@ -52,6 +52,9 @@ Commands planned/run:
 - `npm test`
 - `npm run build`
 - `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `npm run build`
+- `npm run test:e2e`
 - `git diff --check`
 - `ss -ltnp 'sport = :5173'`
 - `curl -I http://100.86.83.35:5173/`
@@ -3669,4 +3672,64 @@ Failures / open questions:
 - Real relay-served popup dispatch-adapter execution still does not pass. The
   popup context resets after first MoonLab `dispatch-start` and before
   `dispatch-complete`.
+- No push was attempted.
+
+## 2026-06-06 15:02:07 AKDT - Generic MoonLab native-operation summary guard
+
+Prompt: User told me to keep working while sidecar agents run on MoonLab,
+Eshkol, and PeerCompute.
+
+Changes:
+
+- Kept `hadamard` and `pauli_x` compatibility summary fields, but changed the
+  MoonLab native-operation readiness guard so every declared native operation
+  result must remain blocked unless it has real execution/coverage evidence.
+- Added generic `moonlabWebGpuNativeOperationProbeDeclaredOperations` and
+  `moonlabWebGpuNativeOperationProbeBlockedOperations` summary fields.
+- Changed the artifact list UI to render native operation status from
+  `moonlabWebGpuNativeOperationProbeOperationResults[]` instead of hard-coding
+  only `hadamard` and `pauli_x`.
+- Added the same generic native operation result arrays to
+  `npm run status:live` output.
+- Extended the unit fixture with a future blocked `pauli_z` operation so ULG
+  proves it can preserve additional MoonLab probe evidence without one-off
+  summary fields.
+
+Files touched:
+
+- `src/runtime/artifactSummary.js`
+- `src/main.js`
+- `scripts/live-status.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/artifactSummary.js`
+- `node --check src/main.js`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+
+Validation:
+
+- PASS: all changed JavaScript files passed syntax checks.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live -- --bridge` reported
+  `nativeOperationDeclaredOperations = ["hadamard", "pauli_x"]`,
+  `nativeOperationBlockedOperations = ["hadamard", "pauli_x"]`, Multiscale ack
+  `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
+  and artifact count `2`.
+
+Failures / open questions:
+
+- This ULG hardening does not create new MoonLab WebGPU execution evidence. It
+  only keeps future declared operation blockers visible and strict.
 - No push was attempted.

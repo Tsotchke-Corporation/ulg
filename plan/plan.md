@@ -74,6 +74,8 @@ physics work:
 - [x] Surface MoonLab's declared `pauli_x` native WebGPU operation probe through
   ULG staging, summaries, UI, handoffs, and live status while preserving
   no-adapter/no-execution flags.
+- [x] Generalize MoonLab native-operation summary rendering so future blocked
+  operations flow through `operationResults[]` without new one-off UI fields.
 - [x] Add direct Multiscale launch status detail for scenario/readiness acks
   while preserving the `handoff ready / blockers 0` compatibility prefix.
 - [ ] Keep the dev server running for live inspection.

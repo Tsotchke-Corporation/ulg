@@ -75,6 +75,12 @@ try {
         nativeOperationProbeExecuted: moonlab?.moonlabWebGpuNativeOperationProbeExecuted ?? null,
         nativeOperationProbePassed: moonlab?.moonlabWebGpuNativeOperationProbePassed ?? null,
         nativeOperationCoveredOperations: moonlab?.moonlabWebGpuNativeOperationCoveredOperations ?? [],
+        nativeOperationDeclaredOperations:
+          moonlab?.moonlabWebGpuNativeOperationProbeDeclaredOperations ?? [],
+        nativeOperationBlockedOperations:
+          moonlab?.moonlabWebGpuNativeOperationProbeBlockedOperations ?? [],
+        nativeOperationResults:
+          moonlab?.moonlabWebGpuNativeOperationProbeOperationResults ?? [],
         hadamardNativeOperationDeclared: moonlab?.moonlabWebGpuHadamardNativeOperationDeclared ?? null,
         hadamardNativeOperationExecuted: moonlab?.moonlabWebGpuHadamardNativeOperationExecuted ?? null,
         hadamardNativeOperationCovered: moonlab?.moonlabWebGpuHadamardNativeOperationCovered ?? null,

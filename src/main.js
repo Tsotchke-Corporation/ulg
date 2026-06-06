@@ -288,11 +288,13 @@ function renderArtifactSummaryLine(summary) {
   if (summary.moonlabWebGpuProbabilityKernelProbeDeclared) {
     parts.push(`wgsl:${summary.moonlabWebGpuProbabilityKernel || 'probe'}-declared`);
   }
-  if (summary.moonlabWebGpuHadamardNativeOperationDeclared) {
-    parts.push(`native:hadamard-${summary.moonlabWebGpuHadamardNativeOperationCovered ? 'covered' : 'blocked'}`);
-  }
-  if (summary.moonlabWebGpuPauliXNativeOperationDeclared) {
-    parts.push(`native:pauli_x-${summary.moonlabWebGpuPauliXNativeOperationCovered ? 'covered' : 'blocked'}`);
+  const nativeOperationResults = Array.isArray(summary.moonlabWebGpuNativeOperationProbeOperationResults)
+    ? summary.moonlabWebGpuNativeOperationProbeOperationResults
+    : [];
+  for (const nativeOperation of nativeOperationResults) {
+    if (nativeOperation?.operation) {
+      parts.push(`native:${nativeOperation.operation}-${nativeOperation.covered ? 'covered' : 'blocked'}`);
+    }
   }
   if (summary.magnetarDipoleIsingReady) {
     parts.push(`magnetar:${summary.magnetarDipoleIsingGroundState || 'ready'}`);

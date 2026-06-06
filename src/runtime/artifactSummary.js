@@ -26,6 +26,7 @@ const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
   'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
   'full-physics-validation-not-run'
 ]);
+const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze(['hadamard', 'pauli_x']);
 
 function inferArtifactKind(artifact = {}) {
   if (artifact.responseDescriptor || artifact.parity || artifact.calibrationArtifacts) return 'quantum-response';
@@ -300,6 +301,17 @@ export function summarizeUlgArtifact(artifact = {}) {
           tolerance: finiteNumberOrNull(entry.tolerance)
         }))
       : [];
+  const moonlabWebGpuNativeOperationResultByOperation = new Map(
+    moonlabWebGpuNativeOperationResults
+      .filter((entry) => entry.operation)
+      .map((entry) => [entry.operation, entry])
+  );
+  const moonlabWebGpuNativeOperationDeclaredOperations =
+    moonlabWebGpuNativeOperationResults.map((entry) => entry.operation).filter(Boolean);
+  const moonlabWebGpuNativeOperationBlockedOperations =
+    moonlabWebGpuNativeOperationResults
+      .filter((entry) => entry.operation && entry.covered !== true)
+      .map((entry) => entry.operation);
   const moonlabWebGpuHadamardNativeOperationResult = moonlabWebGpuNativeOperationResults
     .find((entry) => entry.operation === 'hadamard') || null;
   const moonlabWebGpuPauliXNativeOperationResult = moonlabWebGpuNativeOperationResults
@@ -314,6 +326,10 @@ export function summarizeUlgArtifact(artifact = {}) {
     && moonlabWebGpuProbabilityKernelProbe.passed === false
     && moonlabWebGpuProbabilityKernelProbe.maxProbabilityAbsDiff == null
     && moonlabWebGpuProbabilityKernelCoveredNativeOperations.length === 0;
+  const moonlabWebGpuNativeOperationResultBlocked = (entry) => entry?.executed === false
+    && entry?.passed === false
+    && entry?.covered === false
+    && entry?.blocker === 'native-operation-probe-not-executed';
   const moonlabWebGpuNativeOperationProbeDeclared =
     moonlabWebGpuNativeOperationProbe?.schema === MOONLAB_WEBGPU_COMPLEX64_NATIVE_OPERATION_PROBE_SCHEMA
     && moonlabWebGpuNativeOperationProbe.probeKind === 'browser-webgpu-complex64-native-operation-probe'
@@ -321,14 +337,12 @@ export function summarizeUlgArtifact(artifact = {}) {
     && moonlabWebGpuNativeOperationProbe.passed === false
     && moonlabWebGpuNativeOperationProbe.maxAmplitudeAbsDiff == null
     && moonlabWebGpuNativeOperationCoveredOperations.length === 0
-    && moonlabWebGpuHadamardNativeOperationResult?.executed === false
-    && moonlabWebGpuHadamardNativeOperationResult?.passed === false
-    && moonlabWebGpuHadamardNativeOperationResult?.covered === false
-    && moonlabWebGpuHadamardNativeOperationResult?.blocker === 'native-operation-probe-not-executed'
-    && moonlabWebGpuPauliXNativeOperationResult?.executed === false
-    && moonlabWebGpuPauliXNativeOperationResult?.passed === false
-    && moonlabWebGpuPauliXNativeOperationResult?.covered === false
-    && moonlabWebGpuPauliXNativeOperationResult?.blocker === 'native-operation-probe-not-executed';
+    && MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS
+      .every((operation) => moonlabWebGpuNativeOperationResultBlocked(
+        moonlabWebGpuNativeOperationResultByOperation.get(operation)
+      ))
+    && moonlabWebGpuNativeOperationResults.length >= MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS.length
+    && moonlabWebGpuNativeOperationResults.every(moonlabWebGpuNativeOperationResultBlocked);
   const moonlabWebGpuParityScopeReady = moonlabWebGpuParityScope?.schema === MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA
     && moonlabWebGpuParityScope.contractReady === true
     && moonlabWebGpuParityScope.contractValidation?.valid === true
@@ -771,6 +785,10 @@ export function summarizeUlgArtifact(artifact = {}) {
     moonlabWebGpuNativeOperationProbeOperationCount: moonlabWebGpuNativeOperationResults.length,
     moonlabWebGpuNativeOperationProbeCoveredOperationCount:
       moonlabWebGpuNativeOperationResults.filter((entry) => entry.covered === true).length,
+    moonlabWebGpuNativeOperationProbeDeclaredOperations:
+      clonePlain(moonlabWebGpuNativeOperationDeclaredOperations),
+    moonlabWebGpuNativeOperationProbeBlockedOperations:
+      clonePlain(moonlabWebGpuNativeOperationBlockedOperations),
     moonlabWebGpuNativeOperationProbeOperationResults:
       clonePlain(moonlabWebGpuNativeOperationResults),
     moonlabWebGpuNativeOperationProbeMaxAmplitudeAbsDiff:

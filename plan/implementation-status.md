@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 14:58:03 AKDT
+Updated: 2026-06-06 15:02:07 AKDT
 
 ## Done
 
@@ -493,6 +493,10 @@ Updated: 2026-06-06 14:58:03 AKDT
   dispatch-adapter-popup-context-reset`, proves stages reach
   `dispatch-plan-created` and first MoonLab `dispatch-start`, and keeps
   `runtimeGateRelaxed = false` plus `scientificGateRelaxed = false`.
+- Hardened ULG's MoonLab native-operation summary path for future operations.
+  Artifact summaries now expose generic declared/blocked native operation lists
+  and the UI/live-status script render `operationResults[]`, while compatibility
+  fields for `hadamard` and `pauli_x` remain intact.
 
 ## In Progress
 

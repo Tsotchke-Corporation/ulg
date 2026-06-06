@@ -855,3 +855,30 @@ reference-contract asset support.
   ULG `5173` and Multiscale `5185` ready, with Multiscale ack
   `handoff-ready`, blocker count `0`, `simulationStatus = scientific-ready`,
   and artifact count `2`.
+
+## 2026-06-06 ULG Generic Native Operation Summary Checks
+
+- Syntax:
+  `node --check src/runtime/artifactSummary.js`, `node --check src/main.js`,
+  `node --check scripts/live-status.mjs`,
+  `node --check tests/orchestration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Unit tests:
+  `npm test` passed `22/22`.
+- Build and browser smoke:
+  `npm run build` passed with the existing large-chunk warning, and
+  `npm run test:e2e` passed `1/1`.
+- Live status:
+  `npm run status:live -- --bridge` reported
+  `nativeOperationDeclaredOperations = ["hadamard", "pauli_x"]`,
+  `nativeOperationBlockedOperations = ["hadamard", "pauli_x"]`, Multiscale ack
+  `handoff-ready`, blocker count `0`, and
+  `simulationStatus = scientific-ready`.
+- Summary guard:
+  `tests/orchestration.test.mjs` now includes a blocked `pauli_z` fixture entry
+  in `browserNativeOperationProbe.operationResults[]`, proving ULG preserves
+  future declared native operations through generic declared/blocked operation
+  lists while still requiring `hadamard` and `pauli_x` compatibility blockers.
+- Current live artifact path:
+  `tests/demo.e2e.mjs` still expects the staged live MoonLab artifact to report
+  the current two declared blocked native operations: `hadamard` and `pauli_x`.

@@ -188,6 +188,17 @@ function createMoonLabWebGpuParityScopeFixture() {
           tolerance: 0.00001,
           blocker: 'native-operation-probe-not-executed',
           reason: 'browser WebGPU adapter unavailable'
+        },
+        {
+          operation: 'pauli_z',
+          executed: false,
+          passed: false,
+          covered: false,
+          fixtureResults: [],
+          maxAmplitudeAbsDiff: null,
+          tolerance: 0.00001,
+          blocker: 'native-operation-probe-not-executed',
+          reason: 'browser WebGPU adapter unavailable'
         }
       ],
       maxAmplitudeAbsDiff: null,
@@ -969,8 +980,18 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.moonlabWebGpuNativeOperationProbeExecuted, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbePassed, false);
   assert.deepEqual(summary.moonlabWebGpuNativeOperationCoveredOperations, []);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationCount, 2);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationCount, 3);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeCoveredOperationCount, 0);
+  assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeDeclaredOperations, [
+    'hadamard',
+    'pauli_x',
+    'pauli_z'
+  ]);
+  assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeBlockedOperations, [
+    'hadamard',
+    'pauli_x',
+    'pauli_z'
+  ]);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].operation, 'hadamard');
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].executed, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].passed, false);
@@ -981,6 +1002,11 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].passed, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].covered, false);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].blocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].operation, 'pauli_z');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].executed, false);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].passed, false);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].covered, false);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].blocker, 'native-operation-probe-not-executed');
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationDeclared, true);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationExecuted, false);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationPassed, false);

@@ -65,6 +65,10 @@ physics work:
 - [x] Surface Eshkol's smoke-only f64 tensor linear-memory layout through ULG
   staging guards, compact summaries, browser handoffs, and live status while
   preserving `entryExportConsumesOffsets = false`.
+- [x] Upgrade the staged Eshkol magnetar closure to deterministic tensor-offset
+  runtime smoke, including consumed declared offsets, produced output tensors,
+  `64` changed declared tensor bytes, and explicit non-production/full-physics
+  blockers.
 - [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
   declared `compute_probabilities` browser-kernel probe through ULG staging,
   summaries, UI, and handoffs while preserving no-backend/no-execution flags.
@@ -128,6 +132,9 @@ physics work:
   browser API for VPN inspection.
 - [x] Validate Eshkol descriptor tensor-runtime contracts in dispatch adapter
   probes and service summaries without promoting them to scientific execution.
+- [x] Accept Eshkol deterministic tensor-offset runtime-smoke handoffs in
+  Multiscale browser and relay smokes while keeping production handler and full
+  physics validation blocked.
 - [x] Surface Eshkol production-handler boundary metadata in PeerCompute
   dispatch adapters, supervisor summaries, Multiscale ingestion, and browser UI
   without promoting handler/runtime/scientific readiness.
@@ -168,6 +175,9 @@ physics work:
 - [x] Add concrete smoke-only tensor linear-memory layout metadata and
   host-import validation while keeping the WASM entry export disconnected from
   tensor offsets.
+- [x] Execute deterministic host-runtime tensor-offset smoke for the magnetar
+  closure entry export while preserving production-handler and full-physics
+  blockers.
 - [ ] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a

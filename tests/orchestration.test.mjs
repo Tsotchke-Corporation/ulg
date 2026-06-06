@@ -413,22 +413,26 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
       entryExport: 'main',
       entrySignature: { parameters: ['i32', 'i32'], results: ['i32'] },
       hasStartSection: false,
-      imports: Array.from({ length: 33 }, (_, index) => ({
+      imports: Array.from({ length: 32 }, (_, index) => ({
         module: 'env',
         name: `import_${index}`,
-        kind: index < 9 ? 'function' : 'global'
+        kind: index < 29 ? 'function' : (index === 29 ? 'memory' : (index === 30 ? 'global' : 'table'))
       })),
-      exports: [{ name: 'main', kind: 'function' }],
+      exports: [
+        { name: 'scheme_main', kind: 'function' },
+        { name: 'main', kind: 'function' }
+      ],
       wasmMetadata: {
-        functionCount: 41,
-        types: [
-          { parameters: [], results: [] },
-          { parameters: ['i32', 'i32'], results: ['i32'] }
-        ]
+        functionCount: 42,
+        types: Array.from({ length: 111 }, (_, index) => (
+          index === 0
+            ? { parameters: ['i32', 'i32'], results: ['i32'] }
+            : { parameters: [], results: [] }
+        ))
       },
       module: {
         url: 'magnetar-closure.wasm',
-        sha256: 'sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947'
+        sha256: 'sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa'
       }
     },
     validity: {
@@ -457,21 +461,21 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
       }
     },
     validation: {
-      status: 'descriptor-only',
-      validationMode: 'eshkol-static-magnetar-closure-descriptor',
+      status: 'runtime-smoke',
+      validationMode: 'eshkol-deterministic-magnetar-tensor-abi-smoke',
       outputSemantics: {
         schema: 'eshkol.ulg.closure-output-semantics.v0',
         semanticRole: 'expected-output-smoke',
         semanticScope: 'smoke-fixture',
         scientificScope: 'none',
         entryExport: 'main',
-        entryArgs: [0, 0],
+        entryArgs: [131072, 131136],
         expectedEntryResult: 0,
         stdout: {
           encoding: 'utf-8',
-          expectedText: '1048560\n10485441048528\n',
-          sha256: 'sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768',
-          byteLength: 23
+          expectedText: '',
+          sha256: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          byteLength: 0
         },
         scientificValidation: false
       },
@@ -532,7 +536,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
             contractId: 'eshkol:magnetar-closure-tensor-runtime-contract:v0',
             status: 'declared-fixture-contract',
             runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
-            executionClaim: 'metadata-and-smoke-output-only',
+            executionClaim: 'deterministic-tensor-runtime-smoke-only',
             entryExport: 'main',
             tensorMemoryModel: 'host-managed-linear-f64',
             coordinateSystem: 'normalized-radial-cell',
@@ -555,10 +559,10 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
             linearMemoryBinding: {
               schema: 'eshkol.ulg.tensor-linear-memory-binding.v0',
               bindingId: 'eshkol:magnetar-closure-linear-memory-binding:v0',
-              status: 'host-layout-smoke-bound-not-consumed',
-              runtimeStatus: 'host-layout-smoke-only',
-              executionClaim: 'tensor-buffer-layout-only',
-              entryExportConsumesOffsets: false,
+              status: 'entry-export-runtime-smoke-passed',
+              runtimeStatus: 'deterministic-host-runtime-smoke-executed',
+              executionClaim: 'deterministic-tensor-runtime-smoke-only',
+              entryExportConsumesOffsets: true,
               elementType: 'f64',
               elementByteLength: 8,
               alignmentBytes: 8,
@@ -582,7 +586,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   byteLength: 64,
                   elementOffset: 16384,
                   elementCount: 8,
-                  consumedByEntryExport: false
+                  consumedByEntryExport: true
                 },
                 {
                   id: 'closure-control-vector',
@@ -594,7 +598,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   byteLength: 32,
                   elementOffset: 16392,
                   elementCount: 4,
-                  consumedByEntryExport: false
+                  consumedByEntryExport: true
                 },
                 {
                   id: 'magnetar-closure-update',
@@ -606,7 +610,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   byteLength: 64,
                   elementOffset: 16396,
                   elementCount: 8,
-                  consumedByEntryExport: false
+                  consumedByEntryExport: true
                 },
                 {
                   id: 'closure-residual',
@@ -618,22 +622,23 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   byteLength: 8,
                   elementOffset: 16404,
                   elementCount: 1,
-                  consumedByEntryExport: false
+                  consumedByEntryExport: true
                 }
               ],
               smokeBinding: {
                 schema: 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0',
-                status: 'host-layout-smoke-passed',
+                status: 'entry-export-runtime-smoke-passed',
                 sampleSource: 'validation.closureDescriptor.descriptorBinding.ulgInterpolationTable.samples[0]',
                 writeTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
                 readbackTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
                 outputTensorIds: ['magnetar-closure-update', 'closure-residual'],
-                outputInitialization: 'host-smoke-only-not-entry-export-produced',
+                entryExportConsumesOffsets: true,
+                outputInitialization: 'entry-export-produced',
                 scientificValidation: false
               },
               entryExportOffsetProbe: {
                 schema: 'eshkol.ulg.tensor-entry-export-offset-probe.v0',
-                status: 'abi-blocked',
+                status: 'runtime-smoke-passed',
                 entryExport: 'main',
                 entrySignature: {
                   parameters: ['i32', 'i32'],
@@ -651,17 +656,18 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                     expectedEntryResult: 0
                   }
                 ],
-                entryExportConsumesOffsets: false,
-                outputTensorsProducedByEntryExport: false,
-                changedBytesInDeclaredTensorRange: 0,
-                observedStdoutInvariantAcrossArgs: true,
+                entryExportConsumesOffsets: true,
+                outputTensorsProducedByEntryExport: true,
+                changedBytesInDeclaredTensorRange: 64,
+                observedStdoutInvariantAcrossArgs: false,
                 runtimeScope: 'deterministic-host-runtime-smoke-stubs',
                 hostImportOptions: {
                   factory: 'createEshkolHostImportObject',
                   runtimeSmokeStubs: true,
-                  stubScope: 'deterministic-instantiation-only'
+                  f64TensorMemoryImports: true,
+                  stubScope: 'deterministic-f64-linear-memory-smoke'
                 },
-                blocker: 'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets',
+                blocker: 'none-for-deterministic-runtime-smoke-production-physics-unvalidated',
                 scientificValidation: false,
                 fullPhysicsValidation: false
               },
@@ -669,8 +675,8 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               fullPhysicsValidation: false,
               fullFidelityMagnetarSimulation: false
             },
-            contractHash: 'sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f',
-            runtimeStatus: 'declared-not-executed',
+            contractHash: 'sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64',
+            runtimeStatus: 'deterministic-runtime-smoke-executed',
             scientificValidation: false,
             fullPhysicsValidation: false
           },
@@ -697,20 +703,17 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               required: true,
               factory: 'createEshkolHostImportObject'
             },
-            allowedExecutionClaims: ['metadata-and-smoke-output-only'],
+            allowedExecutionClaims: ['deterministic-tensor-runtime-smoke-only'],
             blockers: [
               'production-magnetar-handler-not-implemented',
-              'wasm-tensor-memory-binding-not-executed',
-              'wasm-entry-export-does-not-consume-tensor-offsets',
-              'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
-              'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
+              'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
               'full-physics-validation-not-run'
             ],
             tensorMemoryBinding: {
               source: 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding',
-              status: 'host-layout-smoke-bound-not-consumed',
-              executionClaim: 'tensor-buffer-layout-only',
-              entryExportConsumesOffsets: false
+              status: 'entry-export-runtime-smoke-passed',
+              executionClaim: 'deterministic-tensor-runtime-smoke-only',
+              entryExportConsumesOffsets: true
             },
             derivativeStatus: 'declared-not-computed',
             scientificValidation: false,
@@ -728,14 +731,16 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   });
   const summary = await cache.getSummary(ref);
   assert.equal(summary.artifactKind, 'closure');
-  assert.equal(summary.validationStatus, 'descriptor-only');
+  assert.equal(summary.validationStatus, 'runtime-smoke');
   assert.equal(summary.closureKind, 'magnetar-closure-descriptor-fixture');
   assert.equal(summary.closureModuleUrl, 'magnetar-closure.wasm');
   assert.equal(summary.closureServiceWorkerSafe, true);
   assert.equal(summary.closureRequiresDynamicCode, false);
-  assert.equal(summary.closureImportCount, 33);
-  assert.equal(summary.closureRuntimeFunctionImportCount, 9);
-  assert.equal(summary.closureWasmFunctionCount, 41);
+  assert.equal(summary.closureImportCount, 32);
+  assert.equal(summary.closureExportCount, 2);
+  assert.equal(summary.closureRuntimeFunctionImportCount, 29);
+  assert.equal(summary.closureWasmFunctionCount, 42);
+  assert.equal(summary.closureWasmTypeCount, 111);
   assert.equal(summary.closureBundleCopyFileCount, 4);
   assert.equal(summary.closureBundlePreserveRelativeUrls, true);
   assert.equal(summary.closureDescriptorSchema, 'eshkol.ulg.magnetar-closure-descriptor.v0');
@@ -788,9 +793,9 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureTensorRuntimeContractId, 'eshkol:magnetar-closure-tensor-runtime-contract:v0');
   assert.equal(summary.closureTensorRuntimeContractStatus, 'declared-fixture-contract');
   assert.equal(summary.closureTensorRuntimeContractReady, true);
-  assert.equal(summary.closureTensorRuntimeContractHash, 'sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f');
+  assert.equal(summary.closureTensorRuntimeContractHash, 'sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64');
   assert.equal(summary.closureTensorRuntimeRuntimeAbi, 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
-  assert.equal(summary.closureTensorRuntimeExecutionClaim, 'metadata-and-smoke-output-only');
+  assert.equal(summary.closureTensorRuntimeExecutionClaim, 'deterministic-tensor-runtime-smoke-only');
   assert.equal(summary.closureTensorRuntimeEntryExport, 'main');
   assert.equal(summary.closureTensorRuntimeMemoryModel, 'host-managed-linear-f64');
   assert.equal(summary.closureTensorRuntimeCoordinateSystem, 'normalized-radial-cell');
@@ -806,14 +811,14 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureTensorRuntimeFullPhysicsValidation, false);
   assert.equal(summary.closureTensorLinearMemoryBindingSchema, 'eshkol.ulg.tensor-linear-memory-binding.v0');
   assert.equal(summary.closureTensorLinearMemoryBindingId, 'eshkol:magnetar-closure-linear-memory-binding:v0');
-  assert.equal(summary.closureTensorLinearMemoryBindingStatus, 'host-layout-smoke-bound-not-consumed');
+  assert.equal(summary.closureTensorLinearMemoryBindingStatus, 'entry-export-runtime-smoke-passed');
   assert.equal(summary.closureTensorLinearMemoryBindingReady, true);
-  assert.equal(summary.closureTensorLinearMemoryRuntimeStatus, 'host-layout-smoke-only');
-  assert.equal(summary.closureTensorLinearMemoryExecutionClaim, 'tensor-buffer-layout-only');
+  assert.equal(summary.closureTensorLinearMemoryRuntimeStatus, 'deterministic-host-runtime-smoke-executed');
+  assert.equal(summary.closureTensorLinearMemoryExecutionClaim, 'deterministic-tensor-runtime-smoke-only');
   assert.equal(summary.closureTensorLinearMemoryElementType, 'f64');
   assert.equal(summary.closureTensorLinearMemoryElementByteLength, 8);
   assert.equal(summary.closureTensorLinearMemoryAlignmentBytes, 8);
-  assert.equal(summary.closureTensorLinearMemoryEntryExportConsumesOffsets, false);
+  assert.equal(summary.closureTensorLinearMemoryEntryExportConsumesOffsets, true);
   assert.equal(summary.closureTensorLinearMemoryBaseOffset, 131072);
   assert.equal(summary.closureTensorLinearMemoryTotalByteLength, 168);
   assert.equal(summary.closureTensorLinearMemoryMinimumPages, 3);
@@ -837,24 +842,25 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     8
   ]);
   assert.deepEqual(summary.closureTensorLinearMemoryTensors.map((tensor) => tensor.consumedByEntryExport), [
-    false,
-    false,
-    false,
-    false
+    true,
+    true,
+    true,
+    true
   ]);
   assert.equal(summary.closureTensorLinearMemorySmokeBindingSchema, 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0');
-  assert.equal(summary.closureTensorLinearMemorySmokeBindingStatus, 'host-layout-smoke-passed');
-  assert.equal(summary.closureTensorLinearMemorySmokeBindingOutputInitialization, 'host-smoke-only-not-entry-export-produced');
+  assert.equal(summary.closureTensorLinearMemorySmokeBindingStatus, 'entry-export-runtime-smoke-passed');
+  assert.equal(summary.closureTensorLinearMemorySmokeBindingEntryExportConsumesOffsets, true);
+  assert.equal(summary.closureTensorLinearMemorySmokeBindingOutputInitialization, 'entry-export-produced');
   assert.equal(summary.closureTensorEntryExportOffsetProbeSchema, 'eshkol.ulg.tensor-entry-export-offset-probe.v0');
-  assert.equal(summary.closureTensorEntryExportOffsetProbeStatus, 'abi-blocked');
+  assert.equal(summary.closureTensorEntryExportOffsetProbeStatus, 'runtime-smoke-passed');
   assert.equal(summary.closureTensorEntryExportOffsetProbeEntryExport, 'main');
-  assert.equal(summary.closureTensorEntryExportConsumesOffsets, false);
-  assert.equal(summary.closureTensorEntryExportOutputTensorsProduced, false);
-  assert.equal(summary.closureTensorEntryExportChangedBytesInDeclaredTensorRange, 0);
-  assert.equal(summary.closureTensorEntryExportObservedStdoutInvariantAcrossArgs, true);
+  assert.equal(summary.closureTensorEntryExportConsumesOffsets, true);
+  assert.equal(summary.closureTensorEntryExportOutputTensorsProduced, true);
+  assert.equal(summary.closureTensorEntryExportChangedBytesInDeclaredTensorRange, 64);
+  assert.equal(summary.closureTensorEntryExportObservedStdoutInvariantAcrossArgs, false);
   assert.equal(
     summary.closureTensorEntryExportOffsetProbeBlocker,
-    'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets'
+    'none-for-deterministic-runtime-smoke-production-physics-unvalidated'
   );
   assert.equal(summary.closureProductionHandlerBoundarySchema, 'eshkol.ulg.production-handler-boundary.v0');
   assert.equal(summary.closureProductionHandlerBoundaryStatus, 'declared-not-executed');
@@ -873,20 +879,17 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureProductionHandlerScientificValidation, false);
   assert.equal(summary.closureProductionHandlerFullPhysicsValidation, false);
   assert.equal(summary.closureProductionHandlerFullFidelityMagnetarSimulation, false);
-  assert.deepEqual(summary.closureProductionHandlerAllowedExecutionClaims, ['metadata-and-smoke-output-only']);
+  assert.deepEqual(summary.closureProductionHandlerAllowedExecutionClaims, ['deterministic-tensor-runtime-smoke-only']);
   assert.deepEqual(summary.closureProductionHandlerBoundaryBlockers, [
     'production-magnetar-handler-not-implemented',
-    'wasm-tensor-memory-binding-not-executed',
-    'wasm-entry-export-does-not-consume-tensor-offsets',
-    'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
-    'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
+    'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
     'full-physics-validation-not-run'
   ]);
   assert.deepEqual(summary.closureProductionHandlerTensorMemoryBinding, {
     source: 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding',
-    status: 'host-layout-smoke-bound-not-consumed',
-    executionClaim: 'tensor-buffer-layout-only',
-    entryExportConsumesOffsets: false
+    status: 'entry-export-runtime-smoke-passed',
+    executionClaim: 'deterministic-tensor-runtime-smoke-only',
+    entryExportConsumesOffsets: true
   });
   assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
   assert.equal(summary.closureOutputSemanticsReady, true);
@@ -894,10 +897,10 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureOutputScientificScope, 'none');
   assert.equal(summary.closureOutputScientificValidation, false);
   assert.equal(summary.closureOutputExpectedEntryExport, 'main');
-  assert.deepEqual(summary.closureOutputExpectedEntryArgs, [0, 0]);
+  assert.deepEqual(summary.closureOutputExpectedEntryArgs, [131072, 131136]);
   assert.equal(summary.closureOutputExpectedEntryResult, 0);
-  assert.equal(summary.closureOutputExpectedStdoutSha256, 'sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768');
-  assert.equal(summary.closureOutputExpectedStdoutByteLength, 23);
+  assert.equal(summary.closureOutputExpectedStdoutSha256, 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  assert.equal(summary.closureOutputExpectedStdoutByteLength, 0);
   assert.equal(summary.closureReady, true);
 });
 

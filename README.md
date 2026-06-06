@@ -88,7 +88,7 @@ covered.
 
 For Eshkol, the default staged bundle is
 `public/service-assets/eshkol/closures/magnetar-closure/`. It packages
-`magnetar-closure.wasm` with descriptor-only metadata under
+`magnetar-closure.wasm` with deterministic runtime-smoke metadata under
 `validation.closureDescriptor.schema =
 "eshkol.ulg.magnetar-closure-descriptor.v0"`, including typed magnetar
 input/output tensor ids, a declared tensor-runtime contract, derivative
@@ -97,8 +97,17 @@ also carries `eshkol.ulg.production-handler-boundary.v0`, which identifies the
 intended PeerCompute handler boundary while keeping `handlerReady: false` and
 `runtimeExecution: false`. Its tensor-runtime contract now includes a concrete
 smoke-only f64 linear-memory layout at byte range `131072..131240`; the staged
-metadata explicitly says the `main` export does not consume those offsets, and
-the offset probe records that calling `main` with declared input offsets changes
-zero bytes in the tensor range. This advances the handoff beyond hello-only
-smoke while still making clear that the closure is a contract seed, not a
-validated magnetar physics result.
+metadata records that the `main` export consumes the declared input offsets,
+produces output tensors, and changes `64` bytes in the declared tensor range
+under deterministic host-runtime smoke stubs. The current magnetar closure WASM
+is `169528` bytes with module hash
+`sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa`,
+source hash
+`sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69`,
+and tensor contract hash
+`sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64`.
+The production handler still declares
+`production-magnetar-handler-not-implemented`,
+`host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
+`full-physics-validation-not-run`, so this advances runtime ABI evidence without
+claiming a full-fidelity or scientifically validated magnetar simulation.

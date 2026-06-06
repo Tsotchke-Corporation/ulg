@@ -4104,3 +4104,101 @@ Failures / open questions:
 - No browser WebGPU adapter executed the MoonLab operations; all four operation
   probes remain declared but blocked.
 - No push was attempted.
+
+## 2026-06-06 15:37:56 AKDT - Eshkol tensor offset runtime smoke handoff
+
+Prompt: User said to keep working after the Eshkol tensor-offset sidecar landed;
+continue the implementation plan, keep commits local, do not push, and keep the
+live Vite demos VPN-accessible.
+
+Changes:
+
+- Integrated local Eshkol commit `a13745e` into ULG staging and artifact
+  summary acceptance. The magnetar closure now stages as deterministic
+  tensor-offset runtime smoke instead of ABI-blocked descriptor evidence.
+- Updated ULG staging guards to require top-level `runtime-smoke` validation,
+  offset entry args `[131072, 131136]`, empty stdout hash
+  `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+  exact production-handler blockers, consumed declared tensor offsets, output
+  tensor production, and `64` changed bytes in the declared tensor range.
+- Updated compact artifact summaries to surface
+  `closureTensorRuntimeRuntimeStatus`,
+  `closureTensorLinearMemorySmokeBindingEntryExportConsumesOffsets`, and the
+  tensor offset probe host-import options.
+- Updated browser e2e and Node artifact-cache tests for the new Eshkol source
+  hash
+  `sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69`,
+  WASM hash
+  `sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa`,
+  WASM byte length `169528`, and tensor contract hash
+  `sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64`.
+- Recorded PeerCompute sidecar commit `dc497229`, which refreshed Multiscale
+  browser and relay ULG handoff smokes for the same Eshkol deterministic
+  runtime-smoke artifact.
+
+Files touched:
+
+- `README.md`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm run stage:service-assets`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `npm --prefix demos/multiscale run test:ulg-handoff`
+- PeerCompute sidecar also ran
+  `node --check demos/multiscale/tests/ulgBrowserHandoffSmoke.mjs`,
+  `node --check demos/multiscale/tests/ulgRelayHandoffSmoke.mjs`,
+  `npm --prefix demos/multiscale run test:ulg-handoff`,
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff`, and
+  `git diff --check`.
+
+Validation:
+
+- PASS: syntax checks passed for changed ULG JavaScript files.
+- PASS: `npm run stage:service-assets` regenerated MoonLab assets and the
+  Eshkol magnetar closure descriptor bundle with the new runtime-smoke contract.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live -- --bridge` reported Eshkol
+  `tensorLinearMemoryEntryExportConsumesOffsets = true`,
+  `tensorEntryExportOffsetProbeStatus = runtime-smoke-passed`,
+  `tensorEntryExportChangedBytesInDeclaredTensorRange = 64`,
+  `productionHandlerReady = false`, Multiscale ack `handoff-ready`, blocker
+  count `0`, and `simulationStatus = scientific-ready`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff`
+  reported the new Eshkol source/WASM hashes, `wasmByteLength = 169528`,
+  `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
+  `handoff-ready`.
+- PASS: PeerCompute sidecar validation passed browser and relay ULG handoff
+  smokes, relay config cleanup, no persistent `4196` listener, and committed
+  locally as `dc497229`.
+
+Failures / open questions:
+
+- A stale-string `rg` command initially failed because the regex included a
+  literal newline without multiline mode; rerun with simpler terms confirmed no
+  stale Eshkol magnetar runtime strings remain in `tests`, `scripts`, or `src`
+  except the separate `hello` smoke fixture stdout string.
+- The Eshkol artifact now proves deterministic host-runtime tensor ABI smoke
+  only. Production host imports, production handler implementation, and full
+  magnetar physics validation remain explicitly blocked.
+- MoonLab browser WebGPU operation probes remain declared but unexecuted because
+  the current headless/VPN runtime has no WebGPU adapter.
+- No push was attempted.

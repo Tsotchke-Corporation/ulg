@@ -1055,3 +1055,56 @@ reference-contract asset support.
   PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed with
   `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
   `handoff-ready`.
+
+## 2026-06-06 Eshkol Tensor Offset Runtime Smoke Handoff Checks
+
+- Eshkol sidecar integration:
+  local Eshkol commit `a13745e` exports a magnetar closure artifact whose
+  top-level validation is `runtime-smoke` with validation mode
+  `eshkol-deterministic-magnetar-tensor-abi-smoke`.
+- Staged Eshkol artifact:
+  source hash
+  `sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69`,
+  WASM hash
+  `sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa`,
+  WASM byte length `169528`, and tensor contract hash
+  `sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64`.
+- Tensor runtime evidence:
+  ULG staging and summaries now require
+  `runtimeStatus = deterministic-runtime-smoke-executed`,
+  `executionClaim = deterministic-tensor-runtime-smoke-only`,
+  `linearMemoryBinding.status = entry-export-runtime-smoke-passed`,
+  `entryExportConsumesOffsets = true`, all declared tensors consumed by the
+  entry export, offset probe `runtime-smoke-passed`, output tensors produced,
+  `changedBytesInDeclaredTensorRange = 64`, and stdout invariant false.
+- Production boundary:
+  ULG requires the exact remaining blockers
+  `production-magnetar-handler-not-implemented`,
+  `host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
+  `full-physics-validation-not-run`; `handlerReady`, `runtimeExecution`,
+  `scientificValidation`, and `fullPhysicsValidation` remain false.
+- ULG validations:
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check scripts/live-status.mjs`,
+  `node --check tests/orchestration.test.mjs`,
+  `node --check tests/demo.e2e.mjs`, `npm run stage:service-assets`,
+  `npm test`, `npm run build`, and `npm run test:e2e` passed.
+- Live status:
+  `npm run status:live -- --bridge` reported Eshkol
+  `tensorLinearMemoryEntryExportConsumesOffsets = true`,
+  `tensorEntryExportOffsetProbeStatus = runtime-smoke-passed`,
+  `tensorEntryExportChangedBytesInDeclaredTensorRange = 64`,
+  `productionHandlerReady = false`, Multiscale ack `handoff-ready`, blocker
+  count `0`, and `simulationStatus = scientific-ready`.
+- Multiscale handoff:
+  PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed with
+  the new Eshkol source/WASM hashes, `wasmByteLength = 169528`,
+  `magnetarVisible = true`, `magnetarLayer = solar`, and bridge ack
+  `handoff-ready`.
+- PeerCompute sidecar validation:
+  local PeerCompute commit `dc497229` updated browser and relay handoff smoke
+  expectations for the new Eshkol artifact and passed syntax checks,
+  `npm --prefix demos/multiscale run test:ulg-handoff`,
+  `npm --prefix demos/multiscale run test:ulg-relay-handoff`, relay config
+  cleanup checks, and `git diff --check`.

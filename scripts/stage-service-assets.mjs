@@ -329,6 +329,20 @@ function stageEshkolAssets() {
     if (artifact.closureKind !== 'magnetar-closure-descriptor-fixture') {
       throw new Error(`Eshkol staged artifact has unexpected closure kind: ${artifact.closureKind || 'unknown'}`);
     }
+    const outputSemantics = artifact.validation?.outputSemantics;
+    if (artifact.validation?.status !== 'runtime-smoke'
+      || artifact.validation?.validationMode !== 'eshkol-deterministic-magnetar-tensor-abi-smoke'
+      || outputSemantics?.schema !== 'eshkol.ulg.closure-output-semantics.v0'
+      || outputSemantics.semanticScope !== 'smoke-fixture'
+      || outputSemantics.scientificScope !== 'none'
+      || outputSemantics.scientificValidation !== false
+      || outputSemantics.entryExport !== 'main'
+      || !arraysEqual(outputSemantics.entryArgs, [131072, 131136])
+      || outputSemantics.expectedEntryResult !== 0
+      || outputSemantics.stdout?.sha256 !== 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+      || outputSemantics.stdout?.byteLength !== 0) {
+      throw new Error('Eshkol staged artifact does not preserve deterministic runtime-smoke output semantics');
+    }
     if (artifact.validation?.closureDescriptor?.schema !== 'eshkol.ulg.magnetar-closure-descriptor.v0') {
       throw new Error('Eshkol staged artifact is missing magnetar closure descriptor metadata');
     }
@@ -374,7 +388,8 @@ function stageEshkolAssets() {
       throw new Error('Eshkol staged magnetar descriptor is missing tensor runtime contract metadata');
     }
     if (tensorRuntimeContract.status !== 'declared-fixture-contract'
-      || tensorRuntimeContract.runtimeStatus !== 'declared-not-executed'
+      || tensorRuntimeContract.runtimeStatus !== 'deterministic-runtime-smoke-executed'
+      || tensorRuntimeContract.executionClaim !== 'deterministic-tensor-runtime-smoke-only'
       || tensorRuntimeContract.scientificValidation !== false
       || tensorRuntimeContract.fullPhysicsValidation !== false) {
       throw new Error('Eshkol staged tensor runtime contract overstates execution or physics validation');
@@ -400,10 +415,10 @@ function stageEshkolAssets() {
       throw new Error('Eshkol staged tensor runtime sample-shape validation is not ready');
     }
     if (tensorLinearMemoryBinding?.schema !== 'eshkol.ulg.tensor-linear-memory-binding.v0'
-      || tensorLinearMemoryBinding.status !== 'host-layout-smoke-bound-not-consumed'
-      || tensorLinearMemoryBinding.runtimeStatus !== 'host-layout-smoke-only'
-      || tensorLinearMemoryBinding.executionClaim !== 'tensor-buffer-layout-only'
-      || tensorLinearMemoryBinding.entryExportConsumesOffsets !== false
+      || tensorLinearMemoryBinding.status !== 'entry-export-runtime-smoke-passed'
+      || tensorLinearMemoryBinding.runtimeStatus !== 'deterministic-host-runtime-smoke-executed'
+      || tensorLinearMemoryBinding.executionClaim !== 'deterministic-tensor-runtime-smoke-only'
+      || tensorLinearMemoryBinding.entryExportConsumesOffsets !== true
       || tensorLinearMemoryBinding.scientificValidation !== false
       || tensorLinearMemoryBinding.fullPhysicsValidation !== false
       || tensorLinearMemoryBinding.fullFidelityMagnetarSimulation !== false) {
@@ -442,30 +457,35 @@ function stageEshkolAssets() {
         || tensor.byteOffset !== byteOffset
         || tensor.byteLength !== byteLength
         || tensor.elementCount !== elementCount
-        || tensor.consumedByEntryExport !== false) {
+        || tensor.consumedByEntryExport !== true) {
         throw new Error(`Eshkol staged tensor linear-memory binding has unexpected tensor layout for ${id}`);
       }
     }
     if (tensorLinearMemorySmokeBinding?.schema !== 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0'
-      || tensorLinearMemorySmokeBinding.status !== 'host-layout-smoke-passed'
+      || tensorLinearMemorySmokeBinding.status !== 'entry-export-runtime-smoke-passed'
+      || tensorLinearMemorySmokeBinding.entryExportConsumesOffsets !== true
       || tensorLinearMemorySmokeBinding.scientificValidation !== false
-      || tensorLinearMemorySmokeBinding.outputInitialization !== 'host-smoke-only-not-entry-export-produced'
+      || tensorLinearMemorySmokeBinding.outputInitialization !== 'entry-export-produced'
       || !arraysEqual(tensorLinearMemorySmokeBinding.writeTensorIds, tensorRuntimeContract.inputTensorIds)
       || !arraysEqual(tensorLinearMemorySmokeBinding.readbackTensorIds, tensorRuntimeContract.inputTensorIds)
       || !arraysEqual(tensorLinearMemorySmokeBinding.outputTensorIds, tensorRuntimeContract.outputTensorIds)) {
       throw new Error('Eshkol staged tensor linear-memory smoke binding is not ready');
     }
     if (tensorEntryExportOffsetProbe?.schema !== 'eshkol.ulg.tensor-entry-export-offset-probe.v0'
-      || tensorEntryExportOffsetProbe.status !== 'abi-blocked'
+      || tensorEntryExportOffsetProbe.status !== 'runtime-smoke-passed'
       || tensorEntryExportOffsetProbe.entryExport !== artifact.validation?.closureDescriptor?.entryExport
-      || tensorEntryExportOffsetProbe.entryExportConsumesOffsets !== false
-      || tensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport !== false
-      || tensorEntryExportOffsetProbe.changedBytesInDeclaredTensorRange !== 0
-      || tensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs !== true
+      || tensorEntryExportOffsetProbe.entryExportConsumesOffsets !== true
+      || tensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport !== true
+      || tensorEntryExportOffsetProbe.changedBytesInDeclaredTensorRange !== 64
+      || tensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs !== false
       || tensorEntryExportOffsetProbe.scientificValidation !== false
       || tensorEntryExportOffsetProbe.fullPhysicsValidation !== false
-      || tensorEntryExportOffsetProbe.blocker !== 'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets') {
-      throw new Error('Eshkol staged tensor entry-export offset probe does not preserve the ABI blocker');
+      || tensorEntryExportOffsetProbe.hostImportOptions?.factory !== 'createEshkolHostImportObject'
+      || tensorEntryExportOffsetProbe.hostImportOptions?.runtimeSmokeStubs !== true
+      || tensorEntryExportOffsetProbe.hostImportOptions?.f64TensorMemoryImports !== true
+      || tensorEntryExportOffsetProbe.hostImportOptions?.stubScope !== 'deterministic-f64-linear-memory-smoke'
+      || tensorEntryExportOffsetProbe.blocker !== 'none-for-deterministic-runtime-smoke-production-physics-unvalidated') {
+      throw new Error('Eshkol staged tensor entry-export offset probe does not preserve deterministic runtime-smoke evidence');
     }
     if (productionHandlerBoundary?.schema !== ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
       || productionHandlerBoundary.dispatchSchema !== PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA) {
@@ -505,23 +525,21 @@ function stageEshkolAssets() {
     if (productionHandlerBoundary.tensorMemoryBinding?.source !== 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
       || productionHandlerBoundary.tensorMemoryBinding?.status !== tensorLinearMemoryBinding.status
       || productionHandlerBoundary.tensorMemoryBinding?.executionClaim !== tensorLinearMemoryBinding.executionClaim
-      || productionHandlerBoundary.tensorMemoryBinding?.entryExportConsumesOffsets !== false) {
+      || productionHandlerBoundary.tensorMemoryBinding?.entryExportConsumesOffsets !== true) {
       throw new Error('Eshkol staged production handler boundary does not match tensor memory binding metadata');
     }
     const handlerBoundaryBlockers = Array.isArray(productionHandlerBoundary.blockers)
       ? productionHandlerBoundary.blockers
       : [];
-    for (const blocker of [
+    const expectedHandlerBoundaryBlockers = [
       'production-magnetar-handler-not-implemented',
-      'wasm-tensor-memory-binding-not-executed',
-      'wasm-entry-export-does-not-consume-tensor-offsets',
-      'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
-      'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
       'full-physics-validation-not-run'
-    ]) {
-      if (!handlerBoundaryBlockers.includes(blocker)) {
-        throw new Error(`Eshkol staged production handler boundary is missing blocker: ${blocker}`);
-      }
+    ];
+    if (!arraysEqual(handlerBoundaryBlockers, expectedHandlerBoundaryBlockers)) {
+      throw new Error(
+        `Eshkol staged production handler boundary blockers changed: ${handlerBoundaryBlockers.join(', ') || 'none'}`
+      );
     }
     if (artifact.execution?.module?.url !== `${eshkolClosureBundleName}.wasm`) {
       throw new Error(`Eshkol staged artifact has unexpected module URL: ${artifact.execution?.module?.url || 'unknown'}`);

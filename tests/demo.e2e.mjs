@@ -1,8 +1,8 @@
 import { expect, test } from '@playwright/test';
 
 const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
-const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:73f2a89ffe3434d995ffe1174185462cf0c2edb653fbe4d1286342b788763052';
-const ESHKOL_MAGNETAR_WASM_SHA256 = 'sha256:38902bb4b3f5ed8abf513a4d739ff9ca99727696df271c3ff17127575785b947';
+const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69';
+const ESHKOL_MAGNETAR_WASM_SHA256 = 'sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa';
 
 test('supervised service smoke renders desktop and mobile worker trees', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
@@ -106,19 +106,19 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolArtifact.closureKind).toBe('magnetar-closure-descriptor-fixture');
     expect(eshkolArtifact.execution.module.url).toBe('magnetar-closure.wasm');
     expect(eshkolArtifact.execution.serviceWorkerSafe).toBe(true);
-    expect(eshkolArtifact.validation.status).toBe('descriptor-only');
-    expect(eshkolArtifact.validation.validationMode).toBe('eshkol-static-magnetar-closure-descriptor');
+    expect(eshkolArtifact.validation.status).toBe('runtime-smoke');
+    expect(eshkolArtifact.validation.validationMode).toBe('eshkol-deterministic-magnetar-tensor-abi-smoke');
     expect(eshkolArtifact.runtime.bundleManifest.preserveRelativeUrls).toBe(true);
     expect(eshkolArtifact.validation.outputSemantics.schema).toBe('eshkol.ulg.closure-output-semantics.v0');
     expect(eshkolArtifact.validation.outputSemantics.semanticScope).toBe('smoke-fixture');
     expect(eshkolArtifact.validation.outputSemantics.scientificScope).toBe('none');
     expect(eshkolArtifact.validation.outputSemantics.scientificValidation).toBe(false);
     expect(eshkolArtifact.validation.outputSemantics.entryExport).toBe('main');
-    expect(eshkolArtifact.validation.outputSemantics.entryArgs).toEqual([0, 0]);
+    expect(eshkolArtifact.validation.outputSemantics.entryArgs).toEqual([131072, 131136]);
     expect(eshkolArtifact.validation.outputSemantics.expectedEntryResult).toBe(0);
-    expect(eshkolArtifact.validation.outputSemantics.stdout.expectedText).toBe('1048560\n10485441048528\n');
-    expect(eshkolArtifact.validation.outputSemantics.stdout.sha256).toBe('sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768');
-    expect(eshkolArtifact.validation.outputSemantics.stdout.byteLength).toBe(23);
+    expect(eshkolArtifact.validation.outputSemantics.stdout.expectedText).toBe('');
+    expect(eshkolArtifact.validation.outputSemantics.stdout.sha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    expect(eshkolArtifact.validation.outputSemantics.stdout.byteLength).toBe(0);
     expect(eshkolArtifact.validation.closureDescriptor.schema).toBe('eshkol.ulg.magnetar-closure-descriptor.v0');
     expect(eshkolArtifact.validation.closureDescriptor.descriptorRole).toBe('magnetar-closure-contract-seed');
     expect(eshkolArtifact.validation.closureDescriptor.scientificValidation).toBe(false);
@@ -169,7 +169,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(tensorRuntimeContract.schema).toBe('eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0');
     expect(tensorRuntimeContract.status).toBe('declared-fixture-contract');
     expect(tensorRuntimeContract.runtimeAbi).toBe('wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
-    expect(tensorRuntimeContract.executionClaim).toBe('metadata-and-smoke-output-only');
+    expect(tensorRuntimeContract.executionClaim).toBe('deterministic-tensor-runtime-smoke-only');
     expect(tensorRuntimeContract.entryExport).toBe('main');
     expect(tensorRuntimeContract.tensorMemoryModel).toBe('host-managed-linear-f64');
     expect(tensorRuntimeContract.inputTensorIds).toEqual([
@@ -185,10 +185,10 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(tensorRuntimeContract.sampleShapeValidation.validatedSampleCount).toBe(4);
     expect(tensorRuntimeContract.sampleShapeValidation.scientificValidation).toBe(false);
     expect(tensorRuntimeContract.linearMemoryBinding.schema).toBe('eshkol.ulg.tensor-linear-memory-binding.v0');
-    expect(tensorRuntimeContract.linearMemoryBinding.status).toBe('host-layout-smoke-bound-not-consumed');
-    expect(tensorRuntimeContract.linearMemoryBinding.runtimeStatus).toBe('host-layout-smoke-only');
-    expect(tensorRuntimeContract.linearMemoryBinding.executionClaim).toBe('tensor-buffer-layout-only');
-    expect(tensorRuntimeContract.linearMemoryBinding.entryExportConsumesOffsets).toBe(false);
+    expect(tensorRuntimeContract.linearMemoryBinding.status).toBe('entry-export-runtime-smoke-passed');
+    expect(tensorRuntimeContract.linearMemoryBinding.runtimeStatus).toBe('deterministic-host-runtime-smoke-executed');
+    expect(tensorRuntimeContract.linearMemoryBinding.executionClaim).toBe('deterministic-tensor-runtime-smoke-only');
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportConsumesOffsets).toBe(true);
     expect(tensorRuntimeContract.linearMemoryBinding.memoryImport.baseOffset).toBe(131072);
     expect(tensorRuntimeContract.linearMemoryBinding.memoryImport.totalByteLength).toBe(168);
     expect(tensorRuntimeContract.linearMemoryBinding.tensors.map((tensor) => tensor.id)).toEqual([
@@ -204,23 +204,30 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       131232
     ]);
     expect(tensorRuntimeContract.linearMemoryBinding.tensors.map((tensor) => tensor.consumedByEntryExport)).toEqual([
-      false,
-      false,
-      false,
-      false
+      true,
+      true,
+      true,
+      true
     ]);
-    expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.status).toBe('host-layout-smoke-passed');
-    expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.outputInitialization).toBe('host-smoke-only-not-entry-export-produced');
+    expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.status).toBe('entry-export-runtime-smoke-passed');
+    expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.entryExportConsumesOffsets).toBe(true);
+    expect(tensorRuntimeContract.linearMemoryBinding.smokeBinding.outputInitialization).toBe('entry-export-produced');
     expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.schema).toBe('eshkol.ulg.tensor-entry-export-offset-probe.v0');
-    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.status).toBe('abi-blocked');
-    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.entryExportConsumesOffsets).toBe(false);
-    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.outputTensorsProducedByEntryExport).toBe(false);
-    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.changedBytesInDeclaredTensorRange).toBe(0);
-    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.observedStdoutInvariantAcrossArgs).toBe(true);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.status).toBe('runtime-smoke-passed');
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.entryExportConsumesOffsets).toBe(true);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.outputTensorsProducedByEntryExport).toBe(true);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.changedBytesInDeclaredTensorRange).toBe(64);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.observedStdoutInvariantAcrossArgs).toBe(false);
+    expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.hostImportOptions).toMatchObject({
+      factory: 'createEshkolHostImportObject',
+      runtimeSmokeStubs: true,
+      f64TensorMemoryImports: true,
+      stubScope: 'deterministic-f64-linear-memory-smoke'
+    });
     expect(tensorRuntimeContract.linearMemoryBinding.entryExportOffsetProbe.blocker).toBe(
-      'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets'
+      'none-for-deterministic-runtime-smoke-production-physics-unvalidated'
     );
-    expect(tensorRuntimeContract.contractHash).toBe('sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f');
+    expect(tensorRuntimeContract.contractHash).toBe('sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64');
     expect(tensorRuntimeContract.scientificValidation).toBe(false);
     expect(tensorRuntimeContract.fullPhysicsValidation).toBe(false);
     const productionHandlerBoundary = descriptorBinding.productionHandlerBoundary;
@@ -246,20 +253,17 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       required: true,
       factory: 'createEshkolHostImportObject'
     });
-    expect(productionHandlerBoundary.allowedExecutionClaims).toContain('metadata-and-smoke-output-only');
+    expect(productionHandlerBoundary.allowedExecutionClaims).toContain('deterministic-tensor-runtime-smoke-only');
     expect(productionHandlerBoundary.blockers).toEqual([
       'production-magnetar-handler-not-implemented',
-      'wasm-tensor-memory-binding-not-executed',
-      'wasm-entry-export-does-not-consume-tensor-offsets',
-      'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
-      'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
       'full-physics-validation-not-run'
     ]);
     expect(productionHandlerBoundary.tensorMemoryBinding).toMatchObject({
       source: 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding',
-      status: 'host-layout-smoke-bound-not-consumed',
-      executionClaim: 'tensor-buffer-layout-only',
-      entryExportConsumesOffsets: false
+      status: 'entry-export-runtime-smoke-passed',
+      executionClaim: 'deterministic-tensor-runtime-smoke-only',
+      entryExportConsumesOffsets: true
     });
     expect(productionHandlerBoundary.derivativeStatus).toBe('declared-not-computed');
     expect(productionHandlerBoundary.scientificValidation).toBe(false);
@@ -267,7 +271,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(productionHandlerBoundary.fullFidelityMagnetarSimulation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.artifactKind).toBe('closure');
-    expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('descriptor-only');
+    expect(eshkolTelemetryRecord.artifactSummary.validationStatus).toBe('runtime-smoke');
     expect(eshkolTelemetryRecord.artifactSummary.closureKind).toBe('magnetar-closure-descriptor-fixture');
     expect(eshkolTelemetryRecord.artifactSummary.closureModuleUrl).toBe('magnetar-closure.wasm');
     expect(eshkolTelemetryRecord.artifactSummary.closureServiceWorkerSafe).toBe(true);
@@ -276,11 +280,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureEntrySignature.results).toEqual(['i32']);
     expect(eshkolTelemetryRecord.artifactSummary.closureHasStartSection).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureStartFunctionIndex).toBe(null);
-    expect(eshkolTelemetryRecord.artifactSummary.closureImportCount).toBe(33);
-    expect(eshkolTelemetryRecord.artifactSummary.closureExportCount).toBe(1);
-    expect(eshkolTelemetryRecord.artifactSummary.closureRuntimeFunctionImportCount).toBe(30);
-    expect(eshkolTelemetryRecord.artifactSummary.closureWasmFunctionCount).toBe(41);
-    expect(eshkolTelemetryRecord.artifactSummary.closureWasmTypeCount).toBe(109);
+    expect(eshkolTelemetryRecord.artifactSummary.closureImportCount).toBe(32);
+    expect(eshkolTelemetryRecord.artifactSummary.closureExportCount).toBe(2);
+    expect(eshkolTelemetryRecord.artifactSummary.closureRuntimeFunctionImportCount).toBe(29);
+    expect(eshkolTelemetryRecord.artifactSummary.closureWasmFunctionCount).toBe(42);
+    expect(eshkolTelemetryRecord.artifactSummary.closureWasmTypeCount).toBe(111);
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsFactory).toBe('createEshkolHostImportObject');
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsDomFree).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureBundlePreserveRelativeUrls).toBe(true);
@@ -290,10 +294,10 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputScientificScope).toBe('none');
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputScientificValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryExport).toBe('main');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryArgs).toEqual([0, 0]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryArgs).toEqual([131072, 131136]);
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedEntryResult).toBe(0);
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768');
-    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(23);
+    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    expect(eshkolTelemetryRecord.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(0);
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorSchema).toBe('eshkol.ulg.magnetar-closure-descriptor.v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorReady).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureDescriptorRole).toBe('magnetar-closure-contract-seed');
@@ -324,18 +328,18 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractSchema).toBe('eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractStatus).toBe('declared-fixture-contract');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractReady).toBe(true);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractHash).toBe('sha256:4d16bf10f236832da92974cd341bb40a533cb2fe7c7ceab67ff8f6758645c95f');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeContractHash).toBe('sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeRuntimeAbi).toBe('wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeExecutionClaim).toBe('metadata-and-smoke-output-only');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeExecutionClaim).toBe('deterministic-tensor-runtime-smoke-only');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeSampleShapeValidationStatus).toBe('pass');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeSampleShapeValidatedSampleCount).toBe(4);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeScientificValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorRuntimeFullPhysicsValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryBindingSchema).toBe('eshkol.ulg.tensor-linear-memory-binding.v0');
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryBindingStatus).toBe('host-layout-smoke-bound-not-consumed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryBindingStatus).toBe('entry-export-runtime-smoke-passed');
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryBindingReady).toBe(true);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryExecutionClaim).toBe('tensor-buffer-layout-only');
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryEntryExportConsumesOffsets).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryExecutionClaim).toBe('deterministic-tensor-runtime-smoke-only');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryEntryExportConsumesOffsets).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryBaseOffset).toBe(131072);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryTotalByteLength).toBe(168);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemoryTensorIds).toEqual([
@@ -350,14 +354,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       131168,
       131232
     ]);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemorySmokeBindingStatus).toBe('host-layout-smoke-passed');
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOffsetProbeStatus).toBe('abi-blocked');
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportConsumesOffsets).toBe(false);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOutputTensorsProduced).toBe(false);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportChangedBytesInDeclaredTensorRange).toBe(0);
-    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportObservedStdoutInvariantAcrossArgs).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorLinearMemorySmokeBindingStatus).toBe('entry-export-runtime-smoke-passed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOffsetProbeStatus).toBe('runtime-smoke-passed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportConsumesOffsets).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOutputTensorsProduced).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportChangedBytesInDeclaredTensorRange).toBe(64);
+    expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportObservedStdoutInvariantAcrossArgs).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureTensorEntryExportOffsetProbeBlocker).toBe(
-      'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets'
+      'none-for-deterministic-runtime-smoke-production-physics-unvalidated'
     );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundarySchema).toBe('eshkol.ulg.production-handler-boundary.v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryStatus).toBe('declared-not-executed');
@@ -371,16 +375,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerScientificValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerFullPhysicsValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerFullFidelityMagnetarSimulation).toBe(false);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerAllowedExecutionClaims).toContain('metadata-and-smoke-output-only');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerAllowedExecutionClaims).toContain('deterministic-tensor-runtime-smoke-only');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryBlockers).toEqual([
       'production-magnetar-handler-not-implemented',
-      'wasm-tensor-memory-binding-not-executed',
-      'wasm-entry-export-does-not-consume-tensor-offsets',
-      'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
-      'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
       'full-physics-validation-not-run'
     ]);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerTensorMemoryBinding.status).toBe('host-layout-smoke-bound-not-consumed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerTensorMemoryBinding.status).toBe('entry-export-runtime-smoke-passed');
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');
@@ -390,10 +391,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(closureHandoff.artifactSummary.closureProductionHandlerReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(false);
     expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
-    expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:34a23605b7cacbeb83ef3391ae049c0bbcf38651b552eb9630eeca2165ca5768');
-    expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(23);
-    expect(closureHandoff.wasmByteLength).toBe(53066);
-    expect(closureHandoff.wasmBytes.length).toBe(53066);
+    expect(closureHandoff.artifactSummary.closureOutputExpectedEntryArgs).toEqual([131072, 131136]);
+    expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(0);
+    expect(closureHandoff.wasmByteLength).toBe(169528);
+    expect(closureHandoff.wasmBytes.length).toBe(169528);
     expect(closureHandoff.wasmSourceUrl).toContain('/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm');
   }
   if (moonlabAssetStatus === 'ready') {

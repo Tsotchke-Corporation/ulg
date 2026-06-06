@@ -520,6 +520,21 @@ Updated: 2026-06-06 15:22:17 AKDT
   into ULG staging, summaries, UI, handoffs, and live status. The current live
   handoff reports no missing native-operation target declarations, while all
   four operations remain blocked/unexecuted/uncovered.
+- Integrated Eshkol's tensor-offset runtime-smoke sidecar commit `a13745e` into
+  ULG staging, summaries, browser e2e, and live handoff status. The staged
+  magnetar closure now reports source hash
+  `sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69`,
+  WASM hash
+  `sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa`,
+  byte length `169528`, tensor contract hash
+  `sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64`,
+  `entryExportConsumesOffsets = true`, and
+  `changedBytesInDeclaredTensorRange = 64` while keeping
+  `handlerReady = false`, `runtimeExecution = false`, and full physics
+  validation false.
+- Recorded PeerCompute sidecar commit `dc497229`, which refreshed Multiscale
+  browser and relay handoff smoke expectations for the same Eshkol deterministic
+  tensor-offset runtime-smoke artifact without pushing.
 
 ## In Progress
 

@@ -20,10 +20,7 @@ export const MOONLAB_WEBGPU_COMPLEX64_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.w
 
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
   'production-magnetar-handler-not-implemented',
-  'wasm-tensor-memory-binding-not-executed',
-  'wasm-entry-export-does-not-consume-tensor-offsets',
-  'wasm-main-export-offset-args-leave-declared-tensor-range-unchanged',
-  'host-imports-require-runtime-smoke-stubs-for-magnetar-fixture',
+  'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
   'full-physics-validation-not-run'
 ]);
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
@@ -451,19 +448,20 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureTensorRuntimeSampleShapeValidation?.status === 'pass'
     && closureTensorRuntimeSampleShapeValidation?.scientificValidation === false
     && finiteNumberOrNull(closureTensorRuntimeSampleShapeValidation?.validatedSampleCount) === finiteNumberOrNull(closureInterpolationTable?.sampleCount)
-    && closureTensorRuntimeContract.runtimeStatus === 'declared-not-executed'
+    && closureTensorRuntimeContract.runtimeStatus === 'deterministic-runtime-smoke-executed'
+    && closureTensorRuntimeContract.executionClaim === 'deterministic-tensor-runtime-smoke-only'
     && closureTensorRuntimeContract.scientificValidation === false
     && closureTensorRuntimeContract.fullPhysicsValidation === false;
   const closureTensorLinearMemoryBindingReady =
     closureTensorLinearMemoryBinding?.schema === ESHKOL_TENSOR_LINEAR_MEMORY_BINDING_SCHEMA
     && closureTensorLinearMemoryBinding.bindingId === 'eshkol:magnetar-closure-linear-memory-binding:v0'
-    && closureTensorLinearMemoryBinding.status === 'host-layout-smoke-bound-not-consumed'
-    && closureTensorLinearMemoryBinding.runtimeStatus === 'host-layout-smoke-only'
-    && closureTensorLinearMemoryBinding.executionClaim === 'tensor-buffer-layout-only'
+    && closureTensorLinearMemoryBinding.status === 'entry-export-runtime-smoke-passed'
+    && closureTensorLinearMemoryBinding.runtimeStatus === 'deterministic-host-runtime-smoke-executed'
+    && closureTensorLinearMemoryBinding.executionClaim === 'deterministic-tensor-runtime-smoke-only'
     && closureTensorLinearMemoryBinding.elementType === 'f64'
     && finiteNumberOrNull(closureTensorLinearMemoryBinding.elementByteLength) === 8
     && finiteNumberOrNull(closureTensorLinearMemoryBinding.alignmentBytes) === 8
-    && closureTensorLinearMemoryBinding.entryExportConsumesOffsets === false
+    && closureTensorLinearMemoryBinding.entryExportConsumesOffsets === true
     && closureTensorLinearMemoryBinding.scientificValidation === false
     && closureTensorLinearMemoryBinding.fullPhysicsValidation === false
     && closureTensorLinearMemoryBinding.fullFidelityMagnetarSimulation === false
@@ -481,26 +479,31 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureTensorLinearMemoryTensors.every((tensor) => (
       tensor.dtype === 'f64'
       && tensor.layout === 'dense-row-major'
-      && tensor.consumedByEntryExport === false
+      && tensor.consumedByEntryExport === true
     ))
     && closureTensorLinearMemorySmokeBinding?.schema === ESHKOL_TENSOR_LINEAR_MEMORY_SMOKE_BINDING_SCHEMA
-    && closureTensorLinearMemorySmokeBinding.status === 'host-layout-smoke-passed'
+    && closureTensorLinearMemorySmokeBinding.status === 'entry-export-runtime-smoke-passed'
+    && closureTensorLinearMemorySmokeBinding.entryExportConsumesOffsets === true
     && closureTensorLinearMemorySmokeBinding.scientificValidation === false
-    && closureTensorLinearMemorySmokeBinding.outputInitialization === 'host-smoke-only-not-entry-export-produced'
+    && closureTensorLinearMemorySmokeBinding.outputInitialization === 'entry-export-produced'
     && arraysEqual(closureTensorLinearMemorySmokeBinding.writeTensorIds, closureTensorRuntimeInputIds)
     && arraysEqual(closureTensorLinearMemorySmokeBinding.readbackTensorIds, closureTensorRuntimeInputIds)
     && arraysEqual(closureTensorLinearMemorySmokeBinding.outputTensorIds, closureTensorRuntimeOutputIds)
     && closureTensorEntryExportOffsetProbe?.schema === ESHKOL_TENSOR_ENTRY_EXPORT_OFFSET_PROBE_SCHEMA
-    && closureTensorEntryExportOffsetProbe.status === 'abi-blocked'
+    && closureTensorEntryExportOffsetProbe.status === 'runtime-smoke-passed'
     && closureTensorEntryExportOffsetProbe.entryExport === closureDescriptor?.entryExport
-    && closureTensorEntryExportOffsetProbe.entryExportConsumesOffsets === false
-    && closureTensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport === false
-    && finiteNumberOrNull(closureTensorEntryExportOffsetProbe.changedBytesInDeclaredTensorRange) === 0
-    && closureTensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs === true
+    && closureTensorEntryExportOffsetProbe.entryExportConsumesOffsets === true
+    && closureTensorEntryExportOffsetProbe.outputTensorsProducedByEntryExport === true
+    && finiteNumberOrNull(closureTensorEntryExportOffsetProbe.changedBytesInDeclaredTensorRange) === 64
+    && closureTensorEntryExportOffsetProbe.observedStdoutInvariantAcrossArgs === false
     && closureTensorEntryExportOffsetProbe.scientificValidation === false
     && closureTensorEntryExportOffsetProbe.fullPhysicsValidation === false
+    && closureTensorEntryExportOffsetProbe.hostImportOptions?.factory === 'createEshkolHostImportObject'
+    && closureTensorEntryExportOffsetProbe.hostImportOptions?.runtimeSmokeStubs === true
+    && closureTensorEntryExportOffsetProbe.hostImportOptions?.f64TensorMemoryImports === true
+    && closureTensorEntryExportOffsetProbe.hostImportOptions?.stubScope === 'deterministic-f64-linear-memory-smoke'
     && closureTensorEntryExportOffsetProbe.blocker
-      === 'main-export-accepts-two-i32-runtime-args-but-does-not-read-or-write-host-managed-tensor-offsets';
+      === 'none-for-deterministic-runtime-smoke-production-physics-unvalidated';
   const closureProductionHandlerBoundaryDeclared =
     closureProductionHandlerBoundary?.schema === ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
     && textOrNull(closureProductionHandlerBoundary.handlerId) != null
@@ -531,10 +534,11 @@ export function summarizeUlgArtifact(artifact = {}) {
       === 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
     && closureProductionHandlerTensorMemoryBinding?.status === closureTensorLinearMemoryBinding?.status
     && closureProductionHandlerTensorMemoryBinding?.executionClaim === closureTensorLinearMemoryBinding?.executionClaim
-    && closureProductionHandlerTensorMemoryBinding?.entryExportConsumesOffsets === false
-    && ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS.every((blocker) => (
-      closureProductionHandlerBoundaryBlockers.includes(blocker)
-    ));
+    && closureProductionHandlerTensorMemoryBinding?.entryExportConsumesOffsets === true
+    && arraysEqual(
+      closureProductionHandlerBoundaryBlockers,
+      ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
+    );
   const closureHandoffReady = (artifact.validation?.status || null) === 'pass'
     || closureDescriptorReady;
 
@@ -629,6 +633,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureTensorRuntimeContractReady,
     closureTensorRuntimeContractHash: closureTensorRuntimeContract?.contractHash || null,
     closureTensorRuntimeRuntimeAbi: closureTensorRuntimeContract?.runtimeAbi || null,
+    closureTensorRuntimeRuntimeStatus: closureTensorRuntimeContract?.runtimeStatus || null,
     closureTensorRuntimeExecutionClaim: closureTensorRuntimeContract?.executionClaim || null,
     closureTensorRuntimeEntryExport: closureTensorRuntimeContract?.entryExport || null,
     closureTensorRuntimeMemoryModel: closureTensorRuntimeContract?.tensorMemoryModel || null,
@@ -677,12 +682,17 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureTensorLinearMemoryTensors: clonePlain(closureTensorLinearMemoryTensors),
     closureTensorLinearMemorySmokeBindingSchema: closureTensorLinearMemorySmokeBinding?.schema || null,
     closureTensorLinearMemorySmokeBindingStatus: closureTensorLinearMemorySmokeBinding?.status || null,
+    closureTensorLinearMemorySmokeBindingEntryExportConsumesOffsets:
+      typeof closureTensorLinearMemorySmokeBinding?.entryExportConsumesOffsets === 'boolean'
+        ? closureTensorLinearMemorySmokeBinding.entryExportConsumesOffsets
+        : null,
     closureTensorLinearMemorySmokeBindingOutputInitialization:
       closureTensorLinearMemorySmokeBinding?.outputInitialization || null,
     closureTensorEntryExportOffsetProbeSchema: closureTensorEntryExportOffsetProbe?.schema || null,
     closureTensorEntryExportOffsetProbeStatus: closureTensorEntryExportOffsetProbe?.status || null,
     closureTensorEntryExportOffsetProbeBlocker: closureTensorEntryExportOffsetProbe?.blocker || null,
     closureTensorEntryExportOffsetProbeEntryExport: closureTensorEntryExportOffsetProbe?.entryExport || null,
+    closureTensorEntryExportHostImportOptions: clonePlain(closureTensorEntryExportOffsetProbe?.hostImportOptions || null),
     closureTensorEntryExportConsumesOffsets:
       typeof closureTensorEntryExportOffsetProbe?.entryExportConsumesOffsets === 'boolean'
         ? closureTensorEntryExportOffsetProbe.entryExportConsumesOffsets

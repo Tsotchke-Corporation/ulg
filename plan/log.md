@@ -2147,3 +2147,41 @@ Failures and open questions:
   validated magnetar runtime solver evidence, not ULG/PeerCompute transfer or
   closure packaging.
 - No push was attempted.
+
+## 2026-06-06 06:18:00 AKDT - Reduced calibrated PeerCompute runtime gate ready
+
+Prompt:
+
+- Continue the overall ULG implementation plan after descriptor handoff
+  acceptance and keep commits local only.
+
+Actions:
+
+- Added PeerCompute commit `d0dbe1f5`, which validates the four reduced
+  solver-family runtime entries against MoonLab calibrated reference contracts
+  and exposes `createScenarioCalibratedRuntimeEvidenceManifest()` /
+  `refreshScenarioCalibratedRuntimeEvidence()`.
+- Added PeerCompute commit `df4ea25a`, which derives the fifth required
+  cross-family conservation/coupling runtime evidence entry from packet
+  conservation/coupling telemetry plus the four validated solver entries.
+- Verified the live ULG-to-PeerCompute browser bridge with ULG on
+  `http://100.86.83.35:5173/` and Multiscale on
+  `https://100.86.83.35:5185/?scenario=magnetar`.
+- Updated the ULG status/test/plan checkpoint to reflect that the reduced
+  calibrated runtime gate now clears.
+
+Validation:
+
+- PASS: PeerCompute focused runtime evidence tests passed `195/195`.
+- PASS: PeerCompute `npm --prefix demos/multiscale run build` completed with
+  the existing large chunk warning.
+- PASS: live bridge after applying the ULG handoff reported
+  `manifestEntryCount = 5`, `runtime-evidence-ready`, `validatedCount = 5`,
+  `scientific-runtime-ready`, `scenarioScientificReady = true`, and no blockers.
+
+Failures and open questions:
+
+- The live system now has a reduced calibrated magnetar runtime path. Full
+  fidelity GRMHD, production PIC, and spectral radiation transport validation
+  remain future work.
+- No push was attempted.

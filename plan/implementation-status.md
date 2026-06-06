@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 05:58:30 AKDT
+Updated: 2026-06-06 06:18:00 AKDT
 
 ## Done
 
@@ -201,23 +201,30 @@ Updated: 2026-06-06 05:58:30 AKDT
   clear closure packaging/probe prerequisites with or without transferred WASM
   bytes, preserve those bytes in the transfer manifest, and do not clear
   scientific readiness.
+- Added and committed PeerCompute reduced calibrated runtime evidence locally:
+  commit `d0dbe1f5` validates the four solver-family runtime entries against
+  MoonLab calibrated references, and commit `df4ea25a` derives the fifth
+  cross-family conservation/coupling validation from packet telemetry.
+- Verified the live VPN ULG-to-PeerCompute path now reaches reduced calibrated
+  magnetar runtime readiness: ULG exports the MoonLab reference suite and
+  Eshkol descriptor handoff, PeerCompute reports `runtime-evidence-ready`,
+  `validatedCount = 5`, `scientific-runtime-ready`,
+  `scenarioScientificReady = true`, and no blockers after
+  `refreshScenarioCalibratedRuntimeEvidence()`.
 
 ## In Progress
 
 - Keep Vite live for inspection.
 - Keep using `npm run stage:service-assets` after MoonLab/Eshkol rebuilds so the
   ignored live asset tree does not drift from sibling source outputs.
-- Start the next runtime-evidence slice: replace proxy-only PeerCompute runtime
-  evidence with validated, hash-backed reduced solver evidence only where the
-  solver output and reference contract justify it.
+- Promote the demo-only ULG handoff packet into a durable PeerCompute service
+  adapter path with provenance, content addressing, and relay-safe transfer.
 
 ## Next
 
-- Replace the reduced MoonLab scalar reference contracts and PeerCompute
-  bounded proxy runtime evidence with real calibrated PIC/radiation/relativity
-  and MHD/force-free solver evidence before clearing scientific blockers.
-- Promote the demo-only ULG handoff packet into a durable PeerCompute service
-  adapter path with provenance, content addressing, and relay-safe transfer.
+- Replace the reduced calibrated reference/runtime contracts with higher
+  fidelity PIC, radiation, relativity, MHD/force-free, and eventually GRMHD
+  validation artifacts.
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and

@@ -172,6 +172,15 @@ reference-contract asset support.
   output-semantics execution claim for the descriptor path, five proxy-only
   runtime evidence entries after refresh, and the intended blocker
   `proxy-runtime-not-scientific`.
+- Live VPN reduced calibrated runtime evidence check on 2026-06-06:
+  after PeerCompute commits `d0dbe1f5` and `df4ea25a`,
+  `window.__multiscaleDemo.refreshScenarioCalibratedRuntimeEvidence()` on
+  `https://100.86.83.35:5185/?scenario=magnetar` reported
+  `manifestEntryCount = 5`, `manifestScientificExecution = true`,
+  `runtime-evidence-ready`, `scientificExecution = true`,
+  `validatedCount = 5`, `missingCount = 0`, `proxyOnlyCount = 0`,
+  `scientific-runtime-ready`, `scenarioScientificReady = true`, and no blockers
+  after applying the live ULG handoff from `http://100.86.83.35:5173/`.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

@@ -130,12 +130,30 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabArtifact.outputs.reference.tolerances.maxObservedEnergyDelta).toBe(0);
     expect(moonlabArtifact.outputs.reference.validation.parityPassed).toBe(true);
     expect(moonlabArtifact.outputs.reference.validation.evaluatedBitstrings).toBe(8);
-    expect(moonlabArtifact.outputs.references).toHaveLength(1);
-    expect(moonlabArtifact.outputs.references[0].schema).toBe('moonlab.magnetar-dipole-ising-reference.v0');
-    expect(moonlabArtifact.outputs.references[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
+    const calibratedFamilies = [
+      'magnetosphere-mhd',
+      'pic-kinetic-plasma',
+      'radiation-transport',
+      'relativistic-correction'
+    ];
+    expect(moonlabArtifact.outputs.references).toHaveLength(4);
+    expect(moonlabArtifact.outputs.references.map((reference) => reference.family)).toEqual(calibratedFamilies);
+    for (const reference of moonlabArtifact.outputs.references) {
+      expect(reference.schema).toBe('moonlab.magnetar.calibrated-reference.v0');
+      expect(reference.role).toBe('peercompute-scientific-tolerance-input');
+      expect(reference.status).toBe('calibrated-reference-missing');
+      expect(reference.ready).toBe(false);
+      expect(reference.scientificCoverage).toBe(false);
+      expect(reference.validation.status).toBe('missing');
+      expect(reference.contractHash).toBe(null);
+      expect(reference.unitsHash).toBe(null);
+    }
+    expect(moonlabArtifact.outputs.references[0].blocker).toBe('calibrated-mhd-reference-missing');
     expect(moonlabArtifact.validationMetrics.magnetarMaxEnergyDelta).toBe(0);
     expect(moonlabArtifact.validationMetrics.magnetarEvaluatedBitstrings).toBe(8);
-    expect(moonlabArtifact.validationMetrics.outputReferenceCount).toBe(1);
+    expect(moonlabArtifact.validationMetrics.outputReferenceCount).toBe(5);
+    expect(moonlabArtifact.validationMetrics.magnetarCalibratedReferenceCount).toBe(4);
+    expect(moonlabArtifact.validationMetrics.magnetarCalibratedReferenceReadyCount).toBe(0);
     expect(moonlabArtifact.outputs.magnetarDipoleIsing.evaluatedBitstrings).toBe(8);
     expect(moonlabArtifact.validation.status).toBe('pass');
     expect(moonlabTelemetryRecord.artifactSummary.schema).toBe('peercompute.ulg.artifact-summary.v0');
@@ -153,15 +171,23 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceToleranceEnergyAbs).toBe(1e-9);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceMaxObservedEnergyDelta).toBe(0);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarReferenceValidationStatus).toBe('pass');
-    expect(moonlabTelemetryRecord.artifactSummary.outputReferenceCount).toBe(1);
+    expect(moonlabTelemetryRecord.artifactSummary.outputReferenceCount).toBe(5);
     expect(moonlabTelemetryRecord.artifactSummary.outputReferenceReadyCount).toBe(1);
     expect(moonlabTelemetryRecord.artifactSummary.outputReferences[0].schema).toBe('moonlab.magnetar-dipole-ising-reference.v0');
     expect(moonlabTelemetryRecord.artifactSummary.outputReferences[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceCount).toBe(4);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceReadyCount).toBe(0);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferenceScientificCoverageCount).toBe(0);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences.map((reference) => reference.family)).toEqual(calibratedFamilies);
+    expect(moonlabTelemetryRecord.artifactSummary.magnetarCalibratedReferences[0].blocker).toBe('calibrated-mhd-reference-missing');
     const moonlabHandoff = handoff.artifacts.find((artifact) => artifact.ref.sourceService === 'moonlab');
-    expect(moonlabHandoff.artifact.outputs.references).toHaveLength(1);
-    expect(moonlabHandoff.artifact.outputs.references[0].contractHash).toBe(moonlabArtifact.outputs.reference.contractHash);
-    expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(1);
+    expect(moonlabHandoff.artifact.outputs.references).toHaveLength(4);
+    expect(moonlabHandoff.artifact.outputs.references.map((reference) => reference.family)).toEqual(calibratedFamilies);
+    expect(moonlabHandoff.artifact.outputs.references[0].ready).toBe(false);
+    expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(5);
     expect(moonlabHandoff.artifactSummary.outputReferenceReadyCount).toBe(1);
+    expect(moonlabHandoff.artifactSummary.magnetarCalibratedReferenceCount).toBe(4);
+    expect(moonlabHandoff.artifactSummary.magnetarCalibratedReferenceReadyCount).toBe(0);
   }
 });
 

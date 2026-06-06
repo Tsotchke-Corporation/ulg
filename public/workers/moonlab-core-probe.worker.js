@@ -304,6 +304,7 @@ function createMagnetarDipoleIsingCalibration(module) {
       isingModel: model,
       evaluations,
       reference: referenceContract,
+      references: createMagnetarReferenceFamilyInventory(),
       responseDescriptor: {
         schema: 'peercompute.ulg.quantum-response-descriptor.v0',
         sample: 'magnetar_dipole_ising',
@@ -388,6 +389,127 @@ function createMagnetarDipoleIsingCalibration(module) {
   } finally {
     module._ising_model_free(modelPtr);
   }
+}
+
+function createMagnetarReferenceFamilyInventory() {
+  return [
+    {
+      id: 'magnetosphere-mhd-reference',
+      family: 'magnetosphere-mhd',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      label: 'Magnetosphere MHD calibrated reference family',
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: {
+        status: 'missing',
+        evidence: []
+      },
+      blocker: 'calibrated-mhd-reference-missing',
+      blockers: [
+        'No calibrated MHD benchmark data is bundled with this artifact.',
+        'No MHD solver parity run has been compared against the normalized Ising calibration.',
+        'No MHD unit, boundary-condition, or conservation-law tolerances are defined.'
+      ]
+    },
+    {
+      id: 'pic-kinetic-plasma-reference',
+      family: 'pic-kinetic-plasma',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      label: 'PIC kinetic plasma calibrated reference family',
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: {
+        status: 'missing',
+        evidence: []
+      },
+      blocker: 'calibrated-pic-reference-missing',
+      blockers: [
+        'No calibrated PIC benchmark data is bundled with this artifact.',
+        'No particle-field coupling parity run has been compared against the normalized Ising calibration.',
+        'No particle distribution, timestep, or plasma parameter tolerances are defined.'
+      ]
+    },
+    {
+      id: 'radiation-transport-reference',
+      family: 'radiation-transport',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      label: 'Radiation transport calibrated reference family',
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: {
+        status: 'missing',
+        evidence: []
+      },
+      blocker: 'calibrated-radiation-reference-missing',
+      blockers: [
+        'No calibrated radiation benchmark data is bundled with this artifact.',
+        'No opacity, emissivity, or radiation-transport parity run has been compared against the normalized Ising calibration.',
+        'No spectral, angular, or transport error tolerances are defined.'
+      ]
+    },
+    {
+      id: 'relativistic-correction-reference',
+      family: 'relativistic-correction',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      label: 'Relativistic correction calibrated reference family',
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: {
+        status: 'missing',
+        evidence: []
+      },
+      blocker: 'calibrated-relativity-reference-missing',
+      blockers: [
+        'No calibrated relativity benchmark data is bundled with this artifact.',
+        'No frame, metric, or relativistic-correction parity run has been compared against the normalized Ising calibration.',
+        'No gauge, coordinate, or correction-order tolerances are defined.'
+      ]
+    }
+  ];
 }
 
 function assertIsingExports(module) {

@@ -5,6 +5,95 @@ import { ChildWorkerLeaseManager } from '../src/runtime/ChildWorkerLeaseManager.
 import { ComputeServiceRegistry } from '../src/runtime/ComputeServiceRegistry.js';
 import { GpuBroker } from '../src/runtime/GpuBroker.js';
 
+function createCalibratedReferenceInventory() {
+  return [
+    {
+      id: 'magnetosphere-mhd-reference',
+      family: 'magnetosphere-mhd',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: { status: 'missing', evidence: [] },
+      blocker: 'calibrated-mhd-reference-missing',
+      blockers: ['No calibrated MHD benchmark data is bundled with this artifact.']
+    },
+    {
+      id: 'pic-kinetic-plasma-reference',
+      family: 'pic-kinetic-plasma',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: { status: 'missing', evidence: [] },
+      blocker: 'calibrated-pic-reference-missing',
+      blockers: ['No calibrated PIC benchmark data is bundled with this artifact.']
+    },
+    {
+      id: 'radiation-transport-reference',
+      family: 'radiation-transport',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: { status: 'missing', evidence: [] },
+      blocker: 'calibrated-radiation-reference-missing',
+      blockers: ['No calibrated radiation benchmark data is bundled with this artifact.']
+    },
+    {
+      id: 'relativistic-correction-reference',
+      family: 'relativistic-correction',
+      provider: 'moonlab',
+      solverId: null,
+      schema: 'moonlab.magnetar.calibrated-reference.v0',
+      role: 'peercompute-scientific-tolerance-input',
+      contractHash: null,
+      unitsHash: null,
+      fieldMap: null,
+      fieldTolerances: null,
+      fieldObservedDeltas: null,
+      status: 'calibrated-reference-missing',
+      ready: false,
+      scientificCoverage: false,
+      scope: 'inventory-only-not-scientific-reference',
+      validationStatus: 'missing',
+      validation: { status: 'missing', evidence: [] },
+      blocker: 'calibrated-relativity-reference-missing',
+      blockers: ['No calibrated relativity benchmark data is bundled with this artifact.']
+    }
+  ];
+}
+
 test('registry resolves services by task kind', async () => {
   const registry = new ComputeServiceRegistry();
   await registry.register({
@@ -172,6 +261,7 @@ test('artifact cache returns content-addressed refs', async () => {
 
 test('artifact cache summarizes MoonLab magnetar calibration metadata', async () => {
   const cache = new ArtifactCache();
+  const calibratedReferenceInventory = createCalibratedReferenceInventory();
   const magnetarReference = {
     schema: 'moonlab.magnetar-dipole-ising-reference.v0',
     role: 'peercompute-reference-tolerance-input',
@@ -198,7 +288,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
     },
     outputs: {
       reference: magnetarReference,
-      references: [magnetarReference]
+      references: calibratedReferenceInventory
     },
     parity: {
       schema: 'peercompute.ulg.quantum-response-parity.v0',
@@ -214,6 +304,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
         validation: { status: 'pass' },
         parity: { status: 'pass', metrics: { maxEnergyDelta: 0 } },
         reference: magnetarReference,
+        references: calibratedReferenceInventory,
         summary: {
           groundState: { bitString: '000', referenceEnergy: -1.6712962962963, energyUnits: 'normalized-ising' },
           maxEnergyDelta: 0,
@@ -234,11 +325,25 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.deepEqual(summary.unsupportedParityModes, ['moonlab-webgpu']);
   assert.equal(summary.calibrationArtifactCount, 1);
   assert.equal(summary.calibrationReadyCount, 1);
-  assert.equal(summary.outputReferenceCount, 1);
+  assert.equal(summary.outputReferenceCount, 5);
   assert.equal(summary.outputReferenceReadyCount, 1);
   assert.equal(summary.outputReferences[0].schema, 'moonlab.magnetar-dipole-ising-reference.v0');
   assert.equal(summary.outputReferences[0].contractHash, 'sha256:f85763af06f271c414d55e29884ee7b0d5738a4a7ec9351493964b98f8d4e1ec');
-  assert.equal(summary.calibrationArtifacts[0].referenceCount, 1);
+  assert.equal(summary.outputReferences[1].family, 'magnetosphere-mhd');
+  assert.equal(summary.outputReferences[1].status, 'calibrated-reference-missing');
+  assert.equal(summary.outputReferences[1].validationStatus, 'missing');
+  assert.equal(summary.outputReferences[1].ready, false);
+  assert.equal(summary.magnetarCalibratedReferenceCount, 4);
+  assert.equal(summary.magnetarCalibratedReferenceReadyCount, 0);
+  assert.equal(summary.magnetarCalibratedReferenceScientificCoverageCount, 0);
+  assert.deepEqual(summary.magnetarCalibratedReferences.map((reference) => reference.family), [
+    'magnetosphere-mhd',
+    'pic-kinetic-plasma',
+    'radiation-transport',
+    'relativistic-correction'
+  ]);
+  assert.equal(summary.magnetarCalibratedReferences[0].blocker, 'calibrated-mhd-reference-missing');
+  assert.equal(summary.calibrationArtifacts[0].referenceCount, 5);
   assert.equal(summary.calibrationArtifacts[0].referenceReadyCount, 1);
   assert.equal(summary.magnetarDipoleIsingReady, true);
   assert.equal(summary.magnetarDipoleIsingGroundState, '000');

@@ -4,8 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 16/16 tests on 2026-06-06 after adding MoonLab
-`outputs.references[]` propagation and summary telemetry.
+Current result: pass, 16/16 tests on 2026-06-06 after switching MoonLab
+`outputs.references[]` from a singular-reference wrapper to the four-entry
+calibrated reference-family inventory.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -41,13 +42,16 @@ Current result: pass, 16/16 tests on 2026-06-06 after adding MoonLab
   `outputs.references[]`, count ready output references, and can derive the
   MoonLab magnetar reference summary from the plural array when the calibration
   entry does not carry a singular reference.
+- Artifact cache summaries preserve the four-entry MoonLab calibrated
+  magnetosphere MHD, PIC kinetic plasma, radiation transport, and relativistic
+  correction inventory with zero ready/scientific-coverage counts.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the ULG MoonLab
-`outputs.references[]` propagation update, with the existing large three.js
+Current result: pass on 2026-06-06 after the ULG MoonLab calibrated
+reference-family inventory propagation update, with the existing large three.js
 chunk warning.
 
 ## Browser Smoke
@@ -55,7 +59,7 @@ chunk warning.
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-06 after the ULG MoonLab
-`outputs.references[]` propagation update.
+calibrated reference-family inventory propagation update.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -95,8 +99,21 @@ Current result: pass, 1/1 Chromium test on 2026-06-06 after the ULG MoonLab
   `-1.6712962962963`, tolerance `1e-9`, zero observed energy delta, and passing
   reference validation.
 - Runtime plural reference check on 2026-06-06: with copied MoonLab assets
-  present, Playwright verifies `outputs.references[]` carries the same MoonLab
-  magnetar reference contract as the compatibility `outputs.reference` alias.
+  present, Playwright verifies `outputs.reference` still carries the ready
+  dipole-Ising compatibility contract while `outputs.references[]` carries the
+  calibrated family inventory.
+- Runtime calibrated reference inventory check on 2026-06-06: with copied
+  MoonLab assets present, Playwright verifies `outputs.references[]` carries the
+  four calibrated magnetosphere MHD, PIC kinetic plasma, radiation transport,
+  and relativistic correction placeholders with `ready: false`,
+  `scientificCoverage: false`, null contract/unit hashes, and missing validation.
+- Live VPN calibrated inventory check on 2026-06-06:
+  `http://100.86.83.35:5173/` reported four raw
+  `outputs.references[]` entries for magnetosphere MHD, PIC kinetic plasma,
+  radiation transport, and relativistic correction, compact
+  `outputReferenceCount = 5`, `outputReferenceReadyCount = 1`,
+  `magnetarCalibratedReferenceCount = 4`, and zero calibrated ready/scientific
+  coverage entries.
 - Artifact-summary telemetry check on 2026-06-05: Playwright verifies the
   MoonLab artifact telemetry record carries
   `peercompute.ulg.artifact-summary.v0`, magnetar readiness `true`, ground state

@@ -275,7 +275,12 @@ function createArtifact(task) {
     const coreProbeReady = coreProbe?.status === 'ready';
     const magnetarDipoleIsing = coreProbe?.magnetarDipoleIsing ?? null;
     const magnetarReference = magnetarDipoleIsing?.reference ?? null;
-    const magnetarReferences = magnetarReference ? [magnetarReference] : [];
+    const magnetarReferences = Array.isArray(magnetarDipoleIsing?.references)
+      ? magnetarDipoleIsing.references.filter((reference) => (
+        reference != null && typeof reference === 'object' && !Array.isArray(reference)
+      ))
+      : [];
+    const magnetarOutputReferenceCount = (magnetarReference ? 1 : 0) + magnetarReferences.length;
     const magnetarReady = magnetarDipoleIsing?.validation?.status === 'pass'
       && magnetarDipoleIsing?.parity?.status === 'pass';
     return {
@@ -310,7 +315,9 @@ function createArtifact(task) {
         unsupportedParityModeCount: coreProbeReady ? coreProbe.parity?.metrics?.unsupportedModeCount ?? 0 : 1,
         magnetarMaxEnergyDelta: magnetarDipoleIsing?.summary?.maxEnergyDelta ?? null,
         magnetarEvaluatedBitstrings: magnetarDipoleIsing?.summary?.evaluatedBitstrings ?? 0,
-        outputReferenceCount: magnetarReferences.length,
+        outputReferenceCount: magnetarOutputReferenceCount,
+        magnetarCalibratedReferenceCount: magnetarReferences.length,
+        magnetarCalibratedReferenceReadyCount: magnetarReferences.filter((reference) => reference.ready === true).length,
         calibrationArtifactCount: magnetarDipoleIsing ? 1 : 0
       },
       validation: {

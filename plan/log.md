@@ -1,5 +1,91 @@
 # ULG Implementation Log
 
+## 2026-06-06 01:25:01 AKDT
+
+Prompt: User asked for status and to keep going on the overall plan while
+keeping commits local only. Hubble sidecar reported local commit `2790ed3`
+covering plural MoonLab references; inspect the live ULG path against the newer
+MoonLab calibrated reference inventory and continue the implementation plan.
+
+Actions attempted:
+
+- Confirmed `/home/cos/projects/AGENTS.md` instructions and current clean branch
+  state for ULG, MoonLab, PeerCompute, and Eshkol.
+- Reviewed ULG `plan/plan.md`, `plan/log.md`, current ULG reference propagation,
+  and the MoonLab committed calibrated reference-family inventory.
+- Determined the existing ULG worker only wrapped the singular
+  `outputs.reference` contract in `outputs.references[]`, which did not expose
+  MoonLab's new calibrated magnetosphere MHD, PIC kinetic plasma, radiation
+  transport, and relativistic correction inventory to PeerCompute.
+- Added the four-entry calibrated reference inventory to the copied MoonLab core
+  probe worker, preserving `ready: false`, `scientificCoverage: false`, null
+  contract/unit hashes, missing validation, and explicit blockers.
+- Updated the supervised MoonLab artifact to keep raw `outputs.references[]`
+  inventory-only while preserving the ready dipole-Ising contract as
+  `outputs.reference`.
+- Extended compact artifact-summary telemetry with calibrated inventory counts,
+  scientific-coverage counts, and blocker-preserving compact reference entries.
+- Updated unit/e2e expectations and docs/plan notes to distinguish the singular
+  ready Ising reference from the four calibrated-family blockers.
+
+Files touched:
+
+- `README.md`
+- `public/workers/moonlab-core-probe.worker.js`
+- `src/runtime/artifactSummary.js`
+- `src/services/dummyService.worker.js`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands planned/run:
+
+- `node -v`
+- `node --check public/workers/moonlab-core-probe.worker.js`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check src/services/dummyService.worker.js`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `git diff --check`
+- `ss -ltnp 'sport = :5173'`
+- `curl -I http://100.86.83.35:5173/`
+- Live Playwright probe against `http://100.86.83.35:5173/` inspecting
+  `window.__ulgDemo` MoonLab artifact telemetry and
+  `createPeerComputeHandoff()`.
+
+Results:
+
+- PASS: Node stayed on v24 (`v24.15.0`).
+- PASS: changed JavaScript files passed syntax checks.
+- PASS: `npm test` completed with `16/16` tests passing.
+- PASS: `npm run build` completed with the existing large three.js chunk
+  warning.
+- PASS: `npm run test:e2e` completed with `1/1` Chromium test passing.
+- PASS: `git diff --check` completed cleanly.
+- PASS: `5173` is listening on `0.0.0.0` and
+  `http://100.86.83.35:5173/` returned HTTP 200.
+- PASS: live VPN Playwright probe reported raw MoonLab
+  `outputs.references[]` families `magnetosphere-mhd`,
+  `pic-kinetic-plasma`, `radiation-transport`, and
+  `relativistic-correction`; compact `outputReferenceCount = 5`,
+  `outputReferenceReadyCount = 1`,
+  `magnetarCalibratedReferenceCount = 4`,
+  `magnetarCalibratedReferenceReadyCount = 0`, and
+  `magnetarCalibratedReferenceScientificCoverageCount = 0`.
+
+Failures / open questions:
+
+- Full magnetar scientific readiness remains intentionally blocked until the
+  calibrated MHD/PIC/radiation/relativity references have real solver IDs,
+  contract/unit hashes, field maps, tolerances, observed deltas, and passing
+  scientific coverage.
+
 ## 2026-06-06 01:14:57 AKDT
 
 Prompt: Inspect the ULG demo/artifact/handoff path for MoonLab

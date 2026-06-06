@@ -101,6 +101,10 @@ physics work:
   `outputs.references[]` entries in the ULG artifact body, compact summary, UI
   status line, and demo handoff packet while keeping `outputs.reference` as a
   compatibility alias.
+- [x] Preserve MoonLab's calibrated magnetosphere MHD, PIC kinetic plasma,
+  radiation transport, and relativistic correction inventory in raw
+  `outputs.references[]` while compact summaries count the singular ready Ising
+  reference plus the four non-ready calibrated blockers.
 - [x] Surface the same handoff through compact ULG artifact-summary telemetry for
   direct PeerCompute/Multiscale scenario ingestion.
 - [x] Surface staged Eshkol closure execution metadata through compact ULG

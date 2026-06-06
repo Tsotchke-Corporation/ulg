@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 01:14:57 AKDT
+Updated: 2026-06-06 01:25:01 AKDT
 
 ## Done
 
@@ -132,11 +132,16 @@ Updated: 2026-06-06 01:14:57 AKDT
   contracts while preserving the legacy `outputs.reference` alias. Compact
   artifact-summary telemetry now counts ready output references and the browser
   handoff packet carries the plural reference list.
+- Updated the live ULG MoonLab core probe to mirror MoonLab's four-entry
+  calibrated magnetosphere MHD, PIC kinetic plasma, radiation transport, and
+  relativistic correction inventory in raw `outputs.references[]`. Compact
+  telemetry now reports calibrated inventory counts separately while preserving
+  the singular ready dipole-Ising reference as `outputs.reference`.
 
 ## In Progress
 
 - Keep Vite live for inspection.
-- Use the ULG MoonLab `outputs.references[]` summary as the next
+- Use the ULG MoonLab calibrated `outputs.references[]` inventory as the next
   PeerCompute/Multiscale adapter signal for reference/tolerance inventory, while
   keeping full magnetar scientific readiness blocked until calibrated
   multiphysics references exist.

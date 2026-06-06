@@ -5,6 +5,8 @@ export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.mag
 export const ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA = 'eshkol.ulg.closure-output-semantics.v0';
 export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
 export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-input';
+export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA = 'moonlab.magnetar.calibrated-reference.v0';
+export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_ROLE = 'peercompute-scientific-tolerance-input';
 
 function inferArtifactKind(artifact = {}) {
   if (artifact.responseDescriptor || artifact.parity || artifact.calibrationArtifacts) return 'quantum-response';
@@ -14,6 +16,12 @@ function inferArtifactKind(artifact = {}) {
 
 function isPlainObject(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function textOrNull(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 function referenceKey(reference = {}) {
@@ -61,29 +69,55 @@ function normalizeReferenceEntry(reference = {}, fallbackId = '') {
   const referenceMaxObservedEnergyDelta = finiteNumberOrNull(referenceTolerances.maxObservedEnergyDelta);
   const referenceGroundStateEnergy = finiteNumberOrNull(referenceGroundState.referenceEnergy);
   const referenceGroundStateBitString = referenceGroundState.bitString || referenceGroundState.bitstring || null;
-  const ready = reference?.schema === MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA
+  const validationStatus = referenceValidation.parityPassed === true
+    ? 'pass'
+    : textOrNull(referenceValidation.status || reference.validationStatus);
+  const contractHash = textOrNull(reference?.contractHash);
+  const unitsHash = textOrNull(reference?.unitsHash);
+  const dipoleIsingReady = reference?.schema === MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA
     && reference.role === MOONLAB_MAGNETAR_REFERENCE_ROLE
-    && typeof reference.contractHash === 'string'
-    && reference.contractHash.startsWith('sha256:')
+    && typeof contractHash === 'string'
+    && contractHash.startsWith('sha256:')
     && reference.energyUnits === 'normalized-ising'
     && referenceGroundStateBitString != null
     && referenceGroundStateEnergy != null
     && referenceEnergyAbs != null
     && referenceMaxObservedEnergyDelta != null
-    && referenceValidation.parityPassed === true
+    && validationStatus === 'pass'
     && referenceMaxObservedEnergyDelta <= referenceEnergyAbs;
+  const calibratedReady = reference?.schema === MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA
+    && reference.role === MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_ROLE
+    && reference.ready === true
+    && reference.scientificCoverage === true
+    && validationStatus === 'pass'
+    && typeof contractHash === 'string'
+    && contractHash.startsWith('sha256:')
+    && typeof unitsHash === 'string'
+    && unitsHash.startsWith('sha256:');
   return {
     id: reference.id || fallbackId || null,
     schema: reference?.schema || null,
     role: reference?.role || null,
-    contractHash: reference?.contractHash || null,
+    family: textOrNull(reference.family),
+    provider: textOrNull(reference.provider),
+    solverId: textOrNull(reference.solverId),
+    contractHash,
+    unitsHash,
     energyUnits: reference?.energyUnits || null,
+    fieldMap: clonePlain(isPlainObject(reference.fieldMap) ? reference.fieldMap : null),
+    fieldTolerances: clonePlain(isPlainObject(reference.fieldTolerances) ? reference.fieldTolerances : null),
+    fieldObservedDeltas: clonePlain(isPlainObject(reference.fieldObservedDeltas) ? reference.fieldObservedDeltas : null),
     groundStateBitString: referenceGroundStateBitString,
     groundStateEnergy: referenceGroundStateEnergy,
     toleranceEnergyAbs: referenceEnergyAbs,
     maxObservedEnergyDelta: referenceMaxObservedEnergyDelta,
-    validationStatus: referenceValidation.parityPassed === true ? 'pass' : null,
-    ready
+    status: textOrNull(reference.status),
+    scientificCoverage: typeof reference.scientificCoverage === 'boolean' ? reference.scientificCoverage : null,
+    scope: textOrNull(reference.scope),
+    validationStatus,
+    blocker: textOrNull(reference.blocker),
+    blockers: Array.isArray(reference.blockers) ? reference.blockers.map((blocker) => String(blocker)) : [],
+    ready: dipoleIsingReady || calibratedReady
   };
 }
 
@@ -190,6 +224,10 @@ export function summarizeUlgArtifact(artifact = {}) {
   const outputReferences = collectReferenceEntries(outputs)
     .map((reference, index) => normalizeReferenceEntry(reference, `output-reference-${index}`));
   const outputMoonLabReference = findMoonLabReferenceSummary(outputReferences);
+  const magnetarCalibratedReferences = outputReferences.filter((reference) => (
+    reference.schema === MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA
+    && reference.role === MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_ROLE
+  ));
 
   return {
     schema: ULG_ARTIFACT_SUMMARY_SCHEMA,
@@ -260,6 +298,11 @@ export function summarizeUlgArtifact(artifact = {}) {
     outputReferenceCount: outputReferences.length,
     outputReferenceReadyCount: outputReferences.filter((entry) => entry.ready).length,
     outputReferences,
+    magnetarCalibratedReferenceCount: magnetarCalibratedReferences.length,
+    magnetarCalibratedReferenceReadyCount: magnetarCalibratedReferences.filter((entry) => entry.ready).length,
+    magnetarCalibratedReferenceScientificCoverageCount: magnetarCalibratedReferences
+      .filter((entry) => entry.scientificCoverage === true).length,
+    magnetarCalibratedReferences,
     magnetarDipoleIsingReady: magnetarDipoleIsing?.ready === true,
     magnetarDipoleIsingStatus: magnetarDipoleIsing?.status || null,
     magnetarDipoleIsingParityStatus: magnetarDipoleIsing?.parityStatus || null,

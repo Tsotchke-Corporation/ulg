@@ -10,12 +10,16 @@ export class ChildWorkerLeaseManager {
       .filter((lease) => lease.parentWorkerId === parentWorkerId && lease.status === 'active')
       .reduce((total, lease) => total + lease.count, 0);
     const requestedCount = spec.count ?? 1;
+    const workerType = spec.workerType ?? 'module';
 
     if (!spec.allowed) {
       throw new Error(`Child workers are not allowed for ${parentWorkerId}`);
     }
     if (!spec.allowedModules?.includes(spec.module)) {
       throw new Error(`Module is not lease-approved: ${spec.module}`);
+    }
+    if (!['classic', 'module'].includes(workerType)) {
+      throw new Error(`Unsupported child worker type: ${workerType}`);
     }
     if (existingCount + requestedCount > spec.maxChildren) {
       throw new Error(`Child worker quota exceeded for ${parentWorkerId}`);
@@ -26,6 +30,7 @@ export class ChildWorkerLeaseManager {
       parentWorkerId,
       rootTaskId: spec.rootTaskId,
       module: spec.module,
+      workerType,
       count: requestedCount,
       createdAt: Date.now(),
       expiresAt: spec.expiresAt ?? Date.now() + 30_000,

@@ -54,6 +54,7 @@ export async function createDemoRuntime() {
 
   const api = {
     registry,
+    artifactCache,
     supervisor,
     get telemetry() {
       return supervisor.getTreeTelemetry();

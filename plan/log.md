@@ -647,3 +647,144 @@ Failures and open questions:
 - Next step is loading the MoonLab module in a supervised worker and running a
   minimal core task or quantum response artifact path.
 - No push was attempted; all commits remain local per user instruction.
+
+## 2026-06-05 16:34:33 AKDT
+
+Prompt: "keep going until i tell you to stop. youre doing great"
+
+Actions attempted:
+
+- Continued with the live Vite server on `0.0.0.0:5173`.
+- Spawned a read-only MoonLab sidecar to confirm the smallest browser-callable
+  WASM API and traps around Emscripten `MODULARIZE`.
+- Confirmed the copied MoonLab loader is a classic/UMD Emscripten factory named
+  `MoonlabModule`, not an ES module.
+- Found that the existing MoonLab C source already has
+  `quantum_state_create`/`quantum_state_destroy`, but those helpers were not in
+  `bindings/javascript/packages/core/emscripten/exports.txt`.
+- Added those two state allocation helpers to the MoonLab WASM export list,
+  rebuilt core, verified the rebuilt loader exposes the helpers, and committed
+  the MoonLab repo locally as `5ce415f Export MoonLab state allocation helpers`.
+- Copied the rebuilt ignored `moonlab.js`/`moonlab.wasm` artifacts back into
+  ULG `public/service-assets/moonlab/`.
+- Ran temporary Chromium worker probes against the live Vite app:
+  the first blob-worker probe failed because root-relative `importScripts()` is
+  invalid from a blob URL; the second probe instantiated the module but failed
+  because `_quantum_state_get_probability` expects a BigInt basis index for its
+  `uint64_t`; the third probe passed with `0n..3n` and returned
+  `[0.5000000000000001, 0, 0, 0.5000000000000001]`, purity `1.0`, and entropy
+  `1.0`.
+- Added ULG support for child worker lease `workerType` metadata so MoonLab can
+  lease a classic child worker while the existing dummy child remains a module
+  worker.
+- Added `public/workers/moonlab-core-probe.worker.js`, a tracked classic child
+  worker that loads `MoonlabModule` with `importScripts()`, resolves the WASM
+  with `locateFile`, allocates a two-qubit state, creates Bell `phi_plus`, reads
+  the basis probabilities, and destroys the WASM heap state.
+- Extended the MoonLab service asset contract with `coreProbeWorkerModule` and
+  made the manifest builder automatically approve that worker for child leases.
+- Updated the root service worker so MoonLab chooses the classic core probe only
+  when the asset probe is `ready`; otherwise it keeps the dummy fallback.
+- Fixed an initialization race where `runSmoke()` could submit tasks before the
+  async asset probe finished. Task start now waits on `initPromise`.
+- Exposed `artifactCache` on `window.__ulgDemo` for Playwright/manual inspection
+  of artifact bodies.
+- Updated README, service asset docs, plan, status, and tests docs.
+- Closed the MoonLab sidecar after receiving its read-only report. Its
+  alternative verified path uses `_gate_hadamard`, `_gate_cnot`, `_malloc`,
+  `_measurement_probability_distribution`, `_measurement_probability_one`, and
+  `_measurement_correlation_zz`; the implemented path uses the exported Bell
+  helper and BigInt basis indices.
+
+Commands run:
+
+```bash
+git status --short --branch
+rg -n "WorkerSupervisor|ChildWorkerLease|dummyService|createUlgServiceManifest|moonlab|serviceAssets|assetProbe|Worker\\(" src tests public plan package.json
+sed -n '1,220p' agents.md
+sed -n '1,220p' /home/cos/projects/AGENTS.md
+sed -n '1,260p' src/services/dummyService.worker.js
+sed -n '1,280p' src/runtime/ChildWorkerLeaseManager.js
+sed -n '1,280p' src/runtime/WorkerSupervisor.js
+sed -n '1,220p' src/runtime/demoRuntime.js
+sed -n '1,320p' ulg-gpu-abi/src/serviceContract.js
+sed -n '1,260p' tests/orchestration.test.mjs
+sed -n '1,280p' tests/demo.e2e.mjs
+sed -n '1,220p' src/services/dummyChild.worker.js
+find public -maxdepth 3 -type f | sort
+cat .gitignore
+rg -n "quantum_state_create|quantum_state_destroy" public/service-assets/moonlab/moonlab.js /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.js /home/cos/projects/moonlab/bindings/javascript/packages/core/emscripten/exports.txt
+sed -n '280,320p' /home/cos/projects/moonlab/src/quantum/state.h
+sed -n '560,590p' /home/cos/projects/moonlab/src/quantum/state.c
+sed -n '1,115p' /home/cos/projects/moonlab/src/algorithms/bell_tests.c
+pnpm --filter @moonlab/quantum-core build
+rg -n "_quantum_state_create|_quantum_state_destroy" bindings/javascript/packages/core/dist/moonlab.js bindings/javascript/packages/core/emscripten/build/moonlab.js bindings/javascript/packages/core/emscripten/exports.txt
+pnpm --filter @moonlab/quantum-core test:unit
+git add bindings/javascript/packages/core/emscripten/exports.txt && git commit -m "Export MoonLab state allocation helpers"
+cp /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.js public/service-assets/moonlab/moonlab.js
+cp /home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.wasm public/service-assets/moonlab/moonlab.wasm
+node --input-type=module - <<'NODE'
+// temporary Chromium worker probes for MoonlabModule, locateFile, and Bell probabilities
+NODE
+node --check src/services/dummyService.worker.js
+node --check public/workers/moonlab-core-probe.worker.js
+node --check src/runtime/ChildWorkerLeaseManager.js
+node --check src/runtime/WorkerSupervisor.js
+npm test
+npm run build
+curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://100.86.83.35:5173/workers/moonlab-core-probe.worker.js
+npm run test:e2e
+node --input-type=module - <<'NODE'
+// live VPN probe against http://100.86.83.35:5173/ reading window.__ulgDemo.artifactCache
+NODE
+```
+
+Files touched:
+
+- `/home/cos/projects/moonlab/bindings/javascript/packages/core/emscripten/exports.txt`
+- `/home/cos/projects/ulg/README.md`
+- `/home/cos/projects/ulg/public/service-assets/README.md`
+- `/home/cos/projects/ulg/public/workers/moonlab-core-probe.worker.js`
+- `/home/cos/projects/ulg/src/runtime/ChildWorkerLeaseManager.js`
+- `/home/cos/projects/ulg/src/runtime/WorkerSupervisor.js`
+- `/home/cos/projects/ulg/src/runtime/demoRuntime.js`
+- `/home/cos/projects/ulg/src/services/dummyService.worker.js`
+- `/home/cos/projects/ulg/tests/demo.e2e.mjs`
+- `/home/cos/projects/ulg/tests/orchestration.test.mjs`
+- `/home/cos/projects/ulg/tests/service-assets.test.mjs`
+- `/home/cos/projects/ulg/ulg-gpu-abi/examples/moonlab-service-manifest.json`
+- `/home/cos/projects/ulg/ulg-gpu-abi/src/schemas/compute_service_manifest.schema.json`
+- `/home/cos/projects/ulg/ulg-gpu-abi/src/serviceContract.js`
+- `/home/cos/projects/ulg/plan/implementation-status.md`
+- `/home/cos/projects/ulg/plan/plan.md`
+- `/home/cos/projects/ulg/plan/tests.md`
+- `/home/cos/projects/ulg/plan/log.md`
+
+Test results:
+
+- MoonLab `pnpm --filter @moonlab/quantum-core build` passed with the existing
+  package exports warning.
+- MoonLab `pnpm --filter @moonlab/quantum-core test:unit` passed 93/93.
+- ULG syntax checks passed for `dummyService.worker.js`,
+  `moonlab-core-probe.worker.js`, `ChildWorkerLeaseManager.js`, and
+  `WorkerSupervisor.js`.
+- ULG `npm test` passed 13/13.
+- ULG `npm run build` passed with the existing large three.js chunk warning.
+- First ULG `npm run test:e2e` failed because `artifactCache` was not exposed on
+  `window.__ulgDemo`; after exposing it, the next e2e run failed because the
+  MoonLab task selected the fallback child before the async asset probe finished.
+- After the init race fix, ULG `npm run test:e2e` passed 1/1.
+- Live VPN probe at `http://100.86.83.35:5173/` returned MoonLab
+  `assetStatus = ready`, `method = moonlab-wasm-bell-phi-plus-probe`,
+  `bellState = bell_phi_plus`, probabilities
+  `[0.5000000000000001, 0, 0, 0.5000000000000001]`,
+  `validation = pass`, and `coreProbe = ready`.
+
+Failures and open questions:
+
+- The real MoonLab runtime files under `public/service-assets/moonlab/` remain
+  ignored local artifacts, not committed source.
+- The sidecar also verified a measurement-buffer path that may be better for the
+  next quantum-response expansion, but the current committed ULG path uses the
+  simpler exported Bell helper and direct probability reads.
+- No push was attempted; all commits remain local per user instruction.

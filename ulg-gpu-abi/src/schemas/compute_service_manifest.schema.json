@@ -29,6 +29,7 @@
             "loaderModule": { "type": "string" },
             "wasmModule": { "type": "string" },
             "locateFileProbe": { "type": "string" },
+            "coreProbeWorkerModule": { "type": "string" },
             "required": {
               "type": "array",
               "items": { "type": "string" }

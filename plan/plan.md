@@ -25,6 +25,8 @@ physics work:
 - [x] Implement dummy Eshkol and MoonLab service workers.
 - [x] Add browser-facing service asset convention and MoonLab WASM locateFile/MIME
   probes for copied artifacts.
+- [x] Add a supervised MoonLab classic child worker that instantiates the real
+  core WASM runtime and emits Bell-state probabilities into the task artifact.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -59,7 +61,7 @@ physics work:
 ### MoonLab
 
 - [x] Identify JS/WASM/WebGPU bindings that can emit ULG quantum response artifacts.
-- [ ] Prototype service worker bootstrap around existing MoonLab core exports.
+- [x] Prototype service worker bootstrap around existing MoonLab core exports.
 - [ ] Add deterministic CPU/WebGPU parity artifact surface.
 - [x] Fix JS unit regressions and WASM dist packaging before real service integration.
 - [ ] Add browser WebGPU complex64/parity kernels with unsupported fallback reporting.
@@ -67,7 +69,7 @@ physics work:
   wiring and consumes the published service fixtures in a browser worker.
 - [x] Copy generated MoonLab core artifacts into ignored local service assets and
   verify live browser asset probe readiness.
-- [ ] Wrap a minimal MoonLab core task in a supervised service worker using the
+- [x] Wrap a minimal MoonLab core task in a supervised service worker using the
   ready asset path.
 
 ### Tooling

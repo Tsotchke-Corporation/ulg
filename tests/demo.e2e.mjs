@@ -27,6 +27,16 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   expect(fixtureProbe.taskKind).toBe('moonlab.quantum.response');
   expect(fixtureProbe.resolvedCount).toBe(1);
   expect(fixtureProbe.assetProbe.locateFile.resolved).toContain('/service-assets/moonlab/moonlab.wasm');
+
+  const moonlabArtifact = await readMoonLabArtifact(page);
+  if (moonlabAssetStatus === 'ready') {
+    expect(moonlabArtifact.method).toBe('moonlab-wasm-bell-phi-plus-probe');
+    expect(moonlabArtifact.runtime.coreProbe.status).toBe('ready');
+    expect(moonlabArtifact.outputs.bellState).toBe('bell_phi_plus');
+    expect(moonlabArtifact.outputs.basisProbabilities[0]).toBeCloseTo(0.5, 9);
+    expect(moonlabArtifact.outputs.basisProbabilities[3]).toBeCloseTo(0.5, 9);
+    expect(moonlabArtifact.validation.status).toBe('pass');
+  }
 });
 
 async function sampledCanvasPixels(page) {
@@ -81,5 +91,19 @@ async function consumeMoonLabFixturesInBrowserWorker(page) {
       });
       worker.postMessage({ manifest, taskCapsule });
     });
+  });
+}
+
+async function readMoonLabArtifact(page) {
+  await page.waitForFunction(
+    () => window.__ulgDemo?.telemetry?.artifacts?.some((record) => record.ref.sourceService === 'moonlab'),
+    undefined,
+    { timeout: 8000 }
+  );
+  return page.evaluate(async () => {
+    const record = window.__ulgDemo.telemetry.artifacts.find((artifact) => (
+      artifact.ref.sourceService === 'moonlab'
+    ));
+    return window.__ulgDemo.artifactCache.get(record.ref);
   });
 }

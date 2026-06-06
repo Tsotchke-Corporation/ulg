@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 13/13 tests on 2026-06-05 after adding service asset
-probe coverage.
+Current result: pass, 13/13 tests on 2026-06-05 after adding the supervised
+MoonLab core probe worker.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -17,24 +17,27 @@ probe coverage.
   `/service-assets/moonlab/moonlab.wasm` convention.
 - Service asset probes classify ready, missing, and wrong-MIME loader/WASM
   responses.
+- MoonLab service asset specs include the classic core probe worker URL and the
+  manifest builder approves it for child-worker leasing.
 - Registry resolution, child-worker lease limits, artifact cache behavior, and
   GPU fallback probe behavior.
+- Child-worker leases preserve `classic` vs `module` worker type metadata.
 
 ## Production Build
 
 Command: `npm run build`
 
 Current result: pass on 2026-06-05 after the service-contract runtime refactor,
-and again after service asset probes, with the existing large three.js chunk
-warning.
+after service asset probes, and after the supervised MoonLab core probe, with
+the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-05 after the demo runtime
-started consuming the shared service contract builders and after the service
-asset-probe slice.
+started consuming the shared service contract builders, after the service
+asset-probe slice, and after the supervised MoonLab core probe.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -46,6 +49,13 @@ asset-probe slice.
   `moonlab.js` and `moonlab.wasm` into ignored `public/service-assets/moonlab/`;
   `curl -I` returned `text/javascript` for JS and `application/wasm` for WASM;
   a Playwright telemetry probe reported MoonLab `assetProbe.status = ready`.
+- Runtime core probe check on 2026-06-05: with copied MoonLab assets present,
+  Playwright verified the supervised MoonLab artifact method
+  `moonlab-wasm-bell-phi-plus-probe`, `coreProbe.status = ready`, validation
+  `pass`, and Bell `phi_plus` probabilities close to `[0.5, 0, 0, 0.5]`.
+- Live VPN check on 2026-06-05: `http://100.86.83.35:5173/` returned the same
+  MoonLab artifact method, core probe status, validation status, and Bell
+  probability vector through `window.__ulgDemo.artifactCache`.
 - Verify the three.js canvas is nonblank at desktop and mobile viewport sizes.
 - Save screenshots into `test-results/`.
 
@@ -75,6 +85,10 @@ asset-probe slice.
   passed, `pnpm test:integration` passed 41/41, `pnpm build:wasm` passed, and
   `git diff --check` passed. Full JS workspace `pnpm build` still fails outside
   core because `@moonlab/quantum-algorithms` lacks `src/index.ts`.
+- MoonLab WASM allocation export checks on 2026-06-05:
+  `pnpm --filter @moonlab/quantum-core build` passed, `pnpm --filter
+  @moonlab/quantum-core test:unit` passed 93/93, and the rebuilt loader exposes
+  `_quantum_state_create`/`_quantum_state_destroy`.
 - Bring up the peercompute relay-backed local stack after the dummy ULG service
   smoke is stable.
 - Reuse peercompute's existing runtime P2P smoke harness where possible.

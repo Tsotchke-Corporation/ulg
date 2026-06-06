@@ -106,6 +106,7 @@ export function createUlgServiceAssetSpec({
   loaderFile,
   wasmFile,
   locateFileProbe,
+  coreProbeWorkerModule,
   required = []
 }) {
   if (!serviceId) {
@@ -125,6 +126,7 @@ export function createUlgServiceAssetSpec({
     loaderModule: loaderFile ? joinUrl(baseUrl, loaderFile) : undefined,
     wasmModule: wasmFile ? joinUrl(baseUrl, wasmFile) : undefined,
     locateFileProbe,
+    coreProbeWorkerModule,
     required,
     files
   });
@@ -136,6 +138,7 @@ export function createMoonLabServiceAssetSpec(options = {}) {
     loaderFile: 'moonlab.js',
     wasmFile: 'moonlab.wasm',
     locateFileProbe: 'moonlab.wasm',
+    coreProbeWorkerModule: '/workers/moonlab-core-probe.worker.js',
     required: ['loaderModule', 'wasmModule'],
     ...options
   });
@@ -168,6 +171,9 @@ export function createUlgServiceManifest({
   const allowedModules = [...(childWorkers.allowedModules ?? [])];
   if (childWorkerModule && !allowedModules.includes(childWorkerModule)) {
     allowedModules.push(childWorkerModule);
+  }
+  if (serviceAssets?.coreProbeWorkerModule && !allowedModules.includes(serviceAssets.coreProbeWorkerModule)) {
+    allowedModules.push(serviceAssets.coreProbeWorkerModule);
   }
   const entry = compact({
     workerModule,

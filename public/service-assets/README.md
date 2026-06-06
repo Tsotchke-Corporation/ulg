@@ -32,3 +32,9 @@ For MoonLab Emscripten output, the manifest convention expects
 Real artifacts under this directory are ignored by git by default. Keep only
 small documentation or placeholder files checked in unless a fixture is
 intentionally part of the ULG ABI contract.
+
+When MoonLab assets are present and ready, the ULG demo leases
+`/workers/moonlab-core-probe.worker.js` as a classic child worker. That worker
+loads the Emscripten `MoonlabModule` factory with `importScripts()`, uses
+`locateFile()` to resolve the WASM next to `moonlab.js`, and emits the
+`bell_phi_plus` probability vector into the MoonLab task artifact.

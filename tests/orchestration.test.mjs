@@ -27,12 +27,14 @@ test('child-worker leases enforce allowed modules and quotas', async () => {
   const lease = await leases.request('root-a', {
     rootTaskId: 'task-a',
     module: '/child.js',
+    workerType: 'classic',
     count: 2,
     allowed: true,
     maxChildren: 2,
     allowedModules: ['/child.js']
   });
   assert.equal(lease.count, 2);
+  assert.equal(lease.workerType, 'classic');
   await assert.rejects(() => leases.request('root-a', {
     rootTaskId: 'task-a',
     module: '/child.js',

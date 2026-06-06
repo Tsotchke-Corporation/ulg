@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-05 16:20:34 AKDT
+Updated: 2026-06-05 16:34:33 AKDT
 
 ## Done
 
@@ -65,6 +65,17 @@ Updated: 2026-06-05 16:20:34 AKDT
   directory `public/service-assets/moonlab/`. The live browser worker now reports
   MoonLab asset probe status `ready`, with JS served as `text/javascript` and
   WASM served as `application/wasm`.
+- MoonLab `ulg` branch now has local commit `5ce415f` exporting
+  `quantum_state_create`/`quantum_state_destroy` to the core WASM runtime so
+  browser workers can allocate/free states without knowing the C struct layout.
+- Added tracked ULG classic child worker
+  `public/workers/moonlab-core-probe.worker.js`. When MoonLab assets are ready,
+  the supervised root service leases that worker, instantiates `MoonlabModule`
+  with `locateFile`, creates a Bell `phi_plus` state in the real WASM module,
+  and records `[0.5, 0, 0, 0.5]` basis probabilities in the MoonLab artifact.
+- Verified the live VPN demo at `http://100.86.83.35:5173/` reports MoonLab
+  `method = moonlab-wasm-bell-phi-plus-probe`, `coreProbe = ready`, and
+  `validation = pass`.
 
 ## In Progress
 
@@ -78,10 +89,7 @@ Updated: 2026-06-05 16:20:34 AKDT
   demo contract.
 - Extend the Eshkol helper into language-level `define-ulg-closure` metadata and
   real closure tensor descriptors once the descriptor contract is stable.
-- Prototype MoonLab quantum response artifact output now that core WASM artifacts
-  can be copied into `public/service-assets/moonlab/` and probed by the browser
-  worker.
-- Wrap a minimal MoonLab core task in a supervised service worker using the now
-  ready browser asset path.
+- Extend the MoonLab probe artifact from Bell-state readiness into deterministic
+  quantum response descriptors and CPU/WebGPU parity metadata.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

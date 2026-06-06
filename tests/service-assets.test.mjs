@@ -19,6 +19,7 @@ test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {
 
   assert.equal(assets.loaderModule, '/service-assets/moonlab/moonlab.js');
   assert.equal(assets.wasmModule, '/service-assets/moonlab/moonlab.wasm');
+  assert.equal(assets.coreProbeWorkerModule, '/workers/moonlab-core-probe.worker.js');
   assert.equal(
     locateFile('moonlab.wasm'),
     'https://ulg.local/service-assets/moonlab/moonlab.wasm'
@@ -33,6 +34,7 @@ test('service asset probe marks declared MoonLab artifacts ready when MIME types
     workerModule: '/workers/moonlab.service.worker.js',
     serviceAssets: assets
   });
+  assert.equal(manifest.childWorkers.allowedModules.includes('/workers/moonlab-core-probe.worker.js'), true);
   const requests = [];
   const probe = await probeManifestServiceAssets(manifest, {
     locationHref: 'https://ulg.local/demo/',

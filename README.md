@@ -12,7 +12,8 @@ This repo currently implements the first executable slice:
 - child-worker leases with cancellation;
 - GPU capability probing with CPU/WASM fallback status;
 - browser-facing service asset probes for real MoonLab/Eshkol readiness;
-- dummy Eshkol and MoonLab services for Demo A;
+- a supervised MoonLab WASM Bell-state probe when copied core artifacts are available;
+- dummy Eshkol service output and MoonLab fallback output for Demo A;
 - a three.js worker-tree visualization.
 
 ## Commands
@@ -37,4 +38,6 @@ artifacts there when testing real services, for example
 `public/service-assets/moonlab/moonlab.js` and
 `public/service-assets/moonlab/moonlab.wasm`. The MoonLab manifest convention
 uses `entry.serviceAssets` plus `locateFile("moonlab.wasm")` so workers can
-probe loader/WASM fetchability and MIME readiness before real tasks are wired.
+probe loader/WASM fetchability and MIME readiness before running the supervised
+MoonLab core probe. When the assets are ready, the MoonLab task artifact records
+the `bell_phi_plus` basis probabilities from the real WASM module.

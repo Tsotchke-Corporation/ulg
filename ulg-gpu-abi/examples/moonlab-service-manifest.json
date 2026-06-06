@@ -13,6 +13,7 @@
       "loaderModule": "/service-assets/moonlab/moonlab.js",
       "wasmModule": "/service-assets/moonlab/moonlab.wasm",
       "locateFileProbe": "moonlab.wasm",
+      "coreProbeWorkerModule": "./workers/moonlab-core-probe.worker.js",
       "required": ["loaderModule", "wasmModule"],
       "files": {
         "loaderModule": "moonlab.js",
@@ -23,7 +24,7 @@
   "childWorkers": {
     "allowed": true,
     "maxChildren": 4,
-    "allowedModules": ["./workers/moonlab.child.worker.js"],
+    "allowedModules": ["./workers/moonlab.child.worker.js", "./workers/moonlab-core-probe.worker.js"],
     "sameOriginOnly": true
   },
   "resources": {

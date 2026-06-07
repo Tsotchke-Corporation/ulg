@@ -166,7 +166,21 @@ try {
         productionDispatchPreflightRejectedRuntimeScopes:
           eshkol?.closureProductionDispatchPreflightRejectedRuntimeScopes ?? [],
         productionDispatchPreflightBlockedBy:
-          eshkol?.closureProductionDispatchPreflightBlockedBy ?? []
+          eshkol?.closureProductionDispatchPreflightBlockedBy ?? [],
+        productionDispatchPreflightCheckSummarySchema:
+          eshkol?.closureProductionDispatchPreflightCheckSummarySchema ?? null,
+        productionDispatchPreflightTotalRequiredCheckCount:
+          eshkol?.closureProductionDispatchPreflightTotalRequiredCheckCount ?? null,
+        productionDispatchPreflightPassedCheckCount:
+          eshkol?.closureProductionDispatchPreflightPassedCheckCount ?? null,
+        productionDispatchPreflightBlockedCheckCount:
+          eshkol?.closureProductionDispatchPreflightBlockedCheckCount ?? null,
+        productionDispatchPreflightPassedChecks:
+          eshkol?.closureProductionDispatchPreflightPassedChecks ?? [],
+        productionDispatchPreflightBlockedChecks:
+          eshkol?.closureProductionDispatchPreflightBlockedChecks ?? [],
+        productionDispatchPreflightCheckResults:
+          eshkol?.closureProductionDispatchPreflightCheckResults ?? []
       },
       bridge: bridgeRequested ? {
         ack: bridgeAck,

@@ -10,6 +10,8 @@ export const ESHKOL_TENSOR_LINEAR_MEMORY_SMOKE_BINDING_SCHEMA = 'eshkol.ulg.tens
 export const ESHKOL_TENSOR_ENTRY_EXPORT_OFFSET_PROBE_SCHEMA = 'eshkol.ulg.tensor-entry-export-offset-probe.v0';
 export const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
+export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
+  'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
 export const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
 export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-input';
@@ -42,6 +44,18 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS = Object.freeze([
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'runtime-smoke-stubs-rejected-for-production',
+  'handler-ready-flag-true',
+  'runtime-execution-flag-true',
+  'full-physics-validation-evidence-present'
+]);
+const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS = Object.freeze([
+  'artifact-module-sha256-matches-module-ref',
+  'entry-export-main-signature-i32-i32-to-i32',
+  'f64-tensor-memory-binding-validated',
+  'runtime-smoke-stubs-rejected-for-production'
+]);
+const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS = Object.freeze([
+  'non-stub-host-imports-present',
   'handler-ready-flag-true',
   'runtime-execution-flag-true',
   'full-physics-validation-evidence-present'
@@ -310,6 +324,8 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionHandlerHostImports = objectOrNull(closureProductionHandlerBoundary?.hostImports);
   const closureProductionHostImportCandidate = objectOrNull(closureProductionHandlerHostImports?.productionCandidate);
   const closureProductionDispatchPreflight = objectOrNull(closureProductionHandlerBoundary?.dispatchPreflight);
+  const closureProductionDispatchPreflightCheckSummary =
+    objectOrNull(closureProductionDispatchPreflight?.checkSummary);
   const closureProductionHostImportCandidateRequiredNonStubImports =
     Array.isArray(closureProductionHostImportCandidate?.requiredNonStubImports)
       ? closureProductionHostImportCandidate.requiredNonStubImports.map((value) => String(value)).filter(Boolean)
@@ -337,6 +353,29 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionDispatchPreflightBlockedBy =
     Array.isArray(closureProductionDispatchPreflight?.blockedBy)
       ? closureProductionDispatchPreflight.blockedBy.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionDispatchPreflightCheckResults =
+    Array.isArray(closureProductionDispatchPreflight?.checkResults)
+      ? closureProductionDispatchPreflight.checkResults
+        .filter(isPlainObject)
+        .map((entry) => ({
+          check: textOrNull(entry.check),
+          status: textOrNull(entry.status),
+          ready: typeof entry.ready === 'boolean' ? entry.ready : null,
+          evidenceSource: textOrNull(entry.evidenceSource),
+          blocker: textOrNull(entry.blocker),
+          observed: clonePlain(objectOrNull(entry.observed))
+        }))
+      : [];
+  const closureProductionDispatchPreflightCheckResultChecks =
+    closureProductionDispatchPreflightCheckResults.map((entry) => entry.check).filter(Boolean);
+  const closureProductionDispatchPreflightCheckSummaryPassedChecks =
+    Array.isArray(closureProductionDispatchPreflightCheckSummary?.passedChecks)
+      ? closureProductionDispatchPreflightCheckSummary.passedChecks.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionDispatchPreflightCheckSummaryBlockedChecks =
+    Array.isArray(closureProductionDispatchPreflightCheckSummary?.blockedChecks)
+      ? closureProductionDispatchPreflightCheckSummary.blockedChecks.map((value) => String(value)).filter(Boolean)
       : [];
   const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
     ? outputSemantics.stdout
@@ -713,6 +752,28 @@ export function summarizeUlgArtifact(artifact = {}) {
       closureProductionDispatchPreflightBlockedBy,
       ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
     )
+    && closureProductionDispatchPreflightCheckSummary?.schema
+      === ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA
+    && closureProductionDispatchPreflightCheckSummary.status === 'blocked'
+    && closureProductionDispatchPreflightCheckSummary.ready === false
+    && closureProductionDispatchPreflightCheckSummary.totalRequiredCheckCount
+      === ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS.length
+    && closureProductionDispatchPreflightCheckSummary.passedCount
+      === ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS.length
+    && closureProductionDispatchPreflightCheckSummary.blockedCount
+      === ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS.length
+    && arraysEqual(
+      closureProductionDispatchPreflightCheckSummaryPassedChecks,
+      ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS
+    )
+    && arraysEqual(
+      closureProductionDispatchPreflightCheckSummaryBlockedChecks,
+      ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS
+    )
+    && arraysEqual(
+      closureProductionDispatchPreflightCheckResultChecks,
+      ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS
+    )
     && arraysEqual(
       closureProductionHandlerBoundaryBlockers,
       ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
@@ -961,6 +1022,32 @@ export function summarizeUlgArtifact(artifact = {}) {
       clonePlain(closureProductionDispatchPreflightRejectedRuntimeScopes),
     closureProductionDispatchPreflightBlockedBy:
       clonePlain(closureProductionDispatchPreflightBlockedBy),
+    closureProductionDispatchPreflightCheckSummarySchema:
+      closureProductionDispatchPreflightCheckSummary?.schema || null,
+    closureProductionDispatchPreflightCheckSummaryStatus:
+      closureProductionDispatchPreflightCheckSummary?.status || null,
+    closureProductionDispatchPreflightCheckSummaryReady:
+      typeof closureProductionDispatchPreflightCheckSummary?.ready === 'boolean'
+        ? closureProductionDispatchPreflightCheckSummary.ready
+        : null,
+    closureProductionDispatchPreflightTotalRequiredCheckCount:
+      Number.isInteger(closureProductionDispatchPreflightCheckSummary?.totalRequiredCheckCount)
+        ? closureProductionDispatchPreflightCheckSummary.totalRequiredCheckCount
+        : null,
+    closureProductionDispatchPreflightPassedCheckCount:
+      Number.isInteger(closureProductionDispatchPreflightCheckSummary?.passedCount)
+        ? closureProductionDispatchPreflightCheckSummary.passedCount
+        : null,
+    closureProductionDispatchPreflightBlockedCheckCount:
+      Number.isInteger(closureProductionDispatchPreflightCheckSummary?.blockedCount)
+        ? closureProductionDispatchPreflightCheckSummary.blockedCount
+        : null,
+    closureProductionDispatchPreflightPassedChecks:
+      clonePlain(closureProductionDispatchPreflightCheckSummaryPassedChecks),
+    closureProductionDispatchPreflightBlockedChecks:
+      clonePlain(closureProductionDispatchPreflightCheckSummaryBlockedChecks),
+    closureProductionDispatchPreflightCheckResults:
+      clonePlain(closureProductionDispatchPreflightCheckResults),
     closureReady: inferArtifactKind(artifact) === 'closure'
       && closureHandoffReady
       && execution.serviceWorkerSafe === true

@@ -1582,6 +1582,70 @@ Failures and open questions:
   scientific readiness remain blocked.
 - No push was attempted.
 
+## 2026-06-06 18:16:35 AKDT - Computed Dispatch Preflight Evidence Propagation
+
+Prompt: keep working, but do not pivot from the core technology to support an
+SPH demo.
+
+Actions:
+
+- Treated SPH/phase-change simulation as downstream evidence only and continued
+  the core Eshkol/ULG production-dispatch boundary propagation.
+- Refreshed the ignored Eshkol service asset bundle after local Eshkol commit
+  `544922c`; the staged magnetar closure now carries computed
+  `dispatchPreflight.checkResults` and `dispatchPreflight.checkSummary`.
+- Updated ULG artifact summaries, staging guards, live status, unit tests, and
+  e2e tests to preserve the computed eight-check evidence.
+- Live status now reports 8 total checks, 4 passed checks, and 4 blocked checks.
+  Passed: module hash, entry signature, f64 tensor memory binding, and
+  production smoke-stub rejection. Blocked: non-stub host imports, handler
+  readiness, runtime execution, and full-physics validation.
+
+Files touched:
+
+- `scripts/live-status.mjs`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `plan/plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `npm run stage:service-assets -- --eshkol-only`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `git diff --check`
+
+Validation:
+
+- PASS: Eshkol-only staging passed with computed preflight check evidence.
+- PASS: syntax checks passed for touched JavaScript and test files.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live -- --bridge` reported ULG `5173` ready,
+  PeerCompute bridge ack `handoff-ready`, `simulationStatus =
+  scientific-ready`, and Eshkol preflight evidence counts `8/4/4`.
+- PASS: `git diff --check` passed.
+
+Failures / open questions:
+
+- No functional failure in this slice. The production boundary remains
+  intentionally blocked on production handler implementation, non-stub host
+  imports, runtime execution, and full-physics validation.
+- No push was attempted.
+
 ## 2026-06-06 02:16:20 AKDT - Analytic magnetosphere reference live bridge
 
 Prompt:

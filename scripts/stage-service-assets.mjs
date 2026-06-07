@@ -32,6 +32,8 @@ const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol'
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
+const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
+  'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
 const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
 const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
@@ -568,6 +570,18 @@ function stageEshkolAssets() {
       'runtime-execution-flag-true',
       'full-physics-validation-evidence-present'
     ];
+    const expectedProductionDispatchPassedChecks = [
+      'artifact-module-sha256-matches-module-ref',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'f64-tensor-memory-binding-validated',
+      'runtime-smoke-stubs-rejected-for-production'
+    ];
+    const expectedProductionDispatchBlockedChecks = [
+      'non-stub-host-imports-present',
+      'handler-ready-flag-true',
+      'runtime-execution-flag-true',
+      'full-physics-validation-evidence-present'
+    ];
     if (productionHostImports.runtimeScope !== 'deterministic-runtime-smoke-stubs'
       || productionHostImports.implementationStatus !== 'smoke-stubs-not-production'
       || productionHostImportCandidate.schema !== ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA
@@ -616,6 +630,29 @@ function stageEshkolAssets() {
       || productionDispatchPreflight.scientificValidationRequired !== true
       || !arraysEqual(productionDispatchPreflight.blockedBy, expectedProductionHandlerBlockers)) {
       throw new Error('Eshkol staged production handler dispatch preflight requirements changed');
+    }
+    const productionDispatchCheckResults = Array.isArray(productionDispatchPreflight.checkResults)
+      ? productionDispatchPreflight.checkResults
+      : [];
+    const productionDispatchCheckSummary = productionDispatchPreflight.checkSummary || {};
+    const passedChecksFromResults = productionDispatchCheckResults
+      .filter((entry) => entry?.ready === true)
+      .map((entry) => entry.check);
+    const blockedChecksFromResults = productionDispatchCheckResults
+      .filter((entry) => entry?.ready !== true)
+      .map((entry) => entry.check);
+    if (productionDispatchCheckSummary.schema !== ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA
+      || productionDispatchCheckSummary.status !== 'blocked'
+      || productionDispatchCheckSummary.ready !== false
+      || productionDispatchCheckSummary.totalRequiredCheckCount !== expectedProductionDispatchChecks.length
+      || productionDispatchCheckSummary.passedCount !== expectedProductionDispatchPassedChecks.length
+      || productionDispatchCheckSummary.blockedCount !== expectedProductionDispatchBlockedChecks.length
+      || !arraysEqual(productionDispatchCheckSummary.passedChecks, expectedProductionDispatchPassedChecks)
+      || !arraysEqual(productionDispatchCheckSummary.blockedChecks, expectedProductionDispatchBlockedChecks)
+      || !arraysEqual(productionDispatchCheckResults.map((entry) => entry?.check), expectedProductionDispatchChecks)
+      || !arraysEqual(passedChecksFromResults, expectedProductionDispatchPassedChecks)
+      || !arraysEqual(blockedChecksFromResults, expectedProductionDispatchBlockedChecks)) {
+      throw new Error('Eshkol staged production handler dispatch preflight check evidence changed');
     }
     const handlerBoundaryBlockers = Array.isArray(productionHandlerBoundary.blockers)
       ? productionHandlerBoundary.blockers

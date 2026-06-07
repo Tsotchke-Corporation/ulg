@@ -51,6 +51,18 @@ const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
   'runtime-execution-flag-true',
   'full-physics-validation-evidence-present'
 ]);
+const ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS = Object.freeze([
+  'artifact-module-sha256-matches-module-ref',
+  'entry-export-main-signature-i32-i32-to-i32',
+  'f64-tensor-memory-binding-validated',
+  'runtime-smoke-stubs-rejected-for-production'
+]);
+const ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS = Object.freeze([
+  'non-stub-host-imports-present',
+  'handler-ready-flag-true',
+  'runtime-execution-flag-true',
+  'full-physics-validation-evidence-present'
+]);
 
 const REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE = Object.freeze({
   schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
@@ -811,7 +823,72 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               runtimeExecutionRequired: true,
               fullPhysicsValidationRequired: true,
               scientificValidationRequired: true,
-              blockedBy: [...ESHKOL_PRODUCTION_BLOCKERS]
+              blockedBy: [...ESHKOL_PRODUCTION_BLOCKERS],
+              checkResults: [
+                {
+                  check: 'artifact-module-sha256-matches-module-ref',
+                  status: 'pass',
+                  ready: true,
+                  evidenceSource: 'artifact.execution.module.sha256'
+                },
+                {
+                  check: 'entry-export-main-signature-i32-i32-to-i32',
+                  status: 'pass',
+                  ready: true,
+                  evidenceSource: 'artifact.execution.entrySignature'
+                },
+                {
+                  check: 'non-stub-host-imports-present',
+                  status: 'blocked',
+                  ready: false,
+                  evidenceSource: 'productionHandlerBoundary.hostImports',
+                  blocker: 'host-imports-are-deterministic-runtime-smoke-stubs-not-production'
+                },
+                {
+                  check: 'f64-tensor-memory-binding-validated',
+                  status: 'pass',
+                  ready: true,
+                  evidenceSource: 'productionHandlerBoundary.tensorMemoryBinding'
+                },
+                {
+                  check: 'runtime-smoke-stubs-rejected-for-production',
+                  status: 'pass',
+                  ready: true,
+                  evidenceSource: 'productionHandlerBoundary.dispatchPreflight'
+                },
+                {
+                  check: 'handler-ready-flag-true',
+                  status: 'blocked',
+                  ready: false,
+                  evidenceSource: 'productionHandlerBoundary.handlerReady',
+                  blocker: 'production-magnetar-handler-not-implemented'
+                },
+                {
+                  check: 'runtime-execution-flag-true',
+                  status: 'blocked',
+                  ready: false,
+                  evidenceSource: 'productionHandlerBoundary.runtimeExecution',
+                  blocker: 'production-handler-runtime-execution-not-ready'
+                },
+                {
+                  check: 'full-physics-validation-evidence-present',
+                  status: 'blocked',
+                  ready: false,
+                  evidenceSource: 'productionHandlerBoundary.fullPhysicsValidation',
+                  blocker: 'full-physics-validation-not-run'
+                }
+              ],
+              checkSummary: {
+                schema: 'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0',
+                status: 'blocked',
+                ready: false,
+                computedBy: 'eshkol-ulg-closure-artifact-v0.3',
+                totalRequiredCheckCount: ESHKOL_PRODUCTION_DISPATCH_CHECKS.length,
+                passedCount: ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS.length,
+                blockedCount: ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS.length,
+                passedChecks: [...ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS],
+                blockedChecks: [...ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS]
+              }
             },
             derivativeStatus: 'declared-not-computed',
             scientificValidation: false,
@@ -1032,6 +1109,25 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     'deterministic-runtime-smoke-stubs'
   ]);
   assert.deepEqual(summary.closureProductionDispatchPreflightBlockedBy, [...ESHKOL_PRODUCTION_BLOCKERS]);
+  assert.equal(
+    summary.closureProductionDispatchPreflightCheckSummarySchema,
+    'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0'
+  );
+  assert.equal(summary.closureProductionDispatchPreflightTotalRequiredCheckCount, ESHKOL_PRODUCTION_DISPATCH_CHECKS.length);
+  assert.equal(summary.closureProductionDispatchPreflightPassedCheckCount, ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS.length);
+  assert.equal(summary.closureProductionDispatchPreflightBlockedCheckCount, ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS.length);
+  assert.deepEqual(
+    summary.closureProductionDispatchPreflightPassedChecks,
+    [...ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS]
+  );
+  assert.deepEqual(
+    summary.closureProductionDispatchPreflightBlockedChecks,
+    [...ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS]
+  );
+  assert.deepEqual(
+    summary.closureProductionDispatchPreflightCheckResults.map((entry) => entry.check),
+    [...ESHKOL_PRODUCTION_DISPATCH_CHECKS]
+  );
   assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
   assert.equal(summary.closureOutputSemanticsReady, true);
   assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');

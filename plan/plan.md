@@ -78,6 +78,9 @@ physics work:
   `eshkol.ulg.production-handler-dispatch-preflight.v0` through ULG staging
   guards, compact summaries, browser handoffs, e2e coverage, and live status
   while keeping production handler/runtime/full-physics readiness blocked.
+- [x] Surface Eshkol's computed production dispatch preflight check evidence
+  through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
+  and live status, preserving the current four-pass/four-blocked split.
 - [x] Surface MoonLab's `moonlab.webgpu.complex64-parity-scope.v0` browser
   evidence through ULG staging, core-probe validation, summaries, UI, handoffs,
   and e2e coverage with `device-acquired`, executed/passing
@@ -190,6 +193,9 @@ physics work:
 - [x] Add production dispatch preflight metadata to the magnetar closure fixture
   so ULG and PeerCompute can reject deterministic runtime-smoke stubs at the
   production handler boundary.
+- [x] Add computed production dispatch preflight `checkResults`/`checkSummary`
+  evidence to exported magnetar closure artifacts without promoting production
+  handler/runtime/full-physics readiness.
 - [ ] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a

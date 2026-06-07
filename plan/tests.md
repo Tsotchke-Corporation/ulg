@@ -5,7 +5,7 @@
 Command: `npm test`
 
 Current result: pass, 22/22 tests on 2026-06-06 after adding Eshkol production
-dispatch preflight summaries, MoonLab browser WebGPU backend preflight
+dispatch preflight check evidence, MoonLab browser WebGPU backend preflight
 summaries, optional MoonLab reference-contract asset probing, normalized
 supplied reference staging, four-family ready calibrated-reference summaries,
 and Eshkol magnetar closure descriptor summaries.
@@ -61,21 +61,22 @@ and Eshkol magnetar closure descriptor summaries.
   metadata, including schema `eshkol.ulg.production-handler-dispatch-preflight.v0`,
   `status = blocked`, `ready = false`, eight required production dispatch
   checks, deterministic runtime-smoke stubs rejected for production dispatch,
-  and the three production blockers.
+  the computed four-pass/four-blocked `checkSummary`, and the three production
+  blockers.
 
 ## Production Build
 
 Command: `npm run build`
 
 Current result: pass on 2026-06-06 after Eshkol production dispatch preflight
-support, with the existing large three.js chunk warning.
+check evidence support, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
 Current result: pass, 1/1 Chromium test on 2026-06-06 after Eshkol production
-dispatch preflight support.
+dispatch preflight check evidence support.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -236,6 +237,18 @@ dispatch preflight support.
   `production-magnetar-handler-not-implemented`,
   `host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
   `full-physics-validation-not-run`.
+- Eshkol production dispatch preflight computed-evidence check on 2026-06-06:
+  `npm run stage:service-assets -- --eshkol-only`, `npm test`,
+  `npm run build`, `npm run test:e2e`, `git diff --check`, and
+  `npm run status:live -- --bridge` passed. The live ULG status reports
+  `productionDispatchPreflightCheckSummarySchema =
+  eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0`,
+  `productionDispatchPreflightTotalRequiredCheckCount = 8`,
+  `productionDispatchPreflightPassedCheckCount = 4`, and
+  `productionDispatchPreflightBlockedCheckCount = 4`. Passed checks are module
+  hash, entry signature, f64 tensor memory binding, and production smoke-stub
+  rejection; blocked checks are non-stub host imports, handler readiness,
+  runtime execution, and full-physics validation.
   durable envelope.
 - Magnetar fidelity/runtime scope gate on 2026-06-06:
   `npm run stage:service-assets`, `npm test`, `npm run build`, and

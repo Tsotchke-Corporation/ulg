@@ -556,6 +556,12 @@ Updated: 2026-06-06 17:45:00 AKDT
   deterministic runtime-smoke stubs for production dispatch, tracks eight
   required checks, and preserves the three production blockers while keeping
   `handlerReady`, runtime execution, and full physics validation false.
+- Integrated Eshkol computed production dispatch preflight evidence into ULG
+  staging, compact summaries, browser handoffs, e2e checks, and live status.
+  ULG now preserves the eight `checkResults`, the
+  `eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0` summary,
+  and the current four-pass/four-blocked split without promoting the production
+  handler boundary to ready.
 - Integrated MoonLab backend-preflight sidecar commit `4e91165` into ULG
   staging, summaries, UI, e2e coverage, and live status. The staged
   `moonlab.webgpu.complex64-parity-scope.v0` artifact now requires

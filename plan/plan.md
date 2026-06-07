@@ -80,7 +80,8 @@ physics work:
   while keeping production handler/runtime/full-physics readiness blocked.
 - [x] Surface Eshkol's computed production dispatch preflight check evidence
   through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
-  and live status, preserving the current four-pass/four-blocked split.
+  and live status, advancing the current split to five passed checks and three
+  blocked checks after production-candidate host imports landed.
 - [x] Surface MoonLab's `moonlab.webgpu.complex64-parity-scope.v0` browser
   evidence through ULG staging, core-probe validation, summaries, UI, handoffs,
   and e2e coverage with `device-acquired`, executed/passing

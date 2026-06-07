@@ -541,11 +541,12 @@ Updated: 2026-06-06 17:45:00 AKDT
   `handler:declared-not-executed:3-blockers`; `npm run status:live -- --bridge`
   prints the exact blocker list, expected entry args, stdout hash, output tensor
   production flag, and production validation flags.
-- Integrated Eshkol host-import contract sidecar commit `b025f5d` into ULG
+- Integrated Eshkol production-candidate host-import commit `8ce5ca4` into ULG
   staging, summaries, UI, and live status. ULG now requires the production
-  boundary to declare `runtimeScope = deterministic-runtime-smoke-stubs`,
-  `implementationStatus = smoke-stubs-not-production`, production candidate
-  status `requirements-declared-not-implemented`,
+  boundary to declare `runtimeScope = production-candidate-host-imports`,
+  `implementationStatus = production-candidate-runtime-imports-present`,
+  production candidate status
+  `production-candidate-runtime-imports-implemented`,
   `runtimeSmokeStubsAllowed = false`, f64 tensor-memory imports, `23` required
   non-stub imports, and readiness requirements for production handler
   implementation, non-stub imports, validated tensor memory imports, and full
@@ -558,6 +559,10 @@ Updated: 2026-06-06 17:45:00 AKDT
   `handlerReady`, runtime execution, and full physics validation false.
 - Integrated Eshkol computed production dispatch preflight evidence into ULG
   staging, compact summaries, browser handoffs, e2e checks, and live status.
+  ULG now reports the source artifact's `8/5/3` evidence split: module hash,
+  entry signature, non-stub host imports, f64 tensor binding, and smoke-stub
+  rejection pass; handler readiness, runtime execution, and full-physics
+  validation remain blocked.
   ULG now preserves the eight `checkResults`, the
   `eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0` summary,
   and the current four-pass/four-blocked split without promoting the production

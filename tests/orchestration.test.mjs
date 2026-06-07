@@ -38,7 +38,6 @@ const ESHKOL_PRODUCTION_READINESS_REQUIREMENTS = Object.freeze([
 ]);
 const ESHKOL_PRODUCTION_BLOCKERS = Object.freeze([
   'production-magnetar-handler-not-implemented',
-  'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
   'full-physics-validation-not-run'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
@@ -54,11 +53,11 @@ const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
 const ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS = Object.freeze([
   'artifact-module-sha256-matches-module-ref',
   'entry-export-main-signature-i32-i32-to-i32',
+  'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'runtime-smoke-stubs-rejected-for-production'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS = Object.freeze([
-  'non-stub-host-imports-present',
   'handler-ready-flag-true',
   'runtime-execution-flag-true',
   'full-physics-validation-evidence-present'
@@ -614,7 +613,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
             schema: 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0',
             contractId: 'eshkol:magnetar-closure-tensor-runtime-contract:v0',
             status: 'declared-fixture-contract',
-            runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+            runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
             executionClaim: 'deterministic-tensor-runtime-smoke-only',
             entryExport: 'main',
             tensorMemoryModel: 'host-managed-linear-f64',
@@ -768,7 +767,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
             handlerReady: false,
             runtimeExecution: false,
             entryExport: 'main',
-            runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+            runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
             tensorMemoryModel: 'host-managed-linear-f64',
             inputTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
             outputTensorIds: ['magnetar-closure-update', 'closure-residual'],
@@ -781,14 +780,16 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               source: 'bundle.hostImports',
               required: true,
               factory: 'createEshkolHostImportObject',
-              runtimeScope: 'deterministic-runtime-smoke-stubs',
-              implementationStatus: 'smoke-stubs-not-production',
+              runtimeScope: 'production-candidate-host-imports',
+              implementationStatus: 'production-candidate-runtime-imports-present',
               productionCandidate: {
                 schema: 'eshkol.ulg.production-host-import-candidate.v0',
-                status: 'requirements-declared-not-implemented',
+                status: 'production-candidate-runtime-imports-implemented',
                 factory: 'createEshkolHostImportObject',
                 smokeRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
                 productionRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
+                runtimeScope: 'production-candidate-host-imports',
+                implementationStatus: 'production-candidate-runtime-imports-present',
                 runtimeSmokeStubsAllowed: false,
                 tensorMemoryImports: ['ulg_read_f64', 'ulg_write_f64'],
                 requiredNonStubImports: [...ESHKOL_PRODUCTION_REQUIRED_NON_STUB_IMPORTS],
@@ -810,7 +811,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               ready: false,
               dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
               entryExport: 'main',
-              currentRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+              currentRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
               requiredRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
               moduleContentAddressing: 'required',
               moduleSha256Field: 'artifact.execution.module.sha256',
@@ -839,10 +840,15 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                 },
                 {
                   check: 'non-stub-host-imports-present',
-                  status: 'blocked',
-                  ready: false,
+                  status: 'pass',
+                  ready: true,
                   evidenceSource: 'productionHandlerBoundary.hostImports',
-                  blocker: 'host-imports-are-deterministic-runtime-smoke-stubs-not-production'
+                  observed: {
+                    runtimeScope: 'production-candidate-host-imports',
+                    implementationStatus: 'production-candidate-runtime-imports-present',
+                    runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
+                    productionRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+                  }
                 },
                 {
                   check: 'f64-tensor-memory-binding-validated',
@@ -969,7 +975,10 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureTensorRuntimeContractStatus, 'declared-fixture-contract');
   assert.equal(summary.closureTensorRuntimeContractReady, true);
   assert.equal(summary.closureTensorRuntimeContractHash, 'sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64');
-  assert.equal(summary.closureTensorRuntimeRuntimeAbi, 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
+  assert.equal(
+    summary.closureTensorRuntimeRuntimeAbi,
+    'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+  );
   assert.equal(summary.closureTensorRuntimeExecutionClaim, 'deterministic-tensor-runtime-smoke-only');
   assert.equal(summary.closureTensorRuntimeEntryExport, 'main');
   assert.equal(summary.closureTensorRuntimeMemoryModel, 'host-managed-linear-f64');
@@ -1046,7 +1055,10 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureProductionHandlerReady, false);
   assert.equal(summary.closureProductionHandlerRuntimeExecution, false);
   assert.equal(summary.closureProductionHandlerEntryExport, 'main');
-  assert.equal(summary.closureProductionHandlerRuntimeAbi, 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0');
+  assert.equal(
+    summary.closureProductionHandlerRuntimeAbi,
+    'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+  );
   assert.equal(summary.closureProductionHandlerTensorMemoryModel, 'host-managed-linear-f64');
   assert.deepEqual(summary.closureProductionHandlerInputTensorIds, ['magnetar-state-vector', 'closure-control-vector']);
   assert.deepEqual(summary.closureProductionHandlerOutputTensorIds, ['magnetar-closure-update', 'closure-residual']);
@@ -1055,21 +1067,20 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureProductionHandlerFullPhysicsValidation, false);
   assert.equal(summary.closureProductionHandlerFullFidelityMagnetarSimulation, false);
   assert.deepEqual(summary.closureProductionHandlerAllowedExecutionClaims, ['deterministic-tensor-runtime-smoke-only']);
-  assert.deepEqual(summary.closureProductionHandlerBoundaryBlockers, [
-    'production-magnetar-handler-not-implemented',
-    'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
-    'full-physics-validation-not-run'
-  ]);
+  assert.deepEqual(summary.closureProductionHandlerBoundaryBlockers, [...ESHKOL_PRODUCTION_BLOCKERS]);
   assert.deepEqual(summary.closureProductionHandlerTensorMemoryBinding, {
     source: 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding',
     status: 'entry-export-runtime-smoke-passed',
     executionClaim: 'deterministic-tensor-runtime-smoke-only',
     entryExportConsumesOffsets: true
   });
-  assert.equal(summary.closureProductionHostImportsRuntimeScope, 'deterministic-runtime-smoke-stubs');
-  assert.equal(summary.closureProductionHostImportsImplementationStatus, 'smoke-stubs-not-production');
+  assert.equal(summary.closureProductionHostImportsRuntimeScope, 'production-candidate-host-imports');
+  assert.equal(
+    summary.closureProductionHostImportsImplementationStatus,
+    'production-candidate-runtime-imports-present'
+  );
   assert.equal(summary.closureProductionHostImportCandidateSchema, 'eshkol.ulg.production-host-import-candidate.v0');
-  assert.equal(summary.closureProductionHostImportCandidateStatus, 'requirements-declared-not-implemented');
+  assert.equal(summary.closureProductionHostImportCandidateStatus, 'production-candidate-runtime-imports-implemented');
   assert.equal(
     summary.closureProductionHostImportCandidateProductionRuntimeAbi,
     'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
@@ -1097,7 +1108,7 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   );
   assert.equal(
     summary.closureProductionDispatchPreflightCurrentRuntimeAbi,
-    'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0'
+    'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
   );
   assert.equal(
     summary.closureProductionDispatchPreflightRequiredRuntimeAbi,

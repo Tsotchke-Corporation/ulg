@@ -551,7 +551,6 @@ function stageEshkolAssets() {
     const productionHostImportCandidate = productionHostImports.productionCandidate || {};
     const expectedProductionHandlerBlockers = [
       'production-magnetar-handler-not-implemented',
-      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
       'full-physics-validation-not-run'
     ];
     const expectedProductionCandidateReadiness = [
@@ -573,22 +572,24 @@ function stageEshkolAssets() {
     const expectedProductionDispatchPassedChecks = [
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'runtime-smoke-stubs-rejected-for-production'
     ];
     const expectedProductionDispatchBlockedChecks = [
-      'non-stub-host-imports-present',
       'handler-ready-flag-true',
       'runtime-execution-flag-true',
       'full-physics-validation-evidence-present'
     ];
-    if (productionHostImports.runtimeScope !== 'deterministic-runtime-smoke-stubs'
-      || productionHostImports.implementationStatus !== 'smoke-stubs-not-production'
+    if (productionHostImports.runtimeScope !== 'production-candidate-host-imports'
+      || productionHostImports.implementationStatus !== 'production-candidate-runtime-imports-present'
       || productionHostImportCandidate.schema !== ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA
-      || productionHostImportCandidate.status !== 'requirements-declared-not-implemented'
+      || productionHostImportCandidate.status !== 'production-candidate-runtime-imports-implemented'
       || productionHostImportCandidate.factory !== 'createEshkolHostImportObject'
-      || productionHostImportCandidate.smokeRuntimeAbi !== tensorRuntimeContract.runtimeAbi
+      || productionHostImportCandidate.smokeRuntimeAbi !== 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0'
       || productionHostImportCandidate.productionRuntimeAbi !== 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+      || productionHostImportCandidate.runtimeScope !== 'production-candidate-host-imports'
+      || productionHostImportCandidate.implementationStatus !== 'production-candidate-runtime-imports-present'
       || productionHostImportCandidate.runtimeSmokeStubsAllowed !== false
       || !arraysEqual(productionHostImportCandidate.tensorMemoryImports, ['ulg_read_f64', 'ulg_write_f64'])
       || !Array.isArray(productionHostImportCandidate.requiredNonStubImports)

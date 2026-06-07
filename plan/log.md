@@ -4660,3 +4660,78 @@ Failures / open questions:
   production magnetar handler, non-stub host runtime imports, and full physics
   validation evidence.
 - No push was attempted.
+
+## 2026-06-06 18:57:51 AKDT - Eshkol Production-Candidate Host Imports ULG Sync
+
+Prompt: don't pivot from the core technology to support an SPH demo.
+
+Actions:
+
+- Kept the work on the core ULG/Eshkol/PeerCompute production-dispatch path and
+  left SPH demos as downstream evidence only.
+- Staged Eshkol local commit `8ce5ca4` into the ignored ULG Eshkol service
+  bundle with `npm run stage:service-assets -- --eshkol-only`.
+- Updated ULG staging guards and compact summaries for the new
+  production-candidate host-import state:
+  `runtimeScope = production-candidate-host-imports`,
+  `implementationStatus = production-candidate-runtime-imports-present`, and
+  production candidate status
+  `production-candidate-runtime-imports-implemented`.
+- Updated browser e2e and orchestration assertions for the new tensor runtime
+  contract hash, production-candidate runtime ABI, two remaining production
+  boundary blockers, and computed preflight split `8/5/3`.
+- Preserved the production dispatch block: handler readiness, runtime
+  execution, scientific validation, and full-physics validation remain false.
+
+Files touched:
+
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+
+Commands run:
+
+- `npm run stage:service-assets -- --eshkol-only`
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check tests/orchestration.test.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `git diff --check`
+
+Validation:
+
+- PASS: Eshkol-only staging passed and the ignored staged magnetar closure now
+  reports runtime ABI
+  `wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0`,
+  contract hash
+  `sha256:7bc3955f9514d894def892e547d26288b305aceb0ae48fb732e2268b0d305985`,
+  production candidate status
+  `production-candidate-runtime-imports-implemented`, and two production
+  boundary blockers.
+- PASS: syntax checks passed for touched JavaScript and test files.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1` after updating expected visible blocker
+  count and blocked-check lists.
+- PASS: `npm run status:live -- --bridge` reported ULG on
+  `http://100.86.83.35:5173/`, Eshkol preflight evidence counts `8/5/3`, and
+  Multiscale bridge ack `handoff-ready` with
+  `simulationStatus = scientific-ready`.
+
+Failures / open questions:
+
+- First `npm run test:e2e` rerun failed because the UI assertion still expected
+  `handler:declared-not-executed:3-blockers`; the artifact now has two boundary
+  blockers. The assertion was updated to `2-blockers`.
+- Second `npm run test:e2e` rerun failed because one nested artifact assertion
+  still expected `non-stub-host-imports-present` in blocked checks. That check
+  now passes and the assertion was updated.
+- No push was attempted.

@@ -24,7 +24,6 @@ export const MOONLAB_WEBGPU_COMPLEX64_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.w
 
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
   'production-magnetar-handler-not-implemented',
-  'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
   'full-physics-validation-not-run'
 ]);
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
@@ -51,11 +50,11 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS = Object.freeze([
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS = Object.freeze([
   'artifact-module-sha256-matches-module-ref',
   'entry-export-main-signature-i32-i32-to-i32',
+  'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'runtime-smoke-stubs-rejected-for-production'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS = Object.freeze([
-  'non-stub-host-imports-present',
   'handler-ready-flag-true',
   'runtime-execution-flag-true',
   'full-physics-validation-evidence-present'
@@ -693,13 +692,18 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureProductionHandlerHostImports?.source === 'bundle.hostImports'
     && closureProductionHandlerHostImports?.required === validity.requiresHostImports
     && closureProductionHandlerHostImports?.factory === 'createEshkolHostImportObject'
-    && closureProductionHandlerHostImports?.runtimeScope === 'deterministic-runtime-smoke-stubs'
-    && closureProductionHandlerHostImports?.implementationStatus === 'smoke-stubs-not-production'
+    && closureProductionHandlerHostImports?.runtimeScope === 'production-candidate-host-imports'
+    && closureProductionHandlerHostImports?.implementationStatus
+      === 'production-candidate-runtime-imports-present'
     && closureProductionHostImportCandidate?.schema === ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA
-    && closureProductionHostImportCandidate.status === 'requirements-declared-not-implemented'
+    && closureProductionHostImportCandidate.status === 'production-candidate-runtime-imports-implemented'
     && closureProductionHostImportCandidate.factory === closureProductionHandlerHostImports?.factory
-    && closureProductionHostImportCandidate.smokeRuntimeAbi === closureTensorRuntimeContract?.runtimeAbi
+    && closureProductionHostImportCandidate.smokeRuntimeAbi
+      === 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0'
     && closureProductionHostImportCandidate.productionRuntimeAbi === 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+    && closureProductionHostImportCandidate.runtimeScope === 'production-candidate-host-imports'
+    && closureProductionHostImportCandidate.implementationStatus
+      === 'production-candidate-runtime-imports-present'
     && closureProductionHostImportCandidate.runtimeSmokeStubsAllowed === false
     && arraysEqual(
       closureProductionHostImportCandidateTensorMemoryImports,

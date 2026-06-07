@@ -235,7 +235,6 @@ dispatch preflight check evidence support.
   `wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0`,
   rejected runtime scope `deterministic-runtime-smoke-stubs`, and blockers
   `production-magnetar-handler-not-implemented`,
-  `host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
   `full-physics-validation-not-run`.
 - Eshkol production dispatch preflight computed-evidence check on 2026-06-06:
   `npm run stage:service-assets -- --eshkol-only`, `npm test`,
@@ -1112,7 +1111,6 @@ dispatch preflight check evidence support.
 - Production boundary:
   ULG requires the exact remaining blockers
   `production-magnetar-handler-not-implemented`,
-  `host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
   `full-physics-validation-not-run`; `handlerReady`, `runtimeExecution`,
   `scientificValidation`, and `fullPhysicsValidation` remain false.
 - ULG validations:
@@ -1171,11 +1169,12 @@ dispatch preflight check evidence support.
 - ULG staging:
   `npm run stage:service-assets -- --eshkol-only` passed and regenerated the
   Eshkol magnetar closure bundle with `runtimeScope =
-  deterministic-runtime-smoke-stubs`, `implementationStatus =
-  smoke-stubs-not-production`, production candidate status
-  `requirements-declared-not-implemented`, `runtimeSmokeStubsAllowed = false`,
-  f64 tensor-memory imports `ulg_read_f64`/`ulg_write_f64`, `23` required
-  non-stub imports, and the same three production blockers.
+  production-candidate-host-imports`, `implementationStatus =
+  production-candidate-runtime-imports-present`, production candidate status
+  `production-candidate-runtime-imports-implemented`,
+  `runtimeSmokeStubsAllowed = false`, f64 tensor-memory imports
+  `ulg_read_f64`/`ulg_write_f64`, `23` required non-stub imports, and the
+  remaining two production boundary blockers.
 - ULG validations:
   `node --check src/runtime/artifactSummary.js`,
   `node --check scripts/stage-service-assets.mjs`,
@@ -1185,11 +1184,13 @@ dispatch preflight check evidence support.
   `npm run test:e2e`, and `npm run status:live -- --bridge` passed.
 - Live status:
   `npm run status:live -- --bridge` reported production candidate status
-  `requirements-declared-not-implemented`, `runtimeSmokeStubsAllowed = false`,
-  required non-stub import count `23`, readiness requirements
+  `production-candidate-runtime-imports-implemented`,
+  `runtimeSmokeStubsAllowed = false`, required non-stub import count `23`,
+  readiness requirements
   `production-magnetar-handler-implementation`, `non-stub-host-runtime-imports`,
   `validated-f64-tensor-memory-imports`, `full-physics-validation-pass`,
-  Multiscale ack `handoff-ready`, and `simulationStatus = scientific-ready`.
+  preflight evidence counts `8/5/3`, Multiscale ack `handoff-ready`, and
+  `simulationStatus = scientific-ready`.
 - Full staging caveat:
   full `npm run stage:service-assets` was not used for this checkpoint because
   the active MoonLab sidecar temporarily removed or had not rebuilt

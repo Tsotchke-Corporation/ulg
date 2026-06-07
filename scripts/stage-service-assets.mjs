@@ -33,6 +33,7 @@ const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
+const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'hadamard',
   'pauli_x',
@@ -196,6 +197,17 @@ function stageMoonLabWebGpuParityScope() {
       || artifact.webgpuParity?.executed !== false
       || artifact.webgpuParity?.passed !== false) {
       throw new Error('MoonLab WebGPU parity scope must remain no-backend evidence in ULG staging');
+    }
+    const backendPreflight = artifact.browserBackendPreflight;
+    if (backendPreflight?.schema !== MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA
+      || backendPreflight.probeKind !== 'browser-webgpu-adapter-device-preflight'
+      || backendPreflight.stage !== 'navigator-gpu-unavailable'
+      || backendPreflight.navigatorGpuAvailable !== false
+      || backendPreflight.adapterAvailable !== false
+      || backendPreflight.deviceAcquired !== false
+      || typeof backendPreflight.reason !== 'string'
+      || backendPreflight.reason.length === 0) {
+      throw new Error('MoonLab WebGPU parity scope is missing no-adapter backend preflight evidence');
     }
     const blockers = Array.isArray(artifact.blockers) ? artifact.blockers : [];
     if (!blockers.includes('browser-webgpu-kernel-parity-not-executed')) {

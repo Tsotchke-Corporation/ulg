@@ -4352,3 +4352,85 @@ Failures / open questions:
   Eshkol blockers are still production handler implementation, non-stub
   production host imports, and full physics validation.
 - No push was attempted.
+
+## 2026-06-06 16:12:07 AKDT - MoonLab browser backend preflight visibility
+
+Prompt: Continue the ULG implementation plan after MoonLab sidecar commit
+`4e91165` added browser WebGPU backend-preflight evidence; keep commits local
+only, preserve the live Vite servers on `0.0.0.0`, and do not push.
+
+Changes:
+
+- Integrated MoonLab's
+  `moonlab.webgpu.complex64-browser-backend-preflight.v0` into ULG staging
+  guards, compact artifact summaries, live status JSON, visible artifact rows,
+  orchestration tests, and browser e2e coverage.
+- Required the current headless/VPN artifact to report
+  `stage = navigator-gpu-unavailable`, `navigatorGpuAvailable = false`,
+  `adapterAvailable = false`, and `deviceAcquired = false` before keeping all
+  browser WebGPU kernel/native-operation probes blocked and unexecuted.
+- Updated README/status/plan/test docs to record the preflight state,
+  PeerCompute sidecar commit `b5b0dcec`, and browser plus relay-dispatch
+  handoff verification against the latest staged MoonLab/Eshkol artifacts.
+- Spawned Huygens as a read-only verification sidecar for the PeerCompute
+  handoff and live listener checks.
+
+Files touched:
+
+- `README.md`
+- `scripts/live-status.mjs`
+- `scripts/stage-service-assets.mjs`
+- `src/main.js`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check scripts/live-status.mjs`
+- `node --check src/main.js`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm run stage:service-assets`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `npm --prefix /home/cos/projects/peercompute/demos/multiscale run test:ulg-handoff`
+- `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 ULG_RELAY_HANDOFF_REQUIRE_DISPATCH=1 npm --prefix /home/cos/projects/peercompute/demos/multiscale run test:ulg-relay-handoff`
+
+Validation:
+
+- PASS: syntax checks passed for touched JavaScript/test files.
+- PASS: `npm run stage:service-assets` copied MoonLab JS/WASM, regenerated the
+  normalized reference suite, generated the new backend-preflight parity-scope
+  asset, and exported the current Eshkol magnetar closure descriptor bundle.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`, including visible
+  `webgpu-preflight:navigator-gpu-unavailable`.
+- PASS: `npm run status:live -- --bridge` reported MoonLab backend preflight
+  declared at `navigator-gpu-unavailable`, Multiscale ack `handoff-ready`, and
+  `simulationStatus = scientific-ready`.
+- PASS: PeerCompute browser handoff smoke reported `magnetarVisible = true`,
+  `magnetarLayer = solar`, ack `handoff-ready`, and
+  `simulationStatus = scientific-ready`.
+- PASS: PeerCompute relay-dispatch smoke reported relay peers connected,
+  `dispatchAdapterStatus = dispatch-adapters-ready`,
+  `acceptedDispatchCount = 2`, ack `handoff-ready`, and
+  `simulationStatus = scientific-ready`.
+
+Failures / open questions:
+
+- Browser WebGPU execution is still blocked in this runtime because
+  `navigator.gpu.requestAdapter` is unavailable; this checkpoint records the
+  blocker explicitly and does not claim native-operation coverage.
+- The failed ULG-relative PeerCompute prefix command was rerun with the correct
+  absolute PeerCompute demo path and did not change files.
+- No push was attempted.

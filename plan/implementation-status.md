@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 15:22:17 AKDT
+Updated: 2026-06-06 16:12:07 AKDT
 
 ## Done
 
@@ -550,6 +550,17 @@ Updated: 2026-06-06 15:22:17 AKDT
   non-stub imports, and readiness requirements for production handler
   implementation, non-stub imports, validated tensor memory imports, and full
   physics validation.
+- Integrated MoonLab backend-preflight sidecar commit `4e91165` into ULG
+  staging, summaries, UI, e2e coverage, and live status. The staged
+  `moonlab.webgpu.complex64-parity-scope.v0` artifact now requires
+  `moonlab.webgpu.complex64-browser-backend-preflight.v0` with
+  `stage = navigator-gpu-unavailable`, `navigatorGpuAvailable = false`,
+  `adapterAvailable = false`, and `deviceAcquired = false` in this runtime.
+- Recorded PeerCompute tensor-runtime candidate sidecar commit `b5b0dcec` and
+  reverified Multiscale browser and relay-dispatch ULG handoffs with the latest
+  staged MoonLab/Eshkol artifacts. Both handoff paths reported
+  `handoff-ready`, `simulationStatus = scientific-ready`, and
+  `magnetarVisible = true` for the browser smoke.
 
 ## In Progress
 

@@ -171,6 +171,16 @@ function createMoonLabWebGpuParityScopeFixture() {
     contractValidation: { valid: true },
     reducedFixtureOnly: true,
     backendAvailable: false,
+    browserBackendPreflight: {
+      schema: 'moonlab.webgpu.complex64-browser-backend-preflight.v0',
+      probeKind: 'browser-webgpu-adapter-device-preflight',
+      runtime: 'node-test',
+      stage: 'navigator-gpu-unavailable',
+      navigatorGpuAvailable: false,
+      adapterAvailable: false,
+      deviceAcquired: false,
+      reason: 'browser WebGPU adapter unavailable'
+    },
     fullFidelityMagnetarSimulation: false,
     fullPhysicsValidation: false,
     blockers: [
@@ -1041,6 +1051,15 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.moonlabWebGpuParityScopeContractReady, true);
   assert.equal(summary.moonlabWebGpuParityScopeReducedFixtureOnly, true);
   assert.equal(summary.moonlabWebGpuParityScopeBackendAvailable, false);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightSchema, 'moonlab.webgpu.complex64-browser-backend-preflight.v0');
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightDeclared, true);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightProbeKind, 'browser-webgpu-adapter-device-preflight');
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightRuntime, 'node-test');
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightStage, 'navigator-gpu-unavailable');
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightNavigatorGpuAvailable, false);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightAdapterAvailable, false);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightDeviceAcquired, false);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightReason, 'browser WebGPU adapter unavailable');
   assert.equal(summary.moonlabWebGpuParityExecuted, false);
   assert.equal(summary.moonlabWebGpuParityPassed, false);
   assert.equal(summary.moonlabWebGpuParityMaxProbabilityAbsDiff, null);

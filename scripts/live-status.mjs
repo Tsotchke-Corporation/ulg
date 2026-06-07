@@ -71,6 +71,18 @@ try {
         probabilityKernel: moonlab?.moonlabWebGpuProbabilityKernel ?? null,
         probabilityKernelExecuted: moonlab?.moonlabWebGpuProbabilityKernelExecuted ?? null,
         probabilityKernelPassed: moonlab?.moonlabWebGpuProbabilityKernelPassed ?? null,
+        browserBackendPreflightDeclared:
+          moonlab?.moonlabWebGpuBrowserBackendPreflightDeclared ?? null,
+        browserBackendPreflightStage:
+          moonlab?.moonlabWebGpuBrowserBackendPreflightStage ?? null,
+        browserBackendPreflightNavigatorGpuAvailable:
+          moonlab?.moonlabWebGpuBrowserBackendPreflightNavigatorGpuAvailable ?? null,
+        browserBackendPreflightAdapterAvailable:
+          moonlab?.moonlabWebGpuBrowserBackendPreflightAdapterAvailable ?? null,
+        browserBackendPreflightDeviceAcquired:
+          moonlab?.moonlabWebGpuBrowserBackendPreflightDeviceAcquired ?? null,
+        browserBackendPreflightReason:
+          moonlab?.moonlabWebGpuBrowserBackendPreflightReason ?? null,
         nativeOperationProbeDeclared: moonlab?.moonlabWebGpuNativeOperationProbeDeclared ?? null,
         nativeOperationProbeExecuted: moonlab?.moonlabWebGpuNativeOperationProbeExecuted ?? null,
         nativeOperationProbePassed: moonlab?.moonlabWebGpuNativeOperationProbePassed ?? null,

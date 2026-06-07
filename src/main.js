@@ -285,6 +285,9 @@ function renderArtifactSummaryLine(summary) {
   if (summary.moonlabWebGpuParityScopeReady) {
     parts.push(`webgpu:${summary.moonlabWebGpuParityScopeBackendAvailable ? 'backend' : 'no-backend'}`);
   }
+  if (summary.moonlabWebGpuBrowserBackendPreflightDeclared) {
+    parts.push(`webgpu-preflight:${summary.moonlabWebGpuBrowserBackendPreflightStage || 'declared'}`);
+  }
   if (summary.moonlabWebGpuProbabilityKernelProbeDeclared) {
     parts.push(`wgsl:${summary.moonlabWebGpuProbabilityKernel || 'probe'}-declared`);
   }

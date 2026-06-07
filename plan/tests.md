@@ -4,10 +4,11 @@
 
 Command: `npm test`
 
-Current result: pass, 18/18 tests on 2026-06-06 after adding optional MoonLab
-reference-contract asset probing, normalized supplied reference staging,
-four-family ready calibrated-reference summaries, and Eshkol magnetar closure
-descriptor summaries.
+Current result: pass, 22/22 tests on 2026-06-06 after adding MoonLab browser
+WebGPU backend preflight summaries, optional MoonLab reference-contract asset
+probing, normalized supplied reference staging, four-family ready
+calibrated-reference summaries, and Eshkol magnetar closure descriptor
+summaries.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -61,15 +62,15 @@ descriptor summaries.
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after optional MoonLab reference-contract
-asset support, with the existing large three.js chunk warning.
+Current result: pass on 2026-06-06 after MoonLab browser WebGPU backend
+preflight support, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after optional MoonLab
-reference-contract asset support.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after MoonLab browser
+WebGPU backend preflight support.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -1163,3 +1164,42 @@ reference-contract asset support.
   the active MoonLab sidecar temporarily removed or had not rebuilt
   `bindings/javascript/packages/core/dist/moonlab.js`; Eshkol-only staging was
   the relevant gate for this integration slice.
+
+## 2026-06-06 MoonLab Browser Backend Preflight Checks
+
+- MoonLab sidecar validation:
+  local MoonLab commit `4e91165` added
+  `moonlab.webgpu.complex64-browser-backend-preflight.v0` and passed TypeScript
+  build, focused parity tests, CLI parity generation, required-backend failure
+  behavior in the no-adapter runtime, quantum-response artifact tests, full core
+  tests, WASM build, and `git diff --check`.
+- ULG staging:
+  `npm run stage:service-assets` passed and regenerated
+  `webgpu-complex64-parity-scope.json` with
+  `browserBackendPreflight.stage = navigator-gpu-unavailable`,
+  `navigatorGpuAvailable = false`, `adapterAvailable = false`, and
+  `deviceAcquired = false`.
+- ULG validations:
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check scripts/live-status.mjs`, `node --check src/main.js`,
+  `node --check tests/orchestration.test.mjs`,
+  `node --check tests/demo.e2e.mjs`, `npm test`, `npm run build`,
+  `npm run test:e2e`, and `npm run status:live -- --bridge` passed.
+- Live status:
+  `npm run status:live -- --bridge` reported MoonLab
+  `browserBackendPreflightDeclared = true`,
+  `browserBackendPreflightStage = navigator-gpu-unavailable`,
+  `browserBackendPreflightNavigatorGpuAvailable = false`,
+  `browserBackendPreflightAdapterAvailable = false`,
+  `browserBackendPreflightDeviceAcquired = false`, Multiscale ack
+  `handoff-ready`, and `simulationStatus = scientific-ready`.
+- PeerCompute handoff:
+  `npm --prefix /home/cos/projects/peercompute/demos/multiscale run test:ulg-handoff`
+  passed with `magnetarVisible = true`, `magnetarLayer = solar`, bridge ack
+  `handoff-ready`, and `simulationStatus = scientific-ready`.
+- PeerCompute relay-dispatch handoff:
+  `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 ULG_RELAY_HANDOFF_REQUIRE_DISPATCH=1 npm --prefix /home/cos/projects/peercompute/demos/multiscale run test:ulg-relay-handoff`
+  passed with relay peers connected, `dispatchAdapterStatus =
+  dispatch-adapters-ready`, `acceptedDispatchCount = 2`, ack `handoff-ready`,
+  and `simulationStatus = scientific-ready`.

@@ -15,6 +15,7 @@ export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-
 export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA = 'moonlab.magnetar.calibrated-reference.v0';
 export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_ROLE = 'peercompute-scientific-tolerance-input';
 export const MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA = 'moonlab.webgpu.complex64-parity-scope.v0';
+export const MOONLAB_WEBGPU_COMPLEX64_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
 export const MOONLAB_WEBGPU_COMPLEX64_PROBABILITY_KERNEL_PROBE_SCHEMA = 'moonlab.webgpu.complex64-probability-kernel-probe.v0';
 export const MOONLAB_WEBGPU_COMPLEX64_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.webgpu.complex64-native-operation-probe.v0';
 
@@ -358,6 +359,15 @@ export function summarizeUlgArtifact(artifact = {}) {
     .find((entry) => entry.operation === 'pauli_x') || null;
   const moonlabComplex64Preflight = objectOrNull(moonlabWebGpuParityScope?.complex64Preflight);
   const moonlabWebGpuParityFidelityRuntimeScope = objectOrNull(moonlabWebGpuParityScope?.fidelityRuntimeScope);
+  const moonlabWebGpuBrowserBackendPreflight = objectOrNull(moonlabWebGpuParityScope?.browserBackendPreflight);
+  const moonlabWebGpuBrowserBackendPreflightDeclared =
+    moonlabWebGpuBrowserBackendPreflight?.schema === MOONLAB_WEBGPU_COMPLEX64_BROWSER_BACKEND_PREFLIGHT_SCHEMA
+    && moonlabWebGpuBrowserBackendPreflight.probeKind === 'browser-webgpu-adapter-device-preflight'
+    && moonlabWebGpuBrowserBackendPreflight.stage === 'navigator-gpu-unavailable'
+    && moonlabWebGpuBrowserBackendPreflight.navigatorGpuAvailable === false
+    && moonlabWebGpuBrowserBackendPreflight.adapterAvailable === false
+    && moonlabWebGpuBrowserBackendPreflight.deviceAcquired === false
+    && textOrNull(moonlabWebGpuBrowserBackendPreflight.reason) != null;
   const moonlabWebGpuProbabilityKernelProbeDeclared =
     moonlabWebGpuProbabilityKernelProbe?.schema === MOONLAB_WEBGPU_COMPLEX64_PROBABILITY_KERNEL_PROBE_SCHEMA
     && moonlabWebGpuProbabilityKernelProbe.probeKind === 'browser-webgpu-complex64-probability-kernel'
@@ -393,6 +403,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     && moonlabComplex64Preflight?.passed === true
     && moonlabWebGpuParityScope.fullFidelityMagnetarSimulation === false
     && moonlabWebGpuParityScope.fullPhysicsValidation === false
+    && moonlabWebGpuBrowserBackendPreflightDeclared
     && moonlabWebGpuParityFidelityRuntimeScope?.schema === 'ulg.magnetar.fidelity-runtime-scope.v0'
     && moonlabWebGpuParityFidelityRuntimeScope.fullFidelityMagnetarSimulation === false
     && moonlabWebGpuParityFidelityRuntimeScope.fullPhysicsValidation === false
@@ -835,6 +846,25 @@ export function summarizeUlgArtifact(artifact = {}) {
       typeof moonlabWebGpuParityScope?.backendAvailable === 'boolean'
         ? moonlabWebGpuParityScope.backendAvailable
         : null,
+    moonlabWebGpuBrowserBackendPreflightSchema: moonlabWebGpuBrowserBackendPreflight?.schema || null,
+    moonlabWebGpuBrowserBackendPreflightDeclared,
+    moonlabWebGpuBrowserBackendPreflightProbeKind: moonlabWebGpuBrowserBackendPreflight?.probeKind || null,
+    moonlabWebGpuBrowserBackendPreflightRuntime: moonlabWebGpuBrowserBackendPreflight?.runtime || null,
+    moonlabWebGpuBrowserBackendPreflightStage: moonlabWebGpuBrowserBackendPreflight?.stage || null,
+    moonlabWebGpuBrowserBackendPreflightNavigatorGpuAvailable:
+      typeof moonlabWebGpuBrowserBackendPreflight?.navigatorGpuAvailable === 'boolean'
+        ? moonlabWebGpuBrowserBackendPreflight.navigatorGpuAvailable
+        : null,
+    moonlabWebGpuBrowserBackendPreflightAdapterAvailable:
+      typeof moonlabWebGpuBrowserBackendPreflight?.adapterAvailable === 'boolean'
+        ? moonlabWebGpuBrowserBackendPreflight.adapterAvailable
+        : null,
+    moonlabWebGpuBrowserBackendPreflightDeviceAcquired:
+      typeof moonlabWebGpuBrowserBackendPreflight?.deviceAcquired === 'boolean'
+        ? moonlabWebGpuBrowserBackendPreflight.deviceAcquired
+        : null,
+    moonlabWebGpuBrowserBackendPreflightReason:
+      textOrNull(moonlabWebGpuBrowserBackendPreflight?.reason),
     moonlabWebGpuParityExecuted:
       typeof moonlabWebGpuParity?.executed === 'boolean' ? moonlabWebGpuParity.executed : null,
     moonlabWebGpuParityPassed:

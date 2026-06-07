@@ -81,10 +81,12 @@ tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, 
 magnetar scientific simulation. The optional
 `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
 currently records MoonLab's declared browser WebGPU `compute_probabilities`
-probe plus declared native `hadamard`, `pauli_x`, `pauli_z`, and `cnot`
-operation probes, but preserves `executed: false`, `passed: false`, empty
-native operation coverage, and blockers until the WebGPU kernels are actually
-covered.
+probe plus a browser backend preflight record. In the current headless/VPN
+runtime that preflight records `navigator-gpu-unavailable` with no adapter or
+device acquired. The artifact also declares native `hadamard`, `pauli_x`,
+`pauli_z`, and `cnot` operation probes, but preserves `executed: false`,
+`passed: false`, empty native operation coverage, and blockers until the WebGPU
+kernels are actually covered.
 
 For Eshkol, the default staged bundle is
 `public/service-assets/eshkol/closures/magnetar-closure/`. It packages

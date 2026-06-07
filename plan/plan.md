@@ -77,6 +77,9 @@ physics work:
 - [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
   declared `compute_probabilities` browser-kernel probe through ULG staging,
   summaries, UI, and handoffs while preserving no-backend/no-execution flags.
+- [x] Surface MoonLab's browser WebGPU backend preflight through ULG staging,
+  summaries, visible artifact rows, e2e coverage, and live status while
+  preserving `navigator-gpu-unavailable`, no-adapter, and no-device evidence.
 - [x] Surface MoonLab's declared `hadamard` native WebGPU operation probe
   through ULG staging, summaries, UI, handoffs, and live status while preserving
   no-adapter/no-execution flags.
@@ -151,6 +154,8 @@ physics work:
 - [x] Fix relay-served popup dispatch adapter execution so the optional relay
   smoke reaches adapter `dispatch-complete` without relaxing runtime or
   scientific gates.
+- [x] Add Eshkol tensor-runtime candidate probes in PeerCompute and reverify
+  browser plus relay-dispatch ULG handoffs against the latest staged artifacts.
 - [ ] Start from `ComputeManager`, `NodeKernel`, `SolverRegistry`, relay tooling,
   NetViz telemetry, and Multiscale ULG schemas.
 - [ ] Replace demo-local scheduling/GPU/artifact substitutes with explicit service
@@ -254,6 +259,8 @@ physics work:
   keeping coverage blocked until hardware execution evidence exists.
 - [x] Add a declared native WebGPU `cnot` complex64 operation probe while
   keeping coverage blocked until hardware execution evidence exists.
+- [x] Add browser WebGPU backend preflight evidence so no-adapter/no-device
+  runtimes are recorded explicitly before operation probes remain blocked.
 
 ### Tooling
 

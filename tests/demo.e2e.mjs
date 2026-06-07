@@ -30,6 +30,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await expect(page.getByText(/tensor-probe:runtime-smoke-passed:offsets-consumed:64b/)).toBeVisible();
   await expect(page.getByText(/handler:declared-not-executed:3-blockers/)).toBeVisible();
   await expect(page.getByText(/prod-host:requirements-declared-not-implemented:23-imports/)).toBeVisible();
+  await expect(page.getByText(/webgpu-preflight:navigator-gpu-unavailable/)).toBeVisible();
 
   const desktopPixels = await sampledCanvasPixels(page);
   expect(desktopPixels.nonBlank).toBeGreaterThan(80);
@@ -459,6 +460,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabArtifact.webGpuParityScope.contractReady).toBe(true);
       expect(moonlabArtifact.webGpuParityScope.reducedFixtureOnly).toBe(true);
       expect(moonlabArtifact.webGpuParityScope.backendAvailable).toBe(false);
+      expect(moonlabArtifact.webGpuParityScope.browserBackendPreflight).toMatchObject({
+        schema: 'moonlab.webgpu.complex64-browser-backend-preflight.v0',
+        probeKind: 'browser-webgpu-adapter-device-preflight',
+        stage: 'navigator-gpu-unavailable',
+        navigatorGpuAvailable: false,
+        adapterAvailable: false,
+        deviceAcquired: false
+      });
       expect(moonlabArtifact.webGpuParityScope.webgpuParity.executed).toBe(false);
       expect(moonlabArtifact.webGpuParityScope.webgpuParity.passed).toBe(false);
       expect(moonlabArtifact.webGpuParityScope.browserKernelProbe.schema).toBe('moonlab.webgpu.complex64-probability-kernel-probe.v0');
@@ -580,6 +589,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeSchema).toBe('moonlab.webgpu.complex64-parity-scope.v0');
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeStatus).toBe('scope-ready-backend-unavailable');
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeBackendAvailable).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuBrowserBackendPreflightDeclared).toBe(true);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuBrowserBackendPreflightStage).toBe('navigator-gpu-unavailable');
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuBrowserBackendPreflightNavigatorGpuAvailable).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuBrowserBackendPreflightAdapterAvailable).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuBrowserBackendPreflightDeviceAcquired).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityExecuted).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityPassed).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuProbabilityKernelProbeDeclared).toBe(true);

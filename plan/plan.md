@@ -71,6 +71,9 @@ physics work:
   blockers.
 - [x] Surface exact Eshkol tensor-runtime smoke evidence and production blocker
   counts in the visible demo artifact row and `npm run status:live` output.
+- [x] Surface Eshkol's production-host-import candidate requirements through
+  ULG staging guards, summaries, visible artifact rows, and live status while
+  keeping smoke stubs explicitly non-production.
 - [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
   declared `compute_probabilities` browser-kernel probe through ULG staging,
   summaries, UI, and handoffs while preserving no-backend/no-execution flags.

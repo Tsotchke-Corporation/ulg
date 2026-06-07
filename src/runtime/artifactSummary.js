@@ -23,6 +23,17 @@ const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
   'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
   'full-physics-validation-not-run'
 ]);
+const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
+const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_READINESS_REQUIRES = Object.freeze([
+  'production-magnetar-handler-implementation',
+  'non-stub-host-runtime-imports',
+  'validated-f64-tensor-memory-imports',
+  'full-physics-validation-pass'
+]);
+const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_TENSOR_MEMORY_IMPORTS = Object.freeze([
+  'ulg_read_f64',
+  'ulg_write_f64'
+]);
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'hadamard',
   'pauli_x',
@@ -264,6 +275,24 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureTensorEntryExportOffsetProbe = objectOrNull(closureTensorLinearMemoryBinding?.entryExportOffsetProbe);
   const closureProductionHandlerBoundary = objectOrNull(closureDescriptorBinding.productionHandlerBoundary);
   const closureProductionHandlerTensorMemoryBinding = objectOrNull(closureProductionHandlerBoundary?.tensorMemoryBinding);
+  const closureProductionHandlerHostImports = objectOrNull(closureProductionHandlerBoundary?.hostImports);
+  const closureProductionHostImportCandidate = objectOrNull(closureProductionHandlerHostImports?.productionCandidate);
+  const closureProductionHostImportCandidateRequiredNonStubImports =
+    Array.isArray(closureProductionHostImportCandidate?.requiredNonStubImports)
+      ? closureProductionHostImportCandidate.requiredNonStubImports.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHostImportCandidateReadinessRequires =
+    Array.isArray(closureProductionHostImportCandidate?.readinessRequires)
+      ? closureProductionHostImportCandidate.readinessRequires.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHostImportCandidateBlockedBy =
+    Array.isArray(closureProductionHostImportCandidate?.blockedBy)
+      ? closureProductionHostImportCandidate.blockedBy.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHostImportCandidateTensorMemoryImports =
+    Array.isArray(closureProductionHostImportCandidate?.tensorMemoryImports)
+      ? closureProductionHostImportCandidate.tensorMemoryImports.map((value) => String(value)).filter(Boolean)
+      : [];
   const outputSemanticsStdout = outputSemantics?.stdout && typeof outputSemantics.stdout === 'object'
     ? outputSemantics.stdout
     : {};
@@ -525,10 +554,31 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureProductionHandlerBoundary.moduleRef?.source === 'artifact.execution.module'
     && closureProductionHandlerBoundary.moduleRef?.contentAddressing === 'required'
     && closureProductionHandlerBoundary.moduleRef?.sha256Field === 'artifact.execution.module.sha256'
-    && closureProductionHandlerBoundary.hostImports?.source === 'bundle.hostImports'
-    && closureProductionHandlerBoundary.hostImports?.required === validity.requiresHostImports
-    && closureProductionHandlerBoundary.hostImports?.factory === 'createEshkolHostImportObject'
-    && hostImports?.factory === closureProductionHandlerBoundary.hostImports?.factory
+    && closureProductionHandlerHostImports?.source === 'bundle.hostImports'
+    && closureProductionHandlerHostImports?.required === validity.requiresHostImports
+    && closureProductionHandlerHostImports?.factory === 'createEshkolHostImportObject'
+    && closureProductionHandlerHostImports?.runtimeScope === 'deterministic-runtime-smoke-stubs'
+    && closureProductionHandlerHostImports?.implementationStatus === 'smoke-stubs-not-production'
+    && closureProductionHostImportCandidate?.schema === ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA
+    && closureProductionHostImportCandidate.status === 'requirements-declared-not-implemented'
+    && closureProductionHostImportCandidate.factory === closureProductionHandlerHostImports?.factory
+    && closureProductionHostImportCandidate.smokeRuntimeAbi === closureTensorRuntimeContract?.runtimeAbi
+    && closureProductionHostImportCandidate.productionRuntimeAbi === 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+    && closureProductionHostImportCandidate.runtimeSmokeStubsAllowed === false
+    && arraysEqual(
+      closureProductionHostImportCandidateTensorMemoryImports,
+      ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_TENSOR_MEMORY_IMPORTS
+    )
+    && closureProductionHostImportCandidateRequiredNonStubImports.length > 0
+    && arraysEqual(
+      closureProductionHostImportCandidateReadinessRequires,
+      ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_READINESS_REQUIRES
+    )
+    && arraysEqual(
+      closureProductionHostImportCandidateBlockedBy,
+      ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
+    )
+    && hostImports?.factory === closureProductionHandlerHostImports?.factory
     && closureProductionHandlerAllowedExecutionClaims.includes(closureTensorRuntimeContract?.executionClaim)
     && closureProductionHandlerTensorMemoryBinding?.source
       === 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
@@ -742,6 +792,25 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureProductionHandlerAllowedExecutionClaims: clonePlain(closureProductionHandlerAllowedExecutionClaims),
     closureProductionHandlerBoundaryBlockers: clonePlain(closureProductionHandlerBoundaryBlockers),
     closureProductionHandlerTensorMemoryBinding: clonePlain(closureProductionHandlerTensorMemoryBinding),
+    closureProductionHostImportsRuntimeScope: closureProductionHandlerHostImports?.runtimeScope || null,
+    closureProductionHostImportsImplementationStatus:
+      closureProductionHandlerHostImports?.implementationStatus || null,
+    closureProductionHostImportCandidateSchema: closureProductionHostImportCandidate?.schema || null,
+    closureProductionHostImportCandidateStatus: closureProductionHostImportCandidate?.status || null,
+    closureProductionHostImportCandidateProductionRuntimeAbi:
+      closureProductionHostImportCandidate?.productionRuntimeAbi || null,
+    closureProductionHostImportCandidateRuntimeSmokeStubsAllowed:
+      typeof closureProductionHostImportCandidate?.runtimeSmokeStubsAllowed === 'boolean'
+        ? closureProductionHostImportCandidate.runtimeSmokeStubsAllowed
+        : null,
+    closureProductionHostImportCandidateRequiredNonStubImports:
+      clonePlain(closureProductionHostImportCandidateRequiredNonStubImports),
+    closureProductionHostImportCandidateTensorMemoryImports:
+      clonePlain(closureProductionHostImportCandidateTensorMemoryImports),
+    closureProductionHostImportCandidateReadinessRequires:
+      clonePlain(closureProductionHostImportCandidateReadinessRequires),
+    closureProductionHostImportCandidateBlockedBy:
+      clonePlain(closureProductionHostImportCandidateBlockedBy),
     closureReady: inferArtifactKind(artifact) === 'closure'
       && closureHandoffReady
       && execution.serviceWorkerSafe === true

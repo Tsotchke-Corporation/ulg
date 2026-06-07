@@ -4267,3 +4267,88 @@ Failures / open questions:
   implementation, production host imports, and full physics validation remain
   the active Eshkol-side blockers.
 - No push was attempted.
+
+## 2026-06-06 15:59:59 AKDT - Eshkol production host import candidate handoff
+
+Prompt: Eshkol sidecar reported local commit `b025f5d` clarifying production
+host import requirements; integrate the new metadata into ULG without relaxing
+production or physics gates.
+
+Changes:
+
+- Updated ULG staging guards to require
+  `productionHandlerBoundary.hostImports.runtimeScope =
+  deterministic-runtime-smoke-stubs`, `implementationStatus =
+  smoke-stubs-not-production`, and a
+  `eshkol.ulg.production-host-import-candidate.v0` block.
+- Added compact artifact-summary fields for production host-import runtime
+  scope, implementation status, production candidate status, production runtime
+  ABI, `runtimeSmokeStubsAllowed`, required non-stub imports, tensor-memory
+  imports, readiness requirements, and candidate blockers.
+- Updated live status and visible artifact rows so the ULG demo reports
+  `prod-host:requirements-declared-not-implemented:23-imports` and JSON fields
+  for the production candidate requirements.
+- Updated browser e2e and Node artifact-cache summary tests for the new
+  candidate contract.
+- Recorded that Eshkol `b025f5d` passed focused host-import/fixture tests,
+  `eshkol-run` rebuild, and `git diff --check` with all production/full-physics
+  flags still false.
+
+Files touched:
+
+- `README.md`
+- `scripts/stage-service-assets.mjs`
+- `scripts/live-status.mjs`
+- `src/main.js`
+- `src/runtime/artifactSummary.js`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `npm run stage:service-assets`
+- `npm run stage:service-assets -- --eshkol-only`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+
+Validation:
+
+- PASS: `npm run stage:service-assets -- --eshkol-only` regenerated the Eshkol
+  magnetar closure bundle and accepted the new production-host candidate
+  requirements.
+- PASS: syntax checks passed for touched JavaScript and test files.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`, including visible
+  `prod-host:requirements-declared-not-implemented:23-imports`.
+- PASS: `npm run status:live -- --bridge` reported production candidate status
+  `requirements-declared-not-implemented`, `runtimeSmokeStubsAllowed = false`,
+  required non-stub import count `23`, the four production readiness
+  requirements, Multiscale ack `handoff-ready`, blocker count `0`, and
+  `simulationStatus = scientific-ready`.
+
+Failures / open questions:
+
+- Full `npm run stage:service-assets` failed at the start of this checkpoint
+  because active MoonLab sidecar work temporarily left
+  `/home/cos/projects/moonlab/bindings/javascript/packages/core/dist/moonlab.js`
+  unavailable. This integration only needed Eshkol asset regeneration, so the
+  Eshkol-only staging path was used and passed.
+- PeerCompute repo tests were not run from the main thread during this slice
+  because the active PeerCompute sidecar had a dirty
+  `peercompute/src/peercompute/serviceOrchestration/UlgDispatchServiceAdapters.js`.
+- No production or scientific readiness flags were relaxed. The remaining
+  Eshkol blockers are still production handler implementation, non-stub
+  production host imports, and full physics validation.
+- No push was attempted.

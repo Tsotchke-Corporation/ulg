@@ -1129,3 +1129,37 @@ reference-contract asset support.
   `node --check scripts/live-status.mjs`, `node --check src/main.js`,
   `node --check tests/demo.e2e.mjs`, `npm test`, `npm run build`,
   `npm run test:e2e`, and `npm run status:live -- --bridge` passed.
+
+## 2026-06-06 Eshkol Production Host Import Candidate Checks
+
+- Eshkol sidecar validation:
+  local Eshkol commit `b025f5d` added a
+  `eshkol.ulg.production-host-import-candidate.v0` requirements block and
+  passed focused host-import/fixture tests plus `eshkol-run` rebuild.
+- ULG staging:
+  `npm run stage:service-assets -- --eshkol-only` passed and regenerated the
+  Eshkol magnetar closure bundle with `runtimeScope =
+  deterministic-runtime-smoke-stubs`, `implementationStatus =
+  smoke-stubs-not-production`, production candidate status
+  `requirements-declared-not-implemented`, `runtimeSmokeStubsAllowed = false`,
+  f64 tensor-memory imports `ulg_read_f64`/`ulg_write_f64`, `23` required
+  non-stub imports, and the same three production blockers.
+- ULG validations:
+  `node --check src/runtime/artifactSummary.js`,
+  `node --check scripts/stage-service-assets.mjs`,
+  `node --check scripts/live-status.mjs`,
+  `node --check tests/orchestration.test.mjs`,
+  `node --check tests/demo.e2e.mjs`, `npm test`, `npm run build`,
+  `npm run test:e2e`, and `npm run status:live -- --bridge` passed.
+- Live status:
+  `npm run status:live -- --bridge` reported production candidate status
+  `requirements-declared-not-implemented`, `runtimeSmokeStubsAllowed = false`,
+  required non-stub import count `23`, readiness requirements
+  `production-magnetar-handler-implementation`, `non-stub-host-runtime-imports`,
+  `validated-f64-tensor-memory-imports`, `full-physics-validation-pass`,
+  Multiscale ack `handoff-ready`, and `simulationStatus = scientific-ready`.
+- Full staging caveat:
+  full `npm run stage:service-assets` was not used for this checkpoint because
+  the active MoonLab sidecar temporarily removed or had not rebuilt
+  `bindings/javascript/packages/core/dist/moonlab.js`; Eshkol-only staging was
+  the relevant gate for this integration slice.

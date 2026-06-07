@@ -32,6 +32,7 @@ const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol'
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
+const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'hadamard',
   'pauli_x',
@@ -516,6 +517,34 @@ function stageEshkolAssets() {
       || productionHandlerBoundary.hostImports?.factory !== 'createEshkolHostImportObject') {
       throw new Error('Eshkol staged production handler boundary has invalid host import metadata');
     }
+    const productionHostImports = productionHandlerBoundary.hostImports || {};
+    const productionHostImportCandidate = productionHostImports.productionCandidate || {};
+    const expectedProductionHandlerBlockers = [
+      'production-magnetar-handler-not-implemented',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
+      'full-physics-validation-not-run'
+    ];
+    const expectedProductionCandidateReadiness = [
+      'production-magnetar-handler-implementation',
+      'non-stub-host-runtime-imports',
+      'validated-f64-tensor-memory-imports',
+      'full-physics-validation-pass'
+    ];
+    if (productionHostImports.runtimeScope !== 'deterministic-runtime-smoke-stubs'
+      || productionHostImports.implementationStatus !== 'smoke-stubs-not-production'
+      || productionHostImportCandidate.schema !== ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA
+      || productionHostImportCandidate.status !== 'requirements-declared-not-implemented'
+      || productionHostImportCandidate.factory !== 'createEshkolHostImportObject'
+      || productionHostImportCandidate.smokeRuntimeAbi !== tensorRuntimeContract.runtimeAbi
+      || productionHostImportCandidate.productionRuntimeAbi !== 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+      || productionHostImportCandidate.runtimeSmokeStubsAllowed !== false
+      || !arraysEqual(productionHostImportCandidate.tensorMemoryImports, ['ulg_read_f64', 'ulg_write_f64'])
+      || !Array.isArray(productionHostImportCandidate.requiredNonStubImports)
+      || productionHostImportCandidate.requiredNonStubImports.length === 0
+      || !arraysEqual(productionHostImportCandidate.readinessRequires, expectedProductionCandidateReadiness)
+      || !arraysEqual(productionHostImportCandidate.blockedBy, expectedProductionHandlerBlockers)) {
+      throw new Error('Eshkol staged production host import candidate requirements changed');
+    }
     const allowedExecutionClaims = Array.isArray(productionHandlerBoundary.allowedExecutionClaims)
       ? productionHandlerBoundary.allowedExecutionClaims
       : [];
@@ -531,12 +560,7 @@ function stageEshkolAssets() {
     const handlerBoundaryBlockers = Array.isArray(productionHandlerBoundary.blockers)
       ? productionHandlerBoundary.blockers
       : [];
-    const expectedHandlerBoundaryBlockers = [
-      'production-magnetar-handler-not-implemented',
-      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
-      'full-physics-validation-not-run'
-    ];
-    if (!arraysEqual(handlerBoundaryBlockers, expectedHandlerBoundaryBlockers)) {
+    if (!arraysEqual(handlerBoundaryBlockers, expectedProductionHandlerBlockers)) {
       throw new Error(
         `Eshkol staged production handler boundary blockers changed: ${handlerBoundaryBlockers.join(', ') || 'none'}`
       );

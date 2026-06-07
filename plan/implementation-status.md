@@ -541,6 +541,15 @@ Updated: 2026-06-06 15:22:17 AKDT
   `handler:declared-not-executed:3-blockers`; `npm run status:live -- --bridge`
   prints the exact blocker list, expected entry args, stdout hash, output tensor
   production flag, and production validation flags.
+- Integrated Eshkol host-import contract sidecar commit `b025f5d` into ULG
+  staging, summaries, UI, and live status. ULG now requires the production
+  boundary to declare `runtimeScope = deterministic-runtime-smoke-stubs`,
+  `implementationStatus = smoke-stubs-not-production`, production candidate
+  status `requirements-declared-not-implemented`,
+  `runtimeSmokeStubsAllowed = false`, f64 tensor-memory imports, `23` required
+  non-stub imports, and readiness requirements for production handler
+  implementation, non-stub imports, validated tensor memory imports, and full
+  physics validation.
 
 ## In Progress
 

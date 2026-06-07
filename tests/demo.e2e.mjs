@@ -29,6 +29,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await page.waitForTimeout(1200);
   await expect(page.getByText(/tensor-probe:runtime-smoke-passed:offsets-consumed:64b/)).toBeVisible();
   await expect(page.getByText(/handler:declared-not-executed:3-blockers/)).toBeVisible();
+  await expect(page.getByText(/prod-host:requirements-declared-not-implemented:23-imports/)).toBeVisible();
 
   const desktopPixels = await sampledCanvasPixels(page);
   expect(desktopPixels.nonBlank).toBeGreaterThan(80);
@@ -253,8 +254,29 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(productionHandlerBoundary.hostImports).toMatchObject({
       source: 'bundle.hostImports',
       required: true,
-      factory: 'createEshkolHostImportObject'
+      factory: 'createEshkolHostImportObject',
+      runtimeScope: 'deterministic-runtime-smoke-stubs',
+      implementationStatus: 'smoke-stubs-not-production'
     });
+    expect(productionHandlerBoundary.hostImports.productionCandidate).toMatchObject({
+      schema: 'eshkol.ulg.production-host-import-candidate.v0',
+      status: 'requirements-declared-not-implemented',
+      productionRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
+      runtimeSmokeStubsAllowed: false,
+      tensorMemoryImports: ['ulg_read_f64', 'ulg_write_f64']
+    });
+    expect(productionHandlerBoundary.hostImports.productionCandidate.requiredNonStubImports.length).toBe(23);
+    expect(productionHandlerBoundary.hostImports.productionCandidate.readinessRequires).toEqual([
+      'production-magnetar-handler-implementation',
+      'non-stub-host-runtime-imports',
+      'validated-f64-tensor-memory-imports',
+      'full-physics-validation-pass'
+    ]);
+    expect(productionHandlerBoundary.hostImports.productionCandidate.blockedBy).toEqual([
+      'production-magnetar-handler-not-implemented',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
+      'full-physics-validation-not-run'
+    ]);
     expect(productionHandlerBoundary.allowedExecutionClaims).toContain('deterministic-tensor-runtime-smoke-only');
     expect(productionHandlerBoundary.blockers).toEqual([
       'production-magnetar-handler-not-implemented',
@@ -384,6 +406,22 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'full-physics-validation-not-run'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerTensorMemoryBinding.status).toBe('entry-export-runtime-smoke-passed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsRuntimeScope).toBe('deterministic-runtime-smoke-stubs');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsImplementationStatus).toBe('smoke-stubs-not-production');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateStatus).toBe('requirements-declared-not-implemented');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateRuntimeSmokeStubsAllowed).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateRequiredNonStubImports.length).toBe(23);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateReadinessRequires).toEqual([
+      'production-magnetar-handler-implementation',
+      'non-stub-host-runtime-imports',
+      'validated-f64-tensor-memory-imports',
+      'full-physics-validation-pass'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateBlockedBy).toEqual([
+      'production-magnetar-handler-not-implemented',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
+      'full-physics-validation-not-run'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');

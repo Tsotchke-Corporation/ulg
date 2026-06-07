@@ -130,7 +130,21 @@ try {
         productionHandlerBoundaryBlockers:
           eshkol?.closureProductionHandlerBoundaryBlockers ?? [],
         productionHandlerAllowedExecutionClaims:
-          eshkol?.closureProductionHandlerAllowedExecutionClaims ?? []
+          eshkol?.closureProductionHandlerAllowedExecutionClaims ?? [],
+        productionHostImportsRuntimeScope:
+          eshkol?.closureProductionHostImportsRuntimeScope ?? null,
+        productionHostImportsImplementationStatus:
+          eshkol?.closureProductionHostImportsImplementationStatus ?? null,
+        productionHostImportCandidateStatus:
+          eshkol?.closureProductionHostImportCandidateStatus ?? null,
+        productionHostImportCandidateRuntimeSmokeStubsAllowed:
+          eshkol?.closureProductionHostImportCandidateRuntimeSmokeStubsAllowed ?? null,
+        productionHostImportCandidateRequiredNonStubImportCount:
+          eshkol?.closureProductionHostImportCandidateRequiredNonStubImports?.length ?? null,
+        productionHostImportCandidateReadinessRequires:
+          eshkol?.closureProductionHostImportCandidateReadinessRequires ?? [],
+        productionHostImportCandidateBlockedBy:
+          eshkol?.closureProductionHostImportCandidateBlockedBy ?? []
       },
       bridge: bridgeRequested ? {
         ack: bridgeAck,

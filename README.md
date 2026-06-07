@@ -110,4 +110,9 @@ The production handler still declares
 `production-magnetar-handler-not-implemented`,
 `host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
 `full-physics-validation-not-run`, so this advances runtime ABI evidence without
-claiming a full-fidelity or scientifically validated magnetar simulation.
+claiming a full-fidelity or scientifically validated magnetar simulation. The
+boundary also exposes a production-host-import candidate contract:
+`runtimeSmokeStubsAllowed: false`, `23` required non-stub runtime imports, f64
+tensor-memory imports `ulg_read_f64`/`ulg_write_f64`, and readiness requirements
+for a production handler implementation, non-stub host imports, validated tensor
+memory imports, and full physics validation.

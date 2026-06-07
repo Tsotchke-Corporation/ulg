@@ -341,6 +341,12 @@ function renderArtifactSummaryLine(summary) {
       ? summary.closureProductionHandlerBoundaryBlockers.length
       : 0;
     parts.push(`handler:declared-not-executed:${blockerCount}-blockers`);
+    if (summary.closureProductionHostImportCandidateStatus) {
+      const nonStubImportCount = Array.isArray(summary.closureProductionHostImportCandidateRequiredNonStubImports)
+        ? summary.closureProductionHostImportCandidateRequiredNonStubImports.length
+        : 0;
+      parts.push(`prod-host:${summary.closureProductionHostImportCandidateStatus}:${nonStubImportCount}-imports`);
+    }
   } else if (summary.closureProductionHandlerBoundarySchema) {
     parts.push(`handler:${summary.closureProductionHandlerBoundaryStatus || 'not-ready'}`);
   }

@@ -74,21 +74,12 @@ physics work:
 - [x] Surface Eshkol's production-host-import candidate requirements through
   ULG staging guards, summaries, visible artifact rows, and live status while
   keeping smoke stubs explicitly non-production.
-- [x] Surface MoonLab's optional `moonlab.webgpu.complex64-parity-scope.v0` and
-  declared `compute_probabilities` browser-kernel probe through ULG staging,
-  summaries, UI, and handoffs while preserving no-backend/no-execution flags.
-- [x] Surface MoonLab's browser WebGPU backend preflight through ULG staging,
-  summaries, visible artifact rows, e2e coverage, and live status while
-  preserving `navigator-gpu-unavailable`, no-adapter, and no-device evidence.
-- [x] Surface MoonLab's declared `hadamard` native WebGPU operation probe
-  through ULG staging, summaries, UI, handoffs, and live status while preserving
-  no-adapter/no-execution flags.
-- [x] Surface MoonLab's declared `pauli_x` native WebGPU operation probe through
-  ULG staging, summaries, UI, handoffs, and live status while preserving
-  no-adapter/no-execution flags.
-- [x] Surface MoonLab's declared `pauli_z` native WebGPU operation probe through
-  ULG staging, generic summaries, UI, handoffs, and live status while
-  preserving no-adapter/no-execution flags.
+- [x] Surface MoonLab's `moonlab.webgpu.complex64-parity-scope.v0` browser
+  evidence through ULG staging, core-probe validation, summaries, UI, handoffs,
+  and e2e coverage with `device-acquired`, executed/passing
+  `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot`
+  reduced probes, while preserving explicit no-full-physics/no-full-fidelity
+  flags.
 - [x] Generalize MoonLab native-operation summary rendering so future blocked
   operations flow through `operationResults[]` without new one-off UI fields.
 - [x] Add direct Multiscale launch status detail for scenario/readiness acks
@@ -248,19 +239,12 @@ physics work:
   PeerCompute handoff envelope, MoonLab normalized reference-suite hash, closure
   surface sample ids, and product-topology binding without claiming scientific
   validation.
-- [x] Add a reduced MoonLab WebGPU complex64 parity-scope artifact with an
-  explicit no-backend state and declared `compute_probabilities` browser-kernel
-  probe.
-- [x] Add a declared native WebGPU `hadamard` complex64 operation probe while
-  keeping coverage blocked until hardware execution evidence exists.
-- [x] Add a declared native WebGPU `pauli_x` complex64 operation probe while
-  keeping coverage blocked until hardware execution evidence exists.
-- [x] Add a declared native WebGPU `pauli_z` complex64 operation probe while
-  keeping coverage blocked until hardware execution evidence exists.
-- [x] Add a declared native WebGPU `cnot` complex64 operation probe while
-  keeping coverage blocked until hardware execution evidence exists.
-- [x] Add browser WebGPU backend preflight evidence so no-adapter/no-device
-  runtimes are recorded explicitly before operation probes remain blocked.
+- [x] Add a reduced MoonLab WebGPU complex64 parity-scope artifact with browser
+  backend-acquired evidence and executed/passing reduced
+  `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot` probes.
+- [ ] Update the PeerCompute receiver to accept MoonLab's successful reduced
+  browser WebGPU parity-scope evidence without treating it as a full-runtime or
+  full-physics claim.
 
 ### Tooling
 

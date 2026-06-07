@@ -166,102 +166,112 @@ function createCalibratedReferenceInventory() {
 function createMoonLabWebGpuParityScopeFixture() {
   return {
     schema: 'moonlab.webgpu.complex64-parity-scope.v0',
-    status: 'scope-ready-backend-unavailable',
+    status: 'scope-ready-backend-detected',
     contractReady: true,
     contractValidation: { valid: true },
     reducedFixtureOnly: true,
-    backendAvailable: false,
+    backendAvailable: true,
+    requireBackend: true,
     browserBackendPreflight: {
       schema: 'moonlab.webgpu.complex64-browser-backend-preflight.v0',
       probeKind: 'browser-webgpu-adapter-device-preflight',
-      runtime: 'node-test',
-      stage: 'navigator-gpu-unavailable',
-      navigatorGpuAvailable: false,
-      adapterAvailable: false,
-      deviceAcquired: false,
-      reason: 'browser WebGPU adapter unavailable'
+      runtime: 'browser-harness',
+      stage: 'device-acquired',
+      navigatorGpuAvailable: true,
+      adapterAvailable: true,
+      deviceAcquired: true,
+      reason: 'browser WebGPU adapter and device were acquired for reduced-fixture probe execution'
     },
     fullFidelityMagnetarSimulation: false,
     fullPhysicsValidation: false,
-    blockers: [
-      'browser-webgpu-adapter-unavailable',
-      'native-webgpu-operation-coverage-not-yet-recorded',
-      'browser-webgpu-kernel-parity-not-executed'
-    ],
+    blockers: [],
     webgpuParity: {
-      executed: false,
-      passed: false,
-      maxProbabilityAbsDiff: null,
+      executed: true,
+      passed: true,
+      maxProbabilityAbsDiff: 0,
       tolerance: 0.00001,
-      reason: 'browser WebGPU adapter unavailable'
+      reason: 'browser WebGPU probes covered all required reduced complex64 operations within tolerance; full runtime backend and full physics validation remain out of scope'
     },
     browserKernelProbe: {
       schema: 'moonlab.webgpu.complex64-probability-kernel-probe.v0',
       probeKind: 'browser-webgpu-complex64-probability-kernel',
       kernel: 'compute_probabilities',
-      executed: false,
-      passed: false,
-      coveredNativeOperations: [],
-      fixtureResults: [],
-      maxProbabilityAbsDiff: null,
+      executed: true,
+      passed: true,
+      coveredNativeOperations: ['compute_probabilities'],
+      fixtureResults: [{ fixtureId: 'bell-2q-hadamard-cnot-probabilities', passed: true, maxProbabilityAbsDiff: 0 }],
+      maxProbabilityAbsDiff: 0,
       tolerance: 0.00001,
-      reason: 'browser WebGPU adapter unavailable'
+      reason: 'browser WebGPU compute_probabilities kernel matched reduced complex64 fixture probabilities'
     },
     browserNativeOperationProbe: {
       schema: 'moonlab.webgpu.complex64-native-operation-probe.v0',
       probeKind: 'browser-webgpu-complex64-native-operation-probe',
-      executed: false,
-      passed: false,
-      coveredNativeOperations: [],
+      executed: true,
+      passed: true,
+      coveredNativeOperations: ['hadamard', 'pauli_x', 'pauli_z', 'cnot'],
       operationResults: [
         {
           operation: 'hadamard',
-          executed: false,
-          passed: false,
-          covered: false,
-          fixtureResults: [],
-          maxAmplitudeAbsDiff: null,
+          executed: true,
+          passed: true,
+          covered: true,
+          fixtureResults: [{ fixtureId: 'hadamard-1q-zero-state-amplitudes', passed: true }],
+          maxAmplitudeAbsDiff: 2.9802322387695312e-8,
           tolerance: 0.00001,
-          blocker: 'native-operation-probe-not-executed',
-          reason: 'browser WebGPU adapter unavailable'
+          reason: 'browser WebGPU native hadamard operation kernel matched reduced complex64 fixture amplitudes'
         },
         {
           operation: 'pauli_x',
-          executed: false,
-          passed: false,
-          covered: false,
-          fixtureResults: [],
-          maxAmplitudeAbsDiff: null,
+          executed: true,
+          passed: true,
+          covered: true,
+          fixtureResults: [{ fixtureId: 'pauli-x-1q-zero-state-amplitudes', passed: true }],
+          maxAmplitudeAbsDiff: 0,
           tolerance: 0.00001,
-          blocker: 'native-operation-probe-not-executed',
-          reason: 'browser WebGPU adapter unavailable'
+          reason: 'browser WebGPU native pauli_x operation kernel matched reduced complex64 fixture amplitudes'
         },
         {
           operation: 'pauli_z',
-          executed: false,
-          passed: false,
-          covered: false,
-          fixtureResults: [],
-          maxAmplitudeAbsDiff: null,
+          executed: true,
+          passed: true,
+          covered: true,
+          fixtureResults: [{ fixtureId: 'pauli-z-1q-one-state-amplitudes', passed: true }],
+          maxAmplitudeAbsDiff: 0,
           tolerance: 0.00001,
-          blocker: 'native-operation-probe-not-executed',
-          reason: 'browser WebGPU adapter unavailable'
+          reason: 'browser WebGPU native pauli_z operation kernel matched reduced complex64 fixture amplitudes'
         },
         {
           operation: 'cnot',
-          executed: false,
-          passed: false,
-          covered: false,
-          fixtureResults: [],
-          maxAmplitudeAbsDiff: null,
+          executed: true,
+          passed: true,
+          covered: true,
+          fixtureResults: [{ fixtureId: 'cnot-2q-bell-basis-amplitudes', passed: true }],
+          maxAmplitudeAbsDiff: 0,
           tolerance: 0.00001,
-          blocker: 'native-operation-probe-not-executed',
-          reason: 'browser WebGPU adapter unavailable'
+          reason: 'browser WebGPU native cnot operation kernel matched reduced complex64 fixture amplitudes'
         }
       ],
-      maxAmplitudeAbsDiff: null,
+      maxAmplitudeAbsDiff: 2.9802322387695312e-8,
       tolerance: 0.00001,
-      reason: 'browser WebGPU adapter unavailable'
+      reason: 'browser WebGPU native operation kernels matched reduced complex64 fixture amplitudes'
+    },
+    coverage: {
+      nativeWebGpu: [
+        { operation: 'hadamard', covered: true, required: true, fallbackAllowed: false, status: 'covered-by-browser-webgpu' },
+        { operation: 'pauli_x', covered: true, required: true, fallbackAllowed: false, status: 'covered-by-browser-webgpu' },
+        { operation: 'pauli_z', covered: true, required: true, fallbackAllowed: false, status: 'covered-by-browser-webgpu' },
+        { operation: 'cnot', covered: true, required: true, fallbackAllowed: false, status: 'covered-by-browser-webgpu' },
+        { operation: 'compute_probabilities', covered: true, required: true, fallbackAllowed: false, status: 'covered-by-browser-webgpu' }
+      ],
+      cpuFallbackExcluded: [
+        {
+          operation: 'phase',
+          fallbackAllowed: true,
+          excludedFromNativeCoverage: true,
+          status: 'cpu-fallback-excluded-from-native-parity'
+        }
+      ]
     },
     complex64Preflight: {
       mode: 'cpu-complex64-rounding-preflight',
@@ -1046,53 +1056,53 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.unsupportedParityModeCount, 1);
   assert.deepEqual(summary.unsupportedParityModes, ['moonlab-webgpu']);
   assert.equal(summary.moonlabWebGpuParityScopeSchema, 'moonlab.webgpu.complex64-parity-scope.v0');
-  assert.equal(summary.moonlabWebGpuParityScopeStatus, 'scope-ready-backend-unavailable');
+  assert.equal(summary.moonlabWebGpuParityScopeStatus, 'scope-ready-backend-detected');
   assert.equal(summary.moonlabWebGpuParityScopeReady, true);
   assert.equal(summary.moonlabWebGpuParityScopeContractReady, true);
   assert.equal(summary.moonlabWebGpuParityScopeReducedFixtureOnly, true);
-  assert.equal(summary.moonlabWebGpuParityScopeBackendAvailable, false);
+  assert.equal(summary.moonlabWebGpuParityScopeBackendAvailable, true);
   assert.equal(summary.moonlabWebGpuBrowserBackendPreflightSchema, 'moonlab.webgpu.complex64-browser-backend-preflight.v0');
   assert.equal(summary.moonlabWebGpuBrowserBackendPreflightDeclared, true);
   assert.equal(summary.moonlabWebGpuBrowserBackendPreflightProbeKind, 'browser-webgpu-adapter-device-preflight');
-  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightRuntime, 'node-test');
-  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightStage, 'navigator-gpu-unavailable');
-  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightNavigatorGpuAvailable, false);
-  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightAdapterAvailable, false);
-  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightDeviceAcquired, false);
-  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightReason, 'browser WebGPU adapter unavailable');
-  assert.equal(summary.moonlabWebGpuParityExecuted, false);
-  assert.equal(summary.moonlabWebGpuParityPassed, false);
-  assert.equal(summary.moonlabWebGpuParityMaxProbabilityAbsDiff, null);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightRuntime, 'browser-harness');
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightStage, 'device-acquired');
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightNavigatorGpuAvailable, true);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightAdapterAvailable, true);
+  assert.equal(summary.moonlabWebGpuBrowserBackendPreflightDeviceAcquired, true);
+  assert.match(summary.moonlabWebGpuBrowserBackendPreflightReason, /adapter and device were acquired/);
+  assert.equal(summary.moonlabWebGpuParityExecuted, true);
+  assert.equal(summary.moonlabWebGpuParityPassed, true);
+  assert.equal(summary.moonlabWebGpuParityMaxProbabilityAbsDiff, 0);
   assert.equal(summary.moonlabWebGpuParityTolerance, 0.00001);
   assert.equal(summary.moonlabWebGpuProbabilityKernelProbeSchema, 'moonlab.webgpu.complex64-probability-kernel-probe.v0');
   assert.equal(summary.moonlabWebGpuProbabilityKernelProbeDeclared, true);
   assert.equal(summary.moonlabWebGpuProbabilityKernelProbeKind, 'browser-webgpu-complex64-probability-kernel');
   assert.equal(summary.moonlabWebGpuProbabilityKernel, 'compute_probabilities');
-  assert.equal(summary.moonlabWebGpuProbabilityKernelExecuted, false);
-  assert.equal(summary.moonlabWebGpuProbabilityKernelPassed, false);
-  assert.deepEqual(summary.moonlabWebGpuProbabilityKernelCoveredNativeOperations, []);
-  assert.equal(summary.moonlabWebGpuProbabilityKernelMaxProbabilityAbsDiff, null);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelExecuted, true);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelPassed, true);
+  assert.deepEqual(summary.moonlabWebGpuProbabilityKernelCoveredNativeOperations, ['compute_probabilities']);
+  assert.equal(summary.moonlabWebGpuProbabilityKernelMaxProbabilityAbsDiff, 0);
   assert.equal(summary.moonlabWebGpuProbabilityKernelTolerance, 0.00001);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeSchema, 'moonlab.webgpu.complex64-native-operation-probe.v0');
   assert.equal(summary.moonlabWebGpuNativeOperationProbeDeclared, true);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeKind, 'browser-webgpu-complex64-native-operation-probe');
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeExecuted, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbePassed, false);
-  assert.deepEqual(summary.moonlabWebGpuNativeOperationCoveredOperations, []);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeExecuted, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbePassed, true);
+  assert.deepEqual(summary.moonlabWebGpuNativeOperationCoveredOperations, [
+    'hadamard',
+    'pauli_x',
+    'pauli_z',
+    'cnot'
+  ]);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationCount, 4);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeCoveredOperationCount, 0);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeCoveredOperationCount, 4);
   assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeDeclaredOperations, [
     'hadamard',
     'pauli_x',
     'pauli_z',
     'cnot'
   ]);
-  assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeBlockedOperations, [
-    'hadamard',
-    'pauli_x',
-    'pauli_z',
-    'cnot'
-  ]);
+  assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeBlockedOperations, []);
   assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeTargetOperations, [
     'hadamard',
     'pauli_x',
@@ -1101,46 +1111,42 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   ]);
   assert.deepEqual(summary.moonlabWebGpuNativeOperationProbeMissingTargetOperations, []);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].operation, 'hadamard');
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].executed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].passed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].covered, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].blocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].executed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].passed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].covered, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[0].blocker, null);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].operation, 'pauli_x');
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].executed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].passed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].covered, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].blocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].executed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].passed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].covered, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[1].blocker, null);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].operation, 'pauli_z');
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].executed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].passed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].covered, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].blocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].executed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].passed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].covered, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[2].blocker, null);
   assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].operation, 'cnot');
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].executed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].passed, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].covered, false);
-  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].blocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].executed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].passed, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].covered, true);
+  assert.equal(summary.moonlabWebGpuNativeOperationProbeOperationResults[3].blocker, null);
   assert.equal(summary.moonlabWebGpuHadamardNativeOperationDeclared, true);
-  assert.equal(summary.moonlabWebGpuHadamardNativeOperationExecuted, false);
-  assert.equal(summary.moonlabWebGpuHadamardNativeOperationPassed, false);
-  assert.equal(summary.moonlabWebGpuHadamardNativeOperationCovered, false);
-  assert.equal(summary.moonlabWebGpuHadamardNativeOperationBlocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuHadamardNativeOperationExecuted, true);
+  assert.equal(summary.moonlabWebGpuHadamardNativeOperationPassed, true);
+  assert.equal(summary.moonlabWebGpuHadamardNativeOperationCovered, true);
+  assert.equal(summary.moonlabWebGpuHadamardNativeOperationBlocker, null);
   assert.equal(summary.moonlabWebGpuPauliXNativeOperationDeclared, true);
-  assert.equal(summary.moonlabWebGpuPauliXNativeOperationExecuted, false);
-  assert.equal(summary.moonlabWebGpuPauliXNativeOperationPassed, false);
-  assert.equal(summary.moonlabWebGpuPauliXNativeOperationCovered, false);
-  assert.equal(summary.moonlabWebGpuPauliXNativeOperationBlocker, 'native-operation-probe-not-executed');
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationExecuted, true);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationPassed, true);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationCovered, true);
+  assert.equal(summary.moonlabWebGpuPauliXNativeOperationBlocker, null);
   assert.equal(summary.moonlabComplex64PreflightPassed, true);
   assert.equal(summary.moonlabComplex64PreflightMaxProbabilityAbsDiff, 2.980232227667301e-8);
   assert.equal(summary.moonlabComplex64PreflightTolerance, 0.00001);
   assert.equal(summary.moonlabWebGpuParityScopeFullFidelityMagnetarSimulation, false);
   assert.equal(summary.moonlabWebGpuParityScopeFullPhysicsValidation, false);
   assert.equal(summary.moonlabWebGpuParityScopeFidelityRuntimeScope.runtimeScope, 'browser-webgpu-complex64-reduced-fixture-parity');
-  assert.deepEqual(summary.moonlabWebGpuParityScopeBlockers, [
-    'browser-webgpu-adapter-unavailable',
-    'native-webgpu-operation-coverage-not-yet-recorded',
-    'browser-webgpu-kernel-parity-not-executed'
-  ]);
+  assert.deepEqual(summary.moonlabWebGpuParityScopeBlockers, []);
   assert.equal(summary.calibrationArtifactCount, 1);
   assert.equal(summary.calibrationReadyCount, 1);
   assert.equal(summary.outputReferenceCount, 5);

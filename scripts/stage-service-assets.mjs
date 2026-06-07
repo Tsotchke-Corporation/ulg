@@ -40,6 +40,10 @@ const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'pauli_z',
   'cnot'
 ]);
+const MOONLAB_WEBGPU_COMPLEX64_REQUIRED_COVERAGE = Object.freeze([
+  ...MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS,
+  'compute_probabilities'
+]);
 
 function valueFor(name) {
   const index = args.indexOf(name);
@@ -153,8 +157,10 @@ function stageMoonLabWebGpuParityScope() {
   const target = moonlabWebGpuParityScopeTarget;
   const command = [
     'pnpm',
-    'webgpu:complex64:parity',
+    'webgpu:complex64:browser-smoke',
     '--',
+    '--require-backend',
+    '--canonical',
     '--out',
     target
   ];
@@ -183,7 +189,8 @@ function stageMoonLabWebGpuParityScope() {
     if (artifact.contractReady !== true || artifact.contractValidation?.valid !== true) {
       throw new Error('MoonLab WebGPU parity scope contract did not validate');
     }
-    if (artifact.reducedFixtureOnly !== true
+    if (artifact.status !== 'scope-ready-backend-detected'
+      || artifact.reducedFixtureOnly !== true
       || artifact.fullFidelityMagnetarSimulation !== false
       || artifact.fullPhysicsValidation !== false) {
       throw new Error('MoonLab WebGPU parity scope overstates fidelity or physics validation');
@@ -193,31 +200,40 @@ function stageMoonLabWebGpuParityScope() {
       || artifact.fidelityRuntimeScope.fullPhysicsValidation !== false) {
       throw new Error('MoonLab WebGPU parity scope is missing reduced fidelity/runtime scope metadata');
     }
-    if (artifact.backendAvailable !== false
-      || artifact.webgpuParity?.executed !== false
-      || artifact.webgpuParity?.passed !== false) {
-      throw new Error('MoonLab WebGPU parity scope must remain no-backend evidence in ULG staging');
+    if (artifact.backendAvailable !== true
+      || artifact.requireBackend !== true
+      || artifact.webgpuParity?.executed !== true
+      || artifact.webgpuParity?.passed !== true
+      || !(Number(artifact.webgpuParity?.maxProbabilityAbsDiff) <= Number(artifact.webgpuParity?.tolerance))) {
+      throw new Error('MoonLab WebGPU parity scope must carry executed browser WebGPU evidence in ULG staging');
     }
     const backendPreflight = artifact.browserBackendPreflight;
     if (backendPreflight?.schema !== MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA
       || backendPreflight.probeKind !== 'browser-webgpu-adapter-device-preflight'
-      || backendPreflight.stage !== 'navigator-gpu-unavailable'
-      || backendPreflight.navigatorGpuAvailable !== false
-      || backendPreflight.adapterAvailable !== false
-      || backendPreflight.deviceAcquired !== false
+      || backendPreflight.stage !== 'device-acquired'
+      || backendPreflight.navigatorGpuAvailable !== true
+      || backendPreflight.adapterAvailable !== true
+      || backendPreflight.deviceAcquired !== true
       || typeof backendPreflight.reason !== 'string'
       || backendPreflight.reason.length === 0) {
-      throw new Error('MoonLab WebGPU parity scope is missing no-adapter backend preflight evidence');
+      throw new Error('MoonLab WebGPU parity scope is missing device-acquired backend preflight evidence');
     }
     const blockers = Array.isArray(artifact.blockers) ? artifact.blockers : [];
-    if (!blockers.includes('browser-webgpu-kernel-parity-not-executed')) {
-      throw new Error('MoonLab WebGPU parity scope is missing the native kernel parity blocker');
-    }
-    if (!blockers.includes('native-webgpu-operation-coverage-not-yet-recorded')) {
-      throw new Error('MoonLab WebGPU parity scope is missing the native operation coverage blocker');
+    if (blockers.length !== 0) {
+      throw new Error(`MoonLab WebGPU parity scope still has blockers: ${blockers.join(', ')}`);
     }
     if (artifact.complex64Preflight?.passed !== true) {
       throw new Error('MoonLab WebGPU parity scope complex64 preflight did not pass');
+    }
+    const coverage = Array.isArray(artifact.coverage?.nativeWebGpu) ? artifact.coverage.nativeWebGpu : [];
+    for (const operation of MOONLAB_WEBGPU_COMPLEX64_REQUIRED_COVERAGE) {
+      const result = coverage.find((entry) => entry?.operation === operation);
+      if (result?.covered !== true
+        || result.required !== true
+        || result.fallbackAllowed !== false
+        || result.status !== 'covered-by-browser-webgpu') {
+        throw new Error(`MoonLab WebGPU parity scope did not cover ${operation} through browser WebGPU`);
+      }
     }
     const browserKernelProbe = artifact.browserKernelProbe;
     if (browserKernelProbe?.schema !== 'moonlab.webgpu.complex64-probability-kernel-probe.v0'
@@ -225,24 +241,24 @@ function stageMoonLabWebGpuParityScope() {
       || browserKernelProbe.kernel !== 'compute_probabilities') {
       throw new Error('MoonLab WebGPU parity scope is missing the browser probability-kernel probe');
     }
-    if (browserKernelProbe.executed !== false
-      || browserKernelProbe.passed !== false
-      || browserKernelProbe.maxProbabilityAbsDiff !== null
+    if (browserKernelProbe.executed !== true
+      || browserKernelProbe.passed !== true
+      || !(Number(browserKernelProbe.maxProbabilityAbsDiff) <= Number(browserKernelProbe.tolerance))
       || !Array.isArray(browserKernelProbe.coveredNativeOperations)
-      || browserKernelProbe.coveredNativeOperations.length !== 0) {
-      throw new Error('MoonLab browser WebGPU kernel probe must remain declared but unexecuted in ULG staging');
+      || !browserKernelProbe.coveredNativeOperations.includes('compute_probabilities')) {
+      throw new Error('MoonLab browser WebGPU probability-kernel probe did not execute and cover compute_probabilities');
     }
     const browserNativeOperationProbe = artifact.browserNativeOperationProbe;
     if (browserNativeOperationProbe?.schema !== 'moonlab.webgpu.complex64-native-operation-probe.v0'
       || browserNativeOperationProbe.probeKind !== 'browser-webgpu-complex64-native-operation-probe') {
       throw new Error('MoonLab WebGPU parity scope is missing the browser native-operation probe');
     }
-    if (browserNativeOperationProbe.executed !== false
-      || browserNativeOperationProbe.passed !== false
-      || browserNativeOperationProbe.maxAmplitudeAbsDiff !== null
+    if (browserNativeOperationProbe.executed !== true
+      || browserNativeOperationProbe.passed !== true
+      || !(Number(browserNativeOperationProbe.maxAmplitudeAbsDiff) <= Number(browserNativeOperationProbe.tolerance))
       || !Array.isArray(browserNativeOperationProbe.coveredNativeOperations)
-      || browserNativeOperationProbe.coveredNativeOperations.length !== 0) {
-      throw new Error('MoonLab browser WebGPU native-operation probe must remain declared but unexecuted in ULG staging');
+      || !arraysEqual(browserNativeOperationProbe.coveredNativeOperations, MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS)) {
+      throw new Error('MoonLab browser WebGPU native-operation probe did not execute all required native operations');
     }
     const nativeOperationResults = Array.isArray(browserNativeOperationProbe.operationResults)
       ? browserNativeOperationProbe.operationResults
@@ -255,19 +271,18 @@ function stageMoonLabWebGpuParityScope() {
     }
     for (const result of nativeOperationResults) {
       const operation = String(result?.operation || 'unknown-operation');
-      if (result.blocker !== 'native-operation-probe-not-executed'
-        || result.covered !== false
-        || result.executed !== false
-        || result.passed !== false
-        || result.maxAmplitudeAbsDiff !== null) {
-        throw new Error(`MoonLab ${operation} native-operation probe must remain unexecuted and uncovered in ULG staging`);
+      if (result.covered !== true
+        || result.executed !== true
+        || result.passed !== true
+        || !(Number(result.maxAmplitudeAbsDiff) <= Number(result.tolerance))) {
+        throw new Error(`MoonLab ${operation} native-operation probe did not execute within tolerance in ULG staging`);
       }
     }
   }
 
   return {
     label: 'MoonLab WebGPU complex64 parity scope',
-    source: path.join(moonlabCoreRoot, 'scripts', 'webgpu-complex64-parity.mjs'),
+    source: path.join(moonlabCoreRoot, 'scripts', 'webgpu-complex64-browser-smoke.mjs'),
     target,
     command,
     contentHash: dryRun ? null : sha256File(target),

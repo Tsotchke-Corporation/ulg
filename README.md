@@ -14,7 +14,7 @@ This repo currently implements the first executable slice:
 - browser-facing service asset probes for real MoonLab/Eshkol readiness;
 - a supervised MoonLab WASM Bell-state probe with deterministic response/parity metadata and a magnetar dipole Ising calibration sub-artifact when copied core artifacts are available;
 - a staged Eshkol magnetar closure descriptor fixture with explicit tensor-runtime and production-handler boundary metadata for Demo A handoff wiring;
-- an optional MoonLab WebGPU complex64 parity-scope handoff artifact that records the current no-backend/probe-only state without claiming browser parity execution;
+- an optional MoonLab WebGPU complex64 parity-scope handoff artifact with reduced browser kernel evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -80,13 +80,12 @@ without fetching the full artifact body. The staged suite contains reduced scala
 tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, or
 magnetar scientific simulation. The optional
 `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
-currently records MoonLab's declared browser WebGPU `compute_probabilities`
-probe plus a browser backend preflight record. In the current headless/VPN
-runtime that preflight records `navigator-gpu-unavailable` with no adapter or
-device acquired. The artifact also declares native `hadamard`, `pauli_x`,
-`pauli_z`, and `cnot` operation probes, but preserves `executed: false`,
-`passed: false`, empty native operation coverage, and blockers until the WebGPU
-kernels are actually covered.
+records MoonLab's reduced browser WebGPU complex64 evidence. ULG staging now
+requires `browserBackendPreflight.stage = device-acquired`, executed/passing
+`compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot` probes,
+browser-native coverage for those five reduced operations, zero parity-scope
+blockers, and explicit `fullFidelityMagnetarSimulation = false` /
+`fullPhysicsValidation = false` flags.
 
 For Eshkol, the default staged bundle is
 `public/service-assets/eshkol/closures/magnetar-closure/`. It packages

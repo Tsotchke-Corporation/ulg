@@ -17,16 +17,20 @@ test('service asset staging canonicalizes the MoonLab normalized reference suite
   const normalizeIndex = source.indexOf("'--normalize-references'");
   const canonicalIndex = source.indexOf("'--canonical'", normalizeIndex);
   const strictIndex = source.indexOf("'--strict'", normalizeIndex);
-  const webGpuParityIndex = source.indexOf("'webgpu:complex64:parity'");
+  const webGpuParityIndex = source.indexOf("'webgpu:complex64:browser-smoke'");
+  const requireBackendIndex = source.indexOf("'--require-backend'", webGpuParityIndex);
   const paritySchemaIndex = source.indexOf('moonlab.webgpu.complex64-parity-scope.v0');
-  const noBackendIndex = source.indexOf('MoonLab WebGPU parity scope must remain no-backend evidence');
+  const executedEvidenceIndex = source.indexOf('MoonLab WebGPU parity scope must carry executed browser WebGPU evidence');
+  const deviceAcquiredIndex = source.indexOf("'device-acquired'", executedEvidenceIndex);
 
   assert.ok(normalizeIndex > 0);
   assert.ok(canonicalIndex > normalizeIndex);
   assert.ok(strictIndex > canonicalIndex);
   assert.ok(webGpuParityIndex > 0);
-  assert.ok(paritySchemaIndex > webGpuParityIndex);
-  assert.ok(noBackendIndex > paritySchemaIndex);
+  assert.ok(requireBackendIndex > webGpuParityIndex);
+  assert.ok(paritySchemaIndex > requireBackendIndex);
+  assert.ok(executedEvidenceIndex > paritySchemaIndex);
+  assert.ok(deviceAcquiredIndex > executedEvidenceIndex);
 });
 
 test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {

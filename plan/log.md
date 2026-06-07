@@ -4434,3 +4434,85 @@ Failures / open questions:
 - The failed ULG-relative PeerCompute prefix command was rerun with the correct
   absolute PeerCompute demo path and did not change files.
 - No push was attempted.
+
+## 2026-06-06 17:05:52 AKDT - MoonLab Browser WebGPU Evidence ULG Integration
+
+Prompt: User asked to keep making progress, then clarified that the work should
+not pivot from the core technology merely to support an SPH demo. Continue the
+ULG implementation plan, keep commits local only, preserve live Vite servers on
+`0.0.0.0`, and treat SPH as an evidence slice rather than the core objective.
+
+Changes:
+
+- Updated ULG staging to use MoonLab's browser WebGPU smoke harness
+  (`webgpu:complex64:browser-smoke -- --require-backend --canonical`) for
+  `public/service-assets/moonlab/webgpu-complex64-parity-scope.json`.
+- Updated `public/workers/moonlab-core-probe.worker.js` to validate
+  `scope-ready-backend-detected`, `device-acquired`, executed/passing
+  `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot`
+  reduced browser probes, full reduced coverage, zero blockers, and explicit
+  no-full-fidelity/no-full-physics flags.
+- Updated `src/runtime/artifactSummary.js` to summarize successful reduced
+  browser WebGPU evidence and require those executed probes before setting
+  `moonlabWebGpuParityScopeReady = true`.
+- Updated ULG orchestration/service-asset/browser e2e tests and current
+  README/plan/status/test notes to describe the successful reduced browser
+  evidence without claiming full MoonLab runtime or full magnetar physics.
+
+Files touched:
+
+- `README.md`
+- `public/workers/moonlab-core-probe.worker.js`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/service-assets.test.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `pnpm --dir /home/cos/projects/moonlab/bindings/javascript/packages/core webgpu:complex64:browser-smoke -- --require-backend --canonical --out /tmp/moonlab-webgpu-parity-browser.json`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/service-assets.test.mjs`
+- `npm run stage:service-assets -- --moonlab-only`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `node --check public/workers/moonlab-core-probe.worker.js`
+- Playwright live telemetry probe against `http://127.0.0.1:5173/`
+- `git diff --check`
+
+Validation:
+
+- PASS: MoonLab browser smoke artifact reported
+  `status = scope-ready-backend-detected`, `backendAvailable = true`,
+  `requireBackend = true`, preflight `stage = device-acquired`, executed/passed
+  WebGPU parity, zero blockers, kernel coverage for `compute_probabilities`,
+  native coverage for `hadamard`, `pauli_x`, `pauli_z`, and `cnot`, and
+  coverage entries for all five required reduced operations.
+- PASS: `npm run stage:service-assets -- --moonlab-only` copied MoonLab
+  JS/WASM, normalized MoonLab references, and generated the browser WebGPU
+  parity-scope asset.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: after fixing the core-probe validator, `npm run test:e2e` passed `1/1`.
+- PASS: live telemetry showed the visible MoonLab artifact row with
+  `webgpu:backend`, `webgpu-preflight:device-acquired`,
+  `wgsl:compute_probabilities-declared`, and covered native operation markers.
+- PASS: listeners remained bound to `0.0.0.0:5173` and `0.0.0.0:5185`.
+
+Failures / open questions:
+
+- First `npm run test:e2e` failed because the core-probe worker still rejected
+  successful browser WebGPU evidence as an overclaim. The validator was updated
+  to require the reduced successful evidence and explicit no-full-physics flags.
+- PeerCompute still needs receiver-side expectation updates for
+  `scope-ready-backend-detected`; otherwise it can treat MoonLab's successful
+  reduced browser evidence as an overclaim.
+- No push was attempted.

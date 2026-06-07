@@ -23,6 +23,19 @@ const MAGNETAR_DIPOLE_ISING_REFERENCE_CONTRACT_HASH = 'sha256:f85763af06f271c414
 const MAGNETOSPHERE_MHD_ANALYTIC_UNITS_HASH = 'sha256:b9ef2d46ec5f2d0c1fb8a2866012e9340a67f188ebc8a579b93ce61e72f4b4a5';
 const MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA = 'ulg.magnetar.fidelity-runtime-scope.v0';
 const MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA = 'moonlab.webgpu.complex64-parity-scope.v0';
+const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
+const MOONLAB_WEBGPU_PROBABILITY_KERNEL_PROBE_SCHEMA = 'moonlab.webgpu.complex64-probability-kernel-probe.v0';
+const MOONLAB_WEBGPU_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.webgpu.complex64-native-operation-probe.v0';
+const MOONLAB_WEBGPU_REQUIRED_NATIVE_OPERATIONS = Object.freeze([
+  'hadamard',
+  'pauli_x',
+  'pauli_z',
+  'cnot'
+]);
+const MOONLAB_WEBGPU_REQUIRED_COVERAGE = Object.freeze([
+  ...MOONLAB_WEBGPU_REQUIRED_NATIVE_OPERATIONS,
+  'compute_probabilities'
+]);
 const REDUCED_MAGNETAR_EXCLUDED_PHYSICS = Object.freeze([
   'charge-conserving-pic',
   'spectral-angular-radiation-transport',
@@ -968,19 +981,78 @@ function validateMoonLabWebGpuParityScope(artifact) {
   if (!webGpuParityFidelityRuntimeScopeReady(artifact.fidelityRuntimeScope)) {
     return { valid: false, reason: 'parity-scope artifact lacks reduced fidelity/runtime scope' };
   }
-  if (artifact.backendAvailable !== false
-    || artifact.webgpuParity?.executed !== false
-    || artifact.webgpuParity?.passed !== false) {
-    return { valid: false, reason: 'parity-scope artifact must remain no-backend evidence' };
+  if (artifact.status !== 'scope-ready-backend-detected'
+    || artifact.backendAvailable !== true
+    || artifact.requireBackend !== true
+    || artifact.webgpuParity?.executed !== true
+    || artifact.webgpuParity?.passed !== true
+    || !finiteWithinTolerance(artifact.webgpuParity?.maxProbabilityAbsDiff, artifact.webgpuParity?.tolerance)) {
+    return { valid: false, reason: 'parity-scope artifact lacks executed browser WebGPU evidence' };
+  }
+  const backendPreflight = artifact.browserBackendPreflight;
+  if (backendPreflight?.schema !== MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA
+    || backendPreflight.probeKind !== 'browser-webgpu-adapter-device-preflight'
+    || backendPreflight.stage !== 'device-acquired'
+    || backendPreflight.navigatorGpuAvailable !== true
+    || backendPreflight.adapterAvailable !== true
+    || backendPreflight.deviceAcquired !== true) {
+    return { valid: false, reason: 'parity-scope artifact lacks device-acquired backend preflight evidence' };
   }
   if (artifact.complex64Preflight?.executed !== true || artifact.complex64Preflight?.passed !== true) {
     return { valid: false, reason: 'parity-scope complex64 preflight did not pass' };
   }
   const blockers = Array.isArray(artifact.blockers) ? artifact.blockers : [];
-  if (!blockers.includes('browser-webgpu-kernel-parity-not-executed')) {
-    return { valid: false, reason: 'parity-scope artifact is missing native kernel parity blocker' };
+  if (blockers.length !== 0) {
+    return { valid: false, reason: 'parity-scope artifact still has blockers' };
+  }
+  const coverage = Array.isArray(artifact.coverage?.nativeWebGpu) ? artifact.coverage.nativeWebGpu : [];
+  for (const operation of MOONLAB_WEBGPU_REQUIRED_COVERAGE) {
+    const entry = coverage.find((item) => item?.operation === operation);
+    if (entry?.covered !== true
+      || entry.required !== true
+      || entry.fallbackAllowed !== false
+      || entry.status !== 'covered-by-browser-webgpu') {
+      return { valid: false, reason: `parity-scope artifact lacks browser WebGPU coverage for ${operation}` };
+    }
+  }
+  const kernelProbe = artifact.browserKernelProbe;
+  if (kernelProbe?.schema !== MOONLAB_WEBGPU_PROBABILITY_KERNEL_PROBE_SCHEMA
+    || kernelProbe.probeKind !== 'browser-webgpu-complex64-probability-kernel'
+    || kernelProbe.kernel !== 'compute_probabilities'
+    || kernelProbe.executed !== true
+    || kernelProbe.passed !== true
+    || !Array.isArray(kernelProbe.coveredNativeOperations)
+    || !kernelProbe.coveredNativeOperations.includes('compute_probabilities')
+    || !finiteWithinTolerance(kernelProbe.maxProbabilityAbsDiff, kernelProbe.tolerance)) {
+    return { valid: false, reason: 'parity-scope artifact lacks executed compute_probabilities probe evidence' };
+  }
+  const nativeProbe = artifact.browserNativeOperationProbe;
+  if (nativeProbe?.schema !== MOONLAB_WEBGPU_NATIVE_OPERATION_PROBE_SCHEMA
+    || nativeProbe.probeKind !== 'browser-webgpu-complex64-native-operation-probe'
+    || nativeProbe.executed !== true
+    || nativeProbe.passed !== true
+    || !Array.isArray(nativeProbe.coveredNativeOperations)
+    || !MOONLAB_WEBGPU_REQUIRED_NATIVE_OPERATIONS.every((operation) => nativeProbe.coveredNativeOperations.includes(operation))) {
+    return { valid: false, reason: 'parity-scope artifact lacks executed native-operation probe evidence' };
+  }
+  const operationResults = Array.isArray(nativeProbe.operationResults) ? nativeProbe.operationResults : [];
+  for (const operation of MOONLAB_WEBGPU_REQUIRED_NATIVE_OPERATIONS) {
+    const result = operationResults.find((entry) => entry?.operation === operation);
+    if (result?.executed !== true
+      || result.passed !== true
+      || result.covered !== true
+      || result.blocker != null
+      || !finiteWithinTolerance(result.maxAmplitudeAbsDiff, result.tolerance)) {
+      return { valid: false, reason: `parity-scope artifact lacks passing ${operation} native-operation evidence` };
+    }
   }
   return { valid: true, reason: null };
+}
+
+function finiteWithinTolerance(value, tolerance) {
+  const number = Number(value);
+  const limit = Number(tolerance);
+  return Number.isFinite(number) && Number.isFinite(limit) && number <= limit;
 }
 
 function webGpuParityFidelityRuntimeScopeReady(value) {

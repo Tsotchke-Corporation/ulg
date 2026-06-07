@@ -1198,6 +1198,35 @@ WebGPU backend preflight support.
   `npm --prefix /home/cos/projects/peercompute/demos/multiscale run test:ulg-handoff`
   passed with `magnetarVisible = true`, `magnetarLayer = solar`, bridge ack
   `handoff-ready`, and `simulationStatus = scientific-ready`.
+
+## 2026-06-06 MoonLab Browser WebGPU Evidence ULG Checks
+
+- ULG staging:
+  `npm run stage:service-assets -- --moonlab-only` passed and regenerated
+  `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` through
+  MoonLab's browser smoke harness with `--require-backend`.
+- Staged parity-scope gate:
+  the staged artifact reports schema
+  `moonlab.webgpu.complex64-parity-scope.v0`, status
+  `scope-ready-backend-detected`, `backendAvailable = true`,
+  `requireBackend = true`, `browserBackendPreflight.stage = device-acquired`,
+  `webgpuParity.executed = true`, `webgpuParity.passed = true`, zero blockers,
+  `compute_probabilities` browser-kernel coverage, and native operation
+  coverage for `hadamard`, `pauli_x`, `pauli_z`, and `cnot`.
+- ULG syntax/regression:
+  `node --check public/workers/moonlab-core-probe.worker.js`,
+  `node --check src/runtime/artifactSummary.js`, `npm test`, and
+  `npm run build` passed. Build retained the existing large-chunk warning.
+- ULG browser e2e:
+  first `npm run test:e2e` failed because the core-probe worker still rejected
+  `backendAvailable = true` / executed browser parity as an overclaim. After
+  updating that validator to require the successful reduced browser evidence
+  and explicit no-full-physics flags, `npm run test:e2e` passed `1/1`.
+- Live ULG runtime:
+  Playwright against `http://127.0.0.1:5173/` showed the MoonLab artifact row
+  containing `webgpu:backend`, `webgpu-preflight:device-acquired`,
+  `wgsl:compute_probabilities-declared`, and covered native operations for
+  `hadamard`, `pauli_x`, `pauli_z`, and `cnot`.
 - PeerCompute relay-dispatch handoff:
   `ULG_RELAY_HANDOFF_RUN_DISPATCH=1 ULG_RELAY_HANDOFF_REQUIRE_DISPATCH=1 npm --prefix /home/cos/projects/peercompute/demos/multiscale run test:ulg-relay-handoff`
   passed with relay peers connected, `dispatchAdapterStatus =

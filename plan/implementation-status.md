@@ -556,6 +556,14 @@ Updated: 2026-06-06 16:12:07 AKDT
   `moonlab.webgpu.complex64-browser-backend-preflight.v0` with
   `stage = navigator-gpu-unavailable`, `navigatorGpuAvailable = false`,
   `adapterAvailable = false`, and `deviceAcquired = false` in this runtime.
+- Integrated MoonLab browser WebGPU parity sidecar commit `2dd3802` into ULG
+  staging, the MoonLab core-probe worker, compact summaries, visible artifact
+  rows, handoff artifacts, and e2e coverage. ULG now requires the staged
+  `moonlab.webgpu.complex64-parity-scope.v0` artifact to report
+  `scope-ready-backend-detected`, `device-acquired`, executed/passing reduced
+  browser probes for `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`,
+  and `cnot`, zero blockers, and explicit no-full-fidelity/no-full-physics
+  flags.
 - Recorded PeerCompute tensor-runtime candidate sidecar commit `b5b0dcec` and
   reverified Multiscale browser and relay-dispatch ULG handoffs with the latest
   staged MoonLab/Eshkol artifacts. Both handoff paths reported
@@ -588,11 +596,8 @@ Updated: 2026-06-06 16:12:07 AKDT
   validation artifacts.
 - Add real peercompute service-hosting modules or adapters based on the working
   ULG demo contract.
-- Complete real MoonLab browser WebGPU quantum-response kernels beyond the
-  declared `compute_probabilities` probe: hadamard, pauli_x, pauli_z, cnot,
-  and compute_probabilities now have declared probes, but still need executed
-  browser WebGPU coverage so the reduced
-  `moonlab.webgpu.complex64-parity-scope.v0` evidence can become an executed
-  browser comparison.
+- Update PeerCompute's receiver-side MoonLab WebGPU expectations so
+  `scope-ready-backend-detected` reduced browser evidence is accepted without
+  being interpreted as full MoonLab runtime or full magnetar physics readiness.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

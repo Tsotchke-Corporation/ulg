@@ -74,6 +74,10 @@ physics work:
 - [x] Surface Eshkol's production-host-import candidate requirements through
   ULG staging guards, summaries, visible artifact rows, and live status while
   keeping smoke stubs explicitly non-production.
+- [x] Surface Eshkol's
+  `eshkol.ulg.production-handler-dispatch-preflight.v0` through ULG staging
+  guards, compact summaries, browser handoffs, e2e coverage, and live status
+  while keeping production handler/runtime/full-physics readiness blocked.
 - [x] Surface MoonLab's `moonlab.webgpu.complex64-parity-scope.v0` browser
   evidence through ULG staging, core-probe validation, summaries, UI, handoffs,
   and e2e coverage with `device-acquired`, executed/passing
@@ -137,6 +141,10 @@ physics work:
 - [x] Surface Eshkol production-handler boundary metadata in PeerCompute
   dispatch adapters, supervisor summaries, Multiscale ingestion, and browser UI
   without promoting handler/runtime/scientific readiness.
+- [x] Surface Eshkol production-host candidate and production dispatch preflight
+  metadata through PeerCompute artifact summaries, dispatch ingest, supervisor
+  summaries, Multiscale readiness, and packet boundary conditions without
+  promoting smoke stubs to production runtime readiness.
 - [x] Run relay-backed focused PeerCompute runtime P2P smoke and preserve
   generated relay configs after the test.
 - [x] Add relay-backed ULG handoff dispatch diagnostics so adapter-enabled relay
@@ -179,6 +187,9 @@ physics work:
 - [x] Execute deterministic host-runtime tensor-offset smoke for the magnetar
   closure entry export while preserving production-handler and full-physics
   blockers.
+- [x] Add production dispatch preflight metadata to the magnetar closure fixture
+  so ULG and PeerCompute can reject deterministic runtime-smoke stubs at the
+  production handler boundary.
 - [ ] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a

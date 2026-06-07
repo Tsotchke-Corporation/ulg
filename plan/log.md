@@ -4516,3 +4516,83 @@ Failures / open questions:
   `scope-ready-backend-detected`; otherwise it can treat MoonLab's successful
   reduced browser evidence as an overclaim.
 - No push was attempted.
+
+## 2026-06-06 17:45:00 AKDT - Eshkol Production Dispatch Preflight ULG Integration
+
+Prompt: User said not to pivot from the core technology just to support an SPH
+demo. Continue the core ULG implementation plan, keep SPH as an evidence slice,
+keep commits local only, and preserve the live Vite servers on `0.0.0.0`.
+
+Actions:
+
+- Used the Socrates read-only Eshkol sidecar result to treat the missing
+  dispatch preflight as a staging sync gap, not a new SPH/demo requirement.
+- Added ULG staging guards for
+  `eshkol.ulg.production-handler-dispatch-preflight.v0` under the Eshkol
+  production handler boundary.
+- Updated compact artifact summaries, browser e2e expectations, and
+  `npm run status:live -- --bridge` output to surface dispatch preflight
+  schema/status/readiness/runtime ABI/rejected runtime scopes/blockers.
+- Refreshed ignored Eshkol service assets with
+  `npm run stage:service-assets -- --eshkol-only`; the staged magnetar closure
+  now includes `dispatchPreflight`.
+- Updated `plan/plan.md`, `plan/implementation-status.md`, and `plan/tests.md`
+  so the implementation record stays aligned with the core boundary work.
+
+Files touched:
+
+- `scripts/live-status.mjs`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `plan/plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `npm run stage:service-assets -- --eshkol-only`
+- `jq '.validation.closureDescriptor.descriptorBinding.productionHandlerBoundary.dispatchPreflight' public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json`
+- `node --check src/runtime/artifactSummary.js`
+- `node --check scripts/stage-service-assets.mjs`
+- `node --check scripts/live-status.mjs`
+- `node --check tests/orchestration.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `git diff --check`
+
+Validation:
+
+- PASS: Eshkol-only staging passed and the ignored staged magnetar closure
+  carries schema `eshkol.ulg.production-handler-dispatch-preflight.v0`,
+  `status = blocked`, `ready = false`, dispatch schema
+  `peercompute.ulg.dispatch-service-handler-context.v0`, required production
+  runtime ABI
+  `wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0`, eight
+  required dispatch checks, rejected runtime scope
+  `deterministic-runtime-smoke-stubs`, `runtimeSmokeStubsAllowed = false`, and
+  the three production blockers.
+- PASS: syntax checks passed for touched JavaScript and test files.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live -- --bridge` reported Multiscale ack
+  `handoff-ready`, `simulationStatus = scientific-ready`, and Eshkol
+  `productionDispatchPreflightStatus = blocked`,
+  `productionDispatchPreflightReady = false`,
+  `productionDispatchPreflightRejectedRuntimeScopes =
+  ["deterministic-runtime-smoke-stubs"]`, plus the three production blockers.
+- PASS: `git diff --check` passed.
+
+Failures / open questions:
+
+- No functional failure in this slice. The important remaining blocker is
+  intentional: production dispatch cannot become ready until Eshkol has a real
+  production magnetar handler, non-stub host runtime imports, and full physics
+  validation evidence.
+- No push was attempted.

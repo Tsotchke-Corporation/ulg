@@ -156,7 +156,17 @@ try {
         productionHostImportCandidateReadinessRequires:
           eshkol?.closureProductionHostImportCandidateReadinessRequires ?? [],
         productionHostImportCandidateBlockedBy:
-          eshkol?.closureProductionHostImportCandidateBlockedBy ?? []
+          eshkol?.closureProductionHostImportCandidateBlockedBy ?? [],
+        productionDispatchPreflightStatus:
+          eshkol?.closureProductionDispatchPreflightStatus ?? null,
+        productionDispatchPreflightReady:
+          eshkol?.closureProductionDispatchPreflightReady ?? null,
+        productionDispatchPreflightRequiredRuntimeAbi:
+          eshkol?.closureProductionDispatchPreflightRequiredRuntimeAbi ?? null,
+        productionDispatchPreflightRejectedRuntimeScopes:
+          eshkol?.closureProductionDispatchPreflightRejectedRuntimeScopes ?? [],
+        productionDispatchPreflightBlockedBy:
+          eshkol?.closureProductionDispatchPreflightBlockedBy ?? []
       },
       bridge: bridgeRequested ? {
         ack: bridgeAck,

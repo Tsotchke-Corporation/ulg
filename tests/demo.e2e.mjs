@@ -290,6 +290,40 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       executionClaim: 'deterministic-tensor-runtime-smoke-only',
       entryExportConsumesOffsets: true
     });
+    expect(productionHandlerBoundary.dispatchPreflight).toMatchObject({
+      schema: 'eshkol.ulg.production-handler-dispatch-preflight.v0',
+      status: 'blocked',
+      ready: false,
+      dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
+      entryExport: 'main',
+      currentRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+      requiredRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
+      moduleContentAddressing: 'required',
+      moduleSha256Field: 'artifact.execution.module.sha256',
+      tensorMemoryBindingSource: 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding',
+      hostImportsCandidateSource: 'productionHandlerBoundary.hostImports.productionCandidate',
+      rejectedRuntimeScopes: ['deterministic-runtime-smoke-stubs'],
+      runtimeSmokeStubsAllowed: false,
+      handlerReadyRequired: true,
+      runtimeExecutionRequired: true,
+      fullPhysicsValidationRequired: true,
+      scientificValidationRequired: true
+    });
+    expect(productionHandlerBoundary.dispatchPreflight.requiredChecks).toEqual([
+      'artifact-module-sha256-matches-module-ref',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'non-stub-host-imports-present',
+      'f64-tensor-memory-binding-validated',
+      'runtime-smoke-stubs-rejected-for-production',
+      'handler-ready-flag-true',
+      'runtime-execution-flag-true',
+      'full-physics-validation-evidence-present'
+    ]);
+    expect(productionHandlerBoundary.dispatchPreflight.blockedBy).toEqual([
+      'production-magnetar-handler-not-implemented',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
+      'full-physics-validation-not-run'
+    ]);
     expect(productionHandlerBoundary.derivativeStatus).toBe('declared-not-computed');
     expect(productionHandlerBoundary.scientificValidation).toBe(false);
     expect(productionHandlerBoundary.fullPhysicsValidation).toBe(false);
@@ -423,6 +457,23 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
       'full-physics-validation-not-run'
     ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightSchema).toBe(
+      'eshkol.ulg.production-handler-dispatch-preflight.v0'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightStatus).toBe('blocked');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightReady).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightRequiredRuntimeAbi).toBe(
+      'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightRuntimeSmokeStubsAllowed).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightRejectedRuntimeScopes).toEqual([
+      'deterministic-runtime-smoke-stubs'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedBy).toEqual([
+      'production-magnetar-handler-not-implemented',
+      'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
+      'full-physics-validation-not-run'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
     const closureHandoff = handoff.artifacts.find((artifact) => artifact.artifactKind === 'closure');
     expect(closureHandoff.artifactSummary.closureEntryExport).toBe('main');
@@ -431,6 +482,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(closureHandoff.artifactSummary.closureProductionHandlerBoundaryDeclared).toBe(true);
     expect(closureHandoff.artifactSummary.closureProductionHandlerReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(false);
+    expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
     expect(closureHandoff.artifactSummary.closureOutputExpectedEntryArgs).toEqual([131072, 131136]);
     expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');

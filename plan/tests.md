@@ -4,11 +4,11 @@
 
 Command: `npm test`
 
-Current result: pass, 22/22 tests on 2026-06-06 after adding MoonLab browser
-WebGPU backend preflight summaries, optional MoonLab reference-contract asset
-probing, normalized supplied reference staging, four-family ready
-calibrated-reference summaries, and Eshkol magnetar closure descriptor
-summaries.
+Current result: pass, 22/22 tests on 2026-06-06 after adding Eshkol production
+dispatch preflight summaries, MoonLab browser WebGPU backend preflight
+summaries, optional MoonLab reference-contract asset probing, normalized
+supplied reference staging, four-family ready calibrated-reference summaries,
+and Eshkol magnetar closure descriptor summaries.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -57,20 +57,25 @@ summaries.
   magnetosphere MHD, PIC kinetic plasma, radiation transport, and relativistic
   correction inventory with four ready/scientific-coverage calibrated entries
   when valid supplied contracts are present.
+- Artifact cache summaries preserve Eshkol production dispatch preflight
+  metadata, including schema `eshkol.ulg.production-handler-dispatch-preflight.v0`,
+  `status = blocked`, `ready = false`, eight required production dispatch
+  checks, deterministic runtime-smoke stubs rejected for production dispatch,
+  and the three production blockers.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after MoonLab browser WebGPU backend
-preflight support, with the existing large three.js chunk warning.
+Current result: pass on 2026-06-06 after Eshkol production dispatch preflight
+support, with the existing large three.js chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after MoonLab browser
-WebGPU backend preflight support.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after Eshkol production
+dispatch preflight support.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -218,6 +223,19 @@ WebGPU backend preflight support.
   artifact refs to concrete service tasks, preserve relay-safe/content-addressed
   refs and transferred Eshkol WASM metadata, optionally execute through an
   injected service executor, and cache dispatch plan/result metadata beside the
+  envelope.
+- Eshkol production dispatch preflight check on 2026-06-06:
+  `npm run stage:service-assets -- --eshkol-only`, `npm test`,
+  `npm run build`, `npm run test:e2e`, and
+  `npm run status:live -- --bridge` passed. The live Eshkol status reports
+  `productionDispatchPreflightStatus = blocked`,
+  `productionDispatchPreflightReady = false`,
+  required production runtime ABI
+  `wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0`,
+  rejected runtime scope `deterministic-runtime-smoke-stubs`, and blockers
+  `production-magnetar-handler-not-implemented`,
+  `host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
+  `full-physics-validation-not-run`.
   durable envelope.
 - Magnetar fidelity/runtime scope gate on 2026-06-06:
   `npm run stage:service-assets`, `npm test`, `npm run build`, and

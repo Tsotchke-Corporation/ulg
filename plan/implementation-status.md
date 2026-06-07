@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 16:12:07 AKDT
+Updated: 2026-06-06 17:45:00 AKDT
 
 ## Done
 
@@ -550,6 +550,12 @@ Updated: 2026-06-06 16:12:07 AKDT
   non-stub imports, and readiness requirements for production handler
   implementation, non-stub imports, validated tensor memory imports, and full
   physics validation.
+- Integrated Eshkol production dispatch preflight metadata into ULG staging,
+  compact summaries, browser handoffs, e2e checks, and live status. ULG now
+  requires `eshkol.ulg.production-handler-dispatch-preflight.v0`, rejects
+  deterministic runtime-smoke stubs for production dispatch, tracks eight
+  required checks, and preserves the three production blockers while keeping
+  `handlerReady`, runtime execution, and full physics validation false.
 - Integrated MoonLab backend-preflight sidecar commit `4e91165` into ULG
   staging, summaries, UI, e2e coverage, and live status. The staged
   `moonlab.webgpu.complex64-parity-scope.v0` artifact now requires
@@ -599,5 +605,8 @@ Updated: 2026-06-06 16:12:07 AKDT
 - Update PeerCompute's receiver-side MoonLab WebGPU expectations so
   `scope-ready-backend-detected` reduced browser evidence is accepted without
   being interpreted as full MoonLab runtime or full magnetar physics readiness.
+- Commit the PeerCompute receiver-side production dispatch preflight propagation
+  once focused service orchestration, Multiscale, ULG handoff, and build checks
+  are green.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.

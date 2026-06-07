@@ -41,6 +41,16 @@ const ESHKOL_PRODUCTION_BLOCKERS = Object.freeze([
   'host-imports-are-deterministic-runtime-smoke-stubs-not-production',
   'full-physics-validation-not-run'
 ]);
+const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
+  'artifact-module-sha256-matches-module-ref',
+  'entry-export-main-signature-i32-i32-to-i32',
+  'non-stub-host-imports-present',
+  'f64-tensor-memory-binding-validated',
+  'runtime-smoke-stubs-rejected-for-production',
+  'handler-ready-flag-true',
+  'runtime-execution-flag-true',
+  'full-physics-validation-evidence-present'
+]);
 
 const REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE = Object.freeze({
   schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
@@ -782,6 +792,27 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               executionClaim: 'deterministic-tensor-runtime-smoke-only',
               entryExportConsumesOffsets: true
             },
+            dispatchPreflight: {
+              schema: 'eshkol.ulg.production-handler-dispatch-preflight.v0',
+              status: 'blocked',
+              ready: false,
+              dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
+              entryExport: 'main',
+              currentRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0',
+              requiredRuntimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
+              moduleContentAddressing: 'required',
+              moduleSha256Field: 'artifact.execution.module.sha256',
+              tensorMemoryBindingSource: 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding',
+              hostImportsCandidateSource: 'productionHandlerBoundary.hostImports.productionCandidate',
+              requiredChecks: [...ESHKOL_PRODUCTION_DISPATCH_CHECKS],
+              rejectedRuntimeScopes: ['deterministic-runtime-smoke-stubs'],
+              runtimeSmokeStubsAllowed: false,
+              handlerReadyRequired: true,
+              runtimeExecutionRequired: true,
+              fullPhysicsValidationRequired: true,
+              scientificValidationRequired: true,
+              blockedBy: [...ESHKOL_PRODUCTION_BLOCKERS]
+            },
             derivativeStatus: 'declared-not-computed',
             scientificValidation: false,
             fullPhysicsValidation: false,
@@ -977,6 +1008,30 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     [...ESHKOL_PRODUCTION_READINESS_REQUIREMENTS]
   );
   assert.deepEqual(summary.closureProductionHostImportCandidateBlockedBy, [...ESHKOL_PRODUCTION_BLOCKERS]);
+  assert.equal(
+    summary.closureProductionDispatchPreflightSchema,
+    'eshkol.ulg.production-handler-dispatch-preflight.v0'
+  );
+  assert.equal(summary.closureProductionDispatchPreflightStatus, 'blocked');
+  assert.equal(summary.closureProductionDispatchPreflightReady, false);
+  assert.equal(
+    summary.closureProductionDispatchPreflightDispatchSchema,
+    'peercompute.ulg.dispatch-service-handler-context.v0'
+  );
+  assert.equal(
+    summary.closureProductionDispatchPreflightCurrentRuntimeAbi,
+    'wasm32-unknown-unknown:eshkol-host-imports-smoke-v0'
+  );
+  assert.equal(
+    summary.closureProductionDispatchPreflightRequiredRuntimeAbi,
+    'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+  );
+  assert.equal(summary.closureProductionDispatchPreflightRuntimeSmokeStubsAllowed, false);
+  assert.deepEqual(summary.closureProductionDispatchPreflightRequiredChecks, [...ESHKOL_PRODUCTION_DISPATCH_CHECKS]);
+  assert.deepEqual(summary.closureProductionDispatchPreflightRejectedRuntimeScopes, [
+    'deterministic-runtime-smoke-stubs'
+  ]);
+  assert.deepEqual(summary.closureProductionDispatchPreflightBlockedBy, [...ESHKOL_PRODUCTION_BLOCKERS]);
   assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
   assert.equal(summary.closureOutputSemanticsReady, true);
   assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');

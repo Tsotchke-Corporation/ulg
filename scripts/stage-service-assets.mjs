@@ -31,6 +31,7 @@ const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
+const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
 const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
 const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
@@ -557,6 +558,16 @@ function stageEshkolAssets() {
       'validated-f64-tensor-memory-imports',
       'full-physics-validation-pass'
     ];
+    const expectedProductionDispatchChecks = [
+      'artifact-module-sha256-matches-module-ref',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'non-stub-host-imports-present',
+      'f64-tensor-memory-binding-validated',
+      'runtime-smoke-stubs-rejected-for-production',
+      'handler-ready-flag-true',
+      'runtime-execution-flag-true',
+      'full-physics-validation-evidence-present'
+    ];
     if (productionHostImports.runtimeScope !== 'deterministic-runtime-smoke-stubs'
       || productionHostImports.implementationStatus !== 'smoke-stubs-not-production'
       || productionHostImportCandidate.schema !== ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA
@@ -583,6 +594,28 @@ function stageEshkolAssets() {
       || productionHandlerBoundary.tensorMemoryBinding?.executionClaim !== tensorLinearMemoryBinding.executionClaim
       || productionHandlerBoundary.tensorMemoryBinding?.entryExportConsumesOffsets !== true) {
       throw new Error('Eshkol staged production handler boundary does not match tensor memory binding metadata');
+    }
+    const productionDispatchPreflight = productionHandlerBoundary.dispatchPreflight || {};
+    if (productionDispatchPreflight.schema !== ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA
+      || productionDispatchPreflight.status !== 'blocked'
+      || productionDispatchPreflight.ready !== false
+      || productionDispatchPreflight.dispatchSchema !== PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA
+      || productionDispatchPreflight.entryExport !== artifact.validation?.closureDescriptor?.entryExport
+      || productionDispatchPreflight.currentRuntimeAbi !== tensorRuntimeContract.runtimeAbi
+      || productionDispatchPreflight.requiredRuntimeAbi !== productionHostImportCandidate.productionRuntimeAbi
+      || productionDispatchPreflight.moduleContentAddressing !== 'required'
+      || productionDispatchPreflight.moduleSha256Field !== 'artifact.execution.module.sha256'
+      || productionDispatchPreflight.tensorMemoryBindingSource !== 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
+      || productionDispatchPreflight.hostImportsCandidateSource !== 'productionHandlerBoundary.hostImports.productionCandidate'
+      || !arraysEqual(productionDispatchPreflight.requiredChecks, expectedProductionDispatchChecks)
+      || !arraysEqual(productionDispatchPreflight.rejectedRuntimeScopes, ['deterministic-runtime-smoke-stubs'])
+      || productionDispatchPreflight.runtimeSmokeStubsAllowed !== false
+      || productionDispatchPreflight.handlerReadyRequired !== true
+      || productionDispatchPreflight.runtimeExecutionRequired !== true
+      || productionDispatchPreflight.fullPhysicsValidationRequired !== true
+      || productionDispatchPreflight.scientificValidationRequired !== true
+      || !arraysEqual(productionDispatchPreflight.blockedBy, expectedProductionHandlerBlockers)) {
+      throw new Error('Eshkol staged production handler dispatch preflight requirements changed');
     }
     const handlerBoundaryBlockers = Array.isArray(productionHandlerBoundary.blockers)
       ? productionHandlerBoundary.blockers

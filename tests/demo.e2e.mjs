@@ -47,7 +47,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.tasks?.length === 2);
   await page.waitForTimeout(1200);
   await expect(page.getByText(/tensor-probe:runtime-smoke-passed:offsets-consumed:64b/)).toBeVisible();
-  await expect(page.getByText(/handler:declared-not-executed:2-blockers/)).toBeVisible();
+  await expect(page.getByText(/handler:production-handler-runtime-smoke-executed:1-blockers/)).toBeVisible();
   await expect(page.getByText(/prod-host:production-candidate-runtime-imports-implemented:23-imports/)).toBeVisible();
   await expect(page.getByText(/prod-probe:production-candidate-runtime-smoke-passed:64b/)).toBeVisible();
   await expect(page.getByText(/webgpu-preflight:device-acquired/)).toBeVisible();
@@ -271,9 +271,9 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(productionHandlerBoundary.handlerId).toBe('eshkol:magnetar-closure:main:v0');
     expect(productionHandlerBoundary.handlerKind).toBe('wasm-export-tensor-closure');
     expect(productionHandlerBoundary.dispatchSchema).toBe('peercompute.ulg.dispatch-service-handler-context.v0');
-    expect(productionHandlerBoundary.status).toBe('declared-not-executed');
-    expect(productionHandlerBoundary.handlerReady).toBe(false);
-    expect(productionHandlerBoundary.runtimeExecution).toBe(false);
+    expect(productionHandlerBoundary.status).toBe('production-handler-runtime-smoke-executed');
+    expect(productionHandlerBoundary.handlerReady).toBe(true);
+    expect(productionHandlerBoundary.runtimeExecution).toBe(true);
     expect(productionHandlerBoundary.entryExport).toBe('main');
     expect(productionHandlerBoundary.runtimeAbi).toBe(tensorRuntimeContract.runtimeAbi);
     expect(productionHandlerBoundary.tensorMemoryModel).toBe(tensorRuntimeContract.tensorMemoryModel);
@@ -286,7 +286,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     });
     expect(productionHandlerBoundary.productionHandlerContract).toMatchObject({
       schema: 'eshkol.ulg.production-handler-contract.v0',
-      status: 'declared-not-implemented',
+      status: 'implemented-runtime-smoke-pending-full-physics',
       handlerId: 'eshkol:magnetar-closure:main:v0',
       dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
       entryExport: 'main',
@@ -316,8 +316,33 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'full-physics-validation-pass'
     ]);
     expect(productionHandlerBoundary.productionHandlerContract.blockedBy).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
+    ]);
+    expect(productionHandlerBoundary.productionHandlerImplementation).toMatchObject({
+      schema: 'eshkol.ulg.production-handler-implementation.v0',
+      status: 'implemented-production-candidate-runtime-smoke',
+      handlerId: 'eshkol:magnetar-closure:main:v0',
+      handlerKind: 'wasm-export-tensor-closure',
+      implementationScope: 'deterministic-magnetar-tensor-abi-smoke',
+      moduleSource: 'artifact.execution.module',
+      entryExport: 'main',
+      runtimeAbi: tensorRuntimeContract.runtimeAbi,
+      dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
+      tensorMemoryModel: tensorRuntimeContract.tensorMemoryModel,
+      executionClaim: 'production-candidate-host-import-runtime-smoke-only',
+      scientificValidation: false,
+      fullPhysicsValidation: false,
+      fullFidelityMagnetarSimulation: false,
+      blockedBy: ['full-physics-validation-not-run']
+    });
+    expect(productionHandlerBoundary.productionHandlerImplementation.inputTensorIds).toEqual(tensorRuntimeContract.inputTensorIds);
+    expect(productionHandlerBoundary.productionHandlerImplementation.outputTensorIds).toEqual(tensorRuntimeContract.outputTensorIds);
+    expect(productionHandlerBoundary.productionHandlerImplementation.evidence).toEqual([
+      'content-addressed-wasm-module',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'production-candidate-host-imports',
+      'validated-f64-tensor-memory-binding',
+      'production-candidate-runtime-probe'
     ]);
     expect(productionHandlerBoundary.hostImports).toMatchObject({
       source: 'bundle.hostImports',
@@ -337,18 +362,18 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     });
     expect(productionHandlerBoundary.hostImports.productionCandidate.requiredNonStubImports.length).toBe(23);
     expect(productionHandlerBoundary.hostImports.productionCandidate.readinessRequires).toEqual([
-      'production-magnetar-handler-implementation',
       'non-stub-host-runtime-imports',
       'validated-f64-tensor-memory-imports',
       'full-physics-validation-pass'
     ]);
     expect(productionHandlerBoundary.hostImports.productionCandidate.blockedBy).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
-    expect(productionHandlerBoundary.allowedExecutionClaims).toContain('deterministic-tensor-runtime-smoke-only');
+    expect(productionHandlerBoundary.allowedExecutionClaims).toEqual([
+      'deterministic-tensor-runtime-smoke-only',
+      'production-candidate-host-import-runtime-smoke-only'
+    ]);
     expect(productionHandlerBoundary.blockers).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
     expect(productionHandlerBoundary.tensorMemoryBinding).toMatchObject({
@@ -368,12 +393,12 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expectedEntryResult: 0,
       changedBytesInDeclaredTensorRange: 64,
       outputTensorsProducedByEntryExport: true,
-      productionHandlerReady: false,
-      productionHandlerRuntimeExecution: false,
+      productionHandlerReady: true,
+      productionHandlerRuntimeExecution: true,
       scientificValidation: false,
       fullPhysicsValidation: false,
       fullFidelityMagnetarSimulation: false,
-      blocker: 'production-candidate-runtime-smoke-only-production-handler-not-ready'
+      blocker: 'full-physics-validation-not-run'
     });
     expect(productionHandlerBoundary.productionCandidateRuntimeProbe.hostImportOptions).toMatchObject({
       factory: 'createEshkolHostImportObject',
@@ -382,6 +407,31 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       f64TensorMemoryImports: true
     });
     expect(productionHandlerBoundary.productionCandidateRuntimeProbe.hostImportCallCounts).toEqual({
+      ulg_read_f64: 12,
+      ulg_write_f64: 9
+    });
+    expect(productionHandlerBoundary.productionHandlerRuntimeExecution).toMatchObject({
+      schema: 'eshkol.ulg.production-handler-runtime-execution.v0',
+      status: 'production-handler-runtime-smoke-executed',
+      handlerId: 'eshkol:magnetar-closure:main:v0',
+      moduleSource: 'artifact.execution.module',
+      entryExport: 'main',
+      runtimeAbi: tensorRuntimeContract.runtimeAbi,
+      runtimeScope: 'production-candidate-host-imports',
+      executionClaim: 'production-candidate-host-import-runtime-smoke-only',
+      argumentMode: 'linear-memory-offsets',
+      parameterTypes: ['i32', 'i32'],
+      resultTypes: ['i32'],
+      entryArgs: [131072, 131136],
+      entryResult: 0,
+      changedBytesInDeclaredTensorRange: 64,
+      outputTensorsProducedByEntryExport: true,
+      scientificValidation: false,
+      fullPhysicsValidation: false,
+      fullFidelityMagnetarSimulation: false,
+      blockedBy: ['full-physics-validation-not-run']
+    });
+    expect(productionHandlerBoundary.productionHandlerRuntimeExecution.hostImportCallCounts).toEqual({
       ulg_read_f64: 12,
       ulg_write_f64: 9
     });
@@ -417,7 +467,6 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'full-physics-validation-evidence-present'
     ]);
     expect(productionHandlerBoundary.dispatchPreflight.blockedBy).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
     expect(productionHandlerBoundary.dispatchPreflight.checkSummary).toMatchObject({
@@ -425,8 +474,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       status: 'blocked',
       ready: false,
       totalRequiredCheckCount: 10,
-      passedCount: 7,
-      blockedCount: 3
+      passedCount: 9,
+      blockedCount: 1
     });
     expect(productionHandlerBoundary.dispatchPreflight.checkSummary.passedChecks).toEqual([
       'artifact-module-sha256-matches-module-ref',
@@ -435,11 +484,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
-      'runtime-smoke-stubs-rejected-for-production'
+      'runtime-smoke-stubs-rejected-for-production',
+      'handler-ready-flag-true',
+      'runtime-execution-flag-true'
     ]);
     expect(productionHandlerBoundary.dispatchPreflight.checkSummary.blockedChecks).toEqual([
-      'handler-ready-flag-true',
-      'runtime-execution-flag-true',
       'full-physics-validation-evidence-present'
     ]);
     expect(productionHandlerBoundary.dispatchPreflight.checkResults.map((entry) => entry.check)).toEqual([
@@ -561,20 +610,22 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'none-for-deterministic-runtime-smoke-production-physics-unvalidated'
     );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundarySchema).toBe('eshkol.ulg.production-handler-boundary.v0');
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryStatus).toBe('declared-not-executed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryStatus).toBe('production-handler-runtime-smoke-executed');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryDeclared).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryHandlerId).toBe('eshkol:magnetar-closure:main:v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryHandlerKind).toBe('wasm-export-tensor-closure');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryDispatchSchema).toBe('peercompute.ulg.dispatch-service-handler-context.v0');
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerReady).toBe(false);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerDerivativeStatus).toBe('declared-not-computed');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerScientificValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerFullPhysicsValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerFullFidelityMagnetarSimulation).toBe(false);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerAllowedExecutionClaims).toContain('deterministic-tensor-runtime-smoke-only');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerAllowedExecutionClaims).toEqual([
+      'deterministic-tensor-runtime-smoke-only',
+      'production-candidate-host-import-runtime-smoke-only'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerBoundaryBlockers).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerTensorMemoryBinding.status).toBe('entry-export-runtime-smoke-passed');
@@ -582,7 +633,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'eshkol.ulg.production-handler-contract.v0'
     );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractStatus).toBe(
-      'declared-not-implemented'
+      'implemented-runtime-smoke-pending-full-physics'
     );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractDeclared).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractInvocationArgumentMode).toBe(
@@ -597,22 +648,42 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractRequiredEvidenceCount).toBe(8);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractBlockedBy).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerImplementationStatus).toBe(
+      'implemented-production-candidate-runtime-smoke'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerImplementationReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerImplementationEvidenceCount).toBe(5);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerImplementationBlockedBy).toEqual([
+      'full-physics-validation-not-run'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecutionStatus).toBe(
+      'production-handler-runtime-smoke-executed'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecutionReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecutionEntryArgs).toEqual([
+      131072,
+      131136
+    ]);
+    expect(
+      eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecutionChangedBytesInDeclaredTensorRange
+    ).toBe(64);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerRuntimeExecutionHostImportCallCounts).toEqual({
+      ulg_read_f64: 12,
+      ulg_write_f64: 9
+    });
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsRuntimeScope).toBe('production-candidate-host-imports');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsImplementationStatus).toBe('production-candidate-runtime-imports-present');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateStatus).toBe('production-candidate-runtime-imports-implemented');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateRuntimeSmokeStubsAllowed).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateRequiredNonStubImports.length).toBe(23);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateReadinessRequires).toEqual([
-      'production-magnetar-handler-implementation',
       'non-stub-host-runtime-imports',
       'validated-f64-tensor-memory-imports',
       'full-physics-validation-pass'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateBlockedBy).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeSchema).toBe(
@@ -640,13 +711,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       ulg_read_f64: 12,
       ulg_write_f64: 9
     });
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeProductionHandlerReady).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeProductionHandlerReady).toBe(true);
     expect(
       eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeProductionHandlerRuntimeExecution
-    ).toBe(false);
+    ).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeFullPhysicsValidation).toBe(false);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeBlocker).toBe(
-      'production-candidate-runtime-smoke-only-production-handler-not-ready'
+      'full-physics-validation-not-run'
     );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightSchema).toBe(
       'eshkol.ulg.production-handler-dispatch-preflight.v0'
@@ -661,15 +732,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'deterministic-runtime-smoke-stubs'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedBy).toEqual([
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightCheckSummarySchema).toBe(
       'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0'
     );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightTotalRequiredCheckCount).toBe(10);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(7);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedCheckCount).toBe(3);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(9);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedCheckCount).toBe(1);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedChecks).toEqual([
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
@@ -677,11 +747,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
-      'runtime-smoke-stubs-rejected-for-production'
+      'runtime-smoke-stubs-rejected-for-production',
+      'handler-ready-flag-true',
+      'runtime-execution-flag-true'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedChecks).toEqual([
-      'handler-ready-flag-true',
-      'runtime-execution-flag-true',
       'full-physics-validation-evidence-present'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureReady).toBe(true);
@@ -691,11 +761,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(closureHandoff.artifactSummary.closureDescriptorReady).toBe(true);
     expect(closureHandoff.artifactSummary.closureProductionHandlerBoundaryDeclared).toBe(true);
     expect(closureHandoff.artifactSummary.closureProductionHandlerContractDeclared).toBe(true);
-    expect(closureHandoff.artifactSummary.closureProductionHandlerReady).toBe(false);
-    expect(closureHandoff.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(false);
+    expect(closureHandoff.artifactSummary.closureProductionHandlerReady).toBe(true);
+    expect(closureHandoff.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(true);
     expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionCandidateRuntimeProbeReady).toBe(true);
-    expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(7);
+    expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(9);
     expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
     expect(closureHandoff.artifactSummary.closureOutputExpectedEntryArgs).toEqual([131072, 131136]);
     expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');

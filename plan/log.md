@@ -1661,6 +1661,73 @@ Failures and open questions:
   scientific readiness remain blocked.
 - No push was attempted.
 
+## 2026-06-06 23:16:57 AKDT
+
+Prompt: great job keep going.
+
+Actions:
+
+- Integrated Eshkol commit `06358c7` production-candidate handler/runtime smoke
+  evidence into ULG without pushing.
+- Updated ULG staging guards, compact artifact summaries, live status JSON,
+  visible artifact-row text, orchestration tests, e2e tests, README, and plan
+  docs for the new Eshkol production handler state.
+- Added ULG summary fields for
+  `productionHandlerImplementation` and
+  `productionHandlerRuntimeExecution`, including statuses, evidence counts,
+  entry args, changed bytes, host-import call counts, and remaining blockers.
+- Refreshed the ignored staged Eshkol service assets from the local Eshkol
+  checkout. The staged magnetar closure now reports
+  `production-handler-runtime-smoke-executed`, `handlerReady = true`,
+  `runtimeExecution = true`, `productionHandlerContract.status =
+  implemented-runtime-smoke-pending-full-physics`, implementation/runtime
+  execution evidence ready, and only `full-physics-validation-not-run` blocked.
+- Advanced ULG-visible production dispatch preflight from `10/7/3` to `10/9/1`:
+  nine required checks pass and only full-physics validation remains blocked.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `scripts/live-status.mjs`
+- `scripts/stage-service-assets.mjs`
+- `src/main.js`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+
+Validation:
+
+- `node --check src/runtime/artifactSummary.js scripts/stage-service-assets.mjs src/main.js scripts/live-status.mjs tests/orchestration.test.mjs tests/demo.e2e.mjs`:
+  passed.
+- `npm run stage:service-assets -- --eshkol-only --created-at 2026-06-06T23:20:00-08:00`:
+  passed.
+- Staged JSON inspection confirmed handler/runtime true, blocker list
+  `["full-physics-validation-not-run"]`, and dispatch preflight `10/9/1`.
+- `node --test tests/orchestration.test.mjs --test-name-pattern "artifact cache summarizes Eshkol"`:
+  passed, 7/7 tests.
+- `npm test`: passed, 22/22 tests.
+- `npm run build`: passed with the existing Vite large-chunk warning.
+- `npm run test:e2e`: passed, 1/1 Chromium test.
+- `npm run status:live -- --bridge`: passed against
+  `http://100.86.83.35:5173/`; live Eshkol status reported
+  `productionHandlerReady = true`,
+  `productionHandlerRuntimeExecution = true`,
+  `productionHandlerImplementationReady = true`,
+  `productionHandlerRuntimeExecutionReady = true`,
+  production dispatch preflight `10/9/1`, and bridge ack `handoff-ready`.
+
+Open blockers:
+
+- Full production dispatch readiness remains blocked on
+  `full-physics-validation-not-run`.
+- Scientific validation, full-fidelity magnetar simulation, full-physics
+  validation, derivative computation, and SPH-specific behavior were not added.
+- No push was attempted.
+
 ## 2026-06-06 18:16:35 AKDT - Computed Dispatch Preflight Evidence Propagation
 
 Prompt: keep working, but do not pivot from the core technology to support an

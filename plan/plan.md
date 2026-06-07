@@ -61,7 +61,7 @@ physics work:
   non-scientific/full-physics flags.
 - [x] Surface Eshkol's `eshkol.ulg.production-handler-boundary.v0` through ULG
   staging guards, compact summaries, browser handoffs, and artifact-list status
-  while preserving `handlerReady = false` and `runtimeExecution = false`.
+  while preserving explicit non-scientific/full-physics flags.
 - [x] Surface Eshkol's smoke-only f64 tensor linear-memory layout through ULG
   staging guards, compact summaries, browser handoffs, and live status while
   preserving `entryExportConsumesOffsets = false`.
@@ -77,19 +77,23 @@ physics work:
 - [x] Surface Eshkol's
   `eshkol.ulg.production-handler-dispatch-preflight.v0` through ULG staging
   guards, compact summaries, browser handoffs, e2e coverage, and live status
-  while keeping production handler/runtime/full-physics readiness blocked.
+  while keeping full-physics readiness blocked.
 - [x] Surface Eshkol's computed production dispatch preflight check evidence
   through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
   and live status.
 - [x] Surface Eshkol's production-candidate runtime probe as smoke-only evidence
   through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
-  and live status while preserving production handler/runtime/full-physics
-  blockers.
+  and live status while preserving the full-physics blocker.
 - [x] Surface Eshkol's declared production handler contract through ULG staging
   guards, compact summaries, browser handoffs, e2e coverage, and live status,
   advancing production dispatch preflight evidence to ten required checks,
-  seven passed checks, and three blocked checks while preserving production
-  handler/runtime/full-physics blockers.
+  seven passed checks, and three blocked checks before the production-candidate
+  handler/runtime evidence slice superseded those counts.
+- [x] Surface Eshkol's production-candidate handler implementation and runtime
+  execution evidence through ULG staging guards, compact summaries, browser
+  handoffs, e2e coverage, and live status, advancing production dispatch
+  preflight evidence to ten required checks, nine passed checks, and one
+  blocked full-physics check.
 - [x] Promote Eshkol's DOM-free `eshkol-host-imports.js` factory to a
   first-class browser/service-worker asset, probe it as JavaScript, import it in
   the supervised Eshkol worker, and expose factory/readiness summary fields
@@ -199,8 +203,8 @@ physics work:
   magnetar descriptor artifact without claiming validated physics.
 - [x] Add metadata-level typed closure tensor runtime descriptors to the
   magnetar fixture, including sample-shape validation and contract hash.
-- [x] Add declared-not-executed production-handler boundary metadata to the
-  magnetar closure fixture and reject runtime/full-physics overclaims.
+- [x] Add production-handler boundary metadata to the magnetar closure fixture
+  and reject unsupported runtime/full-physics overclaims.
 - [x] Add concrete smoke-only tensor linear-memory layout metadata and
   host-import validation while keeping the WASM entry export disconnected from
   tensor offsets.

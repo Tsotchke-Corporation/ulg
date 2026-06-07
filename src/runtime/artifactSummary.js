@@ -10,6 +10,10 @@ export const ESHKOL_TENSOR_LINEAR_MEMORY_SMOKE_BINDING_SCHEMA = 'eshkol.ulg.tens
 export const ESHKOL_TENSOR_ENTRY_EXPORT_OFFSET_PROBE_SCHEMA = 'eshkol.ulg.tensor-entry-export-offset-probe.v0';
 export const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
 export const ESHKOL_PRODUCTION_HANDLER_CONTRACT_SCHEMA = 'eshkol.ulg.production-handler-contract.v0';
+export const ESHKOL_PRODUCTION_HANDLER_IMPLEMENTATION_SCHEMA =
+  'eshkol.ulg.production-handler-implementation.v0';
+export const ESHKOL_PRODUCTION_HANDLER_RUNTIME_EXECUTION_SCHEMA =
+  'eshkol.ulg.production-handler-runtime-execution.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
@@ -27,12 +31,10 @@ export const MOONLAB_WEBGPU_COMPLEX64_PROBABILITY_KERNEL_PROBE_SCHEMA = 'moonlab
 export const MOONLAB_WEBGPU_COMPLEX64_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.webgpu.complex64-native-operation-probe.v0';
 
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS = Object.freeze([
-  'production-magnetar-handler-not-implemented',
   'full-physics-validation-not-run'
 ]);
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_READINESS_REQUIRES = Object.freeze([
-  'production-magnetar-handler-implementation',
   'non-stub-host-runtime-imports',
   'validated-f64-tensor-memory-imports',
   'full-physics-validation-pass'
@@ -70,11 +72,11 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS = Object.freeze([
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'production-candidate-runtime-probe-passed',
-  'runtime-smoke-stubs-rejected-for-production'
+  'runtime-smoke-stubs-rejected-for-production',
+  'handler-ready-flag-true',
+  'runtime-execution-flag-true'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS = Object.freeze([
-  'handler-ready-flag-true',
-  'runtime-execution-flag-true',
   'full-physics-validation-evidence-present'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REJECTED_RUNTIME_SCOPES = Object.freeze([
@@ -346,6 +348,14 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionHandlerBoundary = objectOrNull(closureDescriptorBinding.productionHandlerBoundary);
   const closureProductionHandlerContract = objectOrNull(closureProductionHandlerBoundary?.productionHandlerContract);
   const closureProductionHandlerContractInvocation = objectOrNull(closureProductionHandlerContract?.invocation);
+  const closureProductionHandlerImplementation =
+    objectOrNull(closureProductionHandlerBoundary?.productionHandlerImplementation);
+  const closureProductionHandlerImplementationInvocation =
+    objectOrNull(closureProductionHandlerImplementation?.invocation);
+  const closureProductionHandlerRuntimeExecution =
+    objectOrNull(closureProductionHandlerBoundary?.productionHandlerRuntimeExecution);
+  const closureProductionHandlerRuntimeExecutionHostImportCallCounts =
+    objectOrNull(closureProductionHandlerRuntimeExecution?.hostImportCallCounts);
   const closureProductionHandlerTensorMemoryBinding = objectOrNull(closureProductionHandlerBoundary?.tensorMemoryBinding);
   const closureProductionHandlerHostImports = objectOrNull(closureProductionHandlerBoundary?.hostImports);
   const closureProductionHostImportCandidate = objectOrNull(closureProductionHandlerHostImports?.productionCandidate);
@@ -377,6 +387,30 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionDispatchPreflightRequiredChecks =
     Array.isArray(closureProductionDispatchPreflight?.requiredChecks)
       ? closureProductionDispatchPreflight.requiredChecks.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHandlerImplementationEvidence =
+    Array.isArray(closureProductionHandlerImplementation?.evidence)
+      ? closureProductionHandlerImplementation.evidence.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHandlerImplementationBlockedBy =
+    Array.isArray(closureProductionHandlerImplementation?.blockedBy)
+      ? closureProductionHandlerImplementation.blockedBy.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHandlerRuntimeExecutionEntryArgs =
+    Array.isArray(closureProductionHandlerRuntimeExecution?.entryArgs)
+      ? closureProductionHandlerRuntimeExecution.entryArgs.map((value) => Number(value)).filter(Number.isFinite)
+      : [];
+  const closureProductionHandlerRuntimeExecutionParameterTypes =
+    Array.isArray(closureProductionHandlerRuntimeExecution?.parameterTypes)
+      ? closureProductionHandlerRuntimeExecution.parameterTypes.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHandlerRuntimeExecutionResultTypes =
+    Array.isArray(closureProductionHandlerRuntimeExecution?.resultTypes)
+      ? closureProductionHandlerRuntimeExecution.resultTypes.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureProductionHandlerRuntimeExecutionBlockedBy =
+    Array.isArray(closureProductionHandlerRuntimeExecution?.blockedBy)
+      ? closureProductionHandlerRuntimeExecution.blockedBy.map((value) => String(value)).filter(Boolean)
       : [];
   const closureProductionDispatchPreflightRejectedRuntimeScopes =
     Array.isArray(closureProductionDispatchPreflight?.rejectedRuntimeScopes)
@@ -813,8 +847,8 @@ export function summarizeUlgArtifact(artifact = {}) {
     && finiteNumberOrNull(closureProductionCandidateRuntimeProbe.expectedEntryResult) === 0
     && finiteNumberOrNull(closureProductionCandidateRuntimeProbe.changedBytesInDeclaredTensorRange) === 64
     && closureProductionCandidateRuntimeProbe.outputTensorsProducedByEntryExport === true
-    && closureProductionCandidateRuntimeProbe.productionHandlerReady === false
-    && closureProductionCandidateRuntimeProbe.productionHandlerRuntimeExecution === false
+    && closureProductionCandidateRuntimeProbe.productionHandlerReady === true
+    && closureProductionCandidateRuntimeProbe.productionHandlerRuntimeExecution === true
     && closureProductionCandidateRuntimeProbe.scientificValidation === false
     && closureProductionCandidateRuntimeProbe.fullPhysicsValidation === false
     && closureProductionCandidateRuntimeProbe.fullFidelityMagnetarSimulation === false
@@ -825,10 +859,10 @@ export function summarizeUlgArtifact(artifact = {}) {
     && finiteNumberOrNull(closureProductionCandidateRuntimeProbeHostImportCallCounts?.ulg_read_f64) === 12
     && finiteNumberOrNull(closureProductionCandidateRuntimeProbeHostImportCallCounts?.ulg_write_f64) === 9
     && closureProductionCandidateRuntimeProbe.blocker
-      === 'production-candidate-runtime-smoke-only-production-handler-not-ready';
+      === 'full-physics-validation-not-run';
   const closureProductionHandlerContractDeclared =
     closureProductionHandlerContract?.schema === ESHKOL_PRODUCTION_HANDLER_CONTRACT_SCHEMA
-    && closureProductionHandlerContract.status === 'declared-not-implemented'
+    && closureProductionHandlerContract.status === 'implemented-runtime-smoke-pending-full-physics'
     && closureProductionHandlerContract.handlerId === closureProductionHandlerBoundary?.handlerId
     && closureProductionHandlerContract.dispatchSchema === closureProductionHandlerBoundary?.dispatchSchema
     && closureProductionHandlerContract.entryExport === closureProductionHandlerBoundary?.entryExport
@@ -852,14 +886,79 @@ export function summarizeUlgArtifact(artifact = {}) {
       closureProductionHandlerContractBlockedBy,
       ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
     );
+  const closureProductionHandlerImplementationReady =
+    closureProductionHandlerImplementation?.schema === ESHKOL_PRODUCTION_HANDLER_IMPLEMENTATION_SCHEMA
+    && closureProductionHandlerImplementation.status === 'implemented-production-candidate-runtime-smoke'
+    && closureProductionHandlerImplementation.handlerId === closureProductionHandlerBoundary?.handlerId
+    && closureProductionHandlerImplementation.handlerKind === closureProductionHandlerBoundary?.handlerKind
+    && closureProductionHandlerImplementation.implementationScope === 'deterministic-magnetar-tensor-abi-smoke'
+    && closureProductionHandlerImplementation.moduleSource === 'artifact.execution.module'
+    && closureProductionHandlerImplementation.entryExport === closureProductionHandlerBoundary?.entryExport
+    && closureProductionHandlerImplementation.runtimeAbi === closureProductionHandlerBoundary?.runtimeAbi
+    && closureProductionHandlerImplementation.dispatchSchema === closureProductionHandlerBoundary?.dispatchSchema
+    && closureProductionHandlerImplementation.tensorMemoryModel === closureProductionHandlerBoundary?.tensorMemoryModel
+    && arraysEqual(closureProductionHandlerImplementation.inputTensorIds, closureProductionHandlerInputTensorIds)
+    && arraysEqual(closureProductionHandlerImplementation.outputTensorIds, closureProductionHandlerOutputTensorIds)
+    && closureProductionHandlerImplementationInvocation?.moduleSource === 'artifact.execution.module'
+    && closureProductionHandlerImplementationInvocation?.entryExport === closureProductionHandlerBoundary?.entryExport
+    && closureProductionHandlerImplementationInvocation?.argumentMode === 'linear-memory-offsets'
+    && arraysEqual(closureProductionHandlerImplementationInvocation?.parameterTypes, ['i32', 'i32'])
+    && arraysEqual(closureProductionHandlerImplementationInvocation?.resultTypes, ['i32'])
+    && finiteNumberOrNull(closureProductionHandlerImplementationInvocation?.inputOffsetParam) === 0
+    && finiteNumberOrNull(closureProductionHandlerImplementationInvocation?.outputOffsetParam) === 1
+    && finiteNumberOrNull(closureProductionHandlerImplementationInvocation?.expectedReturn) === 0
+    && closureProductionHandlerImplementation.executionClaim === 'production-candidate-host-import-runtime-smoke-only'
+    && arraysEqual(closureProductionHandlerImplementationEvidence, [
+      'content-addressed-wasm-module',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'production-candidate-host-imports',
+      'validated-f64-tensor-memory-binding',
+      'production-candidate-runtime-probe'
+    ])
+    && closureProductionHandlerImplementation.scientificValidation === false
+    && closureProductionHandlerImplementation.fullPhysicsValidation === false
+    && closureProductionHandlerImplementation.fullFidelityMagnetarSimulation === false
+    && arraysEqual(
+      closureProductionHandlerImplementationBlockedBy,
+      ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
+    );
+  const closureProductionHandlerRuntimeExecutionReady =
+    closureProductionHandlerRuntimeExecution?.schema === ESHKOL_PRODUCTION_HANDLER_RUNTIME_EXECUTION_SCHEMA
+    && closureProductionHandlerRuntimeExecution.status === 'production-handler-runtime-smoke-executed'
+    && closureProductionHandlerRuntimeExecution.handlerId === closureProductionHandlerBoundary?.handlerId
+    && closureProductionHandlerRuntimeExecution.moduleSource === 'artifact.execution.module'
+    && closureProductionHandlerRuntimeExecution.entryExport === closureProductionHandlerBoundary?.entryExport
+    && closureProductionHandlerRuntimeExecution.runtimeAbi === closureProductionHandlerBoundary?.runtimeAbi
+    && closureProductionHandlerRuntimeExecution.runtimeScope === 'production-candidate-host-imports'
+    && closureProductionHandlerRuntimeExecution.executionClaim === 'production-candidate-host-import-runtime-smoke-only'
+    && closureProductionHandlerRuntimeExecution.argumentMode === 'linear-memory-offsets'
+    && arraysEqual(closureProductionHandlerRuntimeExecutionParameterTypes, ['i32', 'i32'])
+    && arraysEqual(closureProductionHandlerRuntimeExecutionResultTypes, ['i32'])
+    && arraysEqual(closureProductionHandlerRuntimeExecutionEntryArgs, closureProductionCandidateRuntimeProbeEntryArgs)
+    && finiteNumberOrNull(closureProductionHandlerRuntimeExecution.entryResult)
+      === finiteNumberOrNull(closureProductionCandidateRuntimeProbe?.expectedEntryResult)
+    && closureProductionHandlerRuntimeExecution.sampleSource === closureProductionCandidateRuntimeProbe?.sampleSource
+    && closureProductionHandlerRuntimeExecution.linearMemoryBindingSource
+      === closureProductionCandidateRuntimeProbe?.linearMemoryBindingSource
+    && finiteNumberOrNull(closureProductionHandlerRuntimeExecution.changedBytesInDeclaredTensorRange) === 64
+    && closureProductionHandlerRuntimeExecution.outputTensorsProducedByEntryExport === true
+    && finiteNumberOrNull(closureProductionHandlerRuntimeExecutionHostImportCallCounts?.ulg_read_f64) === 12
+    && finiteNumberOrNull(closureProductionHandlerRuntimeExecutionHostImportCallCounts?.ulg_write_f64) === 9
+    && closureProductionHandlerRuntimeExecution.scientificValidation === false
+    && closureProductionHandlerRuntimeExecution.fullPhysicsValidation === false
+    && closureProductionHandlerRuntimeExecution.fullFidelityMagnetarSimulation === false
+    && arraysEqual(
+      closureProductionHandlerRuntimeExecutionBlockedBy,
+      ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
+    );
   const closureProductionHandlerBoundaryDeclared =
     closureProductionHandlerBoundary?.schema === ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
     && textOrNull(closureProductionHandlerBoundary.handlerId) != null
     && textOrNull(closureProductionHandlerBoundary.handlerKind) != null
     && closureProductionHandlerBoundary.dispatchSchema === PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA
-    && closureProductionHandlerBoundary.status === 'declared-not-executed'
-    && closureProductionHandlerBoundary.handlerReady === false
-    && closureProductionHandlerBoundary.runtimeExecution === false
+    && closureProductionHandlerBoundary.status === 'production-handler-runtime-smoke-executed'
+    && closureProductionHandlerBoundary.handlerReady === true
+    && closureProductionHandlerBoundary.runtimeExecution === true
     && closureProductionHandlerBoundary.derivativeStatus === 'declared-not-computed'
     && closureProductionHandlerBoundary.scientificValidation === false
     && closureProductionHandlerBoundary.fullPhysicsValidation === false
@@ -874,6 +973,8 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureProductionHandlerBoundary.moduleRef?.contentAddressing === 'required'
     && closureProductionHandlerBoundary.moduleRef?.sha256Field === 'artifact.execution.module.sha256'
     && closureProductionHandlerContractDeclared
+    && closureProductionHandlerImplementationReady
+    && closureProductionHandlerRuntimeExecutionReady
     && closureProductionHandlerHostImports?.source === 'bundle.hostImports'
     && closureProductionHandlerHostImports?.required === validity.requiresHostImports
     && closureProductionHandlerHostImports?.factory === 'createEshkolHostImportObject'
@@ -905,6 +1006,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     )
     && hostImports?.factory === closureProductionHandlerHostImports?.factory
     && closureProductionHandlerAllowedExecutionClaims.includes(closureTensorRuntimeContract?.executionClaim)
+    && closureProductionHandlerAllowedExecutionClaims.includes('production-candidate-host-import-runtime-smoke-only')
     && closureProductionHandlerTensorMemoryBinding?.source
       === 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
     && closureProductionHandlerTensorMemoryBinding?.status === closureTensorLinearMemoryBinding?.status
@@ -1217,6 +1319,36 @@ export function summarizeUlgArtifact(artifact = {}) {
       closureProductionHandlerContractRequiredEvidence.length,
     closureProductionHandlerContractBlockedBy:
       clonePlain(closureProductionHandlerContractBlockedBy),
+    closureProductionHandlerImplementationSchema: closureProductionHandlerImplementation?.schema || null,
+    closureProductionHandlerImplementationStatus: closureProductionHandlerImplementation?.status || null,
+    closureProductionHandlerImplementationReady,
+    closureProductionHandlerImplementationScope:
+      closureProductionHandlerImplementation?.implementationScope || null,
+    closureProductionHandlerImplementationExecutionClaim:
+      closureProductionHandlerImplementation?.executionClaim || null,
+    closureProductionHandlerImplementationEvidence:
+      clonePlain(closureProductionHandlerImplementationEvidence),
+    closureProductionHandlerImplementationEvidenceCount:
+      closureProductionHandlerImplementationEvidence.length,
+    closureProductionHandlerImplementationBlockedBy:
+      clonePlain(closureProductionHandlerImplementationBlockedBy),
+    closureProductionHandlerRuntimeExecutionSchema: closureProductionHandlerRuntimeExecution?.schema || null,
+    closureProductionHandlerRuntimeExecutionStatus: closureProductionHandlerRuntimeExecution?.status || null,
+    closureProductionHandlerRuntimeExecutionReady,
+    closureProductionHandlerRuntimeExecutionEntryArgs:
+      clonePlain(closureProductionHandlerRuntimeExecutionEntryArgs),
+    closureProductionHandlerRuntimeExecutionEntryResult:
+      finiteNumberOrNull(closureProductionHandlerRuntimeExecution?.entryResult),
+    closureProductionHandlerRuntimeExecutionChangedBytesInDeclaredTensorRange:
+      finiteNumberOrNull(closureProductionHandlerRuntimeExecution?.changedBytesInDeclaredTensorRange),
+    closureProductionHandlerRuntimeExecutionOutputTensorsProduced:
+      typeof closureProductionHandlerRuntimeExecution?.outputTensorsProducedByEntryExport === 'boolean'
+        ? closureProductionHandlerRuntimeExecution.outputTensorsProducedByEntryExport
+        : null,
+    closureProductionHandlerRuntimeExecutionHostImportCallCounts:
+      clonePlain(closureProductionHandlerRuntimeExecutionHostImportCallCounts),
+    closureProductionHandlerRuntimeExecutionBlockedBy:
+      clonePlain(closureProductionHandlerRuntimeExecutionBlockedBy),
     closureProductionCandidateRuntimeProbeSchema: closureProductionCandidateRuntimeProbe?.schema || null,
     closureProductionCandidateRuntimeProbeStatus: closureProductionCandidateRuntimeProbe?.status || null,
     closureProductionCandidateRuntimeProbeReady,

@@ -529,16 +529,16 @@ Updated: 2026-06-06 17:45:00 AKDT
   byte length `169528`, tensor contract hash
   `sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64`,
   `entryExportConsumesOffsets = true`, and
-  `changedBytesInDeclaredTensorRange = 64` while keeping
-  `handlerReady = false`, `runtimeExecution = false`, and full physics
-  validation false.
+  `changedBytesInDeclaredTensorRange = 64` while keeping scientific/full
+  physics validation false.
 - Recorded PeerCompute sidecar commit `dc497229`, which refreshed Multiscale
   browser and relay handoff smoke expectations for the same Eshkol deterministic
   tensor-offset runtime-smoke artifact without pushing.
 - Added live/demo visibility for the current Eshkol runtime-smoke evidence and
   production blockers. The artifact row now shows
   `tensor-probe:runtime-smoke-passed:offsets-consumed:64b` and
-  `handler:declared-not-executed:3-blockers`; `npm run status:live -- --bridge`
+  `handler:production-handler-runtime-smoke-executed:1-blockers`;
+  `npm run status:live -- --bridge`
   prints the exact blocker list, expected entry args, stdout hash, output tensor
   production flag, and production validation flags.
 - Integrated Eshkol production-candidate host-import commit `8ce5ca4` into ULG
@@ -548,9 +548,8 @@ Updated: 2026-06-06 17:45:00 AKDT
   production candidate status
   `production-candidate-runtime-imports-implemented`,
   `runtimeSmokeStubsAllowed = false`, f64 tensor-memory imports, `23` required
-  non-stub imports, and readiness requirements for production handler
-  implementation, non-stub imports, validated tensor memory imports, and full
-  physics validation.
+  non-stub imports, and readiness requirements for non-stub imports, validated
+  tensor memory imports, and full physics validation.
 - Integrated Eshkol production dispatch preflight metadata into ULG staging,
   compact summaries, browser handoffs, e2e checks, and live status. ULG now
   requires `eshkol.ulg.production-handler-dispatch-preflight.v0`, rejects
@@ -563,15 +562,24 @@ Updated: 2026-06-06 17:45:00 AKDT
   module hash, entry signature, non-stub host imports, f64 tensor binding, and
   smoke-stub rejection passed; handler readiness, runtime execution, and
   full-physics validation remained blocked. The declared production handler
-  contract slice below supersedes that count with `10/7/3`.
+  contract slice below supersedes that count with `10/7/3`, and the
+  production-candidate handler/runtime evidence slice supersedes it again with
+  `10/9/1`.
 - Integrated Eshkol's declared production handler contract into ULG staging,
   compact summaries, browser handoffs, e2e checks, and live status. The staged
   closure now exposes `eshkol.ulg.production-handler-contract.v0` with
   `main(i32, i32) -> i32`, linear-memory offset arguments, validated input and
   output tensor ids, eight required evidence items, and the current production
-  blockers. Production dispatch preflight now records `10/7/3` while
-  preserving `handlerReady = false`, `runtimeExecution = false`, and full
-  physics validation false.
+  blockers. That slice recorded production dispatch preflight `10/7/3` while
+  preserving full physics validation false.
+- Integrated Eshkol's production-candidate handler implementation/runtime
+  execution evidence into ULG staging, compact summaries, browser handoffs, e2e
+  checks, and live status. The staged closure now exposes
+  `eshkol.ulg.production-handler-implementation.v0` and
+  `eshkol.ulg.production-handler-runtime-execution.v0`, marks
+  `handlerReady = true` and `runtimeExecution = true` for the deterministic
+  tensor ABI smoke scope, and advances production dispatch preflight to
+  `10/9/1` while keeping `fullPhysicsValidation = false`.
 - Integrated MoonLab backend-preflight sidecar commit `4e91165` into ULG
   staging, summaries, UI, e2e coverage, and live status. The staged
   `moonlab.webgpu.complex64-parity-scope.v0` artifact now requires

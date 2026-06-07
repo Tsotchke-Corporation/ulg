@@ -196,6 +196,26 @@ try {
           eshkol?.closureProductionHandlerContractRequiredEvidenceCount ?? null,
         productionHandlerContractBlockedBy:
           eshkol?.closureProductionHandlerContractBlockedBy ?? [],
+        productionHandlerImplementationStatus:
+          eshkol?.closureProductionHandlerImplementationStatus ?? null,
+        productionHandlerImplementationReady:
+          eshkol?.closureProductionHandlerImplementationReady ?? null,
+        productionHandlerImplementationEvidenceCount:
+          eshkol?.closureProductionHandlerImplementationEvidenceCount ?? null,
+        productionHandlerImplementationBlockedBy:
+          eshkol?.closureProductionHandlerImplementationBlockedBy ?? [],
+        productionHandlerRuntimeExecutionStatus:
+          eshkol?.closureProductionHandlerRuntimeExecutionStatus ?? null,
+        productionHandlerRuntimeExecutionReady:
+          eshkol?.closureProductionHandlerRuntimeExecutionReady ?? null,
+        productionHandlerRuntimeExecutionEntryArgs:
+          eshkol?.closureProductionHandlerRuntimeExecutionEntryArgs ?? [],
+        productionHandlerRuntimeExecutionChangedBytesInDeclaredTensorRange:
+          eshkol?.closureProductionHandlerRuntimeExecutionChangedBytesInDeclaredTensorRange ?? null,
+        productionHandlerRuntimeExecutionHostImportCallCounts:
+          eshkol?.closureProductionHandlerRuntimeExecutionHostImportCallCounts ?? null,
+        productionHandlerRuntimeExecutionBlockedBy:
+          eshkol?.closureProductionHandlerRuntimeExecutionBlockedBy ?? [],
         productionCandidateRuntimeProbeStatus:
           eshkol?.closureProductionCandidateRuntimeProbeStatus ?? null,
         productionCandidateRuntimeProbeReady:

@@ -350,7 +350,7 @@ function renderArtifactSummaryLine(summary) {
     const blockerCount = Array.isArray(summary.closureProductionHandlerBoundaryBlockers)
       ? summary.closureProductionHandlerBoundaryBlockers.length
       : 0;
-    parts.push(`handler:declared-not-executed:${blockerCount}-blockers`);
+    parts.push(`handler:${summary.closureProductionHandlerBoundaryStatus || 'declared'}:${blockerCount}-blockers`);
     if (summary.closureProductionHostImportCandidateStatus) {
       const nonStubImportCount = Array.isArray(summary.closureProductionHostImportCandidateRequiredNonStubImports)
         ? summary.closureProductionHostImportCandidateRequiredNonStubImports.length

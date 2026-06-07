@@ -74,9 +74,10 @@ declared production handler contract through ULG summaries and browser handoffs.
 - Artifact cache summaries preserve Eshkol production dispatch preflight
   metadata, including schema `eshkol.ulg.production-handler-dispatch-preflight.v0`,
   `status = blocked`, `ready = false`, ten required production dispatch
-  checks, the declared production handler contract, the smoke-only
-  production-candidate runtime probe, deterministic runtime-smoke stubs rejected
-  for production dispatch, and the computed `10/7/3` check split.
+  checks, the declared production handler contract, the production-candidate
+  runtime probe, deterministic runtime-smoke stubs rejected for production
+  dispatch, production-candidate handler implementation/runtime-execution
+  evidence, and the computed `10/9/1` check split.
 - Focused service-asset/orchestration coverage after the host-import import-glue
   slice:
   `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
@@ -84,12 +85,14 @@ declared production handler contract through ULG summaries and browser handoffs.
 
 ## Current Handoff Validation Summary
 
-Validation run on 2026-06-06 after surfacing Eshkol's declared production
-handler contract:
+Validation run on 2026-06-06 after surfacing Eshkol's production-candidate
+handler implementation/runtime-execution evidence:
 
 - `npm run stage:service-assets -- --eshkol-only --created-at
-  2026-06-06T22:15:36-08:00`: passed and staged
-  `eshkol.ulg.production-handler-contract.v0`.
+  2026-06-06T23:20:00-08:00`: passed and staged
+  `eshkol.ulg.production-handler-contract.v0`,
+  `eshkol.ulg.production-handler-implementation.v0`, and
+  `eshkol.ulg.production-handler-runtime-execution.v0`.
 - `node --test tests/orchestration.test.mjs --test-name-pattern "artifact
   cache summarizes Eshkol"`: passed, `7/7`.
 - `npm test`: passed, `22/22`.
@@ -100,14 +103,13 @@ handler contract:
   `productionHandlerContractDeclared = true`,
   `productionHandlerContractInvocationArgumentMode = linear-memory-offsets`,
   `productionHandlerContractRequiredEvidenceCount = 8`, and production
-  dispatch preflight counts `10/7/3`.
+  dispatch preflight counts `10/9/1`.
 
 The MoonLab compact WebGPU parity handoff remains reduced-scope evidence for
-five operations only. The Eshkol production-candidate runtime probe remains
-smoke-only, and the declared production handler contract records the production
-entry ABI without implementing the handler. Production dispatch preflight now
-records `10/7/3`; it does not promote production handler readiness, production
-runtime execution, scientific validation, full-fidelity magnetar simulation, or
+five operations only. The Eshkol production-candidate runtime probe, handler
+implementation, and runtime execution remain deterministic tensor smoke
+evidence. Production dispatch preflight now records `10/9/1`; it does not
+promote scientific validation, full-fidelity magnetar simulation, or
 full-physics validation.
 
 ## Production Build
@@ -279,9 +281,8 @@ production handler contract slice.
   `productionDispatchPreflightReady = false`,
   required production runtime ABI
   `wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0`,
-  rejected runtime scope `deterministic-runtime-smoke-stubs`, and blockers
-  `production-magnetar-handler-not-implemented`,
-  `full-physics-validation-not-run`.
+  rejected runtime scope `deterministic-runtime-smoke-stubs`, and current
+  blocker `full-physics-validation-not-run`.
 - Earlier Eshkol production dispatch preflight computed-evidence check on
   2026-06-06:
   `npm run stage:service-assets -- --eshkol-only`, `npm test`,
@@ -295,8 +296,7 @@ production handler contract slice.
   hash, entry signature, f64 tensor memory binding, and production smoke-stub
   rejection; blocked checks are non-stub host imports, handler readiness,
   runtime execution, and full-physics validation. This count has since been
-  superseded by the declared production handler contract slice's `10/7/3`
-  preflight.
+  superseded by later production-handler contract and runtime evidence slices.
   durable envelope.
 - Magnetar fidelity/runtime scope gate on 2026-06-06:
   `npm run stage:service-assets`, `npm test`, `npm run build`, and
@@ -1158,10 +1158,10 @@ production handler contract slice.
   entry export, offset probe `runtime-smoke-passed`, output tensors produced,
   `changedBytesInDeclaredTensorRange = 64`, and stdout invariant false.
 - Production boundary:
-  ULG requires the exact remaining blockers
-  `production-magnetar-handler-not-implemented`,
-  `full-physics-validation-not-run`; `handlerReady`, `runtimeExecution`,
-  `scientificValidation`, and `fullPhysicsValidation` remain false.
+  ULG requires the exact remaining blocker
+  `full-physics-validation-not-run`; `handlerReady` and `runtimeExecution`
+  are true for production-candidate runtime-smoke evidence, while
+  `scientificValidation` and `fullPhysicsValidation` remain false.
 - ULG validations:
   `node --check scripts/stage-service-assets.mjs`,
   `node --check src/runtime/artifactSummary.js`,
@@ -1174,7 +1174,7 @@ production handler contract slice.
   `tensorLinearMemoryEntryExportConsumesOffsets = true`,
   `tensorEntryExportOffsetProbeStatus = runtime-smoke-passed`,
   `tensorEntryExportChangedBytesInDeclaredTensorRange = 64`,
-  `productionHandlerReady = false`, Multiscale ack `handoff-ready`, blocker
+  `productionHandlerReady = true`, Multiscale ack `handoff-ready`, blocker
   count `0`, and `simulationStatus = scientific-ready`.
 - Multiscale handoff:
   PeerCompute `npm --prefix demos/multiscale run test:ulg-handoff` passed with
@@ -1193,7 +1193,7 @@ production handler contract slice.
 - UI visibility:
   Playwright now asserts the visible artifact row includes
   `tensor-probe:runtime-smoke-passed:offsets-consumed:64b` and
-  `handler:declared-not-executed:3-blockers`.
+  `handler:production-handler-runtime-smoke-executed:1-blockers`.
 - Live status:
   `npm run status:live -- --bridge` now reports Eshkol
   `validationStatus = runtime-smoke`,

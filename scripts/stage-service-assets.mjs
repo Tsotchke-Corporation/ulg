@@ -33,6 +33,9 @@ const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
+const ESHKOL_PRODUCTION_HANDLER_IMPLEMENTATION_SCHEMA = 'eshkol.ulg.production-handler-implementation.v0';
+const ESHKOL_PRODUCTION_HANDLER_RUNTIME_EXECUTION_SCHEMA =
+  'eshkol.ulg.production-handler-runtime-execution.v0';
 const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
 const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
@@ -636,14 +639,14 @@ function stageEshkolAssets() {
       || productionHandlerBoundary.dispatchSchema !== PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA) {
       throw new Error('Eshkol staged magnetar descriptor is missing production handler boundary metadata');
     }
-    if (productionHandlerBoundary.status !== 'declared-not-executed'
-      || productionHandlerBoundary.handlerReady !== false
-      || productionHandlerBoundary.runtimeExecution !== false
+    if (productionHandlerBoundary.status !== 'production-handler-runtime-smoke-executed'
+      || productionHandlerBoundary.handlerReady !== true
+      || productionHandlerBoundary.runtimeExecution !== true
       || productionHandlerBoundary.derivativeStatus !== 'declared-not-computed'
       || productionHandlerBoundary.scientificValidation !== false
       || productionHandlerBoundary.fullPhysicsValidation !== false
       || productionHandlerBoundary.fullFidelityMagnetarSimulation !== false) {
-      throw new Error('Eshkol staged production handler boundary overstates runtime readiness or physics validation');
+      throw new Error('Eshkol staged production handler boundary lost runtime-smoke evidence or overstates physics validation');
     }
     if (productionHandlerBoundary.entryExport !== artifact.validation?.closureDescriptor?.entryExport
       || productionHandlerBoundary.runtimeAbi !== tensorRuntimeContract.runtimeAbi
@@ -658,7 +661,6 @@ function stageEshkolAssets() {
       throw new Error('Eshkol staged production handler boundary has invalid module reference metadata');
     }
     const expectedProductionHandlerBlockers = [
-      'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ];
     const expectedProductionHandlerContractEvidence = [
@@ -673,7 +675,7 @@ function stageEshkolAssets() {
     ];
     const productionHandlerContract = productionHandlerBoundary.productionHandlerContract || {};
     if (productionHandlerContract.schema !== 'eshkol.ulg.production-handler-contract.v0'
-      || productionHandlerContract.status !== 'declared-not-implemented'
+      || productionHandlerContract.status !== 'implemented-runtime-smoke-pending-full-physics'
       || productionHandlerContract.handlerId !== productionHandlerBoundary.handlerId
       || productionHandlerContract.dispatchSchema !== productionHandlerBoundary.dispatchSchema
       || productionHandlerContract.entryExport !== productionHandlerBoundary.entryExport
@@ -693,6 +695,42 @@ function stageEshkolAssets() {
       || !arraysEqual(productionHandlerContract.blockedBy, expectedProductionHandlerBlockers)) {
       throw new Error('Eshkol staged production handler contract changed');
     }
+    const productionHandlerImplementation = productionHandlerBoundary.productionHandlerImplementation || {};
+    const expectedProductionHandlerImplementationEvidence = [
+      'content-addressed-wasm-module',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'production-candidate-host-imports',
+      'validated-f64-tensor-memory-binding',
+      'production-candidate-runtime-probe'
+    ];
+    if (productionHandlerImplementation.schema !== ESHKOL_PRODUCTION_HANDLER_IMPLEMENTATION_SCHEMA
+      || productionHandlerImplementation.status !== 'implemented-production-candidate-runtime-smoke'
+      || productionHandlerImplementation.handlerId !== productionHandlerBoundary.handlerId
+      || productionHandlerImplementation.handlerKind !== productionHandlerBoundary.handlerKind
+      || productionHandlerImplementation.implementationScope !== 'deterministic-magnetar-tensor-abi-smoke'
+      || productionHandlerImplementation.moduleSource !== 'artifact.execution.module'
+      || productionHandlerImplementation.entryExport !== productionHandlerBoundary.entryExport
+      || productionHandlerImplementation.runtimeAbi !== productionHandlerBoundary.runtimeAbi
+      || productionHandlerImplementation.dispatchSchema !== productionHandlerBoundary.dispatchSchema
+      || productionHandlerImplementation.tensorMemoryModel !== productionHandlerBoundary.tensorMemoryModel
+      || !arraysEqual(productionHandlerImplementation.inputTensorIds, productionHandlerBoundary.inputTensorIds)
+      || !arraysEqual(productionHandlerImplementation.outputTensorIds, productionHandlerBoundary.outputTensorIds)
+      || productionHandlerImplementation.invocation?.moduleSource !== 'artifact.execution.module'
+      || productionHandlerImplementation.invocation?.entryExport !== 'main'
+      || productionHandlerImplementation.invocation?.argumentMode !== 'linear-memory-offsets'
+      || !arraysEqual(productionHandlerImplementation.invocation?.parameterTypes, ['i32', 'i32'])
+      || !arraysEqual(productionHandlerImplementation.invocation?.resultTypes, ['i32'])
+      || productionHandlerImplementation.invocation?.inputOffsetParam !== 0
+      || productionHandlerImplementation.invocation?.outputOffsetParam !== 1
+      || productionHandlerImplementation.invocation?.expectedReturn !== 0
+      || productionHandlerImplementation.executionClaim !== 'production-candidate-host-import-runtime-smoke-only'
+      || !arraysEqual(productionHandlerImplementation.evidence, expectedProductionHandlerImplementationEvidence)
+      || productionHandlerImplementation.scientificValidation !== false
+      || productionHandlerImplementation.fullPhysicsValidation !== false
+      || productionHandlerImplementation.fullFidelityMagnetarSimulation !== false
+      || !arraysEqual(productionHandlerImplementation.blockedBy, expectedProductionHandlerBlockers)) {
+      throw new Error('Eshkol staged production handler implementation evidence changed');
+    }
     if (productionHandlerBoundary.hostImports?.required !== artifact.validity?.requiresHostImports
       || productionHandlerBoundary.hostImports?.factory !== 'createEshkolHostImportObject') {
       throw new Error('Eshkol staged production handler boundary has invalid host import metadata');
@@ -700,7 +738,6 @@ function stageEshkolAssets() {
     const productionHostImports = productionHandlerBoundary.hostImports || {};
     const productionHostImportCandidate = productionHostImports.productionCandidate || {};
     const expectedProductionCandidateReadiness = [
-      'production-magnetar-handler-implementation',
       'non-stub-host-runtime-imports',
       'validated-f64-tensor-memory-imports',
       'full-physics-validation-pass'
@@ -724,11 +761,11 @@ function stageEshkolAssets() {
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
-      'runtime-smoke-stubs-rejected-for-production'
+      'runtime-smoke-stubs-rejected-for-production',
+      'handler-ready-flag-true',
+      'runtime-execution-flag-true'
     ];
     const expectedProductionDispatchBlockedChecks = [
-      'handler-ready-flag-true',
-      'runtime-execution-flag-true',
       'full-physics-validation-evidence-present'
     ];
     if (productionHostImports.runtimeScope !== 'production-candidate-host-imports'
@@ -751,7 +788,8 @@ function stageEshkolAssets() {
     const allowedExecutionClaims = Array.isArray(productionHandlerBoundary.allowedExecutionClaims)
       ? productionHandlerBoundary.allowedExecutionClaims
       : [];
-    if (!allowedExecutionClaims.includes(tensorRuntimeContract.executionClaim)) {
+    if (!allowedExecutionClaims.includes(tensorRuntimeContract.executionClaim)
+      || !allowedExecutionClaims.includes('production-candidate-host-import-runtime-smoke-only')) {
       throw new Error('Eshkol staged production handler boundary does not allow the tensor runtime execution claim');
     }
     if (productionHandlerBoundary.tensorMemoryBinding?.source !== 'validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding'
@@ -770,8 +808,8 @@ function stageEshkolAssets() {
       || productionCandidateRuntimeProbe.expectedEntryResult !== 0
       || productionCandidateRuntimeProbe.changedBytesInDeclaredTensorRange !== 64
       || productionCandidateRuntimeProbe.outputTensorsProducedByEntryExport !== true
-      || productionCandidateRuntimeProbe.productionHandlerReady !== false
-      || productionCandidateRuntimeProbe.productionHandlerRuntimeExecution !== false
+      || productionCandidateRuntimeProbe.productionHandlerReady !== true
+      || productionCandidateRuntimeProbe.productionHandlerRuntimeExecution !== true
       || productionCandidateRuntimeProbe.scientificValidation !== false
       || productionCandidateRuntimeProbe.fullPhysicsValidation !== false
       || productionCandidateRuntimeProbe.fullFidelityMagnetarSimulation !== false
@@ -781,8 +819,35 @@ function stageEshkolAssets() {
       || productionCandidateRuntimeProbe.hostImportOptions?.f64TensorMemoryImports !== true
       || productionCandidateRuntimeProbe.hostImportCallCounts?.ulg_read_f64 !== 12
       || productionCandidateRuntimeProbe.hostImportCallCounts?.ulg_write_f64 !== 9
-      || productionCandidateRuntimeProbe.blocker !== 'production-candidate-runtime-smoke-only-production-handler-not-ready') {
+      || productionCandidateRuntimeProbe.blocker !== 'full-physics-validation-not-run') {
       throw new Error('Eshkol staged production candidate runtime probe does not preserve smoke-only runtime evidence');
+    }
+    const productionHandlerRuntimeExecution = productionHandlerBoundary.productionHandlerRuntimeExecution || {};
+    if (productionHandlerRuntimeExecution.schema !== ESHKOL_PRODUCTION_HANDLER_RUNTIME_EXECUTION_SCHEMA
+      || productionHandlerRuntimeExecution.status !== 'production-handler-runtime-smoke-executed'
+      || productionHandlerRuntimeExecution.handlerId !== productionHandlerBoundary.handlerId
+      || productionHandlerRuntimeExecution.moduleSource !== 'artifact.execution.module'
+      || productionHandlerRuntimeExecution.entryExport !== productionHandlerBoundary.entryExport
+      || productionHandlerRuntimeExecution.runtimeAbi !== productionHandlerBoundary.runtimeAbi
+      || productionHandlerRuntimeExecution.runtimeScope !== 'production-candidate-host-imports'
+      || productionHandlerRuntimeExecution.executionClaim !== 'production-candidate-host-import-runtime-smoke-only'
+      || productionHandlerRuntimeExecution.argumentMode !== 'linear-memory-offsets'
+      || !arraysEqual(productionHandlerRuntimeExecution.parameterTypes, ['i32', 'i32'])
+      || !arraysEqual(productionHandlerRuntimeExecution.resultTypes, ['i32'])
+      || !arraysEqual(productionHandlerRuntimeExecution.entryArgs, productionCandidateRuntimeProbe.entryArgs)
+      || productionHandlerRuntimeExecution.entryResult !== productionCandidateRuntimeProbe.expectedEntryResult
+      || productionHandlerRuntimeExecution.sampleSource !== productionCandidateRuntimeProbe.sampleSource
+      || productionHandlerRuntimeExecution.linearMemoryBindingSource !== productionCandidateRuntimeProbe.linearMemoryBindingSource
+      || productionHandlerRuntimeExecution.changedBytesInDeclaredTensorRange
+        !== productionCandidateRuntimeProbe.changedBytesInDeclaredTensorRange
+      || productionHandlerRuntimeExecution.outputTensorsProducedByEntryExport !== true
+      || productionHandlerRuntimeExecution.hostImportCallCounts?.ulg_read_f64 !== 12
+      || productionHandlerRuntimeExecution.hostImportCallCounts?.ulg_write_f64 !== 9
+      || productionHandlerRuntimeExecution.scientificValidation !== false
+      || productionHandlerRuntimeExecution.fullPhysicsValidation !== false
+      || productionHandlerRuntimeExecution.fullFidelityMagnetarSimulation !== false
+      || !arraysEqual(productionHandlerRuntimeExecution.blockedBy, expectedProductionHandlerBlockers)) {
+      throw new Error('Eshkol staged production handler runtime execution evidence changed');
     }
     const productionDispatchPreflight = productionHandlerBoundary.dispatchPreflight || {};
     if (productionDispatchPreflight.schema !== ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA

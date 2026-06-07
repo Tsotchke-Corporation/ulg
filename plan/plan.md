@@ -86,6 +86,10 @@ physics work:
   and live status, advancing production dispatch preflight evidence to nine
   required checks, six passed checks, and three blocked checks while preserving
   production handler/runtime/full-physics blockers.
+- [x] Promote Eshkol's DOM-free `eshkol-host-imports.js` factory to a
+  first-class browser/service-worker asset, probe it as JavaScript, import it in
+  the supervised Eshkol worker, and expose factory/readiness summary fields
+  without invoking the production handler.
 - [x] Surface MoonLab's `moonlab.webgpu.complex64-parity-scope.v0` browser
   evidence through ULG staging, core-probe validation, summaries, UI, handoffs,
   and e2e coverage with `device-acquired`, executed/passing
@@ -205,7 +209,7 @@ physics work:
 - [x] Add computed production dispatch preflight `checkResults`/`checkSummary`
   evidence to exported magnetar closure artifacts without promoting production
   handler/runtime/full-physics readiness.
-- [ ] Add language-level `define-ulg-closure` syntax and service-worker import
+- [x] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
   general LLVM-to-WGSL compiler.

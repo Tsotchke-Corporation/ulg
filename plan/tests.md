@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 22/22 tests on 2026-06-06 after the MoonLab compact
-WebGPU parity handoff and Eshkol production-candidate runtime probe sync.
+Current result: pass, 22/22 tests on 2026-06-06 after the Eshkol host-import
+service-worker import glue slice.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -19,7 +19,8 @@ WebGPU parity handoff and Eshkol production-candidate runtime probe sync.
   `/service-assets/moonlab/magnetar-reference-contracts.json` reference-contract
   JSON while keeping only loader/WASM assets required.
 - Eshkol closure-bundle service asset specs resolve manually staged artifact
-  JSON, WASM, schema snapshot, and bundle manifest URLs.
+  JSON, WASM, DOM-free host-import JavaScript, schema snapshot, and bundle
+  manifest URLs.
 - Service asset probes classify ready, missing, and wrong-MIME loader/WASM
   responses.
 - Service asset probes report a missing optional MoonLab reference-contract JSON
@@ -44,6 +45,10 @@ WebGPU parity handoff and Eshkol production-candidate runtime probe sync.
 - Artifact cache summaries preserve Eshkol closure entry signature,
   start-section, import/export, WASM metadata count, and DOM-free host-import
   bundle metadata.
+- Artifact cache summaries preserve Eshkol host-import JavaScript asset status,
+  service-worker import factory readiness, production-host candidate
+  requirements schema/status, runtime scope, implementation status, and required
+  non-stub import count.
 - The browser demo handoff exporter returns `peercompute.ulg.demo-handoff.v0`
   records with full closure artifacts, compact summaries, refs, and transferred
   Eshkol WASM bytes.
@@ -68,9 +73,10 @@ WebGPU parity handoff and Eshkol production-candidate runtime probe sync.
   checks, the smoke-only production-candidate runtime probe, deterministic
   runtime-smoke stubs rejected for production dispatch, and the computed
   `9/6/3` check split.
-- Focused service-asset/orchestration coverage:
+- Focused service-asset/orchestration coverage after the host-import import-glue
+  slice:
   `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
-  passed `14/14` in the handoff summary.
+  passed `14/14`.
 
 ## Current Handoff Validation Summary
 
@@ -84,6 +90,10 @@ Already-passed validation recorded from the handoff summary on 2026-06-06:
 - `npm run build`: passed with the existing Vite large chunk warning.
 - `npm run test:e2e`: passed.
 - `npm run status:live`: passed.
+- `npm run status:live` now reports Eshkol host-import JS asset readiness,
+  service-worker import factory readiness, production-host candidate
+  requirements status, runtime scope, implementation status, and `23` required
+  non-stub imports.
 
 The MoonLab compact WebGPU parity handoff remains reduced-scope evidence for
 five operations only. The Eshkol production-candidate runtime probe remains
@@ -95,16 +105,15 @@ validation, full-fidelity magnetar simulation, or full-physics validation.
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the MoonLab compact parity handoff and
-Eshkol production-candidate runtime probe sync, with the existing Vite large
-chunk warning.
+Current result: pass on 2026-06-06 after the Eshkol host-import
+service-worker import glue slice, with the existing Vite large chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after the MoonLab compact
-parity handoff and Eshkol production-candidate runtime probe sync.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after the Eshkol
+host-import service-worker import glue slice.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.

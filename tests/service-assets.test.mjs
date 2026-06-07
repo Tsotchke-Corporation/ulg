@@ -77,6 +77,7 @@ test('Eshkol closure bundle asset spec declares deployable JSON and WASM files',
   assert.equal(assets.baseUrl, '/service-assets/eshkol/closures/magnetar-closure/');
   assert.equal(assets.artifactModule, '/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json');
   assert.equal(assets.wasmModule, '/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm');
+  assert.equal(assets.hostImportsModule, '/service-assets/eshkol/closures/magnetar-closure/eshkol-host-imports.js');
   assert.equal(assets.schemaModule, '/service-assets/eshkol/closures/magnetar-closure/schemas/ulg/closure_artifact.schema.json');
   assert.equal(assets.bundleManifest, '/service-assets/eshkol/closures/magnetar-closure/ulg_bundle_manifest.json');
 
@@ -92,7 +93,7 @@ test('Eshkol closure bundle asset spec declares deployable JSON and WASM files',
       requests.push(url);
       return fakeResponse({
         status: 200,
-        contentType: url.endsWith('.wasm') ? 'application/wasm' : 'application/json'
+        contentType: contentTypeForEshkolAsset(url)
       });
     }
   });
@@ -102,6 +103,7 @@ test('Eshkol closure bundle asset spec declares deployable JSON and WASM files',
     'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm',
     'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json',
     'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/schemas/ulg/closure_artifact.schema.json',
+    'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/eshkol-host-imports.js',
     'https://ulg.local/service-assets/eshkol/closures/magnetar-closure/ulg_bundle_manifest.json'
   ]);
   assert.deepEqual(
@@ -110,6 +112,7 @@ test('Eshkol closure bundle asset spec declares deployable JSON and WASM files',
       ['wasmModule', 'application/wasm', 'ready'],
       ['artifactModule', 'json', 'ready'],
       ['schemaModule', 'json', 'ready'],
+      ['hostImportsModule', 'javascript', 'ready'],
       ['bundleManifest', 'json', 'ready']
     ]
   );
@@ -121,11 +124,13 @@ test('Eshkol hello closure bundle asset spec points at smoke output-semantics as
   assert.equal(assets.baseUrl, '/service-assets/eshkol/closures/hello/');
   assert.equal(assets.artifactModule, '/service-assets/eshkol/closures/hello/hello.ulg.json');
   assert.equal(assets.wasmModule, '/service-assets/eshkol/closures/hello/hello.wasm');
+  assert.equal(assets.hostImportsModule, '/service-assets/eshkol/closures/hello/eshkol-host-imports.js');
   assert.equal(assets.schemaModule, '/service-assets/eshkol/closures/hello/schemas/ulg/closure_artifact.schema.json');
   assert.equal(assets.bundleManifest, '/service-assets/eshkol/closures/hello/ulg_bundle_manifest.json');
   assert.deepEqual(assets.required, [
     'artifactModule',
     'wasmModule',
+    'hostImportsModule',
     'schemaModule',
     'bundleManifest'
   ]);
@@ -232,6 +237,12 @@ function contentTypeForMoonLabAsset(url) {
   if (url.endsWith('.wasm')) return 'application/wasm';
   if (url.endsWith('.json')) return 'application/json';
   return 'text/javascript';
+}
+
+function contentTypeForEshkolAsset(url) {
+  if (url.endsWith('.wasm')) return 'application/wasm';
+  if (url.endsWith('.js')) return 'text/javascript';
+  return 'application/json';
 }
 
 function fakeResponse({ status, contentType }) {

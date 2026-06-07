@@ -18,6 +18,7 @@ public/service-assets/
       <bundle-name>/
         <bundle-name>.wasm
         <bundle-name>.ulg.json
+        eshkol-host-imports.js
         ulg_bundle_manifest.json
         schemas/ulg/closure_artifact.schema.json
 ```
@@ -114,6 +115,10 @@ public/service-assets/eshkol/closures/hello/
 ```
 
 The ULG demo declares the `magnetar-closure` bundle by default and probes the
-artifact JSON, WASM module, schema snapshot, and bundle manifest. With those
-ignored files present, the Eshkol service telemetry reports asset status
-`ready`.
+artifact JSON, WASM module, DOM-free host-import JavaScript, schema snapshot,
+and bundle manifest. With those ignored files present, the Eshkol service
+telemetry reports asset status `ready`, imports `eshkol-host-imports.js` inside
+the supervised module worker, and records the factory/readiness summary under
+the closure artifact runtime metadata. That import glue validates browser
+service-worker shape only; it does not execute the production magnetar handler
+or claim scientific/full-physics validation.

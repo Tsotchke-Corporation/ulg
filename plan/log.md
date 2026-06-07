@@ -1,5 +1,84 @@
 # ULG Implementation Log
 
+## 2026-06-06 21:27:51 AKDT
+
+Prompt: Continue the core ULG triad plan after the Eshkol compiler metadata
+checkpoint; keep commits local; do not push; advance the remaining
+language-level `define-ulg-closure` / service-worker import-glue item without
+claiming production magnetar handler execution or scientific/full-physics
+validation.
+
+Actions:
+
+- Confirmed ULG, Eshkol, and PeerCompute trees were clean before starting the
+  ULG slice. The new Eshkol local commit is `99e8115 Treat ULG closure
+  declarations as compiler metadata`.
+- Attempted to spawn a PeerCompute sidecar for non-overlapping inspection, but
+  the agent thread limit was reached, so this slice stayed local.
+- Added `hostImportsModule` to `createEshkolClosureBundleAssetSpec()`, pointing
+  at the staged `eshkol-host-imports.js` file and making it a required Eshkol
+  service asset.
+- Extended `probeManifestServiceAssets()` so Eshkol host-import modules are
+  fetched and MIME-checked as JavaScript.
+- Extended the supervised Eshkol worker to dynamically import the DOM-free
+  host-import factory, verify `createEshkolHostImportObject` and tensor-memory
+  binding availability, and record compact production-host candidate requirement
+  metadata in service telemetry and closure artifact runtime metadata.
+- Extended compact artifact summaries with host-import JS asset status,
+  factory readiness/status, requirements schema/status, runtime scope,
+  implementation status, and required non-stub import count.
+- Updated focused service-asset, orchestration, and browser smoke assertions for
+  the first-class host-import JS asset and service-worker import readiness.
+- Updated `README.md`, `public/service-assets/README.md`,
+  `plan/implementation-status.md`, `plan/plan.md`, and `plan/tests.md`.
+
+Files touched:
+
+- `README.md`
+- `public/service-assets/README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `scripts/live-status.mjs`
+- `src/runtime/ServiceAssetProbe.js`
+- `src/runtime/artifactSummary.js`
+- `src/runtime/demoRuntime.js`
+- `src/services/dummyService.worker.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/service-assets.test.mjs`
+- `ulg-gpu-abi/src/serviceContract.js`
+
+Validation so far:
+
+- `node --check` for changed JS/test files: passed.
+- `node --test tests/service-assets.test.mjs tests/orchestration.test.mjs`:
+  passed, 14/14 tests.
+- First `npm run test:e2e`: failed because `hostImportsFactory` was placed at
+  the closure artifact top level instead of under `runtime`.
+- Moved `hostImportsFactory` under `runtime` in the supervised Eshkol artifact.
+- `node --check src/services/dummyService.worker.js`: passed.
+- `node --test tests/service-assets.test.mjs tests/orchestration.test.mjs`:
+  passed, 14/14 tests after the fix.
+- `npm run test:e2e`: passed, 1/1 Chromium test.
+- `npm test`: passed, 22/22 tests.
+- `npm run build`: passed with the existing Vite large chunk warning.
+- `node --check scripts/live-status.mjs`: passed.
+- `npm run status:live`: passed and reported Eshkol
+  `hostImportsAssetStatus = "ready"`, `hostImportsFactoryReady = true`,
+  `hostImportsRequirementsStatus =
+  "production-candidate-runtime-imports-implemented"`,
+  `hostImportsRuntimeScope = "production-candidate-host-imports"`, and
+  `hostImportsRequiredNonStubImportCount = 23`.
+
+Open / blockers:
+
+- This is browser/service-worker import readiness only.
+- The Eshkol production magnetar handler is still not implemented or invoked.
+- Production runtime execution, scientific validation, full-fidelity magnetar
+  simulation, and full-physics validation remain blocked.
+
 ## 2026-06-06 01:25:01 AKDT
 
 Prompt: User asked for status and to keep going on the overall plan while

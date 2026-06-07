@@ -586,6 +586,14 @@ Updated: 2026-06-06 17:45:00 AKDT
   staged MoonLab/Eshkol artifacts. Both handoff paths reported
   `handoff-ready`, `simulationStatus = scientific-ready`, and
   `magnetarVisible = true` for the browser smoke.
+- Integrated Eshkol compiler-level `define-ulg-closure` metadata support commit
+  `99e8115` with ULG service-worker import glue: Eshkol closure bundle specs now
+  declare `eshkol-host-imports.js`, service asset probes fetch it as JavaScript,
+  the supervised Eshkol worker imports the DOM-free factory and verifies
+  `createEshkolHostImportObject` plus tensor-memory binding readiness, and
+  compact artifact summaries expose the factory status, production-host
+  candidate requirements, runtime scope, implementation status, and required
+  non-stub import count without invoking the production handler.
 
 ## In Progress
 

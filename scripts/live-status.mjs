@@ -158,6 +158,19 @@ try {
           eshkol?.closureTensorEntryExportObservedStdoutInvariantAcrossArgs ?? null,
         outputExpectedEntryArgs: eshkol?.closureOutputExpectedEntryArgs ?? null,
         outputExpectedStdoutSha256: eshkol?.closureOutputExpectedStdoutSha256 ?? null,
+        hostImportsModule: eshkol?.closureHostImportsModule ?? null,
+        hostImportsAssetStatus: eshkol?.closureHostImportsAssetStatus ?? null,
+        hostImportsFactoryStatus: eshkol?.closureHostImportsFactoryStatus ?? null,
+        hostImportsFactoryReady: eshkol?.closureHostImportsFactoryReady ?? null,
+        hostImportsRequirementsSchema:
+          eshkol?.closureHostImportsRequirementsSchema ?? null,
+        hostImportsRequirementsStatus:
+          eshkol?.closureHostImportsRequirementsStatus ?? null,
+        hostImportsRuntimeScope: eshkol?.closureHostImportsRuntimeScope ?? null,
+        hostImportsImplementationStatus:
+          eshkol?.closureHostImportsImplementationStatus ?? null,
+        hostImportsRequiredNonStubImportCount:
+          eshkol?.closureHostImportsRequiredNonStubImportCount ?? null,
         productionHandlerBoundaryDeclared: eshkol?.closureProductionHandlerBoundaryDeclared ?? null,
         productionHandlerReady: eshkol?.closureProductionHandlerReady ?? null,
         productionHandlerRuntimeExecution: eshkol?.closureProductionHandlerRuntimeExecution ?? null,

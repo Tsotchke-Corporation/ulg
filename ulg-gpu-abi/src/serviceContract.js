@@ -163,9 +163,10 @@ export function createEshkolClosureBundleAssetSpec({
   rootPath = ULG_SERVICE_ASSET_ROOT,
   artifactFile = `${bundleName}.ulg.json`,
   wasmFile = `${bundleName}.wasm`,
+  hostImportsFile = 'eshkol-host-imports.js',
   schemaFile = 'schemas/ulg/closure_artifact.schema.json',
   bundleManifestFile = 'ulg_bundle_manifest.json',
-  required = ['artifactModule', 'wasmModule', 'schemaModule', 'bundleManifest']
+  required = ['artifactModule', 'wasmModule', 'hostImportsModule', 'schemaModule', 'bundleManifest']
 } = {}) {
   const bundleBaseUrl = joinUrl(rootPath, ULG_SERVICE_IDS.eshkol, 'closures', bundleName, '');
   return {
@@ -174,12 +175,14 @@ export function createEshkolClosureBundleAssetSpec({
     baseUrl: bundleBaseUrl,
     artifactModule: joinUrl(bundleBaseUrl, artifactFile),
     wasmModule: joinUrl(bundleBaseUrl, wasmFile),
+    hostImportsModule: joinUrl(bundleBaseUrl, hostImportsFile),
     schemaModule: joinUrl(bundleBaseUrl, schemaFile),
     bundleManifest: joinUrl(bundleBaseUrl, bundleManifestFile),
     required,
     files: {
       artifactModule: artifactFile,
       wasmModule: wasmFile,
+      hostImportsModule: hostImportsFile,
       schemaModule: schemaFile,
       bundleManifest: bundleManifestFile
     }

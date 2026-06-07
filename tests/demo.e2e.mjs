@@ -29,9 +29,20 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolAssetProbe.assets.map((asset) => asset.kind).sort()).toEqual([
       'artifactModule',
       'bundleManifest',
+      'hostImportsModule',
       'schemaModule',
       'wasmModule'
     ]);
+    expect(eshkolAssetProbe.bundleHostImports).toMatchObject({
+      status: 'ready',
+      factoryReady: true,
+      tensorBindingReady: true,
+      requirementsSchema: 'eshkol.ulg.production-host-import-candidate.v0',
+      requirementsStatus: 'production-candidate-runtime-imports-implemented',
+      runtimeScope: 'production-candidate-host-imports',
+      implementationStatus: 'production-candidate-runtime-imports-present',
+      requiredNonStubImportCount: 23
+    });
   }
   await page.waitForFunction(() => window.__ulgDemo?.telemetry?.tasks?.length === 2);
   await page.waitForTimeout(1200);
@@ -107,6 +118,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d');
   expect(smokeClosureHandoff.artifactSummary.closureOutputExpectedStdoutByteLength).toBe(16);
   expect(smokeClosureHandoff.artifactSummary.closureHostImportsDomFree).toBe(true);
+  expect(smokeClosureHandoff.artifactSummary.closureHostImportsAssetStatus).toBe('ready');
   expect(smokeClosureHandoff.artifactSummary.closureDescriptorReady).toBe(false);
   expect(smokeClosureHandoff.wasmByteLength).toBe(33907);
   expect(smokeClosureHandoff.wasmBytes.length).toBe(33907);
@@ -123,6 +135,16 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolArtifact.validation.status).toBe('runtime-smoke');
     expect(eshkolArtifact.validation.validationMode).toBe('eshkol-deterministic-magnetar-tensor-abi-smoke');
     expect(eshkolArtifact.runtime.bundleManifest.preserveRelativeUrls).toBe(true);
+    expect(eshkolArtifact.runtime.hostImportsFactory).toMatchObject({
+      status: 'ready',
+      factoryReady: true,
+      tensorBindingReady: true,
+      requirementsSchema: 'eshkol.ulg.production-host-import-candidate.v0',
+      requirementsStatus: 'production-candidate-runtime-imports-implemented',
+      runtimeScope: 'production-candidate-host-imports',
+      implementationStatus: 'production-candidate-runtime-imports-present',
+      requiredNonStubImportCount: 23
+    });
     expect(eshkolArtifact.validation.outputSemantics.schema).toBe('eshkol.ulg.closure-output-semantics.v0');
     expect(eshkolArtifact.validation.outputSemantics.semanticScope).toBe('smoke-fixture');
     expect(eshkolArtifact.validation.outputSemantics.scientificScope).toBe('none');
@@ -416,6 +438,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureWasmTypeCount).toBe(111);
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsFactory).toBe('createEshkolHostImportObject');
     expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsDomFree).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsAssetStatus).toBe('ready');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsFactoryStatus).toBe('ready');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsFactoryReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsRequirementsSchema).toBe('eshkol.ulg.production-host-import-candidate.v0');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsRequirementsStatus).toBe('production-candidate-runtime-imports-implemented');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsRuntimeScope).toBe('production-candidate-host-imports');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsImplementationStatus).toBe('production-candidate-runtime-imports-present');
+    expect(eshkolTelemetryRecord.artifactSummary.closureHostImportsRequiredNonStubImportCount).toBe(23);
     expect(eshkolTelemetryRecord.artifactSummary.closureBundlePreserveRelativeUrls).toBe(true);
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticsSchema).toBe('eshkol.ulg.closure-output-semantics.v0');
     expect(eshkolTelemetryRecord.artifactSummary.closureOutputSemanticsReady).toBe(true);

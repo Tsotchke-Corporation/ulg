@@ -80,6 +80,7 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
   const artifactModule = serviceAssets.artifactModule ?? entry.artifactModule;
   const schemaModule = serviceAssets.schemaModule ?? entry.schemaModule;
   const bundleManifest = serviceAssets.bundleManifest ?? entry.bundleManifest;
+  const hostImportsModule = serviceAssets.hostImportsModule ?? entry.hostImportsModule;
   const requiredKinds = Array.isArray(serviceAssets.required) ? new Set(serviceAssets.required) : null;
   const isRequired = (kind) => requiredKinds == null || requiredKinds.has(kind);
   const locateFile = createMoonLabLocateFile({
@@ -164,6 +165,16 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       url: toAbsoluteUrl(schemaModule, locationHref),
       expected: 'json',
       required: isRequired('schemaModule')
+    });
+  }
+
+  if (hostImportsModule) {
+    checks.push({
+      serviceId,
+      kind: 'hostImportsModule',
+      url: toAbsoluteUrl(hostImportsModule, locationHref),
+      expected: 'javascript',
+      required: isRequired('hostImportsModule')
     });
   }
 

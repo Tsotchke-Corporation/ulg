@@ -8,6 +8,8 @@ let initPromise = null;
 let serviceBundleArtifact = null;
 let serviceBundleManifest = null;
 let serviceBundleStatus = 'skipped';
+let serviceHostImportsStatus = 'skipped';
+let serviceHostImports = null;
 const activeTasks = new Map();
 const pendingLeaseRequests = new Map();
 
@@ -79,7 +81,10 @@ async function loadServiceBundleAssets() {
         serviceBundleManifest = await manifestResponse.json();
       }
     }
-    serviceBundleStatus = 'ready';
+    await loadServiceHostImports(serviceAssets);
+    serviceBundleStatus = serviceHostImportsStatus === 'error' || serviceHostImportsStatus === 'missing-factory'
+      ? 'host-import-error'
+      : 'ready';
     assetProbe = {
       ...assetProbe,
       bundleArtifact: {
@@ -89,7 +94,8 @@ async function loadServiceBundleAssets() {
         closureId: serviceBundleArtifact.closureId ?? null,
         closureKind: serviceBundleArtifact.closureKind ?? null,
         moduleUrl: serviceBundleArtifact.execution?.module?.url ?? null
-      }
+      },
+      bundleHostImports: serviceHostImports
     };
   } catch (error) {
     serviceBundleStatus = 'error';
@@ -101,6 +107,64 @@ async function loadServiceBundleAssets() {
       }
     };
   }
+}
+
+async function loadServiceHostImports(serviceAssets) {
+  const hostImportsUrl = resolveHostImportsUrl(serviceAssets);
+  if (!hostImportsUrl) {
+    serviceHostImportsStatus = 'skipped';
+    serviceHostImports = null;
+    return;
+  }
+  try {
+    await import(hostImportsUrl);
+    const api = self.EshkolHostImports;
+    const factoryReady = typeof api?.createEshkolHostImportObject === 'function';
+    const tensorBindingReady = typeof api?.createEshkolTensorMemoryBinding === 'function';
+    const requirements = typeof api?.describeEshkolProductionHostImportRequirements === 'function'
+      ? api.describeEshkolProductionHostImportRequirements()
+      : null;
+    serviceHostImportsStatus = factoryReady && tensorBindingReady ? 'ready' : 'missing-factory';
+    serviceHostImports = {
+      status: serviceHostImportsStatus,
+      module: hostImportsUrl,
+      global: 'EshkolHostImports',
+      factory: serviceBundleManifest?.hostImports?.factory ?? 'createEshkolHostImportObject',
+      factoryReady,
+      tensorBindingReady,
+      requirementsSchema: requirements?.schema ?? null,
+      requirementsStatus: requirements?.status ?? null,
+      runtimeScope: requirements?.runtimeScope ?? null,
+      implementationStatus: requirements?.implementationStatus ?? null,
+      runtimeSmokeStubsAllowed: requirements?.runtimeSmokeStubsAllowed ?? null,
+      requiredNonStubImportCount: Array.isArray(requirements?.requiredNonStubImports)
+        ? requirements.requiredNonStubImports.length
+        : 0,
+      readinessRequirementCount: Array.isArray(requirements?.readinessRequires)
+        ? requirements.readinessRequires.length
+        : 0,
+      blockerCount: Array.isArray(requirements?.blockedBy) ? requirements.blockedBy.length : 0
+    };
+  } catch (error) {
+    serviceHostImportsStatus = 'error';
+    serviceHostImports = {
+      status: serviceHostImportsStatus,
+      module: hostImportsUrl,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function resolveHostImportsUrl(serviceAssets) {
+  if (serviceAssets.hostImportsModule) {
+    return new URL(serviceAssets.hostImportsModule, self.location?.href).href;
+  }
+  const manifestPath = serviceBundleManifest?.hostImports?.path;
+  if (manifestPath && serviceAssets.bundleManifest) {
+    const manifestUrl = new URL(serviceAssets.bundleManifest, self.location?.href).href;
+    return new URL(manifestPath, manifestUrl).href;
+  }
+  return null;
 }
 
 async function startTaskAfterInit(taskCapsule) {
@@ -264,7 +328,8 @@ function sendHeartbeat() {
       children: [...activeTasks.values()].reduce((total, task) => total + task.children.length, 0),
       memoryEstimateBytes: activeTasks.size * 1024 * 1024,
       assetProbe,
-      serviceBundleStatus
+      serviceBundleStatus,
+      serviceHostImportsStatus
     }
   });
 }
@@ -364,10 +429,19 @@ function createArtifact(task) {
             sha256: serviceBundleManifest.hostImports.sha256 || null,
             factory: serviceBundleManifest.hostImports.factory || null,
             global: serviceBundleManifest.hostImports.global || null,
-            domFree: serviceBundleManifest.hostImports.domFree === true
+            domFree: serviceBundleManifest.hostImports.domFree === true,
+            module: serviceHostImports?.module ?? null,
+            status: serviceHostImportsStatus,
+            factoryReady: serviceHostImports?.factoryReady === true,
+            requirementsSchema: serviceHostImports?.requirementsSchema ?? null,
+            requirementsStatus: serviceHostImports?.requirementsStatus ?? null,
+            runtimeScope: serviceHostImports?.runtimeScope ?? null,
+            implementationStatus: serviceHostImports?.implementationStatus ?? null,
+            requiredNonStubImportCount: serviceHostImports?.requiredNonStubImportCount ?? 0
           } : null,
           preserveRelativeUrls: serviceBundleManifest.manualDeploy?.preserveRelativeUrls === true
-        } : null
+        } : null,
+        hostImportsFactory: serviceHostImports
       },
       taskProvenance: task.provenance,
       provenance: serviceBundleArtifact.provenance || task.provenance

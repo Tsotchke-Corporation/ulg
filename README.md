@@ -113,5 +113,11 @@ Eshkol's production-candidate runtime probe: it runs the deterministic
 imports and records the output tensor evidence, but remains smoke-only. The
 computed production dispatch preflight is still blocked at `9/6/3`: six checks
 pass, while handler readiness, production runtime execution, and full-physics
-validation remain blocked. This advances production-boundary evidence without
-claiming a full-fidelity or scientifically validated magnetar simulation.
+validation remain blocked. ULG now treats the bundle's DOM-free
+`eshkol-host-imports.js` as a first-class browser/service-worker asset: the
+service asset probe fetches it as JavaScript, the supervised Eshkol worker
+imports it, verifies the `createEshkolHostImportObject` and tensor-memory
+binding factory surface, and exposes production-host candidate requirement
+metadata in compact artifact summaries. This advances production-boundary
+evidence without claiming a full-fidelity or scientifically validated magnetar
+simulation.

@@ -463,6 +463,11 @@ test('artifact cache returns content-addressed refs', async () => {
       requiresHostImports: true
     },
     runtime: {
+      assetProbe: {
+        assets: [
+          { kind: 'hostImportsModule', url: '/service-assets/eshkol/closures/hello/eshkol-host-imports.js', status: 'ready' }
+        ]
+      },
       bundleManifest: {
         schema: 'eshkol.ulg.closure-bundle.v0',
         copyFiles: ['hello.ulg.json', 'hello.wasm', 'eshkol-host-imports.js', 'schemas/ulg/closure_artifact.schema.json'],
@@ -474,6 +479,16 @@ test('artifact cache returns content-addressed refs', async () => {
           domFree: true
         },
         preserveRelativeUrls: true
+      },
+      hostImportsFactory: {
+        status: 'ready',
+        module: '/service-assets/eshkol/closures/hello/eshkol-host-imports.js',
+        factoryReady: true,
+        requirementsSchema: 'eshkol.ulg.production-host-import-candidate.v0',
+        requirementsStatus: 'production-candidate-runtime-imports-implemented',
+        runtimeScope: 'production-candidate-host-imports',
+        implementationStatus: 'production-candidate-runtime-imports-present',
+        requiredNonStubImportCount: 23
       }
     },
     validation: {
@@ -525,6 +540,15 @@ test('artifact cache returns content-addressed refs', async () => {
   assert.equal(summary.closureHostImportsPath, 'eshkol-host-imports.js');
   assert.equal(summary.closureHostImportsFactory, 'createEshkolHostImportObject');
   assert.equal(summary.closureHostImportsDomFree, true);
+  assert.equal(summary.closureHostImportsModule, '/service-assets/eshkol/closures/hello/eshkol-host-imports.js');
+  assert.equal(summary.closureHostImportsAssetStatus, 'ready');
+  assert.equal(summary.closureHostImportsFactoryStatus, 'ready');
+  assert.equal(summary.closureHostImportsFactoryReady, true);
+  assert.equal(summary.closureHostImportsRequirementsSchema, 'eshkol.ulg.production-host-import-candidate.v0');
+  assert.equal(summary.closureHostImportsRequirementsStatus, 'production-candidate-runtime-imports-implemented');
+  assert.equal(summary.closureHostImportsRuntimeScope, 'production-candidate-host-imports');
+  assert.equal(summary.closureHostImportsImplementationStatus, 'production-candidate-runtime-imports-present');
+  assert.equal(summary.closureHostImportsRequiredNonStubImportCount, 23);
   assert.equal(summary.closureOutputSemanticsSchema, 'eshkol.ulg.closure-output-semantics.v0');
   assert.equal(summary.closureOutputSemanticsReady, true);
   assert.equal(summary.closureOutputSemanticScope, 'smoke-fixture');
@@ -577,6 +601,15 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
       requiresHostImports: true
     },
     runtime: {
+      assetProbe: {
+        assets: [
+          {
+            kind: 'hostImportsModule',
+            url: '/service-assets/eshkol/closures/magnetar-closure/eshkol-host-imports.js',
+            status: 'ready'
+          }
+        ]
+      },
       bundleManifest: {
         schema: 'eshkol.ulg.closure-bundle.v0',
         manualDeploy: {
@@ -595,6 +628,16 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
           global: 'EshkolHostImports',
           domFree: true
         }
+      },
+      hostImportsFactory: {
+        status: 'ready',
+        module: '/service-assets/eshkol/closures/magnetar-closure/eshkol-host-imports.js',
+        factoryReady: true,
+        requirementsSchema: 'eshkol.ulg.production-host-import-candidate.v0',
+        requirementsStatus: 'production-candidate-runtime-imports-implemented',
+        runtimeScope: 'production-candidate-host-imports',
+        implementationStatus: 'production-candidate-runtime-imports-present',
+        requiredNonStubImportCount: 23
       }
     },
     validation: {
@@ -1027,6 +1070,12 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
   assert.equal(summary.closureWasmTypeCount, 111);
   assert.equal(summary.closureBundleCopyFileCount, 4);
   assert.equal(summary.closureBundlePreserveRelativeUrls, true);
+  assert.equal(summary.closureHostImportsModule, '/service-assets/eshkol/closures/magnetar-closure/eshkol-host-imports.js');
+  assert.equal(summary.closureHostImportsAssetStatus, 'ready');
+  assert.equal(summary.closureHostImportsFactoryStatus, 'ready');
+  assert.equal(summary.closureHostImportsFactoryReady, true);
+  assert.equal(summary.closureHostImportsRuntimeScope, 'production-candidate-host-imports');
+  assert.equal(summary.closureHostImportsRequiredNonStubImportCount, 23);
   assert.equal(summary.closureDescriptorSchema, 'eshkol.ulg.magnetar-closure-descriptor.v0');
   assert.equal(summary.closureDescriptorReady, true);
   assert.equal(summary.closureDescriptorRole, 'magnetar-closure-contract-seed');

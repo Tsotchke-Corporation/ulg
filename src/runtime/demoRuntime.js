@@ -188,6 +188,7 @@ function createEshkolSmokeAssetProbe(assets) {
     assets: [
       { kind: 'artifactModule', url: assets.artifactModule, status: 'ready' },
       { kind: 'wasmModule', url: assets.wasmModule, status: 'ready' },
+      { kind: 'hostImportsModule', url: assets.hostImportsModule, status: 'ready' },
       { kind: 'schemaModule', url: assets.schemaModule, status: 'ready' },
       { kind: 'bundleManifest', url: assets.bundleManifest, status: 'ready' }
     ]

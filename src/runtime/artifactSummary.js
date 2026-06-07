@@ -406,6 +406,14 @@ export function summarizeUlgArtifact(artifact = {}) {
   const hostImports = bundleManifest?.hostImports && typeof bundleManifest.hostImports === 'object'
     ? bundleManifest.hostImports
     : (artifact.runtime?.hostImports && typeof artifact.runtime.hostImports === 'object' ? artifact.runtime.hostImports : null);
+  const runtimeAssetProbe = objectOrNull(artifact.runtime?.assetProbe);
+  const runtimeAssets = Array.isArray(runtimeAssetProbe?.assets)
+    ? runtimeAssetProbe.assets.filter(isPlainObject)
+    : [];
+  const hostImportsAsset = runtimeAssets.find((asset) => asset.kind === 'hostImportsModule') ?? null;
+  const hostImportsFactory = objectOrNull(artifact.runtime?.hostImportsFactory)
+    || objectOrNull(runtimeAssetProbe?.bundleHostImports)
+    || null;
   const parityComparisons = Array.isArray(parity?.comparisons) ? parity.comparisons : [];
   const moonlabWebGpuParityScope = objectOrNull(artifact.webGpuParityScope)
     || objectOrNull(outputs.webGpuParityScope)
@@ -932,6 +940,17 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureHostImportsFactory: hostImports?.factory || null,
     closureHostImportsGlobal: hostImports?.global || null,
     closureHostImportsDomFree: hostImports?.domFree === true,
+    closureHostImportsModule: hostImports?.module || hostImportsAsset?.url || hostImportsFactory?.module || null,
+    closureHostImportsAssetStatus: hostImportsAsset?.status || null,
+    closureHostImportsFactoryStatus: hostImportsFactory?.status || hostImports?.status || null,
+    closureHostImportsFactoryReady: hostImportsFactory?.factoryReady === true || hostImports?.factoryReady === true,
+    closureHostImportsRequirementsSchema: hostImportsFactory?.requirementsSchema || hostImports?.requirementsSchema || null,
+    closureHostImportsRequirementsStatus: hostImportsFactory?.requirementsStatus || hostImports?.requirementsStatus || null,
+    closureHostImportsRuntimeScope: hostImportsFactory?.runtimeScope || hostImports?.runtimeScope || null,
+    closureHostImportsImplementationStatus:
+      hostImportsFactory?.implementationStatus || hostImports?.implementationStatus || null,
+    closureHostImportsRequiredNonStubImportCount:
+      finiteNumberOrNull(hostImportsFactory?.requiredNonStubImportCount ?? hostImports?.requiredNonStubImportCount),
     closureOutputSemanticsSchema: outputSemantics?.schema || null,
     closureOutputSemanticsReady: outputSemantics?.schema === ESHKOL_CLOSURE_OUTPUT_SEMANTICS_SCHEMA
       && outputSemantics?.semanticScope === 'smoke-fixture'

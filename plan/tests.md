@@ -4,8 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 22/22 tests on 2026-06-06 after surfacing Eshkol's
-declared production handler contract through ULG summaries and browser handoffs.
+Current result: pass, 22/22 tests on 2026-06-07 after surfacing Eshkol's
+declared full-physics validation requirements through ULG summaries and browser
+handoffs.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -41,6 +42,11 @@ declared production handler contract through ULG summaries and browser handoffs.
   `eshkol.ulg.production-handler-contract.v0` production handler contract,
   preserving the `main(i32, i32) -> i32` invocation ABI, tensor input/output
   ids, required evidence, and remaining production/full-physics blockers.
+- `npm run stage:service-assets -- --eshkol-only --created-at ...` also stages
+  `eshkol.ulg.full-physics-validation-requirements.v0`, preserving the five
+  required runtime evidence families, required hash fields, and
+  `full-physics-validation-not-run` blocker without marking the production
+  handler scientifically validated.
 - MoonLab service asset specs include the classic core probe worker URL and the
   manifest builder approves it for child-worker leasing.
 - Registry resolution, child-worker lease limits, artifact cache behavior,
@@ -78,6 +84,10 @@ declared production handler contract through ULG summaries and browser handoffs.
   runtime probe, deterministic runtime-smoke stubs rejected for production
   dispatch, production-candidate handler implementation/runtime-execution
   evidence, and the computed `10/9/1` check split.
+- Artifact cache summaries preserve Eshkol full-physics validation requirements,
+  including `declared-not-run`, `ready = false`, five required runtime evidence
+  families, four required hash fields, and the
+  `full-physics-validation-not-run` blocker.
 - Focused service-asset/orchestration coverage after the host-import import-glue
   slice:
   `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
@@ -85,14 +95,15 @@ declared production handler contract through ULG summaries and browser handoffs.
 
 ## Current Handoff Validation Summary
 
-Validation run on 2026-06-06 after surfacing Eshkol's production-candidate
-handler implementation/runtime-execution evidence:
+Validation run on 2026-06-07 after surfacing Eshkol's declared full-physics
+validation requirements:
 
 - `npm run stage:service-assets -- --eshkol-only --created-at
-  2026-06-06T23:20:00-08:00`: passed and staged
+  2026-06-07T00:04:00-08:00`: passed and staged
   `eshkol.ulg.production-handler-contract.v0`,
   `eshkol.ulg.production-handler-implementation.v0`, and
-  `eshkol.ulg.production-handler-runtime-execution.v0`.
+  `eshkol.ulg.production-handler-runtime-execution.v0`, plus
+  `eshkol.ulg.full-physics-validation-requirements.v0`.
 - `node --test tests/orchestration.test.mjs --test-name-pattern "artifact
   cache summarizes Eshkol"`: passed, `7/7`.
 - `npm test`: passed, `22/22`.
@@ -102,29 +113,31 @@ handler implementation/runtime-execution evidence:
   `http://100.86.83.35:5173/` reports
   `productionHandlerContractDeclared = true`,
   `productionHandlerContractInvocationArgumentMode = linear-memory-offsets`,
-  `productionHandlerContractRequiredEvidenceCount = 8`, and production
+  `productionHandlerContractRequiredEvidenceCount = 8`,
+  `fullPhysicsValidationRequirementsDeclared = true`,
+  `fullPhysicsValidationRequiredRuntimeEvidenceCount = 5`, and production
   dispatch preflight counts `10/9/1`.
 
 The MoonLab compact WebGPU parity handoff remains reduced-scope evidence for
 five operations only. The Eshkol production-candidate runtime probe, handler
-implementation, and runtime execution remain deterministic tensor smoke
-evidence. Production dispatch preflight now records `10/9/1`; it does not
-promote scientific validation, full-fidelity magnetar simulation, or
-full-physics validation.
+implementation, runtime execution, and full-physics requirements remain
+deterministic tensor smoke / declared requirement evidence. Production dispatch
+preflight records `10/9/1`; it does not promote scientific validation,
+full-fidelity magnetar simulation, or full-physics validation.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the declared Eshkol production handler
-contract slice, with the existing Vite large chunk warning.
+Current result: pass on 2026-06-07 after the declared Eshkol full-physics
+requirements slice, with the existing Vite large chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after the declared Eshkol
-production handler contract slice.
+Current result: pass, 1/1 Chromium test on 2026-06-07 after the declared Eshkol
+full-physics requirements slice.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.

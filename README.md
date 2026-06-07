@@ -97,29 +97,34 @@ For Eshkol, the default staged bundle is
 input/output tensor ids, a declared tensor-runtime contract, derivative
 placeholders, and explicit non-scientific/full-physics flags. The descriptor
 also carries `eshkol.ulg.production-handler-boundary.v0`, which identifies the
-intended PeerCompute handler boundary while keeping `handlerReady: false` and
-`runtimeExecution: false`. Its tensor-runtime contract now includes a concrete
+intended PeerCompute handler boundary and now records deterministic
+production-candidate handler/runtime smoke evidence with `handlerReady: true`
+and `runtimeExecution: true`. Its tensor-runtime contract includes a concrete
 smoke-only f64 linear-memory layout at byte range `131072..131240`; the staged
 metadata records that the `main` export consumes the declared input offsets,
-produces output tensors, and changes `64` bytes in the declared tensor range
-under deterministic host-runtime smoke stubs. The boundary also exposes a
-production-host-import candidate contract: `runtimeSmokeStubsAllowed: false`,
-`23` required non-stub runtime imports, f64 tensor-memory imports
-`ulg_read_f64`/`ulg_write_f64`, and readiness requirements for non-stub host
-imports, validated tensor memory imports, and full physics validation. The
-current ULG staging sync also preserves
-Eshkol's production-candidate runtime probe: it runs the deterministic
+produces output tensors, and changes `64` bytes in the declared tensor range.
+The boundary also exposes a production-host-import candidate contract:
+`runtimeSmokeStubsAllowed: false`, `23` required non-stub runtime imports, f64
+tensor-memory imports `ulg_read_f64`/`ulg_write_f64`, and readiness requirements
+for non-stub host imports, validated tensor memory imports, and full physics
+validation. The current ULG staging sync preserves Eshkol's
+production-candidate runtime probe: it runs the deterministic
 `main(131072, 131136)` tensor smoke path through production-candidate host
-imports and records the output tensor evidence. The bundle now also declares
-the transferable
-`eshkol.ulg.production-handler-contract.v0` production handler contract for
-PeerCompute dispatch: `main(i32 inputOffset, i32 outputOffset) -> i32`, backed
-by content-addressed WASM, production-candidate host imports, validated f64
-linear-memory tensors, the runtime probe, production-candidate handler
-implementation evidence, and production-candidate runtime-execution evidence.
-The computed production dispatch preflight is still blocked at `10/9/1`: nine
-checks pass, while full-physics validation remains blocked. ULG now treats the
-bundle's DOM-free
+imports and records the output tensor evidence. The bundle also declares the
+transferable `eshkol.ulg.production-handler-contract.v0` production handler
+contract for PeerCompute dispatch: `main(i32 inputOffset, i32 outputOffset) ->
+i32`, backed by content-addressed WASM, production-candidate host imports,
+validated f64 linear-memory tensors, the runtime probe,
+production-candidate handler implementation evidence, and
+production-candidate runtime-execution evidence. Its
+`eshkol.ulg.full-physics-validation-requirements.v0` block declares the five
+runtime evidence families still required from PeerCompute/MoonLab:
+magnetosphere MHD, PIC kinetic plasma, radiation transport, relativistic
+correction, and cross-family conservation coupling, with reference, tolerance,
+runtime-output, and evidence hashes required. The computed production dispatch
+preflight is still blocked at `10/9/1`: nine checks pass, while full-physics
+validation remains blocked by `full-physics-validation-not-run`. ULG now treats
+the bundle's DOM-free
 `eshkol-host-imports.js` as a first-class browser/service-worker asset: the
 service asset probe fetches it as JavaScript, the supervised Eshkol worker
 imports it, verifies the `createEshkolHostImportObject` and tensor-memory

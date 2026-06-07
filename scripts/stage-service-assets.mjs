@@ -36,6 +36,8 @@ const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler
 const ESHKOL_PRODUCTION_HANDLER_IMPLEMENTATION_SCHEMA = 'eshkol.ulg.production-handler-implementation.v0';
 const ESHKOL_PRODUCTION_HANDLER_RUNTIME_EXECUTION_SCHEMA =
   'eshkol.ulg.production-handler-runtime-execution.v0';
+const ESHKOL_FULL_PHYSICS_VALIDATION_REQUIREMENTS_SCHEMA =
+  'eshkol.ulg.full-physics-validation-requirements.v0';
 const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
 const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
@@ -660,6 +662,26 @@ function stageEshkolAssets() {
       || productionHandlerBoundary.moduleRef?.sha256Field !== 'artifact.execution.module.sha256') {
       throw new Error('Eshkol staged production handler boundary has invalid module reference metadata');
     }
+    const expectedFullPhysicsFamilies = [
+      'magnetosphere-mhd',
+      'pic-kinetic-plasma',
+      'radiation-transport',
+      'relativistic-correction',
+      'cross-family-conservation-coupling'
+    ];
+    const expectedFullPhysicsSchemas = [
+      'peercompute.multiscale.magnetosphere-mhd.runtime-validation.v0',
+      'peercompute.multiscale.pic-kinetic-plasma.runtime-validation.v0',
+      'peercompute.multiscale.radiation-transport.runtime-validation.v0',
+      'peercompute.multiscale.relativistic-correction.runtime-validation.v0',
+      'peercompute.multiscale.cross-family-conservation-coupling.runtime-validation.v0'
+    ];
+    const expectedFullPhysicsHashFields = [
+      'referenceHash',
+      'toleranceHash',
+      'runtimeOutputHash',
+      'evidenceHash'
+    ];
     const expectedProductionHandlerBlockers = [
       'full-physics-validation-not-run'
     ];
@@ -730,6 +752,30 @@ function stageEshkolAssets() {
       || productionHandlerImplementation.fullFidelityMagnetarSimulation !== false
       || !arraysEqual(productionHandlerImplementation.blockedBy, expectedProductionHandlerBlockers)) {
       throw new Error('Eshkol staged production handler implementation evidence changed');
+    }
+    const fullPhysicsRequirements = productionHandlerBoundary.fullPhysicsValidationRequirements || {};
+    const requiredRuntimeEvidence = Array.isArray(fullPhysicsRequirements.requiredRuntimeEvidence)
+      ? fullPhysicsRequirements.requiredRuntimeEvidence
+      : [];
+    if (fullPhysicsRequirements.schema !== ESHKOL_FULL_PHYSICS_VALIDATION_REQUIREMENTS_SCHEMA
+      || fullPhysicsRequirements.status !== 'declared-not-run'
+      || fullPhysicsRequirements.ready !== false
+      || fullPhysicsRequirements.validationScope !== 'magnetar-production-handler-full-physics'
+      || fullPhysicsRequirements.producerSchema !== 'peercompute.multiscale.scenario-runtime-evidence-manifest.v0'
+      || fullPhysicsRequirements.requiredValidationSchema
+        !== 'peercompute.multiscale.scenario-scientific-runtime-validation.v0'
+      || fullPhysicsRequirements.requiredValidationScope !== 'magnetar-scientific-runtime-reference-validation'
+      || !arraysEqual(fullPhysicsRequirements.requiredRuntimeEvidenceFamilies, expectedFullPhysicsFamilies)
+      || !arraysEqual(fullPhysicsRequirements.requiredHashFields, expectedFullPhysicsHashFields)
+      || requiredRuntimeEvidence.length !== expectedFullPhysicsFamilies.length
+      || !requiredRuntimeEvidence.every((entry, index) => (
+        entry.family === expectedFullPhysicsFamilies[index]
+        && entry.schema === expectedFullPhysicsSchemas[index]
+        && entry.status === 'required-not-provided'
+        && entry.required === true
+      ))
+      || !arraysEqual(fullPhysicsRequirements.blockedBy, expectedProductionHandlerBlockers)) {
+      throw new Error('Eshkol staged full-physics validation requirements changed');
     }
     if (productionHandlerBoundary.hostImports?.required !== artifact.validity?.requiresHostImports
       || productionHandlerBoundary.hostImports?.factory !== 'createEshkolHostImportObject') {

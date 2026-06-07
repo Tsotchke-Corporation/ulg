@@ -435,6 +435,25 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       ulg_read_f64: 12,
       ulg_write_f64: 9
     });
+    expect(productionHandlerBoundary.fullPhysicsValidationRequirements).toMatchObject({
+      schema: 'eshkol.ulg.full-physics-validation-requirements.v0',
+      status: 'declared-not-run',
+      ready: false,
+      validationScope: 'magnetar-production-handler-full-physics',
+      producerSchema: 'peercompute.multiscale.scenario-runtime-evidence-manifest.v0',
+      requiredValidationSchema: 'peercompute.multiscale.scenario-scientific-runtime-validation.v0',
+      requiredValidationScope: 'magnetar-scientific-runtime-reference-validation',
+      requiredHashFields: ['referenceHash', 'toleranceHash', 'runtimeOutputHash', 'evidenceHash'],
+      blockedBy: ['full-physics-validation-not-run']
+    });
+    expect(productionHandlerBoundary.fullPhysicsValidationRequirements.requiredRuntimeEvidenceFamilies).toEqual([
+      'magnetosphere-mhd',
+      'pic-kinetic-plasma',
+      'radiation-transport',
+      'relativistic-correction',
+      'cross-family-conservation-coupling'
+    ]);
+    expect(productionHandlerBoundary.fullPhysicsValidationRequirements.requiredRuntimeEvidence).toHaveLength(5);
     expect(productionHandlerBoundary.dispatchPreflight).toMatchObject({
       schema: 'eshkol.ulg.production-handler-dispatch-preflight.v0',
       status: 'blocked',
@@ -673,6 +692,25 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       ulg_read_f64: 12,
       ulg_write_f64: 9
     });
+    expect(eshkolTelemetryRecord.artifactSummary.closureFullPhysicsValidationRequirementsDeclared).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureFullPhysicsValidationRequirementsStatus).toBe(
+      'declared-not-run'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureFullPhysicsValidationRequirementsReady).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies).toEqual([
+      'magnetosphere-mhd',
+      'pic-kinetic-plasma',
+      'radiation-transport',
+      'relativistic-correction',
+      'cross-family-conservation-coupling'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureFullPhysicsValidationRequiredRuntimeEvidenceCount).toBe(5);
+    expect(eshkolTelemetryRecord.artifactSummary.closureFullPhysicsValidationRequiredHashFields).toEqual([
+      'referenceHash',
+      'toleranceHash',
+      'runtimeOutputHash',
+      'evidenceHash'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsRuntimeScope).toBe('production-candidate-host-imports');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsImplementationStatus).toBe('production-candidate-runtime-imports-present');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateStatus).toBe('production-candidate-runtime-imports-implemented');

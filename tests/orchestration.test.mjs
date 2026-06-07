@@ -74,6 +74,26 @@ const ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS = Object.freeze([
 const ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS = Object.freeze([
   'full-physics-validation-evidence-present'
 ]);
+const ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES = Object.freeze([
+  'magnetosphere-mhd',
+  'pic-kinetic-plasma',
+  'radiation-transport',
+  'relativistic-correction',
+  'cross-family-conservation-coupling'
+]);
+const ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_SCHEMAS = Object.freeze([
+  'peercompute.multiscale.magnetosphere-mhd.runtime-validation.v0',
+  'peercompute.multiscale.pic-kinetic-plasma.runtime-validation.v0',
+  'peercompute.multiscale.radiation-transport.runtime-validation.v0',
+  'peercompute.multiscale.relativistic-correction.runtime-validation.v0',
+  'peercompute.multiscale.cross-family-conservation-coupling.runtime-validation.v0'
+]);
+const ESHKOL_FULL_PHYSICS_REQUIRED_HASH_FIELDS = Object.freeze([
+  'referenceHash',
+  'toleranceHash',
+  'runtimeOutputHash',
+  'evidenceHash'
+]);
 
 const REDUCED_MAGNETAR_FIDELITY_RUNTIME_SCOPE = Object.freeze({
   schema: 'ulg.magnetar.fidelity-runtime-scope.v0',
@@ -1036,6 +1056,24 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               fullFidelityMagnetarSimulation: false,
               blockedBy: [...ESHKOL_PRODUCTION_BLOCKERS]
             },
+            fullPhysicsValidationRequirements: {
+              schema: 'eshkol.ulg.full-physics-validation-requirements.v0',
+              status: 'declared-not-run',
+              ready: false,
+              validationScope: 'magnetar-production-handler-full-physics',
+              producerSchema: 'peercompute.multiscale.scenario-runtime-evidence-manifest.v0',
+              requiredValidationSchema: 'peercompute.multiscale.scenario-scientific-runtime-validation.v0',
+              requiredValidationScope: 'magnetar-scientific-runtime-reference-validation',
+              requiredRuntimeEvidenceFamilies: [...ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES],
+              requiredHashFields: [...ESHKOL_FULL_PHYSICS_REQUIRED_HASH_FIELDS],
+              requiredRuntimeEvidence: ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES.map((family, index) => ({
+                family,
+                schema: ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_SCHEMAS[index],
+                status: 'required-not-provided',
+                required: true
+              })),
+              blockedBy: [...ESHKOL_PRODUCTION_BLOCKERS]
+            },
             dispatchPreflight: {
               schema: 'eshkol.ulg.production-handler-dispatch-preflight.v0',
               status: 'blocked',
@@ -1131,7 +1169,14 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   check: 'full-physics-validation-evidence-present',
                   status: 'blocked',
                   ready: false,
-                  evidenceSource: 'productionHandlerBoundary.fullPhysicsValidation',
+                  evidenceSource: 'productionHandlerBoundary.fullPhysicsValidationRequirements',
+                  observed: {
+                    schema: 'eshkol.ulg.full-physics-validation-requirements.v0',
+                    status: 'declared-not-run',
+                    scientificValidation: false,
+                    fullPhysicsValidation: false,
+                    requiredRuntimeEvidenceFamilies: [...ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES]
+                  },
                   blocker: 'full-physics-validation-not-run'
                 }
               ],
@@ -1395,6 +1440,35 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     ulg_write_f64: 9
   });
   assert.deepEqual(summary.closureProductionHandlerRuntimeExecutionBlockedBy, [...ESHKOL_PRODUCTION_BLOCKERS]);
+  assert.equal(
+    summary.closureFullPhysicsValidationRequirementsSchema,
+    'eshkol.ulg.full-physics-validation-requirements.v0'
+  );
+  assert.equal(summary.closureFullPhysicsValidationRequirementsStatus, 'declared-not-run');
+  assert.equal(summary.closureFullPhysicsValidationRequirementsDeclared, true);
+  assert.equal(summary.closureFullPhysicsValidationRequirementsReady, false);
+  assert.equal(
+    summary.closureFullPhysicsValidationRequirementsValidationScope,
+    'magnetar-production-handler-full-physics'
+  );
+  assert.equal(
+    summary.closureFullPhysicsValidationRequirementsRequiredValidationSchema,
+    'peercompute.multiscale.scenario-scientific-runtime-validation.v0'
+  );
+  assert.equal(
+    summary.closureFullPhysicsValidationRequirementsRequiredValidationScope,
+    'magnetar-scientific-runtime-reference-validation'
+  );
+  assert.deepEqual(
+    summary.closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies,
+    [...ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES]
+  );
+  assert.equal(summary.closureFullPhysicsValidationRequiredRuntimeEvidenceCount, 5);
+  assert.deepEqual(
+    summary.closureFullPhysicsValidationRequiredHashFields,
+    [...ESHKOL_FULL_PHYSICS_REQUIRED_HASH_FIELDS]
+  );
+  assert.deepEqual(summary.closureFullPhysicsValidationRequirementsBlockedBy, [...ESHKOL_PRODUCTION_BLOCKERS]);
   assert.equal(summary.closureProductionCandidateRuntimeProbeSchema, 'eshkol.ulg.production-candidate-runtime-probe.v0');
   assert.equal(summary.closureProductionCandidateRuntimeProbeStatus, 'production-candidate-runtime-smoke-passed');
   assert.equal(summary.closureProductionCandidateRuntimeProbeReady, true);

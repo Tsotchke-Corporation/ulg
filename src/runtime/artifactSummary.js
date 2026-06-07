@@ -14,6 +14,8 @@ export const ESHKOL_PRODUCTION_HANDLER_IMPLEMENTATION_SCHEMA =
   'eshkol.ulg.production-handler-implementation.v0';
 export const ESHKOL_PRODUCTION_HANDLER_RUNTIME_EXECUTION_SCHEMA =
   'eshkol.ulg.production-handler-runtime-execution.v0';
+export const ESHKOL_FULL_PHYSICS_VALIDATION_REQUIREMENTS_SCHEMA =
+  'eshkol.ulg.full-physics-validation-requirements.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
@@ -78,6 +80,26 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS = Object.freeze([
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS = Object.freeze([
   'full-physics-validation-evidence-present'
+]);
+const ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES = Object.freeze([
+  'magnetosphere-mhd',
+  'pic-kinetic-plasma',
+  'radiation-transport',
+  'relativistic-correction',
+  'cross-family-conservation-coupling'
+]);
+const ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_SCHEMAS = Object.freeze([
+  'peercompute.multiscale.magnetosphere-mhd.runtime-validation.v0',
+  'peercompute.multiscale.pic-kinetic-plasma.runtime-validation.v0',
+  'peercompute.multiscale.radiation-transport.runtime-validation.v0',
+  'peercompute.multiscale.relativistic-correction.runtime-validation.v0',
+  'peercompute.multiscale.cross-family-conservation-coupling.runtime-validation.v0'
+]);
+const ESHKOL_FULL_PHYSICS_REQUIRED_HASH_FIELDS = Object.freeze([
+  'referenceHash',
+  'toleranceHash',
+  'runtimeOutputHash',
+  'evidenceHash'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REJECTED_RUNTIME_SCOPES = Object.freeze([
   'deterministic-runtime-smoke-stubs'
@@ -356,6 +378,8 @@ export function summarizeUlgArtifact(artifact = {}) {
     objectOrNull(closureProductionHandlerBoundary?.productionHandlerRuntimeExecution);
   const closureProductionHandlerRuntimeExecutionHostImportCallCounts =
     objectOrNull(closureProductionHandlerRuntimeExecution?.hostImportCallCounts);
+  const closureFullPhysicsValidationRequirements =
+    objectOrNull(closureProductionHandlerBoundary?.fullPhysicsValidationRequirements);
   const closureProductionHandlerTensorMemoryBinding = objectOrNull(closureProductionHandlerBoundary?.tensorMemoryBinding);
   const closureProductionHandlerHostImports = objectOrNull(closureProductionHandlerBoundary?.hostImports);
   const closureProductionHostImportCandidate = objectOrNull(closureProductionHandlerHostImports?.productionCandidate);
@@ -411,6 +435,29 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionHandlerRuntimeExecutionBlockedBy =
     Array.isArray(closureProductionHandlerRuntimeExecution?.blockedBy)
       ? closureProductionHandlerRuntimeExecution.blockedBy.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies =
+    Array.isArray(closureFullPhysicsValidationRequirements?.requiredRuntimeEvidenceFamilies)
+      ? closureFullPhysicsValidationRequirements.requiredRuntimeEvidenceFamilies.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureFullPhysicsValidationRequiredHashFields =
+    Array.isArray(closureFullPhysicsValidationRequirements?.requiredHashFields)
+      ? closureFullPhysicsValidationRequirements.requiredHashFields.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureFullPhysicsValidationBlockedBy =
+    Array.isArray(closureFullPhysicsValidationRequirements?.blockedBy)
+      ? closureFullPhysicsValidationRequirements.blockedBy.map((value) => String(value)).filter(Boolean)
+      : [];
+  const closureFullPhysicsValidationRequiredRuntimeEvidence =
+    Array.isArray(closureFullPhysicsValidationRequirements?.requiredRuntimeEvidence)
+      ? closureFullPhysicsValidationRequirements.requiredRuntimeEvidence
+        .filter(isPlainObject)
+        .map((entry) => ({
+          family: textOrNull(entry.family),
+          schema: textOrNull(entry.schema),
+          status: textOrNull(entry.status),
+          required: typeof entry.required === 'boolean' ? entry.required : null
+        }))
       : [];
   const closureProductionDispatchPreflightRejectedRuntimeScopes =
     Array.isArray(closureProductionDispatchPreflight?.rejectedRuntimeScopes)
@@ -951,6 +998,34 @@ export function summarizeUlgArtifact(artifact = {}) {
       closureProductionHandlerRuntimeExecutionBlockedBy,
       ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
     );
+  const closureFullPhysicsValidationRequirementsDeclared =
+    closureFullPhysicsValidationRequirements?.schema === ESHKOL_FULL_PHYSICS_VALIDATION_REQUIREMENTS_SCHEMA
+    && closureFullPhysicsValidationRequirements.status === 'declared-not-run'
+    && closureFullPhysicsValidationRequirements.ready === false
+    && closureFullPhysicsValidationRequirements.validationScope === 'magnetar-production-handler-full-physics'
+    && closureFullPhysicsValidationRequirements.producerSchema
+      === 'peercompute.multiscale.scenario-runtime-evidence-manifest.v0'
+    && closureFullPhysicsValidationRequirements.requiredValidationSchema
+      === 'peercompute.multiscale.scenario-scientific-runtime-validation.v0'
+    && closureFullPhysicsValidationRequirements.requiredValidationScope
+      === 'magnetar-scientific-runtime-reference-validation'
+    && arraysEqual(
+      closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies,
+      ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES
+    )
+    && arraysEqual(closureFullPhysicsValidationRequiredHashFields, ESHKOL_FULL_PHYSICS_REQUIRED_HASH_FIELDS)
+    && closureFullPhysicsValidationRequiredRuntimeEvidence.length
+      === ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES.length
+    && closureFullPhysicsValidationRequiredRuntimeEvidence.every((entry, index) => (
+      entry.family === ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_FAMILIES[index]
+      && entry.schema === ESHKOL_FULL_PHYSICS_RUNTIME_EVIDENCE_SCHEMAS[index]
+      && entry.status === 'required-not-provided'
+      && entry.required === true
+    ))
+    && arraysEqual(
+      closureFullPhysicsValidationBlockedBy,
+      ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
+    );
   const closureProductionHandlerBoundaryDeclared =
     closureProductionHandlerBoundary?.schema === ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
     && textOrNull(closureProductionHandlerBoundary.handlerId) != null
@@ -975,6 +1050,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureProductionHandlerContractDeclared
     && closureProductionHandlerImplementationReady
     && closureProductionHandlerRuntimeExecutionReady
+    && closureFullPhysicsValidationRequirementsDeclared
     && closureProductionHandlerHostImports?.source === 'bundle.hostImports'
     && closureProductionHandlerHostImports?.required === validity.requiresHostImports
     && closureProductionHandlerHostImports?.factory === 'createEshkolHostImportObject'
@@ -1349,6 +1425,33 @@ export function summarizeUlgArtifact(artifact = {}) {
       clonePlain(closureProductionHandlerRuntimeExecutionHostImportCallCounts),
     closureProductionHandlerRuntimeExecutionBlockedBy:
       clonePlain(closureProductionHandlerRuntimeExecutionBlockedBy),
+    closureFullPhysicsValidationRequirementsSchema:
+      closureFullPhysicsValidationRequirements?.schema || null,
+    closureFullPhysicsValidationRequirementsStatus:
+      closureFullPhysicsValidationRequirements?.status || null,
+    closureFullPhysicsValidationRequirementsDeclared,
+    closureFullPhysicsValidationRequirementsReady:
+      typeof closureFullPhysicsValidationRequirements?.ready === 'boolean'
+        ? closureFullPhysicsValidationRequirements.ready
+        : null,
+    closureFullPhysicsValidationRequirementsValidationScope:
+      closureFullPhysicsValidationRequirements?.validationScope || null,
+    closureFullPhysicsValidationRequirementsProducerSchema:
+      closureFullPhysicsValidationRequirements?.producerSchema || null,
+    closureFullPhysicsValidationRequirementsRequiredValidationSchema:
+      closureFullPhysicsValidationRequirements?.requiredValidationSchema || null,
+    closureFullPhysicsValidationRequirementsRequiredValidationScope:
+      closureFullPhysicsValidationRequirements?.requiredValidationScope || null,
+    closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies:
+      clonePlain(closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies),
+    closureFullPhysicsValidationRequiredRuntimeEvidenceCount:
+      closureFullPhysicsValidationRequiredRuntimeEvidence.length,
+    closureFullPhysicsValidationRequiredHashFields:
+      clonePlain(closureFullPhysicsValidationRequiredHashFields),
+    closureFullPhysicsValidationRequiredRuntimeEvidence:
+      clonePlain(closureFullPhysicsValidationRequiredRuntimeEvidence),
+    closureFullPhysicsValidationRequirementsBlockedBy:
+      clonePlain(closureFullPhysicsValidationBlockedBy),
     closureProductionCandidateRuntimeProbeSchema: closureProductionCandidateRuntimeProbe?.schema || null,
     closureProductionCandidateRuntimeProbeStatus: closureProductionCandidateRuntimeProbe?.status || null,
     closureProductionCandidateRuntimeProbeReady,

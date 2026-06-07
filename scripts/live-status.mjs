@@ -216,6 +216,26 @@ try {
           eshkol?.closureProductionHandlerRuntimeExecutionHostImportCallCounts ?? null,
         productionHandlerRuntimeExecutionBlockedBy:
           eshkol?.closureProductionHandlerRuntimeExecutionBlockedBy ?? [],
+        fullPhysicsValidationRequirementsDeclared:
+          eshkol?.closureFullPhysicsValidationRequirementsDeclared ?? null,
+        fullPhysicsValidationRequirementsStatus:
+          eshkol?.closureFullPhysicsValidationRequirementsStatus ?? null,
+        fullPhysicsValidationRequirementsReady:
+          eshkol?.closureFullPhysicsValidationRequirementsReady ?? null,
+        fullPhysicsValidationRequirementsValidationScope:
+          eshkol?.closureFullPhysicsValidationRequirementsValidationScope ?? null,
+        fullPhysicsValidationRequirementsRequiredValidationSchema:
+          eshkol?.closureFullPhysicsValidationRequirementsRequiredValidationSchema ?? null,
+        fullPhysicsValidationRequirementsRequiredValidationScope:
+          eshkol?.closureFullPhysicsValidationRequirementsRequiredValidationScope ?? null,
+        fullPhysicsValidationRequiredRuntimeEvidenceFamilies:
+          eshkol?.closureFullPhysicsValidationRequiredRuntimeEvidenceFamilies ?? [],
+        fullPhysicsValidationRequiredRuntimeEvidenceCount:
+          eshkol?.closureFullPhysicsValidationRequiredRuntimeEvidenceCount ?? null,
+        fullPhysicsValidationRequiredHashFields:
+          eshkol?.closureFullPhysicsValidationRequiredHashFields ?? [],
+        fullPhysicsValidationRequirementsBlockedBy:
+          eshkol?.closureFullPhysicsValidationRequirementsBlockedBy ?? [],
         productionCandidateRuntimeProbeStatus:
           eshkol?.closureProductionCandidateRuntimeProbeStatus ?? null,
         productionCandidateRuntimeProbeReady:

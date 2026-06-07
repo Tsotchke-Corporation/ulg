@@ -94,6 +94,11 @@ physics work:
   handoffs, e2e coverage, and live status, advancing production dispatch
   preflight evidence to ten required checks, nine passed checks, and one
   blocked full-physics check.
+- [x] Surface Eshkol's
+  `eshkol.ulg.full-physics-validation-requirements.v0` through ULG staging
+  guards, compact summaries, browser handoffs, e2e coverage, and live status so
+  the remaining full-physics blocker is a concrete five-family evidence contract
+  instead of a bare boolean.
 - [x] Promote Eshkol's DOM-free `eshkol-host-imports.js` factory to a
   first-class browser/service-worker asset, probe it as JavaScript, import it in
   the supervised Eshkol worker, and expose factory/readiness summary fields
@@ -223,6 +228,10 @@ physics work:
   claiming the production handler has been implemented.
 - [x] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
+- [x] Add declared full-physics validation requirements to exported magnetar
+  closure artifacts, including the required MHD, PIC, radiation, relativity, and
+  cross-family conservation evidence families, without clearing the production
+  full-physics blocker.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
   general LLVM-to-WGSL compiler.
 - [ ] Avoid JIT service paths until the observed derivative/JIT hang is profiled.

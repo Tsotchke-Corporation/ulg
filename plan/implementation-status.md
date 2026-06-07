@@ -580,6 +580,14 @@ Updated: 2026-06-06 17:45:00 AKDT
   `handlerReady = true` and `runtimeExecution = true` for the deterministic
   tensor ABI smoke scope, and advances production dispatch preflight to
   `10/9/1` while keeping `fullPhysicsValidation = false`.
+- Integrated Eshkol's
+  `eshkol.ulg.full-physics-validation-requirements.v0` into ULG staging,
+  compact summaries, browser handoffs, e2e checks, and live status. ULG now
+  preserves the declared-not-run requirements for magnetosphere MHD, PIC kinetic
+  plasma, radiation transport, relativistic correction, and cross-family
+  conservation coupling evidence, including required reference/tolerance/runtime
+  output/evidence hashes, while keeping `fullPhysicsValidation = false` and the
+  production preflight split at `10/9/1`.
 - Integrated MoonLab backend-preflight sidecar commit `4e91165` into ULG
   staging, summaries, UI, e2e coverage, and live status. The staged
   `moonlab.webgpu.complex64-parity-scope.v0` artifact now requires

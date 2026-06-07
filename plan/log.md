@@ -5105,3 +5105,91 @@ Failures / open questions:
   validation, full-fidelity magnetar simulation, and full-physics validation
   remain blocked.
 - No push was attempted.
+
+## 2026-06-07 Eshkol Full-Physics Requirements Surface
+
+Prompt:
+
+- 2026-06-07 00:12 AKDT: "can you see the agents.md fike correctly now?"
+  Confirmed `/home/cos/projects/AGENTS.md`, `/home/cos/projects/ulg/AGENTS.md`,
+  and `/home/cos/projects/peercompute/AGENTS.md` are visible, then continued the
+  standing implementation-plan work with local commits only.
+
+Actions:
+
+- Restaged Eshkol's magnetar closure bundle into ULG with
+  `npm run stage:service-assets -- --eshkol-only --created-at
+  2026-06-07T00:04:00-08:00`.
+- Added ULG summary extraction and strict declaration checks for
+  `eshkol.ulg.full-physics-validation-requirements.v0`, including five required
+  runtime evidence families, four required hash fields, required validation
+  schemas/scopes, and the remaining `full-physics-validation-not-run` blocker.
+- Added ULG staging guards so the staged Eshkol artifact must carry the full
+  requirements object and the final dispatch-preflight check must point at
+  `productionHandlerBoundary.fullPhysicsValidationRequirements`.
+- Added live-status and e2e summary fields for the declared full-physics
+  requirements while keeping `fullPhysicsValidation = false`.
+- Updated `README.md`, `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` to record the current evidence contract.
+
+Files:
+
+- `src/runtime/artifactSummary.js`
+- `scripts/stage-service-assets.mjs`
+- `scripts/live-status.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `README.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/implementation-status.md`
+
+Commands:
+
+- `jq '.validation.closureDescriptor.descriptorBinding.productionHandlerBoundary.fullPhysicsValidationRequirements' public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json`
+- `node --check src/runtime/artifactSummary.js && node --check scripts/live-status.mjs && node --check scripts/stage-service-assets.mjs && node --check tests/orchestration.test.mjs && node --check tests/demo.e2e.mjs`
+- `npm run stage:service-assets -- --eshkol-only --created-at 2026-06-07T00:04:00-08:00`
+- `node --test tests/orchestration.test.mjs --test-name-pattern "artifact cache summarizes Eshkol"`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `multi_agent_v1.wait_agent` on Darwin and Averroes read-only sidecars.
+
+Validation:
+
+- PASS: `node --check src/runtime/artifactSummary.js
+  scripts/live-status.mjs scripts/stage-service-assets.mjs
+  tests/orchestration.test.mjs tests/demo.e2e.mjs`.
+- PASS: `npm run stage:service-assets -- --eshkol-only --created-at
+  2026-06-07T00:04:00-08:00`.
+- PASS: focused Eshkol artifact-cache test passed `7/7`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1` Chromium test.
+- PASS: `npm run status:live -- --bridge` reported ULG on
+  `http://100.86.83.35:5173/`, `productionHandlerBoundaryDeclared = true`,
+  `fullPhysicsValidationRequirementsDeclared = true`,
+  `fullPhysicsValidationRequiredRuntimeEvidenceCount = 5`, required hash fields
+  `referenceHash`, `toleranceHash`, `runtimeOutputHash`, `evidenceHash`,
+  production dispatch preflight `10/9/1`, and bridge ack `handoff-ready`.
+- PASS: Darwin sidecar independently recommended the same ULG full-physics
+  requirements handoff surface. Averroes sidecar identified the next
+  PeerCompute propagation slice for production runtime `entryResult` and
+  output-tensor production fields.
+
+Failures / open questions:
+
+- Initial focused test failed because the unit fixture still used the old
+  `productionHandlerBoundary.fullPhysicsValidation` preflight evidence source
+  and lacked the new requirements object. Updated the fixture to match the
+  staged Eshkol contract; the focused test then passed.
+- `dist/` and `public/service-assets/eshkol/closures/magnetar-closure/` remain
+  ignored generated assets.
+- `agents.md` to `AGENTS.md` remains as pre-existing/user work and was not
+  staged by this checkpoint.
+- Scientific validation, full-fidelity magnetar simulation, and full-physics
+  validation remain blocked. The new object declares what evidence is required;
+  it does not claim the evidence has been produced.
+- No push was attempted.

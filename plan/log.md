@@ -4906,3 +4906,135 @@ Open / blockers:
   handler readiness, production runtime execution, scientific validation,
   full-fidelity magnetar simulation, and full-physics validation remain blocked.
 - No commit or push was attempted.
+
+## 2026-06-06 22:20:07 AKDT - Eshkol Production Handler Contract ULG Surface
+
+Prompt: "great job keep going"
+
+Actions:
+
+- Read `/home/cos/projects/AGENTS.md`; no repo-local `AGENTS.md` was present.
+- Verified the existing partial `scripts/stage-service-assets.mjs` edit with
+  `node --check`.
+- Updated ULG staging guards to require Eshkol's declared
+  `eshkol.ulg.production-handler-contract.v0` metadata before accepting the
+  staged magnetar closure bundle.
+- Updated `src/runtime/artifactSummary.js` to validate and compactly expose the
+  production handler contract schema/status, handler id, dispatch schema,
+  runtime ABI, tensor ids, `linear-memory-offsets` invocation mode, parameter
+  and result types, required evidence, blockers, and declaration readiness.
+- Updated `scripts/live-status.mjs` to print the compact contract declaration
+  status, invocation ABI, required evidence count, and blockers.
+- Updated orchestration and browser E2E coverage to assert the raw staged
+  contract, compact summary fields, and production dispatch preflight transition
+  from `9/6/3` to `10/7/3`.
+- Restaged the Eshkol closure bundle from `/home/cos/projects/eshkol` with a
+  fixed timestamp. The ignored staged asset now includes
+  `productionHandlerContract.schema =
+  eshkol.ulg.production-handler-contract.v0` and
+  dispatch preflight check summary `10/7/3`.
+- Updated `README.md`, `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` to record the declared contract as dispatch
+  evidence while preserving production handler/runtime/full-physics blockers.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `scripts/live-status.mjs`
+- `scripts/stage-service-assets.mjs`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+
+Commands run:
+
+- `git status --short --branch && pwd`
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `node --check scripts/stage-service-assets.mjs`
+- `rg -n "productionHandlerContract|productionDispatchPreflight|closureProduction|production-handler-contract|totalRequiredCheckCount|passedCount|blockedCount" src tests scripts plan package.json`
+- `date -Is && node --version && npm --version`
+- `sed -n '760,930p' src/runtime/artifactSummary.js`
+- `sed -n '1060,1245p' src/runtime/artifactSummary.js`
+- `sed -n '360,420p' tests/demo.e2e.mjs && sed -n '510,645p' tests/demo.e2e.mjs`
+- `sed -n '620,840p' scripts/stage-service-assets.mjs`
+- `sed -n '1,170p' src/runtime/artifactSummary.js`
+- `rg -n "ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT|PRODUCTION_HANDLER|PRODUCTION_HOST_IMPORT|BOUNDARY_REQUIRED|CHECKS|CONTRACT" src/runtime/artifactSummary.js`
+- `sed -n '1,120p' scripts/stage-service-assets.mjs`
+- `git ls-files public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm && jq '.validation.closureDescriptor.descriptorBinding.productionHandlerBoundary.productionHandlerContract, .validation.closureDescriptor.descriptorBinding.productionHandlerBoundary.dispatchPreflight.checkSummary' public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json`
+- `rg -n "totalRequiredCheckCount: 9|PassedCheckCount\)\.toBe\(6\)|PassedCheckCount\)\.toBe\(6|passedCount: 6|blockedCount: 3|production-handler-contract-declared|non-stub-host-imports-present" tests src plan scripts`
+- `sed -n '610,760p' src/runtime/artifactSummary.js`
+- `sed -n '930,1065p' src/runtime/artifactSummary.js`
+- `sed -n '1,85p' tests/orchestration.test.mjs && sed -n '930,995p' tests/orchestration.test.mjs`
+- `sed -n '250,295p' plan/tests.md && sed -n '730,750p' plan/tests.md && tail -n 80 plan/log.md`
+- `sed -n '1,160p' package.json`
+- `sed -n '500,620p' src/runtime/artifactSummary.js`
+- `sed -n '900,1060p' tests/orchestration.test.mjs`
+- `sed -n '1060,1135p' tests/orchestration.test.mjs`
+- `rg -n "productionHandlerBoundary|productionHandlerContract|closureProductionHandlerContract|productionDispatchPreflightPassedCheckCount|totalRequiredCheckCount: 9|passedCount: 6|blockedCount: 3|toBe\(6\)|toBe\(9\)" tests src scripts plan README.md`
+- `sed -n '150,245p' scripts/live-status.mjs`
+- `sed -n '840,930p' tests/orchestration.test.mjs`
+- `sed -n '1135,1245p' tests/orchestration.test.mjs`
+- `sed -n '1245,1325p' tests/orchestration.test.mjs`
+- `sed -n '1325,1385p' tests/orchestration.test.mjs`
+- `rg -n "totalRequiredCheckCount: 9|passedCount: 6|blockedCount: 3|PassedCheckCount\)\.toBe\(6\)|TotalRequiredCheckCount\)\.toBe\(9\)|production-handler-contract-declared|productionHandlerContract|closureProductionHandlerContract" tests src scripts plan README.md`
+- `node --check src/runtime/artifactSummary.js scripts/live-status.mjs scripts/stage-service-assets.mjs tests/orchestration.test.mjs tests/demo.e2e.mjs`
+- `git diff --stat && git diff -- src/runtime/artifactSummary.js tests/orchestration.test.mjs tests/demo.e2e.mjs scripts/live-status.mjs scripts/stage-service-assets.mjs | sed -n '1,260p'`
+- `npm run stage:service-assets -- --eshkol-only --created-at 2026-06-06T22:15:36-08:00`
+- `jq '.validation.closureDescriptor.descriptorBinding.productionHandlerBoundary.productionHandlerContract, .validation.closureDescriptor.descriptorBinding.productionHandlerBoundary.dispatchPreflight.checkSummary' public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json`
+- `git status --short --branch && git ls-files public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm public/service-assets/eshkol/closures/magnetar-closure/eshkol-host-imports.js`
+- `node --test tests/orchestration.test.mjs --test-name-pattern "artifact cache summarizes Eshkol"`
+- `rg -n "productionDispatchPreflightTotalRequiredCheckCount =|production dispatch preflight|9/6/3|10/7/3|production-candidate runtime probe|production handler contract|production-handler-contract" README.md plan/plan.md plan/tests.md plan/log.md plan/implementation-status.md`
+- `sed -n '1,120p' plan/tests.md && sed -n '255,292p' plan/tests.md`
+- `sed -n '68,92p' plan/plan.md && sed -n '152,172p' plan/plan.md && sed -n '200,215p' plan/plan.md`
+- `sed -n '100,122p' README.md`
+- `tail -n 120 plan/log.md`
+- `sed -n '520,575p' plan/implementation-status.md`
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+- `npm test`
+- `npm run build`
+- `npm run test:e2e`
+- `npm run status:live -- --bridge`
+- `git status --short --ignored public/service-assets/eshkol/closures/magnetar-closure dist | sed -n '1,120p'`
+- `git diff -- README.md plan/plan.md plan/tests.md plan/implementation-status.md | sed -n '1,240p'`
+- `sed -n '84,118p' plan/tests.md && sed -n '260,294p' plan/tests.md`
+- `sed -n '118,160p' plan/tests.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/artifactSummary.js
+  scripts/live-status.mjs scripts/stage-service-assets.mjs
+  tests/orchestration.test.mjs tests/demo.e2e.mjs`.
+- PASS: `npm run stage:service-assets -- --eshkol-only --created-at
+  2026-06-06T22:15:36-08:00`.
+- PASS: staged JSON reports
+  `productionHandlerContract.schema =
+  eshkol.ulg.production-handler-contract.v0`,
+  invocation argument mode `linear-memory-offsets`, required evidence count
+  `8`, and dispatch preflight check summary `10/7/3`.
+- PASS: `node --test tests/orchestration.test.mjs --test-name-pattern
+  "artifact cache summarizes Eshkol"` passed `7/7`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing large-chunk warning.
+- PASS: `npm run test:e2e` passed `1/1`.
+- PASS: `npm run status:live -- --bridge` reported ULG on
+  `http://100.86.83.35:5173/`, Eshkol
+  `productionHandlerContractDeclared = true`,
+  `productionHandlerContractRequiredEvidenceCount = 8`,
+  production dispatch preflight `10/7/3`, and bridge ack `handoff-ready`.
+
+Failures / open questions:
+
+- One stale-text scan used unescaped backticks in a double-quoted `rg` pattern,
+  so Bash printed `/bin/bash: line 1: checkResults: command not found`. The
+  scan still surfaced stale doc lines, which were patched.
+- `dist/` and `public/service-assets/eshkol/closures/magnetar-closure/` remain
+  ignored generated assets.
+- The declared production handler contract is metadata/dispatch evidence only.
+  Production handler implementation, production runtime execution, scientific
+  validation, full-fidelity magnetar simulation, and full-physics validation
+  remain blocked.
+- No push was attempted.

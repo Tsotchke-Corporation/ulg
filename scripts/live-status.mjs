@@ -182,6 +182,20 @@ try {
           eshkol?.closureProductionHandlerBoundaryBlockers ?? [],
         productionHandlerAllowedExecutionClaims:
           eshkol?.closureProductionHandlerAllowedExecutionClaims ?? [],
+        productionHandlerContractDeclared:
+          eshkol?.closureProductionHandlerContractDeclared ?? null,
+        productionHandlerContractStatus:
+          eshkol?.closureProductionHandlerContractStatus ?? null,
+        productionHandlerContractInvocationArgumentMode:
+          eshkol?.closureProductionHandlerContractInvocationArgumentMode ?? null,
+        productionHandlerContractInvocationParameterTypes:
+          eshkol?.closureProductionHandlerContractInvocationParameterTypes ?? [],
+        productionHandlerContractInvocationResultTypes:
+          eshkol?.closureProductionHandlerContractInvocationResultTypes ?? [],
+        productionHandlerContractRequiredEvidenceCount:
+          eshkol?.closureProductionHandlerContractRequiredEvidenceCount ?? null,
+        productionHandlerContractBlockedBy:
+          eshkol?.closureProductionHandlerContractBlockedBy ?? [],
         productionCandidateRuntimeProbeStatus:
           eshkol?.closureProductionCandidateRuntimeProbeStatus ?? null,
         productionCandidateRuntimeProbeReady:

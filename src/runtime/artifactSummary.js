@@ -9,6 +9,7 @@ export const ESHKOL_TENSOR_LINEAR_MEMORY_BINDING_SCHEMA = 'eshkol.ulg.tensor-lin
 export const ESHKOL_TENSOR_LINEAR_MEMORY_SMOKE_BINDING_SCHEMA = 'eshkol.ulg.tensor-linear-memory-smoke-binding.v0';
 export const ESHKOL_TENSOR_ENTRY_EXPORT_OFFSET_PROBE_SCHEMA = 'eshkol.ulg.tensor-entry-export-offset-probe.v0';
 export const ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA = 'eshkol.ulg.production-handler-boundary.v0';
+export const ESHKOL_PRODUCTION_HANDLER_CONTRACT_SCHEMA = 'eshkol.ulg.production-handler-contract.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.production-handler-dispatch-preflight.v0';
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
@@ -40,9 +41,20 @@ const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_TENSOR_MEMORY_IMPORTS = Object.fre
   'ulg_read_f64',
   'ulg_write_f64'
 ]);
+const ESHKOL_PRODUCTION_HANDLER_CONTRACT_REQUIRED_EVIDENCE = Object.freeze([
+  'content-addressed-wasm-module',
+  'entry-export-main-signature-i32-i32-to-i32',
+  'production-candidate-host-imports',
+  'validated-f64-tensor-memory-binding',
+  'production-candidate-runtime-probe',
+  'production-magnetar-handler-implementation',
+  'production-handler-runtime-execution',
+  'full-physics-validation-pass'
+]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS = Object.freeze([
   'artifact-module-sha256-matches-module-ref',
   'entry-export-main-signature-i32-i32-to-i32',
+  'production-handler-contract-declared',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'production-candidate-runtime-probe-passed',
@@ -54,6 +66,7 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS = Object.freeze([
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS = Object.freeze([
   'artifact-module-sha256-matches-module-ref',
   'entry-export-main-signature-i32-i32-to-i32',
+  'production-handler-contract-declared',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'production-candidate-runtime-probe-passed',
@@ -331,6 +344,8 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureTensorLinearMemorySmokeBinding = objectOrNull(closureTensorLinearMemoryBinding?.smokeBinding);
   const closureTensorEntryExportOffsetProbe = objectOrNull(closureTensorLinearMemoryBinding?.entryExportOffsetProbe);
   const closureProductionHandlerBoundary = objectOrNull(closureDescriptorBinding.productionHandlerBoundary);
+  const closureProductionHandlerContract = objectOrNull(closureProductionHandlerBoundary?.productionHandlerContract);
+  const closureProductionHandlerContractInvocation = objectOrNull(closureProductionHandlerContract?.invocation);
   const closureProductionHandlerTensorMemoryBinding = objectOrNull(closureProductionHandlerBoundary?.tensorMemoryBinding);
   const closureProductionHandlerHostImports = objectOrNull(closureProductionHandlerBoundary?.hostImports);
   const closureProductionHostImportCandidate = objectOrNull(closureProductionHandlerHostImports?.productionCandidate);
@@ -679,6 +694,30 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionHandlerOutputTensorIds = Array.isArray(closureProductionHandlerBoundary?.outputTensorIds)
     ? closureProductionHandlerBoundary.outputTensorIds
     : [];
+  const closureProductionHandlerContractInputTensorIds =
+    Array.isArray(closureProductionHandlerContract?.inputTensorIds)
+      ? closureProductionHandlerContract.inputTensorIds
+      : [];
+  const closureProductionHandlerContractOutputTensorIds =
+    Array.isArray(closureProductionHandlerContract?.outputTensorIds)
+      ? closureProductionHandlerContract.outputTensorIds
+      : [];
+  const closureProductionHandlerContractInvocationParameterTypes =
+    Array.isArray(closureProductionHandlerContractInvocation?.parameterTypes)
+      ? closureProductionHandlerContractInvocation.parameterTypes
+      : [];
+  const closureProductionHandlerContractInvocationResultTypes =
+    Array.isArray(closureProductionHandlerContractInvocation?.resultTypes)
+      ? closureProductionHandlerContractInvocation.resultTypes
+      : [];
+  const closureProductionHandlerContractRequiredEvidence =
+    Array.isArray(closureProductionHandlerContract?.requiredEvidence)
+      ? closureProductionHandlerContract.requiredEvidence.map((entry) => String(entry)).filter(Boolean)
+      : [];
+  const closureProductionHandlerContractBlockedBy =
+    Array.isArray(closureProductionHandlerContract?.blockedBy)
+      ? closureProductionHandlerContract.blockedBy.map((blocker) => String(blocker)).filter(Boolean)
+      : [];
   const closureProductionHandlerAllowedExecutionClaims =
     Array.isArray(closureProductionHandlerBoundary?.allowedExecutionClaims)
       ? closureProductionHandlerBoundary.allowedExecutionClaims.map((claim) => String(claim)).filter(Boolean)
@@ -787,6 +826,32 @@ export function summarizeUlgArtifact(artifact = {}) {
     && finiteNumberOrNull(closureProductionCandidateRuntimeProbeHostImportCallCounts?.ulg_write_f64) === 9
     && closureProductionCandidateRuntimeProbe.blocker
       === 'production-candidate-runtime-smoke-only-production-handler-not-ready';
+  const closureProductionHandlerContractDeclared =
+    closureProductionHandlerContract?.schema === ESHKOL_PRODUCTION_HANDLER_CONTRACT_SCHEMA
+    && closureProductionHandlerContract.status === 'declared-not-implemented'
+    && closureProductionHandlerContract.handlerId === closureProductionHandlerBoundary?.handlerId
+    && closureProductionHandlerContract.dispatchSchema === closureProductionHandlerBoundary?.dispatchSchema
+    && closureProductionHandlerContract.entryExport === closureProductionHandlerBoundary?.entryExport
+    && closureProductionHandlerContract.runtimeAbi === closureProductionHandlerBoundary?.runtimeAbi
+    && closureProductionHandlerContract.tensorMemoryModel === closureProductionHandlerBoundary?.tensorMemoryModel
+    && arraysEqual(closureProductionHandlerContractInputTensorIds, closureProductionHandlerInputTensorIds)
+    && arraysEqual(closureProductionHandlerContractOutputTensorIds, closureProductionHandlerOutputTensorIds)
+    && closureProductionHandlerContractInvocation?.moduleSource === 'artifact.execution.module'
+    && closureProductionHandlerContractInvocation?.entryExport === closureProductionHandlerBoundary?.entryExport
+    && closureProductionHandlerContractInvocation?.argumentMode === 'linear-memory-offsets'
+    && arraysEqual(closureProductionHandlerContractInvocationParameterTypes, ['i32', 'i32'])
+    && arraysEqual(closureProductionHandlerContractInvocationResultTypes, ['i32'])
+    && finiteNumberOrNull(closureProductionHandlerContractInvocation?.inputOffsetParam) === 0
+    && finiteNumberOrNull(closureProductionHandlerContractInvocation?.outputOffsetParam) === 1
+    && finiteNumberOrNull(closureProductionHandlerContractInvocation?.expectedReturn) === 0
+    && arraysEqual(
+      closureProductionHandlerContractRequiredEvidence,
+      ESHKOL_PRODUCTION_HANDLER_CONTRACT_REQUIRED_EVIDENCE
+    )
+    && arraysEqual(
+      closureProductionHandlerContractBlockedBy,
+      ESHKOL_PRODUCTION_HANDLER_BOUNDARY_REQUIRED_BLOCKERS
+    );
   const closureProductionHandlerBoundaryDeclared =
     closureProductionHandlerBoundary?.schema === ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
     && textOrNull(closureProductionHandlerBoundary.handlerId) != null
@@ -808,6 +873,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureProductionHandlerBoundary.moduleRef?.source === 'artifact.execution.module'
     && closureProductionHandlerBoundary.moduleRef?.contentAddressing === 'required'
     && closureProductionHandlerBoundary.moduleRef?.sha256Field === 'artifact.execution.module.sha256'
+    && closureProductionHandlerContractDeclared
     && closureProductionHandlerHostImports?.source === 'bundle.hostImports'
     && closureProductionHandlerHostImports?.required === validity.requiresHostImports
     && closureProductionHandlerHostImports?.factory === 'createEshkolHostImportObject'
@@ -1116,6 +1182,41 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureProductionHandlerAllowedExecutionClaims: clonePlain(closureProductionHandlerAllowedExecutionClaims),
     closureProductionHandlerBoundaryBlockers: clonePlain(closureProductionHandlerBoundaryBlockers),
     closureProductionHandlerTensorMemoryBinding: clonePlain(closureProductionHandlerTensorMemoryBinding),
+    closureProductionHandlerContractSchema: closureProductionHandlerContract?.schema || null,
+    closureProductionHandlerContractStatus: closureProductionHandlerContract?.status || null,
+    closureProductionHandlerContractDeclared,
+    closureProductionHandlerContractHandlerId: closureProductionHandlerContract?.handlerId || null,
+    closureProductionHandlerContractDispatchSchema: closureProductionHandlerContract?.dispatchSchema || null,
+    closureProductionHandlerContractEntryExport: closureProductionHandlerContract?.entryExport || null,
+    closureProductionHandlerContractRuntimeAbi: closureProductionHandlerContract?.runtimeAbi || null,
+    closureProductionHandlerContractTensorMemoryModel:
+      closureProductionHandlerContract?.tensorMemoryModel || null,
+    closureProductionHandlerContractInputTensorIds:
+      clonePlain(closureProductionHandlerContractInputTensorIds),
+    closureProductionHandlerContractOutputTensorIds:
+      clonePlain(closureProductionHandlerContractOutputTensorIds),
+    closureProductionHandlerContractInvocationModuleSource:
+      closureProductionHandlerContractInvocation?.moduleSource || null,
+    closureProductionHandlerContractInvocationEntryExport:
+      closureProductionHandlerContractInvocation?.entryExport || null,
+    closureProductionHandlerContractInvocationArgumentMode:
+      closureProductionHandlerContractInvocation?.argumentMode || null,
+    closureProductionHandlerContractInvocationParameterTypes:
+      clonePlain(closureProductionHandlerContractInvocationParameterTypes),
+    closureProductionHandlerContractInvocationResultTypes:
+      clonePlain(closureProductionHandlerContractInvocationResultTypes),
+    closureProductionHandlerContractInvocationInputOffsetParam:
+      finiteNumberOrNull(closureProductionHandlerContractInvocation?.inputOffsetParam),
+    closureProductionHandlerContractInvocationOutputOffsetParam:
+      finiteNumberOrNull(closureProductionHandlerContractInvocation?.outputOffsetParam),
+    closureProductionHandlerContractInvocationExpectedReturn:
+      finiteNumberOrNull(closureProductionHandlerContractInvocation?.expectedReturn),
+    closureProductionHandlerContractRequiredEvidence:
+      clonePlain(closureProductionHandlerContractRequiredEvidence),
+    closureProductionHandlerContractRequiredEvidenceCount:
+      closureProductionHandlerContractRequiredEvidence.length,
+    closureProductionHandlerContractBlockedBy:
+      clonePlain(closureProductionHandlerContractBlockedBy),
     closureProductionCandidateRuntimeProbeSchema: closureProductionCandidateRuntimeProbe?.schema || null,
     closureProductionCandidateRuntimeProbeStatus: closureProductionCandidateRuntimeProbe?.status || null,
     closureProductionCandidateRuntimeProbeReady,

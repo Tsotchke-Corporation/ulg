@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 22/22 tests on 2026-06-06 after the Eshkol host-import
-service-worker import glue slice.
+Current result: pass, 22/22 tests on 2026-06-06 after surfacing Eshkol's
+declared production handler contract through ULG summaries and browser handoffs.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -37,6 +37,10 @@ service-worker import glue slice.
   production handler/runtime/full-physics readiness blocked.
 - `npm run stage:service-assets -- --eshkol-only --created-at ...` forwards a
   fixed timestamp to Eshkol helpers that support reproducible bundle metadata.
+  It now also stages the declared
+  `eshkol.ulg.production-handler-contract.v0` production handler contract,
+  preserving the `main(i32, i32) -> i32` invocation ABI, tensor input/output
+  ids, required evidence, and remaining production/full-physics blockers.
 - MoonLab service asset specs include the classic core probe worker URL and the
   manifest builder approves it for child-worker leasing.
 - Registry resolution, child-worker lease limits, artifact cache behavior,
@@ -69,10 +73,10 @@ service-worker import glue slice.
   when valid supplied contracts are present.
 - Artifact cache summaries preserve Eshkol production dispatch preflight
   metadata, including schema `eshkol.ulg.production-handler-dispatch-preflight.v0`,
-  `status = blocked`, `ready = false`, nine required production dispatch
-  checks, the smoke-only production-candidate runtime probe, deterministic
-  runtime-smoke stubs rejected for production dispatch, and the computed
-  `9/6/3` check split.
+  `status = blocked`, `ready = false`, ten required production dispatch
+  checks, the declared production handler contract, the smoke-only
+  production-candidate runtime probe, deterministic runtime-smoke stubs rejected
+  for production dispatch, and the computed `10/7/3` check split.
 - Focused service-asset/orchestration coverage after the host-import import-glue
   slice:
   `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
@@ -80,40 +84,45 @@ service-worker import glue slice.
 
 ## Current Handoff Validation Summary
 
-Already-passed validation recorded from the handoff summary on 2026-06-06:
+Validation run on 2026-06-06 after surfacing Eshkol's declared production
+handler contract:
 
-- `npm run stage:service-assets -- --moonlab-only`: passed.
-- `npm run stage:service-assets -- --eshkol-only`: passed.
-- `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`:
-  passed, `14/14`.
+- `npm run stage:service-assets -- --eshkol-only --created-at
+  2026-06-06T22:15:36-08:00`: passed and staged
+  `eshkol.ulg.production-handler-contract.v0`.
+- `node --test tests/orchestration.test.mjs --test-name-pattern "artifact
+  cache summarizes Eshkol"`: passed, `7/7`.
 - `npm test`: passed, `22/22`.
 - `npm run build`: passed with the existing Vite large chunk warning.
-- `npm run test:e2e`: passed.
-- `npm run status:live`: passed.
-- `npm run status:live` now reports Eshkol host-import JS asset readiness,
-  service-worker import factory readiness, production-host candidate
-  requirements status, runtime scope, implementation status, and `23` required
-  non-stub imports.
+- `npm run test:e2e`: passed, `1/1` Chromium test.
+- `npm run status:live -- --bridge`: passed; live ULG on
+  `http://100.86.83.35:5173/` reports
+  `productionHandlerContractDeclared = true`,
+  `productionHandlerContractInvocationArgumentMode = linear-memory-offsets`,
+  `productionHandlerContractRequiredEvidenceCount = 8`, and production
+  dispatch preflight counts `10/7/3`.
 
 The MoonLab compact WebGPU parity handoff remains reduced-scope evidence for
 five operations only. The Eshkol production-candidate runtime probe remains
-smoke-only and records production dispatch preflight as `9/6/3`; it does not
-promote production handler readiness, production runtime execution, scientific
-validation, full-fidelity magnetar simulation, or full-physics validation.
+smoke-only, and the declared production handler contract records the production
+entry ABI without implementing the handler. Production dispatch preflight now
+records `10/7/3`; it does not promote production handler readiness, production
+runtime execution, scientific validation, full-fidelity magnetar simulation, or
+full-physics validation.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after the Eshkol host-import
-service-worker import glue slice, with the existing Vite large chunk warning.
+Current result: pass on 2026-06-06 after the declared Eshkol production handler
+contract slice, with the existing Vite large chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after the Eshkol
-host-import service-worker import glue slice.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after the declared Eshkol
+production handler contract slice.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.
@@ -273,7 +282,8 @@ host-import service-worker import glue slice.
   rejected runtime scope `deterministic-runtime-smoke-stubs`, and blockers
   `production-magnetar-handler-not-implemented`,
   `full-physics-validation-not-run`.
-- Eshkol production dispatch preflight computed-evidence check on 2026-06-06:
+- Earlier Eshkol production dispatch preflight computed-evidence check on
+  2026-06-06:
   `npm run stage:service-assets -- --eshkol-only`, `npm test`,
   `npm run build`, `npm run test:e2e`, `git diff --check`, and
   `npm run status:live -- --bridge` passed. The live ULG status reports
@@ -284,7 +294,9 @@ host-import service-worker import glue slice.
   `productionDispatchPreflightBlockedCheckCount = 4`. Passed checks are module
   hash, entry signature, f64 tensor memory binding, and production smoke-stub
   rejection; blocked checks are non-stub host imports, handler readiness,
-  runtime execution, and full-physics validation.
+  runtime execution, and full-physics validation. This count has since been
+  superseded by the declared production handler contract slice's `10/7/3`
+  preflight.
   durable envelope.
 - Magnetar fidelity/runtime scope gate on 2026-06-06:
   `npm run stage:service-assets`, `npm test`, `npm run build`, and

@@ -40,9 +40,20 @@ const ESHKOL_PRODUCTION_BLOCKERS = Object.freeze([
   'production-magnetar-handler-not-implemented',
   'full-physics-validation-not-run'
 ]);
+const ESHKOL_PRODUCTION_HANDLER_CONTRACT_REQUIRED_EVIDENCE = Object.freeze([
+  'content-addressed-wasm-module',
+  'entry-export-main-signature-i32-i32-to-i32',
+  'production-candidate-host-imports',
+  'validated-f64-tensor-memory-binding',
+  'production-candidate-runtime-probe',
+  'production-magnetar-handler-implementation',
+  'production-handler-runtime-execution',
+  'full-physics-validation-pass'
+]);
 const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
   'artifact-module-sha256-matches-module-ref',
   'entry-export-main-signature-i32-i32-to-i32',
+  'production-handler-contract-declared',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'production-candidate-runtime-probe-passed',
@@ -54,6 +65,7 @@ const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
 const ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS = Object.freeze([
   'artifact-module-sha256-matches-module-ref',
   'entry-export-main-signature-i32-i32-to-i32',
+  'production-handler-contract-declared',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
   'production-candidate-runtime-probe-passed',
@@ -878,6 +890,29 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               contentAddressing: 'required',
               sha256Field: 'artifact.execution.module.sha256'
             },
+            productionHandlerContract: {
+              schema: 'eshkol.ulg.production-handler-contract.v0',
+              status: 'declared-not-implemented',
+              handlerId: 'eshkol:magnetar-closure:main:v0',
+              dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
+              entryExport: 'main',
+              runtimeAbi: 'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0',
+              tensorMemoryModel: 'host-managed-linear-f64',
+              inputTensorIds: ['magnetar-state-vector', 'closure-control-vector'],
+              outputTensorIds: ['magnetar-closure-update', 'closure-residual'],
+              invocation: {
+                moduleSource: 'artifact.execution.module',
+                entryExport: 'main',
+                argumentMode: 'linear-memory-offsets',
+                parameterTypes: ['i32', 'i32'],
+                resultTypes: ['i32'],
+                inputOffsetParam: 0,
+                outputOffsetParam: 1,
+                expectedReturn: 0
+              },
+              requiredEvidence: [...ESHKOL_PRODUCTION_HANDLER_CONTRACT_REQUIRED_EVIDENCE],
+              blockedBy: [...ESHKOL_PRODUCTION_BLOCKERS]
+            },
             hostImports: {
               source: 'bundle.hostImports',
               required: true,
@@ -967,6 +1002,12 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   status: 'pass',
                   ready: true,
                   evidenceSource: 'artifact.execution.entrySignature'
+                },
+                {
+                  check: 'production-handler-contract-declared',
+                  status: 'pass',
+                  ready: true,
+                  evidenceSource: 'productionHandlerBoundary.productionHandlerContract'
                 },
                 {
                   check: 'non-stub-host-imports-present',
@@ -1226,6 +1267,45 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     executionClaim: 'deterministic-tensor-runtime-smoke-only',
     entryExportConsumesOffsets: true
   });
+  assert.equal(summary.closureProductionHandlerContractSchema, 'eshkol.ulg.production-handler-contract.v0');
+  assert.equal(summary.closureProductionHandlerContractStatus, 'declared-not-implemented');
+  assert.equal(summary.closureProductionHandlerContractDeclared, true);
+  assert.equal(summary.closureProductionHandlerContractHandlerId, 'eshkol:magnetar-closure:main:v0');
+  assert.equal(
+    summary.closureProductionHandlerContractDispatchSchema,
+    'peercompute.ulg.dispatch-service-handler-context.v0'
+  );
+  assert.equal(summary.closureProductionHandlerContractEntryExport, 'main');
+  assert.equal(
+    summary.closureProductionHandlerContractRuntimeAbi,
+    'wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0'
+  );
+  assert.equal(summary.closureProductionHandlerContractTensorMemoryModel, 'host-managed-linear-f64');
+  assert.deepEqual(
+    summary.closureProductionHandlerContractInputTensorIds,
+    ['magnetar-state-vector', 'closure-control-vector']
+  );
+  assert.deepEqual(
+    summary.closureProductionHandlerContractOutputTensorIds,
+    ['magnetar-closure-update', 'closure-residual']
+  );
+  assert.equal(summary.closureProductionHandlerContractInvocationModuleSource, 'artifact.execution.module');
+  assert.equal(summary.closureProductionHandlerContractInvocationEntryExport, 'main');
+  assert.equal(summary.closureProductionHandlerContractInvocationArgumentMode, 'linear-memory-offsets');
+  assert.deepEqual(summary.closureProductionHandlerContractInvocationParameterTypes, ['i32', 'i32']);
+  assert.deepEqual(summary.closureProductionHandlerContractInvocationResultTypes, ['i32']);
+  assert.equal(summary.closureProductionHandlerContractInvocationInputOffsetParam, 0);
+  assert.equal(summary.closureProductionHandlerContractInvocationOutputOffsetParam, 1);
+  assert.equal(summary.closureProductionHandlerContractInvocationExpectedReturn, 0);
+  assert.deepEqual(
+    summary.closureProductionHandlerContractRequiredEvidence,
+    [...ESHKOL_PRODUCTION_HANDLER_CONTRACT_REQUIRED_EVIDENCE]
+  );
+  assert.equal(
+    summary.closureProductionHandlerContractRequiredEvidenceCount,
+    ESHKOL_PRODUCTION_HANDLER_CONTRACT_REQUIRED_EVIDENCE.length
+  );
+  assert.deepEqual(summary.closureProductionHandlerContractBlockedBy, [...ESHKOL_PRODUCTION_BLOCKERS]);
   assert.equal(summary.closureProductionCandidateRuntimeProbeSchema, 'eshkol.ulg.production-candidate-runtime-probe.v0');
   assert.equal(summary.closureProductionCandidateRuntimeProbeStatus, 'production-candidate-runtime-smoke-passed');
   assert.equal(summary.closureProductionCandidateRuntimeProbeReady, true);

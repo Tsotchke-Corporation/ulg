@@ -559,14 +559,19 @@ Updated: 2026-06-06 17:45:00 AKDT
   `handlerReady`, runtime execution, and full physics validation false.
 - Integrated Eshkol computed production dispatch preflight evidence into ULG
   staging, compact summaries, browser handoffs, e2e checks, and live status.
-  ULG now reports the source artifact's `8/5/3` evidence split: module hash,
-  entry signature, non-stub host imports, f64 tensor binding, and smoke-stub
-  rejection pass; handler readiness, runtime execution, and full-physics
-  validation remain blocked.
-  ULG now preserves the eight `checkResults`, the
-  `eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0` summary,
-  and the current four-pass/four-blocked split without promoting the production
-  handler boundary to ready.
+  This earlier slice reported the source artifact's `8/5/3` evidence split:
+  module hash, entry signature, non-stub host imports, f64 tensor binding, and
+  smoke-stub rejection passed; handler readiness, runtime execution, and
+  full-physics validation remained blocked. The declared production handler
+  contract slice below supersedes that count with `10/7/3`.
+- Integrated Eshkol's declared production handler contract into ULG staging,
+  compact summaries, browser handoffs, e2e checks, and live status. The staged
+  closure now exposes `eshkol.ulg.production-handler-contract.v0` with
+  `main(i32, i32) -> i32`, linear-memory offset arguments, validated input and
+  output tensor ids, eight required evidence items, and the current production
+  blockers. Production dispatch preflight now records `10/7/3` while
+  preserving `handlerReady = false`, `runtimeExecution = false`, and full
+  physics validation false.
 - Integrated MoonLab backend-preflight sidecar commit `4e91165` into ULG
   staging, summaries, UI, e2e coverage, and live status. The staged
   `moonlab.webgpu.complex64-parity-scope.v0` artifact now requires

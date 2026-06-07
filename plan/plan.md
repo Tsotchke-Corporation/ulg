@@ -83,9 +83,13 @@ physics work:
   and live status.
 - [x] Surface Eshkol's production-candidate runtime probe as smoke-only evidence
   through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
-  and live status, advancing production dispatch preflight evidence to nine
-  required checks, six passed checks, and three blocked checks while preserving
-  production handler/runtime/full-physics blockers.
+  and live status while preserving production handler/runtime/full-physics
+  blockers.
+- [x] Surface Eshkol's declared production handler contract through ULG staging
+  guards, compact summaries, browser handoffs, e2e coverage, and live status,
+  advancing production dispatch preflight evidence to ten required checks,
+  seven passed checks, and three blocked checks while preserving production
+  handler/runtime/full-physics blockers.
 - [x] Promote Eshkol's DOM-free `eshkol-host-imports.js` factory to a
   first-class browser/service-worker asset, probe it as JavaScript, import it in
   the supervised Eshkol worker, and expose factory/readiness summary fields
@@ -209,6 +213,10 @@ physics work:
 - [x] Add computed production dispatch preflight `checkResults`/`checkSummary`
   evidence to exported magnetar closure artifacts without promoting production
   handler/runtime/full-physics readiness.
+- [x] Add declared production handler contract metadata to exported magnetar
+  closure artifacts so ULG and PeerCompute can hand off the production entry
+  ABI, tensor offsets, required evidence, and remaining blockers without
+  claiming the production handler has been implemented.
 - [x] Add language-level `define-ulg-closure` syntax and service-worker import
   glue on top of the stabilized artifact contract.
 - [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a

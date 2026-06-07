@@ -657,16 +657,48 @@ function stageEshkolAssets() {
       || productionHandlerBoundary.moduleRef?.sha256Field !== 'artifact.execution.module.sha256') {
       throw new Error('Eshkol staged production handler boundary has invalid module reference metadata');
     }
+    const expectedProductionHandlerBlockers = [
+      'production-magnetar-handler-not-implemented',
+      'full-physics-validation-not-run'
+    ];
+    const expectedProductionHandlerContractEvidence = [
+      'content-addressed-wasm-module',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'production-candidate-host-imports',
+      'validated-f64-tensor-memory-binding',
+      'production-candidate-runtime-probe',
+      'production-magnetar-handler-implementation',
+      'production-handler-runtime-execution',
+      'full-physics-validation-pass'
+    ];
+    const productionHandlerContract = productionHandlerBoundary.productionHandlerContract || {};
+    if (productionHandlerContract.schema !== 'eshkol.ulg.production-handler-contract.v0'
+      || productionHandlerContract.status !== 'declared-not-implemented'
+      || productionHandlerContract.handlerId !== productionHandlerBoundary.handlerId
+      || productionHandlerContract.dispatchSchema !== productionHandlerBoundary.dispatchSchema
+      || productionHandlerContract.entryExport !== productionHandlerBoundary.entryExport
+      || productionHandlerContract.runtimeAbi !== productionHandlerBoundary.runtimeAbi
+      || productionHandlerContract.tensorMemoryModel !== productionHandlerBoundary.tensorMemoryModel
+      || !arraysEqual(productionHandlerContract.inputTensorIds, productionHandlerBoundary.inputTensorIds)
+      || !arraysEqual(productionHandlerContract.outputTensorIds, productionHandlerBoundary.outputTensorIds)
+      || productionHandlerContract.invocation?.moduleSource !== 'artifact.execution.module'
+      || productionHandlerContract.invocation?.entryExport !== 'main'
+      || productionHandlerContract.invocation?.argumentMode !== 'linear-memory-offsets'
+      || !arraysEqual(productionHandlerContract.invocation?.parameterTypes, ['i32', 'i32'])
+      || !arraysEqual(productionHandlerContract.invocation?.resultTypes, ['i32'])
+      || productionHandlerContract.invocation?.inputOffsetParam !== 0
+      || productionHandlerContract.invocation?.outputOffsetParam !== 1
+      || productionHandlerContract.invocation?.expectedReturn !== 0
+      || !arraysEqual(productionHandlerContract.requiredEvidence, expectedProductionHandlerContractEvidence)
+      || !arraysEqual(productionHandlerContract.blockedBy, expectedProductionHandlerBlockers)) {
+      throw new Error('Eshkol staged production handler contract changed');
+    }
     if (productionHandlerBoundary.hostImports?.required !== artifact.validity?.requiresHostImports
       || productionHandlerBoundary.hostImports?.factory !== 'createEshkolHostImportObject') {
       throw new Error('Eshkol staged production handler boundary has invalid host import metadata');
     }
     const productionHostImports = productionHandlerBoundary.hostImports || {};
     const productionHostImportCandidate = productionHostImports.productionCandidate || {};
-    const expectedProductionHandlerBlockers = [
-      'production-magnetar-handler-not-implemented',
-      'full-physics-validation-not-run'
-    ];
     const expectedProductionCandidateReadiness = [
       'production-magnetar-handler-implementation',
       'non-stub-host-runtime-imports',
@@ -676,6 +708,7 @@ function stageEshkolAssets() {
     const expectedProductionDispatchChecks = [
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'production-handler-contract-declared',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
@@ -687,6 +720,7 @@ function stageEshkolAssets() {
     const expectedProductionDispatchPassedChecks = [
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'production-handler-contract-declared',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',

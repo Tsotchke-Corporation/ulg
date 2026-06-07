@@ -111,9 +111,14 @@ and full physics validation. The current ULG staging sync also preserves
 Eshkol's production-candidate runtime probe: it runs the deterministic
 `main(131072, 131136)` tensor smoke path through production-candidate host
 imports and records the output tensor evidence, but remains smoke-only. The
-computed production dispatch preflight is still blocked at `9/6/3`: six checks
-pass, while handler readiness, production runtime execution, and full-physics
-validation remain blocked. ULG now treats the bundle's DOM-free
+bundle now also declares the transferable
+`eshkol.ulg.production-handler-contract.v0` production handler contract for
+PeerCompute dispatch: `main(i32 inputOffset, i32 outputOffset) -> i32`, backed
+by content-addressed WASM, production-candidate host imports, validated f64
+linear-memory tensors, and the runtime probe. The computed production dispatch
+preflight is still blocked at `10/7/3`: seven checks pass, while handler
+readiness, production runtime execution, and full-physics validation remain
+blocked. ULG now treats the bundle's DOM-free
 `eshkol-host-imports.js` as a first-class browser/service-worker asset: the
 service asset probe fetches it as JavaScript, the supervised Eshkol worker
 imports it, verifies the `createEshkolHostImportObject` and tensor-memory

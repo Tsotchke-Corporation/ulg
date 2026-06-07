@@ -284,6 +284,41 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       contentAddressing: 'required',
       sha256Field: 'artifact.execution.module.sha256'
     });
+    expect(productionHandlerBoundary.productionHandlerContract).toMatchObject({
+      schema: 'eshkol.ulg.production-handler-contract.v0',
+      status: 'declared-not-implemented',
+      handlerId: 'eshkol:magnetar-closure:main:v0',
+      dispatchSchema: 'peercompute.ulg.dispatch-service-handler-context.v0',
+      entryExport: 'main',
+      runtimeAbi: tensorRuntimeContract.runtimeAbi,
+      tensorMemoryModel: tensorRuntimeContract.tensorMemoryModel,
+      invocation: {
+        moduleSource: 'artifact.execution.module',
+        entryExport: 'main',
+        argumentMode: 'linear-memory-offsets',
+        parameterTypes: ['i32', 'i32'],
+        resultTypes: ['i32'],
+        inputOffsetParam: 0,
+        outputOffsetParam: 1,
+        expectedReturn: 0
+      }
+    });
+    expect(productionHandlerBoundary.productionHandlerContract.inputTensorIds).toEqual(tensorRuntimeContract.inputTensorIds);
+    expect(productionHandlerBoundary.productionHandlerContract.outputTensorIds).toEqual(tensorRuntimeContract.outputTensorIds);
+    expect(productionHandlerBoundary.productionHandlerContract.requiredEvidence).toEqual([
+      'content-addressed-wasm-module',
+      'entry-export-main-signature-i32-i32-to-i32',
+      'production-candidate-host-imports',
+      'validated-f64-tensor-memory-binding',
+      'production-candidate-runtime-probe',
+      'production-magnetar-handler-implementation',
+      'production-handler-runtime-execution',
+      'full-physics-validation-pass'
+    ]);
+    expect(productionHandlerBoundary.productionHandlerContract.blockedBy).toEqual([
+      'production-magnetar-handler-not-implemented',
+      'full-physics-validation-not-run'
+    ]);
     expect(productionHandlerBoundary.hostImports).toMatchObject({
       source: 'bundle.hostImports',
       required: true,
@@ -372,6 +407,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(productionHandlerBoundary.dispatchPreflight.requiredChecks).toEqual([
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'production-handler-contract-declared',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
@@ -388,13 +424,14 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       schema: 'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0',
       status: 'blocked',
       ready: false,
-      totalRequiredCheckCount: 9,
-      passedCount: 6,
+      totalRequiredCheckCount: 10,
+      passedCount: 7,
       blockedCount: 3
     });
     expect(productionHandlerBoundary.dispatchPreflight.checkSummary.passedChecks).toEqual([
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'production-handler-contract-declared',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
@@ -408,6 +445,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(productionHandlerBoundary.dispatchPreflight.checkResults.map((entry) => entry.check)).toEqual([
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'production-handler-contract-declared',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
@@ -540,6 +578,28 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'full-physics-validation-not-run'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerTensorMemoryBinding.status).toBe('entry-export-runtime-smoke-passed');
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractSchema).toBe(
+      'eshkol.ulg.production-handler-contract.v0'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractStatus).toBe(
+      'declared-not-implemented'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractDeclared).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractInvocationArgumentMode).toBe(
+      'linear-memory-offsets'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractInvocationParameterTypes).toEqual([
+      'i32',
+      'i32'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractInvocationResultTypes).toEqual([
+      'i32'
+    ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractRequiredEvidenceCount).toBe(8);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionHandlerContractBlockedBy).toEqual([
+      'production-magnetar-handler-not-implemented',
+      'full-physics-validation-not-run'
+    ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsRuntimeScope).toBe('production-candidate-host-imports');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportsImplementationStatus).toBe('production-candidate-runtime-imports-present');
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionHostImportCandidateStatus).toBe('production-candidate-runtime-imports-implemented');
@@ -607,12 +667,13 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightCheckSummarySchema).toBe(
       'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0'
     );
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightTotalRequiredCheckCount).toBe(9);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(6);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightTotalRequiredCheckCount).toBe(10);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(7);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedCheckCount).toBe(3);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedChecks).toEqual([
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
+      'production-handler-contract-declared',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
       'production-candidate-runtime-probe-passed',
@@ -629,11 +690,12 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(closureHandoff.artifactSummary.closureHostImportsDomFree).toBe(true);
     expect(closureHandoff.artifactSummary.closureDescriptorReady).toBe(true);
     expect(closureHandoff.artifactSummary.closureProductionHandlerBoundaryDeclared).toBe(true);
+    expect(closureHandoff.artifactSummary.closureProductionHandlerContractDeclared).toBe(true);
     expect(closureHandoff.artifactSummary.closureProductionHandlerReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionCandidateRuntimeProbeReady).toBe(true);
-    expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(6);
+    expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(7);
     expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
     expect(closureHandoff.artifactSummary.closureOutputExpectedEntryArgs).toEqual([131072, 131136]);
     expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');

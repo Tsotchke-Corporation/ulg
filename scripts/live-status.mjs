@@ -67,6 +67,32 @@ try {
       },
       moonlab: {
         webGpuParityScopeReady: moonlab?.moonlabWebGpuParityScopeReady ?? null,
+        webGpuParityHandoffSummaryReady:
+          moonlab?.moonlabWebGpuParityHandoffSummaryReady ?? null,
+        webGpuParityHandoffSummarySchema:
+          moonlab?.moonlabWebGpuParityHandoffSummarySchema ?? null,
+        webGpuParityHandoffSummaryStatus:
+          moonlab?.moonlabWebGpuParityHandoffSummaryStatus ?? null,
+        webGpuParityHandoffSummaryRuntimeBackendReady:
+          moonlab?.moonlabWebGpuParityHandoffSummaryRuntimeBackendReady ?? null,
+        webGpuParityHandoffSummaryReducedFixtureOnly:
+          moonlab?.moonlabWebGpuParityHandoffSummaryReducedFixtureOnly ?? null,
+        webGpuParityHandoffSummaryReducedFixtureWebGpuParityReady:
+          moonlab?.moonlabWebGpuParityHandoffSummaryReducedFixtureWebGpuParityReady ?? null,
+        webGpuParityHandoffSummaryReadinessClaim:
+          moonlab?.moonlabWebGpuParityHandoffSummaryReadinessClaim ?? null,
+        webGpuParityHandoffSummaryBackendPreflightStage:
+          moonlab?.moonlabWebGpuParityHandoffSummaryBackendPreflightStage ?? null,
+        webGpuParityHandoffSummaryCoveredOperations:
+          moonlab?.moonlabWebGpuParityHandoffSummaryCoveredOperations ?? [],
+        webGpuParityHandoffSummaryMissingOperations:
+          moonlab?.moonlabWebGpuParityHandoffSummaryMissingOperations ?? [],
+        webGpuParityHandoffSummaryExcludedOperations:
+          moonlab?.moonlabWebGpuParityHandoffSummaryExcludedOperations ?? [],
+        webGpuParityHandoffSummaryFullFidelityMagnetarSimulation:
+          moonlab?.moonlabWebGpuParityHandoffSummaryFullFidelityMagnetarSimulation ?? null,
+        webGpuParityHandoffSummaryFullPhysicsValidation:
+          moonlab?.moonlabWebGpuParityHandoffSummaryFullPhysicsValidation ?? null,
         probabilityKernelProbeDeclared: moonlab?.moonlabWebGpuProbabilityKernelProbeDeclared ?? null,
         probabilityKernel: moonlab?.moonlabWebGpuProbabilityKernel ?? null,
         probabilityKernelExecuted: moonlab?.moonlabWebGpuProbabilityKernelExecuted ?? null,
@@ -143,6 +169,24 @@ try {
           eshkol?.closureProductionHandlerBoundaryBlockers ?? [],
         productionHandlerAllowedExecutionClaims:
           eshkol?.closureProductionHandlerAllowedExecutionClaims ?? [],
+        productionCandidateRuntimeProbeStatus:
+          eshkol?.closureProductionCandidateRuntimeProbeStatus ?? null,
+        productionCandidateRuntimeProbeReady:
+          eshkol?.closureProductionCandidateRuntimeProbeReady ?? null,
+        productionCandidateRuntimeProbeExecutionClaim:
+          eshkol?.closureProductionCandidateRuntimeProbeExecutionClaim ?? null,
+        productionCandidateRuntimeProbeRuntimeScope:
+          eshkol?.closureProductionCandidateRuntimeProbeRuntimeScope ?? null,
+        productionCandidateRuntimeProbeEntryArgs:
+          eshkol?.closureProductionCandidateRuntimeProbeEntryArgs ?? [],
+        productionCandidateRuntimeProbeChangedBytesInDeclaredTensorRange:
+          eshkol?.closureProductionCandidateRuntimeProbeChangedBytesInDeclaredTensorRange ?? null,
+        productionCandidateRuntimeProbeHostImportCallCounts:
+          eshkol?.closureProductionCandidateRuntimeProbeHostImportCallCounts ?? null,
+        productionCandidateRuntimeProbeBlocker:
+          eshkol?.closureProductionCandidateRuntimeProbeBlocker ?? null,
+        productionCandidateRuntimeProbeFullPhysicsValidation:
+          eshkol?.closureProductionCandidateRuntimeProbeFullPhysicsValidation ?? null,
         productionHostImportsRuntimeScope:
           eshkol?.closureProductionHostImportsRuntimeScope ?? null,
         productionHostImportsImplementationStatus:

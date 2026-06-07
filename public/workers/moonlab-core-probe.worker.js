@@ -23,6 +23,8 @@ const MAGNETAR_DIPOLE_ISING_REFERENCE_CONTRACT_HASH = 'sha256:f85763af06f271c414
 const MAGNETOSPHERE_MHD_ANALYTIC_UNITS_HASH = 'sha256:b9ef2d46ec5f2d0c1fb8a2866012e9340a67f188ebc8a579b93ce61e72f4b4a5';
 const MAGNETAR_FIDELITY_RUNTIME_SCOPE_SCHEMA = 'ulg.magnetar.fidelity-runtime-scope.v0';
 const MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA = 'moonlab.webgpu.complex64-parity-scope.v0';
+const MOONLAB_WEBGPU_COMPLEX64_PARITY_HANDOFF_SUMMARY_SCHEMA =
+  'moonlab.webgpu.complex64-parity-handoff-summary.v0';
 const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
 const MOONLAB_WEBGPU_PROBABILITY_KERNEL_PROBE_SCHEMA = 'moonlab.webgpu.complex64-probability-kernel-probe.v0';
 const MOONLAB_WEBGPU_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.webgpu.complex64-native-operation-probe.v0';
@@ -49,6 +51,7 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   const module = await loadMoonLabModule(serviceAssets);
   const referenceContracts = await loadMagnetarReferenceContracts(serviceAssets);
   const webGpuParityScope = await loadMoonLabWebGpuParityScope(serviceAssets);
+  const webGpuParityHandoffSummary = await loadMoonLabWebGpuParityHandoffSummary(serviceAssets);
   self.postMessage({ type: 'progress', childId, progress: 0.55, sample: 0.5 });
 
   const state = module._quantum_state_create(2);
@@ -111,6 +114,12 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
           artifact: webGpuParityScope.artifact,
           reason: webGpuParityScope.reason
         },
+        webGpuParityHandoffSummary: {
+          status: webGpuParityHandoffSummary.status,
+          url: webGpuParityHandoffSummary.url,
+          artifact: webGpuParityHandoffSummary.artifact,
+          reason: webGpuParityHandoffSummary.reason
+        },
         exports: {
           create: typeof module._quantum_state_create,
           destroy: typeof module._quantum_state_destroy,
@@ -125,6 +134,159 @@ async function runMoonLabCoreProbe({ childId, serviceAssets = {} }) {
   } finally {
     module._quantum_state_destroy(state);
   }
+}
+
+async function loadMoonLabWebGpuParityHandoffSummary(serviceAssets) {
+  const url = serviceAssets.webGpuParityHandoffSummaryModule
+    ? toAbsoluteUrl(serviceAssets.webGpuParityHandoffSummaryModule)
+    : null;
+  if (!url) {
+    return {
+      status: 'skipped',
+      url,
+      artifact: null,
+      reason: 'WebGPU parity handoff summary asset not declared'
+    };
+  }
+  if (typeof fetch !== 'function') {
+    return {
+      status: 'unavailable',
+      url,
+      artifact: null,
+      reason: 'fetch is unavailable in this runtime'
+    };
+  }
+
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      return {
+        status: response.status === 404 ? 'missing' : 'error',
+        url,
+        artifact: null,
+        reason: `HTTP ${response.status}`
+      };
+    }
+    const contentType = String(response.headers?.get?.('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (contentType === 'text/html') {
+      return {
+        status: 'missing',
+        url,
+        artifact: null,
+        reason: 'HTML fallback returned for optional WebGPU parity handoff summary asset'
+      };
+    }
+    if (!contentType.includes('json')) {
+      return {
+        status: 'error',
+        url,
+        artifact: null,
+        reason: contentType ? `unexpected content type ${contentType}` : 'missing content type'
+      };
+    }
+    const parsed = await response.json();
+    const validation = validateMoonLabWebGpuParityHandoffSummary(parsed);
+    if (!validation.valid) {
+      return {
+        status: 'error',
+        url,
+        artifact: null,
+        reason: validation.reason
+      };
+    }
+    return {
+      status: 'ready',
+      url,
+      artifact: parsed,
+      reason: null
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      url,
+      artifact: null,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function validateMoonLabWebGpuParityHandoffSummary(summary) {
+  if (!isRecord(summary)) {
+    return { valid: false, reason: 'parity handoff summary is not an object' };
+  }
+  if (summary.schema !== MOONLAB_WEBGPU_COMPLEX64_PARITY_HANDOFF_SUMMARY_SCHEMA) {
+    return { valid: false, reason: 'parity handoff summary has unexpected schema' };
+  }
+  if (summary.sourceSchema !== MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA) {
+    return { valid: false, reason: 'parity handoff summary has unexpected source schema' };
+  }
+  if (summary.artifactKind !== 'browser-webgpu-complex64-parity-handoff-summary') {
+    return { valid: false, reason: 'parity handoff summary has unexpected artifact kind' };
+  }
+  if (summary.status !== 'scope-ready-backend-detected'
+    || summary.reducedFixtureOnly !== true
+    || summary.reducedFixtureWebGpuParityReady !== true
+    || summary.backendAvailable !== true
+    || summary.requireBackend !== true
+    || summary.contractValidationValid !== true
+    || summary.runtimeBackendReady !== false
+    || summary.fullFidelityMagnetarSimulation !== false
+    || summary.fullPhysicsValidation !== false
+    || summary.readinessClaim !== 'integration-tolerance-gate-only') {
+    return { valid: false, reason: 'parity handoff summary overstates runtime or physics readiness' };
+  }
+  const backendPreflight = summary.backendPreflight;
+  if (backendPreflight?.stage !== 'device-acquired'
+    || backendPreflight.navigatorGpuAvailable !== true
+    || backendPreflight.adapterAvailable !== true
+    || backendPreflight.deviceAcquired !== true) {
+    return { valid: false, reason: 'parity handoff summary lacks device-acquired backend preflight evidence' };
+  }
+  const blockers = Array.isArray(summary.blockers) ? summary.blockers : [];
+  if (blockers.length !== 0) {
+    return { valid: false, reason: 'parity handoff summary still has blockers' };
+  }
+  const validationErrors = Array.isArray(summary.validationErrors) ? summary.validationErrors : [];
+  if (validationErrors.length !== 0) {
+    return { valid: false, reason: 'parity handoff summary has validation errors' };
+  }
+  const nativeCoverage = summary.nativeCoverage || {};
+  if (!arrayContentsEqual(nativeCoverage.required, MOONLAB_WEBGPU_REQUIRED_COVERAGE)
+    || !arrayContentsEqual(nativeCoverage.covered, MOONLAB_WEBGPU_REQUIRED_COVERAGE)
+    || !Array.isArray(nativeCoverage.missing)
+    || nativeCoverage.missing.length !== 0) {
+    return { valid: false, reason: 'parity handoff summary lacks required native coverage' };
+  }
+  if (!Array.isArray(nativeCoverage.excluded) || !nativeCoverage.excluded.includes('phase')) {
+    return { valid: false, reason: 'parity handoff summary does not exclude CPU fallback phase coverage' };
+  }
+  if (summary.webgpuParity?.executed !== true
+    || summary.webgpuParity.passed !== true
+    || !finiteWithinTolerance(summary.webgpuParity.maxProbabilityAbsDiff, summary.webgpuParity.tolerance)) {
+    return { valid: false, reason: 'parity handoff summary lacks passing WebGPU parity evidence' };
+  }
+  if (summary.probes?.probabilityKernel?.executed !== true
+    || summary.probes.probabilityKernel.passed !== true
+    || !Array.isArray(summary.probes.probabilityKernel.coveredNativeOperations)
+    || !summary.probes.probabilityKernel.coveredNativeOperations.includes('compute_probabilities')) {
+    return { valid: false, reason: 'parity handoff summary lacks probability-kernel coverage' };
+  }
+  if (summary.probes?.nativeOperations?.executed !== true
+    || summary.probes.nativeOperations.passed !== true
+    || !arrayContentsEqual(
+      summary.probes.nativeOperations.coveredNativeOperations,
+      MOONLAB_WEBGPU_REQUIRED_NATIVE_OPERATIONS
+    )) {
+    return { valid: false, reason: 'parity handoff summary lacks native-operation coverage' };
+  }
+  return { valid: true, reason: null };
+}
+
+function arrayContentsEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && right.every((value) => left.includes(value));
 }
 
 function createBellPhiPlusResponseDescriptor({

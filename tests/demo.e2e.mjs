@@ -3,6 +3,14 @@ import { expect, test } from '@playwright/test';
 const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
 const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69';
 const ESHKOL_MAGNETAR_WASM_SHA256 = 'sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa';
+const MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS = [
+  'hadamard',
+  'pauli_x',
+  'pauli_z',
+  'cnot',
+  'compute_probabilities'
+];
+const MOONLAB_WEBGPU_HANDOFF_SUMMARY_EXCLUDED_OPERATIONS = ['phase'];
 
 test('supervised service smoke renders desktop and mobile worker trees', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
@@ -30,7 +38,9 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   await expect(page.getByText(/tensor-probe:runtime-smoke-passed:offsets-consumed:64b/)).toBeVisible();
   await expect(page.getByText(/handler:declared-not-executed:2-blockers/)).toBeVisible();
   await expect(page.getByText(/prod-host:production-candidate-runtime-imports-implemented:23-imports/)).toBeVisible();
+  await expect(page.getByText(/prod-probe:production-candidate-runtime-smoke-passed:64b/)).toBeVisible();
   await expect(page.getByText(/webgpu-preflight:device-acquired/)).toBeVisible();
+  await expect(page.getByText(/webgpu-handoff:reduced:5ops/)).toBeVisible();
 
   const desktopPixels = await sampledCanvasPixels(page);
   expect(desktopPixels.nonBlank).toBeGreaterThan(80);
@@ -290,6 +300,34 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       executionClaim: 'deterministic-tensor-runtime-smoke-only',
       entryExportConsumesOffsets: true
     });
+    expect(productionHandlerBoundary.productionCandidateRuntimeProbe).toMatchObject({
+      schema: 'eshkol.ulg.production-candidate-runtime-probe.v0',
+      status: 'production-candidate-runtime-smoke-passed',
+      runtimeScope: 'production-candidate-host-imports',
+      implementationStatus: 'production-candidate-runtime-imports-present',
+      executionClaim: 'production-candidate-host-import-runtime-smoke-only',
+      entryExport: 'main',
+      entryArgs: [131072, 131136],
+      expectedEntryResult: 0,
+      changedBytesInDeclaredTensorRange: 64,
+      outputTensorsProducedByEntryExport: true,
+      productionHandlerReady: false,
+      productionHandlerRuntimeExecution: false,
+      scientificValidation: false,
+      fullPhysicsValidation: false,
+      fullFidelityMagnetarSimulation: false,
+      blocker: 'production-candidate-runtime-smoke-only-production-handler-not-ready'
+    });
+    expect(productionHandlerBoundary.productionCandidateRuntimeProbe.hostImportOptions).toMatchObject({
+      factory: 'createEshkolHostImportObject',
+      productionCandidateRuntimeImports: true,
+      runtimeSmokeStubs: false,
+      f64TensorMemoryImports: true
+    });
+    expect(productionHandlerBoundary.productionCandidateRuntimeProbe.hostImportCallCounts).toEqual({
+      ulg_read_f64: 12,
+      ulg_write_f64: 9
+    });
     expect(productionHandlerBoundary.dispatchPreflight).toMatchObject({
       schema: 'eshkol.ulg.production-handler-dispatch-preflight.v0',
       status: 'blocked',
@@ -314,6 +352,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'entry-export-main-signature-i32-i32-to-i32',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
+      'production-candidate-runtime-probe-passed',
       'runtime-smoke-stubs-rejected-for-production',
       'handler-ready-flag-true',
       'runtime-execution-flag-true',
@@ -327,8 +366,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       schema: 'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0',
       status: 'blocked',
       ready: false,
-      totalRequiredCheckCount: 8,
-      passedCount: 5,
+      totalRequiredCheckCount: 9,
+      passedCount: 6,
       blockedCount: 3
     });
     expect(productionHandlerBoundary.dispatchPreflight.checkSummary.passedChecks).toEqual([
@@ -336,6 +375,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'entry-export-main-signature-i32-i32-to-i32',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
+      'production-candidate-runtime-probe-passed',
       'runtime-smoke-stubs-rejected-for-production'
     ]);
     expect(productionHandlerBoundary.dispatchPreflight.checkSummary.blockedChecks).toEqual([
@@ -348,6 +388,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'entry-export-main-signature-i32-i32-to-i32',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
+      'production-candidate-runtime-probe-passed',
       'runtime-smoke-stubs-rejected-for-production',
       'handler-ready-flag-true',
       'runtime-execution-flag-true',
@@ -484,6 +525,39 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       'production-magnetar-handler-not-implemented',
       'full-physics-validation-not-run'
     ]);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeSchema).toBe(
+      'eshkol.ulg.production-candidate-runtime-probe.v0'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeStatus).toBe(
+      'production-candidate-runtime-smoke-passed'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeReady).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeExecutionClaim).toBe(
+      'production-candidate-host-import-runtime-smoke-only'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeRuntimeScope).toBe(
+      'production-candidate-host-imports'
+    );
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeEntryArgs).toEqual([
+      131072,
+      131136
+    ]);
+    expect(
+      eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeChangedBytesInDeclaredTensorRange
+    ).toBe(64);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeOutputTensorsProduced).toBe(true);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeHostImportCallCounts).toEqual({
+      ulg_read_f64: 12,
+      ulg_write_f64: 9
+    });
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeProductionHandlerReady).toBe(false);
+    expect(
+      eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeProductionHandlerRuntimeExecution
+    ).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeFullPhysicsValidation).toBe(false);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionCandidateRuntimeProbeBlocker).toBe(
+      'production-candidate-runtime-smoke-only-production-handler-not-ready'
+    );
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightSchema).toBe(
       'eshkol.ulg.production-handler-dispatch-preflight.v0'
     );
@@ -503,14 +577,15 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightCheckSummarySchema).toBe(
       'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0'
     );
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightTotalRequiredCheckCount).toBe(8);
-    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(5);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightTotalRequiredCheckCount).toBe(9);
+    expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(6);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedCheckCount).toBe(3);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightPassedChecks).toEqual([
       'artifact-module-sha256-matches-module-ref',
       'entry-export-main-signature-i32-i32-to-i32',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
+      'production-candidate-runtime-probe-passed',
       'runtime-smoke-stubs-rejected-for-production'
     ]);
     expect(eshkolTelemetryRecord.artifactSummary.closureProductionDispatchPreflightBlockedChecks).toEqual([
@@ -527,6 +602,8 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(closureHandoff.artifactSummary.closureProductionHandlerReady).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionHandlerRuntimeExecution).toBe(false);
     expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightReady).toBe(false);
+    expect(closureHandoff.artifactSummary.closureProductionCandidateRuntimeProbeReady).toBe(true);
+    expect(closureHandoff.artifactSummary.closureProductionDispatchPreflightPassedCheckCount).toBe(6);
     expect(closureHandoff.artifactSummary.closureOutputSemanticsReady).toBe(true);
     expect(closureHandoff.artifactSummary.closureOutputExpectedEntryArgs).toEqual([131072, 131136]);
     expect(closureHandoff.artifactSummary.closureOutputExpectedStdoutSha256).toBe('sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
@@ -549,7 +626,11 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
     expect(moonlabArtifact.parity.comparisons.find((entry) => entry.mode === 'moonlab-webgpu').status).toBe('unsupported');
     expect(moonlabArtifact.validationMetrics.unsupportedParityModeCount).toBe(1);
     const webGpuParityScopeReady = moonlabArtifact.runtime.coreProbe.webGpuParityScope?.status === 'ready';
+    const webGpuParityHandoffSummaryReady = (
+      moonlabArtifact.runtime.coreProbe.webGpuParityHandoffSummary?.status === 'ready'
+    );
     expect(moonlabArtifact.validationMetrics.webGpuParityScopeReady).toBe(webGpuParityScopeReady);
+    expect(moonlabArtifact.validationMetrics.webGpuParityHandoffSummaryReady).toBe(webGpuParityHandoffSummaryReady);
     if (webGpuParityScopeReady) {
       expect(moonlabArtifact.webGpuParityScope.schema).toBe('moonlab.webgpu.complex64-parity-scope.v0');
       expect(moonlabArtifact.webGpuParityScope.status).toBe('scope-ready-backend-detected');
@@ -600,8 +681,46 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabArtifact.webGpuParityScope.fullFidelityMagnetarSimulation).toBe(false);
       expect(moonlabArtifact.webGpuParityScope.fullPhysicsValidation).toBe(false);
       expect(moonlabArtifact.webGpuParityScope.blockers).toEqual([]);
+      expect(webGpuParityHandoffSummaryReady).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.schema).toBe(
+        'moonlab.webgpu.complex64-parity-handoff-summary.v0'
+      );
+      expect(moonlabArtifact.webGpuParityHandoffSummary.sourceSchema).toBe(
+        'moonlab.webgpu.complex64-parity-scope.v0'
+      );
+      expect(moonlabArtifact.webGpuParityHandoffSummary.status).toBe('scope-ready-backend-detected');
+      expect(moonlabArtifact.webGpuParityHandoffSummary.reducedFixtureOnly).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.reducedFixtureWebGpuParityReady).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.runtimeBackendReady).toBe(false);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.backendAvailable).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.requireBackend).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.contractValidationValid).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.readinessClaim).toBe(
+        'integration-tolerance-gate-only'
+      );
+      expect(moonlabArtifact.webGpuParityHandoffSummary.fullFidelityMagnetarSimulation).toBe(false);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.fullPhysicsValidation).toBe(false);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.backendPreflight.stage).toBe('device-acquired');
+      expect(moonlabArtifact.webGpuParityHandoffSummary.backendPreflight.navigatorGpuAvailable).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.backendPreflight.adapterAvailable).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.backendPreflight.deviceAcquired).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.nativeCoverage.required).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS
+      );
+      expect(moonlabArtifact.webGpuParityHandoffSummary.nativeCoverage.covered).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS
+      );
+      expect(moonlabArtifact.webGpuParityHandoffSummary.nativeCoverage.missing).toEqual([]);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.nativeCoverage.excluded).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_EXCLUDED_OPERATIONS
+      );
+      expect(moonlabArtifact.webGpuParityHandoffSummary.webgpuParity.executed).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.webgpuParity.passed).toBe(true);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.blockers).toEqual([]);
+      expect(moonlabArtifact.webGpuParityHandoffSummary.validationErrors).toEqual([]);
     } else {
       expect(moonlabArtifact.webGpuParityScope).toBe(null);
+      expect(moonlabArtifact.webGpuParityHandoffSummary).toBe(null);
     }
     expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.schema).toBe('peercompute.ulg.magnetar-dipole-ising-calibration.v0');
     expect(moonlabArtifact.calibrationArtifacts.magnetarDipoleIsing.validation.status).toBe('pass');
@@ -726,6 +845,34 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeFullFidelityMagnetarSimulation).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeFullPhysicsValidation).toBe(false);
       expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityScopeBlockers).toEqual([]);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryReady).toBe(true);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummarySchema).toBe(
+        'moonlab.webgpu.complex64-parity-handoff-summary.v0'
+      );
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryStatus).toBe(
+        'scope-ready-backend-detected'
+      );
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryRuntimeBackendReady).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryReducedFixtureOnly).toBe(true);
+      expect(
+        moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryReducedFixtureWebGpuParityReady
+      ).toBe(true);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryReadinessClaim).toBe(
+        'integration-tolerance-gate-only'
+      );
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryCoveredOperations).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS
+      );
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryMissingOperations).toEqual([]);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryExcludedOperations).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_EXCLUDED_OPERATIONS
+      );
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryBlockers).toEqual([]);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryValidationErrors).toEqual([]);
+      expect(
+        moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryFullFidelityMagnetarSimulation
+      ).toBe(false);
+      expect(moonlabTelemetryRecord.artifactSummary.moonlabWebGpuParityHandoffSummaryFullPhysicsValidation).toBe(false);
     }
     expect(moonlabTelemetryRecord.artifactSummary.magnetarDipoleIsingReady).toBe(true);
     expect(moonlabTelemetryRecord.artifactSummary.magnetarDipoleIsingGroundState).toBe('000');
@@ -775,6 +922,19 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuNativeOperationProbeBlockedOperations).toEqual([]);
       expect(moonlabHandoff.artifactSummary.moonlabWebGpuNativeOperationProbeMissingTargetOperations).toEqual([]);
       expect(moonlabHandoff.artifact.webGpuParityScope.fullPhysicsValidation).toBe(false);
+      expect(moonlabHandoff.artifact.webGpuParityHandoffSummary.schema).toBe(
+        'moonlab.webgpu.complex64-parity-handoff-summary.v0'
+      );
+      expect(moonlabHandoff.artifact.webGpuParityHandoffSummary.runtimeBackendReady).toBe(false);
+      expect(moonlabHandoff.artifact.webGpuParityHandoffSummary.nativeCoverage.covered).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS
+      );
+      expect(moonlabHandoff.artifactSummary.moonlabWebGpuParityHandoffSummaryReady).toBe(true);
+      expect(moonlabHandoff.artifactSummary.moonlabWebGpuParityHandoffSummaryRuntimeBackendReady).toBe(false);
+      expect(moonlabHandoff.artifactSummary.moonlabWebGpuParityHandoffSummaryCoveredOperations).toEqual(
+        MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS
+      );
+      expect(moonlabHandoff.artifactSummary.moonlabWebGpuParityHandoffSummaryFullPhysicsValidation).toBe(false);
     }
     expect(moonlabHandoff.artifactSummary.outputReferenceCount).toBe(5);
     expect(moonlabHandoff.artifactSummary.outputReferenceReadyCount).toBe(expectedOutputReferenceReadyCount);

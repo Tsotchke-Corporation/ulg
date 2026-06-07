@@ -4,11 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 22/22 tests on 2026-06-06 after adding Eshkol production
-dispatch preflight check evidence, MoonLab browser WebGPU backend preflight
-summaries, optional MoonLab reference-contract asset probing, normalized
-supplied reference staging, four-family ready calibrated-reference summaries,
-and Eshkol magnetar closure descriptor summaries.
+Current result: pass, 22/22 tests on 2026-06-06 after the MoonLab compact
+WebGPU parity handoff and Eshkol production-candidate runtime probe sync.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -29,6 +26,14 @@ and Eshkol magnetar closure descriptor summaries.
   without changing required loader/WASM readiness.
 - `npm run stage:service-assets -- --dry-run --json` reports the MoonLab and
   Eshkol source/target plan without mutating the ignored service-asset tree.
+- `npm run stage:service-assets -- --moonlab-only` stages the MoonLab compact
+  WebGPU parity handoff summary as reduced-scope evidence for the five covered
+  operations: `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and
+  `cnot`; it preserves `fullFidelityMagnetarSimulation = false` and
+  `fullPhysicsValidation = false`.
+- `npm run stage:service-assets -- --eshkol-only` stages the Eshkol
+  production-candidate runtime probe as smoke-only evidence and keeps
+  production handler/runtime/full-physics readiness blocked.
 - `npm run stage:service-assets -- --eshkol-only --created-at ...` forwards a
   fixed timestamp to Eshkol helpers that support reproducible bundle metadata.
 - MoonLab service asset specs include the classic core probe worker URL and the
@@ -59,24 +64,47 @@ and Eshkol magnetar closure descriptor summaries.
   when valid supplied contracts are present.
 - Artifact cache summaries preserve Eshkol production dispatch preflight
   metadata, including schema `eshkol.ulg.production-handler-dispatch-preflight.v0`,
-  `status = blocked`, `ready = false`, eight required production dispatch
-  checks, deterministic runtime-smoke stubs rejected for production dispatch,
-  the computed four-pass/four-blocked `checkSummary`, and the three production
-  blockers.
+  `status = blocked`, `ready = false`, nine required production dispatch
+  checks, the smoke-only production-candidate runtime probe, deterministic
+  runtime-smoke stubs rejected for production dispatch, and the computed
+  `9/6/3` check split.
+- Focused service-asset/orchestration coverage:
+  `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
+  passed `14/14` in the handoff summary.
+
+## Current Handoff Validation Summary
+
+Already-passed validation recorded from the handoff summary on 2026-06-06:
+
+- `npm run stage:service-assets -- --moonlab-only`: passed.
+- `npm run stage:service-assets -- --eshkol-only`: passed.
+- `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`:
+  passed, `14/14`.
+- `npm test`: passed, `22/22`.
+- `npm run build`: passed with the existing Vite large chunk warning.
+- `npm run test:e2e`: passed.
+- `npm run status:live`: passed.
+
+The MoonLab compact WebGPU parity handoff remains reduced-scope evidence for
+five operations only. The Eshkol production-candidate runtime probe remains
+smoke-only and records production dispatch preflight as `9/6/3`; it does not
+promote production handler readiness, production runtime execution, scientific
+validation, full-fidelity magnetar simulation, or full-physics validation.
 
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-06 after Eshkol production dispatch preflight
-check evidence support, with the existing large three.js chunk warning.
+Current result: pass on 2026-06-06 after the MoonLab compact parity handoff and
+Eshkol production-candidate runtime probe sync, with the existing Vite large
+chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-06 after Eshkol production
-dispatch preflight check evidence support.
+Current result: pass, 1/1 Chromium test on 2026-06-06 after the MoonLab compact
+parity handoff and Eshkol production-candidate runtime probe sync.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.

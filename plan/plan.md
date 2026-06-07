@@ -80,14 +80,22 @@ physics work:
   while keeping production handler/runtime/full-physics readiness blocked.
 - [x] Surface Eshkol's computed production dispatch preflight check evidence
   through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
-  and live status, advancing the current split to five passed checks and three
-  blocked checks after production-candidate host imports landed.
+  and live status.
+- [x] Surface Eshkol's production-candidate runtime probe as smoke-only evidence
+  through ULG staging guards, compact summaries, browser handoffs, e2e coverage,
+  and live status, advancing production dispatch preflight evidence to nine
+  required checks, six passed checks, and three blocked checks while preserving
+  production handler/runtime/full-physics blockers.
 - [x] Surface MoonLab's `moonlab.webgpu.complex64-parity-scope.v0` browser
   evidence through ULG staging, core-probe validation, summaries, UI, handoffs,
   and e2e coverage with `device-acquired`, executed/passing
   `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot`
   reduced probes, while preserving explicit no-full-physics/no-full-fidelity
   flags.
+- [x] Surface MoonLab's compact WebGPU parity handoff summary as reduced-scope
+  five-operation evidence for `compute_probabilities`, `hadamard`, `pauli_x`,
+  `pauli_z`, and `cnot`, without claiming full MoonLab runtime backend,
+  full-fidelity magnetar simulation, or full-physics validation.
 - [x] Generalize MoonLab native-operation summary rendering so future blocked
   operations flow through `operationResults[]` without new one-off UI fields.
 - [x] Add direct Multiscale launch status detail for scenario/readiness acks

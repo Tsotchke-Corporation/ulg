@@ -281,6 +281,7 @@ function createArtifact(task) {
       ))
       : [];
     const webGpuParityScope = coreProbe?.webGpuParityScope?.artifact ?? null;
+    const webGpuParityHandoffSummary = coreProbe?.webGpuParityHandoffSummary?.artifact ?? null;
     const magnetarOutputReferenceCount = (magnetarReference ? 1 : 0) + magnetarReferences.length;
     const magnetarReady = magnetarDipoleIsing?.validation?.status === 'pass'
       && magnetarDipoleIsing?.parity?.status === 'pass';
@@ -305,6 +306,7 @@ function createArtifact(task) {
         magnetarDipoleIsing
       } : {},
       webGpuParityScope,
+      webGpuParityHandoffSummary,
       uncertainty: {
         truncationError: coreProbeReady ? coreProbe.maxProbabilityError : 0,
         parityError: coreProbeReady ? coreProbe.parity?.metrics?.maxProbabilityError ?? 0 : 0,
@@ -324,7 +326,11 @@ function createArtifact(task) {
         webGpuParityScopeReady: coreProbe?.webGpuParityScope?.status === 'ready',
         webGpuParityScopeBackendAvailable: webGpuParityScope?.backendAvailable ?? null,
         webGpuParityExecuted: webGpuParityScope?.webgpuParity?.executed ?? null,
-        webGpuParityBlockerCount: Array.isArray(webGpuParityScope?.blockers) ? webGpuParityScope.blockers.length : 0
+        webGpuParityBlockerCount: Array.isArray(webGpuParityScope?.blockers) ? webGpuParityScope.blockers.length : 0,
+        webGpuParityHandoffSummaryReady: coreProbe?.webGpuParityHandoffSummary?.status === 'ready',
+        webGpuParityHandoffSummaryRuntimeBackendReady: webGpuParityHandoffSummary?.runtimeBackendReady ?? null,
+        webGpuParityHandoffSummaryReducedFixtureReady:
+          webGpuParityHandoffSummary?.reducedFixtureWebGpuParityReady ?? null
       },
       validation: {
         status: coreProbeReady && coreProbe.maxProbabilityError <= 1e-9 && (!magnetarDipoleIsing || magnetarReady) ? 'pass' : 'warn',

@@ -75,6 +75,8 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
   const wasmModule = serviceAssets.wasmModule ?? entry.wasmModule;
   const referenceContractModule = serviceAssets.referenceContractModule ?? entry.referenceContractModule;
   const webGpuParityScopeModule = serviceAssets.webGpuParityScopeModule ?? entry.webGpuParityScopeModule;
+  const webGpuParityHandoffSummaryModule = serviceAssets.webGpuParityHandoffSummaryModule
+    ?? entry.webGpuParityHandoffSummaryModule;
   const artifactModule = serviceAssets.artifactModule ?? entry.artifactModule;
   const schemaModule = serviceAssets.schemaModule ?? entry.schemaModule;
   const bundleManifest = serviceAssets.bundleManifest ?? entry.bundleManifest;
@@ -132,6 +134,16 @@ function buildAssetChecks({ serviceId, entry, serviceAssets, locationHref }) {
       url: toAbsoluteUrl(webGpuParityScopeModule, locationHref),
       expected: 'json',
       required: isRequired('webGpuParityScopeModule')
+    });
+  }
+
+  if (webGpuParityHandoffSummaryModule) {
+    checks.push({
+      serviceId,
+      kind: 'webGpuParityHandoffSummaryModule',
+      url: toAbsoluteUrl(webGpuParityHandoffSummaryModule, locationHref),
+      expected: 'json',
+      required: isRequired('webGpuParityHandoffSummaryModule')
     });
   }
 

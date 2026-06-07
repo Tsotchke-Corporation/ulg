@@ -22,6 +22,11 @@ test('service asset staging canonicalizes the MoonLab normalized reference suite
   const paritySchemaIndex = source.indexOf('moonlab.webgpu.complex64-parity-scope.v0');
   const executedEvidenceIndex = source.indexOf('MoonLab WebGPU parity scope must carry executed browser WebGPU evidence');
   const deviceAcquiredIndex = source.indexOf("'device-acquired'", executedEvidenceIndex);
+  const summaryFunctionIndex = source.indexOf('function stageMoonLabWebGpuParityHandoffSummary');
+  const summaryFlagIndex = source.indexOf("'--summary'", summaryFunctionIndex);
+  const summaryValidationIndex = source.indexOf(
+    'MoonLab WebGPU parity handoff summary overstates readiness or physics validation'
+  );
 
   assert.ok(normalizeIndex > 0);
   assert.ok(canonicalIndex > normalizeIndex);
@@ -31,6 +36,9 @@ test('service asset staging canonicalizes the MoonLab normalized reference suite
   assert.ok(paritySchemaIndex > requireBackendIndex);
   assert.ok(executedEvidenceIndex > paritySchemaIndex);
   assert.ok(deviceAcquiredIndex > executedEvidenceIndex);
+  assert.ok(summaryFunctionIndex > 0);
+  assert.ok(summaryFlagIndex > summaryFunctionIndex);
+  assert.ok(summaryValidationIndex > 0);
 });
 
 test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {
@@ -45,13 +53,18 @@ test('MoonLab service asset spec resolves locateFile-compatible URLs', () => {
   assert.equal(assets.wasmModule, '/service-assets/moonlab/moonlab.wasm');
   assert.equal(assets.referenceContractModule, '/service-assets/moonlab/magnetar-reference-contracts.json');
   assert.equal(assets.webGpuParityScopeModule, '/service-assets/moonlab/webgpu-complex64-parity-scope.json');
+  assert.equal(
+    assets.webGpuParityHandoffSummaryModule,
+    '/service-assets/moonlab/webgpu-complex64-parity-handoff-summary.json'
+  );
   assert.equal(assets.coreProbeWorkerModule, '/workers/moonlab-core-probe.worker.js');
   assert.deepEqual(assets.required, ['loaderModule', 'wasmModule']);
   assert.deepEqual(assets.files, {
     loaderModule: 'moonlab.js',
     wasmModule: 'moonlab.wasm',
     referenceContractModule: 'magnetar-reference-contracts.json',
-    webGpuParityScopeModule: 'webgpu-complex64-parity-scope.json'
+    webGpuParityScopeModule: 'webgpu-complex64-parity-scope.json',
+    webGpuParityHandoffSummaryModule: 'webgpu-complex64-parity-handoff-summary.json'
   });
   assert.equal(
     locateFile('moonlab.wasm'),
@@ -144,7 +157,8 @@ test('service asset probe marks declared MoonLab artifacts ready when MIME types
     'https://ulg.local/service-assets/moonlab/moonlab.js',
     'https://ulg.local/service-assets/moonlab/moonlab.wasm',
     'https://ulg.local/service-assets/moonlab/magnetar-reference-contracts.json',
-    'https://ulg.local/service-assets/moonlab/webgpu-complex64-parity-scope.json'
+    'https://ulg.local/service-assets/moonlab/webgpu-complex64-parity-scope.json',
+    'https://ulg.local/service-assets/moonlab/webgpu-complex64-parity-handoff-summary.json'
   ]);
   assert.deepEqual(
     probe.assets.map((asset) => [asset.kind, asset.expected, asset.status, asset.required]),
@@ -152,7 +166,8 @@ test('service asset probe marks declared MoonLab artifacts ready when MIME types
       ['loaderModule', 'javascript', 'ready', true],
       ['wasmModule', 'application/wasm', 'ready', true],
       ['referenceContractModule', 'json', 'ready', false],
-      ['webGpuParityScopeModule', 'json', 'ready', false]
+      ['webGpuParityScopeModule', 'json', 'ready', false],
+      ['webGpuParityHandoffSummaryModule', 'json', 'ready', false]
     ]
   );
   assert.equal(probe.locateFile.resolved, 'https://ulg.local/service-assets/moonlab/moonlab.wasm');

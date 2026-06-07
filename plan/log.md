@@ -4735,3 +4735,95 @@ Failures / open questions:
   still expected `non-stub-host-imports-present` in blocked checks. That check
   now passes and the assertion was updated.
 - No push was attempted.
+
+## 2026-06-06 20:54:47 AKDT - Handoff Validation Status Sync
+
+Prompt: Sidecar task for `/home/cos/projects/ulg`; address the user as
+`big dog`; do not push; work local only; inspect the current uncommitted ULG
+changes; update only the ULG planning/status docs needed for this prompt:
+`plan/plan.md`, `plan/tests.md`, `plan/log.md`, and README if local
+instructions require it; reflect already-passed handoff validation for
+MoonLab-only and Eshkol-only service asset staging, focused orchestration/assets
+tests, full unit/build/e2e/status checks, MoonLab reduced-scope compact WebGPU
+parity handoff, and Eshkol smoke-only production-candidate runtime probe with
+`9/6/3` dispatch preflight; do not touch source code or commits.
+
+Actions:
+
+- Read `/home/cos/projects/AGENTS.md`; no repo-local `AGENTS.md` was present.
+- Inspected the dirty ULG tree before editing. Existing uncommitted non-doc
+  changes were already present in:
+  `public/workers/moonlab-core-probe.worker.js`, `scripts/live-status.mjs`,
+  `scripts/stage-service-assets.mjs`, `src/main.js`,
+  `src/runtime/ServiceAssetProbe.js`, `src/runtime/artifactSummary.js`,
+  `src/services/dummyService.worker.js`, `tests/demo.e2e.mjs`,
+  `tests/orchestration.test.mjs`, `tests/service-assets.test.mjs`, and
+  `ulg-gpu-abi/src/serviceContract.js`.
+- Left all source/test/runtime files untouched.
+- Updated `plan/plan.md` to record that ULG now surfaces Eshkol's
+  production-candidate runtime probe as smoke-only evidence and advances
+  production dispatch preflight evidence to `9/6/3`.
+- Updated `plan/plan.md` and `README.md` to record MoonLab's compact WebGPU
+  parity handoff as reduced-scope five-operation evidence for
+  `compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot`,
+  without claiming a full MoonLab runtime backend, full-fidelity magnetar
+  simulation, or full-physics validation.
+- Updated `plan/tests.md` with the handoff validation summary:
+  `npm run stage:service-assets -- --moonlab-only` passed,
+  `npm run stage:service-assets -- --eshkol-only` passed,
+  `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
+  passed `14/14`, `npm test` passed `22/22`, `npm run build` passed with the
+  existing Vite large chunk warning, `npm run test:e2e` passed, and
+  `npm run status:live` passed.
+- Updated README's Eshkol service-asset section to replace stale exact
+  byte/hash/blocker wording with the current production-candidate runtime probe
+  and `9/6/3` dispatch-preflight status.
+
+Files touched:
+
+- `README.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `if [ -f /home/cos/projects/ulg/AGENTS.md ]; then sed -n '1,220p' /home/cos/projects/ulg/AGENTS.md; fi`
+- `rg -n "(/home/cos/projects/ulg|ULG|ulg|service-assets|status:live|handoff)" /home/cos/.codex/memories/MEMORY.md`
+- `git status --short --branch`
+- `git diff --name-status`
+- `sed -n '1,260p' plan/plan.md`
+- `sed -n '1,260p' plan/tests.md`
+- `tail -n 260 plan/log.md`
+- `sed -n '1,260p' README.md`
+- `git diff --stat`
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+- `git diff --check`
+- `git diff --name-status`
+- `git diff -- README.md plan/plan.md plan/tests.md plan/log.md | sed -n '1,260p'`
+- `git status --short --branch`
+
+Validation recorded from handoff summary, not rerun in this docs-only task:
+
+- PASS: `npm run stage:service-assets -- --moonlab-only`.
+- PASS: `npm run stage:service-assets -- --eshkol-only`.
+- PASS: `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
+  passed `14/14`.
+- PASS: `npm test` passed `22/22`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `npm run test:e2e` passed.
+- PASS: `npm run status:live` passed.
+
+Docs-only validation run in this prompt:
+
+- PASS: `git diff --check`.
+
+Open / blockers:
+
+- Docs-only sync; no source code was changed.
+- MoonLab WebGPU parity remains reduced-scope five-operation evidence only.
+- Eshkol production-candidate runtime probe remains smoke-only; production
+  handler readiness, production runtime execution, scientific validation,
+  full-fidelity magnetar simulation, and full-physics validation remain blocked.
+- No commit or push was attempted.

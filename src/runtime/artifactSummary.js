@@ -13,11 +13,14 @@ export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA = 'eshkol.ulg.p
 export const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
 export const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
+export const ESHKOL_PRODUCTION_CANDIDATE_RUNTIME_PROBE_SCHEMA = 'eshkol.ulg.production-candidate-runtime-probe.v0';
 export const MOONLAB_MAGNETAR_DIPOLE_ISING_REFERENCE_SCHEMA = 'moonlab.magnetar-dipole-ising-reference.v0';
 export const MOONLAB_MAGNETAR_REFERENCE_ROLE = 'peercompute-reference-tolerance-input';
 export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_SCHEMA = 'moonlab.magnetar.calibrated-reference.v0';
 export const MOONLAB_MAGNETAR_CALIBRATED_REFERENCE_ROLE = 'peercompute-scientific-tolerance-input';
 export const MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA = 'moonlab.webgpu.complex64-parity-scope.v0';
+export const MOONLAB_WEBGPU_COMPLEX64_PARITY_HANDOFF_SUMMARY_SCHEMA =
+  'moonlab.webgpu.complex64-parity-handoff-summary.v0';
 export const MOONLAB_WEBGPU_COMPLEX64_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
 export const MOONLAB_WEBGPU_COMPLEX64_PROBABILITY_KERNEL_PROBE_SCHEMA = 'moonlab.webgpu.complex64-probability-kernel-probe.v0';
 export const MOONLAB_WEBGPU_COMPLEX64_NATIVE_OPERATION_PROBE_SCHEMA = 'moonlab.webgpu.complex64-native-operation-probe.v0';
@@ -42,6 +45,7 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_REQUIRED_CHECKS = Object.freeze([
   'entry-export-main-signature-i32-i32-to-i32',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
+  'production-candidate-runtime-probe-passed',
   'runtime-smoke-stubs-rejected-for-production',
   'handler-ready-flag-true',
   'runtime-execution-flag-true',
@@ -52,6 +56,7 @@ const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_PASSED_CHECKS = Object.freeze([
   'entry-export-main-signature-i32-i32-to-i32',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
+  'production-candidate-runtime-probe-passed',
   'runtime-smoke-stubs-rejected-for-production'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_PREFLIGHT_BLOCKED_CHECKS = Object.freeze([
@@ -261,6 +266,13 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function arrayContentsMatch(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && right.every((value) => left.includes(value));
+}
+
 function countWasmEntries(entries = [], kind) {
   return Array.isArray(entries)
     ? entries.filter((entry) => entry?.kind === kind).length
@@ -322,6 +334,12 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionHandlerTensorMemoryBinding = objectOrNull(closureProductionHandlerBoundary?.tensorMemoryBinding);
   const closureProductionHandlerHostImports = objectOrNull(closureProductionHandlerBoundary?.hostImports);
   const closureProductionHostImportCandidate = objectOrNull(closureProductionHandlerHostImports?.productionCandidate);
+  const closureProductionCandidateRuntimeProbe =
+    objectOrNull(closureProductionHandlerBoundary?.productionCandidateRuntimeProbe);
+  const closureProductionCandidateRuntimeProbeHostImportCallCounts =
+    objectOrNull(closureProductionCandidateRuntimeProbe?.hostImportCallCounts);
+  const closureProductionCandidateRuntimeProbeHostImportOptions =
+    objectOrNull(closureProductionCandidateRuntimeProbe?.hostImportOptions);
   const closureProductionDispatchPreflight = objectOrNull(closureProductionHandlerBoundary?.dispatchPreflight);
   const closureProductionDispatchPreflightCheckSummary =
     objectOrNull(closureProductionDispatchPreflight?.checkSummary);
@@ -392,6 +410,9 @@ export function summarizeUlgArtifact(artifact = {}) {
   const moonlabWebGpuParityScope = objectOrNull(artifact.webGpuParityScope)
     || objectOrNull(outputs.webGpuParityScope)
     || objectOrNull(artifact.runtime?.coreProbe?.webGpuParityScope?.artifact);
+  const moonlabWebGpuParityHandoffSummary = objectOrNull(artifact.webGpuParityHandoffSummary)
+    || objectOrNull(outputs.webGpuParityHandoffSummary)
+    || objectOrNull(artifact.runtime?.coreProbe?.webGpuParityHandoffSummary?.artifact);
   const moonlabWebGpuParityScopeBlockers = Array.isArray(moonlabWebGpuParityScope?.blockers)
     ? moonlabWebGpuParityScope.blockers.map((blocker) => String(blocker)).filter(Boolean)
     : [];
@@ -535,6 +556,66 @@ export function summarizeUlgArtifact(artifact = {}) {
     && moonlabWebGpuNativeOperationProbeReady
     && moonlabWebGpuRequiredCoverageReady
     && moonlabWebGpuParityScopeBlockers.length === 0;
+  const moonlabWebGpuParityHandoffSummaryBlockers =
+    Array.isArray(moonlabWebGpuParityHandoffSummary?.blockers)
+      ? moonlabWebGpuParityHandoffSummary.blockers.map((blocker) => String(blocker)).filter(Boolean)
+      : [];
+  const moonlabWebGpuParityHandoffSummaryValidationErrors =
+    Array.isArray(moonlabWebGpuParityHandoffSummary?.validationErrors)
+      ? moonlabWebGpuParityHandoffSummary.validationErrors.map((error) => String(error)).filter(Boolean)
+      : [];
+  const moonlabWebGpuParityHandoffSummaryNativeCoverage =
+    objectOrNull(moonlabWebGpuParityHandoffSummary?.nativeCoverage);
+  const moonlabWebGpuParityHandoffSummaryRequiredOperations =
+    Array.isArray(moonlabWebGpuParityHandoffSummaryNativeCoverage?.required)
+      ? moonlabWebGpuParityHandoffSummaryNativeCoverage.required.map((operation) => String(operation)).filter(Boolean)
+      : [];
+  const moonlabWebGpuParityHandoffSummaryCoveredOperations =
+    Array.isArray(moonlabWebGpuParityHandoffSummaryNativeCoverage?.covered)
+      ? moonlabWebGpuParityHandoffSummaryNativeCoverage.covered.map((operation) => String(operation)).filter(Boolean)
+      : [];
+  const moonlabWebGpuParityHandoffSummaryMissingOperations =
+    Array.isArray(moonlabWebGpuParityHandoffSummaryNativeCoverage?.missing)
+      ? moonlabWebGpuParityHandoffSummaryNativeCoverage.missing.map((operation) => String(operation)).filter(Boolean)
+      : [];
+  const moonlabWebGpuParityHandoffSummaryExcludedOperations =
+    Array.isArray(moonlabWebGpuParityHandoffSummaryNativeCoverage?.excluded)
+      ? moonlabWebGpuParityHandoffSummaryNativeCoverage.excluded.map((operation) => String(operation)).filter(Boolean)
+      : [];
+  const moonlabWebGpuParityHandoffSummaryBackendPreflight =
+    objectOrNull(moonlabWebGpuParityHandoffSummary?.backendPreflight);
+  const moonlabWebGpuParityHandoffSummaryWebGpuParity =
+    objectOrNull(moonlabWebGpuParityHandoffSummary?.webgpuParity);
+  const moonlabWebGpuParityHandoffSummaryReady =
+    moonlabWebGpuParityHandoffSummary?.schema === MOONLAB_WEBGPU_COMPLEX64_PARITY_HANDOFF_SUMMARY_SCHEMA
+    && moonlabWebGpuParityHandoffSummary.sourceSchema === MOONLAB_WEBGPU_COMPLEX64_PARITY_SCOPE_SCHEMA
+    && moonlabWebGpuParityHandoffSummary.artifactKind === 'browser-webgpu-complex64-parity-handoff-summary'
+    && moonlabWebGpuParityHandoffSummary.status === 'scope-ready-backend-detected'
+    && moonlabWebGpuParityHandoffSummary.contractValidationValid === true
+    && moonlabWebGpuParityHandoffSummary.reducedFixtureOnly === true
+    && moonlabWebGpuParityHandoffSummary.reducedFixtureWebGpuParityReady === true
+    && moonlabWebGpuParityHandoffSummary.backendAvailable === true
+    && moonlabWebGpuParityHandoffSummary.requireBackend === true
+    && moonlabWebGpuParityHandoffSummary.runtimeBackendReady === false
+    && moonlabWebGpuParityHandoffSummary.fullFidelityMagnetarSimulation === false
+    && moonlabWebGpuParityHandoffSummary.fullPhysicsValidation === false
+    && moonlabWebGpuParityHandoffSummary.readinessClaim === 'integration-tolerance-gate-only'
+    && moonlabWebGpuParityHandoffSummaryBackendPreflight?.stage === 'device-acquired'
+    && moonlabWebGpuParityHandoffSummaryBackendPreflight.navigatorGpuAvailable === true
+    && moonlabWebGpuParityHandoffSummaryBackendPreflight.adapterAvailable === true
+    && moonlabWebGpuParityHandoffSummaryBackendPreflight.deviceAcquired === true
+    && arrayContentsMatch(moonlabWebGpuParityHandoffSummaryRequiredOperations, MOONLAB_WEBGPU_COMPLEX64_REQUIRED_COVERAGE)
+    && arrayContentsMatch(moonlabWebGpuParityHandoffSummaryCoveredOperations, MOONLAB_WEBGPU_COMPLEX64_REQUIRED_COVERAGE)
+    && moonlabWebGpuParityHandoffSummaryMissingOperations.length === 0
+    && moonlabWebGpuParityHandoffSummaryExcludedOperations.includes('phase')
+    && moonlabWebGpuParityHandoffSummaryWebGpuParity?.executed === true
+    && moonlabWebGpuParityHandoffSummaryWebGpuParity?.passed === true
+    && finiteWithinTolerance(
+      moonlabWebGpuParityHandoffSummaryWebGpuParity?.maxProbabilityAbsDiff,
+      moonlabWebGpuParityHandoffSummaryWebGpuParity?.tolerance
+    )
+    && moonlabWebGpuParityHandoffSummaryBlockers.length === 0
+    && moonlabWebGpuParityHandoffSummaryValidationErrors.length === 0;
   const calibrationArtifacts = artifact.calibrationArtifacts && typeof artifact.calibrationArtifacts === 'object'
     ? artifact.calibrationArtifacts
     : {};
@@ -593,6 +674,12 @@ export function summarizeUlgArtifact(artifact = {}) {
   const closureProductionHandlerAllowedExecutionClaims =
     Array.isArray(closureProductionHandlerBoundary?.allowedExecutionClaims)
       ? closureProductionHandlerBoundary.allowedExecutionClaims.map((claim) => String(claim)).filter(Boolean)
+      : [];
+  const closureProductionCandidateRuntimeProbeEntryArgs =
+    Array.isArray(closureProductionCandidateRuntimeProbe?.entryArgs)
+      ? closureProductionCandidateRuntimeProbe.entryArgs
+        .map((value) => finiteNumberOrNull(value))
+        .filter((value) => value != null)
       : [];
   const closureProductionHandlerBoundaryBlockers = Array.isArray(closureProductionHandlerBoundary?.blockers)
     ? closureProductionHandlerBoundary.blockers.map((blocker) => String(blocker)).filter(Boolean)
@@ -668,6 +755,30 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureTensorEntryExportOffsetProbe.hostImportOptions?.stubScope === 'deterministic-f64-linear-memory-smoke'
     && closureTensorEntryExportOffsetProbe.blocker
       === 'none-for-deterministic-runtime-smoke-production-physics-unvalidated';
+  const closureProductionCandidateRuntimeProbeReady =
+    closureProductionCandidateRuntimeProbe?.schema === ESHKOL_PRODUCTION_CANDIDATE_RUNTIME_PROBE_SCHEMA
+    && closureProductionCandidateRuntimeProbe.status === 'production-candidate-runtime-smoke-passed'
+    && closureProductionCandidateRuntimeProbe.executionClaim === 'production-candidate-host-import-runtime-smoke-only'
+    && closureProductionCandidateRuntimeProbe.runtimeScope === 'production-candidate-host-imports'
+    && closureProductionCandidateRuntimeProbe.implementationStatus === 'production-candidate-runtime-imports-present'
+    && closureProductionCandidateRuntimeProbe.entryExport === closureDescriptor?.entryExport
+    && arraysEqual(closureProductionCandidateRuntimeProbeEntryArgs, [131072, 131136])
+    && finiteNumberOrNull(closureProductionCandidateRuntimeProbe.expectedEntryResult) === 0
+    && finiteNumberOrNull(closureProductionCandidateRuntimeProbe.changedBytesInDeclaredTensorRange) === 64
+    && closureProductionCandidateRuntimeProbe.outputTensorsProducedByEntryExport === true
+    && closureProductionCandidateRuntimeProbe.productionHandlerReady === false
+    && closureProductionCandidateRuntimeProbe.productionHandlerRuntimeExecution === false
+    && closureProductionCandidateRuntimeProbe.scientificValidation === false
+    && closureProductionCandidateRuntimeProbe.fullPhysicsValidation === false
+    && closureProductionCandidateRuntimeProbe.fullFidelityMagnetarSimulation === false
+    && closureProductionCandidateRuntimeProbeHostImportOptions?.factory === 'createEshkolHostImportObject'
+    && closureProductionCandidateRuntimeProbeHostImportOptions?.productionCandidateRuntimeImports === true
+    && closureProductionCandidateRuntimeProbeHostImportOptions?.runtimeSmokeStubs === false
+    && closureProductionCandidateRuntimeProbeHostImportOptions?.f64TensorMemoryImports === true
+    && finiteNumberOrNull(closureProductionCandidateRuntimeProbeHostImportCallCounts?.ulg_read_f64) === 12
+    && finiteNumberOrNull(closureProductionCandidateRuntimeProbeHostImportCallCounts?.ulg_write_f64) === 9
+    && closureProductionCandidateRuntimeProbe.blocker
+      === 'production-candidate-runtime-smoke-only-production-handler-not-ready';
   const closureProductionHandlerBoundaryDeclared =
     closureProductionHandlerBoundary?.schema === ESHKOL_PRODUCTION_HANDLER_BOUNDARY_SCHEMA
     && textOrNull(closureProductionHandlerBoundary.handlerId) != null
@@ -725,6 +836,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     && closureProductionHandlerTensorMemoryBinding?.status === closureTensorLinearMemoryBinding?.status
     && closureProductionHandlerTensorMemoryBinding?.executionClaim === closureTensorLinearMemoryBinding?.executionClaim
     && closureProductionHandlerTensorMemoryBinding?.entryExportConsumesOffsets === true
+    && closureProductionCandidateRuntimeProbeReady
     && closureProductionDispatchPreflight?.schema === ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA
     && closureProductionDispatchPreflight.status === 'blocked'
     && closureProductionDispatchPreflight.ready === false
@@ -985,6 +1097,53 @@ export function summarizeUlgArtifact(artifact = {}) {
     closureProductionHandlerAllowedExecutionClaims: clonePlain(closureProductionHandlerAllowedExecutionClaims),
     closureProductionHandlerBoundaryBlockers: clonePlain(closureProductionHandlerBoundaryBlockers),
     closureProductionHandlerTensorMemoryBinding: clonePlain(closureProductionHandlerTensorMemoryBinding),
+    closureProductionCandidateRuntimeProbeSchema: closureProductionCandidateRuntimeProbe?.schema || null,
+    closureProductionCandidateRuntimeProbeStatus: closureProductionCandidateRuntimeProbe?.status || null,
+    closureProductionCandidateRuntimeProbeReady,
+    closureProductionCandidateRuntimeProbeExecutionClaim:
+      closureProductionCandidateRuntimeProbe?.executionClaim || null,
+    closureProductionCandidateRuntimeProbeRuntimeScope:
+      closureProductionCandidateRuntimeProbe?.runtimeScope || null,
+    closureProductionCandidateRuntimeProbeImplementationStatus:
+      closureProductionCandidateRuntimeProbe?.implementationStatus || null,
+    closureProductionCandidateRuntimeProbeEntryExport:
+      closureProductionCandidateRuntimeProbe?.entryExport || null,
+    closureProductionCandidateRuntimeProbeEntryArgs:
+      clonePlain(closureProductionCandidateRuntimeProbeEntryArgs),
+    closureProductionCandidateRuntimeProbeExpectedEntryResult:
+      finiteNumberOrNull(closureProductionCandidateRuntimeProbe?.expectedEntryResult),
+    closureProductionCandidateRuntimeProbeChangedBytesInDeclaredTensorRange:
+      finiteNumberOrNull(closureProductionCandidateRuntimeProbe?.changedBytesInDeclaredTensorRange),
+    closureProductionCandidateRuntimeProbeOutputTensorsProduced:
+      typeof closureProductionCandidateRuntimeProbe?.outputTensorsProducedByEntryExport === 'boolean'
+        ? closureProductionCandidateRuntimeProbe.outputTensorsProducedByEntryExport
+        : null,
+    closureProductionCandidateRuntimeProbeProductionHandlerReady:
+      typeof closureProductionCandidateRuntimeProbe?.productionHandlerReady === 'boolean'
+        ? closureProductionCandidateRuntimeProbe.productionHandlerReady
+        : null,
+    closureProductionCandidateRuntimeProbeProductionHandlerRuntimeExecution:
+      typeof closureProductionCandidateRuntimeProbe?.productionHandlerRuntimeExecution === 'boolean'
+        ? closureProductionCandidateRuntimeProbe.productionHandlerRuntimeExecution
+        : null,
+    closureProductionCandidateRuntimeProbeScientificValidation:
+      typeof closureProductionCandidateRuntimeProbe?.scientificValidation === 'boolean'
+        ? closureProductionCandidateRuntimeProbe.scientificValidation
+        : null,
+    closureProductionCandidateRuntimeProbeFullPhysicsValidation:
+      typeof closureProductionCandidateRuntimeProbe?.fullPhysicsValidation === 'boolean'
+        ? closureProductionCandidateRuntimeProbe.fullPhysicsValidation
+        : null,
+    closureProductionCandidateRuntimeProbeFullFidelityMagnetarSimulation:
+      typeof closureProductionCandidateRuntimeProbe?.fullFidelityMagnetarSimulation === 'boolean'
+        ? closureProductionCandidateRuntimeProbe.fullFidelityMagnetarSimulation
+        : null,
+    closureProductionCandidateRuntimeProbeHostImportOptions:
+      clonePlain(closureProductionCandidateRuntimeProbeHostImportOptions),
+    closureProductionCandidateRuntimeProbeHostImportCallCounts:
+      clonePlain(closureProductionCandidateRuntimeProbeHostImportCallCounts),
+    closureProductionCandidateRuntimeProbeBlocker:
+      closureProductionCandidateRuntimeProbe?.blocker || null,
     closureProductionHostImportsRuntimeScope: closureProductionHandlerHostImports?.runtimeScope || null,
     closureProductionHostImportsImplementationStatus:
       closureProductionHandlerHostImports?.implementationStatus || null,
@@ -1189,6 +1348,50 @@ export function summarizeUlgArtifact(artifact = {}) {
         : null,
     moonlabWebGpuParityScopeFidelityRuntimeScope: clonePlain(moonlabWebGpuParityFidelityRuntimeScope),
     moonlabWebGpuParityScopeBlockers,
+    moonlabWebGpuParityHandoffSummarySchema: moonlabWebGpuParityHandoffSummary?.schema || null,
+    moonlabWebGpuParityHandoffSummaryStatus: moonlabWebGpuParityHandoffSummary?.status || null,
+    moonlabWebGpuParityHandoffSummaryReady,
+    moonlabWebGpuParityHandoffSummarySourceSchema: moonlabWebGpuParityHandoffSummary?.sourceSchema || null,
+    moonlabWebGpuParityHandoffSummaryArtifactKind: moonlabWebGpuParityHandoffSummary?.artifactKind || null,
+    moonlabWebGpuParityHandoffSummaryReadinessClaim: moonlabWebGpuParityHandoffSummary?.readinessClaim || null,
+    moonlabWebGpuParityHandoffSummaryReducedFixtureOnly:
+      typeof moonlabWebGpuParityHandoffSummary?.reducedFixtureOnly === 'boolean'
+        ? moonlabWebGpuParityHandoffSummary.reducedFixtureOnly
+        : null,
+    moonlabWebGpuParityHandoffSummaryReducedFixtureWebGpuParityReady:
+      typeof moonlabWebGpuParityHandoffSummary?.reducedFixtureWebGpuParityReady === 'boolean'
+        ? moonlabWebGpuParityHandoffSummary.reducedFixtureWebGpuParityReady
+        : null,
+    moonlabWebGpuParityHandoffSummaryRuntimeBackendReady:
+      typeof moonlabWebGpuParityHandoffSummary?.runtimeBackendReady === 'boolean'
+        ? moonlabWebGpuParityHandoffSummary.runtimeBackendReady
+        : null,
+    moonlabWebGpuParityHandoffSummaryBackendAvailable:
+      typeof moonlabWebGpuParityHandoffSummary?.backendAvailable === 'boolean'
+        ? moonlabWebGpuParityHandoffSummary.backendAvailable
+        : null,
+    moonlabWebGpuParityHandoffSummaryBackendPreflightStage:
+      moonlabWebGpuParityHandoffSummaryBackendPreflight?.stage || null,
+    moonlabWebGpuParityHandoffSummaryRequiredOperations:
+      clonePlain(moonlabWebGpuParityHandoffSummaryRequiredOperations),
+    moonlabWebGpuParityHandoffSummaryCoveredOperations:
+      clonePlain(moonlabWebGpuParityHandoffSummaryCoveredOperations),
+    moonlabWebGpuParityHandoffSummaryMissingOperations:
+      clonePlain(moonlabWebGpuParityHandoffSummaryMissingOperations),
+    moonlabWebGpuParityHandoffSummaryExcludedOperations:
+      clonePlain(moonlabWebGpuParityHandoffSummaryExcludedOperations),
+    moonlabWebGpuParityHandoffSummaryBlockers:
+      clonePlain(moonlabWebGpuParityHandoffSummaryBlockers),
+    moonlabWebGpuParityHandoffSummaryValidationErrors:
+      clonePlain(moonlabWebGpuParityHandoffSummaryValidationErrors),
+    moonlabWebGpuParityHandoffSummaryFullFidelityMagnetarSimulation:
+      typeof moonlabWebGpuParityHandoffSummary?.fullFidelityMagnetarSimulation === 'boolean'
+        ? moonlabWebGpuParityHandoffSummary.fullFidelityMagnetarSimulation
+        : null,
+    moonlabWebGpuParityHandoffSummaryFullPhysicsValidation:
+      typeof moonlabWebGpuParityHandoffSummary?.fullPhysicsValidation === 'boolean'
+        ? moonlabWebGpuParityHandoffSummary.fullPhysicsValidation
+        : null,
     calibrationArtifactCount: calibrationSummaries.length,
     calibrationReadyCount: calibrationSummaries.filter((entry) => entry.ready).length,
     calibrationArtifacts: calibrationSummaries,

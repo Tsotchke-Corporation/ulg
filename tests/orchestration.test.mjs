@@ -45,6 +45,7 @@ const ESHKOL_PRODUCTION_DISPATCH_CHECKS = Object.freeze([
   'entry-export-main-signature-i32-i32-to-i32',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
+  'production-candidate-runtime-probe-passed',
   'runtime-smoke-stubs-rejected-for-production',
   'handler-ready-flag-true',
   'runtime-execution-flag-true',
@@ -55,6 +56,7 @@ const ESHKOL_PRODUCTION_DISPATCH_PASSED_CHECKS = Object.freeze([
   'entry-export-main-signature-i32-i32-to-i32',
   'non-stub-host-imports-present',
   'f64-tensor-memory-binding-validated',
+  'production-candidate-runtime-probe-passed',
   'runtime-smoke-stubs-rejected-for-production'
 ]);
 const ESHKOL_PRODUCTION_DISPATCH_BLOCKED_CHECKS = Object.freeze([
@@ -311,6 +313,63 @@ function createMoonLabWebGpuParityScopeFixture() {
       fullFidelityMagnetarSimulation: false,
       fullPhysicsValidation: false
     }
+  };
+}
+
+function createMoonLabWebGpuParityHandoffSummaryFixture() {
+  return {
+    schema: 'moonlab.webgpu.complex64-parity-handoff-summary.v0',
+    sourceSchema: 'moonlab.webgpu.complex64-parity-scope.v0',
+    artifactKind: 'browser-webgpu-complex64-parity-handoff-summary',
+    status: 'scope-ready-backend-detected',
+    generatedAt: '2026-06-07T04:20:00.000Z',
+    backendAvailable: true,
+    requireBackend: true,
+    contractValidationValid: true,
+    reducedFixtureOnly: true,
+    reducedFixtureWebGpuParityReady: true,
+    runtimeBackendReady: false,
+    readinessClaim: 'integration-tolerance-gate-only',
+    fullFidelityMagnetarSimulation: false,
+    fullPhysicsValidation: false,
+    backendPreflight: {
+      schema: 'moonlab.webgpu.complex64-browser-backend-preflight.v0',
+      runtime: 'browser-harness',
+      stage: 'device-acquired',
+      navigatorGpuAvailable: true,
+      adapterAvailable: true,
+      deviceAcquired: true
+    },
+    nativeCoverage: {
+      required: ['hadamard', 'pauli_x', 'pauli_z', 'cnot', 'compute_probabilities'],
+      covered: ['hadamard', 'pauli_x', 'pauli_z', 'cnot', 'compute_probabilities'],
+      missing: [],
+      excluded: ['phase']
+    },
+    webgpuParity: {
+      executed: true,
+      passed: true,
+      maxProbabilityAbsDiff: 0,
+      tolerance: 0.00001
+    },
+    probes: {
+      probabilityKernel: {
+        executed: true,
+        passed: true,
+        coveredNativeOperations: ['compute_probabilities'],
+        maxProbabilityAbsDiff: 0,
+        tolerance: 0.00001
+      },
+      nativeOperations: {
+        executed: true,
+        passed: true,
+        coveredNativeOperations: ['hadamard', 'pauli_x', 'pauli_z', 'cnot'],
+        maxAmplitudeAbsDiff: 2.9802322387695312e-8,
+        tolerance: 0.00001
+      }
+    },
+    blockers: [],
+    validationErrors: []
   };
 }
 
@@ -805,6 +864,34 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
               executionClaim: 'deterministic-tensor-runtime-smoke-only',
               entryExportConsumesOffsets: true
             },
+            productionCandidateRuntimeProbe: {
+              schema: 'eshkol.ulg.production-candidate-runtime-probe.v0',
+              status: 'production-candidate-runtime-smoke-passed',
+              runtimeScope: 'production-candidate-host-imports',
+              implementationStatus: 'production-candidate-runtime-imports-present',
+              executionClaim: 'production-candidate-host-import-runtime-smoke-only',
+              entryExport: 'main',
+              entryArgs: [131072, 131136],
+              expectedEntryResult: 0,
+              changedBytesInDeclaredTensorRange: 64,
+              outputTensorsProducedByEntryExport: true,
+              productionHandlerReady: false,
+              productionHandlerRuntimeExecution: false,
+              scientificValidation: false,
+              fullPhysicsValidation: false,
+              fullFidelityMagnetarSimulation: false,
+              hostImportOptions: {
+                factory: 'createEshkolHostImportObject',
+                productionCandidateRuntimeImports: true,
+                runtimeSmokeStubs: false,
+                f64TensorMemoryImports: true
+              },
+              hostImportCallCounts: {
+                ulg_read_f64: 12,
+                ulg_write_f64: 9
+              },
+              blocker: 'production-candidate-runtime-smoke-only-production-handler-not-ready'
+            },
             dispatchPreflight: {
               schema: 'eshkol.ulg.production-handler-dispatch-preflight.v0',
               status: 'blocked',
@@ -855,6 +942,22 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
                   status: 'pass',
                   ready: true,
                   evidenceSource: 'productionHandlerBoundary.tensorMemoryBinding'
+                },
+                {
+                  check: 'production-candidate-runtime-probe-passed',
+                  status: 'pass',
+                  ready: true,
+                  evidenceSource: 'productionHandlerBoundary.productionCandidateRuntimeProbe',
+                  observed: {
+                    status: 'production-candidate-runtime-smoke-passed',
+                    runtimeScope: 'production-candidate-host-imports',
+                    executionClaim: 'production-candidate-host-import-runtime-smoke-only',
+                    changedBytesInDeclaredTensorRange: 64,
+                    hostImportCallCounts: {
+                      ulg_read_f64: 12,
+                      ulg_write_f64: 9
+                    }
+                  }
                 },
                 {
                   check: 'runtime-smoke-stubs-rejected-for-production',
@@ -1074,6 +1177,42 @@ test('artifact cache summarizes Eshkol magnetar descriptor closure metadata', as
     executionClaim: 'deterministic-tensor-runtime-smoke-only',
     entryExportConsumesOffsets: true
   });
+  assert.equal(summary.closureProductionCandidateRuntimeProbeSchema, 'eshkol.ulg.production-candidate-runtime-probe.v0');
+  assert.equal(summary.closureProductionCandidateRuntimeProbeStatus, 'production-candidate-runtime-smoke-passed');
+  assert.equal(summary.closureProductionCandidateRuntimeProbeReady, true);
+  assert.equal(
+    summary.closureProductionCandidateRuntimeProbeExecutionClaim,
+    'production-candidate-host-import-runtime-smoke-only'
+  );
+  assert.equal(summary.closureProductionCandidateRuntimeProbeRuntimeScope, 'production-candidate-host-imports');
+  assert.equal(
+    summary.closureProductionCandidateRuntimeProbeImplementationStatus,
+    'production-candidate-runtime-imports-present'
+  );
+  assert.equal(summary.closureProductionCandidateRuntimeProbeEntryExport, 'main');
+  assert.deepEqual(summary.closureProductionCandidateRuntimeProbeEntryArgs, [131072, 131136]);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeExpectedEntryResult, 0);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeChangedBytesInDeclaredTensorRange, 64);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeOutputTensorsProduced, true);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeProductionHandlerReady, false);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeProductionHandlerRuntimeExecution, false);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeScientificValidation, false);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeFullPhysicsValidation, false);
+  assert.equal(summary.closureProductionCandidateRuntimeProbeFullFidelityMagnetarSimulation, false);
+  assert.deepEqual(summary.closureProductionCandidateRuntimeProbeHostImportOptions, {
+    factory: 'createEshkolHostImportObject',
+    productionCandidateRuntimeImports: true,
+    runtimeSmokeStubs: false,
+    f64TensorMemoryImports: true
+  });
+  assert.deepEqual(summary.closureProductionCandidateRuntimeProbeHostImportCallCounts, {
+    ulg_read_f64: 12,
+    ulg_write_f64: 9
+  });
+  assert.equal(
+    summary.closureProductionCandidateRuntimeProbeBlocker,
+    'production-candidate-runtime-smoke-only-production-handler-not-ready'
+  );
   assert.equal(summary.closureProductionHostImportsRuntimeScope, 'production-candidate-host-imports');
   assert.equal(
     summary.closureProductionHostImportsImplementationStatus,
@@ -1192,6 +1331,7 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
       ]
     },
     webGpuParityScope: createMoonLabWebGpuParityScopeFixture(),
+    webGpuParityHandoffSummary: createMoonLabWebGpuParityHandoffSummaryFixture(),
     calibrationArtifacts: {
       magnetarDipoleIsing: {
         schema: 'peercompute.ulg.magnetar-dipole-ising-calibration.v0',
@@ -1309,6 +1449,40 @@ test('artifact cache summarizes MoonLab magnetar calibration metadata', async ()
   assert.equal(summary.moonlabWebGpuParityScopeFullPhysicsValidation, false);
   assert.equal(summary.moonlabWebGpuParityScopeFidelityRuntimeScope.runtimeScope, 'browser-webgpu-complex64-reduced-fixture-parity');
   assert.deepEqual(summary.moonlabWebGpuParityScopeBlockers, []);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummarySchema, 'moonlab.webgpu.complex64-parity-handoff-summary.v0');
+  assert.equal(summary.moonlabWebGpuParityHandoffSummarySourceSchema, 'moonlab.webgpu.complex64-parity-scope.v0');
+  assert.equal(
+    summary.moonlabWebGpuParityHandoffSummaryArtifactKind,
+    'browser-webgpu-complex64-parity-handoff-summary'
+  );
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryStatus, 'scope-ready-backend-detected');
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryReady, true);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryReadinessClaim, 'integration-tolerance-gate-only');
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryReducedFixtureOnly, true);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryReducedFixtureWebGpuParityReady, true);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryRuntimeBackendReady, false);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryBackendAvailable, true);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryBackendPreflightStage, 'device-acquired');
+  assert.deepEqual(summary.moonlabWebGpuParityHandoffSummaryRequiredOperations, [
+    'hadamard',
+    'pauli_x',
+    'pauli_z',
+    'cnot',
+    'compute_probabilities'
+  ]);
+  assert.deepEqual(summary.moonlabWebGpuParityHandoffSummaryCoveredOperations, [
+    'hadamard',
+    'pauli_x',
+    'pauli_z',
+    'cnot',
+    'compute_probabilities'
+  ]);
+  assert.deepEqual(summary.moonlabWebGpuParityHandoffSummaryMissingOperations, []);
+  assert.deepEqual(summary.moonlabWebGpuParityHandoffSummaryExcludedOperations, ['phase']);
+  assert.deepEqual(summary.moonlabWebGpuParityHandoffSummaryBlockers, []);
+  assert.deepEqual(summary.moonlabWebGpuParityHandoffSummaryValidationErrors, []);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryFullFidelityMagnetarSimulation, false);
+  assert.equal(summary.moonlabWebGpuParityHandoffSummaryFullPhysicsValidation, false);
   assert.equal(summary.calibrationArtifactCount, 1);
   assert.equal(summary.calibrationReadyCount, 1);
   assert.equal(summary.outputReferenceCount, 5);

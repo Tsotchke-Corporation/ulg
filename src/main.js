@@ -285,6 +285,13 @@ function renderArtifactSummaryLine(summary) {
   if (summary.moonlabWebGpuParityScopeReady) {
     parts.push(`webgpu:${summary.moonlabWebGpuParityScopeBackendAvailable ? 'backend' : 'no-backend'}`);
   }
+  if (summary.moonlabWebGpuParityHandoffSummaryReady) {
+    const runtimeScope = summary.moonlabWebGpuParityHandoffSummaryRuntimeBackendReady ? 'runtime' : 'reduced';
+    const operationCount = Array.isArray(summary.moonlabWebGpuParityHandoffSummaryCoveredOperations)
+      ? summary.moonlabWebGpuParityHandoffSummaryCoveredOperations.length
+      : 0;
+    parts.push(`webgpu-handoff:${runtimeScope}:${operationCount}ops`);
+  }
   if (summary.moonlabWebGpuBrowserBackendPreflightDeclared) {
     parts.push(`webgpu-preflight:${summary.moonlabWebGpuBrowserBackendPreflightStage || 'declared'}`);
   }
@@ -349,6 +356,10 @@ function renderArtifactSummaryLine(summary) {
         ? summary.closureProductionHostImportCandidateRequiredNonStubImports.length
         : 0;
       parts.push(`prod-host:${summary.closureProductionHostImportCandidateStatus}:${nonStubImportCount}-imports`);
+    }
+    if (summary.closureProductionCandidateRuntimeProbeReady) {
+      const changedBytes = summary.closureProductionCandidateRuntimeProbeChangedBytesInDeclaredTensorRange ?? 0;
+      parts.push(`prod-probe:${summary.closureProductionCandidateRuntimeProbeStatus}:${changedBytes}b`);
     }
   } else if (summary.closureProductionHandlerBoundarySchema) {
     parts.push(`handler:${summary.closureProductionHandlerBoundaryStatus || 'not-ready'}`);

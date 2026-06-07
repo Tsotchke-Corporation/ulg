@@ -14,7 +14,7 @@ This repo currently implements the first executable slice:
 - browser-facing service asset probes for real MoonLab/Eshkol readiness;
 - a supervised MoonLab WASM Bell-state probe with deterministic response/parity metadata and a magnetar dipole Ising calibration sub-artifact when copied core artifacts are available;
 - a staged Eshkol magnetar closure descriptor fixture with explicit tensor-runtime and production-handler boundary metadata for Demo A handoff wiring;
-- an optional MoonLab WebGPU complex64 parity-scope handoff artifact with reduced browser kernel evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
+- a compact MoonLab WebGPU complex64 parity handoff with reduced-scope browser evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -80,12 +80,14 @@ without fetching the full artifact body. The staged suite contains reduced scala
 tolerance plumbing and does not claim full PIC, radiation-transport, GR, GRMHD, or
 magnetar scientific simulation. The optional
 `public/service-assets/moonlab/webgpu-complex64-parity-scope.json` artifact
-records MoonLab's reduced browser WebGPU complex64 evidence. ULG staging now
-requires `browserBackendPreflight.stage = device-acquired`, executed/passing
-`compute_probabilities`, `hadamard`, `pauli_x`, `pauli_z`, and `cnot` probes,
-browser-native coverage for those five reduced operations, zero parity-scope
-blockers, and explicit `fullFidelityMagnetarSimulation = false` /
-`fullPhysicsValidation = false` flags.
+records MoonLab's reduced browser WebGPU complex64 evidence and compact handoff
+summary. ULG staging now requires `browserBackendPreflight.stage =
+device-acquired`, executed/passing `compute_probabilities`, `hadamard`,
+`pauli_x`, `pauli_z`, and `cnot` probes, browser-native coverage for those five
+reduced operations, zero parity-scope blockers, and explicit
+`fullFidelityMagnetarSimulation = false` / `fullPhysicsValidation = false`
+flags. This is a reduced five-operation handoff, not a full MoonLab runtime
+backend or full magnetar physics validation.
 
 For Eshkol, the default staged bundle is
 `public/service-assets/eshkol/closures/magnetar-closure/`. It packages
@@ -100,20 +102,16 @@ intended PeerCompute handler boundary while keeping `handlerReady: false` and
 smoke-only f64 linear-memory layout at byte range `131072..131240`; the staged
 metadata records that the `main` export consumes the declared input offsets,
 produces output tensors, and changes `64` bytes in the declared tensor range
-under deterministic host-runtime smoke stubs. The current magnetar closure WASM
-is `169528` bytes with module hash
-`sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa`,
-source hash
-`sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69`,
-and tensor contract hash
-`sha256:2289b8c8068f1a033cda20f09f30a33f2e41588b8ee2ccd1143100f2fe87dd64`.
-The production handler still declares
-`production-magnetar-handler-not-implemented`,
-`host-imports-are-deterministic-runtime-smoke-stubs-not-production`, and
-`full-physics-validation-not-run`, so this advances runtime ABI evidence without
-claiming a full-fidelity or scientifically validated magnetar simulation. The
-boundary also exposes a production-host-import candidate contract:
-`runtimeSmokeStubsAllowed: false`, `23` required non-stub runtime imports, f64
-tensor-memory imports `ulg_read_f64`/`ulg_write_f64`, and readiness requirements
-for a production handler implementation, non-stub host imports, validated tensor
-memory imports, and full physics validation.
+under deterministic host-runtime smoke stubs. The boundary also exposes a
+production-host-import candidate contract: `runtimeSmokeStubsAllowed: false`,
+`23` required non-stub runtime imports, f64 tensor-memory imports
+`ulg_read_f64`/`ulg_write_f64`, and readiness requirements for a production
+handler implementation, non-stub host imports, validated tensor memory imports,
+and full physics validation. The current ULG staging sync also preserves
+Eshkol's production-candidate runtime probe: it runs the deterministic
+`main(131072, 131136)` tensor smoke path through production-candidate host
+imports and records the output tensor evidence, but remains smoke-only. The
+computed production dispatch preflight is still blocked at `9/6/3`: six checks
+pass, while handler readiness, production runtime execution, and full-physics
+validation remain blocked. This advances production-boundary evidence without
+claiming a full-fidelity or scientifically validated magnetar simulation.

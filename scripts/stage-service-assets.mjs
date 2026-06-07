@@ -27,6 +27,8 @@ const eshkolRoot = path.join(projectsRoot, 'eshkol');
 const moonlabTargetDir = path.join(repoRoot, 'public', 'service-assets', 'moonlab');
 const moonlabReferenceSuiteTarget = path.join(moonlabTargetDir, 'magnetar-reference-contracts.json');
 const moonlabWebGpuParityScopeTarget = path.join(moonlabTargetDir, 'webgpu-complex64-parity-scope.json');
+const moonlabWebGpuParityHandoffSummaryTarget =
+  path.join(moonlabTargetDir, 'webgpu-complex64-parity-handoff-summary.json');
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolTargetDir = path.join(repoRoot, 'public', 'service-assets', 'eshkol', 'closures', eshkolClosureBundleName);
 const SHA256_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
@@ -36,7 +38,10 @@ const ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_CHECK_SUMMARY_SCHEMA =
   'eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0';
 const PEERCOMPUTE_DISPATCH_HANDLER_CONTEXT_SCHEMA = 'peercompute.ulg.dispatch-service-handler-context.v0';
 const ESHKOL_PRODUCTION_HOST_IMPORT_CANDIDATE_SCHEMA = 'eshkol.ulg.production-host-import-candidate.v0';
+const ESHKOL_PRODUCTION_CANDIDATE_RUNTIME_PROBE_SCHEMA = 'eshkol.ulg.production-candidate-runtime-probe.v0';
 const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_SCHEMA = 'moonlab.webgpu.complex64-browser-backend-preflight.v0';
+const MOONLAB_WEBGPU_COMPLEX64_PARITY_HANDOFF_SUMMARY_SCHEMA =
+  'moonlab.webgpu.complex64-parity-handoff-summary.v0';
 const MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS = Object.freeze([
   'hadamard',
   'pauli_x',
@@ -294,6 +299,113 @@ function stageMoonLabWebGpuParityScope() {
   };
 }
 
+function validateMoonLabWebGpuParityHandoffSummary(summary) {
+  if (summary.schema !== MOONLAB_WEBGPU_COMPLEX64_PARITY_HANDOFF_SUMMARY_SCHEMA) {
+    throw new Error('MoonLab WebGPU parity handoff summary asset is missing expected schema');
+  }
+  if (summary.sourceSchema !== 'moonlab.webgpu.complex64-parity-scope.v0') {
+    throw new Error('MoonLab WebGPU parity handoff summary does not identify the source parity-scope schema');
+  }
+  if (summary.artifactKind !== 'browser-webgpu-complex64-parity-handoff-summary') {
+    throw new Error('MoonLab WebGPU parity handoff summary has unexpected artifact kind');
+  }
+  if (summary.status !== 'scope-ready-backend-detected'
+    || summary.reducedFixtureOnly !== true
+    || summary.reducedFixtureWebGpuParityReady !== true
+    || summary.backendAvailable !== true
+    || summary.requireBackend !== true
+    || summary.contractValidationValid !== true
+    || summary.runtimeBackendReady !== false
+    || summary.fullFidelityMagnetarSimulation !== false
+    || summary.fullPhysicsValidation !== false
+    || summary.readinessClaim !== 'integration-tolerance-gate-only') {
+    throw new Error('MoonLab WebGPU parity handoff summary overstates readiness or physics validation');
+  }
+  if (summary.backendPreflight?.stage !== 'device-acquired'
+    || summary.backendPreflight.navigatorGpuAvailable !== true
+    || summary.backendPreflight.adapterAvailable !== true
+    || summary.backendPreflight.deviceAcquired !== true) {
+    throw new Error('MoonLab WebGPU parity handoff summary lacks device-acquired backend preflight evidence');
+  }
+  if (Array.isArray(summary.blockers) && summary.blockers.length > 0) {
+    throw new Error(`MoonLab WebGPU parity handoff summary still has blockers: ${summary.blockers.join(', ')}`);
+  }
+  if (Array.isArray(summary.validationErrors) && summary.validationErrors.length > 0) {
+    throw new Error(`MoonLab WebGPU parity handoff summary has validation errors: ${summary.validationErrors.join(', ')}`);
+  }
+  const nativeCoverage = summary.nativeCoverage || {};
+  if (!arraysEqual(nativeCoverage.required || [], MOONLAB_WEBGPU_COMPLEX64_REQUIRED_COVERAGE)
+    || !arraysEqual(nativeCoverage.covered || [], MOONLAB_WEBGPU_COMPLEX64_REQUIRED_COVERAGE)
+    || !Array.isArray(nativeCoverage.missing)
+    || nativeCoverage.missing.length !== 0
+    || !Array.isArray(nativeCoverage.excluded)
+    || !nativeCoverage.excluded.includes('phase')) {
+    throw new Error('MoonLab WebGPU parity handoff summary does not cover the required reduced operations');
+  }
+  if (summary.webgpuParity?.executed !== true
+    || summary.webgpuParity.passed !== true
+    || !(Number(summary.webgpuParity.maxProbabilityAbsDiff) <= Number(summary.webgpuParity.tolerance))) {
+    throw new Error('MoonLab WebGPU parity handoff summary lacks passing WebGPU parity evidence');
+  }
+  if (summary.probes?.probabilityKernel?.executed !== true
+    || summary.probes.probabilityKernel.passed !== true
+    || !Array.isArray(summary.probes.probabilityKernel.coveredNativeOperations)
+    || !summary.probes.probabilityKernel.coveredNativeOperations.includes('compute_probabilities')) {
+    throw new Error('MoonLab WebGPU parity handoff summary lacks compute_probabilities probe evidence');
+  }
+  if (summary.probes?.nativeOperations?.executed !== true
+    || summary.probes.nativeOperations.passed !== true
+    || !arraysEqual(
+      summary.probes.nativeOperations.coveredNativeOperations || [],
+      MOONLAB_NATIVE_OPERATION_REQUIRED_DECLARATIONS
+    )) {
+    throw new Error('MoonLab WebGPU parity handoff summary lacks native operation probe evidence');
+  }
+}
+
+function stageMoonLabWebGpuParityHandoffSummary() {
+  const target = moonlabWebGpuParityHandoffSummaryTarget;
+  const command = [
+    'pnpm',
+    'webgpu:complex64:browser-smoke',
+    '--',
+    '--summary',
+    '--require-backend',
+    '--canonical',
+    '--out',
+    target
+  ];
+  if (createdAt != null) {
+    command.push('--generated-at', createdAt);
+  }
+
+  if (!dryRun) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    const result = spawnSync(command[0], command.slice(1), {
+      cwd: moonlabCoreRoot,
+      encoding: 'utf8'
+    });
+    if (result.status !== 0) {
+      throw new Error([
+        `MoonLab WebGPU complex64 parity handoff summary generation failed with status ${result.status}`,
+        result.stdout.trim(),
+        result.stderr.trim()
+      ].filter(Boolean).join('\n'));
+    }
+    validateMoonLabWebGpuParityHandoffSummary(JSON.parse(readFileSync(target, 'utf8')));
+  }
+
+  return {
+    label: 'MoonLab WebGPU complex64 parity handoff summary',
+    source: path.join(moonlabCoreRoot, 'scripts', 'webgpu-complex64-browser-smoke.mjs'),
+    target,
+    command,
+    contentHash: dryRun ? null : sha256File(target),
+    byteLength: dryRun ? null : statSync(target).size,
+    action: dryRun ? 'would-generate' : 'generated'
+  };
+}
+
 function stageMoonLabAssets() {
   const staged = [
     copyAsset(
@@ -309,6 +421,7 @@ function stageMoonLabAssets() {
   ];
   staged.push(stageMoonLabReferenceSuite());
   staged.push(stageMoonLabWebGpuParityScope());
+  staged.push(stageMoonLabWebGpuParityHandoffSummary());
   return staged;
 }
 
@@ -415,6 +528,7 @@ function stageEshkolAssets() {
     const tensorLinearMemorySmokeBinding = tensorLinearMemoryBinding?.smokeBinding;
     const tensorEntryExportOffsetProbe = tensorLinearMemoryBinding?.entryExportOffsetProbe;
     const productionHandlerBoundary = descriptorBinding?.productionHandlerBoundary;
+    const productionCandidateRuntimeProbe = productionHandlerBoundary?.productionCandidateRuntimeProbe || {};
     if (tensorRuntimeContract?.schema !== 'eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0') {
       throw new Error('Eshkol staged magnetar descriptor is missing tensor runtime contract metadata');
     }
@@ -564,6 +678,7 @@ function stageEshkolAssets() {
       'entry-export-main-signature-i32-i32-to-i32',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
+      'production-candidate-runtime-probe-passed',
       'runtime-smoke-stubs-rejected-for-production',
       'handler-ready-flag-true',
       'runtime-execution-flag-true',
@@ -574,6 +689,7 @@ function stageEshkolAssets() {
       'entry-export-main-signature-i32-i32-to-i32',
       'non-stub-host-imports-present',
       'f64-tensor-memory-binding-validated',
+      'production-candidate-runtime-probe-passed',
       'runtime-smoke-stubs-rejected-for-production'
     ];
     const expectedProductionDispatchBlockedChecks = [
@@ -609,6 +725,30 @@ function stageEshkolAssets() {
       || productionHandlerBoundary.tensorMemoryBinding?.executionClaim !== tensorLinearMemoryBinding.executionClaim
       || productionHandlerBoundary.tensorMemoryBinding?.entryExportConsumesOffsets !== true) {
       throw new Error('Eshkol staged production handler boundary does not match tensor memory binding metadata');
+    }
+    if (productionCandidateRuntimeProbe.schema !== ESHKOL_PRODUCTION_CANDIDATE_RUNTIME_PROBE_SCHEMA
+      || productionCandidateRuntimeProbe.status !== 'production-candidate-runtime-smoke-passed'
+      || productionCandidateRuntimeProbe.executionClaim !== 'production-candidate-host-import-runtime-smoke-only'
+      || productionCandidateRuntimeProbe.runtimeScope !== 'production-candidate-host-imports'
+      || productionCandidateRuntimeProbe.implementationStatus !== 'production-candidate-runtime-imports-present'
+      || productionCandidateRuntimeProbe.entryExport !== artifact.validation?.closureDescriptor?.entryExport
+      || !arraysEqual(productionCandidateRuntimeProbe.entryArgs, [131072, 131136])
+      || productionCandidateRuntimeProbe.expectedEntryResult !== 0
+      || productionCandidateRuntimeProbe.changedBytesInDeclaredTensorRange !== 64
+      || productionCandidateRuntimeProbe.outputTensorsProducedByEntryExport !== true
+      || productionCandidateRuntimeProbe.productionHandlerReady !== false
+      || productionCandidateRuntimeProbe.productionHandlerRuntimeExecution !== false
+      || productionCandidateRuntimeProbe.scientificValidation !== false
+      || productionCandidateRuntimeProbe.fullPhysicsValidation !== false
+      || productionCandidateRuntimeProbe.fullFidelityMagnetarSimulation !== false
+      || productionCandidateRuntimeProbe.hostImportOptions?.factory !== 'createEshkolHostImportObject'
+      || productionCandidateRuntimeProbe.hostImportOptions?.productionCandidateRuntimeImports !== true
+      || productionCandidateRuntimeProbe.hostImportOptions?.runtimeSmokeStubs !== false
+      || productionCandidateRuntimeProbe.hostImportOptions?.f64TensorMemoryImports !== true
+      || productionCandidateRuntimeProbe.hostImportCallCounts?.ulg_read_f64 !== 12
+      || productionCandidateRuntimeProbe.hostImportCallCounts?.ulg_write_f64 !== 9
+      || productionCandidateRuntimeProbe.blocker !== 'production-candidate-runtime-smoke-only-production-handler-not-ready') {
+      throw new Error('Eshkol staged production candidate runtime probe does not preserve smoke-only runtime evidence');
     }
     const productionDispatchPreflight = productionHandlerBoundary.dispatchPreflight || {};
     if (productionDispatchPreflight.schema !== ESHKOL_PRODUCTION_HANDLER_DISPATCH_PREFLIGHT_SCHEMA

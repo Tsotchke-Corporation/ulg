@@ -131,6 +131,10 @@ physics work:
   simulation WebGPU summary fields, and e2e coverage that accepts WebGPU only
   when parity passes. CPU-reference output remains authoritative and this does
   not claim SPH/material/full-physics validation.
+- [x] Add Phase 3A carrier topology primitives without building an SPH demo:
+  normalized particle state, deterministic spatial hashes, radius-limited
+  neighbor pairs, and closure-sampled edge messages with antisymmetric force
+  conservation summaries for future field/material/EOS operators.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

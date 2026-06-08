@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 11:17:15 AKDT
+Updated: 2026-06-08 11:27:00 AKDT
 
 ## Done
 
@@ -26,6 +26,11 @@ Updated: 2026-06-08 11:17:15 AKDT
   lease marking, and compact simulation WebGPU summary/UI fields. This remains
   a toy carrier runtime and does not claim SPH/material/full-physics
   validation.
+- Added Phase 3A carrier topology primitives: normalized particle state,
+  deterministic spatial hashes, radius-limited neighbor pairs, and
+  closure-sampled edge messages with antisymmetric force conservation summaries.
+  This is first-principles locality/operator substrate for future
+  field/material/EOS work, not an SPH demo or phase-change validation.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -35,6 +40,10 @@ Updated: 2026-06-08 11:17:15 AKDT
   WebGPU/broker/supervisor/carrier/ABI tests, `npm test` (`36/36`),
   `npm run build`, `npm run test:e2e` (`2/2`),
   `npm run status:live -- --bridge`, and `git diff --check`.
+- Verified the topology primitive slice with syntax checks, focused
+  spatialHash/edgeMessages/carrier parity tests (`10/10`), and `npm test`
+  (`44/44`), `npm run build`, `npm run test:e2e` (`2/2`), and
+  `git diff --check`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

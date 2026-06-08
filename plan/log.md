@@ -1,5 +1,61 @@
 # ULG Implementation Log
 
+## 2026-06-08 11:27:00 AKDT
+
+Prompt: Continue on the core technology path after the WebGPU carrier runtime
+checkpoint without pivoting into a demo-only SPH/material feature.
+
+Actions:
+
+- Started the next Phase 3A foundation as topology/operator primitives rather
+  than a full SPH demo.
+- Added `src/runtime/particleState.js` for normalized particle state with
+  deterministic ids, positions, velocities, masses, smoothing lengths, step,
+  and time metadata.
+- Added `src/runtime/spatialHash.js` with open-boundary cell hashing,
+  duplicate-free neighbor-pair queries, symmetric pair emission when requested,
+  and stable radius-limited neighbor graph summaries.
+- Added `src/runtime/edgeMessages.js` with closure-sampled pair messages,
+  force-on-source/force-on-target vectors, antisymmetric residuals,
+  out-of-range edge reporting, and compact conservation summaries.
+- Added focused tests for particle normalization, spatial hash cell keys,
+  neighbor pair determinism, harmonic closure sampling over graph edges,
+  out-of-range closure reporting, zero net-force leakage, and parity with the
+  existing two-body carrier force convention.
+- Updated README and plan/status docs to keep this scoped as first-principles
+  topology/operator substrate for future field/material/EOS work, not SPH or
+  phase-change validation.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `src/runtime/edgeMessages.js`
+- `src/runtime/particleState.js`
+- `src/runtime/spatialHash.js`
+- `tests/carrierRuntime.test.mjs`
+- `tests/edgeMessages.test.mjs`
+- `tests/spatialHash.test.mjs`
+
+Validation so far:
+
+- PASS: syntax checks for the new runtime and test files.
+- PASS:
+  `node --test tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/carrierRuntime.test.mjs`
+  passed `10/10`.
+- PASS: `npm test` passed `44/44`.
+- PASS: `npm run build` passed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`.
+- PASS: `git diff --check` passed.
+
+Open / blockers:
+
+- These primitives do not yet implement material properties, EOS phase changes,
+  SPH observers, or full-physics validation.
+
 ## 2026-06-08 11:17:15 AKDT
 
 Prompt: Proceed on the core technology path for ULG after the Phase 1

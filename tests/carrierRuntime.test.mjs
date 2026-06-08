@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createCarrierRuntime, createDefaultCarrierState } from '../src/runtime/carrierRuntime.js';
 import { createClosureHandle } from '../src/runtime/closureHandle.js';
+import { evaluateEdgeMessages } from '../src/runtime/edgeMessages.js';
 import { computeInvariants } from '../src/runtime/invariants.js';
+import { buildNeighborGraph } from '../src/runtime/spatialHash.js';
 import { hashPayload } from '../ulg-gpu-abi/src/index.js';
 
 function createOscillatorClosure() {
@@ -81,4 +83,24 @@ test('carrier runtime advances a two-body oscillator and conserves invariants wi
   assert.ok(Math.abs(result.invariantSeries[0].totalEnergy - initialInvariants.totalEnergy) < 1e-12);
   assert.notEqual(result.finalState.bodies[0].x, initialState.bodies[0].x);
   assert.notEqual(result.finalState.bodies[1].x, initialState.bodies[1].x);
+});
+
+test('edge-message primitive matches the existing two-body carrier force convention', () => {
+  const handle = createClosureHandle(createOscillatorClosure());
+  const runtime = createCarrierRuntime({ closureHandle: handle, dt: 0.002 });
+  const initialState = createDefaultCarrierState({ separation: 1.2, velocity: 0, mass: 1 });
+  const graph = buildNeighborGraph({
+    cellSize: 1,
+    radius: 1.3,
+    bodies: initialState.bodies
+  });
+  const edgeMessages = evaluateEdgeMessages({ neighborGraph: graph, closureHandle: handle });
+  const [message] = edgeMessages.messages;
+  const step = runtime.step(initialState);
+  const expectedDx = 0.5 * message.forceOnSource[0] * runtime.dt * runtime.dt;
+
+  assert.equal(edgeMessages.summary.status, 'pass');
+  assert.ok(Math.abs(message.forceOnSource[0] - 0.2) < 1e-12);
+  assert.ok(Math.abs(step.delta.bodies[0].dx - expectedDx) < 1e-12);
+  assert.ok(Math.abs(step.delta.bodies[1].dx + expectedDx) < 1e-12);
 });

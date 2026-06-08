@@ -16,6 +16,7 @@ This repo currently implements the first executable slice:
 - a staged Eshkol magnetar closure descriptor fixture with explicit tensor-runtime and production-handler boundary metadata for Demo A handoff wiring;
 - a compact MoonLab WebGPU complex64 parity handoff with reduced-scope browser evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
 - a Phase 2 ULG carrier runtime with a `ClosureRegistry`, table-interpolation closure handle, CPU-reference two-particle oscillator, optional WebGPU carrier step, CPU/WebGPU parity gate, device-loss CPU fallback reporting, invariant drift report, `ulg-runtime` service contract, and simulation artifacts that remain explicitly toy/reference scoped;
+- Phase 3A carrier topology primitives: normalized particle state, deterministic spatial hashes, radius-limited neighbor pairs, and closure-sampled edge messages with antisymmetric force checks for future field/material/EOS operators, without claiming SPH or phase-change validation;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -43,6 +44,11 @@ fallback, and emits a `peercompute.ulg.simulation-artifact.v0` carrier delta
 artifact. WebGPU output is accepted only when it passes CPU-reference parity;
 otherwise the artifact records the fallback reason. This is a
 core-runtime/provenance slice, not calibrated SPH or full-physics validation.
+The runtime also includes standalone Phase 3A topology primitives:
+`normalizeParticleState()`, `buildSpatialHash()`, `queryNeighborPairs()`, and
+`evaluateEdgeMessages()` are deterministic CPU-reference building blocks for
+future field operators. They do not yet implement a material model, EOS phase
+changes, or an SPH solver.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 44/44 tests on 2026-06-08 after adding Phase 3A carrier
-topology primitives.
+Current result: pass, 49/49 tests on 2026-06-08 after adding Phase 3A carrier
+field-observer primitives.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -108,6 +108,13 @@ topology primitives.
   carrier force convention. The CPU-reference carrier runtime now emits
   edge-message conservation summaries in compact deltas. These tests preserve
   explicit false scientific/full-physics flags.
+- Phase 3A field-observer coverage verifies compact-support scalar observations
+  over deterministic neighbor graphs and warning behavior when no contribution
+  reaches a particle. It also verifies supplied graph validation,
+  symmetric-pair canonicalization, recipient smoothing-length behavior,
+  duplicate-position handling, and explicit empty-field rejection. The observer
+  summaries preserve explicit false scientific/full-physics flags and do not
+  claim SPH/material/EOS readiness.
 - The ABI schema coverage now validates
   `peercompute.ulg.simulation-artifact.v0`, and service-contract tests lock the
   `ulg-runtime` service id, `simulation.step` task kind, capabilities, and
@@ -128,6 +135,9 @@ topology primitives.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.
+- Focused Phase 3A field-observer coverage on 2026-06-08:
+  `node --test tests/observers.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs`
+  passed `12/12`.
 
 ## Current Handoff Validation Summary
 

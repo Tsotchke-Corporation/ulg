@@ -17,6 +17,7 @@ This repo currently implements the first executable slice:
 - a compact MoonLab WebGPU complex64 parity handoff with reduced-scope browser evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
 - a Phase 2 ULG carrier runtime with a `ClosureRegistry`, table-interpolation closure handle, CPU-reference two-particle oscillator, optional WebGPU carrier step, CPU/WebGPU parity gate, device-loss CPU fallback reporting, invariant drift report, `ulg-runtime` service contract, and simulation artifacts that remain explicitly toy/reference scoped;
 - Phase 3A carrier topology primitives: normalized particle state, deterministic spatial hashes, radius-limited neighbor pairs, and closure-sampled edge messages with antisymmetric force checks for future field/material/EOS operators, without claiming SPH or phase-change validation;
+- Phase 3A field observers over neighbor graphs with compact-support scalar smoothing summaries for future material/EOS closure inputs, still without claiming an SPH solver or phase-change validation;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -49,7 +50,9 @@ The runtime also includes standalone Phase 3A topology primitives:
 `evaluateEdgeMessages()` are deterministic CPU-reference building blocks for
 future field operators, and the two-body carrier force path now consumes them
 before emitting compact deltas with edge-message conservation summaries. They
-do not yet implement a material model, EOS phase changes, or an SPH solver.
+also include `evaluateFieldObservers()` for compact-support scalar field
+observations over the neighbor graph. They do not yet implement a material
+model, EOS phase changes, or an SPH solver.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

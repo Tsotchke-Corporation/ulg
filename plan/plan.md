@@ -135,6 +135,9 @@ physics work:
   normalized particle state, deterministic spatial hashes, radius-limited
   neighbor pairs, and closure-sampled edge messages with antisymmetric force
   conservation summaries for future field/material/EOS operators.
+- [x] Add Phase 3A field-observer primitives over neighbor graphs, with
+  compact-support scalar smoothing summaries and explicit no-SPH/no-material/
+  no-phase-change validation scope.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

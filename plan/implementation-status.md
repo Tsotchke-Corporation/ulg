@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 11:27:00 AKDT
+Updated: 2026-06-08 11:37:46 AKDT
 
 ## Done
 
@@ -34,6 +34,9 @@ Updated: 2026-06-08 11:27:00 AKDT
 - Wired the CPU-reference two-body carrier force path through the Phase 3A
   topology/edge-message primitives so compact deltas now carry
   `peercompute.ulg.edge-message-summary.v0` conservation evidence.
+- Added Phase 3A field-observer primitives over neighbor graphs with
+  compact-support scalar smoothing summaries and explicit no-SPH/no-material/
+  no-phase-change validation scope.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -47,6 +50,9 @@ Updated: 2026-06-08 11:27:00 AKDT
   carrier/spatialHash/edgeMessages/WebGPU parity tests (`17/17`), and `npm test`
   (`44/44`), `npm run build`, `npm run test:e2e` (`2/2`), and
   `git diff --check`.
+- Verified the field-observer primitive slice with syntax checks, focused
+  observer/topology tests (`12/12`), `npm test` (`49/49`), `npm run build`,
+  `npm run test:e2e` (`2/2`), and `git diff --check`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

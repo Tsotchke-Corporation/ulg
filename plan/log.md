@@ -1,5 +1,53 @@
 # ULG Implementation Log
 
+## 2026-06-08 11:37:46 AKDT
+
+Prompt: Keep advancing core carrier primitives after topology wiring while
+avoiding an SPH/material demo pivot.
+
+Actions:
+
+- Added `src/runtime/observers.js` with compact-support scalar field observers
+  over normalized particle state and deterministic neighbor graphs.
+- The observer pass reports per-particle weight sums, neighbor counts,
+  weighted scalar field observations, zero-contribution warnings, and compact
+  summaries with explicit false scientific/full-physics flags.
+- Added focused tests for smoothing a scalar field over deterministic neighbor
+  pairs and warning instead of overclaiming when no contribution reaches a
+  particle.
+- Hardened supplied neighbor-graph validation, symmetric-pair canonicalization,
+  empty-field rejection, recipient smoothing-length coverage, and
+  duplicate-position handling after read-only sidecar audit feedback.
+- Updated README and plan/status docs to present observers as reusable field
+  operator substrate for future material/EOS closure inputs, not an SPH solver
+  or phase-change validation.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `src/runtime/observers.js`
+- `tests/observers.test.mjs`
+
+Validation so far:
+
+- PASS: syntax checks for the observer runtime and test files.
+- PASS:
+  `node --test tests/observers.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs`
+  passed `12/12`.
+- PASS: `npm test` passed `49/49`.
+- PASS: `npm run build` passed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`.
+- PASS: `git diff --check` passed.
+
+Open / blockers:
+
+- These observers do not implement material properties, EOS phase changes, SPH
+  dynamics, or full-physics validation.
+
 ## 2026-06-08 11:27:00 AKDT
 
 Prompt: Continue on the core technology path after the WebGPU carrier runtime

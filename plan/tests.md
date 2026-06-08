@@ -4,13 +4,12 @@
 
 Command: `npm test`
 
-Current result: pass, 22/22 tests on 2026-06-07 after surfacing Eshkol's
-declared full-physics validation requirements through ULG summaries and browser
-handoffs.
+Current result: pass, 27/27 tests on 2026-06-08 after adding Phase 1
+ClosureRegistry and CPU-reference carrier runtime coverage.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
-  quantum response artifacts, and tolerance reports.
+  quantum response artifacts, simulation artifacts, and tolerance reports.
 - Static Eshkol/MoonLab adapter fixtures validate against the shared schemas.
 - Service contract builders reproduce the published manifest defaults and emit a
   schema-compatible default MoonLab task capsule.
@@ -88,10 +87,26 @@ handoffs.
   including `declared-not-run`, `ready = false`, five required runtime evidence
   families, four required hash fields, and the
   `full-physics-validation-not-run` blocker.
+- `ClosureRegistry` stores table-interpolation closure artifacts in the
+  content-addressed `ArtifactCache`, resolves by closure kind/input/method hash,
+  reports in-range/out-of-range/miss validity, emits cache events, and
+  invalidates stale closure refs.
+- The Phase 1 closure handle samples `table-interpolation` closures for energy
+  and `dEdr`, and the CPU-reference carrier runtime advances a two-particle
+  oscillator with compact deltas plus invariant drift reports.
+- The ABI schema coverage now validates
+  `peercompute.ulg.simulation-artifact.v0`, and service-contract tests lock the
+  `ulg-runtime` service id, `simulation.step` task kind, capabilities, and
+  default `simulation-delta` output artifact kind.
 - Focused service-asset/orchestration coverage after the host-import import-glue
   slice:
   `node --test tests/orchestration.test.mjs tests/service-assets.test.mjs`
   passed `14/14`.
+- Focused carrier-runtime coverage on 2026-06-08:
+  `node --test tests/closureRegistry.test.mjs` passed `2/2`,
+  `node --test tests/carrierRuntime.test.mjs` passed `2/2`, and
+  `node --test tests/abi.test.mjs tests/contract-fixtures.test.mjs` passed
+  `7/7`.
 
 ## Current Handoff Validation Summary
 
@@ -125,19 +140,43 @@ deterministic tensor smoke / declared requirement evidence. Production dispatch
 preflight records `10/9/1`; it does not promote scientific validation,
 full-fidelity magnetar simulation, or full-physics validation.
 
+## Carrier Runtime Validation Summary
+
+Validation run on 2026-06-08 after adding the Phase 1 CPU-reference carrier
+runtime:
+
+- `node --check` passed for `ClosureRegistry.js`, `closureHandle.js`,
+  `invariants.js`, `carrierRuntime.js`, `ulgRuntime.worker.js`,
+  `demoRuntime.js`, `closureRegistry.test.mjs`, and `carrierRuntime.test.mjs`.
+- `node --test tests/closureRegistry.test.mjs`: passed, `2/2`.
+- `node --test tests/carrierRuntime.test.mjs`: passed, `2/2`.
+- `node --test tests/abi.test.mjs tests/contract-fixtures.test.mjs`: passed,
+  `7/7`.
+- `npm test`: passed, `27/27`.
+- `npm run build`: passed with the existing Vite large chunk warning and emitted
+  bundled `ulgRuntime.worker`.
+- `npm run test:e2e`: passed, `2/2`; the second browser smoke calls
+  `window.__ulgDemo.runOscillatorDemo()`, verifies cached closure validity,
+  `peercompute.ulg.simulation-artifact.v0`, CPU-reference execution, invariant
+  pass status, 32 deltas, false scientific/full-physics flags, and visible
+  `simulation:carrier-toy` telemetry.
+- `npm run status:live -- --bridge`: passed against
+  `http://100.86.83.35:5173/`, preserving the default two-artifact
+  Eshkol/MoonLab magnetar handoff and `handoff-ready` Multiscale ack.
+
 ## Production Build
 
 Command: `npm run build`
 
-Current result: pass on 2026-06-07 after the declared Eshkol full-physics
-requirements slice, with the existing Vite large chunk warning.
+Current result: pass on 2026-06-08 after the carrier-runtime slice, with the
+existing Vite large chunk warning.
 
 ## Browser Smoke
 
 Command: `npm run test:e2e`
 
-Current result: pass, 1/1 Chromium test on 2026-06-07 after the declared Eshkol
-full-physics requirements slice.
+Current result: pass, 2/2 Chromium tests on 2026-06-08 after the
+carrier-runtime slice.
 
 - Load the Vite app through Playwright.
 - Verify two supervised services register and run.

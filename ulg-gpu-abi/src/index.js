@@ -1,5 +1,6 @@
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';
+export const ULG_SIMULATION_ARTIFACT_SCHEMA = 'peercompute.ulg.simulation-artifact.v0';
 
 export const D_TYPES = Object.freeze({
   f32: { name: 'f32', byteSize: 4, lanes: 1 },
@@ -122,6 +123,48 @@ export function createToleranceReport({
     status,
     toleranceProfile,
     metrics,
+    provenance
+  };
+}
+
+export function createSimulationArtifact({
+  artifactId,
+  sourceService = 'ulg-runtime',
+  taskKind = 'simulation.step',
+  closureRef,
+  representation = 'carrier-toy',
+  outputs,
+  execution,
+  validity,
+  uncertainty = {},
+  validation = {},
+  provenance
+}) {
+  if (!artifactId) {
+    throw new Error('artifactId is required for ULG simulation artifacts');
+  }
+  if (!closureRef) {
+    throw new Error('closureRef is required for ULG simulation artifacts');
+  }
+  return {
+    schema: ULG_SIMULATION_ARTIFACT_SCHEMA,
+    artifactId,
+    sourceService,
+    taskKind,
+    closureRef,
+    representation,
+    outputs,
+    execution,
+    validity,
+    uncertainty,
+    validation: {
+      status: 'pass',
+      validationMode: 'cpu-reference-toy-carrier',
+      scientificValidation: false,
+      fullPhysics: false,
+      fullPhysicsValidation: false,
+      ...validation
+    },
     provenance
   };
 }

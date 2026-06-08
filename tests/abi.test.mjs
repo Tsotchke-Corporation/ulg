@@ -7,6 +7,7 @@ import {
   createClosureTableDescriptor,
   createComplex64Vector,
   createProvenanceBlock,
+  createSimulationArtifact,
   createTensorDescriptor,
   createToleranceReport,
   complex64ToPairs
@@ -113,12 +114,32 @@ test('schema sketches validate representative artifacts', () => {
     metrics: { maxAbsError: 0 },
     provenance
   });
+  const simulationArtifact = createSimulationArtifact({
+    artifactId: 'simulation-1',
+    closureRef: {
+      uri: 'artifact://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      artifactHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    },
+    outputs: {
+      deltas: [],
+      invariants: { status: 'pass' }
+    },
+    execution: {
+      backend: 'cpu-reference',
+      dt: 0.002,
+      steps: 1,
+      integrator: 'velocity-verlet'
+    },
+    validity: { status: 'toy-reference-valid' },
+    provenance
+  });
 
   assertValid('compute_service_manifest.schema.json', serviceManifest);
   assertValid('task_capsule.schema.json', taskCapsule);
   assertValid('closure_artifact.schema.json', closureArtifact);
   assertValid('quantum_response_artifact.schema.json', quantumArtifact);
   assertValid('tolerance_report.schema.json', toleranceReport);
+  assertValid('simulation_artifact.schema.json', simulationArtifact);
 });
 
 function assertValid(schemaFile, value) {

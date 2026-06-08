@@ -1,4 +1,5 @@
 export const ULG_ARTIFACT_SUMMARY_SCHEMA = 'peercompute.ulg.artifact-summary.v0';
+export const ULG_SIMULATION_ARTIFACT_SCHEMA = 'peercompute.ulg.simulation-artifact.v0';
 export const ULG_QUANTUM_RESPONSE_DESCRIPTOR_SCHEMA = 'peercompute.ulg.quantum-response-descriptor.v0';
 export const ULG_QUANTUM_RESPONSE_PARITY_SCHEMA = 'peercompute.ulg.quantum-response-parity.v0';
 export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.magnetar-dipole-ising-calibration.v0';
@@ -129,6 +130,9 @@ const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_STAGES = Object.freeze([
 ]);
 
 function inferArtifactKind(artifact = {}) {
+  if (artifact.schema === ULG_SIMULATION_ARTIFACT_SCHEMA || artifact.sourceService === 'ulg-runtime') {
+    return 'simulation-delta';
+  }
   if (artifact.responseDescriptor || artifact.parity || artifact.calibrationArtifacts) return 'quantum-response';
   if (artifact.closureKind || artifact.closureId) return 'closure';
   return artifact.taskKind || 'artifact';
@@ -338,6 +342,10 @@ export function summarizeUlgArtifact(artifact = {}) {
     : null;
   const parity = artifact.parity && typeof artifact.parity === 'object' ? artifact.parity : null;
   const execution = artifact.execution && typeof artifact.execution === 'object' ? artifact.execution : {};
+  const simulationInvariantReport = objectOrNull(outputs.invariants);
+  const simulationInvariantMetrics = objectOrNull(simulationInvariantReport?.metrics);
+  const simulationDeltas = Array.isArray(outputs.deltas) ? outputs.deltas : [];
+  const simulationFinalState = objectOrNull(outputs.finalState);
   const module = execution.module && typeof execution.module === 'object' ? execution.module : {};
   const executionImports = Array.isArray(execution.imports) ? execution.imports : [];
   const executionExports = Array.isArray(execution.exports) ? execution.exports : [];
@@ -1155,6 +1163,27 @@ export function summarizeUlgArtifact(artifact = {}) {
     artifactId: artifact.artifactId || artifact.closureId || null,
     sourceService: artifact.sourceService || null,
     validationStatus: artifact.validation?.status || null,
+    simulationSchema: artifact.schema === ULG_SIMULATION_ARTIFACT_SCHEMA ? artifact.schema : null,
+    simulationRepresentation: artifact.representation || null,
+    simulationTaskKind: artifact.taskKind || null,
+    simulationClosureRef: artifact.closureRef?.uri || artifact.closureRef?.artifactHash || null,
+    simulationBackend: execution.backend || null,
+    simulationIntegrator: execution.integrator || null,
+    simulationStepCount: finiteNumberOrNull(execution.steps),
+    simulationDt: finiteNumberOrNull(execution.dt),
+    simulationDeltaCount: simulationDeltas.length,
+    simulationFinalStep: finiteNumberOrNull(simulationFinalState?.step),
+    simulationInvariantStatus: simulationInvariantReport?.status || null,
+    simulationMaxEnergyDriftAbs: finiteNumberOrNull(simulationInvariantMetrics?.maxEnergyDriftAbs),
+    simulationMaxMomentumDriftAbs: finiteNumberOrNull(simulationInvariantMetrics?.maxMomentumDriftAbs),
+    simulationScientificValidation:
+      typeof artifact.validation?.scientificValidation === 'boolean'
+        ? artifact.validation.scientificValidation
+        : null,
+    simulationFullPhysicsValidation:
+      typeof artifact.validation?.fullPhysicsValidation === 'boolean'
+        ? artifact.validation.fullPhysicsValidation
+        : null,
     closureKind: artifact.closureKind || null,
     closureModuleUrl: module.url || null,
     closureModuleSha256: module.sha256 || null,

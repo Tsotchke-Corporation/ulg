@@ -117,6 +117,14 @@ physics work:
   operations flow through `operationResults[]` without new one-off UI fields.
 - [x] Add direct Multiscale launch status detail for scenario/readiness acks
   while preserving the `handoff ready / blockers 0` compatibility prefix.
+- [x] Add Phase 1 ULG carrier-runtime foundations: `ClosureRegistry`,
+  table-interpolation closure handles, CPU-reference velocity-Verlet carrier
+  runtime, invariant drift reports, `peercompute.ulg.simulation-artifact.v0`,
+  and a first-class `ulg-runtime` service contract.
+- [x] Add `window.__ulgDemo.runOscillatorDemo()` and a retro UI control that
+  stores a toy harmonic closure, resolves it from the cache, submits a
+  supervised `simulation.step` task, and emits a toy/reference simulation
+  artifact without changing the magnetar Eshkol/MoonLab handoff.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

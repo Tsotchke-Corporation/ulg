@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ULG Simulation Artifact v0.5",
+  "type": "object",
+  "required": ["schema", "artifactId", "sourceService", "taskKind", "closureRef", "representation", "outputs", "execution", "validity", "validation", "provenance"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "peercompute.ulg.simulation-artifact.v0" },
+    "artifactId": { "type": "string", "minLength": 1 },
+    "sourceService": { "const": "ulg-runtime" },
+    "taskKind": { "type": "string", "minLength": 1 },
+    "closureRef": { "type": "object" },
+    "representation": { "type": "string", "minLength": 1 },
+    "outputs": { "type": "object" },
+    "execution": { "type": "object" },
+    "validity": { "type": "object" },
+    "uncertainty": { "type": "object" },
+    "validation": { "type": "object" },
+    "provenance": { "type": "object" }
+  }
+}

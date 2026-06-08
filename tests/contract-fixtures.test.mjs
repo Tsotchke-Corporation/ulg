@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import {
+  ULG_SERVICE_IDS,
   ULG_TASK_KINDS,
   createUlgServiceManifest,
   createUlgTaskCapsule,
@@ -73,6 +74,39 @@ test('task capsule builder emits schema-compatible default service capsules', ()
 
   assert.equal(capsule.taskKind, ULG_TASK_KINDS.quantumResponse);
   assert.deepEqual(capsule.outputs, [{ artifactKind: 'quantum-response' }]);
+  assertValid('task_capsule.schema.json', capsule);
+});
+
+test('ULG runtime service contract emits simulation-step capsules', () => {
+  const runtimeContract = getUlgServiceContract(ULG_SERVICE_IDS.ulgRuntime);
+  assert.deepEqual(runtimeContract.taskKinds, [
+    ULG_TASK_KINDS.simulationStep,
+    ULG_TASK_KINDS.closureConsume
+  ]);
+  assert.deepEqual(runtimeContract.capabilities, [
+    'ulg.simulation.step',
+    'ulg.closure.consume',
+    'ulg.invariants.reference'
+  ]);
+  assert.equal(runtimeContract.outputArtifactKind, 'simulation-delta');
+
+  const capsule = createUlgTaskCapsule({
+    taskId: 'contract-ulg-runtime-task',
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    input: {
+      closureRef: { uri: 'artifact://sha256:fixture' },
+      steps: 4
+    },
+    method: {
+      serviceId: ULG_SERVICE_IDS.ulgRuntime,
+      taskKind: ULG_TASK_KINDS.simulationStep,
+      backend: 'cpu-reference'
+    }
+  });
+  assert.equal(capsule.taskKind, ULG_TASK_KINDS.simulationStep);
+  assert.deepEqual(capsule.outputs, [{ artifactKind: 'simulation-delta' }]);
+  assert.equal(capsule.input.steps, 4);
+  assert.equal(capsule.method.backend, 'cpu-reference');
   assertValid('task_capsule.schema.json', capsule);
 });
 

@@ -9,17 +9,21 @@ export const ULG_SERVICE_PROTOCOL_VERSION = '0.5';
 
 export const ULG_SERVICE_IDS = Object.freeze({
   eshkol: 'eshkol',
-  moonlab: 'moonlab'
+  moonlab: 'moonlab',
+  ulgRuntime: 'ulg-runtime'
 });
 
 export const ULG_TASK_KINDS = Object.freeze({
   closureDerive: 'eshkol.closure.derive',
-  quantumResponse: 'moonlab.quantum.response'
+  quantumResponse: 'moonlab.quantum.response',
+  simulationStep: 'simulation.step',
+  closureConsume: 'closure.consume'
 });
 
 export const ULG_ARTIFACT_KINDS = Object.freeze({
   closure: 'closure',
-  quantumResponse: 'quantum-response'
+  quantumResponse: 'quantum-response',
+  simulationDelta: 'simulation-delta'
 });
 
 export const ULG_SERVICE_ASSET_ROOT = '/service-assets';
@@ -37,12 +41,18 @@ export const ULG_SERVICE_CAPABILITIES = deepFreeze({
     'ulg.quantum.response',
     'ulg.parity.cpu_webgpu',
     'ulg.tensor.contract'
+  ],
+  [ULG_SERVICE_IDS.ulgRuntime]: [
+    'ulg.simulation.step',
+    'ulg.closure.consume',
+    'ulg.invariants.reference'
   ]
 });
 
 export const ULG_SERVICE_TASK_KINDS = deepFreeze({
   [ULG_SERVICE_IDS.eshkol]: [ULG_TASK_KINDS.closureDerive],
-  [ULG_SERVICE_IDS.moonlab]: [ULG_TASK_KINDS.quantumResponse]
+  [ULG_SERVICE_IDS.moonlab]: [ULG_TASK_KINDS.quantumResponse],
+  [ULG_SERVICE_IDS.ulgRuntime]: [ULG_TASK_KINDS.simulationStep, ULG_TASK_KINDS.closureConsume]
 });
 
 const SERVICE_CONTRACTS = deepFreeze({
@@ -57,6 +67,12 @@ const SERVICE_CONTRACTS = deepFreeze({
     taskKinds: ULG_SERVICE_TASK_KINDS[ULG_SERVICE_IDS.moonlab],
     toleranceProfile: 'quantum-response-demo',
     outputArtifactKind: ULG_ARTIFACT_KINDS.quantumResponse
+  },
+  [ULG_SERVICE_IDS.ulgRuntime]: {
+    capabilities: ULG_SERVICE_CAPABILITIES[ULG_SERVICE_IDS.ulgRuntime],
+    taskKinds: ULG_SERVICE_TASK_KINDS[ULG_SERVICE_IDS.ulgRuntime],
+    toleranceProfile: 'toy-carrier-reference',
+    outputArtifactKind: ULG_ARTIFACT_KINDS.simulationDelta
   }
 });
 
@@ -297,7 +313,9 @@ export function createUlgTaskCapsule({
     inputs,
     outputs: outputs ?? [{ artifactKind: contract.outputArtifactKind }],
     unitsHash: unitsHash ?? hashPayload(units),
+    input,
     inputHash: resolvedInputHash,
+    method: resolvedMethod,
     methodHash: resolvedMethodHash,
     deterministicSeed,
     resources: {

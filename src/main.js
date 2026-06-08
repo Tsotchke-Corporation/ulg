@@ -26,6 +26,7 @@ app.innerHTML = `
           <button id="launch-magnetar" type="button">Launch Magnetar</button>
           <button id="copy-handoff" type="button">Copy Handoff</button>
           <button id="run-smoke" type="button">Run Smoke</button>
+          <button id="run-oscillator" type="button">Run Oscillator</button>
           <button id="cancel-smoke" type="button">Cancel</button>
         </div>
       </div>
@@ -62,6 +63,7 @@ const launchMagnetarButton = document.querySelector('#launch-magnetar');
 const copyHandoffButton = document.querySelector('#copy-handoff');
 const handoffStatus = document.querySelector('#handoff-status');
 const runButton = document.querySelector('#run-smoke');
+const oscillatorButton = document.querySelector('#run-oscillator');
 const cancelButton = document.querySelector('#cancel-smoke');
 const gpuStatus = document.querySelector('#gpu-status');
 const capabilitiesEl = document.querySelector('#capabilities');
@@ -87,6 +89,19 @@ runButton.addEventListener('click', () => {
 });
 cancelButton.addEventListener('click', () => {
   runtime.cancelActive();
+});
+oscillatorButton.addEventListener('click', async () => {
+  oscillatorButton.disabled = true;
+  handoffStatus.textContent = 'oscillator running';
+  try {
+    const result = await runtime.runOscillatorDemo();
+    const summary = await runtime.artifactCache.getSummary(result.artifactRef);
+    handoffStatus.textContent = `oscillator ${summary.simulationInvariantStatus} / ${summary.simulationDeltaCount} deltas`;
+  } catch (error) {
+    handoffStatus.textContent = `oscillator failed: ${String(error?.message || error)}`;
+  } finally {
+    oscillatorButton.disabled = false;
+  }
 });
 launchMagnetarButton.addEventListener('click', async () => {
   launchMagnetarButton.disabled = true;
@@ -131,7 +146,7 @@ async function createReadyPeerComputeHandoff() {
     handoffStatus.textContent = 'handoff waiting for services';
     await runtime.runSmoke();
   }
-  return runtime.createPeerComputeHandoff();
+  return runtime.createPeerComputeHandoff({ sourceServices: ['eshkol', 'moonlab'] });
 }
 
 function postPeerComputeHandoffToMultiscale(targetWindow, handoff) {
@@ -281,6 +296,14 @@ function renderArtifactSummaryLine(summary) {
   }
   const parts = [];
   if (summary.validationStatus) parts.push(`validation:${summary.validationStatus}`);
+  if (summary.simulationSchema) {
+    parts.push(`simulation:${summary.simulationRepresentation || 'runtime'}`);
+    parts.push(`backend:${summary.simulationBackend || 'unknown'}`);
+    parts.push(`steps:${summary.simulationStepCount ?? summary.simulationDeltaCount}`);
+    if (summary.simulationInvariantStatus) {
+      parts.push(`invariants:${summary.simulationInvariantStatus}`);
+    }
+  }
   if (summary.parityStatus) parts.push(`parity:${summary.parityStatus}`);
   if (summary.moonlabWebGpuParityScopeReady) {
     parts.push(`webgpu:${summary.moonlabWebGpuParityScopeBackendAvailable ? 'backend' : 'no-backend'}`);

@@ -15,6 +15,7 @@ This repo currently implements the first executable slice:
 - a supervised MoonLab WASM Bell-state probe with deterministic response/parity metadata and a magnetar dipole Ising calibration sub-artifact when copied core artifacts are available;
 - a staged Eshkol magnetar closure descriptor fixture with explicit tensor-runtime and production-handler boundary metadata for Demo A handoff wiring;
 - a compact MoonLab WebGPU complex64 parity handoff with reduced-scope browser evidence for `hadamard`, `pauli_x`, `pauli_z`, `cnot`, and `compute_probabilities` without claiming full MoonLab runtime or full magnetar physics validation;
+- a Phase 1 ULG carrier runtime with a `ClosureRegistry`, table-interpolation closure handle, CPU-reference two-particle oscillator, invariant drift report, `ulg-runtime` service contract, and simulation artifacts that remain explicitly toy/reference scoped;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -35,6 +36,12 @@ The Vite demo exports `window.__ulgDemo` for smoke tests and browser inspection.
 `window.__ulgDemo.createPeerComputeHandoff()` exports the current artifact cache
 as `peercompute.ulg.demo-handoff.v0` packets for PeerCompute/Multiscale
 ingestion.
+`window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
+the `ClosureRegistry`, resolves it in range, submits a supervised
+`simulation.step` task to `ulg-runtime`, and emits a
+`peercompute.ulg.simulation-artifact.v0` CPU-reference carrier delta artifact.
+This is a core-runtime/provenance slice, not calibrated SPH or full-physics
+validation.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

@@ -1,17 +1,23 @@
 import {
   createEshkolClosureBundleAssetSpec,
   createMoonLabServiceAssetSpec,
+  ULG_SERVICE_IDS,
+  ULG_TASK_KINDS,
   createUlgServiceManifest,
   createUlgTaskCapsule
 } from '../../ulg-gpu-abi/src/serviceContract.js';
+import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
 import { ArtifactCache } from './ArtifactCache.js';
 import { ChildWorkerLeaseManager } from './ChildWorkerLeaseManager.js';
+import { ClosureRegistry } from './ClosureRegistry.js';
 import { ComputeServiceRegistry } from './ComputeServiceRegistry.js';
 import { GpuBroker } from './GpuBroker.js';
 import { WorkerSupervisor } from './WorkerSupervisor.js';
+import { createDefaultCarrierState } from './carrierRuntime.js';
 import { createId } from './ids.js';
 
 const serviceWorkerModule = new URL('../services/dummyService.worker.js', import.meta.url).href;
+const ulgRuntimeWorkerModule = new URL('../services/ulgRuntime.worker.js', import.meta.url).href;
 const childWorkerModule = new URL('../services/dummyChild.worker.js', import.meta.url).href;
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolSmokeBundleName = 'hello';
@@ -21,6 +27,7 @@ export async function createDemoRuntime() {
   const leaseManager = new ChildWorkerLeaseManager();
   const gpuBroker = new GpuBroker();
   const artifactCache = new ArtifactCache();
+  const closureRegistry = new ClosureRegistry({ artifactCache });
   const supervisor = new WorkerSupervisor({ registry, leaseManager, gpuBroker, artifactCache });
   const listeners = new Set();
 
@@ -50,6 +57,24 @@ export async function createDemoRuntime() {
       toleranceProfile: 'quantum-response-demo'
     }
   }));
+  await registry.register(createUlgServiceManifest({
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    runtime: 'js',
+    workerModule: ulgRuntimeWorkerModule,
+    childWorkers: {
+      allowed: false,
+      maxChildren: 0,
+      allowedModules: []
+    },
+    resources: {
+      maxCpuWorkers: 1,
+      maxGpuMemoryBytes: 8 * 1024 * 1024
+    },
+    validation: {
+      toleranceProfile: 'toy-carrier-reference',
+      parityModes: ['cpu-reference']
+    }
+  }));
   await supervisor.spawnService('eshkol');
   await supervisor.spawnService('moonlab');
 
@@ -59,6 +84,7 @@ export async function createDemoRuntime() {
   const api = {
     registry,
     artifactCache,
+    closureRegistry,
     supervisor,
     get telemetry() {
       return supervisor.getTreeTelemetry();
@@ -78,6 +104,44 @@ export async function createDemoRuntime() {
         api.cancelActive();
       }, 4200);
       return Promise.allSettled(taskPromises);
+    },
+    async runOscillatorDemo(options = {}) {
+      if (autoCancelTimer) {
+        clearTimeout(autoCancelTimer);
+        autoCancelTimer = null;
+      }
+      const closureArtifact = options.closureArtifact || createToyOscillatorClosureArtifact(options);
+      const closureRef = await closureRegistry.store(closureArtifact);
+      const initialState = options.initialState || createDefaultCarrierState({
+        separation: options.separation ?? 1.2,
+        velocity: options.velocity ?? 0,
+        mass: options.mass ?? 1
+      });
+      const resolved = await closureRegistry.resolve({
+        closureKind: closureArtifact.closureKind,
+        inputHash: closureArtifact.inputHash || closureArtifact.provenance?.inputHash,
+        methodHash: closureArtifact.methodHash || closureArtifact.provenance?.methodHash,
+        point: { r: Math.abs(initialState.bodies[1].x - initialState.bodies[0].x) }
+      });
+      if (resolved.validity !== 'in-range') {
+        await closureRegistry.invalidate({ ref: closureRef, reason: resolved.reason || 'closure-out-of-range' });
+        throw new Error(`Oscillator closure resolve failed: ${resolved.validity}`);
+      }
+      const task = createOscillatorTask({
+        closureRef: resolved.ref,
+        closureArtifact: resolved.closure,
+        closureValidity: resolved.validity,
+        initialState,
+        steps: options.steps ?? 64,
+        dt: options.dt ?? 0.002
+      });
+      activeRootTasks = [task];
+      const result = await supervisor.submitTask(task);
+      return {
+        ...result,
+        closureRef: resolved.ref,
+        closureValidity: resolved.validity
+      };
     },
     async cancelActive() {
       if (autoCancelTimer) {
@@ -108,6 +172,121 @@ export async function createDemoRuntime() {
   };
 
   return api;
+}
+
+function createToyOscillatorClosureArtifact({
+  sampleCount = 121,
+  minR = 0.6,
+  maxR = 1.8,
+  restLength = 1,
+  springK = 1,
+  createdAt = new Date().toISOString()
+} = {}) {
+  const input = { closureKind: 'toy-two-particle-oscillator', minR, maxR, restLength, springK };
+  const method = { mode: 'table-interpolation', model: 'harmonic-potential', sampleCount };
+  const inputHash = hashPayload(input);
+  const methodHash = hashPayload(method);
+  const samples = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    const r = minR + (index / (sampleCount - 1)) * (maxR - minR);
+    const displacement = r - restLength;
+    samples.push({
+      r,
+      energy: 0.5 * springK * displacement * displacement,
+      dEdr: springK * displacement
+    });
+  }
+  return {
+    closureId: `toy-oscillator-closure-${sampleCount}`,
+    sourceService: 'ulg-runtime-fixture',
+    closureKind: 'toy-two-particle-oscillator',
+    inputHash,
+    methodHash,
+    inputs: [{ name: 'r', units: 'demo-length' }],
+    outputs: [{ name: 'energy', units: 'demo-energy' }],
+    derivatives: [{ output: 'energy', axis: 'r', name: 'dEdr' }],
+    execution: {
+      mode: 'table-interpolation',
+      table: {
+        axisName: 'r',
+        outputName: 'energy',
+        derivativeName: 'dEdr',
+        samples
+      }
+    },
+    validity: { r: [minR, maxR] },
+    uncertainty: {
+      interpolationError: 0,
+      modelScope: 'toy-harmonic-reference'
+    },
+    validation: {
+      status: 'pass',
+      validationMode: 'analytic-harmonic-table-fixture',
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    },
+    provenance: {
+      sourceService: 'ulg-runtime-fixture',
+      methodHash,
+      inputHash,
+      codeVersion: 'ulg-demo',
+      deterministicSeed: 'toy-oscillator-table',
+      createdAt,
+      notes: [
+        'Phase 1 ULG carrier runtime fixture.',
+        'Table-interpolation closure for a two-particle harmonic oscillator.',
+        'Not a scientific or full-physics validation artifact.'
+      ]
+    }
+  };
+}
+
+function createOscillatorTask({
+  closureRef,
+  closureArtifact,
+  closureValidity,
+  initialState,
+  steps,
+  dt
+}) {
+  const taskId = createId('task-ulg-runtime');
+  return createUlgTaskCapsule({
+    taskId,
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    taskKind: ULG_TASK_KINDS.simulationStep,
+    outputs: [{ artifactKind: 'simulation-delta' }],
+    input: {
+      closureRef,
+      closureArtifact,
+      closureValidity,
+      initialState,
+      steps,
+      dt,
+      toleranceProfile: {
+        name: 'toy-carrier-reference',
+        energyAbs: 1e-3,
+        momentumAbs: 1e-9
+      }
+    },
+    method: {
+      serviceId: ULG_SERVICE_IDS.ulgRuntime,
+      taskKind: ULG_TASK_KINDS.simulationStep,
+      integrator: 'velocity-verlet',
+      backend: 'cpu-reference'
+    },
+    resources: {
+      childWorkers: 0,
+      gpu: 'optional',
+      wasmMemoryBytes: 0,
+      gpuMemoryBytes: 1024 * 1024,
+      priority: 'simulation'
+    },
+    validation: {
+      mode: 'cpu-reference',
+      toleranceProfile: 'toy-carrier-reference'
+    },
+    provenanceNotes: ['ulg-carrier-runtime-phase-1']
+  });
 }
 
 function createPeerComputeHandoffEnvelope(artifacts, extra = {}) {

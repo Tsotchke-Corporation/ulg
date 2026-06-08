@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-06 17:45:00 AKDT
+Updated: 2026-06-08 10:39:17 AKDT
 
 ## Done
 
@@ -12,8 +12,19 @@ Updated: 2026-06-06 17:45:00 AKDT
 - Added PeerCompute-style service registry, child-worker leases, GPU broker,
   artifact cache, worker supervisor, dummy Eshkol/MoonLab service workers, and
   browser telemetry.
+- Added Phase 1 ULG carrier-runtime foundations: `ClosureRegistry`,
+  table-interpolation closure handles, CPU-reference two-particle carrier
+  runtime, invariant drift reports, a `peercompute.ulg.simulation-artifact.v0`
+  schema/builder, and a first-class `ulg-runtime` service contract.
+- Added `window.__ulgDemo.runOscillatorDemo()` and a supervised
+  `src/services/ulgRuntime.worker.js` path that consumes a cached toy closure
+  and emits a simulation artifact while keeping scientific/full-physics flags
+  false.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
+- Verified the carrier-runtime slice with syntax checks, focused
+  ClosureRegistry/carrier/ABI tests, `npm test` (`27/27`), `npm run build`,
+  `npm run test:e2e` (`2/2`), and `npm run status:live -- --bridge`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

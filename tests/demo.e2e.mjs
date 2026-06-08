@@ -1143,6 +1143,49 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   }
 });
 
+test('ULG oscillator demo consumes a cached closure and emits a simulation artifact', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Run Oscillator' })).toBeVisible();
+  await page.waitForFunction(() => typeof window.__ulgDemo?.runOscillatorDemo === 'function');
+  const result = await page.evaluate(async () => {
+    const run = await window.__ulgDemo.runOscillatorDemo({ steps: 32, dt: 0.002 });
+    const artifact = await window.__ulgDemo.artifactCache.get(run.artifactRef);
+    const summary = await window.__ulgDemo.artifactCache.getSummary(run.artifactRef);
+    return {
+      status: run.status,
+      closureValidity: run.closureValidity,
+      artifactRef: run.artifactRef,
+      artifact,
+      summary,
+      closureRegistry: window.__ulgDemo.closureRegistry.list(),
+      services: window.__ulgDemo.telemetry.services.map((service) => service.serviceId)
+    };
+  });
+  expect(result.status).toBe('complete');
+  expect(result.closureValidity).toBe('in-range');
+  expect(result.artifactRef.uri).toMatch(/^artifact:\/\/sha256:[0-9a-f]{64}$/);
+  expect(result.artifact.schema).toBe('peercompute.ulg.simulation-artifact.v0');
+  expect(result.artifact.sourceService).toBe('ulg-runtime');
+  expect(result.artifact.representation).toBe('carrier-toy');
+  expect(result.artifact.execution.backend).toBe('cpu-reference');
+  expect(result.artifact.execution.steps).toBe(32);
+  expect(result.artifact.outputs.deltas.length).toBe(32);
+  expect(result.artifact.outputs.invariants.status).toBe('pass');
+  expect(result.artifact.validation.scientificValidation).toBe(false);
+  expect(result.artifact.validation.fullPhysicsValidation).toBe(false);
+  expect(result.summary.artifactKind).toBe('simulation-delta');
+  expect(result.summary.simulationInvariantStatus).toBe('pass');
+  expect(result.summary.simulationDeltaCount).toBe(32);
+  expect(result.summary.simulationScientificValidation).toBe(false);
+  expect(result.summary.simulationFullPhysicsValidation).toBe(false);
+  expect(result.closureRegistry.some((entry) => (
+    entry.closureKind === 'toy-two-particle-oscillator'
+    && entry.status === 'valid'
+  ))).toBe(true);
+  expect(result.services).toContain('ulg-runtime');
+  await expect(page.getByText(/simulation:carrier-toy/)).toBeVisible();
+});
+
 async function sampledCanvasPixels(page) {
   return page.locator('canvas').evaluate((canvas) => {
     const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');

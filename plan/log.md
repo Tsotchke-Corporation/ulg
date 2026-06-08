@@ -1,5 +1,49 @@
 # ULG Implementation Log
 
+## 2026-06-08 11:42:33 AKDT
+
+Prompt: Continue core carrier work by making the new topology/operator evidence
+visible to handoff consumers.
+
+Actions:
+
+- Extended simulation artifact summaries to read
+  `peercompute.ulg.edge-message-summary.v0` from carrier deltas.
+- Added compact summary fields for edge-message status/count, max net-force
+  residual, max antisymmetric residual, out-of-range count, and false
+  scientific/full-physics flags.
+- Rendered a visible `edge:*` artifact-list marker for simulation artifacts.
+- Extended oscillator e2e coverage to assert delta-level edge summaries,
+  compact summary fields, and visible `edge:pass` output.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `src/main.js`
+- `src/runtime/artifactSummary.js`
+- `tests/demo.e2e.mjs`
+
+Validation so far:
+
+- PASS: syntax checks for artifact summary, UI, and e2e files.
+- PASS:
+  `node --test tests/carrierRuntime.test.mjs tests/edgeMessages.test.mjs tests/observers.test.mjs tests/spatialHash.test.mjs`
+  passed `15/15`.
+- PASS: `npm test` passed `49/49`.
+- PASS: `npm run build` passed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`, including visible `edge:pass`
+  coverage for the oscillator simulation artifact row.
+- PASS: `git diff --check` passed.
+
+Open / blockers:
+
+- This surfaces topology/operator evidence only; it does not claim material
+  properties, EOS phase changes, SPH dynamics, or full-physics validation.
+
 ## 2026-06-08 11:37:46 AKDT
 
 Prompt: Keep advancing core carrier primitives after topology wiring while

@@ -53,6 +53,9 @@ before emitting compact deltas with edge-message conservation summaries. They
 also include `evaluateFieldObservers()` for compact-support scalar field
 observations over the neighbor graph. They do not yet implement a material
 model, EOS phase changes, or an SPH solver.
+Simulation artifact summaries and the live artifact row surface this topology
+operator evidence as `edge:pass` when compact deltas carry valid edge-message
+conservation summaries.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

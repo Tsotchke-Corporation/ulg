@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 11:37:46 AKDT
+Updated: 2026-06-08 11:42:33 AKDT
 
 ## Done
 
@@ -37,6 +37,8 @@ Updated: 2026-06-08 11:37:46 AKDT
 - Added Phase 3A field-observer primitives over neighbor graphs with
   compact-support scalar smoothing summaries and explicit no-SPH/no-material/
   no-phase-change validation scope.
+- Surfaced Phase 3A edge-message conservation summaries through simulation
+  artifact summaries, browser artifact rows, and oscillator e2e coverage.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -53,6 +55,9 @@ Updated: 2026-06-08 11:37:46 AKDT
 - Verified the field-observer primitive slice with syntax checks, focused
   observer/topology tests (`12/12`), `npm test` (`49/49`), `npm run build`,
   `npm run test:e2e` (`2/2`), and `git diff --check`.
+- Verified the edge-summary surface with syntax checks, focused
+  carrier/edge/observer/spatial tests (`15/15`), `npm test` (`49/49`),
+  `npm run build`, `npm run test:e2e` (`2/2`), and `git diff --check`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

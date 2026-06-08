@@ -138,6 +138,9 @@ physics work:
 - [x] Add Phase 3A field-observer primitives over neighbor graphs, with
   compact-support scalar smoothing summaries and explicit no-SPH/no-material/
   no-phase-change validation scope.
+- [x] Surface Phase 3A edge-message conservation summaries through simulation
+  artifact summaries, browser artifact rows, and oscillator e2e coverage so
+  handoff consumers can distinguish topology/operator evidence from raw deltas.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

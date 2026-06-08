@@ -345,6 +345,10 @@ export function summarizeUlgArtifact(artifact = {}) {
   const simulationInvariantReport = objectOrNull(outputs.invariants);
   const simulationInvariantMetrics = objectOrNull(simulationInvariantReport?.metrics);
   const simulationDeltas = Array.isArray(outputs.deltas) ? outputs.deltas : [];
+  const simulationEdgeMessageSummaries = simulationDeltas
+    .map((delta) => objectOrNull(delta?.edgeMessageSummary))
+    .filter(Boolean);
+  const simulationEdgeMessageSummary = simulationEdgeMessageSummaries.at(-1) || null;
   const simulationFinalState = objectOrNull(outputs.finalState);
   const simulationWebGpuStatus = objectOrNull(execution.webgpuStatus);
   const simulationWebGpuParity = objectOrNull(execution.webgpuParity);
@@ -1185,6 +1189,21 @@ export function summarizeUlgArtifact(artifact = {}) {
     simulationInvariantStatus: simulationInvariantReport?.status || null,
     simulationMaxEnergyDriftAbs: finiteNumberOrNull(simulationInvariantMetrics?.maxEnergyDriftAbs),
     simulationMaxMomentumDriftAbs: finiteNumberOrNull(simulationInvariantMetrics?.maxMomentumDriftAbs),
+    simulationEdgeMessageSummarySchema: simulationEdgeMessageSummary?.schema || null,
+    simulationEdgeMessageSummaryStatus: simulationEdgeMessageSummary?.status || null,
+    simulationEdgeMessageSummaryCount: simulationEdgeMessageSummaries.length,
+    simulationEdgeMessageMaxNetForceAbs: finiteNumberOrNull(simulationEdgeMessageSummary?.maxNetForceAbs),
+    simulationEdgeMessageMaxAntisymmetricResidualAbs:
+      finiteNumberOrNull(simulationEdgeMessageSummary?.maxAntisymmetricResidualAbs),
+    simulationEdgeMessageOutOfRangeCount: finiteNumberOrNull(simulationEdgeMessageSummary?.outOfRangeCount),
+    simulationEdgeMessageScientificValidation:
+      typeof simulationEdgeMessageSummary?.scientificValidation === 'boolean'
+        ? simulationEdgeMessageSummary.scientificValidation
+        : null,
+    simulationEdgeMessageFullPhysicsValidation:
+      typeof simulationEdgeMessageSummary?.fullPhysicsValidation === 'boolean'
+        ? simulationEdgeMessageSummary.fullPhysicsValidation
+        : null,
     simulationScientificValidation:
       typeof artifact.validation?.scientificValidation === 'boolean'
         ? artifact.validation.scientificValidation

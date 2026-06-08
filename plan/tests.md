@@ -106,8 +106,10 @@ field-observer primitives.
   queries, closure sampling over graph edges, out-of-range edge reporting,
   antisymmetric pair-force conservation, and parity with the existing two-body
   carrier force convention. The CPU-reference carrier runtime now emits
-  edge-message conservation summaries in compact deltas. These tests preserve
-  explicit false scientific/full-physics flags.
+  edge-message conservation summaries in compact deltas, and the oscillator e2e
+  smoke verifies those summaries are visible in compact artifact telemetry and
+  the live artifact row as `edge:pass`. These tests preserve explicit false
+  scientific/full-physics flags.
 - Phase 3A field-observer coverage verifies compact-support scalar observations
   over deterministic neighbor graphs and warning behavior when no contribution
   reaches a particle. It also verifies supplied graph validation,

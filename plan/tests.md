@@ -149,6 +149,16 @@ field-observer primitives.
   test:e2e` passed `2/2`; and `npm run status:live -- --bridge` preserved the
   default MoonLab/Eshkol two-artifact handoff and Multiscale bridge ack
   `handoff-ready`.
+- Focused oscillator closure-artifact descriptor surface coverage on
+  2026-06-08:
+  syntax checks for `src/runtime/demoRuntime.js` and `tests/demo.e2e.mjs`
+  passed; `node --test tests/abi.test.mjs tests/webgpuCarrierKernel.test.mjs
+  tests/carrierRuntime.test.mjs` passed `14/14`; and `npm run test:e2e -- --grep
+  "ULG oscillator demo"` passed `1/1` while verifying
+  `tableDescriptor.wgslTableDescriptor` and `execution.wgslTableDescriptor`.
+  The follow-up full regression passed `npm test` (`54/54`), `npm run build`,
+  full Playwright e2e (`2/2`), `npm run status:live -- --bridge`, and
+  `git diff --check`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

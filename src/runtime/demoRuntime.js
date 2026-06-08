@@ -6,7 +6,7 @@ import {
   createUlgServiceManifest,
   createUlgTaskCapsule
 } from '../../ulg-gpu-abi/src/serviceContract.js';
-import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
+import { createClosureTableDescriptor, hashPayload } from '../../ulg-gpu-abi/src/index.js';
 import { ArtifactCache } from './ArtifactCache.js';
 import { ChildWorkerLeaseManager } from './ChildWorkerLeaseManager.js';
 import { ClosureRegistry } from './ClosureRegistry.js';
@@ -197,8 +197,16 @@ function createToyOscillatorClosureArtifact({
       dEdr: springK * displacement
     });
   }
-  return {
+  const tableDescriptor = createClosureTableDescriptor({
     closureId: `toy-oscillator-closure-${sampleCount}`,
+    axes: [{ name: 'r', samples: sampleCount, min: minR, max: maxR, units: 'demo-length' }],
+    outputs: [{ name: 'energy', dtype: 'f32', samples: sampleCount, units: 'demo-energy' }],
+    derivativeName: 'dEdr',
+    interpolation: 'linear',
+    validity: { r: [minR, maxR] }
+  });
+  return {
+    closureId: tableDescriptor.closureId,
     sourceService: 'ulg-runtime-fixture',
     closureKind: 'toy-two-particle-oscillator',
     inputHash,
@@ -206,8 +214,11 @@ function createToyOscillatorClosureArtifact({
     inputs: [{ name: 'r', units: 'demo-length' }],
     outputs: [{ name: 'energy', units: 'demo-energy' }],
     derivatives: [{ output: 'energy', axis: 'r', name: 'dEdr' }],
+    tableDescriptor,
     execution: {
       mode: 'table-interpolation',
+      tableDescriptor,
+      wgslTableDescriptor: tableDescriptor.wgslTableDescriptor,
       table: {
         axisName: 'r',
         outputName: 'energy',

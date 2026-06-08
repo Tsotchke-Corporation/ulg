@@ -78,6 +78,10 @@ manifests and task capsules in `ulg-gpu-abi/examples/`.
 `ClosureTableSample` storage-buffer rows, and
 `createClosureTableSampleBuffer()` encodes normalized table samples into the
 same f32x4 row layout consumed by the carrier WGSL path.
+The oscillator closure cached by `runOscillatorDemo()` now carries the same
+descriptor in `tableDescriptor.wgslTableDescriptor` and
+`execution.wgslTableDescriptor`, so the browser cache exposes the table/WGSL
+contract before any production compiler path exists.
 
 ## Service Assets
 

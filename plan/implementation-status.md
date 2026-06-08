@@ -33,6 +33,10 @@ Updated: 2026-06-08 11:42:33 AKDT
   encodes closure samples for the carrier WebGPU path. This is a table-layout
   runtime contract, not a general LLVM-to-WGSL compiler or calibrated material
   validation.
+- Surfaced that descriptor through the oscillator closure artifact cached by
+  `runOscillatorDemo()`, so browser/runtime inspection can verify the
+  `ClosureTableSample` row contract on a concrete closure artifact before any
+  production WGSL compiler path exists.
 - Added Phase 3A carrier topology primitives: normalized particle state,
   deterministic spatial hashes, radius-limited neighbor pairs, and
   closure-sampled edge messages with antisymmetric force conservation summaries.
@@ -78,6 +82,10 @@ Updated: 2026-06-08 11:42:33 AKDT
   ABI/WebGPU/carrier tests (`14/14`), `npm test` (`54/54`), `npm run build`,
   `npm run test:e2e` (`2/2`), `npm run status:live -- --bridge`, and
   `git diff --check`.
+- Verified the oscillator closure-artifact descriptor surface with syntax
+  checks, focused ABI/WebGPU/carrier tests (`14/14`), `npm test` (`54/54`),
+  `npm run build`, full Playwright e2e (`2/2`), `npm run status:live --
+  --bridge`, and `git diff --check`.
 - Verified the edge-summary surface with syntax checks, focused
   carrier/edge/observer/spatial tests (`15/15`), `npm test` (`49/49`),
   `npm run build`, `npm run test:e2e` (`2/2`), and `git diff --check`.

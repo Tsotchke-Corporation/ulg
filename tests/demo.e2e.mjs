@@ -1155,10 +1155,13 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
     });
     const artifact = await window.__ulgDemo.artifactCache.get(run.artifactRef);
     const summary = await window.__ulgDemo.artifactCache.getSummary(run.artifactRef);
+    const closureArtifact = await window.__ulgDemo.artifactCache.get(run.closureRef);
     return {
       status: run.status,
       closureValidity: run.closureValidity,
       artifactRef: run.artifactRef,
+      closureRef: run.closureRef,
+      closureArtifact,
       artifact,
       summary,
       closureRegistry: window.__ulgDemo.closureRegistry.list(),
@@ -1168,6 +1171,25 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.status).toBe('complete');
   expect(result.closureValidity).toBe('in-range');
   expect(result.artifactRef.uri).toMatch(/^artifact:\/\/sha256:[0-9a-f]{64}$/);
+  expect(result.closureRef.uri).toMatch(/^artifact:\/\/sha256:[0-9a-f]{64}$/);
+  expect(result.closureArtifact.tableDescriptor.wgslTableDescriptor.schema).toBe(
+    'peercompute.ulg.closure-table-wgsl-descriptor.v0'
+  );
+  expect(result.closureArtifact.execution.wgslTableDescriptor.status).toBe('declared-table-wgsl-layout');
+  expect(result.closureArtifact.execution.wgslTableDescriptor.sampleStruct).toBe('ClosureTableSample');
+  expect(result.closureArtifact.execution.wgslTableDescriptor.sampleStrideFloats).toBe(4);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.rowLayout).toEqual([
+    'axis:f32',
+    'value:f32',
+    'derivative:f32',
+    'pad0:f32'
+  ]);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.scientificValidation).toBe(false);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.fullPhysicsValidation).toBe(false);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.materialValidation).toBe(false);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.eosValidation).toBe(false);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.sphValidation).toBe(false);
+  expect(result.closureArtifact.execution.wgslTableDescriptor.phaseChangeValidation).toBe(false);
   expect(result.artifact.schema).toBe('peercompute.ulg.simulation-artifact.v0');
   expect(result.artifact.sourceService).toBe('ulg-runtime');
   expect(result.artifact.representation).toBe('carrier-toy');

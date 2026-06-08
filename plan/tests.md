@@ -105,8 +105,9 @@ topology primitives.
   deterministic spatial hashing, duplicate-free and symmetric neighbor-pair
   queries, closure sampling over graph edges, out-of-range edge reporting,
   antisymmetric pair-force conservation, and parity with the existing two-body
-  carrier force convention. These tests preserve explicit false
-  scientific/full-physics flags.
+  carrier force convention. The CPU-reference carrier runtime now emits
+  edge-message conservation summaries in compact deltas. These tests preserve
+  explicit false scientific/full-physics flags.
 - The ABI schema coverage now validates
   `peercompute.ulg.simulation-artifact.v0`, and service-contract tests lock the
   `ulg-runtime` service id, `simulation.step` task kind, capabilities, and
@@ -125,8 +126,8 @@ topology primitives.
   `node --test --test-name-pattern "GPU broker|WorkerSupervisor records gpu-device-lost" tests/orchestration.test.mjs`
   passed `3/3`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
-  `node --test tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/carrierRuntime.test.mjs`
-  passed `10/10`.
+  `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `17/17`.
 
 ## Current Handoff Validation Summary
 

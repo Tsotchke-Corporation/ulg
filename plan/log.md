@@ -22,6 +22,9 @@ Actions:
   neighbor pair determinism, harmonic closure sampling over graph edges,
   out-of-range closure reporting, zero net-force leakage, and parity with the
   existing two-body carrier force convention.
+- Wired `src/runtime/carrierRuntime.js` to use the topology/edge-message
+  primitives for its two-body force path and to include
+  `peercompute.ulg.edge-message-summary.v0` in compact deltas.
 - Updated README and plan/status docs to keep this scoped as first-principles
   topology/operator substrate for future field/material/EOS work, not SPH or
   phase-change validation.
@@ -36,6 +39,7 @@ Files touched:
 - `src/runtime/edgeMessages.js`
 - `src/runtime/particleState.js`
 - `src/runtime/spatialHash.js`
+- `src/runtime/carrierRuntime.js`
 - `tests/carrierRuntime.test.mjs`
 - `tests/edgeMessages.test.mjs`
 - `tests/spatialHash.test.mjs`
@@ -44,8 +48,8 @@ Validation so far:
 
 - PASS: syntax checks for the new runtime and test files.
 - PASS:
-  `node --test tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/carrierRuntime.test.mjs`
-  passed `10/10`.
+  `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `17/17`.
 - PASS: `npm test` passed `44/44`.
 - PASS: `npm run build` passed with the existing large chunk warning.
 - PASS: `npm run test:e2e` passed `2/2`.

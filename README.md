@@ -47,8 +47,9 @@ core-runtime/provenance slice, not calibrated SPH or full-physics validation.
 The runtime also includes standalone Phase 3A topology primitives:
 `normalizeParticleState()`, `buildSpatialHash()`, `queryNeighborPairs()`, and
 `evaluateEdgeMessages()` are deterministic CPU-reference building blocks for
-future field operators. They do not yet implement a material model, EOS phase
-changes, or an SPH solver.
+future field operators, and the two-body carrier force path now consumes them
+before emitting compact deltas with edge-message conservation summaries. They
+do not yet implement a material model, EOS phase changes, or an SPH solver.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

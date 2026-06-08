@@ -1,4 +1,6 @@
 import { computeInvariants, invariantDriftReport } from './invariants.js';
+import { evaluateEdgeMessages } from './edgeMessages.js';
+import { buildNeighborGraph } from './spatialHash.js';
 
 export const ULG_CARRIER_DELTA_SCHEMA = 'peercompute.ulg.carrier-delta.v0';
 
@@ -30,13 +32,28 @@ function forcePair(state, closureHandle) {
   const [left, right] = state.bodies;
   const dx = right.x - left.x;
   const r = Math.abs(dx);
-  const direction = dx >= 0 ? 1 : -1;
-  const sample = closureHandle.sample({ r });
-  const dEdr = sample.derivatives.dEdr;
+  const graph = buildNeighborGraph({
+    cellSize: Math.max(r, 1e-12),
+    radius: Math.max(r + 1e-12, 1e-12),
+    dimensions: 1,
+    bodies: state.bodies
+  });
+  const edgeMessages = evaluateEdgeMessages({ neighborGraph: graph, closureHandle });
+  if (edgeMessages.outOfRangeCount > 0) {
+    throw new RangeError(edgeMessages.outOfRangeEdges[0].reason);
+  }
+  const [message] = edgeMessages.messages;
+  if (!message) {
+    throw new Error('Carrier topology force path produced no edge message');
+  }
   return {
-    forces: [dEdr * direction, -dEdr * direction],
-    sample,
-    separation: r
+    forces: [message.forceOnSource[0], message.forceOnTarget[0]],
+    sample: {
+      value: message.sampledPotentialEnergy,
+      derivatives: { dEdr: message.sampledDerivative }
+    },
+    separation: message.distance,
+    edgeMessageSummary: edgeMessages.summary
   };
 }
 
@@ -107,6 +124,7 @@ export function createCarrierRuntime({
           separation: secondForces.separation,
           sampledPotentialEnergy: secondForces.sample.value,
           sampledDerivative: secondForces.sample.derivatives.dEdr,
+          edgeMessageSummary: secondForces.edgeMessageSummary,
           bodies: next.bodies.map((body, index) => ({
             id: body.id,
             x: body.x,

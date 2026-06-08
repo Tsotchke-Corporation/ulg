@@ -31,6 +31,9 @@ Updated: 2026-06-08 11:27:00 AKDT
   closure-sampled edge messages with antisymmetric force conservation summaries.
   This is first-principles locality/operator substrate for future
   field/material/EOS work, not an SPH demo or phase-change validation.
+- Wired the CPU-reference two-body carrier force path through the Phase 3A
+  topology/edge-message primitives so compact deltas now carry
+  `peercompute.ulg.edge-message-summary.v0` conservation evidence.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -41,7 +44,7 @@ Updated: 2026-06-08 11:27:00 AKDT
   `npm run build`, `npm run test:e2e` (`2/2`),
   `npm run status:live -- --bridge`, and `git diff --check`.
 - Verified the topology primitive slice with syntax checks, focused
-  spatialHash/edgeMessages/carrier parity tests (`10/10`), and `npm test`
+  carrier/spatialHash/edgeMessages/WebGPU parity tests (`17/17`), and `npm test`
   (`44/44`), `npm run build`, `npm run test:e2e` (`2/2`), and
   `git diff --check`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service

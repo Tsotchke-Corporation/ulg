@@ -63,6 +63,11 @@ The same topology pass now emits `fieldClosureSampleSummary` telemetry through
 `closureAxisR` scalar field as an operator descriptor. This is closure-field
 interpolation evidence for future material/EOS operators, not material
 properties, density, SPH dynamics, phase behavior, or scientific validation.
+Those summaries include a `peercompute.ulg.closure-refresh-request.v0`
+decision object. When observed fields leave the declared closure table domain,
+the runtime can recommend `invalidate-and-rerun-closure-derive` through
+`ClosureRegistry.applyRefreshRequest()` without claiming material, EOS, SPH, or
+phase-change validation.
 Simulation artifact summaries and the live artifact row surface this topology
 operator evidence as `edge:pass`, `field:pass`, and `closure-field:pass` when
 compact deltas carry valid edge-message, field-observer, and field-closure

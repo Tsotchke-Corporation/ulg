@@ -131,6 +131,27 @@ export class ClosureRegistry {
     };
   }
 
+  async applyRefreshRequest({ ref, refreshRequest, reason = null } = {}) {
+    const request = refreshRequest?.closureRefreshRequest || refreshRequest;
+    const shouldInvalidate = request?.invalidationRecommended === true
+      || request?.refreshRecommended === true
+      || request?.registryAction === 'invalidate-and-rerun-closure-derive';
+    if (!shouldInvalidate) {
+      const uri = typeof ref === 'string' ? ref : ref?.uri;
+      const record = this.records.get(uri);
+      return {
+        ref: record?.ref || ref || null,
+        status: record?.status || 'unchanged',
+        reason: null,
+        registryAction: request?.registryAction || 'none'
+      };
+    }
+    return this.invalidate({
+      ref,
+      reason: reason || request?.reason || 'closure-refresh-requested'
+    });
+  }
+
   list() {
     return [...this.records.values()].map((record) => ({
       ref: record.ref,

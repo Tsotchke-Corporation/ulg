@@ -1217,6 +1217,9 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.artifact.outputs.deltas[0].fieldObserverSummary.status).toBe('pass');
   expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.schema).toBe('peercompute.ulg.field-closure-sample-summary.v0');
   expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.status).toBe('pass');
+  expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.validityStatus).toBe('in-range');
+  expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.closureRefreshRequest.status).toBe('not-needed');
+  expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.closureRefreshRecommended).toBe(false);
   expect(result.artifact.outputs.invariants.status).toBe('pass');
   expect(result.artifact.validation.scientificValidation).toBe(false);
   expect(result.artifact.validation.fullPhysicsValidation).toBe(false);
@@ -1249,6 +1252,7 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.summary.simulationFieldClosureSampleSummarySchema).toBe('peercompute.ulg.field-closure-sample-summary.v0');
   expect(result.summary.simulationFieldClosureSampleSummaryStatus).toBe('pass');
   expect(result.summary.simulationFieldClosureSampleSummaryCount).toBe(32);
+  expect(result.summary.simulationFieldClosureSampleValidityStatus).toBe('in-range');
   expect(result.summary.simulationFieldClosureSampleFieldName).toBe('closureAxisR');
   expect(result.summary.simulationFieldClosureSampleAxisName).toBe('r');
   expect(result.summary.simulationFieldClosureSampleCount).toBe(2);
@@ -1258,6 +1262,11 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.summary.simulationFieldClosureSampleMaxSampledValue).toBeGreaterThanOrEqual(
     result.summary.simulationFieldClosureSampleMinSampledValue
   );
+  expect(result.summary.simulationFieldClosureSampleRefreshRequestSchema).toBe('peercompute.ulg.closure-refresh-request.v0');
+  expect(result.summary.simulationFieldClosureSampleRefreshRequestStatus).toBe('not-needed');
+  expect(result.summary.simulationFieldClosureSampleRefreshRecommended).toBe(false);
+  expect(result.summary.simulationFieldClosureSampleInvalidationRecommended).toBe(false);
+  expect(result.summary.simulationFieldClosureSampleRefreshRegistryAction).toBe('none');
   expect(result.summary.simulationFieldClosureSampleMaterialValidation).toBe(false);
   expect(result.summary.simulationFieldClosureSampleEosValidation).toBe(false);
   expect(result.summary.simulationFieldClosureSampleSphValidation).toBe(false);

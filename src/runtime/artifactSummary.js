@@ -357,6 +357,8 @@ export function summarizeUlgArtifact(artifact = {}) {
     .map((delta) => objectOrNull(delta?.fieldClosureSampleSummary))
     .filter(Boolean);
   const simulationFieldClosureSampleSummary = simulationFieldClosureSampleSummaries.at(-1) || null;
+  const simulationFieldClosureSampleRefreshRequest =
+    objectOrNull(simulationFieldClosureSampleSummary?.closureRefreshRequest);
   const simulationFinalState = objectOrNull(outputs.finalState);
   const simulationWebGpuStatus = objectOrNull(execution.webgpuStatus);
   const simulationWebGpuParity = objectOrNull(execution.webgpuParity);
@@ -1236,6 +1238,7 @@ export function summarizeUlgArtifact(artifact = {}) {
     simulationFieldClosureSampleSummarySchema: simulationFieldClosureSampleSummary?.schema || null,
     simulationFieldClosureSampleSummaryStatus: simulationFieldClosureSampleSummary?.status || null,
     simulationFieldClosureSampleSummaryCount: simulationFieldClosureSampleSummaries.length,
+    simulationFieldClosureSampleValidityStatus: simulationFieldClosureSampleSummary?.validityStatus || null,
     simulationFieldClosureSampleKind: simulationFieldClosureSampleSummary?.sampleKind || null,
     simulationFieldClosureSampleClosureId: simulationFieldClosureSampleSummary?.closureId || null,
     simulationFieldClosureSampleFieldName: simulationFieldClosureSampleSummary?.fieldName || null,
@@ -1257,6 +1260,36 @@ export function summarizeUlgArtifact(artifact = {}) {
       finiteNumberOrNull(simulationFieldClosureSampleSummary?.maxSampledValue),
     simulationFieldClosureSampleMaxAbsDerivative:
       finiteNumberOrNull(simulationFieldClosureSampleSummary?.maxAbsDerivative),
+    simulationFieldClosureSampleRefreshRequestSchema:
+      simulationFieldClosureSampleRefreshRequest?.schema || null,
+    simulationFieldClosureSampleRefreshRequestStatus:
+      simulationFieldClosureSampleRefreshRequest?.status || null,
+    simulationFieldClosureSampleRefreshRecommended:
+      typeof simulationFieldClosureSampleSummary?.closureRefreshRecommended === 'boolean'
+        ? simulationFieldClosureSampleSummary.closureRefreshRecommended
+        : (
+            typeof simulationFieldClosureSampleRefreshRequest?.refreshRecommended === 'boolean'
+              ? simulationFieldClosureSampleRefreshRequest.refreshRecommended
+              : null
+          ),
+    simulationFieldClosureSampleInvalidationRecommended:
+      typeof simulationFieldClosureSampleSummary?.closureInvalidationRecommended === 'boolean'
+        ? simulationFieldClosureSampleSummary.closureInvalidationRecommended
+        : (
+            typeof simulationFieldClosureSampleRefreshRequest?.invalidationRecommended === 'boolean'
+              ? simulationFieldClosureSampleRefreshRequest.invalidationRecommended
+              : null
+          ),
+    simulationFieldClosureSampleRefreshReason:
+      simulationFieldClosureSampleSummary?.closureRefreshReason || simulationFieldClosureSampleRefreshRequest?.reason || null,
+    simulationFieldClosureSampleRefreshRegistryAction:
+      simulationFieldClosureSampleSummary?.closureRefreshRegistryAction
+        || simulationFieldClosureSampleRefreshRequest?.registryAction
+        || null,
+    simulationFieldClosureSampleMinOutOfRangeInput:
+      finiteNumberOrNull(simulationFieldClosureSampleRefreshRequest?.minOutOfRangeInput),
+    simulationFieldClosureSampleMaxOutOfRangeInput:
+      finiteNumberOrNull(simulationFieldClosureSampleRefreshRequest?.maxOutOfRangeInput),
     simulationFieldClosureSampleScientificValidation:
       typeof simulationFieldClosureSampleSummary?.scientificValidation === 'boolean'
         ? simulationFieldClosureSampleSummary.scientificValidation

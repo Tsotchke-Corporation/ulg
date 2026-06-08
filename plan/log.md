@@ -1,5 +1,46 @@
 # ULG Implementation Log
 
+## 2026-06-08 13:12:47 AKDT
+
+Prompt: Continue core technology work toward first-principles material/EOS/SPH
+support without pivoting to a demo-only SPH implementation.
+
+Actions:
+
+- Added `peercompute.ulg.closure-refresh-request.v0` to field-closure sample
+  summaries so out-of-range observed scalar fields become explicit refresh
+  evidence instead of silent warning text.
+- Added `ClosureRegistry.applyRefreshRequest()` to convert a refresh request
+  into cached-closure invalidation only when the sampler recommends it.
+- Projected compact refresh/invalidation fields through artifact summaries and
+  the visible artifact row, while keeping normal in-range oscillator runs quiet.
+- Carried `fieldClosureSampleSummary` through the WebGPU carrier delta builder
+  so accepted WebGPU deltas expose the same closure-field validity evidence as
+  CPU-reference deltas.
+
+Validation:
+
+- PASS: syntax checks for changed runtime, UI, and test files.
+- PASS:
+  `node --test tests/fieldClosureSamples.test.mjs tests/carrierRuntime.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `16/16`.
+- PASS: `npm test` passed `56/56`.
+- PASS: `npm run build` completed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`.
+- PASS: `npm run status:live -- --bridge` reported the ULG server at
+  `http://100.86.83.35:5173/` and Multiscale bridge ack `handoff-ready`.
+- PASS: `git diff --check`.
+
+Open / blockers:
+
+- This is closure validity and refresh/invalidation plumbing. It does not
+  implement production closure regeneration, material properties, EOS physics,
+  SPH dynamics, phase-change behavior, calibrated scientific runtime, or
+  full-physics validation.
+- PeerCompute still needs a small adapter projection for the new
+  `closure-refresh-request` and closure-table WGSL descriptor fields.
+- No push was attempted.
+
 ## 2026-06-08 13:01:33 AKDT
 
 Prompt: Make the new closure-table WGSL ABI descriptor observable on the live

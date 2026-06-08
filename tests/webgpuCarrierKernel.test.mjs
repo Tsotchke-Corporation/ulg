@@ -79,6 +79,8 @@ test('optional WebGPU carrier path returns CPU reference when WebGPU is not requ
   assert.equal(result.deltas.length, 16);
   assert.equal(result.deltas[0].fieldClosureSampleSummary.schema, 'peercompute.ulg.field-closure-sample-summary.v0');
   assert.equal(result.deltas[0].fieldClosureSampleSummary.status, 'pass');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.validityStatus, 'in-range');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.closureRefreshRecommended, false);
   assert.equal(result.deltas[0].fieldClosureSampleSummary.fullPhysicsValidation, false);
 });
 
@@ -198,6 +200,8 @@ test('optional WebGPU carrier path accepts a parity-passing WebGPU result', asyn
   assert.equal(result.deltas.length, 16);
   assert.equal(result.deltas[0].fieldClosureSampleSummary.schema, 'peercompute.ulg.field-closure-sample-summary.v0');
   assert.equal(result.deltas[0].fieldClosureSampleSummary.status, 'pass');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.validityStatus, 'in-range');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.closureRefreshRecommended, false);
   assert.equal(result.deltas[0].fieldClosureSampleSummary.fullPhysicsValidation, false);
 });
 

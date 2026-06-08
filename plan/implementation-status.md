@@ -62,6 +62,13 @@ Updated: 2026-06-08 11:42:33 AKDT
   including input, sampled-output, and derivative bounds. This is closure-field
   interpolation/operator evidence only, not material properties, EOS, SPH
   dynamics, phase-change validation, or calibrated scientific runtime.
+- Added a closure refresh-request decision object to field-closure sample
+  summaries. Out-of-range observed scalar fields now produce
+  `peercompute.ulg.closure-refresh-request.v0` with an explicit
+  `invalidate-and-rerun-closure-derive` registry action, and
+  `ClosureRegistry.applyRefreshRequest()` can invalidate the cached closure
+  without promoting the evidence to material, EOS, SPH, phase-change, or
+  scientific validation.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -84,6 +91,10 @@ Updated: 2026-06-08 11:42:33 AKDT
   `git diff --check`.
 - Verified the oscillator closure-artifact descriptor surface with syntax
   checks, focused ABI/WebGPU/carrier tests (`14/14`), `npm test` (`54/54`),
+  `npm run build`, full Playwright e2e (`2/2`), `npm run status:live --
+  --bridge`, and `git diff --check`.
+- Verified the closure refresh-request slice with syntax checks and focused
+  field/carrier/WebGPU tests (`16/16`), `npm test` (`56/56`),
   `npm run build`, full Playwright e2e (`2/2`), `npm run status:live --
   --bridge`, and `git diff --check`.
 - Verified the edge-summary surface with syntax checks, focused

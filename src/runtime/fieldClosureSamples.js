@@ -2,6 +2,7 @@ import { ULG_FIELD_OBSERVERS_SCHEMA } from './observers.js';
 
 export const ULG_FIELD_CLOSURE_SAMPLES_SCHEMA = 'peercompute.ulg.field-closure-samples.v0';
 export const ULG_FIELD_CLOSURE_SAMPLE_SUMMARY_SCHEMA = 'peercompute.ulg.field-closure-sample-summary.v0';
+export const ULG_CLOSURE_REFRESH_REQUEST_SCHEMA = 'peercompute.ulg.closure-refresh-request.v0';
 
 function finiteNumber(value, label) {
   const number = Number(value);
@@ -33,6 +34,62 @@ function readDerivative(sample, closureHandle) {
   );
 }
 
+function inputBounds(samples) {
+  const values = samples
+    .map((sample) => finiteNumberOrNull(sample.inputValue))
+    .filter((value) => value != null);
+  return {
+    min: values.length > 0 ? Math.min(...values) : null,
+    max: values.length > 0 ? Math.max(...values) : null
+  };
+}
+
+function validityStatus({ samples, outOfRangeSamples, nullFieldCount }) {
+  if (outOfRangeSamples.length > 0) return 'out-of-range';
+  if (samples.length > 0 && nullFieldCount === 0) return 'in-range';
+  if (samples.length > 0) return 'partial-in-range';
+  return 'unresolved';
+}
+
+function createClosureRefreshRequest({
+  closureHandle,
+  fieldName,
+  axisName,
+  samples,
+  outOfRangeSamples,
+  nullFieldCount
+}) {
+  const outOfRangeBounds = inputBounds(outOfRangeSamples);
+  const refreshRecommended = outOfRangeSamples.length > 0;
+  return {
+    schema: ULG_CLOSURE_REFRESH_REQUEST_SCHEMA,
+    status: refreshRecommended ? 'refresh-recommended' : 'not-needed',
+    reason: refreshRecommended ? 'observed-field-outside-closure-domain' : null,
+    sourceSchema: ULG_FIELD_CLOSURE_SAMPLE_SUMMARY_SCHEMA,
+    sourceKind: 'observed-scalar-field-table-sample-reference',
+    closureId: closureHandle.closureId || null,
+    closureKind: closureHandle.closureKind || null,
+    fieldName,
+    axisName,
+    outputName: closureHandle.outputName || null,
+    observedSampleCount: samples.length + outOfRangeSamples.length + nullFieldCount,
+    inRangeSampleCount: samples.length,
+    outOfRangeCount: outOfRangeSamples.length,
+    nullFieldCount,
+    minOutOfRangeInput: outOfRangeBounds.min,
+    maxOutOfRangeInput: outOfRangeBounds.max,
+    registryAction: refreshRecommended ? 'invalidate-and-rerun-closure-derive' : 'none',
+    invalidationRecommended: refreshRecommended,
+    refreshRecommended,
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false
+  };
+}
+
 function summarizeSamples({
   closureHandle,
   fieldName,
@@ -49,9 +106,18 @@ function summarizeSamples({
   const status = samples.length > 0 && outOfRangeSamples.length === 0 && nullFieldCount === 0
     ? 'pass'
     : 'warn';
+  const refreshRequest = createClosureRefreshRequest({
+    closureHandle,
+    fieldName,
+    axisName,
+    samples,
+    outOfRangeSamples,
+    nullFieldCount
+  });
   return {
     schema: ULG_FIELD_CLOSURE_SAMPLE_SUMMARY_SCHEMA,
     status,
+    validityStatus: validityStatus({ samples, outOfRangeSamples, nullFieldCount }),
     sampleKind: 'observed-scalar-field-table-sample-reference',
     closureId: closureHandle.closureId || null,
     closureKind: closureHandle.closureKind || null,
@@ -68,6 +134,11 @@ function summarizeSamples({
     maxAbsDerivative: derivatives.length > 0
       ? derivatives.reduce((max, value) => Math.max(max, Math.abs(value)), 0)
       : null,
+    closureRefreshRequest: refreshRequest,
+    closureRefreshRecommended: refreshRequest.refreshRecommended,
+    closureInvalidationRecommended: refreshRequest.invalidationRecommended,
+    closureRefreshReason: refreshRequest.reason,
+    closureRefreshRegistryAction: refreshRequest.registryAction,
     scientificValidation: false,
     fullPhysicsValidation: false,
     materialValidation: false,

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
+import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { createClosureHandle } from '../src/runtime/closureHandle.js';
-import { evaluateFieldClosureSamples } from '../src/runtime/fieldClosureSamples.js';
+import {
+  ULG_CLOSURE_REFRESH_REQUEST_SCHEMA,
+  evaluateFieldClosureSamples
+} from '../src/runtime/fieldClosureSamples.js';
 import { evaluateFieldObservers } from '../src/runtime/observers.js';
 import { buildNeighborGraph } from '../src/runtime/spatialHash.js';
 import { hashPayload } from '../ulg-gpu-abi/src/index.js';
@@ -54,6 +59,7 @@ test('field closure samples interpolate closures over observed scalar fields', (
   assert.equal(fieldSamples.schema, 'peercompute.ulg.field-closure-samples.v0');
   assert.equal(fieldSamples.summary.schema, 'peercompute.ulg.field-closure-sample-summary.v0');
   assert.equal(fieldSamples.summary.status, 'pass');
+  assert.equal(fieldSamples.summary.validityStatus, 'in-range');
   assert.equal(fieldSamples.summary.fieldName, 'temperature');
   assert.equal(fieldSamples.summary.axisName, 'temperature');
   assert.equal(fieldSamples.summary.sampleCount, 3);
@@ -62,6 +68,11 @@ test('field closure samples interpolate closures over observed scalar fields', (
   assert.equal(fieldSamples.summary.minSampledValue, 2 / 3);
   assert.equal(fieldSamples.summary.maxSampledValue, 4 / 3);
   assert.equal(fieldSamples.summary.maxAbsDerivative, 1);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.schema, ULG_CLOSURE_REFRESH_REQUEST_SCHEMA);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.status, 'not-needed');
+  assert.equal(fieldSamples.summary.closureRefreshRecommended, false);
+  assert.equal(fieldSamples.summary.closureInvalidationRecommended, false);
+  assert.equal(fieldSamples.summary.closureRefreshRegistryAction, 'none');
   assert.equal(fieldSamples.summary.scientificValidation, false);
   assert.equal(fieldSamples.summary.fullPhysicsValidation, false);
   assert.equal(fieldSamples.summary.materialValidation, false);
@@ -82,11 +93,74 @@ test('field closure samples warn on out-of-range or null observed fields', () =>
   const fieldSamples = evaluateFieldClosureSamples({ fieldObservers, closureHandle });
 
   assert.equal(fieldSamples.summary.status, 'warn');
+  assert.equal(fieldSamples.summary.validityStatus, 'out-of-range');
   assert.equal(fieldSamples.summary.sampleCount, 1);
   assert.equal(fieldSamples.summary.outOfRangeCount, 1);
   assert.match(fieldSamples.outOfRangeSamples[0].reason, /outside table domain/);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.schema, ULG_CLOSURE_REFRESH_REQUEST_SCHEMA);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.status, 'refresh-recommended');
+  assert.equal(fieldSamples.summary.closureRefreshRecommended, true);
+  assert.equal(fieldSamples.summary.closureInvalidationRecommended, true);
+  assert.equal(fieldSamples.summary.closureRefreshReason, 'observed-field-outside-closure-domain');
+  assert.equal(fieldSamples.summary.closureRefreshRegistryAction, 'invalidate-and-rerun-closure-derive');
+  assert.equal(fieldSamples.summary.closureRefreshRequest.minOutOfRangeInput, 3);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.maxOutOfRangeInput, 3);
   assert.equal(fieldSamples.summary.scientificValidation, false);
   assert.equal(fieldSamples.summary.fullPhysicsValidation, false);
+});
+
+test('field closure refresh requests can drive registry invalidation without physics claims', async () => {
+  const closureArtifact = createTemperatureClosure();
+  const closureHandle = createClosureHandle(closureArtifact);
+  const cache = new ArtifactCache();
+  const registry = new ClosureRegistry({ artifactCache: cache });
+  const ref = await registry.store(closureArtifact);
+  const fieldObservers = evaluateFieldObservers({
+    particles: { bodies: [{ id: 'a', x: 0 }, { id: 'b', x: 10 }] },
+    fields: { temperature: [1, 3] },
+    radius: 1,
+    smoothingLength: 1,
+    includeSelf: true
+  });
+  const fieldSamples = evaluateFieldClosureSamples({ fieldObservers, closureHandle });
+
+  assert.equal(fieldSamples.summary.closureInvalidationRecommended, true);
+  const invalidated = await registry.applyRefreshRequest({
+    ref,
+    refreshRequest: fieldSamples.summary
+  });
+  assert.equal(invalidated.status, 'invalidated');
+  assert.equal(invalidated.reason, 'observed-field-outside-closure-domain');
+  assert.equal(registry.list()[0].invalidatedReason, 'observed-field-outside-closure-domain');
+  assert.equal(fieldSamples.summary.closureRefreshRequest.scientificValidation, false);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.materialValidation, false);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.sphValidation, false);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.phaseChangeValidation, false);
+});
+
+test('field closure refresh requests leave registry entries valid when no refresh is needed', async () => {
+  const closureArtifact = createTemperatureClosure();
+  const closureHandle = createClosureHandle(closureArtifact);
+  const cache = new ArtifactCache();
+  const registry = new ClosureRegistry({ artifactCache: cache });
+  const ref = await registry.store(closureArtifact);
+  const fieldObservers = evaluateFieldObservers({
+    particles: { bodies: [{ id: 'a', x: 0 }, { id: 'b', x: 1 }] },
+    fields: { temperature: [1, 1] },
+    radius: 1,
+    smoothingLength: 1,
+    includeSelf: true
+  });
+  const fieldSamples = evaluateFieldClosureSamples({ fieldObservers, closureHandle });
+
+  const unchanged = await registry.applyRefreshRequest({
+    ref,
+    refreshRequest: fieldSamples.summary
+  });
+  assert.equal(fieldSamples.summary.closureRefreshRecommended, false);
+  assert.equal(unchanged.status, 'valid');
+  assert.equal(unchanged.registryAction, 'none');
+  assert.equal(registry.list()[0].status, 'valid');
 });
 
 test('field closure samples warn on null observed fields without sampling them', () => {
@@ -102,11 +176,14 @@ test('field closure samples warn on null observed fields without sampling them',
   const fieldSamples = evaluateFieldClosureSamples({ fieldObservers, closureHandle });
 
   assert.equal(fieldSamples.summary.status, 'warn');
+  assert.equal(fieldSamples.summary.validityStatus, 'unresolved');
   assert.equal(fieldSamples.summary.sampleCount, 0);
   assert.equal(fieldSamples.summary.outOfRangeCount, 0);
   assert.equal(fieldSamples.summary.nullFieldCount, 2);
   assert.equal(fieldSamples.summary.minSampledValue, null);
   assert.equal(fieldSamples.summary.maxSampledValue, null);
+  assert.equal(fieldSamples.summary.closureRefreshRequest.status, 'not-needed');
+  assert.equal(fieldSamples.summary.closureRefreshRecommended, false);
   assert.equal(fieldSamples.summary.scientificValidation, false);
   assert.equal(fieldSamples.summary.fullPhysicsValidation, false);
 });

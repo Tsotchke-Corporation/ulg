@@ -105,6 +105,7 @@ function createDelta({ before, next, closureHandle, dt }) {
     sampledDerivative: topology.sample.derivatives.dEdr,
     edgeMessageSummary: topology.edgeMessageSummary,
     fieldObserverSummary: topology.fieldObserverSummary,
+    fieldClosureSampleSummary: topology.fieldClosureSampleSummary,
     bodies: next.bodies.map((body, index) => ({
       id: body.id,
       x: body.x,

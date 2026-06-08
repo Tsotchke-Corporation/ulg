@@ -159,6 +159,17 @@ field-observer primitives.
   The follow-up full regression passed `npm test` (`54/54`), `npm run build`,
   full Playwright e2e (`2/2`), `npm run status:live -- --bridge`, and
   `git diff --check`.
+- Focused closure refresh-request coverage on 2026-06-08:
+  syntax checks for `src/runtime/fieldClosureSamples.js`,
+  `src/runtime/ClosureRegistry.js`, `src/runtime/artifactSummary.js`,
+  `src/runtime/webgpuCarrierKernel.js`, `src/main.js`, and related tests passed;
+  `node --test tests/fieldClosureSamples.test.mjs tests/carrierRuntime.test.mjs
+  tests/webgpuCarrierKernel.test.mjs` passed `16/16`, including out-of-range
+  field sampling, `ClosureRegistry.applyRefreshRequest()` invalidation, in-range
+  no-op preservation, compact artifact summary fields, and CPU/WebGPU delta
+  contract parity. The follow-up full regression passed `npm test` (`56/56`),
+  `npm run build`, full Playwright e2e (`2/2`), `npm run status:live --
+  --bridge`, and `git diff --check`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

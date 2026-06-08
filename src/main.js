@@ -318,6 +318,9 @@ function renderArtifactSummaryLine(summary) {
     if (summary.simulationFieldClosureSampleSummaryStatus) {
       parts.push(`closure-field:${summary.simulationFieldClosureSampleSummaryStatus}`);
     }
+    if (summary.simulationFieldClosureSampleRefreshRecommended === true) {
+      parts.push(`closure-refresh:${summary.simulationFieldClosureSampleRefreshRegistryAction || 'recommended'}`);
+    }
   }
   if (summary.parityStatus) parts.push(`parity:${summary.parityStatus}`);
   if (summary.moonlabWebGpuParityScopeReady) {

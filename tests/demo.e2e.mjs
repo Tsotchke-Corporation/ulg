@@ -1148,7 +1148,11 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   await expect(page.getByRole('button', { name: 'Run Oscillator' })).toBeVisible();
   await page.waitForFunction(() => typeof window.__ulgDemo?.runOscillatorDemo === 'function');
   const result = await page.evaluate(async () => {
-    const run = await window.__ulgDemo.runOscillatorDemo({ steps: 32, dt: 0.002 });
+    const run = await window.__ulgDemo.runOscillatorDemo({
+      steps: 32,
+      dt: 0.002,
+      backendPreference: ['webgpu', 'cpu-reference']
+    });
     const artifact = await window.__ulgDemo.artifactCache.get(run.artifactRef);
     const summary = await window.__ulgDemo.artifactCache.getSummary(run.artifactRef);
     return {
@@ -1167,15 +1171,36 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.artifact.schema).toBe('peercompute.ulg.simulation-artifact.v0');
   expect(result.artifact.sourceService).toBe('ulg-runtime');
   expect(result.artifact.representation).toBe('carrier-toy');
-  expect(result.artifact.execution.backend).toBe('cpu-reference');
+  expect(['cpu-reference', 'webgpu']).toContain(result.artifact.execution.backend);
+  expect(result.artifact.execution.webgpuStatus.status).not.toBe('not-requested');
   expect(result.artifact.execution.steps).toBe(32);
+  if (result.artifact.execution.backend === 'webgpu') {
+    expect(result.artifact.execution.webgpuStatus.status).toBe('webgpu-executed');
+    expect(result.artifact.execution.webgpuParity.schema).toBe('peercompute.ulg.carrier-webgpu-parity.v0');
+    expect(result.artifact.execution.webgpuParity.status).toBe('pass');
+  } else {
+    expect([
+      'blocked-webgpu-unavailable',
+      'webgpu-device-lost-fallback',
+      'webgpu-error-fallback',
+      'webgpu-parity-failed'
+    ]).toContain(
+      result.artifact.execution.webgpuStatus.status
+    );
+  }
   expect(result.artifact.outputs.deltas.length).toBe(32);
   expect(result.artifact.outputs.invariants.status).toBe('pass');
   expect(result.artifact.validation.scientificValidation).toBe(false);
   expect(result.artifact.validation.fullPhysicsValidation).toBe(false);
   expect(result.summary.artifactKind).toBe('simulation-delta');
+  expect(result.summary.simulationBackend).toBe(result.artifact.execution.backend);
+  expect(result.summary.simulationWebGpuStatus).toBe(result.artifact.execution.webgpuStatus.status);
   expect(result.summary.simulationInvariantStatus).toBe('pass');
   expect(result.summary.simulationDeltaCount).toBe(32);
+  if (result.artifact.execution.webgpuParity) {
+    expect(result.summary.simulationWebGpuParitySchema).toBe('peercompute.ulg.carrier-webgpu-parity.v0');
+    expect(result.summary.simulationWebGpuParityStatus).toBe(result.artifact.execution.webgpuParity.status);
+  }
   expect(result.summary.simulationScientificValidation).toBe(false);
   expect(result.summary.simulationFullPhysicsValidation).toBe(false);
   expect(result.closureRegistry.some((entry) => (
@@ -1184,6 +1209,10 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   ))).toBe(true);
   expect(result.services).toContain('ulg-runtime');
   await expect(page.getByText(/simulation:carrier-toy/)).toBeVisible();
+  await expect(page.getByText(new RegExp(`sim-gpu:${result.summary.simulationWebGpuStatus}`))).toBeVisible();
+  if (result.summary.simulationWebGpuParityStatus) {
+    await expect(page.getByText(new RegExp(`sim-parity:${result.summary.simulationWebGpuParityStatus}`))).toBeVisible();
+  }
 });
 
 async function sampledCanvasPixels(page) {

@@ -90,23 +90,43 @@ test('ULG runtime service contract emits simulation-step capsules', () => {
   ]);
   assert.equal(runtimeContract.outputArtifactKind, 'simulation-delta');
 
+  const manifest = createUlgServiceManifest({
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    runtime: 'js',
+    workerModule: '/src/services/ulgRuntime.worker.js',
+    childWorkers: { allowed: false, maxChildren: 0, allowedModules: [] },
+    validation: {
+      toleranceProfile: 'toy-carrier-reference',
+      parityModes: ['cpu-reference', 'cpu-webgpu']
+    }
+  });
+  assert.deepEqual(manifest.validation.parityModes, ['cpu-reference', 'cpu-webgpu']);
+  assertValid('compute_service_manifest.schema.json', manifest);
+
   const capsule = createUlgTaskCapsule({
     taskId: 'contract-ulg-runtime-task',
     serviceId: ULG_SERVICE_IDS.ulgRuntime,
     input: {
       closureRef: { uri: 'artifact://sha256:fixture' },
-      steps: 4
+      steps: 4,
+      backendPreference: ['webgpu', 'cpu-reference']
     },
     method: {
       serviceId: ULG_SERVICE_IDS.ulgRuntime,
       taskKind: ULG_TASK_KINDS.simulationStep,
-      backend: 'cpu-reference'
-    }
+      backend: 'webgpu-or-cpu-reference',
+      backendPreference: ['webgpu', 'cpu-reference']
+    },
+    resources: { gpu: 'optional', gpuMemoryBytes: 1024 * 1024 },
+    validation: { mode: 'cpu-webgpu', toleranceProfile: 'toy-carrier-reference' }
   });
   assert.equal(capsule.taskKind, ULG_TASK_KINDS.simulationStep);
   assert.deepEqual(capsule.outputs, [{ artifactKind: 'simulation-delta' }]);
   assert.equal(capsule.input.steps, 4);
-  assert.equal(capsule.method.backend, 'cpu-reference');
+  assert.deepEqual(capsule.input.backendPreference, ['webgpu', 'cpu-reference']);
+  assert.equal(capsule.method.backend, 'webgpu-or-cpu-reference');
+  assert.deepEqual(capsule.method.backendPreference, ['webgpu', 'cpu-reference']);
+  assert.equal(capsule.validation.mode, 'cpu-webgpu');
   assertValid('task_capsule.schema.json', capsule);
 });
 

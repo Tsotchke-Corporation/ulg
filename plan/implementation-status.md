@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 10:39:17 AKDT
+Updated: 2026-06-08 11:17:15 AKDT
 
 ## Done
 
@@ -20,11 +20,21 @@ Updated: 2026-06-08 10:39:17 AKDT
   `src/services/ulgRuntime.worker.js` path that consumes a cached toy closure
   and emits a simulation artifact while keeping scientific/full-physics flags
   false.
+- Added Phase 2 optional WebGPU carrier-runtime plumbing: a WGSL toy
+  two-particle carrier step, WebGPU execution path guarded by CPU-reference
+  parity, worker-local device-loss fallback reporting, GPU broker device-loss
+  lease marking, and compact simulation WebGPU summary/UI fields. This remains
+  a toy carrier runtime and does not claim SPH/material/full-physics
+  validation.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
   ClosureRegistry/carrier/ABI tests, `npm test` (`27/27`), `npm run build`,
   `npm run test:e2e` (`2/2`), and `npm run status:live -- --bridge`.
+- Verified the WebGPU carrier-runtime slice with syntax checks, focused
+  WebGPU/broker/supervisor/carrier/ABI tests, `npm test` (`36/36`),
+  `npm run build`, `npm run test:e2e` (`2/2`),
+  `npm run status:live -- --bridge`, and `git diff --check`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

@@ -72,7 +72,7 @@ export async function createDemoRuntime() {
     },
     validation: {
       toleranceProfile: 'toy-carrier-reference',
-      parityModes: ['cpu-reference']
+      parityModes: ['cpu-reference', 'cpu-webgpu']
     }
   }));
   await supervisor.spawnService('eshkol');
@@ -133,7 +133,8 @@ export async function createDemoRuntime() {
         closureValidity: resolved.validity,
         initialState,
         steps: options.steps ?? 64,
-        dt: options.dt ?? 0.002
+        dt: options.dt ?? 0.002,
+        backendPreference: normalizeBackendPreference(options.backendPreference)
       });
       activeRootTasks = [task];
       const result = await supervisor.submitTask(task);
@@ -247,9 +248,11 @@ function createOscillatorTask({
   closureValidity,
   initialState,
   steps,
-  dt
+  dt,
+  backendPreference
 }) {
   const taskId = createId('task-ulg-runtime');
+  const requestsWebGpu = backendPreference.includes('webgpu');
   return createUlgTaskCapsule({
     taskId,
     serviceId: ULG_SERVICE_IDS.ulgRuntime,
@@ -262,6 +265,7 @@ function createOscillatorTask({
       initialState,
       steps,
       dt,
+      backendPreference,
       toleranceProfile: {
         name: 'toy-carrier-reference',
         energyAbs: 1e-3,
@@ -272,7 +276,8 @@ function createOscillatorTask({
       serviceId: ULG_SERVICE_IDS.ulgRuntime,
       taskKind: ULG_TASK_KINDS.simulationStep,
       integrator: 'velocity-verlet',
-      backend: 'cpu-reference'
+      backend: requestsWebGpu ? 'webgpu-or-cpu-reference' : 'cpu-reference',
+      backendPreference
     },
     resources: {
       childWorkers: 0,
@@ -282,11 +287,28 @@ function createOscillatorTask({
       priority: 'simulation'
     },
     validation: {
-      mode: 'cpu-reference',
+      mode: requestsWebGpu ? 'cpu-webgpu' : 'cpu-reference',
       toleranceProfile: 'toy-carrier-reference'
     },
-    provenanceNotes: ['ulg-carrier-runtime-phase-1']
+    provenanceNotes: [
+      'ulg-carrier-runtime-phase-1',
+      requestsWebGpu ? 'ulg-carrier-runtime-webgpu-phase-2-requested' : 'ulg-carrier-runtime-cpu-reference'
+    ]
   });
+}
+
+function normalizeBackendPreference(backendPreference) {
+  if (!Array.isArray(backendPreference)) {
+    return ['webgpu', 'cpu-reference'];
+  }
+  const allowedBackends = new Set(['webgpu', 'cpu-reference']);
+  const selected = [];
+  for (const backend of backendPreference) {
+    if (allowedBackends.has(backend) && !selected.includes(backend)) {
+      selected.push(backend);
+    }
+  }
+  return selected.length > 0 ? selected : ['cpu-reference'];
 }
 
 function createPeerComputeHandoffEnvelope(artifacts, extra = {}) {

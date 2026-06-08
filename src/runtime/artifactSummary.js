@@ -346,6 +346,8 @@ export function summarizeUlgArtifact(artifact = {}) {
   const simulationInvariantMetrics = objectOrNull(simulationInvariantReport?.metrics);
   const simulationDeltas = Array.isArray(outputs.deltas) ? outputs.deltas : [];
   const simulationFinalState = objectOrNull(outputs.finalState);
+  const simulationWebGpuStatus = objectOrNull(execution.webgpuStatus);
+  const simulationWebGpuParity = objectOrNull(execution.webgpuParity);
   const module = execution.module && typeof execution.module === 'object' ? execution.module : {};
   const executionImports = Array.isArray(execution.imports) ? execution.imports : [];
   const executionExports = Array.isArray(execution.exports) ? execution.exports : [];
@@ -1168,6 +1170,13 @@ export function summarizeUlgArtifact(artifact = {}) {
     simulationTaskKind: artifact.taskKind || null,
     simulationClosureRef: artifact.closureRef?.uri || artifact.closureRef?.artifactHash || null,
     simulationBackend: execution.backend || null,
+    simulationWebGpuStatus: simulationWebGpuStatus?.status || null,
+    simulationWebGpuFallback: simulationWebGpuStatus?.fallback || null,
+    simulationWebGpuReason: simulationWebGpuStatus?.reason || null,
+    simulationWebGpuParitySchema: simulationWebGpuParity?.schema || null,
+    simulationWebGpuParityStatus: simulationWebGpuParity?.status || null,
+    simulationWebGpuParityMaxPositionAbs: finiteNumberOrNull(simulationWebGpuParity?.maxPositionAbs),
+    simulationWebGpuParityMaxVelocityAbs: finiteNumberOrNull(simulationWebGpuParity?.maxVelocityAbs),
     simulationIntegrator: execution.integrator || null,
     simulationStepCount: finiteNumberOrNull(execution.steps),
     simulationDt: finiteNumberOrNull(execution.dt),

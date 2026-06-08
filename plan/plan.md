@@ -125,6 +125,12 @@ physics work:
   stores a toy harmonic closure, resolves it from the cache, submits a
   supervised `simulation.step` task, and emits a toy/reference simulation
   artifact without changing the magnetar Eshkol/MoonLab handoff.
+- [x] Add Phase 2 WebGPU carrier-runtime plumbing: an optional WGSL
+  two-particle carrier step, CPU/WebGPU parity gate, worker-local device-loss
+  fallback reporting, GPU broker device-loss lease marking, compact
+  simulation WebGPU summary fields, and e2e coverage that accepts WebGPU only
+  when parity passes. CPU-reference output remains authoritative and this does
+  not claim SPH/material/full-physics validation.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

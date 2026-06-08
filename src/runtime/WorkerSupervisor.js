@@ -149,6 +149,20 @@ export class WorkerSupervisor {
     if (message.type === 'lease-release') {
       await this.leaseManager.release(message.leaseId);
     }
+    if (message.type === 'gpu-device-lost') {
+      this.gpuBroker.markDeviceLost({
+        reason: message.reason || 'worker-local-device-lost'
+      });
+      const task = this.tasks.get(message.rootTaskId);
+      if (task) {
+        task.gpuDeviceLost = {
+          reason: message.reason || 'worker-local-device-lost',
+          leaseId: message.leaseId || task.gpuLease?.leaseId || null,
+          at: Date.now(),
+          retryableOnCpu: true
+        };
+      }
+    }
     if (message.type === 'task-result') {
       await this.#completeTask(message.rootTaskId, message.result, 'complete');
     }

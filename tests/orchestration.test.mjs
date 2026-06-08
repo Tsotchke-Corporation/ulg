@@ -4,6 +4,8 @@ import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
 import { ChildWorkerLeaseManager } from '../src/runtime/ChildWorkerLeaseManager.js';
 import { ComputeServiceRegistry } from '../src/runtime/ComputeServiceRegistry.js';
 import { GpuBroker } from '../src/runtime/GpuBroker.js';
+import { WorkerSupervisor } from '../src/runtime/WorkerSupervisor.js';
+import { createSimulationArtifact } from '../ulg-gpu-abi/src/index.js';
 
 const ESHKOL_PRODUCTION_REQUIRED_NON_STUB_IMPORTS = Object.freeze([
   'eshkol_is_bignum_tagged',
@@ -451,6 +453,130 @@ test('GPU broker reports CPU fallback when WebGPU is unavailable', async () => {
   assert.equal(caps.supported, false);
   const lease = await broker.requestLease({ gpu: 'optional', priority: 'simulation', rootTaskId: 'task-a' });
   assert.equal(lease.status, 'fallback');
+});
+
+test('GPU broker marks granted leases retryable when a device is lost', async () => {
+  let resolveLost;
+  const lost = new Promise((resolve) => {
+    resolveLost = resolve;
+  });
+  const fakeDevice = { lost };
+  const fakeAdapter = {
+    features: new Set(['shader-f16']),
+    limits: { maxBufferSize: 1024 },
+    async requestDevice() {
+      return fakeDevice;
+    }
+  };
+  const broker = new GpuBroker({
+    navigatorRef: {
+      gpu: {
+        async requestAdapter() {
+          return fakeAdapter;
+        }
+      }
+    }
+  });
+  const caps = await broker.probe();
+  assert.equal(caps.supported, true);
+  const lease = await broker.requestLease({ gpu: 'optional', priority: 'simulation', rootTaskId: 'task-gpu' });
+  assert.equal(lease.status, 'granted');
+  const device = await broker.getDevice();
+  assert.equal(device, fakeDevice);
+  assert.equal(broker.reportPressure().deviceStatus, 'ready');
+  resolveLost({ reason: 'destroyed' });
+  await Promise.resolve();
+  await Promise.resolve();
+  const pressure = broker.reportPressure();
+  assert.equal(pressure.deviceStatus, 'lost');
+  assert.equal(pressure.fallback, 'wasm-cpu');
+  assert.equal(broker.leases.get(lease.leaseId).status, 'device-lost');
+  assert.equal(broker.leases.get(lease.leaseId).retryableOnCpu, true);
+  const fallbackLease = await broker.requestLease({ gpu: 'optional', priority: 'simulation', rootTaskId: 'task-cpu' });
+  assert.equal(fallbackLease.status, 'fallback');
+});
+
+test('WorkerSupervisor records gpu-device-lost messages without relaxing completion', async () => {
+  class FakeWorker extends EventTarget {
+    postMessage(message) {
+      if (message.type === 'init') {
+        this.dispatchEvent(new MessageEvent('message', {
+          data: { type: 'ready', workerId: message.workerId, serviceId: message.manifest.serviceId }
+        }));
+      }
+      if (message.type === 'submit-task') {
+        this.dispatchEvent(new MessageEvent('message', {
+          data: {
+            type: 'gpu-device-lost',
+            rootTaskId: message.task.rootTaskId,
+            leaseId: message.gpuLease.leaseId,
+            reason: 'fake-worker-device-lost'
+          }
+        }));
+        this.dispatchEvent(new MessageEvent('message', {
+          data: {
+            type: 'task-result',
+            rootTaskId: message.task.rootTaskId,
+            result: {
+              artifact: createSimulationArtifact({
+                artifactId: 'fake-worker-simulation',
+                closureRef: { uri: 'artifact://fake-closure' },
+                outputs: { deltas: [] },
+                execution: { backend: 'cpu-reference', webgpuStatus: { status: 'webgpu-device-lost-fallback' } },
+                validity: { status: 'fake' },
+                validation: { status: 'pass', scientificValidation: false, fullPhysicsValidation: false },
+                provenance: { sourceService: 'ulg-runtime' }
+              })
+            }
+          }
+        }));
+      }
+    }
+
+    terminate() {}
+  }
+
+  const registry = new ComputeServiceRegistry();
+  await registry.register({
+    serviceId: 'ulg-runtime',
+    runtime: 'js',
+    capabilities: ['ulg.simulation.step'],
+    taskKinds: ['simulation.step'],
+    abi: {},
+    childWorkers: { allowed: false, maxChildren: 0, allowedModules: [] },
+    entry: { workerModule: '/fake-worker.js' }
+  });
+  const gpuBroker = new GpuBroker({
+    navigatorRef: {
+      gpu: {
+        async requestAdapter() {
+          return { features: new Set(), limits: {} };
+        }
+      }
+    }
+  });
+  await gpuBroker.probe();
+  const supervisor = new WorkerSupervisor({
+    registry,
+    leaseManager: new ChildWorkerLeaseManager(),
+    gpuBroker,
+    artifactCache: new ArtifactCache(),
+    workerFactory: () => new FakeWorker()
+  });
+  const result = await supervisor.submitTask({
+    taskId: 'fake-simulation',
+    rootTaskId: 'fake-root',
+    serviceId: 'ulg-runtime',
+    taskKind: 'simulation.step',
+    resources: { gpu: 'optional', priority: 'simulation', gpuMemoryBytes: 128 }
+  });
+
+  assert.equal(result.status, 'complete');
+  assert.equal(result.artifact.execution.webgpuStatus.status, 'webgpu-device-lost-fallback');
+  assert.equal(gpuBroker.reportPressure().deviceStatus, 'lost');
+  const task = supervisor.tasks.get('fake-root');
+  assert.equal(task.gpuDeviceLost.reason, 'fake-worker-device-lost');
+  assert.equal(task.gpuDeviceLost.retryableOnCpu, true);
 });
 
 test('artifact cache returns content-addressed refs', async () => {

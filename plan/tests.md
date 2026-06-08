@@ -4,8 +4,8 @@
 
 Command: `npm test`
 
-Current result: pass, 27/27 tests on 2026-06-08 after adding Phase 1
-ClosureRegistry and CPU-reference carrier runtime coverage.
+Current result: pass, 36/36 tests on 2026-06-08 after adding Phase 2
+optional WebGPU carrier-runtime fallback and parity coverage.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -94,6 +94,13 @@ ClosureRegistry and CPU-reference carrier runtime coverage.
 - The Phase 1 closure handle samples `table-interpolation` closures for energy
   and `dEdr`, and the CPU-reference carrier runtime advances a two-particle
   oscillator with compact deltas plus invariant drift reports.
+- The Phase 2 optional WebGPU carrier path exposes a WGSL compute entrypoint,
+  returns CPU when WebGPU is not requested or unavailable, rejects parity drift,
+  reports device-lost CPU fallback, and preserves the explicit
+  `peercompute.ulg.carrier-webgpu-parity.v0` schema.
+- GPU broker and worker-supervisor coverage verifies device-loss pressure
+  reporting, retryable CPU fallback lease marking, and worker-originated
+  `gpu-device-lost` telemetry without relaxing task completion.
 - The ABI schema coverage now validates
   `peercompute.ulg.simulation-artifact.v0`, and service-contract tests lock the
   `ulg-runtime` service id, `simulation.step` task kind, capabilities, and
@@ -107,6 +114,10 @@ ClosureRegistry and CPU-reference carrier runtime coverage.
   `node --test tests/carrierRuntime.test.mjs` passed `2/2`, and
   `node --test tests/abi.test.mjs tests/contract-fixtures.test.mjs` passed
   `7/7`.
+- Focused WebGPU carrier-runtime coverage on 2026-06-08:
+  `node --test tests/webgpuCarrierKernel.test.mjs` passed `7/7`, and
+  `node --test --test-name-pattern "GPU broker|WorkerSupervisor records gpu-device-lost" tests/orchestration.test.mjs`
+  passed `3/3`.
 
 ## Current Handoff Validation Summary
 

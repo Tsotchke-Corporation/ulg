@@ -1,5 +1,88 @@
 # ULG Implementation Log
 
+## 2026-06-08 11:17:15 AKDT
+
+Prompt: Proceed on the core technology path for ULG after the Phase 1
+carrier-runtime checkpoint; keep commits local-only; use subagents where useful;
+do not pivot into a demo-only SPH/material feature.
+
+Actions:
+
+- Closed the completed Phase 2 audit sidecar and spawned a fresh read-only
+  sidecar to audit docs/tests/contract gaps while implementation continued
+  locally.
+- Added optional WebGPU carrier execution through
+  `src/runtime/webgpuCarrierKernel.js`, keeping CPU-reference execution
+  authoritative and accepting WebGPU output only when CPU/WebGPU final-state
+  parity passes.
+- Added `carrierStepWgsl` in `ulg-gpu-abi/src/wgsl.js` for a toy two-body
+  velocity-Verlet carrier step over closure-table samples.
+- Shared closure-table normalization from `src/runtime/closureHandle.js` so CPU
+  and WebGPU paths consume the same table semantics.
+- Extended `GpuBroker` and `WorkerSupervisor` device-loss handling so lost
+  devices mark GPU leases retryable on CPU and worker-local device loss is
+  recorded without relaxing task completion.
+- Wired `ulgRuntime.worker` to request optional WebGPU when the task asks for
+  it, fall back to CPU on unavailable/error/device-lost/parity-failed states,
+  and record `execution.webgpuStatus` plus `execution.webgpuParity`.
+- Defaulted `window.__ulgDemo.runOscillatorDemo()` to request `webgpu` with
+  `cpu-reference` fallback, while preserving explicit false
+  scientific/full-physics validation flags.
+- Surfaced simulation WebGPU status/parity fields through compact artifact
+  summaries and the visible artifact line.
+- Added unit and e2e coverage for not-requested, unavailable, device-lost,
+  parity-failed, and accepted-parity WebGPU carrier cases.
+
+Files touched:
+
+- `src/runtime/GpuBroker.js`
+- `src/runtime/WorkerSupervisor.js`
+- `src/runtime/artifactSummary.js`
+- `src/runtime/closureHandle.js`
+- `src/runtime/demoRuntime.js`
+- `src/runtime/webgpuCarrierKernel.js`
+- `src/services/ulgRuntime.worker.js`
+- `src/main.js`
+- `README.md`
+- `ulg-gpu-abi/src/schemas/task_capsule.schema.json`
+- `ulg-gpu-abi/src/schemas/validation_report.schema.json`
+- `ulg-gpu-abi/src/wgsl.js`
+- `tests/contract-fixtures.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/orchestration.test.mjs`
+- `tests/webgpuCarrierKernel.test.mjs`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+
+Validation so far:
+
+- PASS: syntax checks for changed runtime, worker, UI, and e2e files.
+- PASS: `node --test tests/webgpuCarrierKernel.test.mjs` passed `7/7`.
+- PASS:
+  `node --test --test-name-pattern "GPU broker|WorkerSupervisor records gpu-device-lost" tests/orchestration.test.mjs`
+  passed `3/3`.
+- PASS: `node --test tests/carrierRuntime.test.mjs tests/closureRegistry.test.mjs`
+  passed `4/4`.
+- PASS: `node --test tests/abi.test.mjs tests/contract-fixtures.test.mjs`
+  passed `7/7`.
+- PASS: `npm test` passed `36/36`.
+- PASS: `npm run build` passed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`, including visible `sim-gpu:*`
+  coverage for the oscillator simulation artifact line.
+- PASS: `npm run status:live -- --bridge` reported the VPN demo at
+  `http://100.86.83.35:5173/` with the default two-artifact MoonLab/Eshkol
+  handoff and Multiscale ack `handoff-ready` /
+  `simulationStatus = scientific-ready`.
+- PASS: `git diff --check` passed.
+
+Open / blockers:
+
+- This is optional WebGPU toy carrier execution. SPH, material properties,
+  EOS/phase-change evidence, and full magnetar physics validation remain future
+  core-technology slices rather than claims made by this checkpoint.
+
 ## 2026-06-06 21:27:51 AKDT
 
 Prompt: Continue the core ULG triad plan after the Eshkol compiler metadata

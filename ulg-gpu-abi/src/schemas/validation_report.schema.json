@@ -7,7 +7,7 @@
   "properties": {
     "reportId": { "type": "string", "minLength": 1 },
     "status": { "enum": ["pass", "warn", "fail", "unsupported"] },
-    "mode": { "enum": ["none", "self", "cpu-reference", "quorum", "spot-check", "physics-invariant"] },
+    "mode": { "enum": ["none", "self", "cpu-reference", "cpu-webgpu", "quorum", "spot-check", "physics-invariant"] },
     "toleranceProfile": { "type": "string", "minLength": 1 },
     "metrics": { "type": "object" },
     "provenance": { "type": "object" }

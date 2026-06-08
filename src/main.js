@@ -299,6 +299,12 @@ function renderArtifactSummaryLine(summary) {
   if (summary.simulationSchema) {
     parts.push(`simulation:${summary.simulationRepresentation || 'runtime'}`);
     parts.push(`backend:${summary.simulationBackend || 'unknown'}`);
+    if (summary.simulationWebGpuStatus) {
+      parts.push(`sim-gpu:${summary.simulationWebGpuStatus}`);
+    }
+    if (summary.simulationWebGpuParityStatus) {
+      parts.push(`sim-parity:${summary.simulationWebGpuParityStatus}`);
+    }
     parts.push(`steps:${summary.simulationStepCount ?? summary.simulationDeltaCount}`);
     if (summary.simulationInvariantStatus) {
       parts.push(`invariants:${summary.simulationInvariantStatus}`);

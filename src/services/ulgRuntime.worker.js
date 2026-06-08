@@ -1,6 +1,7 @@
 import { createSimulationArtifact } from '../../ulg-gpu-abi/src/index.js';
-import { createCarrierRuntime, createDefaultCarrierState } from '../runtime/carrierRuntime.js';
+import { createDefaultCarrierState } from '../runtime/carrierRuntime.js';
 import { createClosureHandle } from '../runtime/closureHandle.js';
+import { runCarrierRuntimeWithOptionalWebGpu } from '../runtime/webgpuCarrierKernel.js';
 
 let workerId = null;
 let manifest = null;
@@ -54,18 +55,31 @@ async function runTask(task, gpuLease) {
     throw new Error('simulation.step task missing input.closureArtifact');
   }
   const closureHandle = createClosureHandle(closureArtifact);
-  const runtime = createCarrierRuntime({
-    closureHandle,
-    dt: input.dt ?? 0.002,
-    toleranceProfile: input.toleranceProfile || {
-      name: 'toy-carrier-reference',
-      energyAbs: 1e-3,
-      momentumAbs: 1e-9
-    }
-  });
+  const toleranceProfile = input.toleranceProfile || {
+    name: 'toy-carrier-reference',
+    energyAbs: 1e-3,
+    momentumAbs: 1e-9
+  };
   const steps = input.steps ?? 64;
   const initialState = input.initialState || createDefaultCarrierState();
-  const run = runtime.run(initialState, steps);
+  const run = await runCarrierRuntimeWithOptionalWebGpu({
+    closureArtifact,
+    closureHandle,
+    initialState,
+    steps,
+    dt: input.dt ?? 0.002,
+    toleranceProfile,
+    preferWebGpu: gpuLease?.status === 'granted' || input.backendPreference?.includes?.('webgpu') === true,
+    navigatorRef: self.navigator,
+    onDeviceLost(info) {
+      self.postMessage({
+        type: 'gpu-device-lost',
+        rootTaskId: task.rootTaskId,
+        leaseId: gpuLease?.leaseId || null,
+        reason: info?.reason || info?.message || String(info || 'device lost')
+      });
+    }
+  });
   if (record.cancelled) {
     return;
   }
@@ -85,6 +99,8 @@ async function runTask(task, gpuLease) {
     execution: {
       backend: run.backend,
       gpuLeaseStatus: gpuLease?.status || null,
+      webgpuStatus: run.webgpuStatus || null,
+      webgpuParity: run.webgpuParity || null,
       dt: run.dt,
       steps: run.steps,
       integrator: run.integrator
@@ -101,7 +117,9 @@ async function runTask(task, gpuLease) {
     },
     validation: {
       status: run.invariants.status,
-      validationMode: 'cpu-reference-invariant-drift',
+      validationMode: run.backend === 'webgpu'
+        ? 'cpu-webgpu-parity-invariant-drift'
+        : 'cpu-reference-invariant-drift',
       scientificValidation: false,
       fullPhysicsValidation: false,
       blockers: ['toy-carrier-reference-not-scientific-physics']
@@ -113,6 +131,9 @@ async function runTask(task, gpuLease) {
       notes: [
         ...(task.provenance?.notes || []),
         'Consumed a cached table-interpolation closure with CPU reference carrier runtime.',
+        run.backend === 'webgpu'
+          ? 'Executed the toy carrier kernel through WebGPU and accepted CPU/WebGPU parity.'
+          : 'WebGPU carrier execution was unavailable or not requested; CPU reference artifact retained.',
         'Toy oscillator only; no scientific or full-physics validation claim.'
       ]
     }

@@ -69,6 +69,18 @@ function normalizeSamples(table = {}) {
   })).sort((left, right) => left.axis - right.axis);
 }
 
+export function normalizeClosureTableSamples(table = {}) {
+  const axisName = readAxisName(table);
+  const outputName = table.outputName || table.valueName || 'energy';
+  const derivativeName = table.derivativeName || 'dEdr';
+  return {
+    axisName,
+    outputName,
+    derivativeName,
+    samples: normalizeSamples(table)
+  };
+}
+
 function interpolate(left, right, x) {
   if (right.axis === left.axis) return left.value;
   const t = (x - left.axis) / (right.axis - left.axis);
@@ -93,10 +105,12 @@ export function createClosureHandle(closureArtifact) {
   if (!isObject(table)) {
     throw new Error('table-interpolation closure missing execution.table');
   }
-  const axisName = readAxisName(table);
-  const outputName = table.outputName || table.valueName || 'energy';
-  const derivativeName = table.derivativeName || 'dEdr';
-  const samples = normalizeSamples(table);
+  const {
+    axisName,
+    outputName,
+    derivativeName,
+    samples
+  } = normalizeClosureTableSamples(table);
   if (samples.length < 2) {
     throw new Error('table-interpolation closure requires at least two samples');
   }

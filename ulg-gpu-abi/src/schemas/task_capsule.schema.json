@@ -32,7 +32,7 @@
       "type": "object",
       "required": ["mode", "toleranceProfile"],
       "properties": {
-        "mode": { "enum": ["none", "self", "cpu-reference", "quorum", "spot-check"] },
+        "mode": { "enum": ["none", "self", "cpu-reference", "cpu-webgpu", "quorum", "spot-check"] },
         "toleranceProfile": { "type": "string" }
       }
     },

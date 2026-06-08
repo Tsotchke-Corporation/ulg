@@ -1193,6 +1193,8 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.artifact.outputs.deltas[0].edgeMessageSummary.status).toBe('pass');
   expect(result.artifact.outputs.deltas[0].fieldObserverSummary.schema).toBe('peercompute.ulg.field-observer-summary.v0');
   expect(result.artifact.outputs.deltas[0].fieldObserverSummary.status).toBe('pass');
+  expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.schema).toBe('peercompute.ulg.field-closure-sample-summary.v0');
+  expect(result.artifact.outputs.deltas[0].fieldClosureSampleSummary.status).toBe('pass');
   expect(result.artifact.outputs.invariants.status).toBe('pass');
   expect(result.artifact.validation.scientificValidation).toBe(false);
   expect(result.artifact.validation.fullPhysicsValidation).toBe(false);
@@ -1216,11 +1218,28 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
     'positionX',
     'velocityX',
     'mass',
-    'kineticEnergy'
+    'kineticEnergy',
+    'closureAxisR'
   ]);
   expect(result.summary.simulationFieldObserverZeroWeightCount).toBe(0);
   expect(result.summary.simulationFieldObserverScientificValidation).toBe(false);
   expect(result.summary.simulationFieldObserverFullPhysicsValidation).toBe(false);
+  expect(result.summary.simulationFieldClosureSampleSummarySchema).toBe('peercompute.ulg.field-closure-sample-summary.v0');
+  expect(result.summary.simulationFieldClosureSampleSummaryStatus).toBe('pass');
+  expect(result.summary.simulationFieldClosureSampleSummaryCount).toBe(32);
+  expect(result.summary.simulationFieldClosureSampleFieldName).toBe('closureAxisR');
+  expect(result.summary.simulationFieldClosureSampleAxisName).toBe('r');
+  expect(result.summary.simulationFieldClosureSampleCount).toBe(2);
+  expect(result.summary.simulationFieldClosureSampleOutOfRangeCount).toBe(0);
+  expect(result.summary.simulationFieldClosureSampleNullFieldCount).toBe(0);
+  expect(result.summary.simulationFieldClosureSampleMinSampledValue).toBeGreaterThanOrEqual(0);
+  expect(result.summary.simulationFieldClosureSampleMaxSampledValue).toBeGreaterThanOrEqual(
+    result.summary.simulationFieldClosureSampleMinSampledValue
+  );
+  expect(result.summary.simulationFieldClosureSampleMaterialValidation).toBe(false);
+  expect(result.summary.simulationFieldClosureSampleEosValidation).toBe(false);
+  expect(result.summary.simulationFieldClosureSampleSphValidation).toBe(false);
+  expect(result.summary.simulationFieldClosureSamplePhaseChangeValidation).toBe(false);
   if (result.artifact.execution.webgpuParity) {
     expect(result.summary.simulationWebGpuParitySchema).toBe('peercompute.ulg.carrier-webgpu-parity.v0');
     expect(result.summary.simulationWebGpuParityStatus).toBe(result.artifact.execution.webgpuParity.status);
@@ -1235,6 +1254,7 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   await expect(page.getByText(/simulation:carrier-toy/)).toBeVisible();
   await expect(page.getByText(/edge:pass/)).toBeVisible();
   await expect(page.getByText(/field:pass/)).toBeVisible();
+  await expect(page.getByText(/closure-field:pass/)).toBeVisible();
   await expect(page.getByText(new RegExp(`sim-gpu:${result.summary.simulationWebGpuStatus}`))).toBeVisible();
   if (result.summary.simulationWebGpuParityStatus) {
     await expect(page.getByText(new RegExp(`sim-parity:${result.summary.simulationWebGpuParityStatus}`))).toBeVisible();

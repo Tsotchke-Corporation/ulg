@@ -146,6 +146,16 @@ field-observer primitives.
   existing large chunk warning, and `npm run test:e2e` passed `2/2` with
   delta-level `peercompute.ulg.field-observer-summary.v0`, compact
   `simulationFieldObserver*` summary fields, and visible `field:pass`.
+- Focused Phase 3A field-closure sample coverage on 2026-06-08:
+  `node --test tests/fieldClosureSamples.test.mjs tests/carrierRuntime.test.mjs tests/observers.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `19/19`, including standalone observed-field closure sampling,
+  sampled-output bounds, out-of-range and null-field warning behavior, carrier
+  delta summaries, WebGPU fallback delta summaries, and accepted WebGPU parity
+  delta summaries. `npm test` passed `53/53`, `npm run build` passed with the
+  existing large chunk warning, `npm run test:e2e` passed `2/2` with visible
+  `closure-field:pass`, and `npm run status:live -- --bridge` preserved the
+  default two-artifact MoonLab/Eshkol handoff and Multiscale bridge ack
+  `handoff-ready`.
 
 ## Current Handoff Validation Summary
 

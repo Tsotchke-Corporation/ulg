@@ -75,6 +75,9 @@ test('optional WebGPU carrier path returns CPU reference when WebGPU is not requ
   assert.equal(result.backend, 'cpu-reference');
   assert.equal(result.webgpuStatus.status, 'not-requested');
   assert.equal(result.deltas.length, 16);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.schema, 'peercompute.ulg.field-closure-sample-summary.v0');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.status, 'pass');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.fullPhysicsValidation, false);
 });
 
 test('optional WebGPU carrier path falls back to CPU reference without navigator.gpu', async () => {
@@ -191,6 +194,9 @@ test('optional WebGPU carrier path accepts a parity-passing WebGPU result', asyn
   assert.equal(result.webgpuParity.schema, ULG_CARRIER_WEBGPU_PARITY_SCHEMA);
   assert.equal(result.webgpuParity.status, 'pass');
   assert.equal(result.deltas.length, 16);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.schema, 'peercompute.ulg.field-closure-sample-summary.v0');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.status, 'pass');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.fullPhysicsValidation, false);
 });
 
 test('optional WebGPU carrier path reports device-lost CPU fallback', async () => {

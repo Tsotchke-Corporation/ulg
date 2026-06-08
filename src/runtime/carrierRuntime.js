@@ -1,5 +1,6 @@
 import { computeInvariants, invariantDriftReport } from './invariants.js';
 import { evaluateEdgeMessages } from './edgeMessages.js';
+import { evaluateFieldClosureSamples } from './fieldClosureSamples.js';
 import { evaluateFieldObservers } from './observers.js';
 import { buildNeighborGraph } from './spatialHash.js';
 
@@ -30,11 +31,13 @@ function cloneState(state) {
 }
 
 function createCarrierObserverFields(state) {
+  const separation = Math.abs(state.bodies[1].x - state.bodies[0].x);
   return {
     positionX: state.bodies.map((body) => body.x),
     velocityX: state.bodies.map((body) => body.v),
     mass: state.bodies.map((body) => body.mass),
-    kineticEnergy: state.bodies.map((body) => 0.5 * body.mass * body.v * body.v)
+    kineticEnergy: state.bodies.map((body) => 0.5 * body.mass * body.v * body.v),
+    closureAxisR: state.bodies.map(() => separation)
   };
 }
 
@@ -66,6 +69,12 @@ export function observeCarrierTopology(state, closureHandle) {
     kernel: 'linear-compact-reference',
     includeSelf: true
   });
+  const fieldClosureSamples = evaluateFieldClosureSamples({
+    fieldObservers,
+    closureHandle,
+    fieldName: 'closureAxisR',
+    axisName: closureHandle.axisName || 'r'
+  });
   return {
     forces: [message.forceOnSource[0], message.forceOnTarget[0]],
     sample: {
@@ -74,7 +83,8 @@ export function observeCarrierTopology(state, closureHandle) {
     },
     separation: message.distance,
     edgeMessageSummary: edgeMessages.summary,
-    fieldObserverSummary: fieldObservers.summary
+    fieldObserverSummary: fieldObservers.summary,
+    fieldClosureSampleSummary: fieldClosureSamples.summary
   };
 }
 
@@ -147,6 +157,7 @@ export function createCarrierRuntime({
           sampledDerivative: secondForces.sample.derivatives.dEdr,
           edgeMessageSummary: secondForces.edgeMessageSummary,
           fieldObserverSummary: secondForces.fieldObserverSummary,
+          fieldClosureSampleSummary: secondForces.fieldClosureSampleSummary,
           bodies: next.bodies.map((body, index) => ({
             id: body.id,
             x: body.x,

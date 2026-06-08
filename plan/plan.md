@@ -145,6 +145,9 @@ physics work:
   deltas, simulation artifact summaries, browser artifact rows, and oscillator
   e2e coverage so handoff consumers can see scalar field-observer operator
   evidence without claiming density, material, SPH, or phase-change readiness.
+- [x] Add Phase 3A field-closure sample descriptors over observed scalar fields
+  and surface compact `simulationFieldClosureSample*` telemetry without
+  claiming material properties, EOS, SPH, or phase-change readiness.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

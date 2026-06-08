@@ -18,6 +18,7 @@ This repo currently implements the first executable slice:
 - a Phase 2 ULG carrier runtime with a `ClosureRegistry`, table-interpolation closure handle, CPU-reference two-particle oscillator, optional WebGPU carrier step, CPU/WebGPU parity gate, device-loss CPU fallback reporting, invariant drift report, `ulg-runtime` service contract, and simulation artifacts that remain explicitly toy/reference scoped;
 - Phase 3A carrier topology primitives: normalized particle state, deterministic spatial hashes, radius-limited neighbor pairs, and closure-sampled edge messages with antisymmetric force checks for future field/material/EOS operators, without claiming SPH or phase-change validation;
 - Phase 3A field observers over neighbor graphs with compact-support scalar smoothing summaries for future material/EOS closure inputs, still without claiming an SPH solver or phase-change validation;
+- Phase 3A field-closure sample descriptors over observed scalar fields for future closure-field interpolation, without claiming material, EOS, SPH, or phase-change validation;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -55,9 +56,15 @@ observations over the neighbor graph. Carrier simulation deltas now preserve
 field-observer summaries for scalar carrier fields including mass without
 calling those observations density, EOS, phase, or SPH state. They do not yet
 implement a material model, EOS phase changes, or an SPH solver.
+The same topology pass now emits `fieldClosureSampleSummary` telemetry through
+`evaluateFieldClosureSamples()`, sampling the toy closure over the observed
+`closureAxisR` scalar field as an operator descriptor. This is closure-field
+interpolation evidence for future material/EOS operators, not material
+properties, density, SPH dynamics, phase behavior, or scientific validation.
 Simulation artifact summaries and the live artifact row surface this topology
-operator evidence as `edge:pass` and `field:pass` when compact deltas carry
-valid edge-message and field-observer summaries.
+operator evidence as `edge:pass`, `field:pass`, and `closure-field:pass` when
+compact deltas carry valid edge-message, field-observer, and field-closure
+sample summaries.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

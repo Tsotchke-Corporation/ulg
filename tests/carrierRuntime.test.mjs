@@ -84,10 +84,21 @@ test('carrier runtime advances a two-body oscillator and conserves invariants wi
     'positionX',
     'velocityX',
     'mass',
-    'kineticEnergy'
+    'kineticEnergy',
+    'closureAxisR'
   ]);
   assert.equal(result.deltas[0].fieldObserverSummary.scientificValidation, false);
   assert.equal(result.deltas[0].fieldObserverSummary.fullPhysicsValidation, false);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.schema, 'peercompute.ulg.field-closure-sample-summary.v0');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.status, 'pass');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.fieldName, 'closureAxisR');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.axisName, 'r');
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.sampleCount, 2);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.outOfRangeCount, 0);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.materialValidation, false);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.eosValidation, false);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.sphValidation, false);
+  assert.equal(result.deltas[0].fieldClosureSampleSummary.phaseChangeValidation, false);
   assert.equal(result.invariants.schema, 'peercompute.ulg.carrier-invariant-drift.v0');
   assert.equal(result.invariants.status, 'pass');
   assert.ok(result.invariants.metrics.maxEnergyDriftAbs < 2e-5);

@@ -44,6 +44,13 @@ Updated: 2026-06-08 11:42:33 AKDT
   e2e coverage as `field:pass` operator telemetry. The observed scalar fields
   include mass but are not interpreted as density, EOS, material properties,
   SPH dynamics, or phase-change validation.
+- Added Phase 3A field-closure sample descriptors over observed scalar fields.
+  Carrier deltas now include `peercompute.ulg.field-closure-sample-summary.v0`
+  by sampling the toy closure over the observed `closureAxisR` field, and
+  artifact summaries expose compact `simulationFieldClosureSample*` fields,
+  including input, sampled-output, and derivative bounds. This is closure-field
+  interpolation/operator evidence only, not material properties, EOS, SPH
+  dynamics, phase-change validation, or calibrated scientific runtime.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -66,6 +73,10 @@ Updated: 2026-06-08 11:42:33 AKDT
 - Verified the field-observer carrier surface with syntax checks, focused
   carrier/observer/WebGPU tests (`15/15`), `npm test` (`49/49`),
   `npm run build`, and `npm run test:e2e` (`2/2`).
+- Verified the field-closure sample surface with syntax checks, focused
+  carrier/observer/WebGPU/field-closure tests (`19/19`), `npm test` (`53/53`),
+  `npm run build`, `npm run test:e2e` (`2/2`), and
+  `npm run status:live -- --bridge`.
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

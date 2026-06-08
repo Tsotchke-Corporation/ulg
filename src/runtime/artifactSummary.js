@@ -353,6 +353,10 @@ export function summarizeUlgArtifact(artifact = {}) {
     .map((delta) => objectOrNull(delta?.fieldObserverSummary))
     .filter(Boolean);
   const simulationFieldObserverSummary = simulationFieldObserverSummaries.at(-1) || null;
+  const simulationFieldClosureSampleSummaries = simulationDeltas
+    .map((delta) => objectOrNull(delta?.fieldClosureSampleSummary))
+    .filter(Boolean);
+  const simulationFieldClosureSampleSummary = simulationFieldClosureSampleSummaries.at(-1) || null;
   const simulationFinalState = objectOrNull(outputs.finalState);
   const simulationWebGpuStatus = objectOrNull(execution.webgpuStatus);
   const simulationWebGpuParity = objectOrNull(execution.webgpuParity);
@@ -1228,6 +1232,54 @@ export function summarizeUlgArtifact(artifact = {}) {
     simulationFieldObserverFullPhysicsValidation:
       typeof simulationFieldObserverSummary?.fullPhysicsValidation === 'boolean'
         ? simulationFieldObserverSummary.fullPhysicsValidation
+        : null,
+    simulationFieldClosureSampleSummarySchema: simulationFieldClosureSampleSummary?.schema || null,
+    simulationFieldClosureSampleSummaryStatus: simulationFieldClosureSampleSummary?.status || null,
+    simulationFieldClosureSampleSummaryCount: simulationFieldClosureSampleSummaries.length,
+    simulationFieldClosureSampleKind: simulationFieldClosureSampleSummary?.sampleKind || null,
+    simulationFieldClosureSampleClosureId: simulationFieldClosureSampleSummary?.closureId || null,
+    simulationFieldClosureSampleFieldName: simulationFieldClosureSampleSummary?.fieldName || null,
+    simulationFieldClosureSampleAxisName: simulationFieldClosureSampleSummary?.axisName || null,
+    simulationFieldClosureSampleOutputName: simulationFieldClosureSampleSummary?.outputName || null,
+    simulationFieldClosureSampleCount:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.sampleCount),
+    simulationFieldClosureSampleOutOfRangeCount:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.outOfRangeCount),
+    simulationFieldClosureSampleNullFieldCount:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.nullFieldCount),
+    simulationFieldClosureSampleMinInput:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.minInput),
+    simulationFieldClosureSampleMaxInput:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.maxInput),
+    simulationFieldClosureSampleMinSampledValue:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.minSampledValue),
+    simulationFieldClosureSampleMaxSampledValue:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.maxSampledValue),
+    simulationFieldClosureSampleMaxAbsDerivative:
+      finiteNumberOrNull(simulationFieldClosureSampleSummary?.maxAbsDerivative),
+    simulationFieldClosureSampleScientificValidation:
+      typeof simulationFieldClosureSampleSummary?.scientificValidation === 'boolean'
+        ? simulationFieldClosureSampleSummary.scientificValidation
+        : null,
+    simulationFieldClosureSampleFullPhysicsValidation:
+      typeof simulationFieldClosureSampleSummary?.fullPhysicsValidation === 'boolean'
+        ? simulationFieldClosureSampleSummary.fullPhysicsValidation
+        : null,
+    simulationFieldClosureSampleMaterialValidation:
+      typeof simulationFieldClosureSampleSummary?.materialValidation === 'boolean'
+        ? simulationFieldClosureSampleSummary.materialValidation
+        : null,
+    simulationFieldClosureSampleEosValidation:
+      typeof simulationFieldClosureSampleSummary?.eosValidation === 'boolean'
+        ? simulationFieldClosureSampleSummary.eosValidation
+        : null,
+    simulationFieldClosureSampleSphValidation:
+      typeof simulationFieldClosureSampleSummary?.sphValidation === 'boolean'
+        ? simulationFieldClosureSampleSummary.sphValidation
+        : null,
+    simulationFieldClosureSamplePhaseChangeValidation:
+      typeof simulationFieldClosureSampleSummary?.phaseChangeValidation === 'boolean'
+        ? simulationFieldClosureSampleSummary.phaseChangeValidation
         : null,
     simulationScientificValidation:
       typeof artifact.validation?.scientificValidation === 'boolean'

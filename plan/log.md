@@ -1,5 +1,53 @@
 # ULG Implementation Log
 
+## 2026-06-08 12:31:45 AKDT
+
+Prompt: Continue the ULG core technology path after field observers by adding
+closure-field interpolation over observed scalar fields, without pivoting into
+an SPH/material/phase-change demo.
+
+Actions:
+
+- Added `src/runtime/fieldClosureSamples.js` with
+  `peercompute.ulg.field-closure-samples.v0` and compact
+  `peercompute.ulg.field-closure-sample-summary.v0` telemetry.
+- Wired the carrier topology pass to observe a `closureAxisR` scalar field and
+  sample the current table-interpolation closure over that observed field.
+- Added `fieldClosureSampleSummary` to CPU/WebGPU carrier deltas.
+- Extended simulation artifact summaries with compact
+  `simulationFieldClosureSample*` fields, including sampled-output bounds, and
+  surfaced `closure-field:pass` in the browser artifact row.
+- Added focused tests for standalone field-closure sampling, out-of-range
+  warning behavior, null-field skipping, carrier delta summaries, WebGPU
+  fallback and accepted-parity delta summaries, e2e compact fields, and visible
+  `closure-field:pass`.
+
+Validation:
+
+- PASS: syntax checks for changed runtime/UI/test files.
+- FAIL then fixed: a null observed-field test showed `Number(null)` was being
+  treated as a finite zero in `fieldClosureSamples.js`; `finiteNumberOrNull()`
+  now preserves null/empty values as null and the warning path is covered.
+- PASS:
+  `node --test tests/fieldClosureSamples.test.mjs tests/carrierRuntime.test.mjs tests/observers.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `19/19`.
+- PASS: `npm test` passed `53/53`.
+- PASS: `npm run build` passed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`, including compact
+  `simulationFieldClosureSample*` fields and visible `closure-field:pass`.
+- PASS: `npm run status:live -- --bridge` preserved the default two-artifact
+  MoonLab/Eshkol handoff, live URL `http://100.86.83.35:5173/`, and Multiscale
+  bridge ack `handoff-ready`.
+
+Open / blockers:
+
+- This is closure-field operator telemetry only. It does not implement density,
+  EOS, material properties, SPH dynamics, phase changes, calibrated scientific
+  runtime, or full-physics validation.
+- Pre-existing `agents.md` deletion plus untracked `Agents.md`,
+  `plan/claude-audit.md`, and `plan/ulg-runtime-plan.md` remain untouched.
+- No push was attempted.
+
 ## 2026-06-08 12:10:01 AKDT
 
 Prompt: Keep advancing the core ULG carrier/operator path and wire the new

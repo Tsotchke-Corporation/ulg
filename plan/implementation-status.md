@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 11:42:33 AKDT
+Updated: 2026-06-08 15:39 AKDT
 
 ## Done
 
@@ -69,6 +69,40 @@ Updated: 2026-06-08 11:42:33 AKDT
   `ClosureRegistry.applyRefreshRequest()` can invalidate the cached closure
   without promoting the evidence to material, EOS, SPH, phase-change, or
   scientific validation.
+- Closed the end-to-end closure refresh path (recommended-work item 1). A
+  supervised carrier run that leaves the closure's sampled validity domain now
+  halts cleanly (keeping prior deltas), emits a
+  `carrier-runtime-closure-domain-exit` refresh request on the simulation
+  artifact (`validity.status: closure-domain-exited`, `validation: warn`),
+  and `runOscillatorDemo()` consumes it via
+  `applyClosureRefreshFromSimulation()` to call
+  `ClosureRegistry.applyRefreshRequest()`, emit the `closure-invalidated` event,
+  and cache an explicit `peercompute.ulg.closure-invalidation-artifact.v0`
+  evidence artifact. Still recommendation-only: no production closure is yet
+  rederived, and no material/EOS/SPH/phase/scientific validation is claimed.
+  Verified `npm test` (`60/60`), `npm run build`, `npm run test:e2e` (`2/2`), and
+  `git diff --check`; ULG `status:live` healthy (PeerCompute 5185 down so the
+  bridge ack was not re-confirmed, envelope untouched).
+- Added an opt-in ULG runtime handoff (recommended-work item 3).
+  `createPeerComputeUlgRuntimeHandoff()` / exported
+  `createUlgRuntimeHandoff(artifactCache, options)` include only
+  `ulg-runtime`/`ulg-runtime-fixture` closure + simulation (+ invalidation)
+  artifacts, surface `tableDescriptor.wgslTableDescriptor` on each entry for
+  PeerCompute inspection, and add MoonLab/Eshkol ancestors only when
+  `includeAncestors` is set; the default handoff/bridge path is untouched.
+  `inferArtifactKind` now classifies the closure-invalidation artifact distinctly.
+- Closed limitation #1 with an opt-in closure rederivation loop (recommended-work
+  item 4). After a recommended invalidation,
+  `applyClosureRefreshFromSimulation({ rederiveClosure })` re-derives a refreshed
+  closure (`rederiveToyOscillatorClosure` infers the harmonic constants and
+  expands the validity domain to cover the offending input), `store()`s it in the
+  registry, and emits a `peercompute.ulg.closure-rederivation-artifact.v0`
+  evidence artifact (old→new lineage). The re-derived closure resolves in-range
+  at the point that previously left the domain. Opt-in via `rederiveOnRefresh`;
+  the re-derived closure is a toy reference and asserts no
+  material/EOS/SPH/phase/scientific validation. Verified `npm test` (`64/64`),
+  `npm run build`, `npm run test:e2e` (`2/2`), `git diff --check`, and the live
+  two-server ULG→Multiscale handoff smoke (default 2-artifact handoff intact).
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

@@ -1,5 +1,6 @@
 export const ULG_ARTIFACT_SUMMARY_SCHEMA = 'peercompute.ulg.artifact-summary.v0';
 export const ULG_SIMULATION_ARTIFACT_SCHEMA = 'peercompute.ulg.simulation-artifact.v0';
+export const ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-invalidation-artifact.v0';
 export const ULG_QUANTUM_RESPONSE_DESCRIPTOR_SCHEMA = 'peercompute.ulg.quantum-response-descriptor.v0';
 export const ULG_QUANTUM_RESPONSE_PARITY_SCHEMA = 'peercompute.ulg.quantum-response-parity.v0';
 export const ULG_MAGNETAR_DIPOLE_ISING_CALIBRATION_SCHEMA = 'peercompute.ulg.magnetar-dipole-ising-calibration.v0';
@@ -130,6 +131,9 @@ const MOONLAB_WEBGPU_BROWSER_BACKEND_PREFLIGHT_STAGES = Object.freeze([
 ]);
 
 function inferArtifactKind(artifact = {}) {
+  if (artifact.schema === ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA) {
+    return 'closure-invalidation';
+  }
   if (artifact.schema === ULG_SIMULATION_ARTIFACT_SCHEMA || artifact.sourceService === 'ulg-runtime') {
     return 'simulation-delta';
   }

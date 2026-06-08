@@ -85,6 +85,10 @@ async function runTask(task, gpuLease) {
   }
   record.progress = 1;
   postStatus(record);
+  const refreshRequest = run.closureRefreshRequest || null;
+  const domainExit = run.domainExit || null;
+  const refreshRecommended = refreshRequest?.refreshRecommended === true
+    || refreshRequest?.status === 'refresh-recommended';
   const artifact = createSimulationArtifact({
     artifactId: `${task.rootTaskId}.simulation`,
     taskKind: task.taskKind,
@@ -94,7 +98,11 @@ async function runTask(task, gpuLease) {
       deltas: run.deltas,
       invariants: run.invariants,
       invariantSeries: run.invariantSeries,
-      finalState: run.finalState
+      finalState: run.finalState,
+      completedSteps: run.completedSteps ?? run.deltas.length,
+      requestedSteps: run.requestedSteps ?? run.steps,
+      closureRefreshRequest: refreshRequest,
+      domainExit
     },
     execution: {
       backend: run.backend,
@@ -106,23 +114,30 @@ async function runTask(task, gpuLease) {
       integrator: run.integrator
     },
     validity: {
-      status: 'toy-reference-valid',
+      status: refreshRecommended ? 'closure-domain-exited' : 'toy-reference-valid',
       closureValidity: input.closureValidity || null,
       closureId: closureArtifact.closureId,
-      closureKind: closureArtifact.closureKind
+      closureKind: closureArtifact.closureKind,
+      closureRefreshRecommended: refreshRecommended,
+      closureRefreshRegistryAction: refreshRequest?.registryAction || 'none'
     },
     uncertainty: {
       modelScope: 'toy-two-particle-carrier-reference',
       calibratedPhysics: false
     },
     validation: {
-      status: run.invariants.status,
+      status: refreshRecommended ? 'warn' : run.invariants.status,
       validationMode: run.backend === 'webgpu'
         ? 'cpu-webgpu-parity-invariant-drift'
         : 'cpu-reference-invariant-drift',
       scientificValidation: false,
       fullPhysicsValidation: false,
-      blockers: ['toy-carrier-reference-not-scientific-physics']
+      blockers: refreshRecommended
+        ? [
+            'toy-carrier-reference-not-scientific-physics',
+            'closure-domain-exited-refresh-recommended'
+          ]
+        : ['toy-carrier-reference-not-scientific-physics']
     },
     provenance: {
       ...task.provenance,
@@ -134,6 +149,12 @@ async function runTask(task, gpuLease) {
         run.backend === 'webgpu'
           ? 'Executed the toy carrier kernel through WebGPU and accepted CPU/WebGPU parity.'
           : 'WebGPU carrier execution was unavailable or not requested; CPU reference artifact retained.',
+        ...(refreshRecommended
+          ? [
+              `Carrier left the closure sampled domain at step ${domainExit?.atStep ?? 'unknown'}; closure refresh recommended.`,
+              'Closure/provenance evidence only; no material/EOS/SPH/phase validation claim.'
+            ]
+          : []),
         'Toy oscillator only; no scientific or full-physics validation claim.'
       ]
     }

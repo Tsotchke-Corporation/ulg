@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createCarrierRuntime, createDefaultCarrierState } from '../src/runtime/carrierRuntime.js';
 import { createClosureHandle } from '../src/runtime/closureHandle.js';
 import { evaluateEdgeMessages } from '../src/runtime/edgeMessages.js';
+import { ULG_CLOSURE_REFRESH_REQUEST_SCHEMA } from '../src/runtime/fieldClosureSamples.js';
 import { computeInvariants } from '../src/runtime/invariants.js';
 import { buildNeighborGraph } from '../src/runtime/spatialHash.js';
 import { hashPayload } from '../ulg-gpu-abi/src/index.js';
@@ -110,6 +111,77 @@ test('carrier runtime advances a two-body oscillator and conserves invariants wi
   assert.ok(Math.abs(result.invariantSeries[0].totalEnergy - initialInvariants.totalEnergy) < 1e-12);
   assert.notEqual(result.finalState.bodies[0].x, initialState.bodies[0].x);
   assert.notEqual(result.finalState.bodies[1].x, initialState.bodies[1].x);
+});
+
+function createNarrowOscillatorClosure() {
+  const inputHash = hashPayload({ closureKind: 'toy-two-particle-oscillator', domain: 'narrow' });
+  const methodHash = hashPayload({ mode: 'table-interpolation', potential: 'harmonic', domain: 'narrow' });
+  const samples = [];
+  for (let index = 0; index <= 40; index += 1) {
+    const r = 0.9 + index * 0.01;
+    const displacement = r - 1;
+    samples.push({ r, energy: 0.5 * displacement * displacement, dEdr: displacement });
+  }
+  return {
+    closureId: 'toy-oscillator-narrow-closure',
+    sourceService: 'eshkol',
+    closureKind: 'toy-two-particle-oscillator',
+    inputHash,
+    methodHash,
+    inputs: [{ name: 'r' }],
+    outputs: [{ name: 'energy' }],
+    derivatives: [{ output: 'energy', axis: 'r', name: 'dEdr' }],
+    execution: {
+      mode: 'table-interpolation',
+      table: { axisName: 'r', outputName: 'energy', derivativeName: 'dEdr', samples }
+    },
+    validity: { r: [0.9, 1.3] },
+    validation: { status: 'pass', scientificValidation: false, fullPhysicsValidation: false },
+    provenance: {
+      sourceService: 'eshkol',
+      inputHash,
+      methodHash,
+      createdAt: '2026-06-08T10:00:00.000Z',
+      notes: ['narrow toy oscillator fixture']
+    }
+  };
+}
+
+test('carrier run halts on closure-domain exit and surfaces a refresh request', () => {
+  const handle = createClosureHandle(createNarrowOscillatorClosure());
+  const runtime = createCarrierRuntime({ closureHandle: handle, dt: 0.01 });
+  const initialState = createDefaultCarrierState({ separation: 1.25, velocity: -5, mass: 1 });
+  const result = runtime.run(initialState, 64);
+
+  assert.ok(result.domainExit, 'expected a domain exit');
+  assert.equal(result.completedSteps, result.deltas.length);
+  assert.ok(result.completedSteps < 64, 'run should halt before all requested steps');
+  assert.equal(result.domainExit.axisName, 'r');
+  assert.ok(result.domainExit.inputValue > 1.3, 'offending separation should be above domain max');
+  assert.deepEqual(result.domainExit.domain, [0.9, 1.3]);
+
+  const request = result.closureRefreshRequest;
+  assert.equal(request.schema, ULG_CLOSURE_REFRESH_REQUEST_SCHEMA);
+  assert.equal(request.status, 'refresh-recommended');
+  assert.equal(request.reason, 'observed-field-outside-closure-domain');
+  assert.equal(request.sourceKind, 'carrier-runtime-closure-domain-exit');
+  assert.equal(request.registryAction, 'invalidate-and-rerun-closure-derive');
+  assert.equal(request.invalidationRecommended, true);
+  assert.equal(request.refreshRecommended, true);
+  assert.equal(request.scientificValidation, false);
+  assert.equal(request.materialValidation, false);
+  assert.equal(request.eosValidation, false);
+  assert.equal(request.sphValidation, false);
+  assert.equal(request.phaseChangeValidation, false);
+});
+
+test('carrier run that stays in range reports no domain exit', () => {
+  const handle = createClosureHandle(createOscillatorClosure());
+  const runtime = createCarrierRuntime({ closureHandle: handle, dt: 0.002 });
+  const result = runtime.run(createDefaultCarrierState({ separation: 1.2, velocity: 0, mass: 1 }), 32);
+  assert.equal(result.domainExit, null);
+  assert.equal(result.completedSteps, 32);
+  assert.equal(result.closureRefreshRequest.status, 'not-needed');
 });
 
 test('edge-message primitive matches the existing two-body carrier force convention', () => {

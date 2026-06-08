@@ -1,6 +1,8 @@
 export const ULG_IR_VERSION = '0.5';
 export const ULG_GPU_ABI_VERSION = '0.5';
 export const ULG_SIMULATION_ARTIFACT_SCHEMA = 'peercompute.ulg.simulation-artifact.v0';
+export const ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-invalidation-artifact.v0';
+export const ULG_CLOSURE_REDERIVATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-rederivation-artifact.v0';
 export const ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA = 'peercompute.ulg.closure-table-wgsl-descriptor.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
@@ -312,6 +314,125 @@ export function createSimulationArtifact({
       ...validation
     },
     provenance
+  };
+}
+
+/**
+ * Explicit evidence that a cached closure was invalidated because a supervised carrier
+ * run left its sampled validity domain. This is closure/provenance evidence only — it
+ * records that a refresh/re-derivation is recommended, and never asserts that any
+ * material/EOS/SPH/phase behaviour was validated.
+ */
+export function createClosureInvalidationArtifact({
+  artifactId,
+  closureRef,
+  closureId = null,
+  closureKind = null,
+  refreshRequest,
+  invalidation,
+  simulationArtifactRef = null,
+  provenance = {}
+}) {
+  if (!artifactId) {
+    throw new Error('artifactId is required for ULG closure-invalidation artifacts');
+  }
+  if (!closureRef) {
+    throw new Error('closureRef is required for ULG closure-invalidation artifacts');
+  }
+  if (!refreshRequest) {
+    throw new Error('refreshRequest is required for ULG closure-invalidation artifacts');
+  }
+  return {
+    schema: ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA,
+    artifactId,
+    sourceService: 'ulg-runtime',
+    closureRef,
+    closureId,
+    closureKind,
+    invalidatedClosureRef: invalidation?.ref || closureRef,
+    status: invalidation?.status || 'invalidated',
+    reason: invalidation?.reason || refreshRequest?.reason || 'closure-refresh-requested',
+    registryAction: refreshRequest?.registryAction || 'invalidate-and-rerun-closure-derive',
+    refreshRequest,
+    simulationArtifactRef,
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    provenance: {
+      sourceService: 'ulg-runtime',
+      parents: [closureRef, simulationArtifactRef].filter(Boolean),
+      ...provenance,
+      notes: [
+        ...(provenance.notes || []),
+        'Closure invalidated after a supervised carrier run left its sampled validity domain.',
+        'Recommends closure refresh / re-derivation; closure-provenance evidence only.',
+        'No material/EOS/SPH/phase validation is claimed.'
+      ]
+    }
+  };
+}
+
+/**
+ * Explicit evidence that an invalidated closure was re-derived with an expanded validity
+ * domain so a supervised carrier run can continue. Records the old→new closure lineage and
+ * the domain that was expanded. Closure/provenance evidence only — the re-derived closure is
+ * a toy reference and never asserts material/EOS/SPH/phase validation.
+ */
+export function createClosureRederivationArtifact({
+  artifactId,
+  previousClosureRef,
+  newClosureRef,
+  previousClosureId = null,
+  newClosureId = null,
+  closureKind = null,
+  refreshRequest,
+  previousDomain = null,
+  expandedDomain = null,
+  axisName = 'r',
+  invalidationArtifactRef = null,
+  provenance = {}
+}) {
+  if (!artifactId) {
+    throw new Error('artifactId is required for ULG closure-rederivation artifacts');
+  }
+  if (!previousClosureRef || !newClosureRef) {
+    throw new Error('previousClosureRef and newClosureRef are required for ULG closure-rederivation artifacts');
+  }
+  return {
+    schema: ULG_CLOSURE_REDERIVATION_ARTIFACT_SCHEMA,
+    artifactId,
+    sourceService: 'ulg-runtime',
+    closureKind,
+    previousClosureRef,
+    newClosureRef,
+    previousClosureId,
+    newClosureId,
+    axisName,
+    previousDomain,
+    expandedDomain,
+    refreshRequest: refreshRequest || null,
+    registryAction: 'rederived-and-reregistered-closure',
+    status: 'rederived',
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    provenance: {
+      sourceService: 'ulg-runtime',
+      parents: [previousClosureRef, newClosureRef, invalidationArtifactRef].filter(Boolean),
+      ...provenance,
+      notes: [
+        ...(provenance.notes || []),
+        'Re-derived an invalidated closure with an expanded validity domain after a carrier domain exit.',
+        'Re-derived closure is a toy reference; closure/provenance evidence only.',
+        'No material/EOS/SPH/phase validation is claimed.'
+      ]
+    }
   };
 }
 

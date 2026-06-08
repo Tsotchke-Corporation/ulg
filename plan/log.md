@@ -1,5 +1,275 @@
 # ULG Implementation Log
 
+## 2026-06-08 15:39 AKDT - Closure refresh items 3 (opt-in ULG runtime handoff) and 4 (closure rederivation)
+
+Prompt: Recommended-next-work items 3 and 4. (3) Add an explicit opt-in handoff
+mode for ULG runtime closure/simulation artifacts so PeerCompute can inspect
+`tableDescriptor.wgslTableDescriptor`. (4) Continue the core substrate — taken as
+its next concrete increment: close limitation #1 by re-deriving/re-registering a
+refreshed closure after a recommended invalidation (the runtime plan's Demo C
+closure-refresh loop). Closure/provenance evidence only; no material/EOS/SPH/
+phase or scientific validation claim.
+
+Item 3 — opt-in ULG runtime handoff:
+
+- `src/runtime/artifactSummary.js`: `inferArtifactKind` now classifies the
+  item-1 `closure-invalidation-artifact.v0` as `closure-invalidation` (it was
+  mislabeled `simulation-delta` because it matched `sourceService==='ulg-runtime'`
+  first).
+- `src/runtime/demoRuntime.js`: `createCachedArtifactHandoffs` surfaces
+  `wgslTableDescriptor` on each handoff entry when present
+  (`artifact.tableDescriptor.wgslTableDescriptor` or
+  `artifact.execution.wgslTableDescriptor`). Added exported
+  `createUlgRuntimeHandoff(artifactCache, options)` + API method
+  `createPeerComputeUlgRuntimeHandoff(options)` that include only
+  `ulg-runtime`/`ulg-runtime-fixture` sources (opt-in `includeAncestors` adds
+  MoonLab/Eshkol), tag `handoffKind: 'ulg-runtime-closure-simulation'`, count
+  artifacts + wgsl descriptors, all non-overclaim flags false. The default
+  `createPeerComputeHandoff`/bridge path is unchanged.
+- `tests/ulgRuntimeHandoff.test.mjs` (new, 2 tests): only ULG runtime artifacts
+  included; closure entry surfaces `wgslTableDescriptor`; `closure-invalidation`
+  classified distinctly; `includeAncestors` pulls in MoonLab/Eshkol.
+
+Item 4 — closure rederivation loop (closes limitation #1):
+
+- `ulg-gpu-abi/src/index.js`: added `ULG_CLOSURE_REDERIVATION_ARTIFACT_SCHEMA` +
+  `createClosureRederivationArtifact(...)` — old→new closure lineage, previous/
+  expanded domain, `registryAction: 'rederived-and-reregistered-closure'`, all
+  validation flags false.
+- `src/runtime/demoRuntime.js`: `applyClosureRefreshFromSimulation` now takes an
+  optional `rederiveClosure` callback — after invalidation it builds the refreshed
+  closure, `closureRegistry.store()`s it, emits a rederivation evidence artifact,
+  and returns `closureRefresh.rederivation`. Added
+  `rederiveToyOscillatorClosure(previousClosure, refreshRequest)` which infers
+  spring constant + rest length from the previous harmonic table and expands the
+  validity domain (with margin) to cover the offending input.
+  `runOscillatorDemo` wires this behind an opt-in `rederiveOnRefresh` flag.
+- `tests/closureRefreshPath.test.mjs` (+2 tests): domain-exit → invalidate →
+  rederive re-registers a closure whose expanded domain covers the offending
+  input and resolves in-range at that point, with content-addressed rederivation
+  evidence (old→new lineage), non-overclaiming; plus a guard test that no
+  rederivation happens unless opted in.
+
+Commands run / results:
+
+- PASS: `node --test tests/ulgRuntimeHandoff.test.mjs` 2/2;
+  `node --test tests/closureRefreshPath.test.mjs` 4/4; `npm test` 64/64
+  (was 60/60; +4); `npm run build`; `npm run test:e2e` 2/2; `git diff --check`.
+- ULG `npm run status:live -- --bridge`: ULG live status healthy on
+  0.0.0.0:5173; bridge ack timed out (PeerCompute 5185 not on the VPN interface;
+  starting it on 0.0.0.0 is sandbox-blocked). Re-confirmed the live two-server
+  handoff smoke after items 3/4 from PeerCompute
+  (`ULG_HANDOFF_URL=http://localhost:5173/ npm --prefix demos/multiscale run
+  test:ulg-handoff`, multiscale on localhost:5185) → exit 0, HUD `handoff ready
+  / blockers 0`, default 2-artifact handoff intact.
+
+Failures / open questions:
+
+- Re-derivation produces a toy harmonic closure over the expanded domain; it is
+  evidence/provenance only and opt-in (`rederiveOnRefresh`). No material/EOS/SPH/
+  phase or scientific validation is claimed.
+- Concurrent/external working-tree churn not made by this task was observed:
+  `plans/claudehandoff.md` and `plans/sphphasedemo.md` moved to `plan/`,
+  `agents.md` still deleted, and a separate `15:28:39` SPH-phase-demo log entry
+  appeared mid-task. Left untouched per the operating rules. No push attempted.
+
+## 2026-06-08 15:28:39 AKDT - Align SPH phase demo plan with wall sliders and macro-particles
+
+Prompt:
+
+- User clarified the SPH phase demo plan after moving it from `plans/` to
+  `plan/`: the container cube must expose six independent absolute-temperature
+  side sliders; material color and behavior must be derived from low-level
+  simulations; material properties such as bulk modulus, Young's modulus, and
+  viscosity must also be derived; the user should be able to set the number of
+  macro-particles, where each particle represents many molecules/atoms.
+
+Actions:
+
+- Located the moved plan at `plan/sphphasedemo.md` and preserved the user's
+  move from `plans/`.
+- Updated the plan to replace the single ambient shortcut with six named
+  fixed-temperature wall controls: `xMin`, `xMax`, `yMin`, `yMax`, `zMin`,
+  and `zMax`.
+- Added explicit macro-particle resolution controls and represented
+  molecule/atom counts for H2O, Fe, and gas.
+- Added mechanical and optical closure requirements so color, opacity,
+  viscosity, bulk modulus, Young's modulus, shear modulus, Poisson ratio,
+  yield/plastic behavior, emissivity, absorption, and scattering all come from
+  low-level-derived artifacts instead of renderer/demo constants.
+- Extended implementation, validation, acceptance, milestone, and immediate
+  next-slice sections to include wall-temperature schemas, particle-resolution
+  schemas, convergence reports, optical/mechanical tests, and per-side heat
+  ledgers.
+
+Files touched:
+
+- `plan/sphphasedemo.md`
+- `plan/log.md`
+
+Commands run / results:
+
+- PASS: `git status --short --branch`
+- PASS: `rg --files -g '*sph*phase*demo*.md' -g '*sph*' -g '*phase*' plan plans`
+  found `plan/sphphasedemo.md`; it also reported `plans` no longer exists.
+- PASS: `sed -n '1,120p' /home/cos/projects/AGENTS.md`
+- PASS: `sed -n '1,220p' plan/sphphasedemo.md`
+- PASS: `sed -n '221,520p' plan/sphphasedemo.md`
+- PASS: `sed -n '521,700p' plan/sphphasedemo.md`
+- PASS: `rg -n "ambient|six|wall|particle|Young|bulk|viscosity|optical|color|fake|faked|molecule|atom" plan/sphphasedemo.md`
+
+Failures / open questions:
+
+- No implementation tests were run because this prompt only updated the plan.
+- The tree still contains unrelated active runtime/test/doc edits and the
+  user's move from `plans/` to `plan/`; only the moved demo plan should be
+  staged if a checkpoint commit is made.
+
+## 2026-06-08 15:14:03 AKDT - SPH phase demo implementation plan
+
+Prompt:
+
+- User asked for `plans/sphphasedemo.md`: a new demo plan for a 10 m sealed
+  transparent 1 atm box at -40 F with a 1 m ice cube on a 1 m molten iron cube,
+  where iron glow, ice melting, steam pressure, iron cooling/solidification,
+  and final ice/gray-iron behavior must emerge from fundamental
+  molecular/Schrodinger-derived ULG simulation chains rather than being faked.
+
+Actions:
+
+- Read repo and parent instructions, current ULG implementation plan/status,
+  Claude handoff, test plan, and recent implementation log.
+- Queried ICC status for ULG. ICC reported the index exists but is stale:
+  indexed at `9946a1255e7a68f66ba08ba2b3192a726b7eece8`, current repo at
+  `7b11242d0e4f6821b94407c3bb790f6cf16fc700`.
+- Confirmed the worktree already had active uncommitted runtime/test/doc edits,
+  so this prompt avoided touching them except for this log entry.
+- Added `plans/sphphasedemo.md` as a planning artifact, not implementation.
+  The plan keeps the work on the core ULG path: closure/provenance,
+  thermodynamic preflight, material/EOS/phase/radiation closure artifacts,
+  conservative SPH carrier, sealed-box gas pressure, and validation gates.
+- Added an explicit energy feasibility gate noting that a 1 m molten iron cube
+  can release enough heat to vaporize a 1 m ice cube and remain hot unless the
+  -40 F environment is modeled as a real wall heat sink. The demo must report
+  impossible boundary conditions instead of forcing the expected visual state.
+
+Files touched:
+
+- `plans/sphphasedemo.md`
+- `plan/log.md`
+
+Commands run / results:
+
+- PASS: `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- PASS: `sed -n '1,220p' Agents.md`
+- PASS: `sed -n '1,240p' plans/claudehandoff.md`
+- PASS: `sed -n '1,220p' plan/plan.md`
+- PASS: `sed -n '1,240p' plan/implementation-status.md`
+- PASS: `tail -n 160 plan/log.md`
+- PASS: `sed -n '1,220p' plan/tests.md`
+- PASS: ICC status command for ULG completed and reported stale index.
+- PASS: `sed -n '1,260p' plans/sphphasedemo.md`
+- PASS: `sed -n '261,620p' plans/sphphasedemo.md`
+- PASS: `wc -l plans/sphphasedemo.md` reported 580 lines.
+
+Failures / open questions:
+
+- No implementation tests were run because this prompt only added a planning
+  document.
+- ICC was not refreshed because the tree was actively dirty and the task did
+  not require a refreshed codebase index.
+- The plan requires an explicit choice on thermal boundary conditions: adiabatic
+  sealed box versus sealed mass boundary with heat transfer to the -40 F
+  ambient. The requested final cold iron with ice around it needs a heat sink.
+
+## 2026-06-08 14:58 AKDT
+
+Prompt: Recommended-next-work item 1 — add an end-to-end ULG closure refresh
+path: trigger `ClosureRegistry.applyRefreshRequest()` from a supervised runtime
+path when field sampling leaves a closure domain, and emit an explicit
+invalidated-closure event/artifact. Closure/provenance evidence only; no
+material/EOS/SPH/phase validation claim.
+
+Approach / reasoning:
+
+- The refresh-request *evidence* (`peercompute.ulg.closure-refresh-request.v0`)
+  already existed and `ClosureRegistry.applyRefreshRequest()` already existed,
+  but nothing in a supervised runtime path consumed the evidence to invalidate a
+  cached closure. In the two-body carrier, the force edge-message guard throws a
+  `RangeError` the instant a step leaves the closure's sampled domain, so the
+  refresh-recommended branch was effectively unreachable end to end and a domain
+  exit surfaced only as an opaque error artifact.
+- Made the domain-exit reachable and actionable rather than fatal: a step that
+  leaves the domain now halts the run cleanly, keeps prior deltas, and produces a
+  structured refresh request that the supervised orchestration acts on.
+
+Files touched:
+
+- `src/runtime/fieldClosureSamples.js`: extracted shared
+  `refreshRequestValidationFlags()`; added exported
+  `createClosureDomainExitRefreshRequest(...)` that emits the same
+  `closure-refresh-request.v0` contract from a single domain-exit event (status
+  `refresh-recommended`, `sourceKind: carrier-runtime-closure-domain-exit`,
+  `registryAction: invalidate-and-rerun-closure-derive`, all
+  scientific/material/EOS/SPH/phase flags false). Added a `detail` field for the
+  raw out-of-range message while keeping the canonical
+  `observed-field-outside-closure-domain` reason.
+- `src/runtime/carrierRuntime.js`: annotated the out-of-domain `RangeError` with
+  structured `closureDomainExit` data (closure ids, axis, offending input,
+  validity domain). `run()` now catches that specific error, records
+  `domainExit` + `completedSteps`, and returns a top-level
+  `closureRefreshRequest` (domain-exit request on exit, else the final delta's
+  field-closure request).
+- `src/services/ulgRuntime.worker.js`: surfaces `outputs.closureRefreshRequest`,
+  `outputs.domainExit`, and completed/requested step counts on the simulation
+  artifact; sets `validity.status = closure-domain-exited`, `validation.status =
+  warn`, and a `closure-domain-exited-refresh-recommended` blocker plus
+  provenance notes when refresh is recommended. Non-overclaim flags unchanged.
+- `ulg-gpu-abi/src/index.js`: added
+  `ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA` +
+  `createClosureInvalidationArtifact(...)` — explicit content-addressable
+  closure-invalidation evidence artifact (refresh request, invalidation result,
+  simulation parent ref, all validation flags false).
+- `src/runtime/demoRuntime.js`: `runOscillatorDemo()` now calls the new exported
+  `applyClosureRefreshFromSimulation(...)` after the supervised task returns —
+  reads the artifact's refresh request, calls
+  `closureRegistry.applyRefreshRequest()`, and on invalidation builds + caches a
+  `closure-invalidation-artifact.v0`, returning `closureRefresh` in the result.
+  The registry's existing `closure-invalidated` subscribe event is the emitted
+  event.
+- Tests: `tests/carrierRuntime.test.mjs` (+2: domain-exit halts run & surfaces a
+  refresh request; in-range run reports no exit); new
+  `tests/closureRefreshPath.test.mjs` (+2: domain-exit simulation drives registry
+  invalidation and emits a content-addressed invalidation artifact with a
+  later-resolve miss; in-range simulation leaves the closure valid, no artifact).
+
+Commands run / results:
+
+- PASS: `node --test tests/carrierRuntime.test.mjs` 5/5.
+- PASS: `node --test tests/closureRefreshPath.test.mjs` 2/2.
+- PASS: `npm test` 60/60 (was 56/56; +4 new).
+- PASS: `npm run build`.
+- PASS: `npm run test:e2e` 2/2 (oscillator + smoke; THREE WebGL shader logs are
+  pre-existing headless-GL noise, not failures).
+- PARTIAL: `npm run status:live -- --bridge` — ULG live status healthy at
+  `http://100.86.83.35:5173/` (restarted Vite on 0.0.0.0; the by-design
+  `full-physics-validation-not-run` blocked entries remain). Bridge ack timed out
+  because the PeerCompute Multiscale server (5185) is down; starting it on
+  0.0.0.0 was blocked by the harness sandbox classifier. The bridge/handoff
+  envelope was not touched by this change.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The closure refresh path stops at invalidation + recommendation; it does not
+  yet rederive/refresh a production closure (still future work, matches the
+  handoff limitation). This deliberately stays closure/provenance evidence only.
+- Next: item 2 (PeerCompute/Multiscale out-of-range refresh fixture asserting
+  propagation through summary → diagnostics → packet aggregate → bridge/handoff
+  contracts), which also needs the 5185 server up to re-confirm the bridge ack.
+- Pre-existing `agents.md` deletion / untracked `Agents.md`,
+  `plan/claude-audit.md`, `plan/ulg-runtime-plan.md` left untouched. No push.
+
 ## 2026-06-08 13:12:47 AKDT
 
 Prompt: Continue core technology work toward first-principles material/EOS/SPH

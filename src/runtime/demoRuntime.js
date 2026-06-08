@@ -6,7 +6,12 @@ import {
   createUlgServiceManifest,
   createUlgTaskCapsule
 } from '../../ulg-gpu-abi/src/serviceContract.js';
-import { createClosureTableDescriptor, hashPayload } from '../../ulg-gpu-abi/src/index.js';
+import {
+  createClosureInvalidationArtifact,
+  createClosureRederivationArtifact,
+  createClosureTableDescriptor,
+  hashPayload
+} from '../../ulg-gpu-abi/src/index.js';
 import { ArtifactCache } from './ArtifactCache.js';
 import { ChildWorkerLeaseManager } from './ChildWorkerLeaseManager.js';
 import { ClosureRegistry } from './ClosureRegistry.js';
@@ -138,10 +143,19 @@ export async function createDemoRuntime() {
       });
       activeRootTasks = [task];
       const result = await supervisor.submitTask(task);
+      const closureRefresh = await applyClosureRefreshFromSimulation({
+        closureRegistry,
+        artifactCache,
+        closureRef: resolved.ref,
+        closureArtifact: resolved.closure,
+        result,
+        rederiveClosure: options.rederiveOnRefresh ? rederiveToyOscillatorClosure : null
+      });
       return {
         ...result,
         closureRef: resolved.ref,
-        closureValidity: resolved.validity
+        closureValidity: resolved.validity,
+        closureRefresh
       };
     },
     async cancelActive() {
@@ -155,6 +169,9 @@ export async function createDemoRuntime() {
       return createPeerComputeHandoffEnvelope(
         await createCachedArtifactHandoffs(artifactCache, options)
       );
+    },
+    async createPeerComputeUlgRuntimeHandoff(options = {}) {
+      return createUlgRuntimeHandoff(artifactCache, options);
     },
     async createPeerComputeEshkolSmokeHandoff(options = {}) {
       const cachedArtifacts = await createCachedArtifactHandoffs(artifactCache, {
@@ -173,6 +190,127 @@ export async function createDemoRuntime() {
   };
 
   return api;
+}
+
+export async function applyClosureRefreshFromSimulation({
+  closureRegistry,
+  artifactCache,
+  closureRef,
+  closureArtifact,
+  result,
+  rederiveClosure = null
+}) {
+  const refreshRequest = result?.artifact?.outputs?.closureRefreshRequest || null;
+  if (!refreshRequest) {
+    return null;
+  }
+  const applied = await closureRegistry.applyRefreshRequest({ ref: closureRef, refreshRequest });
+  if (applied?.status !== 'invalidated') {
+    return {
+      status: applied?.status || 'unchanged',
+      registryAction: applied?.registryAction || refreshRequest.registryAction || 'none',
+      refreshRequest
+    };
+  }
+  const invalidationArtifact = createClosureInvalidationArtifact({
+    artifactId: `${result.rootTaskId}.closure-invalidation`,
+    closureRef,
+    closureId: closureArtifact?.closureId || null,
+    closureKind: closureArtifact?.closureKind || null,
+    refreshRequest,
+    invalidation: applied,
+    simulationArtifactRef: result.artifactRef || null
+  });
+  const invalidationRef = await artifactCache.put(invalidationArtifact);
+  const closureRefresh = {
+    status: 'invalidated',
+    reason: applied.reason,
+    registryAction: refreshRequest.registryAction || 'invalidate-and-rerun-closure-derive',
+    refreshRequest,
+    artifactRef: invalidationRef,
+    artifact: invalidationArtifact
+  };
+  // Opt-in: actually re-derive and re-register a refreshed closure so a supervised run can
+  // continue (closes the "recommend-only" gap). Evidence-only; the re-derived closure is a toy.
+  if (typeof rederiveClosure === 'function' && closureArtifact) {
+    const axisName = closureArtifact.execution?.table?.axisName || 'r';
+    const previousDomain = Array.isArray(closureArtifact.validity?.[axisName])
+      ? closureArtifact.validity[axisName]
+      : null;
+    const newClosure = rederiveClosure(closureArtifact, refreshRequest);
+    const newClosureRef = await closureRegistry.store(newClosure);
+    const expandedDomain = Array.isArray(newClosure.validity?.[axisName])
+      ? newClosure.validity[axisName]
+      : null;
+    const rederivationArtifact = createClosureRederivationArtifact({
+      artifactId: `${result.rootTaskId}.closure-rederivation`,
+      previousClosureRef: closureRef,
+      newClosureRef,
+      previousClosureId: closureArtifact.closureId || null,
+      newClosureId: newClosure.closureId || null,
+      closureKind: newClosure.closureKind || closureArtifact.closureKind || null,
+      refreshRequest,
+      previousDomain,
+      expandedDomain,
+      axisName,
+      invalidationArtifactRef: invalidationRef
+    });
+    const rederivationRef = await artifactCache.put(rederivationArtifact);
+    closureRefresh.rederivation = {
+      status: 'rederived',
+      newClosureRef,
+      newClosureId: newClosure.closureId || null,
+      previousDomain,
+      expandedDomain,
+      artifactRef: rederivationRef,
+      artifact: rederivationArtifact,
+      closure: newClosure
+    };
+  }
+  return closureRefresh;
+}
+
+/**
+ * Re-derive a refreshed toy oscillator closure with a validity domain expanded to cover the
+ * input that left the previous closure's domain. Infers the harmonic spring constant and rest
+ * length from the previous table so the physics is preserved across the wider domain.
+ */
+export function rederiveToyOscillatorClosure(previousClosure, refreshRequest, { marginFraction = 0.25 } = {}) {
+  const axisName = previousClosure?.execution?.table?.axisName || 'r';
+  const prevDomain = Array.isArray(previousClosure?.validity?.[axisName])
+    ? previousClosure.validity[axisName]
+    : [0.6, 1.8];
+  const samples = Array.isArray(previousClosure?.execution?.table?.samples)
+    ? previousClosure.execution.table.samples
+    : [];
+  let springK = 1;
+  let restLength = 1;
+  if (samples.length >= 2) {
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const dFirst = Number(first.dEdr);
+    const dLast = Number(last.dEdr);
+    const rFirst = Number(first.r);
+    const rLast = Number(last.r);
+    if (Number.isFinite(dFirst) && Number.isFinite(dLast) && rLast !== rFirst) {
+      const slope = (dLast - dFirst) / (rLast - rFirst);
+      if (slope !== 0) {
+        springK = slope;
+        restLength = rFirst - dFirst / slope;
+      }
+    }
+  }
+  const offendingMin = Number.isFinite(refreshRequest?.minOutOfRangeInput)
+    ? refreshRequest.minOutOfRangeInput
+    : prevDomain[0];
+  const offendingMax = Number.isFinite(refreshRequest?.maxOutOfRangeInput)
+    ? refreshRequest.maxOutOfRangeInput
+    : prevDomain[1];
+  const span = Math.max(prevDomain[1] - prevDomain[0], 1e-6);
+  const margin = span * marginFraction;
+  const minR = Math.max(1e-6, Math.min(prevDomain[0], offendingMin) - margin);
+  const maxR = Math.max(prevDomain[1], offendingMax) + margin;
+  return createToyOscillatorClosureArtifact({ minR, maxR, restLength, springK });
 }
 
 function createToyOscillatorClosureArtifact({
@@ -332,6 +470,40 @@ function createPeerComputeHandoffEnvelope(artifacts, extra = {}) {
   };
 }
 
+export const ULG_RUNTIME_HANDOFF_SOURCE_SERVICES = ['ulg-runtime', 'ulg-runtime-fixture'];
+
+/**
+ * Opt-in handoff that deliberately includes ULG runtime closure + simulation (and
+ * closure-invalidation) artifacts so PeerCompute can inspect
+ * `tableDescriptor.wgslTableDescriptor`. The default `createPeerComputeHandoff`
+ * carries whatever the live smoke produced (MoonLab/Eshkol); this is the explicit
+ * mode for ULG runtime evidence. Closure/provenance + runtime evidence only — no
+ * material/EOS/SPH/phase or scientific validation is claimed.
+ */
+export async function createUlgRuntimeHandoff(artifactCache, options = {}) {
+  const sourceServices = options.includeAncestors
+    ? [...ULG_RUNTIME_HANDOFF_SOURCE_SERVICES, 'moonlab', 'eshkol']
+    : [...ULG_RUNTIME_HANDOFF_SOURCE_SERVICES];
+  const artifacts = await createCachedArtifactHandoffs(artifactCache, { ...options, sourceServices });
+  const wgslDescriptorCount = artifacts.filter((handoff) => handoff.wgslTableDescriptor).length;
+  return createPeerComputeHandoffEnvelope(artifacts, {
+    handoffKind: 'ulg-runtime-closure-simulation',
+    ulgRuntimeArtifactCount: artifacts.length,
+    wgslTableDescriptorCount: wgslDescriptorCount,
+    includesAncestors: options.includeAncestors === true,
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    notes: [
+      'Opt-in ULG runtime handoff: includes ULG closure + simulation artifacts so PeerCompute can inspect tableDescriptor.wgslTableDescriptor.',
+      'Closure/provenance + runtime evidence only; no material/EOS/SPH/phase or scientific validation claim.'
+    ]
+  });
+}
+
 async function createCachedArtifactHandoffs(artifactCache, options = {}) {
   const allowedSourceServices = Array.isArray(options.sourceServices)
     ? new Set(options.sourceServices)
@@ -348,6 +520,14 @@ async function createCachedArtifactHandoffs(artifactCache, options = {}) {
       artifactSummary: record.artifactSummary,
       artifact
     };
+    // Surface the closure-table WGSL descriptor so PeerCompute can inspect it without
+    // re-walking the artifact body (used by the opt-in ULG runtime handoff).
+    const wgslTableDescriptor = artifact?.tableDescriptor?.wgslTableDescriptor
+      || artifact?.execution?.wgslTableDescriptor
+      || null;
+    if (wgslTableDescriptor) {
+      handoff.wgslTableDescriptor = wgslTableDescriptor;
+    }
     if (record.artifactKind === 'closure' && options.includeWasmBytes !== false) {
       const wasmAsset = artifact?.runtime?.assetProbe?.assets?.find((asset) => asset.kind === 'wasmModule');
       if (wasmAsset?.url) {

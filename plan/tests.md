@@ -4,8 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 49/49 tests on 2026-06-08 after adding Phase 3A carrier
-field-observer primitives.
+Current result: pass, 64/64 tests on 2026-06-08 after adding the opt-in ULG
+runtime handoff (item 3) and the closure rederivation loop (item 4). Prior
+milestone: 60/60 after the end-to-end closure refresh path (item 1).
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -170,6 +171,41 @@ field-observer primitives.
   contract parity. The follow-up full regression passed `npm test` (`56/56`),
   `npm run build`, full Playwright e2e (`2/2`), `npm run status:live --
   --bridge`, and `git diff --check`.
+- End-to-end closure refresh path coverage on 2026-06-08 (recommended-work
+  item 1): `node --test tests/carrierRuntime.test.mjs` passed `5/5` (added:
+  carrier run halts on a closure-domain exit and surfaces a
+  `closure-refresh-request.v0` with status `refresh-recommended`,
+  `sourceKind: carrier-runtime-closure-domain-exit`, and all
+  scientific/material/EOS/SPH/phase flags false; an in-range run reports no
+  domain exit). New `node --test tests/closureRefreshPath.test.mjs` passed `2/2`:
+  a domain-exit simulation artifact drives
+  `ClosureRegistry.applyRefreshRequest()` invalidation, emits a content-addressed
+  `closure-invalidation-artifact.v0` (non-overclaiming, with simulation parent
+  ref) and the `closure-invalidated` event, and a later resolve misses; an
+  in-range simulation leaves the closure valid and emits no artifact. Full
+  regression: `npm test` `60/60`, `npm run build`, `npm run test:e2e` `2/2`, and
+  `git diff --check` clean. `npm run status:live -- --bridge` ULG live status
+  healthy on 0.0.0.0:5173; bridge ack not re-confirmed because the PeerCompute
+  Multiscale 5185 server was down in this environment (bridge/handoff envelope
+  untouched by this change).
+- Opt-in ULG runtime handoff coverage on 2026-06-08 (recommended-work item 3):
+  new `node --test tests/ulgRuntimeHandoff.test.mjs` passed `2/2` —
+  `createUlgRuntimeHandoff` includes only `ulg-runtime`/`ulg-runtime-fixture`
+  artifacts, surfaces `wgslTableDescriptor` on the closure entry, classifies the
+  `closure-invalidation` artifact distinctly, and pulls MoonLab/Eshkol ancestors
+  only when `includeAncestors` is set. The default handoff/bridge path is
+  unchanged.
+- Closure rederivation loop coverage on 2026-06-08 (recommended-work item 4):
+  `node --test tests/closureRefreshPath.test.mjs` passed `4/4` — domain exit →
+  invalidate → opt-in rederive re-registers a closure whose expanded domain
+  covers the offending input and resolves in-range there, emitting a
+  content-addressed `closure-rederivation-artifact.v0` with old→new lineage and
+  all scientific/material/EOS/SPH/phase flags false; plus a guard test that no
+  rederivation occurs unless opted in. Full regression: `npm test` `64/64`,
+  `npm run build`, `npm run test:e2e` `2/2`, `git diff --check` clean. The live
+  two-server ULG→Multiscale handoff smoke was re-confirmed (exit 0, `handoff
+  ready / blockers 0`, default 2-artifact handoff) with Multiscale on
+  localhost:5185.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

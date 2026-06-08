@@ -51,6 +51,17 @@ function validityStatus({ samples, outOfRangeSamples, nullFieldCount }) {
   return 'unresolved';
 }
 
+function refreshRequestValidationFlags() {
+  return {
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false
+  };
+}
+
 function createClosureRefreshRequest({
   closureHandle,
   fieldName,
@@ -81,12 +92,53 @@ function createClosureRefreshRequest({
     registryAction: refreshRecommended ? 'invalidate-and-rerun-closure-derive' : 'none',
     invalidationRecommended: refreshRecommended,
     refreshRecommended,
-    scientificValidation: false,
-    fullPhysicsValidation: false,
-    materialValidation: false,
-    eosValidation: false,
-    sphValidation: false,
-    phaseChangeValidation: false
+    ...refreshRequestValidationFlags()
+  };
+}
+
+/**
+ * Build a refresh request from a single closure-domain-exit event (e.g. a carrier
+ * integration step that left the closure's sampled validity domain). Produces the same
+ * `ULG_CLOSURE_REFRESH_REQUEST_SCHEMA` shape as the field-sampling path so downstream
+ * consumers (registry invalidation, PeerCompute projection) read one contract. Closure
+ * and provenance evidence only — never asserts material/EOS/SPH/phase validation.
+ */
+export function createClosureDomainExitRefreshRequest({
+  closureId = null,
+  closureKind = null,
+  outputName = null,
+  axisName = 'r',
+  fieldName = null,
+  inputValue,
+  domain = null,
+  reason = 'observed-field-outside-closure-domain',
+  detail = null
+} = {}) {
+  const offendingInput = finiteNumberOrNull(inputValue);
+  return {
+    schema: ULG_CLOSURE_REFRESH_REQUEST_SCHEMA,
+    status: 'refresh-recommended',
+    reason: reason || 'observed-field-outside-closure-domain',
+    detail,
+    sourceSchema: ULG_CLOSURE_REFRESH_REQUEST_SCHEMA,
+    sourceKind: 'carrier-runtime-closure-domain-exit',
+    closureId,
+    closureKind,
+    fieldName: fieldName || axisName,
+    axisName,
+    outputName,
+    domainMin: Array.isArray(domain) ? finiteNumberOrNull(domain[0]) : null,
+    domainMax: Array.isArray(domain) ? finiteNumberOrNull(domain[1]) : null,
+    observedSampleCount: 1,
+    inRangeSampleCount: 0,
+    outOfRangeCount: 1,
+    nullFieldCount: 0,
+    minOutOfRangeInput: offendingInput,
+    maxOutOfRangeInput: offendingInput,
+    registryAction: 'invalidate-and-rerun-closure-derive',
+    invalidationRecommended: true,
+    refreshRecommended: true,
+    ...refreshRequestValidationFlags()
   };
 }
 

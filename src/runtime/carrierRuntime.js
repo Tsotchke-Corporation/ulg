@@ -1,6 +1,6 @@
 import { computeInvariants, invariantDriftReport } from './invariants.js';
 import { evaluateEdgeMessages } from './edgeMessages.js';
-import { evaluateFieldClosureSamples } from './fieldClosureSamples.js';
+import { createClosureDomainExitRefreshRequest, evaluateFieldClosureSamples } from './fieldClosureSamples.js';
 import { evaluateFieldObservers } from './observers.js';
 import { buildNeighborGraph } from './spatialHash.js';
 
@@ -54,7 +54,23 @@ export function observeCarrierTopology(state, closureHandle) {
   });
   const edgeMessages = evaluateEdgeMessages({ neighborGraph: graph, closureHandle });
   if (edgeMessages.outOfRangeCount > 0) {
-    throw new RangeError(edgeMessages.outOfRangeEdges[0].reason);
+    const edge = edgeMessages.outOfRangeEdges[0];
+    const axisName = closureHandle.axisName || 'r';
+    const domain = Array.isArray(closureHandle.validity?.[axisName])
+      ? closureHandle.validity[axisName]
+      : null;
+    const error = new RangeError(edge.reason);
+    error.closureDomainExit = {
+      closureId: closureHandle.closureId || null,
+      closureKind: closureHandle.closureKind || null,
+      outputName: closureHandle.outputName || null,
+      axisName,
+      fieldName: 'closureAxisR',
+      inputValue: edge.distance,
+      domain,
+      reason: edge.reason
+    };
+    throw error;
   }
   const [message] = edgeMessages.messages;
   if (!message) {
@@ -176,21 +192,49 @@ export function createCarrierRuntime({
       let state = this.init(initialState);
       const deltas = [];
       const invariantSeries = [computeInvariants(state, closureHandle)];
+      let domainExit = null;
       for (let index = 0; index < stepCount; index += 1) {
-        const result = this.step(state);
+        let result;
+        try {
+          result = this.step(state);
+        } catch (error) {
+          // A step that leaves the closure's sampled validity domain is a recoverable
+          // signal, not a failure: halt cleanly, keep the deltas observed so far, and
+          // surface a closure refresh request for the supervised runtime to act on.
+          if (error instanceof RangeError && error.closureDomainExit) {
+            domainExit = {
+              ...error.closureDomainExit,
+              atStep: Number.isFinite(state.step) ? state.step : index,
+              completedSteps: deltas.length
+            };
+            break;
+          }
+          throw error;
+        }
         state = result.state;
         deltas.push(result.delta);
         invariantSeries.push(result.invariants);
       }
+      const closureRefreshRequest = domainExit
+        ? createClosureDomainExitRefreshRequest({
+            ...domainExit,
+            reason: 'observed-field-outside-closure-domain',
+            detail: domainExit.reason
+          })
+        : (deltas.at(-1)?.fieldClosureSampleSummary?.closureRefreshRequest ?? null);
       return {
         backend: this.backend,
         integrator,
         dt: timestep,
         steps: stepCount,
+        requestedSteps: stepCount,
+        completedSteps: deltas.length,
         finalState: state,
         deltas,
         invariantSeries,
-        invariants: invariantDriftReport(invariantSeries, toleranceProfile)
+        invariants: invariantDriftReport(invariantSeries, toleranceProfile),
+        domainExit,
+        closureRefreshRequest
       };
     }
   };

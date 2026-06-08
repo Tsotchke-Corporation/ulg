@@ -312,6 +312,9 @@ function renderArtifactSummaryLine(summary) {
     if (summary.simulationEdgeMessageSummaryStatus) {
       parts.push(`edge:${summary.simulationEdgeMessageSummaryStatus}`);
     }
+    if (summary.simulationFieldObserverSummaryStatus) {
+      parts.push(`field:${summary.simulationFieldObserverSummaryStatus}`);
+    }
   }
   if (summary.parityStatus) parts.push(`parity:${summary.parityStatus}`);
   if (summary.moonlabWebGpuParityScopeReady) {

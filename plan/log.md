@@ -1,5 +1,77 @@
 # ULG Implementation Log
 
+## 2026-06-08 12:10:01 AKDT
+
+Prompt: Keep advancing the core ULG carrier/operator path and wire the new
+field observers into simulation artifacts without pivoting to a demo-only SPH
+or phase-change feature.
+
+Actions:
+
+- Used Infinite Context Coder for ULG before editing:
+  `status --repo ulg --check-staleness` showed the index was fresh at
+  `c17dfe58b281c7e6566671fe581bc55632c3a417`, and targeted ICC searches plus
+  `rg` located the carrier runtime, observer, and artifact-summary surfaces.
+- Spawned Parfit as a read-only ULG audit sidecar. The returned write set
+  matched the implementation path: wire `evaluateFieldObservers()` into carrier
+  deltas, surface compact `simulationFieldObserver*` fields, add UI/test/docs,
+  and keep all scientific/full-physics flags false.
+- Added `observeCarrierTopology()` in `src/runtime/carrierRuntime.js` so the
+  same topology pass builds the neighbor graph, edge-message summary, and
+  compact-support field-observer summary for each carrier step.
+- Added scalar carrier observer fields `positionX`, `velocityX`, `mass`, and
+  `kineticEnergy`, including mass without treating it as density, EOS, phase,
+  or SPH state.
+- Updated `src/runtime/webgpuCarrierKernel.js` so accepted WebGPU deltas also
+  carry edge-message and field-observer summaries through the helper path.
+- Extended `src/runtime/artifactSummary.js` to collect
+  `delta.fieldObserverSummary` and expose `simulationFieldObserver*` compact
+  summary fields.
+- Updated the visible artifact row to show `field:pass` when carrier deltas
+  contain a passing `peercompute.ulg.field-observer-summary.v0`.
+- Extended carrier-runtime and oscillator e2e coverage for delta-level
+  observer summaries, compact summary fields, explicit false scientific/full-
+  physics flags, and visible `field:pass`.
+- Updated README and plan/status/test docs to describe this as topology/operator
+  telemetry only.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `src/main.js`
+- `src/runtime/artifactSummary.js`
+- `src/runtime/carrierRuntime.js`
+- `src/runtime/webgpuCarrierKernel.js`
+- `tests/carrierRuntime.test.mjs`
+- `tests/demo.e2e.mjs`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/UI/test files.
+- PASS:
+  `node --test tests/carrierRuntime.test.mjs tests/observers.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `15/15`.
+- PASS: `npm test` passed `49/49`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`, including visible `field:pass`
+  coverage for the oscillator simulation artifact row.
+- PASS: `npm run status:live -- --bridge` preserved the default two-artifact
+  MoonLab/Eshkol handoff, live URL `http://100.86.83.35:5173/`, and Multiscale
+  bridge ack `handoff-ready`.
+
+Open / blockers:
+
+- This is carrier field-observer telemetry only. It does not implement SPH,
+  density estimation, material properties, EOS phase changes, calibrated
+  scientific runtime, or full-physics validation.
+- Pre-existing `agents.md` deletion plus untracked `Agents.md`,
+  `plan/claude-audit.md`, and `plan/ulg-runtime-plan.md` remain untouched.
+- No push was attempted.
+
 ## 2026-06-08 11:42:33 AKDT
 
 Prompt: Continue core carrier work by making the new topology/operator evidence

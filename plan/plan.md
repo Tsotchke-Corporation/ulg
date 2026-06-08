@@ -141,6 +141,10 @@ physics work:
 - [x] Surface Phase 3A edge-message conservation summaries through simulation
   artifact summaries, browser artifact rows, and oscillator e2e coverage so
   handoff consumers can distinguish topology/operator evidence from raw deltas.
+- [x] Surface Phase 3A field-observer summaries through carrier compact
+  deltas, simulation artifact summaries, browser artifact rows, and oscillator
+  e2e coverage so handoff consumers can see scalar field-observer operator
+  evidence without claiming density, material, SPH, or phase-change readiness.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute

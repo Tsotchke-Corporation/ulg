@@ -349,6 +349,10 @@ export function summarizeUlgArtifact(artifact = {}) {
     .map((delta) => objectOrNull(delta?.edgeMessageSummary))
     .filter(Boolean);
   const simulationEdgeMessageSummary = simulationEdgeMessageSummaries.at(-1) || null;
+  const simulationFieldObserverSummaries = simulationDeltas
+    .map((delta) => objectOrNull(delta?.fieldObserverSummary))
+    .filter(Boolean);
+  const simulationFieldObserverSummary = simulationFieldObserverSummaries.at(-1) || null;
   const simulationFinalState = objectOrNull(outputs.finalState);
   const simulationWebGpuStatus = objectOrNull(execution.webgpuStatus);
   const simulationWebGpuParity = objectOrNull(execution.webgpuParity);
@@ -1203,6 +1207,27 @@ export function summarizeUlgArtifact(artifact = {}) {
     simulationEdgeMessageFullPhysicsValidation:
       typeof simulationEdgeMessageSummary?.fullPhysicsValidation === 'boolean'
         ? simulationEdgeMessageSummary.fullPhysicsValidation
+        : null,
+    simulationFieldObserverSummarySchema: simulationFieldObserverSummary?.schema || null,
+    simulationFieldObserverSummaryStatus: simulationFieldObserverSummary?.status || null,
+    simulationFieldObserverSummaryCount: simulationFieldObserverSummaries.length,
+    simulationFieldObserverObservedFieldNames:
+      Array.isArray(simulationFieldObserverSummary?.observedFieldNames)
+        ? simulationFieldObserverSummary.observedFieldNames
+        : [],
+    simulationFieldObserverZeroWeightCount:
+      finiteNumberOrNull(simulationFieldObserverSummary?.zeroWeightCount),
+    simulationFieldObserverMaxNeighborCount:
+      finiteNumberOrNull(simulationFieldObserverSummary?.maxNeighborCount),
+    simulationFieldObserverMaxWeightSum:
+      finiteNumberOrNull(simulationFieldObserverSummary?.maxWeightSum),
+    simulationFieldObserverScientificValidation:
+      typeof simulationFieldObserverSummary?.scientificValidation === 'boolean'
+        ? simulationFieldObserverSummary.scientificValidation
+        : null,
+    simulationFieldObserverFullPhysicsValidation:
+      typeof simulationFieldObserverSummary?.fullPhysicsValidation === 'boolean'
+        ? simulationFieldObserverSummary.fullPhysicsValidation
         : null,
     simulationScientificValidation:
       typeof artifact.validation?.scientificValidation === 'boolean'

@@ -1,5 +1,6 @@
 import { computeInvariants, invariantDriftReport } from './invariants.js';
 import { evaluateEdgeMessages } from './edgeMessages.js';
+import { evaluateFieldObservers } from './observers.js';
 import { buildNeighborGraph } from './spatialHash.js';
 
 export const ULG_CARRIER_DELTA_SCHEMA = 'peercompute.ulg.carrier-delta.v0';
@@ -28,13 +29,23 @@ function cloneState(state) {
   };
 }
 
-function forcePair(state, closureHandle) {
+function createCarrierObserverFields(state) {
+  return {
+    positionX: state.bodies.map((body) => body.x),
+    velocityX: state.bodies.map((body) => body.v),
+    mass: state.bodies.map((body) => body.mass),
+    kineticEnergy: state.bodies.map((body) => 0.5 * body.mass * body.v * body.v)
+  };
+}
+
+export function observeCarrierTopology(state, closureHandle) {
   const [left, right] = state.bodies;
   const dx = right.x - left.x;
   const r = Math.abs(dx);
+  const radius = Math.max(r * 1.5, r + 1e-12, 1e-12);
   const graph = buildNeighborGraph({
     cellSize: Math.max(r, 1e-12),
-    radius: Math.max(r + 1e-12, 1e-12),
+    radius,
     dimensions: 1,
     bodies: state.bodies
   });
@@ -46,6 +57,15 @@ function forcePair(state, closureHandle) {
   if (!message) {
     throw new Error('Carrier topology force path produced no edge message');
   }
+  const fieldObservers = evaluateFieldObservers({
+    particles: state,
+    neighborGraph: graph,
+    fields: createCarrierObserverFields(state),
+    radius,
+    smoothingLength: radius,
+    kernel: 'linear-compact-reference',
+    includeSelf: true
+  });
   return {
     forces: [message.forceOnSource[0], message.forceOnTarget[0]],
     sample: {
@@ -53,7 +73,8 @@ function forcePair(state, closureHandle) {
       derivatives: { dEdr: message.sampledDerivative }
     },
     separation: message.distance,
-    edgeMessageSummary: edgeMessages.summary
+    edgeMessageSummary: edgeMessages.summary,
+    fieldObserverSummary: fieldObservers.summary
   };
 }
 
@@ -95,7 +116,7 @@ export function createCarrierRuntime({
     step(state) {
       assertState(state);
       const before = cloneState(state);
-      const firstForces = forcePair(before, closureHandle);
+      const firstForces = observeCarrierTopology(before, closureHandle);
       const next = cloneState(before);
       next.step = (Number.isFinite(before.step) ? before.step : 0) + 1;
       next.time = (Number.isFinite(before.time) ? before.time : 0) + timestep;
@@ -105,7 +126,7 @@ export function createCarrierRuntime({
         body.x += halfVelocity * timestep;
         body.v = halfVelocity;
       }
-      const secondForces = forcePair(next, closureHandle);
+      const secondForces = observeCarrierTopology(next, closureHandle);
       for (let index = 0; index < next.bodies.length; index += 1) {
         const body = next.bodies[index];
         body.v += 0.5 * (secondForces.forces[index] / body.mass) * timestep;
@@ -125,6 +146,7 @@ export function createCarrierRuntime({
           sampledPotentialEnergy: secondForces.sample.value,
           sampledDerivative: secondForces.sample.derivatives.dEdr,
           edgeMessageSummary: secondForces.edgeMessageSummary,
+          fieldObserverSummary: secondForces.fieldObserverSummary,
           bodies: next.bodies.map((body, index) => ({
             id: body.id,
             x: body.x,

@@ -51,11 +51,13 @@ The runtime also includes standalone Phase 3A topology primitives:
 future field operators, and the two-body carrier force path now consumes them
 before emitting compact deltas with edge-message conservation summaries. They
 also include `evaluateFieldObservers()` for compact-support scalar field
-observations over the neighbor graph. They do not yet implement a material
-model, EOS phase changes, or an SPH solver.
+observations over the neighbor graph. Carrier simulation deltas now preserve
+field-observer summaries for scalar carrier fields including mass without
+calling those observations density, EOS, phase, or SPH state. They do not yet
+implement a material model, EOS phase changes, or an SPH solver.
 Simulation artifact summaries and the live artifact row surface this topology
-operator evidence as `edge:pass` when compact deltas carry valid edge-message
-conservation summaries.
+operator evidence as `edge:pass` and `field:pass` when compact deltas carry
+valid edge-message and field-observer summaries.
 `npm run status:live` probes the live VPN-served demo and prints a compact JSON
 readiness report. Add `-- --bridge` to also launch/post the handoff to
 PeerCompute Multiscale and report the browser ack.

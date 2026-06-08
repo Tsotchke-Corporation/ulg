@@ -1191,6 +1191,8 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.artifact.outputs.deltas.length).toBe(32);
   expect(result.artifact.outputs.deltas[0].edgeMessageSummary.schema).toBe('peercompute.ulg.edge-message-summary.v0');
   expect(result.artifact.outputs.deltas[0].edgeMessageSummary.status).toBe('pass');
+  expect(result.artifact.outputs.deltas[0].fieldObserverSummary.schema).toBe('peercompute.ulg.field-observer-summary.v0');
+  expect(result.artifact.outputs.deltas[0].fieldObserverSummary.status).toBe('pass');
   expect(result.artifact.outputs.invariants.status).toBe('pass');
   expect(result.artifact.validation.scientificValidation).toBe(false);
   expect(result.artifact.validation.fullPhysicsValidation).toBe(false);
@@ -1207,6 +1209,18 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.summary.simulationEdgeMessageOutOfRangeCount).toBe(0);
   expect(result.summary.simulationEdgeMessageScientificValidation).toBe(false);
   expect(result.summary.simulationEdgeMessageFullPhysicsValidation).toBe(false);
+  expect(result.summary.simulationFieldObserverSummarySchema).toBe('peercompute.ulg.field-observer-summary.v0');
+  expect(result.summary.simulationFieldObserverSummaryStatus).toBe('pass');
+  expect(result.summary.simulationFieldObserverSummaryCount).toBe(32);
+  expect(result.summary.simulationFieldObserverObservedFieldNames).toEqual([
+    'positionX',
+    'velocityX',
+    'mass',
+    'kineticEnergy'
+  ]);
+  expect(result.summary.simulationFieldObserverZeroWeightCount).toBe(0);
+  expect(result.summary.simulationFieldObserverScientificValidation).toBe(false);
+  expect(result.summary.simulationFieldObserverFullPhysicsValidation).toBe(false);
   if (result.artifact.execution.webgpuParity) {
     expect(result.summary.simulationWebGpuParitySchema).toBe('peercompute.ulg.carrier-webgpu-parity.v0');
     expect(result.summary.simulationWebGpuParityStatus).toBe(result.artifact.execution.webgpuParity.status);
@@ -1220,6 +1234,7 @@ test('ULG oscillator demo consumes a cached closure and emits a simulation artif
   expect(result.services).toContain('ulg-runtime');
   await expect(page.getByText(/simulation:carrier-toy/)).toBeVisible();
   await expect(page.getByText(/edge:pass/)).toBeVisible();
+  await expect(page.getByText(/field:pass/)).toBeVisible();
   await expect(page.getByText(new RegExp(`sim-gpu:${result.summary.simulationWebGpuStatus}`))).toBeVisible();
   if (result.summary.simulationWebGpuParityStatus) {
     await expect(page.getByText(new RegExp(`sim-parity:${result.summary.simulationWebGpuParityStatus}`))).toBeVisible();

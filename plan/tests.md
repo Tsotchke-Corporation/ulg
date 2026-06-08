@@ -140,6 +140,12 @@ field-observer primitives.
 - Focused Phase 3A field-observer coverage on 2026-06-08:
   `node --test tests/observers.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs`
   passed `12/12`.
+- Focused Phase 3A field-observer carrier-surface coverage on 2026-06-08:
+  `node --test tests/carrierRuntime.test.mjs tests/observers.test.mjs tests/webgpuCarrierKernel.test.mjs`
+  passed `15/15`, `npm test` passed `49/49`, `npm run build` passed with the
+  existing large chunk warning, and `npm run test:e2e` passed `2/2` with
+  delta-level `peercompute.ulg.field-observer-summary.v0`, compact
+  `simulationFieldObserver*` summary fields, and visible `field:pass`.
 
 ## Current Handoff Validation Summary
 

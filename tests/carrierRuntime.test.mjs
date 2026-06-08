@@ -78,6 +78,16 @@ test('carrier runtime advances a two-body oscillator and conserves invariants wi
   assert.equal(result.deltas[0].schema, 'peercompute.ulg.carrier-delta.v0');
   assert.equal(result.deltas[0].edgeMessageSummary.schema, 'peercompute.ulg.edge-message-summary.v0');
   assert.equal(result.deltas[0].edgeMessageSummary.status, 'pass');
+  assert.equal(result.deltas[0].fieldObserverSummary.schema, 'peercompute.ulg.field-observer-summary.v0');
+  assert.equal(result.deltas[0].fieldObserverSummary.status, 'pass');
+  assert.deepEqual(result.deltas[0].fieldObserverSummary.observedFieldNames, [
+    'positionX',
+    'velocityX',
+    'mass',
+    'kineticEnergy'
+  ]);
+  assert.equal(result.deltas[0].fieldObserverSummary.scientificValidation, false);
+  assert.equal(result.deltas[0].fieldObserverSummary.fullPhysicsValidation, false);
   assert.equal(result.invariants.schema, 'peercompute.ulg.carrier-invariant-drift.v0');
   assert.equal(result.invariants.status, 'pass');
   assert.ok(result.invariants.metrics.maxEnergyDriftAbs < 2e-5);
@@ -103,6 +113,8 @@ test('edge-message primitive matches the existing two-body carrier force convent
 
   assert.equal(edgeMessages.summary.status, 'pass');
   assert.equal(step.delta.edgeMessageSummary.status, 'pass');
+  assert.equal(step.delta.fieldObserverSummary.status, 'pass');
+  assert.equal(step.delta.fieldObserverSummary.particleCount, 2);
   assert.ok(Math.abs(message.forceOnSource[0] - 0.2) < 1e-12);
   assert.ok(Math.abs(step.delta.bodies[0].dx - expectedDx) < 1e-12);
   assert.ok(Math.abs(step.delta.bodies[1].dx + expectedDx) < 1e-12);

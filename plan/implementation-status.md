@@ -39,6 +39,11 @@ Updated: 2026-06-08 11:42:33 AKDT
   no-phase-change validation scope.
 - Surfaced Phase 3A edge-message conservation summaries through simulation
   artifact summaries, browser artifact rows, and oscillator e2e coverage.
+- Surfaced Phase 3A field-observer summaries through CPU/WebGPU carrier compact
+  deltas, simulation artifact summaries, browser artifact rows, and oscillator
+  e2e coverage as `field:pass` operator telemetry. The observed scalar fields
+  include mass but are not interpreted as density, EOS, material properties,
+  SPH dynamics, or phase-change validation.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -58,6 +63,9 @@ Updated: 2026-06-08 11:42:33 AKDT
 - Verified the edge-summary surface with syntax checks, focused
   carrier/edge/observer/spatial tests (`15/15`), `npm test` (`49/49`),
   `npm run build`, `npm run test:e2e` (`2/2`), and `git diff --check`.
+- Verified the field-observer carrier surface with syntax checks, focused
+  carrier/observer/WebGPU tests (`15/15`), `npm test` (`49/49`),
+  `npm run build`, and `npm run test:e2e` (`2/2`).
 - Added `@ulg/gpu-abi/service-contract` builders for Eshkol/MoonLab service
   manifests and task capsules.
 - Added cross-repo adapter README and static Eshkol/MoonLab manifest/task

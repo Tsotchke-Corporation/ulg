@@ -1,5 +1,5 @@
 import { carrierStepWgsl } from '../../ulg-gpu-abi/src/wgsl.js';
-import { createCarrierRuntime } from './carrierRuntime.js';
+import { createCarrierRuntime, observeCarrierTopology } from './carrierRuntime.js';
 import { normalizeClosureTableSamples } from './closureHandle.js';
 import { computeInvariants, invariantDriftReport } from './invariants.js';
 
@@ -103,8 +103,7 @@ function createParamsArray({ dt, sampleCount, step }) {
 }
 
 function createDelta({ before, next, closureHandle, dt }) {
-  const separation = Math.abs(next.bodies[1].x - next.bodies[0].x);
-  const sample = closureHandle.sample({ r: separation });
+  const topology = observeCarrierTopology(next, closureHandle);
   return {
     schema: 'peercompute.ulg.carrier-delta.v0',
     step: next.step,
@@ -112,9 +111,11 @@ function createDelta({ before, next, closureHandle, dt }) {
     dt,
     integrator: 'velocity-verlet',
     closureId: closureHandle.closureId,
-    separation,
-    sampledPotentialEnergy: sample.value,
-    sampledDerivative: sample.derivatives.dEdr,
+    separation: topology.separation,
+    sampledPotentialEnergy: topology.sample.value,
+    sampledDerivative: topology.sample.derivatives.dEdr,
+    edgeMessageSummary: topology.edgeMessageSummary,
+    fieldObserverSummary: topology.fieldObserverSummary,
     bodies: next.bodies.map((body, index) => ({
       id: body.id,
       x: body.x,

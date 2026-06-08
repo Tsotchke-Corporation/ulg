@@ -1,5 +1,51 @@
 # ULG Implementation Log
 
+## 2026-06-08 12:57:46 AKDT
+
+Prompt: Continue core technology work after closure-field sampling by moving
+closure interpolation toward WGSL/table descriptor emission instead of a
+general LLVM-to-WGSL compiler.
+
+Actions:
+
+- Added `peercompute.ulg.closure-table-wgsl-descriptor.v0` ABI emission through
+  `createClosureTableDescriptor()` / `createClosureTableWgslDescriptor()`.
+- Added a deterministic f32x4 `ClosureTableSample` row layout contract with
+  axis, value, derivative, and padding fields, explicit storage-buffer access
+  metadata, and false scientific/full-physics/material/EOS/SPH/phase-change
+  validation flags.
+- Added `createClosureTableSampleBuffer()` so table samples are encoded once in
+  the ABI layer instead of reimplemented inside the carrier WebGPU runner.
+- Updated the carrier WGSL source to use the shared `ClosureTableSample` struct
+  and updated the optional WebGPU carrier path to consume the ABI sample-buffer
+  encoder.
+- Added ABI tests for descriptor fields, sample-buffer layout, derivative
+  inference, and full-physics overclaim rejection.
+
+Validation:
+
+- PASS: syntax checks for changed ABI, WGSL, WebGPU runtime, and focused test
+  files.
+- PASS:
+  `node --test tests/abi.test.mjs tests/webgpuCarrierKernel.test.mjs tests/carrierRuntime.test.mjs`
+  passed `14/14`.
+- PASS: `npm test` passed `54/54`.
+- PASS: `npm run build` passed with the existing large chunk warning.
+- PASS: `npm run test:e2e` passed `2/2`.
+- PASS: `npm run status:live -- --bridge` preserved the default MoonLab/Eshkol
+  two-artifact handoff, live URL `http://100.86.83.35:5173/`, and Multiscale
+  bridge ack `handoff-ready`.
+
+Open / blockers:
+
+- This is a table-layout ABI/runtime contract. It does not implement a general
+  Eshkol LLVM-to-WGSL compiler, production WGSL kernel generation, density/EOS
+  validation, SPH/material physics, phase-change behavior, calibrated
+  scientific runtime, or full-physics validation.
+- Pre-existing `agents.md` deletion plus untracked `Agents.md`,
+  `plan/claude-audit.md`, and `plan/ulg-runtime-plan.md` remain untouched.
+- No push was attempted.
+
 ## 2026-06-08 12:31:45 AKDT
 
 Prompt: Continue the ULG core technology path after field observers by adding

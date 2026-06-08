@@ -26,6 +26,13 @@ Updated: 2026-06-08 11:42:33 AKDT
   lease marking, and compact simulation WebGPU summary/UI fields. This remains
   a toy carrier runtime and does not claim SPH/material/full-physics
   validation.
+- Added ABI-level closure-table WGSL descriptor emission:
+  `createClosureTableDescriptor()` now includes a
+  `peercompute.ulg.closure-table-wgsl-descriptor.v0` contract for deterministic
+  f32x4 `ClosureTableSample` rows, and `createClosureTableSampleBuffer()`
+  encodes closure samples for the carrier WebGPU path. This is a table-layout
+  runtime contract, not a general LLVM-to-WGSL compiler or calibrated material
+  validation.
 - Added Phase 3A carrier topology primitives: normalized particle state,
   deterministic spatial hashes, radius-limited neighbor pairs, and
   closure-sampled edge messages with antisymmetric force conservation summaries.
@@ -67,6 +74,10 @@ Updated: 2026-06-08 11:42:33 AKDT
 - Verified the field-observer primitive slice with syntax checks, focused
   observer/topology tests (`12/12`), `npm test` (`49/49`), `npm run build`,
   `npm run test:e2e` (`2/2`), and `git diff --check`.
+- Verified the closure-table WGSL descriptor slice with syntax checks, focused
+  ABI/WebGPU/carrier tests (`14/14`), `npm test` (`54/54`), `npm run build`,
+  `npm run test:e2e` (`2/2`), `npm run status:live -- --bridge`, and
+  `git diff --check`.
 - Verified the edge-summary surface with syntax checks, focused
   carrier/edge/observer/spatial tests (`15/15`), `npm test` (`49/49`),
   `npm run build`, `npm run test:e2e` (`2/2`), and `git diff --check`.

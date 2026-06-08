@@ -6,6 +6,13 @@ struct TensorDescriptor {
   layout: u32,
 };
 
+struct ClosureTableSample {
+  axis: f32,
+  value: f32,
+  derivative: f32,
+  _pad0: f32,
+};
+
 fn complex64_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(
     a.x * b.x - a.y * b.y,
@@ -28,13 +35,6 @@ struct CarrierBody {
   _pad0: f32,
 };
 
-struct CarrierSample {
-  r: f32,
-  energy: f32,
-  dEdr: f32,
-  _pad0: f32,
-};
-
 struct CarrierParams {
   dt: f32,
   sample_count: u32,
@@ -43,7 +43,7 @@ struct CarrierParams {
 };
 
 @group(0) @binding(0) var<storage, read_write> bodies: array<CarrierBody>;
-@group(0) @binding(1) var<storage, read> samples: array<CarrierSample>;
+@group(0) @binding(1) var<storage, read> samples: array<ClosureTableSample>;
 @group(0) @binding(2) var<uniform> params: CarrierParams;
 
 fn sample_derivative(r: f32) -> f32 {
@@ -53,8 +53,8 @@ fn sample_derivative(r: f32) -> f32 {
   var left_index = 0u;
   var right_index = params.sample_count - 1u;
   for (var index = 0u; index + 1u < params.sample_count; index = index + 1u) {
-    let left = samples[index].r;
-    let right = samples[index + 1u].r;
+    let left = samples[index].axis;
+    let right = samples[index + 1u].axis;
     if (r >= left && r <= right) {
       left_index = index;
       right_index = index + 1u;
@@ -63,11 +63,11 @@ fn sample_derivative(r: f32) -> f32 {
   }
   let left = samples[left_index];
   let right = samples[right_index];
-  if (right.r == left.r) {
-    return left.dEdr;
+  if (right.axis == left.axis) {
+    return left.derivative;
   }
-  let t = clamp((r - left.r) / (right.r - left.r), 0.0, 1.0);
-  return left.dEdr + t * (right.dEdr - left.dEdr);
+  let t = clamp((r - left.axis) / (right.axis - left.axis), 0.0, 1.0);
+  return left.derivative + t * (right.derivative - left.derivative);
 }
 
 fn pair_forces(left_x: f32, right_x: f32) -> vec2<f32> {

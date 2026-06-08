@@ -4,13 +4,17 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import {
+  CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT,
   createClosureTableDescriptor,
+  createClosureTableSampleBuffer,
+  createClosureTableWgslDescriptor,
   createComplex64Vector,
   createProvenanceBlock,
   createSimulationArtifact,
   createTensorDescriptor,
   createToleranceReport,
-  complex64ToPairs
+  complex64ToPairs,
+  ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 
 const ajv = new Ajv2020({ strict: false });
@@ -33,6 +37,62 @@ test('tensor and closure descriptors carry ABI metadata', () => {
     outputs: [{ name: 'pressure', dtype: 'f32' }]
   });
   assert.equal(closure.layout, 'soa');
+  assert.equal(closure.wgslTableDescriptor.schema, ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA);
+  assert.equal(closure.wgslTableDescriptor.status, 'declared-table-wgsl-layout');
+  assert.equal(closure.wgslTableDescriptor.axisName, 'rho');
+  assert.equal(closure.wgslTableDescriptor.outputName, 'pressure');
+  assert.equal(closure.wgslTableDescriptor.sampleCount, 8);
+  assert.equal(closure.wgslTableDescriptor.sampleStrideBytes, 16);
+  assert.deepEqual(closure.wgslTableDescriptor.rowLayout, CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT);
+  assert.equal(closure.wgslTableDescriptor.materialValidation, false);
+  assert.equal(closure.wgslTableDescriptor.eosValidation, false);
+  assert.equal(closure.wgslTableDescriptor.sphValidation, false);
+  assert.equal(closure.wgslTableDescriptor.phaseChangeValidation, false);
+});
+
+test('closure table WGSL descriptors and sample buffers use a stable f32x4 row layout', () => {
+  const descriptor = createClosureTableWgslDescriptor({
+    closureId: 'toy-table',
+    axisName: 'r',
+    outputName: 'energy',
+    derivativeName: 'dEdr',
+    sampleCount: 3
+  });
+  assert.equal(descriptor.schema, ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA);
+  assert.equal(descriptor.bufferLayout, 'aos-f32x4');
+  assert.equal(descriptor.sampleStruct, 'ClosureTableSample');
+  assert.equal(descriptor.sampleStrideFloats, 4);
+  assert.equal(descriptor.fullPhysicsValidation, false);
+
+  const explicit = createClosureTableSampleBuffer([
+    { axis: 0.5, value: 0.125, derivative: -0.5 },
+    { axis: 1, value: 0, derivative: 0 },
+    { axis: 1.5, value: 0.125, derivative: 0.5 }
+  ]);
+  assert.deepEqual(Array.from(explicit), [
+    0.5, 0.125, -0.5, 0,
+    1, 0, 0, 0,
+    1.5, 0.125, 0.5, 0
+  ]);
+
+  const inferred = createClosureTableSampleBuffer([
+    { r: 0, energy: 0 },
+    { r: 1, energy: 2 },
+    { r: 2, energy: 8 }
+  ], {
+    axisKey: 'r',
+    outputKey: 'energy',
+    derivativeKey: 'dEdr'
+  });
+  assert.deepEqual(Array.from(inferred), [
+    0, 0, 2, 0,
+    1, 2, 4, 0,
+    2, 8, 6, 0
+  ]);
+  assert.throws(() => createClosureTableWgslDescriptor({
+    closureId: 'overclaim',
+    fullPhysicsValidation: true
+  }), /fullPhysicsValidation must remain false/);
 });
 
 test('schema sketches validate representative artifacts', () => {

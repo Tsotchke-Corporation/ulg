@@ -48,7 +48,9 @@ function createOscillatorClosure() {
 
 test('carrier-step WGSL exposes storage buffers, table sampling, and compute entrypoint', () => {
   assert.match(carrierStepWgsl, /struct CarrierBody/);
+  assert.match(carrierStepWgsl, /struct ClosureTableSample/);
   assert.match(carrierStepWgsl, /var<storage, read_write> bodies/);
+  assert.match(carrierStepWgsl, /var<storage, read> samples: array<ClosureTableSample>/);
   assert.match(carrierStepWgsl, /fn sample_derivative/);
   assert.match(carrierStepWgsl, /@compute @workgroup_size\(1\)/);
 });

@@ -98,6 +98,11 @@ field-observer primitives.
   returns CPU when WebGPU is not requested or unavailable, rejects parity drift,
   reports device-lost CPU fallback, and preserves the explicit
   `peercompute.ulg.carrier-webgpu-parity.v0` schema.
+- The closure-table WGSL descriptor coverage verifies
+  `peercompute.ulg.closure-table-wgsl-descriptor.v0`, deterministic f32x4
+  `ClosureTableSample` row layout, explicit false validation flags, stable
+  sample-buffer encoding, derivative inference for tables that omit
+  derivatives, and rejection of full-physics validation overclaims.
 - GPU broker and worker-supervisor coverage verifies device-loss pressure
   reporting, retryable CPU fallback lease marking, and worker-originated
   `gpu-device-lost` telemetry without relaxing task completion.
@@ -134,6 +139,16 @@ field-observer primitives.
   `node --test tests/webgpuCarrierKernel.test.mjs` passed `7/7`, and
   `node --test --test-name-pattern "GPU broker|WorkerSupervisor records gpu-device-lost" tests/orchestration.test.mjs`
   passed `3/3`.
+- Focused closure-table WGSL descriptor coverage on 2026-06-08:
+  syntax checks for `ulg-gpu-abi/src/index.js`, `ulg-gpu-abi/src/wgsl.js`,
+  `src/runtime/webgpuCarrierKernel.js`, `tests/abi.test.mjs`, and
+  `tests/webgpuCarrierKernel.test.mjs` passed; `node --test
+  tests/abi.test.mjs tests/webgpuCarrierKernel.test.mjs
+  tests/carrierRuntime.test.mjs` passed `14/14`; `npm test` passed `54/54`;
+  `npm run build` passed with the existing large chunk warning; `npm run
+  test:e2e` passed `2/2`; and `npm run status:live -- --bridge` preserved the
+  default MoonLab/Eshkol two-artifact handoff and Multiscale bridge ack
+  `handoff-ready`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

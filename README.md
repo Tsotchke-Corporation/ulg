@@ -6,6 +6,8 @@ Browser-native ULG integration scaffold for the PeerCompute + Eshkol + MoonLab p
 This repo currently implements the first executable slice:
 
 - shared ULG GPU ABI descriptors and JSON schemas;
+- ABI-level closure-table WGSL descriptors plus a stable f32x4 sample-buffer
+  encoder for table interpolation without a general LLVM-to-WGSL compiler;
 - shared service contract builders and adapter fixtures;
 - PeerCompute-style compute service registry;
 - supervised root service workers;
@@ -71,6 +73,11 @@ PeerCompute Multiscale and report the browser ack.
 
 The cross-repo adapter contract lives in `ulg-gpu-abi/README.md` with fixture
 manifests and task capsules in `ulg-gpu-abi/examples/`.
+`createClosureTableDescriptor()` also emits a
+`peercompute.ulg.closure-table-wgsl-descriptor.v0` layout contract for
+`ClosureTableSample` storage-buffer rows, and
+`createClosureTableSampleBuffer()` encodes normalized table samples into the
+same f32x4 row layout consumed by the carrier WGSL path.
 
 ## Service Assets
 

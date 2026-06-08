@@ -1,3 +1,4 @@
+import { createClosureTableSampleBuffer } from '../../ulg-gpu-abi/src/index.js';
 import { carrierStepWgsl } from '../../ulg-gpu-abi/src/wgsl.js';
 import { createCarrierRuntime, observeCarrierTopology } from './carrierRuntime.js';
 import { normalizeClosureTableSamples } from './closureHandle.js';
@@ -74,22 +75,10 @@ function normalizeTableSamples(closureArtifact) {
   const table = closureArtifact?.execution?.table || closureArtifact?.table || {};
   const { samples } = normalizeClosureTableSamples(table);
   return samples.map((sample, index) => ({
-    r: finiteNumber(sample.axis),
-    energy: finiteNumber(sample.value),
-    dEdr: finiteNumber(derivativeAtSample(samples, index))
+    axis: finiteNumber(sample.axis),
+    value: finiteNumber(sample.value),
+    derivative: finiteNumber(derivativeAtSample(samples, index))
   }));
-}
-
-function createSampleArray(samples) {
-  const array = new Float32Array(samples.length * 4);
-  samples.forEach((sample, index) => {
-    const offset = index * 4;
-    array[offset] = sample.r;
-    array[offset + 1] = sample.energy;
-    array[offset + 2] = sample.dEdr;
-    array[offset + 3] = 0;
-  });
-  return array;
 }
 
 function createParamsArray({ dt, sampleCount, step }) {
@@ -179,7 +168,7 @@ async function runWebGpuCarrierSteps({
 }) {
   const samples = normalizeTableSamples(closureArtifact);
   const bodyByteLength = 8 * Float32Array.BYTES_PER_ELEMENT;
-  const sampleArray = createSampleArray(samples);
+  const sampleArray = createClosureTableSampleBuffer(samples);
   const bodyBuffer = device.createBuffer({
     size: bodyByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST

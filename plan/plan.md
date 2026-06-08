@@ -227,7 +227,8 @@ physics work:
 
 - [x] Identify compiler/runtime points for ULG closure manifests and WASM exports.
 - [x] Prototype closure artifact generation using the shared ABI contract.
-- [ ] Add WGSL/table strategy emitter only after descriptor conformance is stable.
+- [x] Add ABI-level WGSL/table strategy descriptor emission after descriptor
+  conformance stabilized.
 - [x] Fold in the Eshkol sidecar report.
 - [ ] Start from `eshkol-run` CLI `--wasm`/target/export paths, `llvm_backend.h`,
   `llvm_codegen.cpp`, GPU memory/VM dispatch APIs, and existing web/GPU scripts.
@@ -263,7 +264,7 @@ physics work:
   closure artifacts, including the required MHD, PIC, radiation, relativity, and
   cross-family conservation evidence families, without clearing the production
   full-physics blocker.
-- [ ] Prefer WGSL/table descriptor emission for closure interpolation instead of a
+- [x] Prefer WGSL/table descriptor emission for closure interpolation instead of a
   general LLVM-to-WGSL compiler.
 - [ ] Avoid JIT service paths until the observed derivative/JIT hang is profiled.
 

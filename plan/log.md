@@ -1,5 +1,54 @@
 # ULG Implementation Log
 
+## 2026-06-09 07:59 AKDT - General statistical-mechanics MD engine (the general solution, not per-material formulas)
+
+Prompt: Stop the onesie-twosie per-material derivations — we need a GENERAL
+solution.
+
+Right call. The analytic closures (Debye for iron c_v, Beer–Lambert for water
+colour, equipartition for air, Richards for fusion, Grüneisen for expansion) are
+a patchwork: a different hand-picked model per material and per property. The
+general solution is ONE engine that derives every thermodynamic/mechanical
+property uniformly from an interatomic potential — the potential being the only
+material-specific input, itself from ab-initio (MoonLab/DFT). That is molecular
+dynamics + statistical-mechanics estimators.
+
+Built the engine core (`src/runtime/md/`):
+
+- `pairPotential.js`: general potential interface (energy U(r), force −dU/dr,
+  cutoff). Lennard-Jones (analytic) + tabulated pair potential, so an
+  ab-initio/closure-derived cohesive curve plugs in with NO engine change.
+- `mdEngine.js`: periodic-box velocity-Verlet (minimum image), NVE + a
+  velocity-rescaling NVT thermostat, potential energy + virial accumulation, and
+  material-agnostic instantaneous temperature (equipartition) and pressure
+  (virial) read-outs.
+- `mdInit.js`: deterministic cubic-lattice positions + Maxwell–Boltzmann
+  velocities (COM removed, exact T).
+- `propertyEstimators.js`: uniform, material-agnostic estimators — equilibrium
+  averages, density, and heat capacity from a temperature scan (dE/dT). The SAME
+  code derives properties for gas/liquid/solid, any material.
+
+Validation (`tests/mdEngine.test.mjs`, 3/3) — the general engine recovers known
+statistical mechanics with no per-material formula, on a generic LJ (argon-like)
+system:
+- equipartition: measured T tracks the thermostat target;
+- ideal-gas law PV = N kB T at low density, from the virial pressure (within 10%);
+- heat capacity (3/2) N kB for a monatomic gas, from dE/dT (within 15%).
+
+`npm test` 117/117 (+3), `npm run build`, `git diff --check` clean.
+
+This replaces the per-material analytic patchwork with one measurement-based
+method. What completes the general solution:
+- Estimators for the condensed phases: NPT for density(T,P) + thermal expansion +
+  bulk modulus, two-phase coexistence for melting, enthalpy jump for latent heat —
+  all from the same engine, material-agnostic. (Next.)
+- The per-material potentials from ab-initio: fit MoonLab/DFT energies+forces to a
+  potential (tabulated or ML), the ONE remaining material input. MoonLab supplies
+  the molecular/cluster electronic-structure training data; periodic-solid DFT is
+  the piece neither MoonLab nor ULG has yet.
+Properties become MEASURED, not modelled per material; validation flags stay false
+until validated against measured references.
+
 ## 2026-06-09 07:19 AKDT - Material EOS: Grüneisen density(T) + Richards/Trouton latent heats
 
 Prompt: Derive them all with real science (the remaining material-property

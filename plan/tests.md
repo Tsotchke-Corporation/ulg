@@ -4,10 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 114/114 tests on 2026-06-09 after adding the Mie-Grüneisen
-thermal EOS (density(T)/thermal expansion) and Richards/Trouton latent heats to
-the material closures. Prior milestone: 107/107 after deriving the thermal
-(equipartition/Debye) and optical (Drude/Beer-Lambert/Rayleigh) closures.
+Current result: pass, 117/117 tests on 2026-06-09 after adding the general
+statistical-mechanics MD engine (uniform property derivation from a potential).
+Prior milestone: 114/114 after the Mie-Grüneisen thermal EOS + Richards/Trouton
+latent heats.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -277,6 +277,14 @@ the material closures. Prior milestone: 107/107 after deriving the thermal
   test was updated: Debye + Richards corrections nearly cancel (~865 MJ vs the
   864 MJ baseline). Full regression `npm test` `114/114`, `npm run build`,
   `git diff --check` clean.
+- General MD statistical-mechanics engine coverage on 2026-06-09: new
+  `node --test tests/mdEngine.test.mjs` passed `3/3` — on a generic Lennard-Jones
+  (argon-like) system the engine recovers equipartition (measured T tracks the
+  thermostat), the ideal-gas law PV = N kB T at low density from the virial
+  pressure (within 10%), and a monatomic heat capacity (3/2) N kB from dE/dT
+  (within 15%) — all measured uniformly with the potential as the only
+  per-material input, no analytic per-material model. Full regression `npm test`
+  `117/117`, `npm run build`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

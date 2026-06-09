@@ -4,11 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 107/107 tests on 2026-06-09 after deriving the material
-thermal closures (equipartition air, Debye iron) and optical closures (Drude
-iron, Beer-Lambert water/ice, Rayleigh air) from first principles. Prior
-milestone: 99/99 after standing up the ULG SPH phase demo with the radiation
-closure.
+Current result: pass, 114/114 tests on 2026-06-09 after adding the Mie-Grüneisen
+thermal EOS (density(T)/thermal expansion) and Richards/Trouton latent heats to
+the material closures. Prior milestone: 107/107 after deriving the thermal
+(equipartition/Debye) and optical (Drude/Beer-Lambert/Rayleigh) closures.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -268,6 +267,16 @@ closure.
   ~845 MJ vs the constant-cp baseline 864 MJ, consistent on masses + feasibility).
   Full regression `npm test` `107/107`, `npm run build`, and a headless render
   check (ice blue, molten iron orange glow, no console errors).
+- Material EOS + latent-heat coverage on 2026-06-09: new
+  `node --test tests/materialEos.test.mjs` passed `7/7` — Grüneisen linear thermal
+  expansion of iron 1.18e-5/K, ρ(T) drop toward melting (~7469 at 1800 K),
+  Richards L_fus within ~10% for iron, Trouton underestimating water L_vap (flagged
+  as associated-liquid, not faked), Clausius–Clapeyron boiling depression, the
+  MaterialRegistry returning a temperature-dependent iron density, and the EOS
+  closure non-overclaiming (eosValidation false). The closure-backed preflight
+  test was updated: Debye + Richards corrections nearly cancel (~865 MJ vs the
+  864 MJ baseline). Full regression `npm test` `114/114`, `npm run build`,
+  `git diff --check` clean.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

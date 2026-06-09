@@ -1,5 +1,55 @@
 # ULG Implementation Log
 
+## 2026-06-09 07:19 AKDT - Material EOS: Grüneisen density(T) + Richards/Trouton latent heats
+
+Prompt: Derive them all with real science (the remaining material-property
+closures: density, latent heats, melting/boiling).
+
+Derived the maximal further set with real physics; honest about the irreducible
+inputs that genuinely need DFT/MD.
+
+Density / thermal expansion (`src/runtime/material/gruneisenEos.js`):
+
+- Mie–Grüneisen thermal EOS: α_V = γ ρ c_v / B_T, and ρ(T) by integrating
+  dρ/ρ = −α_V dT. Iron's derived linear thermal expansion is 1.18e-5/K (the
+  literature value, exactly), and ρ(293 K→1800 K) goes 7874 → ~7469 kg/m^3
+  (matches iron near melting). Wired into the iron solid closure + the
+  MaterialRegistry density sampling, so iron's density is now a derived,
+  temperature-dependent quantity (using the Debye c_v at T). The cold-curve
+  reference (ρ0, B0, γ) is the irreducible input (flagged, needs DFT/measurement).
+  `createGruneisenEosClosure()` (eshkol.ulg.eos-closure.v0).
+
+Latent heats (`src/runtime/material/phaseTransitions.js`):
+
+- Richards' rule (ΔS_fus ≈ R) derives iron's latent heat of fusion from its
+  melting point: 270 kJ/kg vs the measured 247 (+9%) — wired into the iron
+  closure. Trouton's rule (ΔS_vap ≈ 88) + Clausius–Clapeyron implemented too.
+- Honest limit: the universal rules break for water (hydrogen bonding → ΔS_vap
+  ~109 not 88, ΔS_fus ~22 not R). The closures do NOT fake water's latent heats
+  with the universal constants; they stay reference fixtures pending
+  cohesive-energy microphysics (a MoonLab water-dimer / lattice computation).
+
+The two iron corrections nearly cancel in the preflight: Debye lowers the energy
+budget, Richards fusion raises it, net +1.2 MJ vs the 864 MJ constant-cp baseline
+(consistent on masses + feasibility).
+
+Validation: new `tests/materialEos.test.mjs` 7/7 (iron thermal expansion, ρ(T)
+drop, Richards L_fus within 10%, Trouton-underestimates-water flagged,
+Clausius–Clapeyron, registry temperature-dependent iron density, EOS closure
+non-overclaim). `npm test` 114/114 (+7), `npm run build`, `git diff --check` clean.
+
+Honest property hierarchy now:
+- Ab-initio (fundamental): Debye c_v (iron), equipartition c_v (air), Planck glow
+  colour, Drude colour (iron), Beer–Lambert colour (water/ice), Rayleigh (air).
+- Phenomenological physical laws (derive one property from others): Grüneisen
+  thermal expansion / ρ(T), Richards L_fus, Trouton L_vap, Clausius–Clapeyron.
+- Irreducible inputs (need DFT/MD/experiment, flagged): melting/boiling points,
+  cold density ρ0, bulk modulus B0, Grüneisen γ, liquid + ice heat capacities,
+  and water's latent heats (associated liquid). These are the genuine blockers;
+  the path is MoonLab/Eshkol EOS + cohesive-energy + optical-response microphysics
+  (DFT-class), which does not exist yet. material/EOS/optical/scientific
+  validation stay false.
+
 ## 2026-06-09 07:03 AKDT - First-principles material closures: thermal (equipartition + Debye) and optical (Drude/Beer-Lambert/Rayleigh)
 
 Prompt: Fix the broken closures around material properties and optics for iron,

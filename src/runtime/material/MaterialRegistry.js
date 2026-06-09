@@ -10,6 +10,7 @@ import { createClosureDomainExitRefreshRequest } from '../fieldClosureSamples.js
 import { idealGasDensityKgPerM3 } from '../materials/referenceMaterials.js';
 import { heatCapacityJPerKgK, specificInternalEnergyJPerKg } from './thermoState.js';
 import { stablePhaseAt } from './phaseEquilibrium.js';
+import { densityAtTemperature } from './gruneisenEos.js';
 
 function phaseRecordAt(properties, temperatureK) {
   const t = Number(temperatureK);
@@ -40,7 +41,20 @@ function evaluateProperty(closure, property, temperatureK, pressurePa) {
         }
         return idealGasDensityKgPerM3({ pressurePa, temperatureK, molarMassKgPerMol: properties.molarMassKgPerMol });
       }
-      return phaseRecordAt(properties, temperatureK)?.densityKgPerM3 ?? null;
+      const record = phaseRecordAt(properties, temperatureK);
+      if (record?.eos) {
+        // Temperature-dependent density from the Grüneisen thermal EOS (thermal expansion),
+        // using the phase's (Debye) heat capacity at T.
+        return densityAtTemperature({
+          referenceDensityKgPerM3: record.eos.referenceDensityKgPerM3,
+          referenceTemperatureK: record.eos.referenceTemperatureK,
+          temperatureK,
+          gruneisen: record.eos.gruneisen,
+          heatCapacityJPerKgK: heatCapacityJPerKgK(properties, temperatureK),
+          bulkModulusPa: record.eos.bulkModulusPa
+        });
+      }
+      return record?.densityKgPerM3 ?? null;
     }
     default:
       throw new Error(`Unknown material property: ${property}`);

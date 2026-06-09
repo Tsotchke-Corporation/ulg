@@ -95,10 +95,11 @@ test('closure-backed preflight reproduces the reference-constant preflight', asy
   assert.equal(preflight.closureBacked, true);
   // Masses + feasibility are invariant to the heat-capacity model, so they still match.
   assert.equal(preflight.closureSampling.consistentWithReference, true);
-  // The first-principles (Debye iron) energy budget is close to, but below, the constant-cp
-  // baseline of ~864 MJ — the Debye correction lowers it by a few percent.
-  assert.ok(preflight.closureSampling.heatExportedToWallsJ > 820e6 && preflight.closureSampling.heatExportedToWallsJ < 864e6);
-  assert.ok(preflight.closureSampling.firstPrinciplesEnergyDeltaJ < 0);
+  // The first-principles energy budget is within a few percent of the constant-cp baseline
+  // (~864 MJ): the Debye heat capacity lowers it and the Richards latent heat raises it, and the
+  // two corrections nearly cancel here.
+  assert.ok(preflight.closureSampling.heatExportedToWallsJ > 820e6 && preflight.closureSampling.heatExportedToWallsJ < 910e6);
+  assert.ok(Math.abs(preflight.closureSampling.firstPrinciplesEnergyDeltaJ) < 40e6);
   assert.equal(preflight.closureSampling.feasible, true);
   assert.equal(preflight.feasibility.feasible, true);
   assert.equal(preflight.scientificValidation, false);

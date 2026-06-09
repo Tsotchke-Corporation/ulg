@@ -17,6 +17,7 @@ import {
   debyeTemperatureFromSoundSpeed,
   gasMixtureThermal
 } from './statisticalMechanics.js';
+import { latentHeatOfFusionJPerKg } from './phaseTransitions.js';
 
 const OPEN_TOP_K = 1e6;
 
@@ -71,12 +72,25 @@ function materialProperties(materialKey) {
       molarMassKgPerMol: m.molarMassKgPerMol,
       atomsPerFormula: 1,
       heatCapacityModel: { solid: 'debye', liquid: 'constant-reference' },
+      densityModel: { solid: 'gruneisen-debye-thermal-expansion', liquid: 'constant-reference' },
+      latentModel: { fusion: 'richards-rule' },
       phases: [
-        { name: 'solid', cpJPerKgK: m.cpJPerKgK.solid, densityKgPerM3: m.densityKgPerM3.solid, temperatureRange: [0, m.meltingPointK], debyeTemperatureK: IRON_DEBYE_TEMPERATURE_K },
+        {
+          name: 'solid',
+          cpJPerKgK: m.cpJPerKgK.solid,
+          densityKgPerM3: m.densityKgPerM3.solid,
+          temperatureRange: [0, m.meltingPointK],
+          debyeTemperatureK: IRON_DEBYE_TEMPERATURE_K,
+          // Grüneisen thermal EOS: thermal expansion / ρ(T) derived from these cold-curve inputs
+          // (reference density, bulk modulus, Grüneisen γ) — the inputs ideally come from DFT.
+          eos: { gruneisen: 1.7, bulkModulusPa: 170e9, referenceDensityKgPerM3: m.densityKgPerM3.solid, referenceTemperatureK: 293 }
+        },
         { name: 'liquid', cpJPerKgK: m.cpJPerKgK.liquid, densityKgPerM3: m.densityKgPerM3.liquid, temperatureRange: [m.meltingPointK, OPEN_TOP_K] }
       ],
       transitions: [
-        { from: 'solid', to: 'liquid', temperatureK: m.meltingPointK, latentHeatJPerKg: m.latentHeatFusionJPerKg }
+        // Latent heat of fusion derived from the melting point via Richards' rule (ΔS_fus ≈ R for
+        // a close-packed metal); ~9% of the measured value for iron.
+        { from: 'solid', to: 'liquid', temperatureK: m.meltingPointK, latentHeatJPerKg: latentHeatOfFusionJPerKg({ meltingPointK: m.meltingPointK, molarMassKgPerMol: m.molarMassKgPerMol }) }
       ]
     };
   }

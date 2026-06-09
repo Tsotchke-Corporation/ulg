@@ -4,10 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 70/70 tests on 2026-06-08 after adding the SPH phase demo
-thermodynamic energy-feasibility preflight (first physics slice). Prior
-milestone: 64/64 after the opt-in ULG runtime handoff (item 3) and the closure
-rederivation loop (item 4).
+Current result: pass, 83/83 tests on 2026-06-08 after the SPH phase demo P1/P2/P3
+(closure contracts, material registry, thermodynamic core). Prior milestone:
+70/70 after the thermodynamic energy-feasibility preflight (first physics slice).
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -217,6 +216,17 @@ rederivation loop (item 4).
   preflight + its ABI artifact never overclaim (`closureBacked` and all
   scientific/material/EOS/SPH/phase flags false). Full regression: `npm test`
   `70/70`, `npm run build`, `git diff --check` clean.
+- SPH phase demo P1/P2/P3 coverage on 2026-06-08: new
+  `node --test tests/sphPhaseContracts.test.mjs` passed `6/6` (closure family
+  schemas, the overclaim guard rejecting validation flags without evidence refs,
+  six-face wall guard, resolution mass invariant, phase-equilibrium/conservation
+  builders) and `node --test tests/materialThermo.test.mjs` passed `7/7`
+  (reference closures non-overclaiming and citing pending microphysics; closure
+  energy == reference energy; phase-equilibrium lever rule at the melt plateau;
+  MaterialRegistry density/phase/energy sampling; out-of-domain sampling emits a
+  refresh request; closure-backed preflight reproduces the reference path and
+  blocks with a refresh request when iron starts above the Fe closure domain).
+  Full regression: `npm test` `83/83`, `npm run build`, `git diff --check` clean.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 16:19 AKDT
+Updated: 2026-06-08 16:36 AKDT
 
 ## Done
 
@@ -120,6 +120,23 @@ Updated: 2026-06-08 16:19 AKDT
   `npm test` (`70/70`) and `npm run build`. Material/EOS/SPH/phase remain
   blocked; the reference constants are replaced by MoonLab/Eshkol material
   closures in demo plan P2.
+- Built the SPH phase demo closure pipeline + thermodynamic core (demo plan
+  P1/P2/P3), all evidence-only. P1: `eshkol.ulg.*-closure.v0` builders
+  (`createMaterialClosureArtifact`) with a single overclaim guard
+  (`assertNoOverclaim`) that rejects any validation flag without evidence refs,
+  plus wall-temperature-boundary (six-face guard), particle-resolution
+  (mass-invariant guard), phase-equilibrium, and conservation-report builders.
+  P2: H2O/Fe/air reference-fixture material closures storable in ClosureRegistry
+  with provenance to the pending MoonLab microphysics references, and a
+  `MaterialRegistry` whose `sampleProperty` goes through ClosureRegistry and
+  emits the closure-refresh request on a domain exit instead of extrapolating.
+  P3: a thermodynamic core (specific internal energy <-> temperature, phase
+  equilibrium via lever rule over latent plateaus) and a closure-backed preflight
+  that re-derives the energy budget through the registry and is verified
+  consistent with the reference-constant preflight. Verified `npm test`
+  (`83/83`) and `npm run build`. Material/EOS/SPH/phase validation stay false
+  until MoonLab/Eshkol produce and validate the cited microphysics references;
+  next is the P4 conservative SPH carrier consuming `equilibriumFromSpecificEnergy`.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

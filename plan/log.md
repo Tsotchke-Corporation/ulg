@@ -1,5 +1,86 @@
 # ULG Implementation Log
 
+## 2026-06-08 16:36 AKDT - SPH phase demo P1/P2/P3: closure contracts, material registry, thermodynamic core
+
+Prompt: Do P1, P2, and P3 of the SPH phase demo plan. Core physics first.
+
+Approach: build the real closure pipeline + thermodynamic core, evidence-only.
+Material numbers remain tagged reference fixtures wrapped as proper closures, so
+swapping in MoonLab/Eshkol microphysics is a data swap, not a code change.
+
+P1 - artifact/closure contracts (`ulg-gpu-abi/src/sphPhaseContracts.js`,
+re-exported from index.js):
+
+- `createMaterialClosureArtifact` for the eshkol.ulg.*-closure.v0 families
+  (material/eos/phase-equilibrium/transport/mechanical/optical/radiation/
+  wall-boundary) carrying input refs, producer metadata, validity domain, units,
+  properties, descriptors, uncertainty/tolerance.
+- `assertNoOverclaim` — single guard that refuses any
+  material/eos/mechanical/optical/phase/sph/scientific/full-physics validation
+  flag without `validation.evidenceRefs`.
+- `createWallTemperatureBoundary` (rejects a config missing any of the six
+  faces), `createParticleResolutionConfig` + `assertResolutionMassInvariant`
+  (resolution must not change material mass), `createPhaseEquilibriumArtifact`,
+  `createConservationReport`, and schema constants for sph-phase
+  scenario/simulation/convergence.
+
+P2 - material closures + registry:
+
+- `src/runtime/material/materialClosures.js`: H2O/Fe/air reference-fixture
+  material closures (phases + transitions + densities + molar mass), storable in
+  ClosureRegistry (closureId/closureKind/inputHash/methodHash/execution/validity),
+  provenance citing the pending `moonlab.ulg.*-microphysics-reference.v0`
+  families, validation flags false. Registry validity envelope gates on
+  temperature only (pressure kept in validityDomain metadata).
+- `src/runtime/material/MaterialRegistry.js`: registers closures and
+  `sampleProperty({material,property,temperatureK,pressurePa})` through
+  ClosureRegistry. A sample outside the validity domain returns
+  `status:'out-of-domain'` with the existing closure-refresh request (the
+  carrier domain-exit contract) instead of extrapolating.
+
+P3 - thermodynamic core:
+
+- `src/runtime/material/thermoState.js`: data-driven specific internal energy
+  (latent heats; condensed cp as cv; gas cv) and heat capacity from a closure's
+  phases/transitions.
+- `src/runtime/material/phaseEquilibrium.js`: `stablePhaseAt(T)` and
+  `equilibriumFromSpecificEnergy(e)` — the lever-rule map from a particle's
+  internal energy to temperature + phase fractions (what the P4 SPH carrier
+  needs).
+- `src/runtime/material/thermodynamicPreflight.js`:
+  `computeClosureBackedPreflight(scenario,{materialRegistry})` re-derives the
+  preflight by sampling densities through the registry and computing the energy
+  budget from closure data; cross-checks `consistentWithReference` against the
+  reference-constant preflight, and blocks (surfacing a refresh request) if a
+  material starts outside its closure domain.
+
+Validation results:
+
+- Closure energy == reference-constant energy at all checked temperatures.
+- Phase equilibrium: mid-fusion energy -> 273.15 K with 50/50 solid/liquid
+  fractions (lever rule).
+- Registry: fe density 7000 (liquid) at 1850 K, ice 917 (solid) at 233 K, air
+  ~1.51 at -40 C; out-of-domain (5000 K) -> refresh request.
+- Closure-backed preflight reproduces the reference path
+  (`consistentWithReference: true`; ~864 MJ; feasible with cold reservoirs,
+  infeasible adiabatic) and blocks with a refresh request when iron starts above
+  the Fe closure domain.
+
+Commands: `node --test tests/sphPhaseContracts.test.mjs` 6/6;
+`node --test tests/materialThermo.test.mjs` 7/7; `npm test` 83/83 (was 64/64
+before the preflight; +6 preflight, +6 P1, +7 P2/P3 = +19 across the SPH slices);
+`npm run build`; `git diff --check` clean. (e2e not re-run: all new code is
+headless and not imported by the browser/demo path.)
+
+Maps to demo plan: P1 core contracts done (mechanical/optical/radiation closures
+are buildable via the same generic builder; their property models land with P5
+rendering). P2 material-closure pipeline + MaterialRegistry done with
+reference-fixture closures. P3 thermodynamic core (energy<->temperature, phase
+equilibrium, closure-backed preflight) done. Still blocked by design:
+material/EOS/SPH/phase validation false until MoonLab/Eshkol produce and validate
+the microphysics references the closures cite. Next: P4 conservative SPH carrier
+over `sphState`/`sphOperators` consuming `equilibriumFromSpecificEnergy`.
+
 ## 2026-06-08 16:19 AKDT - SPH phase demo: thermodynamic energy-feasibility preflight (first physics slice)
 
 Prompt: Shrink the iron cube to 1/8 the ice block's volume, make the walls

@@ -1,5 +1,50 @@
 # ULG Implementation Log
 
+## 2026-06-09 09:04 AKDT - General MD engine: condensed-phase estimators + ab-initio→potential pipeline
+
+Prompt: Do the two things — extend the engine to the condensed phases, and build
+the MoonLab-energies → fitted-potential pipeline that feeds it.
+
+Both done; the full general pipeline now runs end to end: MoonLab ab-initio curve
+→ fitted potential → general MD engine → measured properties. No per-material
+analytic formulas.
+
+(A) Condensed-phase estimators (all material-agnostic, same code for any potential):
+
+- `mdEngine.js`: added unwrapped-coordinate tracking + per-sample mean-squared
+  displacement (diffusion order parameter) and box-volume sampling to `runMd`.
+- `propertyEstimators.js`: `diffusionCoefficientM2PerS` (D = MSD/6t),
+  `equationOfStateScan` (NVT virial pressure vs box → EOS), `densityAtPressure`,
+  `bulkModulusPa` (B = −V dP/dV), and `meltingScan` (heat through T, track PE +
+  diffusion).
+- Validation (`tests/mdCondensed.test.mjs` 3/3, generic LJ argon): diffusion
+  distinguishes a cold solid (≈0) from a hot liquid (≫); the EOS scan shows
+  pressure rising under compression with a positive bulk modulus and a
+  density(P) that increases with pressure; the melting scan shows potential energy
+  and diffusion both jumping across the solid→liquid transition. Density, bulk
+  modulus, melting, latent-heat signature — all MEASURED uniformly.
+
+(B) Ab-initio → potential pipeline (`potentialFitting.js`):
+
+- `morsePotential` (conforms to the pair-potential interface) and
+  `fitMorsePotential` (least-squares fit of D_e, r_e, a to an energy curve).
+- `fitMoonlabH2Potential` fits MoonLab's real H2 dissociation curve: recovers
+  r_e = 0.7414 Å (the experimental bond length) and D_e = 0.142 Ha = 3.87 eV,
+  force = 0 at r_e. The fitted potential drives the MD engine (a bound pair
+  oscillates around r_e).
+- Validation (`tests/potentialFitting.test.mjs` 3/3): H2 fit recovers bond
+  length + dissociation energy; the fitter round-trips a known Morse potential;
+  the fitted potential runs in the MD engine and stays bound.
+
+`npm test` 123/123 (+6), `npm run build`, `git diff --check` clean.
+
+The architecture is now complete and general: properties are measured by MD; the
+only per-material input is the interatomic potential, fit to ab-initio energies.
+The remaining frontier is producing those ab-initio energies at scale — MoonLab
+gives molecular/cluster curves (demonstrated for H2); periodic-solid DFT (bulk
+iron cold curve, multi-atom force fitting / ML potentials) is the genuine missing
+engine. Validation flags stay false until validated against measured references.
+
 ## 2026-06-09 07:59 AKDT - General statistical-mechanics MD engine (the general solution, not per-material formulas)
 
 Prompt: Stop the onesie-twosie per-material derivations — we need a GENERAL

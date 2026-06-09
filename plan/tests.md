@@ -4,10 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 117/117 tests on 2026-06-09 after adding the general
-statistical-mechanics MD engine (uniform property derivation from a potential).
-Prior milestone: 114/114 after the Mie-Grüneisen thermal EOS + Richards/Trouton
-latent heats.
+Current result: pass, 123/123 tests on 2026-06-09 after adding the condensed-phase
+MD estimators (diffusion, EOS scan, bulk modulus, melting) and the
+ab-initio→fitted-potential pipeline (MoonLab H2 → Morse → MD). Prior milestone:
+117/117 after the general MD engine core.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -285,6 +285,18 @@ latent heats.
   (within 15%) — all measured uniformly with the potential as the only
   per-material input, no analytic per-material model. Full regression `npm test`
   `117/117`, `npm run build`.
+- Condensed-phase MD estimator coverage on 2026-06-09: new
+  `node --test tests/mdCondensed.test.mjs` passed `3/3` — diffusion (MSD)
+  distinguishes a cold LJ solid from a hot liquid; the EOS scan shows pressure
+  rising under compression with a positive bulk modulus and density increasing
+  with pressure; the melting scan shows potential energy + diffusion jumping
+  across the transition. All measured uniformly from the one engine.
+- Ab-initio → potential pipeline coverage on 2026-06-09: new
+  `node --test tests/potentialFitting.test.mjs` passed `3/3` — the Morse fit to
+  MoonLab's H2 dissociation curve recovers r_e = 0.7414 Å and D_e = 3.87 eV with
+  zero force at r_e, the fitter round-trips a known Morse potential, and the
+  fitted potential drives the MD engine as a bound pair. Full regression
+  `npm test` `123/123`, `npm run build`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

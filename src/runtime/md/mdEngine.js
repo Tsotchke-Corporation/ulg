@@ -21,6 +21,8 @@ export function createMdSystem({ positions, velocities, massKg, boxLengthM, pote
     potential,
     masses,
     x: positions.map((p) => [...p]),
+    // Unwrapped coordinates (no periodic wrapping) for mean-squared-displacement / diffusion.
+    xUnwrapped: positions.map((p) => [...p]),
     v: velocities ? velocities.map((p) => [...p]) : positions.map(() => [0, 0, 0]),
     potentialEnergyJ: 0,
     virialJ: 0
@@ -96,14 +98,18 @@ function rescaleToTemperature(sys, targetTempK) {
  */
 export function runMd(sys, { steps, dtS, thermostatTempK = null, equilibrationSteps = 0 } = {}) {
   let forces = computeForces(sys);
-  const samples = { temperatureK: [], pressurePa: [], totalEnergyJ: [], potentialEnergyJ: [] };
+  const samples = { temperatureK: [], pressurePa: [], totalEnergyJ: [], potentialEnergyJ: [], meanSquaredDisplacementM2: [] };
+  let msdReference = null;
+  let sampleTimeS = 0;
   for (let s = 0; s < steps; s += 1) {
     for (let i = 0; i < sys.n; i += 1) {
       const m = sys.masses[i];
       for (let d = 0; d < 3; d += 1) {
         sys.v[i][d] += 0.5 * (forces[i][d] / m) * dtS;
-        sys.x[i][d] += sys.v[i][d] * dtS;
-        // wrap into the periodic box
+        const step = sys.v[i][d] * dtS;
+        sys.xUnwrapped[i][d] += step;
+        sys.x[i][d] += step;
+        // wrap the periodic image; the unwrapped copy keeps the true trajectory for diffusion
         sys.x[i][d] -= sys.boxLengthM * Math.floor(sys.x[i][d] / sys.boxLengthM);
       }
     }
@@ -114,11 +120,21 @@ export function runMd(sys, { steps, dtS, thermostatTempK = null, equilibrationSt
     }
     if (thermostatTempK != null) rescaleToTemperature(sys, thermostatTempK);
     if (s >= equilibrationSteps) {
+      if (!msdReference) msdReference = sys.xUnwrapped.map((p) => [...p]);
+      else sampleTimeS += dtS;
+      let msd = 0;
+      for (let i = 0; i < sys.n; i += 1) {
+        msd += (sys.xUnwrapped[i][0] - msdReference[i][0]) ** 2
+          + (sys.xUnwrapped[i][1] - msdReference[i][1]) ** 2
+          + (sys.xUnwrapped[i][2] - msdReference[i][2]) ** 2;
+      }
       samples.temperatureK.push(instantaneousTemperatureK(sys));
       samples.pressurePa.push(instantaneousPressurePa(sys));
       samples.potentialEnergyJ.push(sys.potentialEnergyJ);
       samples.totalEnergyJ.push(sys.potentialEnergyJ + kineticEnergyJ(sys));
+      samples.meanSquaredDisplacementM2.push(msd / sys.n);
     }
   }
+  samples.sampleTimeS = sampleTimeS;
   return samples;
 }

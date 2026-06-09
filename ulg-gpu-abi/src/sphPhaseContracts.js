@@ -234,6 +234,62 @@ export function createPhaseEquilibriumArtifact({
 }
 
 /**
+ * SPH phase simulation artifact (evidence-only). Wraps a conservative SPH carrier run with its
+ * conservation report and phase summary. Always non-overclaiming: a conservative reference run
+ * is not validated material/phase physics.
+ */
+export function createSphPhaseSimulationArtifact({
+  artifactId,
+  scenarioId = null,
+  backend = 'cpu-reference',
+  integrator = 'leapfrog-kdk',
+  dt,
+  steps,
+  particleCount = null,
+  initialTotals = null,
+  finalTotals = null,
+  conservationReport = null,
+  phaseSummary = null,
+  closureRefs = [],
+  provenance = {}
+}) {
+  if (!artifactId) {
+    throw new Error('artifactId is required for SPH phase simulation artifacts');
+  }
+  return {
+    schema: ULG_SPH_PHASE_SIMULATION_ARTIFACT_SCHEMA,
+    artifactId,
+    sourceService: 'ulg-runtime',
+    scenarioId,
+    representation: 'sph-phase-carrier',
+    execution: { backend, integrator, dt, steps },
+    particleCount,
+    initialTotals,
+    finalTotals,
+    conservationReport,
+    phaseSummary,
+    closureRefs,
+    ...falseValidationFlags(),
+    validation: {
+      status: conservationReport?.status === 'fail' ? 'fail' : 'conservative-reference-ok',
+      blockers: [
+        'sph-phase-carrier-reference-not-validated-physics',
+        'material-closures-not-microphysics-validated'
+      ]
+    },
+    provenance: {
+      sourceService: 'ulg-runtime',
+      ...provenance,
+      notes: [
+        ...(provenance.notes || []),
+        'Conservative CPU-reference SPH carrier run; phases emerge from specific internal energy.',
+        'No material/EOS/SPH/phase/scientific validation is claimed.'
+      ]
+    }
+  };
+}
+
+/**
  * Conservation report (energy/mass/momentum residuals) for a simulation step or budget.
  */
 export function createConservationReport({

@@ -4,9 +4,9 @@
 
 Command: `npm test`
 
-Current result: pass, 83/83 tests on 2026-06-08 after the SPH phase demo P1/P2/P3
-(closure contracts, material registry, thermodynamic core). Prior milestone:
-70/70 after the thermodynamic energy-feasibility preflight (first physics slice).
+Current result: pass, 88/88 tests on 2026-06-08 after the SPH phase demo P4
+(conservative SPH carrier). Prior milestone: 83/83 after P1/P2/P3 (closure
+contracts, material registry, thermodynamic core).
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -227,6 +227,13 @@ Current result: pass, 83/83 tests on 2026-06-08 after the SPH phase demo P1/P2/P
   refresh request; closure-backed preflight reproduces the reference path and
   blocks with a refresh request when iron starts above the Fe closure domain).
   Full regression: `npm test` `83/83`, `npm run build`, `git diff --check` clean.
+- SPH phase demo P4 conservative carrier coverage on 2026-06-08: new
+  `node --test tests/sphCarrier.test.mjs` passed `5/5` — cubic-spline kernel
+  support, symmetric pressure forces conserving momentum to round-off, an
+  inviscid run conserving total energy (<1% drift) and momentum (<1e-9) with
+  exact mass, particle phase emerging from specific internal energy, and the SPH
+  simulation artifact staying evidence-only. Full regression: `npm test`
+  `88/88`, `npm run build`, `git diff --check` clean.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

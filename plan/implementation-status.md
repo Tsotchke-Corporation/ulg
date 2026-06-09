@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 16:36 AKDT
+Updated: 2026-06-08 19:04 AKDT
 
 ## Done
 
@@ -137,6 +137,18 @@ Updated: 2026-06-08 16:36 AKDT
   (`83/83`) and `npm run build`. Material/EOS/SPH/phase validation stay false
   until MoonLab/Eshkol produce and validate the cited microphysics references;
   next is the P4 conservative SPH carrier consuming `equilibriumFromSpecificEnergy`.
+- Stood up the conservative SPH carrier (demo plan P4), CPU reference and
+  evidence-only. `src/runtime/sph/` adds a cubic-spline kernel + symmetric
+  momentum/thermal-energy SPH operators with Monaghan artificial viscosity, SPH
+  particle state, conservation diagnostics, and a leapfrog phase carrier whose
+  per-particle phase emerges from specific internal energy via the P3
+  `equilibriumFromSpecificEnergy` solver, plus a `sph-phase-simulation-artifact.v0`
+  builder. Verified momentum is conserved to round-off, total energy is conserved
+  (<1% drift inviscid) with exact mass, and phase classification works
+  (`npm test` `88/88`). Deferred to later slices: multi-material contact, Tait/
+  condensed EOS, six fixed-temperature wall heat flux (P5), spatial-hash neighbor
+  acceleration (P7). sph/phase/material/scientific validation stay false until the
+  cited MoonLab/Eshkol microphysics references exist and validate.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

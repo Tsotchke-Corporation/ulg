@@ -1,5 +1,97 @@
 # ULG Implementation Log
 
+## 2026-06-08 19:04 AKDT - SPH phase demo P4: conservative SPH carrier
+
+Prompt: Stand up the basic SPH carrier, then dive into MoonLab/Eshkol microphysics.
+
+Built a textbook conservative compressible-SPH carrier (CPU reference,
+evidence-only), reusing the P3 thermodynamic core for phase state.
+
+Files added (`src/runtime/sph/`):
+
+- `sphOperators.js`: cubic-spline kernel + gradient (D=2/3), density by summation,
+  ideal-gas pressure/sound speed, and the symmetric momentum + thermal-energy
+  operators with Monaghan artificial viscosity. The symmetric pressure form makes
+  pairwise forces equal/opposite -> total momentum exactly conserved.
+- `sphState.js`: particle state (position/velocity vectors, mass, specific
+  internal energy); mass is set once and never changes.
+- `sphConservation.js`: total mass/momentum/(kinetic+thermal) energy and a
+  conservation-report (reuses the P1 conservation-report builder).
+- `sphPhaseCarrier.js`: leapfrog kick-drift-kick integrator; `summarizePhases`
+  reads each particle's phase from its specific internal energy via
+  `equilibriumFromSpecificEnergy`; `runSphPhaseCarrier` returns totals series +
+  conservation report + phase summary.
+- `ulg-gpu-abi/src/sphPhaseContracts.js`: `createSphPhaseSimulationArtifact`
+  (sph-phase-simulation-artifact.v0, overclaim flags false).
+
+Validation (`tests/sphCarrier.test.mjs`, 5/5):
+
+- Kernel positive at centre, zero beyond 2h.
+- Symmetric pressure forces: sum of m*a is zero to round-off (momentum exact).
+- Inviscid run conserves total energy (<1% drift) and momentum (<1e-9), mass
+  exact.
+- Particle phase emerges from energy (ice vs water particles classified).
+- The SPH simulation artifact stays evidence-only.
+
+Commands: `node --test tests/sphCarrier.test.mjs` 5/5; `npm test` 88/88 (+5);
+`npm run build`; `git diff --check` clean. (e2e not re-run: headless, not in the
+browser path.)
+
+Status / next: this is the conservative SPH spine (ideal-gas EOS, single-material
+momentum/energy). Still blocked by design: sph/phase/material/scientific
+validation false. Demo-specific pieces deferred: multi-material contact, Tait/
+condensed EOS, six fixed-temperature wall heat flux (P5), and spatial-hash
+neighbor acceleration (P7). Next per the prompt: dive into the MoonLab/Eshkol
+microphysics that the material closures cite (the real validation un-blocker).
+
+Concurrent external churn observed (not mine): a `16:44 GPU-resident performance
+upgrade plan` log entry + `plan/perf-upgrade.md`, plus the earlier `plans/`->
+`plan/` move and `agents.md` deletion. Left untouched. No push.
+
+## 2026-06-08 16:44:42 AKDT - GPU-resident performance upgrade plan
+
+Prompt:
+
+- User asked to note the performance discussion in a new plan file named
+  `perf-upgrade.md`: keep contract/provenance work out of the per-frame hot
+  loop, move SPH/EOS/phase/gas/wall/render state into WebGPU-resident buffers,
+  and clarify what is needed for GPU MD and Schrodinger/DFT-style material
+  derivation.
+
+Actions:
+
+- Confirmed `plan/perf-upgrade.md` did not exist.
+- Added `plan/perf-upgrade.md` documenting the GPU-resident runtime target.
+- Captured the architectural split:
+  - CPU/JS handles validation, contracts, UI, bind setup, rare diagnostics, and
+    closure invalidation.
+  - WebGPU handles particle state, closures, neighbor/grid data, gas/steam,
+    wall heat exchange, phase updates, mechanical/optical/radiation sampling,
+    and rendering.
+- Documented that GPU MD/property sampling is plausible and should be async,
+  while full Schrodinger/DFT for H2O/Fe is not realistic inside the 60 Hz
+  browser hot loop and should start as offline/remote/native or reduced-scope
+  reference work.
+
+Files touched:
+
+- `plan/perf-upgrade.md`
+- `plan/log.md`
+
+Commands run / results:
+
+- PASS: `git status --short --branch`
+- PASS: `test -f plan/perf-upgrade.md` returned not found before creation.
+- PASS: `date '+%Y-%m-%d %H:%M:%S %Z'`
+- PASS: `sed -n '1,120p' /home/cos/projects/AGENTS.md`
+
+Failures / open questions:
+
+- No implementation tests were run because this prompt only added a planning
+  document.
+- The repo still has the user's pending `plans/` to `plan/` file move and other
+  untracked plan files. No staging or commit was attempted.
+
 ## 2026-06-08 16:36 AKDT - SPH phase demo P1/P2/P3: closure contracts, material registry, thermodynamic core
 
 Prompt: Do P1, P2, and P3 of the SPH phase demo plan. Core physics first.

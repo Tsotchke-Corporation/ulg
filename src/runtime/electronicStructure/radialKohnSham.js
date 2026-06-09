@@ -88,6 +88,68 @@ function lowestRadialState(vEff, r, h, l, shiftHa) {
   return { energyHa: energy, u };
 }
 
+// Number of eigenvalues of the symmetric tridiagonal (diag, off) strictly below mu (Sturm
+// sequence via the signs of the LDL^T pivots).
+function sturmCount(diag, off, mu) {
+  const n = diag.length;
+  let count = 0;
+  let p = diag[0] - mu;
+  if (p < 0) count += 1;
+  for (let i = 1; i < n; i += 1) {
+    if (Math.abs(p) < 1e-300) p = -1e-300;
+    p = (diag[i] - mu) - (off[i - 1] * off[i - 1]) / p;
+    if (p < 0) count += 1;
+  }
+  return count;
+}
+
+/**
+ * The k lowest eigenpairs of a symmetric tridiagonal matrix (diag d, sub/super-diagonal off,
+ * length n-1): eigenvalues by Sturm-sequence bisection, eigenvectors by inverse iteration.
+ */
+function lowestEigenpairs(diag, off, k, h) {
+  const n = diag.length;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < n; i += 1) {
+    const radius = Math.abs(i > 0 ? off[i - 1] : 0) + Math.abs(i < n - 1 ? off[i] : 0);
+    lo = Math.min(lo, diag[i] - radius);
+    hi = Math.max(hi, diag[i] + radius);
+  }
+  const pairs = [];
+  for (let m = 1; m <= k; m += 1) {
+    let a = lo;
+    let b = hi;
+    for (let iter = 0; iter < 120; iter += 1) {
+      const mid = 0.5 * (a + b);
+      if (sturmCount(diag, off, mid) >= m) b = mid; else a = mid;
+    }
+    const value = 0.5 * (a + b);
+    // Eigenvector by inverse iteration at a shift just off the eigenvalue.
+    const shift = value - 1e-7 * (Math.abs(value) + 1);
+    const shifted = new Float64Array(n);
+    for (let i = 0; i < n; i += 1) shifted[i] = diag[i] - shift;
+    let v = new Float64Array(n);
+    for (let i = 0; i < n; i += 1) v[i] = Math.sin(((m) * Math.PI * (i + 1)) / (n + 1));
+    for (let iter = 0; iter < 12; iter += 1) {
+      const y = solveTridiagonal(shifted, off, v);
+      // Orthogonalize against already-found lower eigenvectors (∫ dr weight = h).
+      for (const prev of pairs) {
+        let dot = 0;
+        for (let i = 0; i < n; i += 1) dot += y[i] * prev.u[i] * h;
+        for (let i = 0; i < n; i += 1) y[i] -= dot * prev.u[i];
+      }
+      let norm = 0;
+      for (let i = 0; i < n; i += 1) norm += y[i] * y[i] * h;
+      norm = Math.sqrt(norm);
+      for (let i = 0; i < n; i += 1) v[i] = y[i] / norm;
+    }
+    if (v[1] < 0) for (let i = 0; i < n; i += 1) v[i] = -v[i];
+    pairs.push({ energyHa: value, u: v });
+  }
+  return pairs;
+}
+
 /** Spherical Hartree potential V_H(r) from a radial density ρ(r). */
 function hartreePotential(rho, r, h) {
   const n = r.length;
@@ -154,4 +216,105 @@ export function solveKohnShamAtom({ atomicNumberZ, occupancy, l = 0, gridPointsN
   energyHa = occupancy * orbitalEnergyHa - eHartreeDouble + eXcCorrection;
 
   return { totalEnergyHa: energyHa, orbitalEnergyHa, atomicNumberZ, occupancy };
+}
+
+// Ground-state electron configurations (subshells filled in energy order). Occupancies are the
+// standard neutral-atom configurations.
+export const ELEMENT_CONFIGURATIONS = Object.freeze({
+  H: { Z: 1, config: [{ n: 1, l: 0, occupancy: 1 }] },
+  He: { Z: 2, config: [{ n: 1, l: 0, occupancy: 2 }] },
+  Be: { Z: 4, config: [{ n: 1, l: 0, occupancy: 2 }, { n: 2, l: 0, occupancy: 2 }] },
+  Ne: { Z: 10, config: [{ n: 1, l: 0, occupancy: 2 }, { n: 2, l: 0, occupancy: 2 }, { n: 2, l: 1, occupancy: 6 }] },
+  Ar: { Z: 18, config: [
+    { n: 1, l: 0, occupancy: 2 }, { n: 2, l: 0, occupancy: 2 }, { n: 2, l: 1, occupancy: 6 },
+    { n: 3, l: 0, occupancy: 2 }, { n: 3, l: 1, occupancy: 6 }
+  ] },
+  Fe: { Z: 26, config: [
+    { n: 1, l: 0, occupancy: 2 }, { n: 2, l: 0, occupancy: 2 }, { n: 2, l: 1, occupancy: 6 },
+    { n: 3, l: 0, occupancy: 2 }, { n: 3, l: 1, occupancy: 6 }, { n: 4, l: 0, occupancy: 2 },
+    { n: 3, l: 2, occupancy: 6 }
+  ] }
+});
+
+function densityFromSubshells(configuration, statesByL, r, gridPointsN) {
+  const rho = new Float64Array(gridPointsN);
+  for (const sub of configuration) {
+    const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+    for (let i = 0; i < gridPointsN; i += 1) {
+      rho[i] += (sub.occupancy * state.u[i] * state.u[i]) / (4 * Math.PI * r[i] * r[i]);
+    }
+  }
+  return rho;
+}
+
+/**
+ * Self-consistent all-electron Kohn–Sham LDA for an atom of any (closed/standard-shell)
+ * configuration, using Aufbau filling: for each angular momentum l, the lowest needed radial
+ * states are found by the tridiagonal eigensolver, then occupied per the configuration. Returns
+ * the total energy, the per-subshell orbital energies, and the integrated electron count.
+ */
+export function solveKohnShamAtomConfig({ atomicNumberZ, configuration, gridPointsN = 6000, rMaxBohr = 16, mixing = 0.2, maxScf = 400 }) {
+  const h = rMaxBohr / gridPointsN;
+  const r = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) r[i] = (i + 1) * h;
+
+  // States needed per l = max (n - l) over the configuration.
+  const statesPerL = new Map();
+  for (const sub of configuration) statesPerL.set(sub.l, Math.max(statesPerL.get(sub.l) || 0, sub.n - sub.l));
+
+  let rho = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) rho[i] = atomicNumberZ * (atomicNumberZ ** 3 / Math.PI) * Math.exp(-2 * atomicNumberZ * r[i]);
+
+  let statesByL = new Map();
+  let vH = new Float64Array(gridPointsN);
+  let vXC = new Float64Array(gridPointsN);
+  const invH2 = 1 / (h * h);
+  const off = new Float64Array(gridPointsN).fill(-0.5 * invH2);
+
+  for (let scf = 0; scf < maxScf; scf += 1) {
+    vH = hartreePotential(rho, r, h);
+    for (let i = 0; i < gridPointsN; i += 1) vXC[i] = xcPotential(rho[i]);
+    statesByL = new Map();
+    for (const [l, count] of statesPerL) {
+      const diag = new Float64Array(gridPointsN);
+      for (let i = 0; i < gridPointsN; i += 1) {
+        diag[i] = invH2 - atomicNumberZ / r[i] + vH[i] + vXC[i] + (l * (l + 1)) / (2 * r[i] * r[i]);
+      }
+      statesByL.set(l, lowestEigenpairs(diag, off, count, h));
+    }
+    const rhoNew = densityFromSubshells(configuration, statesByL, r, gridPointsN);
+    let delta = 0;
+    for (let i = 0; i < gridPointsN; i += 1) {
+      delta += Math.abs(rhoNew[i] - rho[i]) * 4 * Math.PI * r[i] * r[i] * h;
+      rho[i] = (1 - mixing) * rho[i] + mixing * rhoNew[i];
+    }
+    if (delta < 1e-6 && scf > 8) break;
+  }
+
+  // Total energy + diagnostics.
+  let sumOcc = 0;
+  let electronCount = 0;
+  const orbitals = [];
+  for (const sub of configuration) {
+    const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+    sumOcc += sub.occupancy * state.energyHa;
+    electronCount += sub.occupancy;
+    orbitals.push({ n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa });
+  }
+  let integratedElectrons = 0;
+  let eHartreeDouble = 0;
+  let eXcCorrection = 0;
+  for (let i = 0; i < gridPointsN; i += 1) {
+    const dV = 4 * Math.PI * r[i] * r[i] * h;
+    integratedElectrons += rho[i] * dV;
+    eHartreeDouble += 0.5 * rho[i] * vH[i] * dV;
+    eXcCorrection += (xcEnergyPerVolume(rho[i]) - vXC[i] * rho[i]) * dV;
+  }
+  return {
+    totalEnergyHa: sumOcc - eHartreeDouble + eXcCorrection,
+    orbitals,
+    electronCount,
+    integratedElectrons,
+    atomicNumberZ
+  };
 }

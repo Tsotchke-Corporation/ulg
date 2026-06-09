@@ -4,16 +4,22 @@
 
 Command: `npm test`
 
-Current result: pass, 132/132 tests on 2026-06-09 after adding the minimal
-Kohn–Sham DFT (radial atomic LDA solver, validated on helium) plus the SPH
-renderer test. Prior milestone: 128/128 after the periodic electronic-structure
-frontier (UEG/LDA core validated vs QMC + jellium cohesion for sodium).
+Current result: pass, 134/134 tests on 2026-06-09 after taking Kohn–Sham DFT all
+the way to the iron atom (multi-shell Aufbau + tridiagonal eigensolver). Prior
+milestone: 132/132 after the minimal radial KS-LDA solver validated on helium.
 
 - Kohn–Sham DFT coverage on 2026-06-09: `node --test tests/radialKohnSham.test.mjs`
   passed `3/3` — the radial KS-LDA solver reproduces helium's total energy
   (−2.823 Ha vs the LDA reference ~−2.83) and 1s orbital energy (−0.563 vs ~−0.57)
   within ~0.3%, a more-charged He-like ion is more tightly bound, and the SCF is
   deterministic.
+- Multi-shell / iron KS-LDA coverage on 2026-06-09:
+  `node --test tests/atomicKohnSham.test.mjs` passed `2/2` — beryllium
+  (−14.41 Ha) and neon (−127.9 Ha) totals match the LDA references with exact
+  electron counts, and the all-electron iron atom (Z=26, [Ar]4s²3d⁶) solves to
+  exactly 26 electrons, total ~−1258 Ha (non-relativistic, near the LDA reference
+  ~−1261), the full 1s..4s,3d shell structure all bound, and 3d below 4s (the
+  correct LDA atomic ordering).
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,

@@ -3,6 +3,7 @@ export const ULG_GPU_ABI_VERSION = '0.5';
 export const ULG_SIMULATION_ARTIFACT_SCHEMA = 'peercompute.ulg.simulation-artifact.v0';
 export const ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-invalidation-artifact.v0';
 export const ULG_CLOSURE_REDERIVATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-rederivation-artifact.v0';
+export const ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA = 'peercompute.ulg.thermodynamic-preflight.v0';
 export const ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA = 'peercompute.ulg.closure-table-wgsl-descriptor.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
@@ -431,6 +432,60 @@ export function createClosureRederivationArtifact({
         'Re-derived an invalidated closure with an expanded validity domain after a carrier domain exit.',
         'Re-derived closure is a toy reference; closure/provenance evidence only.',
         'No material/EOS/SPH/phase validation is claimed.'
+      ]
+    }
+  };
+}
+
+/**
+ * Wrap a thermodynamic energy-feasibility preflight result as a content-addressable artifact.
+ * This is the SPH phase demo's first physics artifact: a deterministic energy budget + per-wall
+ * ledger + feasibility verdict. It is energy-budget/provenance evidence only — the material
+ * numbers come from tagged reference fixtures (not validated closures), so the artifact always
+ * carries `closureBacked: false` and no material/EOS/SPH/phase/scientific validation.
+ */
+export function createThermodynamicPreflightArtifact({
+  artifactId,
+  preflight,
+  materialReferences = [],
+  provenance = {}
+}) {
+  if (!artifactId) {
+    throw new Error('artifactId is required for ULG thermodynamic preflight artifacts');
+  }
+  if (!preflight || typeof preflight !== 'object') {
+    throw new Error('preflight result is required for ULG thermodynamic preflight artifacts');
+  }
+  return {
+    schema: ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA,
+    artifactId,
+    sourceService: 'ulg-runtime',
+    scenarioId: preflight.scenarioId || null,
+    status: preflight.status || null,
+    geometry: preflight.geometry || null,
+    masses: preflight.masses || null,
+    initialState: preflight.initialState || null,
+    boundary: preflight.boundary || null,
+    energyBudget: preflight.energyBudget || null,
+    transient: preflight.transient || null,
+    feasibility: preflight.feasibility || null,
+    particleResolution: preflight.particleResolution || null,
+    materialReferences,
+    closureBacked: false,
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    blockers: Array.isArray(preflight.blockers) ? preflight.blockers : [],
+    provenance: {
+      sourceService: 'ulg-runtime',
+      ...provenance,
+      notes: [
+        ...(provenance.notes || []),
+        'Energy-feasibility preflight from tagged reference material fixtures; not closure-backed.',
+        'No material/EOS/SPH/phase/scientific validation is claimed (demo plan P2+ provides closures and validation).'
       ]
     }
   };

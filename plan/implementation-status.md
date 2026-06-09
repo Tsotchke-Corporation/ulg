@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 15:39 AKDT
+Updated: 2026-06-08 16:19 AKDT
 
 ## Done
 
@@ -103,6 +103,23 @@ Updated: 2026-06-08 15:39 AKDT
   material/EOS/SPH/phase/scientific validation. Verified `npm test` (`64/64`),
   `npm run build`, `npm run test:e2e` (`2/2`), `git diff --check`, and the live
   two-server ULG→Multiscale handoff smoke (default 2-artifact handoff intact).
+- Started the SPH phase demo on the core-physics path with the thermodynamic
+  energy-feasibility preflight (the plan's "Immediate Next Slice"; demo plan P0
+  done, P1 partially). Added tagged reference material fixtures (H2O/Fe/air, all
+  `closureBacked: false`), a piecewise specific-internal-energy model with latent
+  heats, `createSphPhaseScenario`/`computeThermodynamicPreflight`
+  (`src/runtime/thermoPreflight.js`), and a `thermodynamic-preflight.v0` ABI
+  artifact builder with overclaim guards. Geometry: 1 m ice cube + iron cube at
+  1/8 the ice volume (0.5 m edge) in a 10 m sealed box of -40 F air, with six
+  infinite fixed-temperature reservoir walls. The preflight computes masses
+  (iron 875 kg, ice 917 kg, air ~1512 kg), the ~864 MJ exported to the cold
+  walls, the energy-conserving adiabatic equilibrium (~352.6 K), transient
+  phase-excursion energetics (iron can melt but not boil all the ice), and the
+  cold-iron+ice feasibility verdict: feasible with cold infinite reservoirs,
+  correctly INFEASIBLE for an adiabatic box or walls at/above freezing. Verified
+  `npm test` (`70/70`) and `npm run build`. Material/EOS/SPH/phase remain
+  blocked; the reference constants are replaced by MoonLab/Eshkol material
+  closures in demo plan P2.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

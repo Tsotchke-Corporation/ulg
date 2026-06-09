@@ -1,5 +1,80 @@
 # ULG Implementation Log
 
+## 2026-06-08 16:19 AKDT - SPH phase demo: thermodynamic energy-feasibility preflight (first physics slice)
+
+Prompt: Shrink the iron cube to 1/8 the ice block's volume, make the walls
+infinite fixed-temperature reservoirs, do the preflight and continue
+implementation. Core physics first, not a faked demo.
+
+Approach / reasoning:
+
+- This is the SPH phase demo plan's "Immediate Next Slice": a deterministic,
+  headless thermodynamic energy-feasibility preflight (the gate that can FAIL),
+  not particles/renderer. It reuses the closure/provenance discipline and is
+  evidence-only — material numbers come from tagged reference fixtures, so
+  everything is `closureBacked: false` with no material/EOS/SPH/phase/scientific
+  validation until demo plan P2 swaps in MoonLab/Eshkol material closures.
+- Geometry per the prompt: 1 m ice cube (1 m^3) and an iron cube at 1/8 that
+  volume (0.125 m^3 -> 0.5 m edge), in a 10 m sealed box of -40 F (233.15 K) air
+  at 1 atm, with six infinite fixed-temperature reservoir walls (default
+  233.15 K).
+
+Files added:
+
+- `src/runtime/materials/referenceMaterials.js`: tagged reference constants for
+  H2O/Fe/air (densities, melting/boiling points, latent heats, per-phase heat
+  capacities), ideal-gas density, phase classification, and a piecewise specific
+  internal-energy function with latent heats (condensed cp used as cv; gas uses
+  cv for the constant-volume box). All `closureBacked: false`.
+- `src/runtime/thermoPreflight.js`: `createSphPhaseScenario` (overridable
+  geometry/temps/wall temps/particle counts; material laws are not overridable)
+  and `computeThermodynamicPreflight` — masses, initial/final internal energy,
+  heat exported to walls, a lumped equal-area per-wall ledger, an
+  energy-conserving adiabatic-equilibrium bisection solver, the cold-iron+ice
+  feasibility verdict, transient phase-excursion energetics, and
+  represented-entities-per-macro-particle.
+- `ulg-gpu-abi/src/index.js`: `ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA` +
+  `createThermodynamicPreflightArtifact` (content-addressable, overclaim flags
+  false, reference-fixture provenance).
+- `tests/thermoPreflight.test.mjs` (6 tests).
+
+Physics results (match hand calculations):
+
+- Iron mass 875 kg (0.125 m^3 x 7000 kg/m^3 molten), ice 917 kg, air 1512 kg.
+- Cold infinite reservoirs: feasible. Heat exported to walls = the iron
+  cool+solidify energy ~864 MJ (144 MJ per face x 6). Final water phase = solid.
+- Transient: the iron's ~864 MJ can fully MELT all the ice (~382 MJ) but cannot
+  BOIL it all (~2835 MJ) — energy-availability bounds; the SPH carrier (P4)
+  resolves the real transient.
+- Adiabatic sealed box: energy-conserving lumped equilibrium ~352.6 K (> 273.15)
+  -> INFEASIBLE; the demo cannot end as cold gray iron with ice without the wall
+  sink. Walls set >= freezing (e.g. 300 K) are also infeasible. This is the
+  failing-preflight gate the plan demands.
+
+Commands run / results:
+
+- PASS: `node --test tests/thermoPreflight.test.mjs` 6/6; `npm test` 70/70
+  (was 64/64; +6); `npm run build`; `git diff --check` clean. (e2e not re-run:
+  the preflight is headless and not imported by any browser/demo path.)
+
+Maps to demo plan milestones: P0 (feasibility) done; P1 partially (preflight +
+material-reference + preflight artifact schemas with overclaim guards) — the
+remaining P1 EOS/phase/mechanical/optical/SPH-artifact schemas and P2 material
+closures are the next steps.
+
+Open / next:
+
+- Per-wall ledger is a lumped equal-area budget, not a resolved conductive flux
+  solve; labeled as such on the artifact.
+- Next slices: P1 remaining contract schemas (mechanical/optical/EOS/phase, SPH
+  phase simulation artifact, convergence/conservation reports) with overclaim
+  guards, then P2 `MaterialRegistry` over `ClosureRegistry` fed by real
+  MoonLab/Eshkol microphysics closures. Material/EOS/SPH/phase stay blocked
+  until that evidence exists.
+- `plan/sphphasedemo.md` is concurrently authored and untracked; its P0/P1
+  checkboxes should be ticked by its author. Pre-existing external churn
+  (`plans/`->`plan/` move, `agents.md` deletion) left untouched. No push.
+
 ## 2026-06-08 15:39 AKDT - Closure refresh items 3 (opt-in ULG runtime handoff) and 4 (closure rederivation)
 
 Prompt: Recommended-next-work items 3 and 4. (3) Add an explicit opt-in handoff

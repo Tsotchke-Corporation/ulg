@@ -4,9 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 64/64 tests on 2026-06-08 after adding the opt-in ULG
-runtime handoff (item 3) and the closure rederivation loop (item 4). Prior
-milestone: 60/60 after the end-to-end closure refresh path (item 1).
+Current result: pass, 70/70 tests on 2026-06-08 after adding the SPH phase demo
+thermodynamic energy-feasibility preflight (first physics slice). Prior
+milestone: 64/64 after the opt-in ULG runtime handoff (item 3) and the closure
+rederivation loop (item 4).
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -206,6 +207,16 @@ milestone: 60/60 after the end-to-end closure refresh path (item 1).
   two-server ULG→Multiscale handoff smoke was re-confirmed (exit 0, `handoff
   ready / blockers 0`, default 2-artifact handoff) with Multiscale on
   localhost:5185.
+- SPH phase demo thermodynamic preflight coverage on 2026-06-08 (first physics
+  slice): new `node --test tests/thermoPreflight.test.mjs` passed `6/6` —
+  iron cube is 1/8 the ice volume (0.125 m^3, 875 kg) with ice 917 kg and air
+  ~1512 kg; cold infinite reservoirs make cold solid iron + ice feasible with
+  ~864 MJ exported to the walls (144 MJ/face) and the iron able to melt but not
+  boil all the ice; an adiabatic sealed box reaches a ~352.6 K mixed equilibrium
+  and is correctly reported INFEASIBLE (as are walls set >= freezing); and the
+  preflight + its ABI artifact never overclaim (`closureBacked` and all
+  scientific/material/EOS/SPH/phase flags false). Full regression: `npm test`
+  `70/70`, `npm run build`, `git diff --check` clean.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

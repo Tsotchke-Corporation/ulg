@@ -4,10 +4,16 @@
 
 Command: `npm test`
 
-Current result: pass, 128/128 tests on 2026-06-09 after adding the periodic
-electronic-structure frontier (uniform-electron-gas LDA core validated vs QMC +
-jellium cohesion deriving sodium's density/bulk modulus). Prior milestone:
-123/123 after the condensed-phase MD estimators + ab-initio→potential pipeline.
+Current result: pass, 132/132 tests on 2026-06-09 after adding the minimal
+Kohn–Sham DFT (radial atomic LDA solver, validated on helium) plus the SPH
+renderer test. Prior milestone: 128/128 after the periodic electronic-structure
+frontier (UEG/LDA core validated vs QMC + jellium cohesion for sodium).
+
+- Kohn–Sham DFT coverage on 2026-06-09: `node --test tests/radialKohnSham.test.mjs`
+  passed `3/3` — the radial KS-LDA solver reproduces helium's total energy
+  (−2.823 Ha vs the LDA reference ~−2.83) and 1s orbital energy (−0.563 vs ~−0.57)
+  within ~0.3%, a more-charged He-like ion is more tightly bound, and the SCF is
+  deterministic.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,

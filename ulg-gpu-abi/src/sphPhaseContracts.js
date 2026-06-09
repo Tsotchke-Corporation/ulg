@@ -18,6 +18,7 @@ export const SPH_PHASE_CLOSURE_SCHEMAS = Object.freeze({
   'wall-boundary': 'eshkol.ulg.wall-boundary-closure.v0'
 });
 
+export const MOONLAB_MICROPHYSICS_REFERENCE_SCHEMA = 'moonlab.ulg.microphysics-reference.v0';
 export const ULG_WALL_TEMPERATURE_BOUNDARY_SCHEMA = 'peercompute.ulg.wall-temperature-boundary.v0';
 export const ULG_PARTICLE_RESOLUTION_CONFIG_SCHEMA = 'peercompute.ulg.particle-resolution-config.v0';
 export const ULG_PARTICLE_CONVERGENCE_REPORT_SCHEMA = 'peercompute.ulg.particle-convergence-report.v0';
@@ -71,6 +72,51 @@ function requireValidityDomain(validityDomain, family) {
   if (!Array.isArray(t) || t.length !== 2 || !(Number(t[0]) < Number(t[1]))) {
     throw new Error(`${family} closure validityDomain.temperatureK must be an ascending [min, max] range`);
   }
+}
+
+/**
+ * A produced microphysics reference: the molecular-ground-state evidence a material closure is
+ * derived from (MoonLab molecular Hamiltonian, exactly diagonalized). It carries the producer,
+ * the data, derived physical quantities, and a comparison to a published reference where one
+ * exists. `quantitative` records whether the result is quantitatively trustworthy (true for the
+ * near-FCI H2 case, false for the minimal-basis H2O model). Validation flags stay false: a
+ * produced reference is evidence, and only flips a closure's validation if it meets the bar.
+ */
+export function createMicrophysicsReferenceArtifact({
+  artifactId,
+  species,
+  producer = {},
+  data = {},
+  derived = {},
+  comparison = null,
+  quantitative = false,
+  provenance = {}
+}) {
+  if (!artifactId || !species) {
+    throw new Error('artifactId and species are required for microphysics reference artifacts');
+  }
+  return {
+    schema: MOONLAB_MICROPHYSICS_REFERENCE_SCHEMA,
+    artifactId,
+    sourceService: 'moonlab',
+    species,
+    producer,
+    data,
+    derived,
+    comparison,
+    quantitative: quantitative === true,
+    status: quantitative === true ? 'produced-quantitative' : 'produced-model-not-quantitative',
+    ...falseValidationFlags(),
+    provenance: {
+      sourceService: 'moonlab',
+      ...provenance,
+      notes: [
+        ...(provenance.notes || []),
+        'Produced microphysics evidence: exact ground state of a MoonLab molecular Hamiltonian.',
+        'Evidence only; does not by itself flip closure material/EOS/scientific validation.'
+      ]
+    }
+  };
 }
 
 /**

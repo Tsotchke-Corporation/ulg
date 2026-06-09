@@ -11,14 +11,22 @@
 
 import { createMaterialClosureArtifact, hashPayload } from '../../../ulg-gpu-abi/src/index.js';
 import { REFERENCE_MATERIALS } from '../materials/referenceMaterials.js';
+import { createH2OMicrophysicsReference, microphysicsInputRef } from './microphysicsReferences.js';
 
 const OPEN_TOP_K = 1e6;
 
-const PENDING_MICROPHYSICS_REFS = {
-  h2o: ['moonlab.ulg.h2o-microphysics-reference.v0'],
-  fe: ['moonlab.ulg.fe-microphysics-reference.v0'],
-  air: ['moonlab.ulg.air-mixture-reference.v0']
-};
+// H2O now cites a *produced* MoonLab microphysics reference (model-quality, not yet
+// quantitative). Fe and air remain pending — no MoonLab microphysics has been produced for them.
+function microphysicsRefsFor(materialKey) {
+  if (materialKey === 'h2o') {
+    return [microphysicsInputRef(createH2OMicrophysicsReference())];
+  }
+  const pending = {
+    fe: 'moonlab.ulg.fe-microphysics-reference.v0',
+    air: 'moonlab.ulg.air-mixture-reference.v0'
+  }[materialKey];
+  return [{ schema: pending, status: 'pending-not-yet-produced' }];
+}
 
 function materialProperties(materialKey) {
   const m = REFERENCE_MATERIALS[materialKey];
@@ -80,7 +88,7 @@ function buildMaterialClosure(materialKey) {
     closureFamily: 'material',
     closureId: `sph-phase-${materialKey}-material-closure`,
     material: materialKey,
-    inputRefs: PENDING_MICROPHYSICS_REFS[materialKey].map((schema) => ({ schema, status: 'pending-not-yet-produced' })),
+    inputRefs: microphysicsRefsFor(materialKey),
     producer: { service: 'eshkol', commit: null, toolchain: 'reference-fixture' },
     validityDomain,
     units: {
@@ -94,7 +102,7 @@ function buildMaterialClosure(materialKey) {
     derivatives: true,
     provenance: {
       source: 'reference-fixture',
-      notes: [`Reference-fixture material closure for ${materialKey}; awaiting ${PENDING_MICROPHYSICS_REFS[materialKey].join(', ')}.`]
+      notes: [`Reference-fixture material closure for ${materialKey}; microphysics refs: ${microphysicsRefsFor(materialKey).map((r) => `${r.schema}:${r.status}`).join(', ')}.`]
     }
   });
   // Augment with the fields ClosureRegistry needs (identity + validity envelope + execution).

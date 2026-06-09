@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 19:04 AKDT
+Updated: 2026-06-08 19:28 AKDT
 
 ## Done
 
@@ -149,6 +149,21 @@ Updated: 2026-06-08 19:04 AKDT
   condensed EOS, six fixed-temperature wall heat flux (P5), spatial-hash neighbor
   acceleration (P7). sph/phase/material/scientific validation stay false until the
   cited MoonLab/Eshkol microphysics references exist and validate.
+- Produced the first real MoonLab ab-initio microphysics references and wired them
+  into the material-closure pipeline. A driver
+  (`tools/moonlab-microphysics/h2_h2o_microphysics.c`) links MoonLab's
+  `libquantumsim.so`, has MoonLab construct the molecular qubit Hamiltonian
+  (Jordan-Wigner), and exact-diagonalizes it. The H2 dissociation curve has its
+  minimum at the experimental bond length (0.7414 A), is within ~4.9 mHa of the
+  FCI reference, and gives a ~3.87 eV bond energy; the H2O 8-qubit model
+  Hamiltonian is exactly diagonalized (model-only, not quantitative). Added
+  `moonlab.ulg.microphysics-reference.v0` artifacts (`microphysicsReferences.js`),
+  a committed deterministic dataset, and updated the H2O material closure to cite
+  the produced reference (status produced) — without flipping materialValidation,
+  which stays false because the reference is model-quality. Fe and air microphysics
+  remain pending. Verified `npm test` (`92/92`). The microphysics chain is real;
+  un-blocking material/EOS/scientific validation needs a quantitative basis (and Fe
+  is a much harder solid-state problem) plus Eshkol-side closure compilation.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

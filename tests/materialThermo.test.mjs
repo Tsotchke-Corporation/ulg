@@ -23,8 +23,10 @@ test('reference material closures are non-overclaiming and cite pending microphy
   assert.equal(closures.fe.schema, 'eshkol.ulg.material-closure.v0');
   assert.equal(closures.fe.validation.materialValidation, false);
   assert.equal(closures.fe.validation.scientificValidation, false);
-  assert.equal(closures.h2o.inputRefs[0].schema, 'moonlab.ulg.h2o-microphysics-reference.v0');
-  assert.equal(closures.h2o.inputRefs[0].status, 'pending-not-yet-produced');
+  // Fe microphysics is not yet produced; H2O now cites a produced (model-quality) reference,
+  // covered in microphysics.test.mjs.
+  assert.equal(closures.fe.inputRefs[0].schema, 'moonlab.ulg.fe-microphysics-reference.v0');
+  assert.equal(closures.fe.inputRefs[0].status, 'pending-not-yet-produced');
 });
 
 test('thermodynamic core matches the reference constants (closure energy == reference energy)', () => {

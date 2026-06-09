@@ -1,5 +1,61 @@
 # ULG Implementation Log
 
+## 2026-06-08 19:28 AKDT - MoonLab microphysics: real ab-initio molecular references wired into closures
+
+Prompt: ...then dive into the MoonLab/Eshkol microphysics.
+
+Found MoonLab (quantum simulator, `libquantumsim.so`) exports molecular Hamiltonian
++ VQE chemistry (`vqe_create_h2_hamiltonian`, `vqe_create_h2o_hamiltonian`,
+`molecule_h2/h2o`). Eshkol is the autodiff Scheme->LLVM closure compiler. The
+microphysics chain is MoonLab (build molecular Hamiltonian) -> Eshkol (compile
+closures) -> ULG (consume). Produced the first real microphysics evidence.
+
+What I ran:
+
+- The shot-based VQE solver was too slow (~2 s/iter). Instead wrote a driver
+  (`tools/moonlab-microphysics/h2_h2o_microphysics.c`) that links libquantumsim.so,
+  has MoonLab *construct* the molecular qubit Hamiltonian (Jordan-Wigner of the
+  molecular integrals — the physics), then exact-diagonalizes it via shifted power
+  iteration (FCI in the minimal basis): fast, deterministic, gold-standard ground
+  state.
+- H2 dissociation curve: minimum at 0.7414 A (the experimental H2 bond length),
+  total energy -1.142171 Ha (within ~4.9 mHa of the FCI reference -1.137284 Ha),
+  dissociating toward ~-1.0 Ha (two H atoms). Derived bond energy ~3.87 eV /
+  ~373 kJ/mol (minimal basis underbinds vs experiment 4.48 eV — right order).
+- H2O (8-qubit model Hamiltonian, dim 256): exact ground state -67.895 Ha
+  (electronic -77.084 + nuclear 9.190). This is a MoonLab *model* Hamiltonian, not
+  a quantitative water energy (~-76.4 Ha), so it is recorded as model-only.
+
+Wired into the pipeline (all evidence-only):
+
+- `src/runtime/material/microphysicsData.js`: the committed, deterministic dataset
+  (reproducible from the driver).
+- `ulg-gpu-abi/src/sphPhaseContracts.js`: `createMicrophysicsReferenceArtifact`
+  (`moonlab.ulg.microphysics-reference.v0`) with producer/data/derived/comparison,
+  a `quantitative` flag, and overclaim flags false.
+- `src/runtime/material/microphysicsReferences.js`: builds the H2 (quantitative)
+  and H2O (model-only) references and derives the H2 equilibrium bond length +
+  bond energy + FCI comparison from the curve.
+- `src/runtime/material/materialClosures.js`: the H2O material closure now cites
+  the *produced* microphysics reference (status pending-not-yet-produced ->
+  produced-model-not-quantitative, with content hash). Fe and air remain pending.
+  Producing a model-quality reference does NOT flip materialValidation — the
+  overclaim discipline keeps validation false.
+
+Validation (`tests/microphysics.test.mjs`, 4/4): derived H2 equilibrium recovers
+0.7414 A and ~3.87 eV bond energy within tolerance; H2 reference is
+produced-quantitative and non-overclaiming; H2O reference is produced-model-not-
+quantitative; the H2O closure cites the produced reference but materialValidation
+stays false; fe/air still pending. `npm test` 92/92 (+4); build; diff --check clean.
+
+Honest status: the microphysics chain is real and produces genuine quantum-chemistry
+evidence (H2 at near-FCI accuracy with the correct bond length). But the demo
+materials' references are model-quality (H2O) or absent (Fe, air), so material/EOS/
+SPH/phase/scientific validation stay false by design. Un-blocking validation needs
+a quantitative basis (and Fe is a much harder solid-state problem than these small
+molecules). Next: Eshkol-side closure compilation from these references (autodiff
+derivatives), and better-basis H2O / a tractable Fe model.
+
 ## 2026-06-08 19:04 AKDT - SPH phase demo P4: conservative SPH carrier
 
 Prompt: Stand up the basic SPH carrier, then dive into MoonLab/Eshkol microphysics.

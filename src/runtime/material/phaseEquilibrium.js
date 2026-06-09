@@ -6,7 +6,7 @@
 //    specific internal energy, using the lever rule across latent plateaus. This is the map the
 //    SPH carrier (P4) needs to turn a particle's energy into its phase state.
 
-import { orderedSegments } from './thermoState.js';
+import { orderedSegments, segmentTemperatureFromEnergyAbove } from './thermoState.js';
 
 /**
  * The phase stable at temperature T. At an exact transition temperature the lower (not-yet-
@@ -41,7 +41,7 @@ export function equilibriumFromSpecificEnergy(properties, specificEnergyJPerKg) 
   if (e >= maxEnergy) {
     const last = segments[segments.length - 1];
     if (last.type === 'phase') {
-      const temperatureK = last.tLo + (e - last.eStart) / last.cpJPerKgK;
+      const temperatureK = segmentTemperatureFromEnergyAbove(last, e - last.eStart);
       return { temperatureK, stablePhase: last.phase, phaseFractions: { [last.phase]: 1 }, clamped: e > maxEnergy ? 'high' : null };
     }
     return { temperatureK: last.temperatureK, stablePhase: last.to, phaseFractions: { [last.to]: 1 }, clamped: e > maxEnergy ? 'high' : null };
@@ -49,7 +49,7 @@ export function equilibriumFromSpecificEnergy(properties, specificEnergyJPerKg) 
   for (const segment of segments) {
     if (e < segment.eStart || e > segment.eEnd) continue;
     if (segment.type === 'phase') {
-      const temperatureK = segment.tLo + (e - segment.eStart) / segment.cpJPerKgK;
+      const temperatureK = segmentTemperatureFromEnergyAbove(segment, e - segment.eStart);
       return { temperatureK, stablePhase: segment.phase, phaseFractions: { [segment.phase]: 1 }, clamped: null };
     }
     const toFraction = segment.latentHeatJPerKg > 0

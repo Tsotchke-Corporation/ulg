@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 19:59 AKDT
+Updated: 2026-06-09 07:03 AKDT
 
 ## Done
 
@@ -180,6 +180,22 @@ Updated: 2026-06-08 19:59 AKDT
   feasible, 280 particles, no errors). sph/phase/material/optical/scientific
   validation stay false; P5 (condensed EOS, multi-material contact, wall heat
   flux, conduction) is the next physics slice.
+- Replaced the broken/placeholder material closures with first-principles
+  derivations (`statisticalMechanics.js`, `opticalClosure.js`). Heat capacity:
+  air from equipartition over molecular degrees of freedom (cv≈715, matching
+  measured air <1%), solid iron from the Debye model with θ_D derived from sound
+  speed + atomic density (cv(233K)≈368 rising to Dulong–Petit) — integrated into
+  the thermo core (per-phase constant-cp or Debye energy + energy→temperature
+  inversion). Optics: intrinsic colour derived from Drude free-electron
+  reflectance (iron → warm grey), Beer–Lambert O–H overtone absorption (water/ice
+  → blue), and Rayleigh (air → near-transparent), integrated over CIE 1931 → sRGB;
+  the SPH demo's particle colour is now fully closure-backed (Planck radiation
+  glow + optical intrinsic colour, no demo-tuned/placeholder colours). All
+  closureBacked but model-derived, not measured-validated, so
+  material/EOS/optical/scientific validation stay false. Still reference fixtures
+  (flagged): latent heats, melting/boiling points, liquid + ice heat capacities,
+  condensed densities. Verified `npm test` (`107/107`), `npm run build`, headless
+  render (ice blue, iron orange glow).
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

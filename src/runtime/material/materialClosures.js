@@ -12,8 +12,28 @@
 import { createMaterialClosureArtifact, hashPayload } from '../../../ulg-gpu-abi/src/index.js';
 import { REFERENCE_MATERIALS } from '../materials/referenceMaterials.js';
 import { createH2OMicrophysicsReference, microphysicsInputRef } from './microphysicsReferences.js';
+import {
+  atomicNumberDensity,
+  debyeTemperatureFromSoundSpeed,
+  gasMixtureThermal
+} from './statisticalMechanics.js';
 
 const OPEN_TOP_K = 1e6;
+
+// Air heat capacity + molar mass derived first-principles from equipartition over molecular
+// degrees of freedom (no tabulated cp).
+const AIR_THERMAL = gasMixtureThermal();
+// Iron Debye temperature derived from a Debye-averaged sound speed + atomic number density.
+// The sound speed is a reference mechanical input (a mechanical closure is still pending); the
+// Debye temperature and the resulting temperature-dependent heat capacity are derived.
+const IRON_DEBYE_SOUND_SPEED_M_PER_S = 3600;
+const IRON_DEBYE_TEMPERATURE_K = debyeTemperatureFromSoundSpeed({
+  soundSpeedMPerS: IRON_DEBYE_SOUND_SPEED_M_PER_S,
+  numberDensityPerM3: atomicNumberDensity({
+    densityKgPerM3: REFERENCE_MATERIALS.fe.densityKgPerM3.solid,
+    molarMassKgPerMol: REFERENCE_MATERIALS.fe.molarMassKgPerMol
+  })
+});
 
 // H2O now cites a *produced* MoonLab microphysics reference (model-quality, not yet
 // quantitative). Fe and air remain pending — no MoonLab microphysics has been produced for them.
@@ -45,10 +65,14 @@ function materialProperties(materialKey) {
     };
   }
   if (materialKey === 'fe') {
+    // Solid iron heat capacity is the first-principles Debye model (θ_D derived from sound speed
+    // + atomic density); the constant cpJPerKgK is kept as the Dulong–Petit high-T fallback.
     return {
       molarMassKgPerMol: m.molarMassKgPerMol,
+      atomsPerFormula: 1,
+      heatCapacityModel: { solid: 'debye', liquid: 'constant-reference' },
       phases: [
-        { name: 'solid', cpJPerKgK: m.cpJPerKgK.solid, densityKgPerM3: m.densityKgPerM3.solid, temperatureRange: [0, m.meltingPointK] },
+        { name: 'solid', cpJPerKgK: m.cpJPerKgK.solid, densityKgPerM3: m.densityKgPerM3.solid, temperatureRange: [0, m.meltingPointK], debyeTemperatureK: IRON_DEBYE_TEMPERATURE_K },
         { name: 'liquid', cpJPerKgK: m.cpJPerKgK.liquid, densityKgPerM3: m.densityKgPerM3.liquid, temperatureRange: [m.meltingPointK, OPEN_TOP_K] }
       ],
       transitions: [
@@ -57,13 +81,15 @@ function materialProperties(materialKey) {
     };
   }
   if (materialKey === 'air') {
-    // Sealed rigid (constant-volume) box: the gas uses cv as its effective heat capacity, and
-    // its density follows the ideal-gas law (computed from P,T at sample time), not a constant.
+    // Sealed rigid (constant-volume) box: the gas uses cv (equipartition-derived) as its
+    // effective heat capacity; density follows the ideal-gas law (computed from P,T at sample
+    // time), not a constant. Heat capacity + molar mass are first-principles, not tabulated.
     return {
-      molarMassKgPerMol: m.molarMassKgPerMol,
+      molarMassKgPerMol: AIR_THERMAL.molarMassKgPerMol,
       idealGas: true,
+      heatCapacityModel: { gas: 'equipartition' },
       phases: [
-        { name: 'gas', cpJPerKgK: m.cvJPerKgK, densityKgPerM3: null, temperatureRange: [0, OPEN_TOP_K] }
+        { name: 'gas', cpJPerKgK: AIR_THERMAL.cvJPerKgK, densityKgPerM3: null, temperatureRange: [0, OPEN_TOP_K] }
       ],
       transitions: []
     };

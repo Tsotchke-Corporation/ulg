@@ -1,5 +1,61 @@
 # ULG Implementation Log
 
+## 2026-06-09 07:03 AKDT - First-principles material closures: thermal (equipartition + Debye) and optical (Drude/Beer-Lambert/Rayleigh)
+
+Prompt: Fix the broken closures around material properties and optics for iron,
+water, and air — derive them, don't leave placeholders.
+
+Replaced reference-fixture constants and demo-tuned/placeholder colours with
+first-principles derivations. All still derived-not-measured-validated, so
+materialValidation/opticalValidation stay false, but closureBacked is now true.
+
+Thermal (`src/runtime/material/statisticalMechanics.js`):
+
+- Air heat capacity from equipartition over molecular degrees of freedom
+  (Cv = (f/2)R per mole, mixed by composition): cv 714.9, cp 1002, gamma 1.401,
+  mean molar mass 0.028966 — all within <1% of measured air, with no tabulated cp.
+- Monatomic-solid heat capacity from the Debye model, Cv(T) = 3R/M · D3(θ_D/T),
+  with the Debye temperature derived from sound speed + atomic number density
+  (θ_D ≈ 470 K for iron). Iron cv(233 K) ≈ 368 J/kgK (the real low-T value) rising
+  to the Dulong–Petit 446.7 at high T — not the constant 449 the fixture used.
+  Added the matching Debye internal energy U(T) (dU/dT = cv).
+- Wired into the thermo core: thermoState now integrates per-phase energy with a
+  constant cp OR Debye (iron solid declares a Debye temperature), and
+  phaseEquilibrium inverts energy->temperature through the (possibly Debye)
+  segment. materialClosures derives air cv (equipartition) and iron solid cv
+  (Debye). The closure-backed preflight is now ~845 MJ vs the constant-cp baseline
+  864 MJ; consistentWithReference is redefined on the model-invariant quantities
+  (masses, feasibility) and reports the first-principles energy delta separately.
+
+Optical (`src/runtime/material/opticalClosure.js`):
+
+- Intrinsic (reflective/transmissive) colour derived per material:
+  iron from the Drude free-electron reflectance (warm silvery grey),
+  water/ice from Beer–Lambert absorption with the O–H vibrational-overtone rise
+  toward the red (so water/ice come out BLUE — the actual physics of why water is
+  blue), air from Rayleigh 1/λ^4 (near-transparent, faint blue). Colour integrated
+  over the visible against CIE 1931 -> sRGB. `createOpticalClosure()`
+  (eshkol.ulg.optical-closure.v0).
+- The SPH demo's particle colour is now fully closure-backed: Planck radiation
+  closure for incandescent glow (hot iron orange) and the optical closure for
+  intrinsic colour (ice blue). The demo-tuned colormap and the flagged grey
+  placeholder are both gone.
+
+Validation: new `tests/statisticalMechanics.test.mjs` 4/4 (air cv, Debye limits,
+θ_D, dU/dT=cv), `tests/opticalClosure.test.mjs` 4/4 (white/black integration,
+Drude metal, iron warm grey + water/ice blue + air transparent, closure non-
+overclaim). Updated materialThermo + closure-backed preflight tests for the
+first-principles values. `npm test` 107/107 (+8), `npm run build`,
+`git diff --check` clean, headless browser render confirms ice blue + iron orange
+glow, no console errors.
+
+Honest scope: heat capacity (air, solid iron), and optics (iron/water/air colour)
+are now first-principles. Still NOT derived (reference fixtures, flagged): latent
+heats, melting/boiling points, liquid + ice heat capacities, condensed densities;
+and the closures are model-derived, not validated against measured optical/EOS
+data — so material/EOS/optical/scientific validation stay false. MoonLab
+optical-response / EOS microphysics would validate them.
+
 ## 2026-06-08 19:59 AKDT - ULG SPH phase demo (MLS-MPM render style) + closure-backed colour
 
 Prompt: Stand up a new SPH demo copying the rendering style of the existing

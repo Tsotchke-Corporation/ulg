@@ -4,7 +4,7 @@ import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
 import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
-import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
+import { heatCapacityJPerKgK, specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { equilibriumFromSpecificEnergy, stablePhaseAt } from '../src/runtime/material/phaseEquilibrium.js';
 import { computeClosureBackedPreflight } from '../src/runtime/material/thermodynamicPreflight.js';
 import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
@@ -29,14 +29,19 @@ test('reference material closures are non-overclaiming and cite pending microphy
   assert.equal(closures.fe.inputRefs[0].status, 'pending-not-yet-produced');
 });
 
-test('thermodynamic core matches the reference constants (closure energy == reference energy)', () => {
+test('thermo core: H2O matches the constant-cp reference; iron solid uses first-principles Debye', () => {
   const { fe, h2o } = createReferenceMaterialClosures();
-  for (const t of [233.15, 1000, 1811, 1850]) {
-    assert.ok(Math.abs(specificInternalEnergyJPerKg(fe.properties, t) - specificEnergyJPerKg('fe', t)) < 1e-6);
-  }
+  // Water still uses constant per-phase heat capacities, so it matches the reference exactly.
   for (const t of [233.15, 300, 350, 500]) {
     assert.ok(Math.abs(specificInternalEnergyJPerKg(h2o.properties, t) - specificEnergyJPerKg('h2o', t)) < 1e-6);
   }
+  // Iron solid heat capacity is now the Debye model: below Dulong–Petit at low T, approaching it
+  // at high T. So its internal energy is genuinely lower than the constant-449 reference.
+  const cv233 = heatCapacityJPerKgK(fe.properties, 233.15);
+  const cv1500 = heatCapacityJPerKgK(fe.properties, 1500);
+  assert.ok(cv233 > 340 && cv233 < 390, `Fe cv(233) ${cv233}`);
+  assert.ok(cv1500 > cv233 && cv1500 < 449, `Fe cv(1500) ${cv1500}`);
+  assert.ok(specificInternalEnergyJPerKg(fe.properties, 1000) < specificEnergyJPerKg('fe', 1000), 'Debye energy below constant-cp');
 });
 
 test('phase equilibrium: stable phase by temperature and lever rule by energy', () => {
@@ -64,9 +69,11 @@ test('MaterialRegistry samples closure-backed properties with phase and density'
   assert.equal(iceDensity.phase, 'solid');
   const airDensity = await registry.sampleProperty({ material: 'air', property: 'density', temperatureK: 233.15, pressurePa: STD_ATM });
   assert.ok(airDensity.value > 1.5 && airDensity.value < 1.53);
-  // Energy sampling matches the thermo core, and stays non-overclaiming.
+  // Energy sampling uses the first-principles Debye iron solid, so it is below (and within a few
+  // percent of) the constant-cp reference, and stays non-overclaiming.
   const ironEnergy = await registry.sampleProperty({ material: 'fe', property: 'specificInternalEnergy', temperatureK: 1850 });
-  assert.ok(Math.abs(ironEnergy.value - specificEnergyJPerKg('fe', 1850)) < 1e-6);
+  assert.ok(ironEnergy.value > 0 && ironEnergy.value < specificEnergyJPerKg('fe', 1850));
+  assert.ok(ironEnergy.value > 0.9 * specificEnergyJPerKg('fe', 1850));
   assert.equal(ironEnergy.materialValidation, false);
 });
 
@@ -86,8 +93,12 @@ test('closure-backed preflight reproduces the reference-constant preflight', asy
   const scenario = createSphPhaseScenario();
   const preflight = await computeClosureBackedPreflight(scenario, { materialRegistry: registry });
   assert.equal(preflight.closureBacked, true);
+  // Masses + feasibility are invariant to the heat-capacity model, so they still match.
   assert.equal(preflight.closureSampling.consistentWithReference, true);
-  assert.ok(Math.abs(preflight.closureSampling.heatExportedToWallsJ - 864e6) < 4e6);
+  // The first-principles (Debye iron) energy budget is close to, but below, the constant-cp
+  // baseline of ~864 MJ — the Debye correction lowers it by a few percent.
+  assert.ok(preflight.closureSampling.heatExportedToWallsJ > 820e6 && preflight.closureSampling.heatExportedToWallsJ < 864e6);
+  assert.ok(preflight.closureSampling.firstPrinciplesEnergyDeltaJ < 0);
   assert.equal(preflight.closureSampling.feasible, true);
   assert.equal(preflight.feasibility.feasible, true);
   assert.equal(preflight.scientificValidation, false);

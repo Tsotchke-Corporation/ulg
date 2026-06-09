@@ -69,7 +69,7 @@ function buildOverlayShell() {
         <strong style="color:#75f7b4;">SPH PHASE — ice on molten iron</strong>
         <button id="sph-close" type="button" style="background:#14342c;color:#bfe9d8;border:0;padding:4px 8px;cursor:pointer;">close</button>
       </div>
-      <p style="opacity:.6;font-size:11px;line-height:1.4;">CPU reference, reduced resolution. Colour: incandescent glow is closure-backed (Planck radiation closure, first-principles from temperature); intrinsic/reflective colour is a flagged placeholder pending the optical closure (MoonLab optical-response microphysics, not produced). Not demo-tuned. Multi-material EOS / wall heat flux / conduction are P5; phase dynamics here are not yet validated physics.</p>
+      <p style="opacity:.6;font-size:11px;line-height:1.4;">CPU reference, reduced resolution. Colour is closure-backed, not demo-tuned: incandescent glow from the Planck radiation closure (first-principles from temperature); intrinsic colour from the optical closure (Drude reflectance for iron, Beer–Lambert O–H absorption for water/ice, Rayleigh for air). Heat capacity is first-principles too (equipartition air, Debye iron). Closures are derived, not yet validated against measured optics/EOS. Multi-material EOS / wall heat flux / conduction are P5.</p>
       <div style="margin:8px 0;">
         <button id="sph-preflight" type="button">Preflight</button>
         <button id="sph-play" type="button">Play</button>

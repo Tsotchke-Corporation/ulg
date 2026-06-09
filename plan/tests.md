@@ -4,10 +4,11 @@
 
 Command: `npm test`
 
-Current result: pass, 99/99 tests on 2026-06-08 after standing up the ULG SPH
-phase demo (MLS-MPM render style) with a first-principles radiation closure for
-incandescent colour. Prior milestone: 92/92 after wiring real MoonLab ab-initio
-microphysics references into the material closures.
+Current result: pass, 107/107 tests on 2026-06-09 after deriving the material
+thermal closures (equipartition air, Debye iron) and optical closures (Drude
+iron, Beer-Lambert water/ice, Rayleigh air) from first principles. Prior
+milestone: 99/99 after standing up the ULG SPH phase demo with the radiation
+closure.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -255,6 +256,18 @@ microphysics references into the material closures.
   `99/99`, `npm run build`. A headless browser check on `127.0.0.1:5173` confirmed
   the SPH Phase overlay opens, preflight-feasible, 280 particles, no console
   errors, iron glowing with the derived blackbody colour.
+- First-principles material closure coverage on 2026-06-09: new
+  `node --test tests/statisticalMechanics.test.mjs` passed `4/4` (air equipartition
+  cv≈715/cp≈1002/γ≈1.40, Debye reaches Dulong–Petit at high T and falls below it
+  at low T, iron θ_D≈470 K from sound speed + density, Debye dU/dT = cv) and
+  `node --test tests/opticalClosure.test.mjs` passed `4/4` (flat reflectance →
+  white/black, Drude metal high+flat reflectance, iron warm grey + water/ice blue
+  + air near-transparent, optical closure non-overclaiming). The
+  materialThermo/closure-backed-preflight tests were updated for the
+  first-principles values (iron solid now Debye; closure-backed heat-to-walls
+  ~845 MJ vs the constant-cp baseline 864 MJ, consistent on masses + feasibility).
+  Full regression `npm test` `107/107`, `npm run build`, and a headless render
+  check (ice blue, molten iron orange glow, no console errors).
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

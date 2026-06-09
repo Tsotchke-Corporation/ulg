@@ -10,7 +10,8 @@
 import { createReferenceMaterialClosures } from './material/materialClosures.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
 import { equilibriumFromSpecificEnergy } from './material/phaseEquilibrium.js';
-import { particleDisplayColor } from './material/radiationClosure.js';
+import { incandescentColor } from './material/radiationClosure.js';
+import { intrinsicColorSrgb } from './material/opticalClosure.js';
 import { createSphState } from './sph/sphState.js';
 import { createSphPhaseCarrier } from './sph/sphPhaseCarrier.js';
 import { sphTotals } from './sph/sphConservation.js';
@@ -105,16 +106,21 @@ export function particleThermalState(demo) {
 }
 
 /**
- * Per-particle render colour from the radiation closure: closure-backed Planck incandescent glow
- * blended over a flagged intrinsic-reflectance placeholder (pending the optical closure). A
- * particle's colour is fully closure-backed only where the glow dominates (no placeholder).
+ * Per-particle render colour, fully closure-backed: the Planck radiation closure gives the
+ * incandescent glow of hot matter, and the optical closure gives the intrinsic
+ * (Drude-reflectance / Beer–Lambert / Rayleigh) colour of non-incandescent matter. No demo-tuned
+ * colours remain.
  */
 export function particleColors(demo) {
   return demo.state.particles.map((p) => {
     const props = demo.materialProperties[p.material];
     const eq = equilibriumFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
-    const c = particleDisplayColor({ material: p.material, temperatureK: eq.temperatureK, phase: eq.stablePhase });
-    return { rgb: [c.r, c.g, c.b], closureBacked: c.closureBackedGlow && !c.intrinsicPlaceholder };
+    const inc = incandescentColor(eq.temperatureK);
+    if (inc.visible) {
+      return { rgb: [...inc.srgb], closureBacked: true, source: 'radiation-closure' };
+    }
+    const c = intrinsicColorSrgb({ material: p.material, phase: eq.stablePhase });
+    return { rgb: [c.r, c.g, c.b], closureBacked: true, source: 'optical-closure' };
   });
 }
 

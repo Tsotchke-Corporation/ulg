@@ -66,7 +66,7 @@ export function atomicNumberDensity({ densityKgPerM3, molarMassKgPerMol, atomsPe
 // Dulong–Petit limit. Evaluated by midpoint quadrature; D3 -> 1 as y -> 0, ~ (4π^4/5)/y^3 large y.
 function debyeRatio(y) {
   if (y <= 0) return 1;
-  const steps = 4000;
+  const steps = 256;
   let integral = 0;
   for (let i = 1; i <= steps; i += 1) {
     const x = (y * (i - 0.5)) / steps;
@@ -89,7 +89,7 @@ export function debyeHeatCapacityJPerKgK(temperatureK, { debyeTemperatureK, mola
 // Debye internal-energy integral: ∫_0^y x^3/(e^x - 1) dx (midpoint quadrature).
 function debyeEnergyIntegral(y) {
   if (y <= 0) return 0;
-  const steps = 4000;
+  const steps = 256;
   let integral = 0;
   for (let i = 1; i <= steps; i += 1) {
     const x = (y * (i - 0.5)) / steps;

@@ -3,7 +3,7 @@
 // status rows. Also exposes a headless API on window.__ulgDemo for e2e/status checks.
 
 import { createSphPhaseScene } from './sphPhaseScene.js';
-import { createSphPhaseDemo, particleColors, phaseMassSummary } from '../runtime/sphPhaseDemo.js';
+import { createSphPhaseDemo, particleColors, particleRenderMaterials, phaseMassSummary } from '../runtime/sphPhaseDemo.js';
 import { computeThermodynamicPreflight, createSphPhaseScenario } from '../runtime/thermoPreflight.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
 
@@ -134,6 +134,7 @@ export function mountSphPhaseDemoOverlay() {
 
   function syncParticles() {
     const colors = particleColors(driver.demo);
+    const renderMaterials = particleRenderMaterials(driver.demo);
     const n = driver.demo.state.particles.length;
     const positionsM = new Float32Array(n * 3);
     const colorsRgb = new Float32Array(n * 3);
@@ -145,7 +146,7 @@ export function mountSphPhaseDemoOverlay() {
       colorsRgb[i * 3] = colors[i].rgb[0];
       colorsRgb[i * 3 + 1] = colors[i].rgb[1];
       colorsRgb[i * 3 + 2] = colors[i].rgb[2];
-      materials[i] = p.material;
+      materials[i] = renderMaterials[i];
     });
     scene.setParticles({ positionsM, colorsRgb, materials });
   }

@@ -37,6 +37,23 @@ const SURFACE_CONFIG = {
       depthWrite: true
     }
   },
+  // Vaporized water: a faint, diffuse cloud rather than a tight blob. Lower isolation + larger
+  // ball influence makes the metaballs bleed together into a whispy volume; high transparency and
+  // no depth-write let it read as steam drifting in front of the scene.
+  steam: {
+    resolution: 28,
+    subtract: 10,
+    isolation: 24,
+    maxPolyCount: 120000,
+    opacity: 0.5,
+    materialOptions: {
+      roughness: 0.95,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false
+    }
+  },
   default: {
     resolution: 34,
     subtract: 24,
@@ -56,6 +73,11 @@ const SURFACE_CONFIG = {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+
+// Inset the simulation box inside the marching-cubes field cube so surfaces touching a box face
+// (e.g. the ice resting on the floor) aren't clipped at the field boundary. The mesh scale is
+// widened by the same factor (below) so the inset surface still aligns with the box wireframe.
+const FIELD_PADDING = 0.08;
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
@@ -124,10 +146,11 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
     const y = positionsM[i * 3 + 1];
     const z = positionsM[i * 3 + 2];
     batch.positionsM.push(x, y, z);
+    const span = 1 - 2 * FIELD_PADDING;
     batch.normalizedPositions.push(
-      clamp(x / boxEdgeM, 0.001, 0.999),
-      clamp(y / boxEdgeM, 0.001, 0.999),
-      clamp(z / boxEdgeM, 0.001, 0.999)
+      clamp(FIELD_PADDING + (x / boxEdgeM) * span, 0.001, 0.999),
+      clamp(FIELD_PADDING + (y / boxEdgeM) * span, 0.001, 0.999),
+      clamp(FIELD_PADDING + (z / boxEdgeM) * span, 0.001, 0.999)
     );
     batch.colorsRgb.push(
       clamp(colorsRgb[i * 3], 0, 1),
@@ -194,7 +217,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
       config.maxPolyCount
     );
     mesh.isolation = config.isolation;
-    mesh.scale.setScalar(boxEdgeM / 2);
+    // Widen the field cube by 1/(1-2·pad) so the padded normalized positions still map onto the
+    // box [0, boxEdgeM]; centre stays at the box centre.
+    mesh.scale.setScalar(boxEdgeM / (2 * (1 - 2 * FIELD_PADDING)));
     mesh.position.set(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
     mesh.frustumCulled = false;
     mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;

@@ -105,8 +105,9 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3 
     return spectralResponseToSrgb((nm) => drudeReflectance(nm, IRON_DRUDE));
   }
   if (material === 'h2o') {
-    // Ice is clearer than liquid water (shorter effective absorption path); both go blue.
-    const path = phase === 'solid' ? pathLengthM * 0.6 : pathLengthM;
+    // Bulk water/ice go blue from O–H absorption over a path; ice is clearer (shorter path).
+    // Vapour (steam) is optically thin — negligible visible absorption — so it reads near-white.
+    const path = phase === 'gas' ? pathLengthM * 0.02 : (phase === 'solid' ? pathLengthM * 0.6 : pathLengthM);
     return spectralResponseToSrgb((nm) => Math.exp(-waterAbsorption(nm) * path));
   }
   if (material === 'air') {

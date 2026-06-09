@@ -39,7 +39,20 @@ export function segmentTemperatureFromEnergyAbove(seg, energyAbove) {
   return 0.5 * (lo + hi);
 }
 
+// orderedSegments is pure in `properties` (which is stable per material), but it evaluates the
+// Debye internal energy at phase boundaries — expensive to rebuild on every energy/phase query.
+// Memoize per properties object so it is built once per material.
+const orderedSegmentsCache = new WeakMap();
+
 export function orderedSegments(properties) {
+  const cached = orderedSegmentsCache.get(properties);
+  if (cached) return cached;
+  const segments = buildOrderedSegments(properties);
+  orderedSegmentsCache.set(properties, segments);
+  return segments;
+}
+
+function buildOrderedSegments(properties) {
   const phases = properties.phases || [];
   const transitions = properties.transitions || [];
   const molarMassKgPerMol = properties.molarMassKgPerMol;

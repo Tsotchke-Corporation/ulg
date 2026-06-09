@@ -15,6 +15,7 @@ import { intrinsicColorSrgb } from './material/opticalClosure.js';
 import { createSphState } from './sph/sphState.js';
 import { createSphPhaseCarrier } from './sph/sphPhaseCarrier.js';
 import { sphTotals } from './sph/sphConservation.js';
+import { buoyancyAccelerationMPerS2, phaseMassWithSteam, thermalStep } from './sph/thermalPhase.js';
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
 function fillCube({ material, min, size, spacing, temperatureK, properties, densityKgPerM3 }) {
@@ -46,19 +47,21 @@ function fillCube({ material, min, size, spacing, temperatureK, properties, dens
  * iron cube on top, both filled with particles. Reduced resolution so the CPU reference carrier runs
  * interactively.
  */
-export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), closures = createReferenceMaterialClosures(), ironSpacingM, iceSpacingM } = {}) {
+export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), closures = createReferenceMaterialClosures(), ironSpacingM, iceSpacingM, ironDropGapM = 0.6 } = {}) {
   const boxEdge = scenario.box.edgeM;
   const ironEdge = scenario.iron.edgeM;
   const iceEdge = scenario.ice.edgeM;
   const cx = boxEdge / 2;
   const cz = boxEdge / 2;
   // Reduced resolution so the O(N^2) CPU reference carrier runs interactively in the browser.
-  const ironSpacing = ironSpacingM ?? ironEdge / 4;
-  const iceSpacing = iceSpacingM ?? iceEdge / 6;
+  // (Higher counts and the O(N) / GPU hot loop are the performance-upgrade track.)
+  const ironSpacing = ironSpacingM ?? ironEdge / 3;
+  const iceSpacing = iceSpacingM ?? iceEdge / 5;
 
+  // The iron block starts a small gap above the ice and falls onto it under gravity.
   const ironParticles = fillCube({
     material: 'fe',
-    min: [cx - ironEdge / 2, iceEdge, cz - ironEdge / 2],
+    min: [cx - ironEdge / 2, iceEdge + ironDropGapM, cz - ironEdge / 2],
     size: ironEdge,
     spacing: ironSpacing,
     temperatureK: scenario.iron.initialTemperatureK,
@@ -125,6 +128,21 @@ export function particleColors(demo) {
 }
 
 /**
+ * Per-particle render-material key. Identical to the simulation material except that vaporized
+ * water (gas phase) is tagged `steam`, so the renderer can draw it as a distinct whispy surface
+ * rather than merging it into the bulk-water blob — that is what makes the rising steam visible.
+ */
+export function particleRenderMaterials(demo) {
+  return demo.state.particles.map((p) => {
+    if (p.material === 'h2o') {
+      const phase = equilibriumFromSpecificEnergy(demo.materialProperties.h2o, p.specificInternalEnergyJPerKg).stablePhase;
+      if (phase === 'gas') return 'steam';
+    }
+    return p.material;
+  });
+}
+
+/**
  * Phase mass summary (water mass by phase, iron solid fraction) for the status rows.
  */
 export function phaseMassSummary(demo) {
@@ -149,6 +167,14 @@ export function phaseMassSummary(demo) {
  */
 export function createSphPhaseDemo(options = {}) {
   const demo = buildSphPhaseDemoState(options);
+  // Per-face cumulative heat ledger (J exchanged with each fixed-temperature wall reservoir).
+  demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
+  const gasDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'gas').densityKgPerM3;
+  const liquidDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'liquid').densityKgPerM3;
+  // Thermal-substep rates are accelerated for interactive visualization; the structure
+  // (conduction, six-wall flux, latent-heat phase change) is physical (see thermalPhase.js).
+  const dtThermalS = options.dtThermalS ?? 0.02;
+  const buoyancyCap = options.buoyancyCapMPerS2 ?? 45;
   const carrier = createSphPhaseCarrier({
     dimension: 3,
     gamma: options.gamma ?? 1.4,
@@ -165,8 +191,27 @@ export function createSphPhaseDemo(options = {}) {
     step() {
       const result = carrier.step(demo.state);
       demo.state = result.state;
-      // Display safeguards for the reduced reference: reflect at the sealed-box walls and clamp
-      // speed so the (condensed-on-ideal-gas-EOS, pre-P5) cloud stays bounded and on-screen.
+
+      // P5: evolve energy by conduction + six-wall heat flux (closures wired into the dynamics).
+      const { wallHeatJ, thermal } = thermalStep(demo.state, {
+        materialProperties: demo.materialProperties,
+        wallTemperaturesK: demo.scenario.walls.faces,
+        boxEdgeM: demo.box.edgeM,
+        dtS: dtThermalS,
+        conductionRate: options.conductionRate,
+        wallRate: options.wallRate
+      });
+      for (const face of Object.keys(demo.wallHeatLedgerJ)) demo.wallHeatLedgerJ[face] += wallHeatJ[face];
+
+      // Phase-driven buoyancy: water that has vaporized (gas phase) rises as steam (reuse the
+      // phases the thermal step already computed).
+      const steamBuoyancy = Math.min(buoyancyCap, buoyancyAccelerationMPerS2(gasDensity, liquidDensity));
+      demo.state.particles.forEach((p, i) => {
+        if (p.material === 'h2o' && thermal[i].phase === 'gas') p.v[1] += steamBuoyancy * dtThermalS;
+      });
+
+      // Display safeguards: reflect at the sealed-box walls and clamp speed so the (reduced,
+      // pre-full-EOS) cloud stays bounded and on-screen.
       const edge = demo.box.edgeM;
       const maxSpeed = options.maxDisplaySpeedMPerS ?? 8;
       for (const p of demo.state.particles) {
@@ -190,6 +235,12 @@ export function createSphPhaseDemo(options = {}) {
     },
     phaseMassSummary() {
       return phaseMassSummary(demo);
+    },
+    steamSummary() {
+      return phaseMassWithSteam(demo.state, demo.materialProperties);
+    },
+    wallHeatLedgerJ() {
+      return { ...demo.wallHeatLedgerJ };
     }
   };
 }

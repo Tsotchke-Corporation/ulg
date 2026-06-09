@@ -1,5 +1,47 @@
 # ULG Implementation Log
 
+## 2026-06-09 09:13 AKDT - Frontier: periodic electronic structure (UEG/LDA core + jellium cohesion)
+
+Prompt: March into the frontier (the periodic-solid electronic-structure engine
+neither MoonLab nor ULG had).
+
+Built the cornerstone of density-functional theory and a cohesion model that
+derives a metal's cold-curve properties (density, bulk modulus) from electronic
+structure — parameter-free except one pseudopotential radius — validated against
+QMC and a real metal.
+
+Uniform electron gas / LDA (`src/runtime/electronicStructure/uniformElectronGas.js`):
+
+- Energy per electron vs Wigner–Seitz radius: Thomas–Fermi kinetic (1.10495/r_s^2),
+  Dirac exchange (−0.458165/r_s), Chachiyo correlation (parameter-free fit). This
+  is the LDA energy density every DFT integrates.
+- Validated: kinetic + exchange are exact; correlation is within ~3% of
+  Ceperley–Alder QMC at r_s = 1, 2, 5.
+
+Jellium cohesion (`jelliumCohesion.js`):
+
+- Energy per valence electron = UEG + bcc Madelung (−0.8959/r_s) + Ashcroft
+  empty-core pseudopotential ((3 r_c^2)/(2 r_s^3)). Minimizing over r_s gives the
+  equilibrium density; the curvature gives the bulk modulus.
+- Validated on sodium (r_c = 1.76 Bohr, its standard core): equilibrium r_s ≈ 4.0
+  (exp 3.93), density 955 kg/m^3 (exp 971, ~1.6%), bulk modulus 7.0 GPa (exp 6.3).
+  The bare point ion (r_c = 0) overbinds to r_s ≈ 1.6 — confirming the empty core
+  is physically required, not a fudge.
+- `simpleMetalColdCurve()` returns exactly the cold-curve inputs (ρ0, B0) the
+  Grüneisen EOS / MD pipeline needed — now DERIVED from electronic structure for
+  sp-metals, closing that loop end to end.
+
+Validation: new `tests/electronicStructure.test.mjs` 5/5; `npm test` 128/128 (+5),
+`npm run build`, `git diff --check` clean.
+
+Honest scope: this is quantitative for nearly-free-electron sp-metals (Na, K, Al).
+Iron is a transition metal with localized d-electrons — jellium does NOT apply;
+that needs full Kohn–Sham DFT with orbitals (an SCF eigenvalue solve on a basis),
+the deeper frontier this does not yet reach. So the chain is now real and validated
+for simple metals (electronic structure → cold curve → EOS → MD → properties);
+extending it to d-electron metals and molecular crystals (water/ice) is the
+remaining work. Validation flags stay false until validated vs measured references.
+
 ## 2026-06-09 09:04 AKDT - General MD engine: condensed-phase estimators + ab-initio→potential pipeline
 
 Prompt: Do the two things — extend the engine to the condensed phases, and build

@@ -4,10 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 123/123 tests on 2026-06-09 after adding the condensed-phase
-MD estimators (diffusion, EOS scan, bulk modulus, melting) and the
-ab-initio→fitted-potential pipeline (MoonLab H2 → Morse → MD). Prior milestone:
-117/117 after the general MD engine core.
+Current result: pass, 128/128 tests on 2026-06-09 after adding the periodic
+electronic-structure frontier (uniform-electron-gas LDA core validated vs QMC +
+jellium cohesion deriving sodium's density/bulk modulus). Prior milestone:
+123/123 after the condensed-phase MD estimators + ab-initio→potential pipeline.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -297,6 +297,14 @@ ab-initio→fitted-potential pipeline (MoonLab H2 → Morse → MD). Prior miles
   zero force at r_e, the fitter round-trips a known Morse potential, and the
   fitted potential drives the MD engine as a bound pair. Full regression
   `npm test` `123/123`, `npm run build`.
+- Periodic electronic-structure coverage on 2026-06-09: new
+  `node --test tests/electronicStructure.test.mjs` passed `5/5` — the uniform
+  electron gas reproduces the exact Thomas–Fermi kinetic and Dirac exchange and
+  matches Ceperley–Alder QMC correlation within ~3% (r_s = 1, 2, 5); jellium
+  cohesion derives sodium's equilibrium density (955 vs 971 kg/m^3) and bulk
+  modulus (7.0 vs 6.3 GPa) from electronic structure with one pseudopotential
+  radius; and a bare point ion overbinds (r_s ≈ 1.6), confirming the empty core is
+  physically required. Full regression `npm test` `128/128`, `npm run build`.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

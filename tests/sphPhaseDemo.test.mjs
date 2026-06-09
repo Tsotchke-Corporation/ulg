@@ -7,7 +7,7 @@ import {
   phaseMassSummary
 } from '../src/runtime/sphPhaseDemo.js';
 
-test('demo initial state: cold ice block on a hot molten-iron block', () => {
+test('demo initial state: hot molten-iron block on a cold ice block', () => {
   const demo = buildSphPhaseDemoState();
   assert.ok(demo.counts.fe > 0 && demo.counts.h2o > 0);
   assert.equal(demo.counts.total, demo.counts.fe + demo.counts.h2o);
@@ -15,10 +15,10 @@ test('demo initial state: cold ice block on a hot molten-iron block', () => {
   const ice = demo.state.particles.filter((p) => p.material === 'h2o');
   assert.ok(fe.every((p) => p.temperatureK === 1850));
   assert.ok(ice.every((p) => p.temperatureK === 233.15));
-  // Ice sits above the iron (higher y).
-  const maxIronY = Math.max(...fe.map((p) => p.x[1]));
-  const minIceY = Math.min(...ice.map((p) => p.x[1]));
-  assert.ok(minIceY >= maxIronY - 1e-9);
+  // Iron sits above the ice (higher y).
+  const minIronY = Math.min(...fe.map((p) => p.x[1]));
+  const maxIceY = Math.max(...ice.map((p) => p.x[1]));
+  assert.ok(minIronY >= maxIceY - 1e-9);
 });
 
 test('particle phase + temperature come from the closure energy', () => {

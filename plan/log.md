@@ -1,5 +1,105 @@
 # ULG Implementation Log
 
+## 2026-06-09 10:21 AKDT - SPH demo: molten iron above ice
+
+Prompt: Slight change to the sim: put the iron block on top of the ice block
+instead of the way it currently is.
+
+Changed the initial SPH layout so the H2O cube rests on the box floor and the
+molten Fe cube starts above it. This keeps the same masses, particle counts,
+initial temperatures, wall temperatures, thermodynamic preflight, and continuous
+MarchingCubes renderer path; only the spatial stack order changes.
+
+Files:
+
+- `src/runtime/sphPhaseDemo.js`: inverted the initial y placement and particle
+  ordering (`iceParticles` first, `ironParticles` above).
+- `src/visualization/sphPhaseDemoMount.js`: updated the overlay title to
+  `SPH PHASE - molten iron on ice`.
+- `tests/sphPhaseDemo.test.mjs`: updated the initial-state regression assertion
+  to require Fe particles to start above H2O particles.
+- `tests/demo.e2e.mjs`: updated the SPH overlay title assertion.
+
+Verification:
+
+- `node --check src/runtime/sphPhaseDemo.js` passed.
+- `node --check src/visualization/sphPhaseDemoMount.js` passed.
+- `node --test tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs`
+  passed.
+- `npm test` passed.
+- `npm run build` passed, with only the existing Vite large-chunk warning.
+- `npm run test:e2e -- --grep "SPH phase demo"` passed outside the sandbox.
+
+No commit or push was made, per the local-commits-only instruction.
+
+## 2026-06-09 10:17 AKDT - SPH renderer: continuous material volumes
+
+Prompt: Fix the SPH renderer so it renders a continuous volume instead of
+individual particles, using PeerCompute's MLS-MPM demo as the reference.
+
+Reference inspected:
+
+- `/home/cos/projects/peercompute/demos/webgpuphys/demos/mpm-visual.js`
+- `/home/cos/projects/peercompute/demos/webgpuphys/demos/shared/fluidRenderer.js`
+
+PeerCompute's MLS-MPM demo uses a screen-space continuous-material pass: depth,
+thickness/material maps, filtering, and final composition. ULG's current renderer
+is Three.js rather than WebGPU-native, so this pass landed the closest low-risk
+equivalent for the SPH phase demo: MarchingCubes continuous implicit surfaces
+instead of point sprites.
+
+Changes:
+
+- `src/visualization/sphPhaseScene.js`: replaced particle point-sprite rendering
+  with `MarchingCubes` surfaces grouped by material (`h2o`, `fe`, fallback). The
+  surface color still comes from the simulation-provided closure RGB values; the
+  renderer only reconstructs a continuous field from particle samples.
+- `src/visualization/sphPhaseScene.js`: added
+  `createContinuousSurfaceBatches()` as a pure helper for material grouping,
+  normalized box coordinates, sample radius estimation, and color preservation.
+- `src/visualization/sphPhaseDemoMount.js`: now passes per-particle material IDs
+  into the scene renderer and exposes the scene object on the overlay for e2e
+  inspection. This preserved Claude's mobile drawer change.
+- `tests/sphPhaseRenderer.test.mjs`: added focused renderer-data tests for
+  material-separated continuous surfaces and color preservation.
+- `tests/demo.e2e.mjs`: added an SPH phase demo e2e check that verifies visible
+  H2O and Fe continuous surfaces are present, non-empty, and render nonblank
+  canvas pixels.
+
+Verification:
+
+- `node --check src/visualization/sphPhaseScene.js` passed.
+- `node --check src/visualization/sphPhaseDemoMount.js` passed.
+- `node --test tests/sphPhaseRenderer.test.mjs` passed.
+- `npm test` passed.
+- `npm run build` passed, with only the existing Vite large-chunk warning.
+- `git diff --check` passed.
+- Sandboxed `npm run test:e2e -- --grep "SPH phase demo"` could not start/connect
+  to the Playwright web server because of sandbox networking, then passed outside
+  the sandbox.
+- Full `npm run test:e2e` passed outside the sandbox.
+- Confirmed the live Vite server on `0.0.0.0:5173` is reachable from both
+  `127.0.0.1:5173` and the VPN address `100.86.83.35:5173`.
+
+No commit or push was made, per the local-commits-only instruction.
+
+## 2026-06-09 09:19 AKDT - SPH demo: mobile-friendly collapsible control menu
+
+Prompt: Fix mobile rendering in the SPH demo — make the menu collapsible.
+
+`src/visualization/sphPhaseDemoMount.js`: reworked the overlay so the 3D scene
+fills the whole viewport (`position:absolute; inset:0`) and the control panel is a
+slide-in drawer over it (instead of a fixed 340px column that squeezed the scene
+on phones). Added an always-visible `☰ menu` / `✕ hide` toggle, a `.collapsed`
+transform that slides the drawer off-screen, touch-sized controls (40px buttons,
+16px inputs to avoid iOS zoom-on-focus), wrapping button row, and a small media
+query. The drawer starts collapsed when `innerWidth < 700` so the scene is the
+first thing visible on mobile.
+
+Verified headless at a 390×844 portrait viewport: starts collapsed, scene canvas
+fills the full 390px width, the toggle reveals/hides the drawer, no page errors.
+`npm run build` green (UI-only; no unit-test surface).
+
 ## 2026-06-09 09:13 AKDT - Frontier: periodic electronic structure (UEG/LDA core + jellium cohesion)
 
 Prompt: March into the frontier (the periodic-solid electronic-structure engine

@@ -1,6 +1,6 @@
 // SPH phase demo logic (headless; the renderer in visualization/sphPhaseScene.js draws it).
 //
-// Builds the ice-on-molten-iron scenario as an SPH particle cloud whose specific internal
+// Builds the molten-iron-on-ice scenario as an SPH particle cloud whose specific internal
 // energy (and therefore phase + render colour) comes from the material closures, runs the
 // energy-feasibility preflight, and steps the conservative CPU-reference carrier. This is a
 // reduced-resolution reference: condensed-phase EOS, multi-material contact, wall heat flux,
@@ -42,8 +42,8 @@ function fillCube({ material, min, size, spacing, temperatureK, properties, dens
 }
 
 /**
- * Build the demo's initial SPH state: an iron cube resting on the box floor with a larger ice
- * cube on top, both filled with particles. Reduced resolution so the CPU reference carrier runs
+ * Build the demo's initial SPH state: a larger ice cube resting on the box floor with a molten
+ * iron cube on top, both filled with particles. Reduced resolution so the CPU reference carrier runs
  * interactively.
  */
 export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), closures = createReferenceMaterialClosures(), ironSpacingM, iceSpacingM } = {}) {
@@ -58,7 +58,7 @@ export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), cl
 
   const ironParticles = fillCube({
     material: 'fe',
-    min: [cx - ironEdge / 2, 0, cz - ironEdge / 2],
+    min: [cx - ironEdge / 2, iceEdge, cz - ironEdge / 2],
     size: ironEdge,
     spacing: ironSpacing,
     temperatureK: scenario.iron.initialTemperatureK,
@@ -67,7 +67,7 @@ export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), cl
   });
   const iceParticles = fillCube({
     material: 'h2o',
-    min: [cx - iceEdge / 2, ironEdge, cz - iceEdge / 2],
+    min: [cx - iceEdge / 2, 0, cz - iceEdge / 2],
     size: iceEdge,
     spacing: iceSpacing,
     temperatureK: scenario.ice.initialTemperatureK,
@@ -75,7 +75,7 @@ export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), cl
     densityKgPerM3: closures.h2o.properties.phases.find((p) => p.name === 'solid').densityKgPerM3
   });
 
-  const all = [...ironParticles, ...iceParticles];
+  const all = [...iceParticles, ...ironParticles];
   const smoothingLengthM = 1.6 * Math.min(ironSpacing, iceSpacing);
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   // Carry per-particle temperature + material alongside the SPH state for rendering.

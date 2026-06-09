@@ -1,28 +1,149 @@
-// SPH phase demo renderer (three.js), copying the webgpuphys MLS-MPM visual style:
-// a particle cloud coloured cold->hot by temperature, inside a wireframe sealed-box domain,
-// viewed through an orbit camera. Cold = blue (0.2,0.7,0.95), hot = red (0.95,0.2,0.2),
-// matching the MLS-MPM demo's temperature colour map.
+// SPH phase demo renderer (three.js), following the webgpuphys MLS-MPM visual style:
+// particles are treated as density samples and reconstructed as continuous metaball surfaces
+// instead of visible point sprites. Colour still comes from the closure-backed demo state.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 
-function makeParticleTexture() {
-  const size = 64;
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  g.addColorStop(0, 'rgba(255,255,255,1)');
-  g.addColorStop(0.4, 'rgba(255,255,255,0.85)');
-  g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, size, size);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.needsUpdate = true;
-  return tex;
+export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
+
+const SURFACE_CONFIG = {
+  h2o: {
+    resolution: 36,
+    subtract: 24,
+    isolation: 80,
+    maxPolyCount: 120000,
+    opacity: 0.82,
+    materialOptions: {
+      roughness: 0.18,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: true
+    }
+  },
+  fe: {
+    resolution: 34,
+    subtract: 26,
+    isolation: 82,
+    maxPolyCount: 120000,
+    opacity: 1,
+    materialOptions: {
+      roughness: 0.36,
+      metalness: 0.48,
+      transparent: false,
+      opacity: 1,
+      depthWrite: true
+    }
+  },
+  default: {
+    resolution: 34,
+    subtract: 24,
+    isolation: 80,
+    maxPolyCount: 120000,
+    opacity: 0.9,
+    materialOptions: {
+      roughness: 0.24,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: true
+    }
+  }
+};
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
-export function createSphPhaseScene(container, { boxEdgeM = 10, pointSize = 0.12 } = {}) {
+function materialKeyOf(value) {
+  return typeof value === 'string' && value.length > 0 ? value : 'default';
+}
+
+function makeSurfaceMaterial(key) {
+  const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
+  return new THREE.MeshPhysicalMaterial({
+    vertexColors: true,
+    side: THREE.DoubleSide,
+    clearcoat: key === 'fe' ? 0.18 : 0.05,
+    transmission: key === 'h2o' ? 0.12 : 0,
+    thickness: key === 'h2o' ? 0.4 : 0,
+    ...config.materialOptions
+  });
+}
+
+function emptyBounds() {
+  return {
+    min: [Infinity, Infinity, Infinity],
+    max: [-Infinity, -Infinity, -Infinity]
+  };
+}
+
+function expandBounds(bounds, x, y, z) {
+  bounds.min[0] = Math.min(bounds.min[0], x);
+  bounds.min[1] = Math.min(bounds.min[1], y);
+  bounds.min[2] = Math.min(bounds.min[2], z);
+  bounds.max[0] = Math.max(bounds.max[0], x);
+  bounds.max[1] = Math.max(bounds.max[1], y);
+  bounds.max[2] = Math.max(bounds.max[2], z);
+}
+
+function estimateSurfaceRadiusM(bounds, count, boxEdgeM) {
+  if (count <= 1) return boxEdgeM * 0.045;
+  const spans = bounds.max.map((max, index) => Math.max(max - bounds.min[index], boxEdgeM * 0.025));
+  const occupiedVolumeM3 = spans[0] * spans[1] * spans[2];
+  const spacingM = Math.cbrt(occupiedVolumeM3 / Math.max(1, count));
+  return clamp(spacingM * 1.65, boxEdgeM * 0.025, boxEdgeM * 0.11);
+}
+
+export function createContinuousSurfaceBatches({ positionsM, colorsRgb, materials = null, boxEdgeM = 10 } = {}) {
+  if (!positionsM || !colorsRgb) {
+    throw new Error('positionsM and colorsRgb are required for SPH continuous surfaces');
+  }
+  if (positionsM.length !== colorsRgb.length || positionsM.length % 3 !== 0) {
+    throw new Error('positionsM and colorsRgb must be matching vec3 arrays');
+  }
+  const batches = new Map();
+  const particleCount = positionsM.length / 3;
+  for (let i = 0; i < particleCount; i += 1) {
+    const key = materialKeyOf(materials?.[i]);
+    let batch = batches.get(key);
+    if (!batch) {
+      batch = {
+        material: key,
+        positionsM: [],
+        normalizedPositions: [],
+        colorsRgb: [],
+        bounds: emptyBounds(),
+        count: 0
+      };
+      batches.set(key, batch);
+    }
+    const x = positionsM[i * 3];
+    const y = positionsM[i * 3 + 1];
+    const z = positionsM[i * 3 + 2];
+    batch.positionsM.push(x, y, z);
+    batch.normalizedPositions.push(
+      clamp(x / boxEdgeM, 0.001, 0.999),
+      clamp(y / boxEdgeM, 0.001, 0.999),
+      clamp(z / boxEdgeM, 0.001, 0.999)
+    );
+    batch.colorsRgb.push(
+      clamp(colorsRgb[i * 3], 0, 1),
+      clamp(colorsRgb[i * 3 + 1], 0, 1),
+      clamp(colorsRgb[i * 3 + 2], 0, 1)
+    );
+    expandBounds(batch.bounds, x, y, z);
+    batch.count += 1;
+  }
+  return [...batches.values()].map((batch) => ({
+    ...batch,
+    surfaceRadiusM: estimateSurfaceRadiusM(batch.bounds, batch.count, boxEdgeM)
+  }));
+}
+
+export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM = null } = {}) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x05080a);
 
@@ -58,38 +179,75 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, pointSize = 0.12
   grid.position.set(boxEdgeM / 2, 0, boxEdgeM / 2);
   scene.add(grid);
 
-  const geometry = new THREE.BufferGeometry();
-  const material = new THREE.PointsMaterial({
-    size: pointSize,
-    map: makeParticleTexture(),
-    vertexColors: true,
-    transparent: true,
-    alphaTest: 0.2,
-    depthWrite: true,
-    sizeAttenuation: true
-  });
-  const points = new THREE.Points(geometry, material);
-  scene.add(points);
+  const surfaces = new Map();
 
-  let positions = new Float32Array(0);
-  let colors = new Float32Array(0);
+  function ensureSurface(materialKey) {
+    const key = materialKeyOf(materialKey);
+    let surface = surfaces.get(key);
+    if (surface) return surface;
+    const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
+    const mesh = new MarchingCubes(
+      config.resolution,
+      makeSurfaceMaterial(key),
+      false,
+      true,
+      config.maxPolyCount
+    );
+    mesh.isolation = config.isolation;
+    mesh.scale.setScalar(boxEdgeM / 2);
+    mesh.position.set(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
+    mesh.frustumCulled = false;
+    mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;
+    mesh.userData.materialKey = key;
+    scene.add(mesh);
+    surface = { mesh, config };
+    surfaces.set(key, surface);
+    return surface;
+  }
+
+  ensureSurface('h2o');
+  ensureSurface('fe');
 
   // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
-  // for hot matter; a flagged placeholder for not-yet-closure-backed intrinsic colour). The
-  // renderer does not invent colour from temperature.
-  function setParticles({ positionsM, colorsRgb }) {
-    const n = positionsM.length / 3;
-    if (positions.length !== n * 3) {
-      positions = new Float32Array(n * 3);
-      colors = new Float32Array(n * 3);
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
+  // continuous density surface from particles, but it does not invent material colour.
+  function setParticles({ positionsM, colorsRgb, materials = null }) {
+    const activeKeys = new Set();
+    const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM });
+    for (const batch of batches) {
+      const surface = ensureSurface(batch.material);
+      const { mesh, config } = surface;
+      mesh.reset();
+      const radiusM = Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM;
+      const radiusNorm = clamp(radiusM / boxEdgeM, 0.006, 0.14);
+      const strength = (mesh.isolation + config.subtract) * radiusNorm * radiusNorm;
+      for (let i = 0; i < batch.count; i += 1) {
+        mesh.addBall(
+          batch.normalizedPositions[i * 3],
+          batch.normalizedPositions[i * 3 + 1],
+          batch.normalizedPositions[i * 3 + 2],
+          strength,
+          config.subtract,
+          [
+            batch.colorsRgb[i * 3],
+            batch.colorsRgb[i * 3 + 1],
+            batch.colorsRgb[i * 3 + 2]
+          ]
+        );
+      }
+      mesh.update();
+      mesh.visible = batch.count > 0;
+      mesh.userData.particleCount = batch.count;
+      mesh.userData.surfaceRadiusM = radiusM;
+      activeKeys.add(batch.material);
     }
-    positions.set(positionsM);
-    colors.set(colorsRgb);
-    geometry.attributes.position.needsUpdate = true;
-    geometry.attributes.color.needsUpdate = true;
-    geometry.computeBoundingSphere();
+    for (const [key, surface] of surfaces) {
+      if (!activeKeys.has(key)) {
+        surface.mesh.reset();
+        surface.mesh.update();
+        surface.mesh.visible = false;
+      }
+    }
   }
 
   let running = true;
@@ -114,6 +272,10 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, pointSize = 0.12
     running = false;
     window.removeEventListener('resize', resize);
     controls.dispose();
+    for (const { mesh } of surfaces.values()) {
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }

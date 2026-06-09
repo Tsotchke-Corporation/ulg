@@ -61,23 +61,34 @@ export function createSphPhaseDemoApi() {
 function buildOverlayShell() {
   const overlay = document.createElement('div');
   overlay.id = 'sph-phase-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:50;background:#04070a;display:flex;color:#bfe9d8;font-family:ui-monospace,monospace;';
+  // The 3D scene fills the whole overlay; the control panel is a slide-in drawer over it, so the
+  // scene stays full-viewport (good for touch orbit) and the menu collapses on small screens.
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:50;background:#04070a;color:#bfe9d8;font-family:ui-monospace,monospace;';
   overlay.innerHTML = `
-    <div id="sph-scene" style="flex:1;min-width:0;position:relative;"></div>
-    <aside style="width:340px;border-left:1px solid #14342c;padding:14px;overflow:auto;background:#050b0e;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <strong style="color:#75f7b4;">SPH PHASE — ice on molten iron</strong>
-        <button id="sph-close" type="button" style="background:#14342c;color:#bfe9d8;border:0;padding:4px 8px;cursor:pointer;">close</button>
+    <style>
+      #sph-phase-overlay button { background:#14342c;color:#bfe9d8;border:1px solid #1d8b6d;border-radius:6px;padding:8px 12px;margin:0 4px 4px 0;font:600 13px ui-monospace,monospace;cursor:pointer;min-height:40px;touch-action:manipulation; }
+      #sph-phase-overlay button:active { background:#1d8b6d;color:#04070a; }
+      #sph-phase-overlay input { min-height:36px;font-size:16px;box-sizing:border-box; }
+      #sph-panel { transition:transform .25s ease; }
+      #sph-panel.collapsed { transform:translateX(110%); }
+      @media (max-width:700px) { #sph-panel { width:min(340px,92vw); } #sph-status { font-size:13px; } }
+    </style>
+    <div id="sph-scene" style="position:absolute;inset:0;"></div>
+    <button id="sph-toggle" type="button" aria-label="Toggle controls" style="position:absolute;top:12px;left:12px;z-index:60;">☰ menu</button>
+    <aside id="sph-panel" style="position:absolute;top:0;right:0;height:100%;width:min(360px,92vw);box-sizing:border-box;border-left:1px solid #14342c;padding:14px;padding-top:56px;overflow:auto;-webkit-overflow-scrolling:touch;background:rgba(5,11,14,0.96);z-index:55;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <strong style="color:#75f7b4;">SPH PHASE — molten iron on ice</strong>
+        <button id="sph-close" type="button">close</button>
       </div>
       <p style="opacity:.6;font-size:11px;line-height:1.4;">CPU reference, reduced resolution. Colour is closure-backed, not demo-tuned: incandescent glow from the Planck radiation closure (first-principles from temperature); intrinsic colour from the optical closure (Drude reflectance for iron, Beer–Lambert O–H absorption for water/ice, Rayleigh for air). Heat capacity is first-principles too (equipartition air, Debye iron). Closures are derived, not yet validated against measured optics/EOS. Multi-material EOS / wall heat flux / conduction are P5.</p>
-      <div style="margin:8px 0;">
+      <div style="margin:8px 0;display:flex;flex-wrap:wrap;">
         <button id="sph-preflight" type="button">Preflight</button>
         <button id="sph-play" type="button">Play</button>
         <button id="sph-step" type="button">Step</button>
         <button id="sph-reset" type="button">Reset</button>
       </div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
-      <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:4px 0;"></div>
+      <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
     </aside>
@@ -119,12 +130,14 @@ export function mountSphPhaseDemoOverlay() {
 
   let driver = createSphPhaseDemo({ scenario: scenarioFromControls() });
   const scene = createSphPhaseScene(sceneContainer, { boxEdgeM: driver.demo.box.edgeM });
+  overlay.__sphScene = scene;
 
   function syncParticles() {
     const colors = particleColors(driver.demo);
     const n = driver.demo.state.particles.length;
     const positionsM = new Float32Array(n * 3);
     const colorsRgb = new Float32Array(n * 3);
+    const materials = new Array(n);
     driver.demo.state.particles.forEach((p, i) => {
       positionsM[i * 3] = p.x[0];
       positionsM[i * 3 + 1] = p.x[1];
@@ -132,8 +145,9 @@ export function mountSphPhaseDemoOverlay() {
       colorsRgb[i * 3] = colors[i].rgb[0];
       colorsRgb[i * 3 + 1] = colors[i].rgb[1];
       colorsRgb[i * 3 + 2] = colors[i].rgb[2];
+      materials[i] = p.material;
     });
-    scene.setParticles({ positionsM, colorsRgb });
+    scene.setParticles({ positionsM, colorsRgb, materials });
   }
 
   function renderStatus() {
@@ -183,6 +197,19 @@ export function mountSphPhaseDemoOverlay() {
     syncParticles();
     renderStatus();
   });
+
+  // Collapsible control drawer. Start collapsed on small/portrait screens so the scene is the
+  // first thing visible; the toggle button reveals it.
+  const panel = overlay.querySelector('#sph-panel');
+  const toggle = overlay.querySelector('#sph-toggle');
+  let collapsed = window.innerWidth < 700;
+  function applyCollapsed() {
+    panel.classList.toggle('collapsed', collapsed);
+    toggle.textContent = collapsed ? '☰ menu' : '✕ hide';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+  }
+  toggle.addEventListener('click', () => { collapsed = !collapsed; applyCollapsed(); });
+  applyCollapsed();
 
   function close() {
     playing = false;

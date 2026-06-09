@@ -1,5 +1,74 @@
 # ULG Implementation Log
 
+## 2026-06-08 19:59 AKDT - ULG SPH phase demo (MLS-MPM render style) + closure-backed colour
+
+Prompt: Stand up a new SPH demo copying the rendering style of the existing
+mlsmpm demo, then reassess. (Plus a directive: particle colour must be derived
+from the atomic simulation, not demo-tuned.)
+
+Where it lives: a NEW demo in the ULG repo (physics authority), not inside
+PeerCompute Multiscale. Multiscale stays the downstream consumer/visualizer per
+the plan ("PeerCompute should host the heavier demo once ULG can emit the
+required artifacts").
+
+Render style copied from webgpuphys `demos/mpm-visual.html` (thermal MLS-MPM with
+phase transitions): a particle cloud in a wireframe sealed-box domain with an
+orbit camera.
+
+Files added:
+
+- `src/runtime/sphPhaseDemo.js`: headless demo logic — builds the ice cube (1 m)
+  on the iron cube (0.5 m = 1/8 ice volume) as SPH particles whose specific
+  internal energy comes from the material closures, runs the preflight, steps the
+  conservative CPU-reference carrier (with sealed-box reflection + a display speed
+  clamp so the pre-P5 condensed-on-ideal-gas cloud stays bounded), and derives
+  per-particle phase + colour.
+- `src/visualization/sphPhaseScene.js`: three.js renderer (Points cloud with
+  precomputed per-particle colours, wireframe box, floor grid, OrbitControls,
+  round particle sprite) in ULG's dark style.
+- `src/visualization/sphPhaseDemoMount.js`: full-viewport overlay — retro-terminal
+  control panel (six wall-temperature inputs, Preflight/Play/Step/Reset) + live
+  status rows (preflight verdict, final phases, heat to walls, masses, particle
+  counts, molecules/atoms per macro-particle, water mass by phase, iron solid
+  fraction, total energy, momentum, per-wall ledger). Also a headless
+  `createSphPhaseDemoApi()` exposed on `window.__ulgDemo.runSphPhaseDemo*`.
+- `src/main.js`: an "SPH Phase" button opening the overlay; the headless API on
+  the runtime.
+
+Closure-backed colour (honouring "colour must be derived, not tuned"):
+
+- `src/runtime/material/radiationClosure.js`: first-principles incandescent glow —
+  Planck blackbody spectral radiance -> CIE 1931 colour-matching functions
+  (Wyman 2013 fit) -> linear sRGB (D65) -> sRGB gamma. Molten iron at 1850 K
+  renders orange (r>g>b); the blue channel rises monotonically toward white with
+  temperature. `createRadiationClosure()` (eshkol.ulg.radiation-closure.v0,
+  closureBacked true, opticalValidation false — physically derived but not
+  validated against measured emissivity). The demo-tuned blue->red colormap was
+  removed.
+- Intrinsic/reflective colour (cold ice/water, solid iron) is a FLAGGED
+  placeholder (closureBacked: false) pending an optical closure fed by MoonLab
+  `optical-response` microphysics (not produced). The UI states this explicitly.
+
+Validation (`tests/sphPhaseDemo.test.mjs` 3/3, `tests/radiationClosure.test.mjs`
+4/4): demo builds cold-ice-on-hot-iron, phase/temperature from closure energy,
+preflight feasible, stepping stays bounded inside the box; blackbody colour
+follows the Planck locus; cold matter is non-incandescent (flagged placeholder);
+radiation closure is closureBacked but not optically validated. `npm test` 99/99
+(+6); `npm run build`; `git diff --check` clean. Headless browser check on
+`127.0.0.1:5173`: SPH Phase button opens the overlay, preflight-feasible, 280
+particles (Fe 64 / H2O 216), no console errors; iron glows orange (derived), ice
+is the flagged placeholder.
+
+Concurrency: a background agent built `radiationClosure.js` as a superset of the
+demo's imports and left the commit to this (parent) agent. The webgpuphys MLS-MPM
+demo (the style source) lives in a separate repo and was only read.
+
+Reassess next: P5 (condensed/Tait EOS, multi-material contact, six fixed-T wall
+heat flux, conduction) for real phase dynamics; the optical closure + MoonLab
+optical-response microphysics for intrinsic colour; then the Multiscale
+`scenario=sph-phase-ice-on-iron` consumer. sph/phase/material/optical/scientific
+validation all stay false.
+
 ## 2026-06-08 19:28 AKDT - MoonLab microphysics: real ab-initio molecular references wired into closures
 
 Prompt: ...then dive into the MoonLab/Eshkol microphysics.

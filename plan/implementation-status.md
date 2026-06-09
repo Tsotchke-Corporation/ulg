@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-08 19:28 AKDT
+Updated: 2026-06-08 19:59 AKDT
 
 ## Done
 
@@ -164,6 +164,22 @@ Updated: 2026-06-08 19:28 AKDT
   remain pending. Verified `npm test` (`92/92`). The microphysics chain is real;
   un-blocking material/EOS/scientific validation needs a quantitative basis (and Fe
   is a much harder solid-state problem) plus Eshkol-side closure compilation.
+- Stood up a new ULG SPH phase demo (MLS-MPM render style; lives in ULG, not
+  Multiscale). `src/runtime/sphPhaseDemo.js` builds the ice-on-molten-iron
+  particle cloud from the material closures, runs the preflight, and steps the
+  CPU-reference carrier (sealed-box reflection + display speed clamp). The
+  three.js renderer (`sphPhaseScene.js`) + overlay UI (`sphPhaseDemoMount.js`,
+  six wall-temperature inputs + status rows) are wired into `main.js` via an
+  "SPH Phase" button and `window.__ulgDemo.runSphPhaseDemo*`. Particle colour is
+  closure-backed where physics allows: `src/runtime/material/radiationClosure.js`
+  derives the incandescent glow from Planck's law (blackbody -> CIE 1931 -> sRGB;
+  molten iron renders orange), and intrinsic/reflective colour is a flagged
+  placeholder pending the optical closure + MoonLab optical-response microphysics.
+  The demo-tuned colormap was removed. Verified `npm test` (`99/99`),
+  `npm run build`, and a headless browser check (overlay opens, preflight
+  feasible, 280 particles, no errors). sph/phase/material/optical/scientific
+  validation stay false; P5 (condensed EOS, multi-material contact, wall heat
+  flux, conduction) is the next physics slice.
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused

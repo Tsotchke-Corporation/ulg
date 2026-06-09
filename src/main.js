@@ -2,6 +2,7 @@ import './styles.css';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
 import { formatHandoffAckStatus } from './runtime/handoffStatus.js';
 import { createWorkerTreeScene } from './visualization/workerTreeScene.js';
+import { createSphPhaseDemoApi, mountSphPhaseDemoOverlay } from './visualization/sphPhaseDemoMount.js';
 
 const app = document.querySelector('#app');
 const multiscaleUrl = new URL(
@@ -27,6 +28,7 @@ app.innerHTML = `
           <button id="copy-handoff" type="button">Copy Handoff</button>
           <button id="run-smoke" type="button">Run Smoke</button>
           <button id="run-oscillator" type="button">Run Oscillator</button>
+          <button id="run-sph-phase" type="button">SPH Phase</button>
           <button id="cancel-smoke" type="button">Cancel</button>
         </div>
       </div>
@@ -77,7 +79,13 @@ const artifactCount = document.querySelector('#artifact-count');
 const runtime = await createDemoRuntime();
 runtime.launchPeerComputeMagnetarDemo = launchPeerComputeMagnetarDemo;
 runtime.sendPeerComputeHandoffToMultiscale = launchPeerComputeMagnetarDemo;
+Object.assign(runtime, createSphPhaseDemoApi());
 window.__ulgDemo = runtime;
+
+const sphPhaseButton = document.querySelector('#run-sph-phase');
+sphPhaseButton.addEventListener('click', () => {
+  mountSphPhaseDemoOverlay();
+});
 
 runtime.subscribe((_event, telemetry) => {
   scene.setTelemetry(telemetry);

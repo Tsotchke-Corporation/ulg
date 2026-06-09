@@ -4,9 +4,10 @@
 
 Command: `npm test`
 
-Current result: pass, 92/92 tests on 2026-06-08 after wiring real MoonLab
-ab-initio microphysics references into the material closures. Prior milestone:
-88/88 after the SPH phase demo P4 (conservative SPH carrier).
+Current result: pass, 99/99 tests on 2026-06-08 after standing up the ULG SPH
+phase demo (MLS-MPM render style) with a first-principles radiation closure for
+incandescent colour. Prior milestone: 92/92 after wiring real MoonLab ab-initio
+microphysics references into the material closures.
 
 - ABI descriptor construction and complex64 round trip.
 - JSON schema validation for service manifests, task capsules, closure artifacts,
@@ -244,6 +245,16 @@ ab-initio microphysics references into the material closures. Prior milestone:
   reference (status produced) while materialValidation stays false (fe/air still
   pending). Full regression: `npm test` `92/92`, `npm run build`,
   `git diff --check` clean.
+- ULG SPH phase demo coverage on 2026-06-08: `node --test
+  tests/sphPhaseDemo.test.mjs` passed `3/3` (cold-ice-on-hot-iron initial build,
+  phase/temperature from closure energy, preflight feasible + bounded stepping
+  inside the sealed box) and `node --test tests/radiationClosure.test.mjs` passed
+  `4/4` (blackbody colour follows the Planck locus — molten iron orange, blue
+  rising to white; cold matter non-incandescent / flagged placeholder; radiation
+  closure closureBacked but opticalValidation false). Full regression `npm test`
+  `99/99`, `npm run build`. A headless browser check on `127.0.0.1:5173` confirmed
+  the SPH Phase overlay opens, preflight-feasible, 280 particles, no console
+  errors, iron glowing with the derived blackbody colour.
 - Focused Phase 3A topology primitive coverage on 2026-06-08:
   `node --test tests/carrierRuntime.test.mjs tests/spatialHash.test.mjs tests/edgeMessages.test.mjs tests/webgpuCarrierKernel.test.mjs`
   passed `17/17`.

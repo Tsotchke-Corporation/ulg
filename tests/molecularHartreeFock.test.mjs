@@ -61,3 +61,16 @@ test('atomization energy is derived, bound, and the right order of magnitude', (
   assert.ok(eV > 0, 'H2 must be bound'); // Σ atoms above the molecule
   assert.ok(eV > 3 && eV < 7, `H2 atomization ${eV.toFixed(2)} eV (exp 4.75; HF/STO-3G qualitative)`);
 });
+
+import { mp2 } from '../src/runtime/electronicStructure/molecularHartreeFock.js';
+
+test('MP2 adds the correlation energy HF misses (H2 correlation is exact for STO-3G)', () => {
+  const r = mp2([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.4] }]);
+  assert.ok(r.mp2CorrelationHa < 0, 'correlation must lower the energy');
+  assert.ok(Math.abs(r.mp2CorrelationHa - (-0.0131)) < 1e-3, `H2 Ecorr ${r.mp2CorrelationHa}`);
+  assert.ok(r.totalEnergyHa < r.hfEnergyHa);
+  // Water: all-electron MP2 correlation is a few ×10^-2 Ha and lowers the energy.
+  const w = mp2([{ Z: 8, position: [0, 0, 0] }, { Z: 1, position: [1.43, 0, 1.108] }, { Z: 1, position: [-1.43, 0, 1.108] }]);
+  assert.ok(w.mp2CorrelationHa < -0.01 && w.mp2CorrelationHa > -0.1);
+  assert.ok(w.totalEnergyHa < w.hfEnergyHa);
+});

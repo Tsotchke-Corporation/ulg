@@ -338,7 +338,7 @@ function solveFock(Fock, X, n) {
       C[i][a] = s;
     }
   }
-  return C;
+  return { C, epsilon: order.map((o) => values[o]) };
 }
 
 /**
@@ -352,6 +352,8 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
   let P = Array.from({ length: n }, () => new Array(n).fill(0));
   let energy = 0;
   let lastEnergy = Infinity;
+  let finalC = null;
+  let finalEps = null;
   for (let iter = 0; iter < maxIter; iter += 1) {
     const Fock = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) {
@@ -361,7 +363,9 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
         Fock[i][j] = Hcore[i][j] + g;
       }
     }
-    const C = solveFock(Fock, X, n);
+    const { C, epsilon } = solveFock(Fock, X, n);
+    finalC = C;
+    finalEps = epsilon;
     const Pnew = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
       let s = 0;
@@ -375,7 +379,7 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
     if (Math.abs(energy - lastEnergy) < tol && iter > 2) break;
     lastEnergy = energy;
   }
-  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons };
+  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx };
 }
 
 /**
@@ -404,7 +408,7 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
     }
     return P;
   };
-  const Cinit = solveFock(Hcore, X, n);
+  const { C: Cinit } = solveFock(Hcore, X, n);
   let Pa = buildDensity(Cinit, nAlpha);
   let Pb = buildDensity(Cinit, nBeta);
 
@@ -428,8 +432,8 @@ export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol
         Fb[i][j] = Hcore[i][j] + coul - exb;
       }
     }
-    const Ca = solveFock(Fa, X, n);
-    const Cb = solveFock(Fb, X, n);
+    const { C: Ca } = solveFock(Fa, X, n);
+    const { C: Cb } = solveFock(Fb, X, n);
     const PaNew = buildDensity(Ca, nAlpha);
     const PbNew = buildDensity(Cb, nBeta);
     let eElec = 0;
@@ -480,6 +484,59 @@ function matMul(A, B, n) {
     for (let j = 0; j < n; j += 1) C[i][j] += aik * B[k][j];
   }
   return C;
+}
+
+// Four-index AO->MO transformation of the two-electron integrals, by successive quarter-transforms
+// (O(N^5)). Returns the MO-basis ERI tensor in chemist notation (pq|rs).
+function transformERItoMO(eri, idx, C, n) {
+  const N4 = n * n * n * n;
+  const moIdx = (p, q, r, s) => ((p * n + q) * n + r) * n + s;
+  const a = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let nu = 0; nu < n; nu += 1) for (let la = 0; la < n; la += 1) for (let si = 0; si < n; si += 1) {
+    let s = 0; for (let mu = 0; mu < n; mu += 1) s += C[mu][p] * eri[idx(mu, nu, la, si)];
+    a[moIdx(p, nu, la, si)] = s;
+  }
+  const b = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let q = 0; q < n; q += 1) for (let la = 0; la < n; la += 1) for (let si = 0; si < n; si += 1) {
+    let s = 0; for (let nu = 0; nu < n; nu += 1) s += C[nu][q] * a[moIdx(p, nu, la, si)];
+    b[moIdx(p, q, la, si)] = s;
+  }
+  const c = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let q = 0; q < n; q += 1) for (let r = 0; r < n; r += 1) for (let si = 0; si < n; si += 1) {
+    let s = 0; for (let la = 0; la < n; la += 1) s += C[la][r] * b[moIdx(p, q, la, si)];
+    c[moIdx(p, q, r, si)] = s;
+  }
+  const d = new Float64Array(N4);
+  for (let p = 0; p < n; p += 1) for (let q = 0; q < n; q += 1) for (let r = 0; r < n; r += 1) for (let ss = 0; ss < n; ss += 1) {
+    let s = 0; for (let si = 0; si < n; si += 1) s += C[si][ss] * c[moIdx(p, q, r, si)];
+    d[moIdx(p, q, r, ss)] = s;
+  }
+  return { mo: d, moIdx };
+}
+
+/**
+ * Second-order Møller–Plesset (MP2) correlation on top of closed-shell RHF — the leading electron
+ * correlation HF leaves out. E_corr = Σ_{ijab} (ia|jb)[2(ia|jb) − (ib|ja)] / (ε_i+ε_j−ε_a−ε_b)
+ * (i,j occupied; a,b virtual, in the MO basis). Returns the HF energy, the (negative) correlation
+ * energy, and their sum. Closed-shell molecules only (open-shell/atoms need UMP2).
+ */
+export function mp2(atoms, options = {}) {
+  const hf = rhf(atoms, options);
+  const { nBasis: n, nOcc, C, orbitalEnergies: eps, eri, idx } = hf;
+  const { mo, moIdx } = transformERItoMO(eri, idx, C, n);
+  let eCorr = 0;
+  for (let i = 0; i < nOcc; i += 1) {
+    for (let j = 0; j < nOcc; j += 1) {
+      for (let a = nOcc; a < n; a += 1) {
+        for (let b = nOcc; b < n; b += 1) {
+          const iajb = mo[moIdx(i, a, j, b)];
+          const ibja = mo[moIdx(i, b, j, a)];
+          eCorr += (iajb * (2 * iajb - ibja)) / (eps[i] + eps[j] - eps[a] - eps[b]);
+        }
+      }
+    }
+  }
+  return { hfEnergyHa: hf.totalEnergyHa, mp2CorrelationHa: eCorr, totalEnergyHa: hf.totalEnergyHa + eCorr, nBasis: n };
 }
 
 /**

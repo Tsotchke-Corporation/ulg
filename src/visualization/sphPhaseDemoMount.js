@@ -246,7 +246,7 @@ export function mountSphPhaseDemoOverlay() {
   let playing = false;
   function tick() {
     if (!playing) return;
-    for (let i = 0; i < 2; i += 1) driver.step();
+    driver.step();
     syncParticles();
     renderStatus();
     requestAnimationFrame(tick);

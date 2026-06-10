@@ -57,17 +57,25 @@ export function kernelGradient(xi, xj, h, dimension) {
 }
 
 /**
- * Density by summation: rho_i = sum_j m_j W(r_ij, h) (includes self).
+ * Density by summation: rho_i = sum_j m_j W(r_ij, h) (includes self). Inlined scalar distance (no
+ * per-pair array allocation) — this is an O(N^2) hot loop.
  */
 export function computeDensities(particles, h, dimension) {
-  return particles.map((pi) => {
-    let rho = 0;
-    for (const pj of particles) {
-      const r = vlen(vsub(pi.x, pj.x));
-      if (r < 2 * h) rho += pj.massKg * cubicSplineKernel(r, h, dimension);
+  const n = particles.length;
+  const twoH = 2 * h;
+  const rho = new Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const xi = particles[i].x;
+    let s = 0;
+    for (let j = 0; j < n; j += 1) {
+      const xj = particles[j].x;
+      let r2 = 0;
+      for (let d = 0; d < dimension; d += 1) { const dd = xi[d] - xj[d]; r2 += dd * dd; }
+      if (r2 < twoH * twoH) s += particles[j].massKg * cubicSplineKernel(Math.sqrt(r2), h, dimension);
     }
-    return rho;
-  });
+    rho[i] = s;
+  }
+  return rho;
 }
 
 /**
@@ -113,39 +121,52 @@ export function computeAccelerationsAndEnergyRates(particles, options = {}) {
     pressures.push(pressurePa);
     soundSpeeds.push(soundSpeedMPerS);
   }
-  const accelerations = particles.map((p) => p.x.map(() => 0));
-  const energyRates = particles.map(() => 0);
-  for (let i = 0; i < particles.length; i += 1) {
+  const n = particles.length;
+  const accelerations = particles.map(() => new Array(dimension).fill(0));
+  const energyRates = new Array(n).fill(0);
+  const twoH = 2 * h;
+  // Inlined O(N^2) symmetric momentum + energy loop: scalar component math, no per-pair allocation.
+  for (let i = 0; i < n; i += 1) {
     const pi = particles[i];
+    const xi = pi.x;
+    const vi = pi.v;
+    const acci = accelerations[i];
     const termI = pressures[i] / (densities[i] * densities[i]);
-    for (let j = 0; j < particles.length; j += 1) {
+    let eRate = 0;
+    for (let j = 0; j < n; j += 1) {
       if (j === i) continue;
       const pj = particles[j];
-      const xij = vsub(pi.x, pj.x);
-      const r = vlen(xij);
-      if (r >= 2 * h || r <= 0) continue;
-      const gradW = kernelGradient(pi.x, pj.x, h, dimension);
+      const xj = pj.x;
+      let r2 = 0;
+      for (let d = 0; d < dimension; d += 1) { const dd = xi[d] - xj[d]; r2 += dd * dd; }
+      if (r2 >= twoH * twoH || r2 <= 0) continue;
+      const r = Math.sqrt(r2);
+      const dWdr = cubicSplineKernelGradientMagnitude(r, h, dimension);
+      const gradCoef = dWdr / r; // gradW[d] = gradCoef * (xi[d]-xj[d])
       const termJ = pressures[j] / (densities[j] * densities[j]);
-      const vij = vsub(pi.v, pj.v);
-      const visc = artificialViscosity({
-        vij,
-        xij,
-        r2: r * r,
-        rhoBar: 0.5 * (densities[i] + densities[j]),
-        cBar: 0.5 * (soundSpeeds[i] + soundSpeeds[j]),
-        h,
-        alpha,
-        beta,
-        epsilon
-      });
-      const coeff = termI + termJ + visc;
-      for (let d = 0; d < pi.x.length; d += 1) {
-        accelerations[i][d] -= pj.massKg * coeff * gradW[d];
+      // Monaghan artificial viscosity (only for approaching pairs).
+      let visc = 0;
+      let vr = 0;
+      for (let d = 0; d < dimension; d += 1) vr += (vi[d] - pj.v[d]) * (xi[d] - xj[d]);
+      if (vr < 0) {
+        const rhoBar = 0.5 * (densities[i] + densities[j]);
+        const cBar = 0.5 * (soundSpeeds[i] + soundSpeeds[j]);
+        const mu = (h * vr) / (r2 + epsilon * h * h);
+        visc = (-alpha * cBar * mu + beta * mu * mu) / rhoBar;
       }
-      energyRates[i] += 0.5 * pj.massKg * coeff * vdot(vij, gradW);
+      const coeff = termI + termJ + visc;
+      const mj = pj.massKg;
+      let vdotGrad = 0;
+      for (let d = 0; d < dimension; d += 1) {
+        const grad = gradCoef * (xi[d] - xj[d]);
+        acci[d] -= mj * coeff * grad;
+        vdotGrad += (vi[d] - pj.v[d]) * grad;
+      }
+      eRate += 0.5 * mj * coeff * vdotGrad;
     }
+    energyRates[i] = eRate;
     if (Array.isArray(gravity)) {
-      for (let d = 0; d < pi.x.length; d += 1) accelerations[i][d] += gravity[d];
+      for (let d = 0; d < dimension; d += 1) acci[d] += gravity[d];
     }
   }
   return { accelerations, energyRates, pressures, soundSpeeds, densities };

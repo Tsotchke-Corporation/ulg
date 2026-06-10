@@ -238,9 +238,15 @@ export function createSphPhaseDemo(options = {}) {
   demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
   const gasDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'gas').densityKgPerM3;
   const liquidDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'liquid').densityKgPerM3;
-  // Thermal-substep rates are accelerated for interactive visualization; the structure
-  // (conduction, six-wall flux, latent-heat phase change) is physical (see thermalPhase.js).
-  const dtThermalS = options.dtThermalS ?? 0.02;
+  // Single simulation clock: each driver.step advances the mechanics by `mechanicalSubsteps`
+  // carrier substeps of `dt` each, and the thermal step by the SAME sim-time (subs * dt). This
+  // keeps the thermodynamics and the motion on one clock — heat flow / melting / steam no longer
+  // outrun the falling and flowing (the old code stepped thermal at a fixed 0.02 s while mechanics
+  // crept at 3e-4 s, ~67x faster). The conduction/wall coefficients are still elevated (fast heat
+  // transfer for a watchable demo, labelled in thermalPhase.js), but applied over the consistent dt.
+  const carrierDt = options.dt ?? 3e-4;
+  const mechanicalSubsteps = options.mechanicalSubsteps ?? 24;
+  const dtStepS = mechanicalSubsteps * carrierDt; // sim-time advanced per driver.step
   const buoyancyCap = options.buoyancyCapMPerS2 ?? 45;
   // Phase-aware multi-material EOS: each particle's pressure references its current phase's rest
   // density (from the closures), so condensed iron/water stay ~incompressible while vaporized water
@@ -268,25 +274,29 @@ export function createSphPhaseDemo(options = {}) {
       return computeThermodynamicPreflight(demo.scenario);
     },
     step() {
-      const result = carrier.step(demo.state);
-      demo.state = result.state;
+      // Advance the mechanics by several CFL-limited carrier substeps so it covers the same
+      // sim-time the thermal step uses below (one shared clock).
+      for (let s = 0; s < mechanicalSubsteps; s += 1) {
+        const result = carrier.step(demo.state);
+        demo.state = result.state;
+      }
 
-      // P5: evolve energy by conduction + six-wall heat flux (closures wired into the dynamics).
+      // P5: evolve energy by conduction + six-wall heat flux over the SAME sim-time as the mechanics.
       const { wallHeatJ, thermal } = thermalStep(demo.state, {
         materialProperties: demo.materialProperties,
         wallTemperaturesK: demo.scenario.walls.faces,
         boxEdgeM: demo.box.edgeM,
-        dtS: dtThermalS,
+        dtS: dtStepS,
         conductionRate: options.conductionRate,
         wallRate: options.wallRate
       });
       for (const face of Object.keys(demo.wallHeatLedgerJ)) demo.wallHeatLedgerJ[face] += wallHeatJ[face];
 
       // Phase-driven buoyancy: water that has vaporized (gas phase) rises as steam (reuse the
-      // phases the thermal step already computed).
+      // phases the thermal step already computed), over the same sim-time.
       const steamBuoyancy = Math.min(buoyancyCap, buoyancyAccelerationMPerS2(gasDensity, liquidDensity));
       demo.state.particles.forEach((p, i) => {
-        if (p.material === 'h2o' && thermal[i].phase === 'gas') p.v[1] += steamBuoyancy * dtThermalS;
+        if (p.material === 'h2o' && thermal[i].phase === 'gas') p.v[1] += steamBuoyancy * dtStepS;
       });
 
       // Display safeguards: reflect at the sealed-box walls and clamp speed so the (reduced,

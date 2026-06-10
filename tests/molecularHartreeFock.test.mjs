@@ -109,3 +109,12 @@ test('population analysis reads bonding off the wavefunction (charges + bond ord
   const n2mol = [{ Z: 7, position: [0, 0, 0] }, { Z: 7, position: [0, 0, 2.07] }];
   assert.ok(populationAnalysis(rhf(n2mol), n2mol).bondOrders[0][1] > 2, 'N2 multiple bond');
 });
+
+import { vibrationalFrequencies } from '../src/runtime/electronicStructure/molecularHartreeFock.js';
+
+test('vibrational analysis: H2 has one real stretch mode (HF/STO-3G overestimates)', () => {
+  const opt = optimizeGeometry([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }]);
+  const { vibrationsCm1 } = vibrationalFrequencies(opt.atoms);
+  assert.equal(vibrationsCm1.length, 1); // 3N-5 = 1 for a diatomic
+  assert.ok(vibrationsCm1[0] > 4000 && vibrationsCm1[0] < 6500, `H2 stretch ${vibrationsCm1[0].toFixed(0)} cm-1 (exp 4401; HF/STO-3G high)`);
+});

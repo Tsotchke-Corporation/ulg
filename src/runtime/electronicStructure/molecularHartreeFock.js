@@ -10,7 +10,10 @@
 // units throughout. Evidence-only: HF/STO-3G is a known approximation, so callers keep validation
 // false until checked against measured/correlated references.
 
-import { unpairedElectronCount } from './periodicTable.js';
+import { unpairedElectronCount, ATOMIC_MASS_U } from './periodicTable.js';
+
+const AMU_TO_ELECTRON_MASS = 1822.888486;
+const HARTREE_TO_CM1 = 219474.6313705; // ħω [Hartree] -> wavenumber [cm^-1]
 
 // ---- small dense symmetric eigensolver (Jacobi) ----------------------------------------------
 function jacobiEigh(Ain, n) {
@@ -681,6 +684,55 @@ export function optimizeGeometry(atoms, { method = (a) => rhf(a).totalEnergyHa, 
     steps: step,
     converged: gradNorm < gradTol
   };
+}
+
+/**
+ * Harmonic vibrational frequencies (cm^-1) from the mass-weighted Hessian of E(R). Build the
+ * Hessian by central differences of the nuclear gradient, mass-weight (H_ij / sqrt(m_i m_j)),
+ * diagonalize, and convert eigenvalues to wavenumbers. At a minimum, 3N−6 (3N−5 for a linear
+ * molecule) modes are real vibrations; the rest are near-zero translations/rotations and are
+ * dropped. A negative eigenvalue → imaginary frequency (the geometry is a saddle, not a minimum).
+ * Should be called on an optimized geometry. This is the molecular link to thermodynamics
+ * (zero-point energy, vibrational heat capacity).
+ */
+export function vibrationalFrequencies(atoms, { method = (a) => rhf(a).totalEnergyHa, h = 5e-3, dropModes = null } = {}) {
+  const Zs = atoms.map((a) => a.Z);
+  const masses = atoms.map((a) => ATOMIC_MASS_U[a.Z - 1] * AMU_TO_ELECTRON_MASS);
+  const m = atoms.length;
+  const dim = 3 * m;
+  let coords = atoms.map((a) => [...a.position]);
+  const E = (cs) => method(cs.map((p, i) => ({ Z: Zs[i], position: p })));
+  // Hessian columns from gradient differences.
+  const H = Array.from({ length: dim }, () => new Array(dim).fill(0));
+  for (let j = 0; j < dim; j += 1) {
+    const aj = Math.floor(j / 3);
+    const dj = j % 3;
+    const orig = coords[aj][dj];
+    coords[aj][dj] = orig + h;
+    const gp = nuclearGradient(coords, E, h).flat();
+    coords[aj][dj] = orig - h;
+    const gm = nuclearGradient(coords, E, h).flat();
+    coords[aj][dj] = orig;
+    for (let i = 0; i < dim; i += 1) H[i][j] = (gp[i] - gm[i]) / (2 * h);
+  }
+  // Symmetrize and mass-weight.
+  const Hmw = Array.from({ length: dim }, () => new Array(dim).fill(0));
+  for (let i = 0; i < dim; i += 1) {
+    for (let j = 0; j < dim; j += 1) {
+      const mi = masses[Math.floor(i / 3)];
+      const mj = masses[Math.floor(j / 3)];
+      Hmw[i][j] = 0.5 * (H[i][j] + H[j][i]) / Math.sqrt(mi * mj);
+    }
+  }
+  const { values } = jacobiEigh(Hmw, dim);
+  const toCm1 = (lambda) => (lambda >= 0 ? 1 : -1) * Math.sqrt(Math.abs(lambda)) * HARTREE_TO_CM1;
+  const all = values.map(toCm1).sort((a, b) => a - b);
+  // Drop the 5 (linear) or 6 (nonlinear) lowest-magnitude near-zero translation/rotation modes.
+  const nDrop = dropModes ?? (m === 2 ? 5 : 6);
+  const byMagnitude = [...all].sort((a, b) => Math.abs(a) - Math.abs(b));
+  const dropped = new Set(byMagnitude.slice(0, nDrop));
+  const vibrations = all.filter((f) => !dropped.has(f));
+  return { vibrationsCm1: vibrations, allModesCm1: all };
 }
 
 /** Distance (Bohr) between two atoms in a geometry. */

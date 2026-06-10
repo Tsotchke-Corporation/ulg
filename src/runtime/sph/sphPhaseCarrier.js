@@ -38,9 +38,10 @@ export function createSphPhaseCarrier(options = {}) {
     gravity = null,
     alpha = 0,
     beta = 0,
-    dt = 1e-4
+    dt = 1e-4,
+    eos = null
   } = options;
-  const fieldOptions = { dimension, gamma, gravity, alpha, beta };
+  const fieldOptions = { dimension, gamma, gravity, alpha, beta, eos };
 
   function step(state) {
     const next = cloneSphState(state);

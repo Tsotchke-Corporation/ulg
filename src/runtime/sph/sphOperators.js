@@ -98,13 +98,18 @@ export function computeAccelerationsAndEnergyRates(particles, options = {}) {
     gravity = null,
     alpha = 0,
     beta = 0,
-    epsilon = 0.01
+    epsilon = 0.01,
+    eos = null
   } = options;
   const densities = computeDensities(particles, h, dimension);
   const pressures = [];
   const soundSpeeds = [];
   for (let i = 0; i < particles.length; i += 1) {
-    const { pressurePa, soundSpeedMPerS } = idealGasPressure(densities[i], particles[i].specificInternalEnergyJPerKg, gamma);
+    // Default: single ideal-gas law (P4). When an `eos` is supplied (phase-aware multi-material
+    // EOS), it sets each particle's pressure from its phase's rest density instead.
+    const { pressurePa, soundSpeedMPerS } = eos
+      ? eos({ density: densities[i], specificInternalEnergyJPerKg: particles[i].specificInternalEnergyJPerKg, particle: particles[i], gamma })
+      : idealGasPressure(densities[i], particles[i].specificInternalEnergyJPerKg, gamma);
     pressures.push(pressurePa);
     soundSpeeds.push(soundSpeedMPerS);
   }

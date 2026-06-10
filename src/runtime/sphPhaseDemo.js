@@ -16,6 +16,7 @@ import { createSphState } from './sph/sphState.js';
 import { createSphPhaseCarrier } from './sph/sphPhaseCarrier.js';
 import { sphTotals } from './sph/sphConservation.js';
 import { buoyancyAccelerationMPerS2, phaseMassWithSteam, thermalStep } from './sph/thermalPhase.js';
+import { createPhaseAwareEos } from './sph/multiMaterialEos.js';
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
 function fillCube({ material, min, size, spacing, temperatureK, properties, densityKgPerM3 }) {
@@ -186,13 +187,25 @@ export function createSphPhaseDemo(options = {}) {
   // (conduction, six-wall flux, latent-heat phase change) is physical (see thermalPhase.js).
   const dtThermalS = options.dtThermalS ?? 0.02;
   const buoyancyCap = options.buoyancyCapMPerS2 ?? 45;
+  // Phase-aware multi-material EOS: each particle's pressure references its current phase's rest
+  // density (from the closures), so condensed iron/water stay ~incompressible while vaporized water
+  // expands toward the gas density. This is what makes the steam grow in volume and stops the
+  // molten iron from puffing up like a gas.
+  const eos = createPhaseAwareEos(demo.materialProperties, {
+    condensedSoundSpeedMPerS: options.condensedSoundSpeedMPerS ?? 180,
+    gasSoundSpeedMPerS: options.gasSoundSpeedMPerS ?? 70
+  });
+  // The weakly-compressible sound speeds (~180 m/s) cap the acoustic CFL, so the timestep can be
+  // ~6x the old ideal-gas-stiffness value — more mechanical sim-time per (equally expensive) step,
+  // which is what lets the steam expansion and the falling iron actually develop on screen.
   const carrier = createSphPhaseCarrier({
     dimension: 3,
     gamma: options.gamma ?? 1.4,
     gravity: options.gravity ?? [0, -9.80665, 0],
     alpha: options.alpha ?? 1.0,
     beta: options.beta ?? 2.0,
-    dt: options.dt ?? 5e-5
+    dt: options.dt ?? 3e-4,
+    eos
   });
   return {
     demo,
@@ -224,7 +237,7 @@ export function createSphPhaseDemo(options = {}) {
       // Display safeguards: reflect at the sealed-box walls and clamp speed so the (reduced,
       // pre-full-EOS) cloud stays bounded and on-screen.
       const edge = demo.box.edgeM;
-      const maxSpeed = options.maxDisplaySpeedMPerS ?? 8;
+      const maxSpeed = options.maxDisplaySpeedMPerS ?? 25;
       for (const p of demo.state.particles) {
         for (let d = 0; d < 3; d += 1) {
           if (p.x[d] < 0) { p.x[d] = 0; p.v[d] = Math.abs(p.v[d]) * 0.4; }

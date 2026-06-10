@@ -268,12 +268,23 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
   // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
   // continuous density surface from particles, but it does not invent material colour.
-  function setParticles({ positionsM, colorsRgb, materials = null }) {
+  function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null }) {
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM });
     for (const batch of batches) {
       const surface = ensureSurface(batch.material);
       const { mesh, config } = surface;
+      // Incandescent surfaces (hot iron) glow: the radiation closure supplies the emissive colour,
+      // which is added on top of the BRDF, so a fully-metallic surface still lights up instead of
+      // rendering dark. A null/absent entry means the surface is below the glow threshold.
+      const emissive = emissiveByMaterial?.[batch.material] ?? null;
+      if (emissive) {
+        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2]);
+        mesh.material.emissiveIntensity = 1.8;
+      } else {
+        mesh.material.emissive.setRGB(0, 0, 0);
+        mesh.material.emissiveIntensity = 0;
+      }
       mesh.reset();
       const radiusM = Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM;
       const radiusNorm = clamp(radiusM / boxEdgeM, 0.006, 0.14);

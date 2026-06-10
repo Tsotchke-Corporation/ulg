@@ -155,6 +155,34 @@ export function particleRenderMaterials(demo) {
 }
 
 /**
+ * Per-material emissive colour for incandescent surfaces, from the Planck radiation closure. Hot
+ * matter glows (emits), so the renderer should drive the material's emissive channel from this —
+ * a metal surface lit only by ambient light would otherwise render dark. Returns the luminance-
+ * weighted mean incandescent colour over the material's glowing particles, or null when none of
+ * them are above the incandescence threshold (so a cold surface does not falsely glow).
+ */
+export function surfaceEmissive(demo) {
+  const acc = {};
+  for (const p of demo.state.particles) {
+    const props = demo.materialProperties[p.material];
+    const eq = equilibriumFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
+    const inc = incandescentColor(eq.temperatureK);
+    if (!inc.visible) continue;
+    const lum = 0.2126 * inc.srgb[0] + 0.7152 * inc.srgb[1] + 0.0722 * inc.srgb[2];
+    const a = acc[p.material] || (acc[p.material] = { r: 0, g: 0, b: 0, w: 0 });
+    a.r += inc.srgb[0] * lum;
+    a.g += inc.srgb[1] * lum;
+    a.b += inc.srgb[2] * lum;
+    a.w += lum;
+  }
+  const out = {};
+  for (const [material, a] of Object.entries(acc)) {
+    out[material] = a.w > 0 ? [a.r / a.w, a.g / a.w, a.b / a.w] : null;
+  }
+  return out;
+}
+
+/**
  * Phase mass summary (water mass by phase, iron solid fraction) for the status rows.
  */
 export function phaseMassSummary(demo) {

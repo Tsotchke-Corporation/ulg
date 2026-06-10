@@ -74,3 +74,18 @@ test('MP2 adds the correlation energy HF misses (H2 correlation is exact for STO
   assert.ok(w.mp2CorrelationHa < -0.01 && w.mp2CorrelationHa > -0.1);
   assert.ok(w.totalEnergyHa < w.hfEnergyHa);
 });
+
+import { optimizeGeometry, bondLength, bondAngle } from '../src/runtime/electronicStructure/molecularHartreeFock.js';
+
+test('geometry optimization predicts molecular structure from first principles', () => {
+  // H2 relaxes from a stretched guess to near the STO-3G equilibrium (~1.39 bohr).
+  const h2 = optimizeGeometry([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.7] }]);
+  const r = bondLength(h2.atoms, 0, 1);
+  assert.ok(r > 1.25 && r < 1.45, `H2 R ${r.toFixed(3)} bohr`);
+  // Water: bond length ~0.99 A (1.87 bohr) and angle ~100 deg come out of the energy.
+  const w = optimizeGeometry([{ Z: 8, position: [0, 0, 0] }, { Z: 1, position: [1.7, 0, 0.9] }, { Z: 1, position: [-1.6, 0, 1.0] }]);
+  const oh = bondLength(w.atoms, 0, 1);
+  const angle = bondAngle(w.atoms, 1, 0, 2);
+  assert.ok(oh > 1.7 && oh < 2.0, `OH ${oh.toFixed(3)} bohr`);
+  assert.ok(angle > 95 && angle < 112, `HOH angle ${angle.toFixed(1)} deg`);
+});

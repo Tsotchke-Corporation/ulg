@@ -593,4 +593,77 @@ export function atomizationEnergyHa(atoms, { moleculeOptions = {}, atomCache = n
   return { atomizationEnergyHa: eAtoms - eMolecule, moleculeEnergyHa: eMolecule, atomsEnergyHa: eAtoms };
 }
 
+// Numerical nuclear gradient dE/dR (central differences). `energyFn` maps a coordinate array
+// (array of [x,y,z]) to the total energy.
+function nuclearGradient(coords, energyFn, h) {
+  const grad = coords.map(() => [0, 0, 0]);
+  for (let a = 0; a < coords.length; a += 1) {
+    for (let d = 0; d < 3; d += 1) {
+      const orig = coords[a][d];
+      coords[a][d] = orig + h;
+      const ep = energyFn(coords);
+      coords[a][d] = orig - h;
+      const em = energyFn(coords);
+      coords[a][d] = orig;
+      grad[a][d] = (ep - em) / (2 * h);
+    }
+  }
+  return grad;
+}
+
+/**
+ * Optimize a molecular geometry on the Born–Oppenheimer surface: move the nuclei downhill on E(R)
+ * (numerical gradient + backtracking line search) to the equilibrium structure. Bond lengths and
+ * angles come out of the electronic energy — molecular structure is predicted, not assumed.
+ * `method` is the energy model (default closed-shell RHF total energy).
+ */
+export function optimizeGeometry(atoms, { method = (a) => rhf(a).totalEnergyHa, maxSteps = 80, gradTol = 1.5e-3, h = 1e-3 } = {}) {
+  const Zs = atoms.map((a) => a.Z);
+  let coords = atoms.map((a) => [...a.position]);
+  const E = (cs) => method(cs.map((p, i) => ({ Z: Zs[i], position: p })));
+  let energy = E(coords);
+  let gradNorm = Infinity;
+  let step = 0;
+  for (; step < maxSteps; step += 1) {
+    const grad = nuclearGradient(coords, E, h);
+    gradNorm = Math.max(...grad.flat().map(Math.abs));
+    if (gradNorm < gradTol) break;
+    // Backtracking line search along the steepest-descent direction.
+    let alpha = 0.6;
+    let accepted = false;
+    for (let bt = 0; bt < 25; bt += 1) {
+      const trial = coords.map((p, i) => [p[0] - alpha * grad[i][0], p[1] - alpha * grad[i][1], p[2] - alpha * grad[i][2]]);
+      const eTrial = E(trial);
+      if (eTrial < energy) { coords = trial; energy = eTrial; accepted = true; break; }
+      alpha *= 0.5;
+    }
+    if (!accepted) break; // converged to numerical-gradient noise floor
+  }
+  return {
+    atoms: coords.map((p, i) => ({ Z: Zs[i], position: p })),
+    energyHa: energy,
+    gradNorm,
+    steps: step,
+    converged: gradNorm < gradTol
+  };
+}
+
+/** Distance (Bohr) between two atoms in a geometry. */
+export function bondLength(atoms, i, j) {
+  const a = atoms[i].position;
+  const b = atoms[j].position;
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+/** Angle (degrees) i–center–j. */
+export function bondAngle(atoms, i, center, j) {
+  const c = atoms[center].position;
+  const v1 = atoms[i].position.map((x, d) => x - c[d]);
+  const v2 = atoms[j].position.map((x, d) => x - c[d]);
+  const dot = v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
+  const n1 = Math.hypot(...v1);
+  const n2 = Math.hypot(...v2);
+  return (Math.acos(dot / (n1 * n2)) * 180) / Math.PI;
+}
+
 export { uhf as _uhf, jacobiEigh, boys, hermiteE, hermiteR, primitiveOverlap, primitiveKinetic, primitiveNuclear, primitiveERI, makeBasisFunction, contract2 };

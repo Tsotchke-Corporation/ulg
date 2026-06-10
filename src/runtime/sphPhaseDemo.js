@@ -17,6 +17,7 @@ import { createSphPhaseCarrier } from './sph/sphPhaseCarrier.js';
 import { sphTotals } from './sph/sphConservation.js';
 import { buoyancyAccelerationMPerS2, phaseMassWithSteam, thermalStep } from './sph/thermalPhase.js';
 import { createPhaseAwareEos } from './sph/multiMaterialEos.js';
+import { createMlsMpmCarrier } from './sph/mlsMpmCarrier.js';
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
 function fillCube({ material, min, size, spacing, temperatureK, properties, densityKgPerM3 }) {
@@ -35,7 +36,8 @@ function fillCube({ material, min, size, spacing, temperatureK, properties, dens
           v: [0, 0, 0],
           massKg,
           specificInternalEnergyJPerKg: u,
-          temperatureK
+          temperatureK,
+          restDensityKgPerM3: densityKgPerM3 // initial rest density (sets the MLS-MPM particle volume)
         });
       }
     }
@@ -121,6 +123,7 @@ export function buildSphPhaseDemoState({
   state.particles.forEach((p, index) => {
     p.material = all[index].material;
     p.temperatureK = all[index].temperatureK;
+    p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
   });
   return {
     scenario,
@@ -244,30 +247,49 @@ export function createSphPhaseDemo(options = {}) {
   // outrun the falling and flowing (the old code stepped thermal at a fixed 0.02 s while mechanics
   // crept at 3e-4 s, ~67x faster). The conduction/wall coefficients are still elevated (fast heat
   // transfer for a watchable demo, labelled in thermalPhase.js), but applied over the consistent dt.
-  const carrierDt = options.dt ?? 3e-4;
-  const mechanicalSubsteps = options.mechanicalSubsteps ?? 24;
-  const dtStepS = mechanicalSubsteps * carrierDt; // sim-time advanced per driver.step
   const buoyancyCap = options.buoyancyCapMPerS2 ?? 45;
   // Phase-aware multi-material EOS: each particle's pressure references its current phase's rest
   // density (from the closures), so condensed iron/water stay ~incompressible while vaporized water
   // expands toward the gas density. This is what makes the steam grow in volume and stops the
-  // molten iron from puffing up like a gas.
+  // molten iron from puffing up like a gas. Shared by both mechanical backends.
   const eos = createPhaseAwareEos(demo.materialProperties, {
     condensedSoundSpeedMPerS: options.condensedSoundSpeedMPerS ?? 180,
     gasSoundSpeedMPerS: options.gasSoundSpeedMPerS ?? 70
   });
-  // The weakly-compressible sound speeds (~180 m/s) cap the acoustic CFL, so the timestep can be
-  // ~6x the old ideal-gas-stiffness value — more mechanical sim-time per (equally expensive) step,
-  // which is what lets the steam expansion and the falling iron actually develop on screen.
-  const carrier = createSphPhaseCarrier({
-    dimension: 3,
-    gamma: options.gamma ?? 1.4,
-    gravity: options.gravity ?? [0, -9.80665, 0],
-    alpha: options.alpha ?? 1.0,
-    beta: options.beta ?? 2.0,
-    dt: options.dt ?? 3e-4,
-    eos
-  });
+
+  // Mechanical backend: MLS-MPM (default — grid-based, stable for large deformation / multi-material
+  // / free-surface, GPU-friendly) or the SPH carrier (conservation reference). Both consume the same
+  // phase-aware EOS. The buoyancy on vaporized water is bolted on for SPH; with MPM the density
+  // contrast drives expansion through the grid, but we keep a gentle buoyancy assist for both.
+  const mechanics = options.mechanics ?? 'mlsmpm';
+  let carrier;
+  let carrierDt;
+  let mechanicalSubsteps;
+  if (mechanics === 'mlsmpm') {
+    carrierDt = options.dt ?? 5e-4;
+    mechanicalSubsteps = options.mechanicalSubsteps ?? 16;
+    carrier = createMlsMpmCarrier({
+      gridSpacingM: options.gridSpacingM ?? Math.max(0.15, demo.state.smoothingLengthM),
+      boxEdgeM: demo.box.edgeM,
+      dt: carrierDt,
+      gravity: options.gravity ?? [0, -9.80665, 0],
+      eos,
+      restDensityOf: (p) => p.restDensityKgPerM3 || demo.materialProperties[p.material].phases[0].densityKgPerM3
+    });
+  } else {
+    carrierDt = options.dt ?? 3e-4;
+    mechanicalSubsteps = options.mechanicalSubsteps ?? 24;
+    carrier = createSphPhaseCarrier({
+      dimension: 3,
+      gamma: options.gamma ?? 1.4,
+      gravity: options.gravity ?? [0, -9.80665, 0],
+      alpha: options.alpha ?? 1.0,
+      beta: options.beta ?? 2.0,
+      dt: carrierDt,
+      eos
+    });
+  }
+  const dtStepS = mechanicalSubsteps * carrierDt; // sim-time advanced per driver.step
   return {
     demo,
     preflight() {

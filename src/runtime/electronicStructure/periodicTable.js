@@ -118,3 +118,23 @@ export function configurationString(Z, options) {
 export function configurationElectronCount(config) {
   return config.reduce((sum, s) => sum + s.occupancy, 0);
 }
+
+/**
+ * Spin-resolved configuration applying Hund's first rule per subshell: a subshell of capacity
+ * 2(2l+1) fills its 2l+1 spin-up slots singly first, then pairs with spin-down. Returns
+ * { n, l, occUp, occDown } subshells; the total spin moment is Σ(occUp − occDown). (Per-subshell
+ * Hund is the standard atomic-LSDA filling; e.g. Fe 3d6 → 5↑ 1↓, moment 4.)
+ */
+export function spinElectronConfiguration(Z, options) {
+  return electronConfiguration(Z, options).map(({ n, l, occupancy }) => {
+    const halfCapacity = 2 * l + 1;
+    const occUp = Math.min(occupancy, halfCapacity);
+    const occDown = occupancy - occUp;
+    return { n, l, occUp, occDown };
+  });
+}
+
+/** Net spin (Σ(↑−↓)/... here Σ(↑−↓), i.e. 2S) of the ground-state configuration. */
+export function unpairedElectronCount(Z, options) {
+  return spinElectronConfiguration(Z, options).reduce((sum, s) => sum + (s.occUp - s.occDown), 0);
+}

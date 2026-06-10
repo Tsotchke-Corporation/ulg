@@ -7,8 +7,11 @@
 //
 // Reuses the uniform-electron-gas LDA energy density (uniformElectronGas.js). Atomic units.
 
-import { numberDensityFromRs, uegEnergyPerElectronHa, wignerSeitzRadius } from './uniformElectronGas.js';
-import { electronConfiguration, symbolForZ } from './periodicTable.js';
+import { numberDensityFromRs, uegEnergyPerElectronHa, wignerSeitzRadius, xcEnergyPerElectronSpinHa } from './uniformElectronGas.js';
+import { electronConfiguration, spinElectronConfiguration, symbolForZ } from './periodicTable.js';
+
+// Fine-structure constant (atomic units: c = 1/α). Used by the scalar-relativistic correction.
+const ALPHA_FINE = 7.2973525693e-3;
 
 // LDA exchange-correlation energy per unit volume (Ha/Bohr^3) from the UEG (energy per electron
 // minus the kinetic term = exchange + correlation), and the corresponding potential.
@@ -261,10 +264,60 @@ function hartreePotentialLog(rho, r, dx) {
   return vH;
 }
 
+// Lowest `count` radial states for angular momentum l in effective potential vEff, on the log
+// grid. Builds the folded symmetric-tridiagonal operator Â = B^{-1/2} A B^{-1/2} (B = 2 r^2),
+// solves it, and recovers the physical u(r) = ŵ/sqrt(2r) normalized to ∫u^2 dr = 1. Shared by the
+// spin-restricted (LDA) and spin-polarized (LSDA) solvers.
+function radialStatesLog(vEff, r, dx, l, count) {
+  const n = r.length;
+  const invDx2 = 1 / (dx * dx);
+  const diag = new Float64Array(n);
+  const off = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    diag[i] = (invDx2 + 0.5 * (l + 0.5) * (l + 0.5)) / (r[i] * r[i]) + vEff[i];
+    if (i < n - 1) off[i] = -invDx2 / (2 * r[i] * r[i + 1]);
+  }
+  const pairs = lowestEigenpairs(diag, off, count, dx);
+  for (const pair of pairs) {
+    const u = new Float64Array(n);
+    for (let i = 0; i < n; i += 1) u[i] = pair.u[i] / Math.sqrt(2 * r[i]);
+    let norm = 0;
+    for (let i = 0; i < n; i += 1) norm += u[i] * u[i] * r[i] * dx;
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < n; i += 1) u[i] /= norm;
+    pair.u = u;
+  }
+  return pairs;
+}
+
+// Scalar-relativistic (spin-orbit-averaged) first-order correction to one orbital's energy:
+// mass-velocity ΔE_MV = −(α²/2)∫(ε−V)² u² dr  plus the Darwin contact term (s-states only, from
+// the nuclear ∇²(−Z/r) = 4πZδ) ΔE_D = (α²/8) Z R(0)². For a bare hydrogenic 1s this reproduces
+// the exact leading correction −α²Z⁴/8 (validated). In many-electron atoms it is a first-order
+// estimate: the large near-nucleus MV and Darwin terms nearly cancel, so the net amplifies small
+// screening differences and overestimates for heavy Z (and first-order PT breaks down as αZ→1);
+// the non-perturbative Koelling–Harmon SCF is the rigorous upgrade. The smooth electronic Darwin
+// part is small and omitted.
+export function relativisticOrbitalCorrectionHa({ u, energyHa, vFull, r, dx, l, atomicNumberZ }) {
+  const a2 = ALPHA_FINE * ALPHA_FINE;
+  let mv = 0;
+  for (let i = 0; i < r.length; i += 1) {
+    const ev = energyHa - vFull[i];
+    mv += ev * ev * u[i] * u[i] * r[i] * dx; // ∫(ε−V)² u² dr, dr = r dx
+  }
+  let darwin = 0;
+  if (l === 0) {
+    const R0 = u[0] / r[0]; // R(0) = lim u/r for an s-state
+    darwin = (a2 / 8) * atomicNumberZ * R0 * R0;
+  }
+  return -0.5 * a2 * mv + darwin;
+}
+
 /**
  * All-electron Kohn–Sham LDA on a logarithmic radial grid. Accurate across the periodic table.
  * `configuration` is the { n, l, occupancy } subshell list. Returns total energy, per-subshell
- * orbital energies, and the integrated electron count.
+ * orbital energies, and the integrated electron count. With `relativistic: true`, also returns the
+ * scalar-relativistic (mass-velocity + Darwin) correction and the corrected total energy.
  */
 export function solveKohnShamAtomLog({
   atomicNumberZ,
@@ -274,7 +327,8 @@ export function solveKohnShamAtomLog({
   rMaxBohr = 40,
   mixing = 0.2,
   maxScf = 500,
-  tol = 1e-7
+  tol = 1e-7,
+  relativistic = false
 }) {
   const xMin = Math.log(rMinBohr);
   const xMax = Math.log(rMaxBohr);
@@ -292,36 +346,16 @@ export function solveKohnShamAtomLog({
   let statesByL = new Map();
   let vH = new Float64Array(gridPointsN);
   let vXC = new Float64Array(gridPointsN);
-  const invDx2 = 1 / (dx * dx);
+  let vEff = new Float64Array(gridPointsN);
 
   for (let scf = 0; scf < maxScf; scf += 1) {
     vH = hartreePotentialLog(rho, r, dx);
-    for (let i = 0; i < gridPointsN; i += 1) vXC[i] = xcPotential(rho[i]);
-    statesByL = new Map();
-    for (const [l, count] of statesPerL) {
-      // Folded symmetric-tridiagonal operator  Â = B^{-1/2} A B^{-1/2}, B_ii = 2 r_i^2.
-      const diag = new Float64Array(gridPointsN);
-      const off = new Float64Array(gridPointsN);
-      for (let i = 0; i < gridPointsN; i += 1) {
-        const vEff = -atomicNumberZ / r[i] + vH[i] + vXC[i];
-        // A_ii = 2/dx^2 + (l+1/2)^2 + 2 r^2 V ;  Â_ii = A_ii / (2 r^2)
-        diag[i] = (invDx2 + 0.5 * (l + 0.5) * (l + 0.5)) / (r[i] * r[i]) + vEff;
-        if (i < gridPointsN - 1) off[i] = -invDx2 / (2 * r[i] * r[i + 1]);
-      }
-      const pairs = lowestEigenpairs(diag, off, count, dx);
-      // Recover physical u(r) = ŵ / sqrt(2 r) (B^{-1/2} unfolding, B = 2 r^2), then renormalize
-      // ∫u^2 dr = 1.
-      for (const pair of pairs) {
-        const u = new Float64Array(gridPointsN);
-        for (let i = 0; i < gridPointsN; i += 1) u[i] = pair.u[i] / Math.sqrt(2 * r[i]);
-        let norm = 0;
-        for (let i = 0; i < gridPointsN; i += 1) norm += u[i] * u[i] * r[i] * dx; // ∫u^2 dr, dr = r dx
-        norm = Math.sqrt(norm);
-        for (let i = 0; i < gridPointsN; i += 1) u[i] /= norm;
-        pair.u = u;
-      }
-      statesByL.set(l, pairs);
+    for (let i = 0; i < gridPointsN; i += 1) {
+      vXC[i] = xcPotential(rho[i]);
+      vEff[i] = -atomicNumberZ / r[i] + vH[i] + vXC[i];
     }
+    statesByL = new Map();
+    for (const [l, count] of statesPerL) statesByL.set(l, radialStatesLog(vEff, r, dx, l, count));
     // New density ρ = Σ occ u^2 / (4π r^2).
     const rhoNew = new Float64Array(gridPointsN);
     for (const sub of configuration) {
@@ -338,12 +372,20 @@ export function solveKohnShamAtomLog({
 
   let sumOcc = 0;
   let electronCount = 0;
+  let relativisticCorrectionHa = 0;
   const orbitals = [];
   for (const sub of configuration) {
     const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
     sumOcc += sub.occupancy * state.energyHa;
     electronCount += sub.occupancy;
-    orbitals.push({ n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa });
+    const orbital = { n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa };
+    if (relativistic) {
+      orbital.relativisticShiftHa = relativisticOrbitalCorrectionHa({
+        u: state.u, energyHa: state.energyHa, vFull: vEff, r, dx, l: sub.l, atomicNumberZ
+      });
+      relativisticCorrectionHa += sub.occupancy * orbital.relativisticShiftHa;
+    }
+    orbitals.push(orbital);
   }
   let integratedElectrons = 0;
   let eHartreeDouble = 0;
@@ -354,12 +396,169 @@ export function solveKohnShamAtomLog({
     eHartreeDouble += 0.5 * rho[i] * vH[i] * dV;
     eXcCorrection += (xcEnergyPerVolume(rho[i]) - vXC[i] * rho[i]) * dV;
   }
+  const totalEnergyHa = sumOcc - eHartreeDouble + eXcCorrection;
   return {
-    totalEnergyHa: sumOcc - eHartreeDouble + eXcCorrection,
+    totalEnergyHa,
     orbitals,
     electronCount,
     integratedElectrons,
-    atomicNumberZ
+    atomicNumberZ,
+    ...(relativistic ? { relativisticCorrectionHa, totalEnergyRelHa: totalEnergyHa + relativisticCorrectionHa } : {})
+  };
+}
+
+// Spin-polarized (LSDA) exchange-correlation energy per unit volume and the per-spin potentials
+// v_xc^σ = ∂(ρ ε_xc)/∂ρ_σ (by finite difference in each spin density).
+function xcEnergyPerVolumeSpin(rhoUp, rhoDown) {
+  const rho = rhoUp + rhoDown;
+  if (rho <= 1e-12) return 0;
+  const rs = wignerSeitzRadius(rho);
+  const zeta = Math.max(-1, Math.min(1, (rhoUp - rhoDown) / rho));
+  return rho * xcEnergyPerElectronSpinHa(rs, zeta);
+}
+function xcPotentialsSpin(rhoUp, rhoDown) {
+  const dU = rhoUp * 1e-4 + 1e-15;
+  const dD = rhoDown * 1e-4 + 1e-15;
+  const vUp = (xcEnergyPerVolumeSpin(rhoUp + dU, rhoDown) - xcEnergyPerVolumeSpin(rhoUp - dU, rhoDown)) / (2 * dU);
+  const vDown = (xcEnergyPerVolumeSpin(rhoUp, rhoDown + dD) - xcEnergyPerVolumeSpin(rhoUp, rhoDown - dD)) / (2 * dD);
+  return { vUp, vDown };
+}
+
+function densityFromSpinSubshells(spinConfiguration, statesUp, statesDown, r, n) {
+  const rhoUp = new Float64Array(n);
+  const rhoDown = new Float64Array(n);
+  for (const sub of spinConfiguration) {
+    const idx = sub.n - sub.l - 1;
+    if (sub.occUp > 0) {
+      const u = statesUp.get(sub.l)[idx].u;
+      for (let i = 0; i < n; i += 1) rhoUp[i] += (sub.occUp * u[i] * u[i]) / (4 * Math.PI * r[i] * r[i]);
+    }
+    if (sub.occDown > 0) {
+      const u = statesDown.get(sub.l)[idx].u;
+      for (let i = 0; i < n; i += 1) rhoDown[i] += (sub.occDown * u[i] * u[i]) / (4 * Math.PI * r[i] * r[i]);
+    }
+  }
+  return { rhoUp, rhoDown };
+}
+
+/**
+ * All-electron Kohn–Sham LSDA (spin-polarized) on a logarithmic grid. The spin-up and spin-down
+ * channels have separate effective potentials (sharing the Hartree term from the total density),
+ * so open-shell atoms acquire a magnetic moment from Hund's-rule spin filling — e.g. Fe (3d↑5 3d↓1)
+ * gets ~4 μ_B. `spinConfiguration` is the { n, l, occUp, occDown } list. Returns total energy, the
+ * net spin moment (n↑ − n↓), per-spin orbital energies, and (optionally) the relativistic correction.
+ */
+export function solveKohnShamAtomLSDA({
+  atomicNumberZ,
+  spinConfiguration,
+  gridPointsN = 1400,
+  rMinBohr = 1e-5,
+  rMaxBohr = 40,
+  mixing = 0.2,
+  maxScf = 600,
+  tol = 1e-7,
+  relativistic = false
+}) {
+  const xMin = Math.log(rMinBohr);
+  const xMax = Math.log(rMaxBohr);
+  const dx = (xMax - xMin) / (gridPointsN - 1);
+  const r = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) r[i] = Math.exp(xMin + i * dx);
+
+  const statesPerLUp = new Map();
+  const statesPerLDown = new Map();
+  let nUp = 0;
+  let nDown = 0;
+  for (const sub of spinConfiguration) {
+    if (sub.occUp > 0) statesPerLUp.set(sub.l, Math.max(statesPerLUp.get(sub.l) || 0, sub.n - sub.l));
+    if (sub.occDown > 0) statesPerLDown.set(sub.l, Math.max(statesPerLDown.get(sub.l) || 0, sub.n - sub.l));
+    nUp += sub.occUp;
+    nDown += sub.occDown;
+  }
+  const nTot = nUp + nDown;
+
+  // Initial densities: split a hydrogenic guess by the overall spin ratio.
+  let rhoUp = new Float64Array(gridPointsN);
+  let rhoDown = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) {
+    const g = atomicNumberZ * (atomicNumberZ ** 3 / Math.PI) * Math.exp(-2 * atomicNumberZ * r[i]);
+    rhoUp[i] = g * (nUp / nTot);
+    rhoDown[i] = g * (nDown / nTot);
+  }
+
+  let statesUp = new Map();
+  let statesDown = new Map();
+  let vH = new Float64Array(gridPointsN);
+  const vXCUp = new Float64Array(gridPointsN);
+  const vXCDown = new Float64Array(gridPointsN);
+  const vEffUp = new Float64Array(gridPointsN);
+  const vEffDown = new Float64Array(gridPointsN);
+
+  for (let scf = 0; scf < maxScf; scf += 1) {
+    const rhoTot = new Float64Array(gridPointsN);
+    for (let i = 0; i < gridPointsN; i += 1) rhoTot[i] = rhoUp[i] + rhoDown[i];
+    vH = hartreePotentialLog(rhoTot, r, dx);
+    for (let i = 0; i < gridPointsN; i += 1) {
+      const { vUp, vDown } = xcPotentialsSpin(rhoUp[i], rhoDown[i]);
+      vXCUp[i] = vUp; vXCDown[i] = vDown;
+      vEffUp[i] = -atomicNumberZ / r[i] + vH[i] + vUp;
+      vEffDown[i] = -atomicNumberZ / r[i] + vH[i] + vDown;
+    }
+    statesUp = new Map();
+    statesDown = new Map();
+    for (const [l, count] of statesPerLUp) statesUp.set(l, radialStatesLog(vEffUp, r, dx, l, count));
+    for (const [l, count] of statesPerLDown) statesDown.set(l, radialStatesLog(vEffDown, r, dx, l, count));
+    const { rhoUp: upNew, rhoDown: downNew } = densityFromSpinSubshells(spinConfiguration, statesUp, statesDown, r, gridPointsN);
+    let delta = 0;
+    for (let i = 0; i < gridPointsN; i += 1) {
+      delta += (Math.abs(upNew[i] - rhoUp[i]) + Math.abs(downNew[i] - rhoDown[i])) * 4 * Math.PI * r[i] * r[i] * r[i] * dx;
+      rhoUp[i] = (1 - mixing) * rhoUp[i] + mixing * upNew[i];
+      rhoDown[i] = (1 - mixing) * rhoDown[i] + mixing * downNew[i];
+    }
+    if (delta < tol && scf > 8) break;
+  }
+
+  let sumOcc = 0;
+  let relativisticCorrectionHa = 0;
+  const orbitals = [];
+  for (const sub of spinConfiguration) {
+    const idx = sub.n - sub.l - 1;
+    const orbital = { n: sub.n, l: sub.l, occUp: sub.occUp, occDown: sub.occDown };
+    if (sub.occUp > 0) {
+      const st = statesUp.get(sub.l)[idx];
+      orbital.energyUpHa = st.energyHa;
+      sumOcc += sub.occUp * st.energyHa;
+      if (relativistic) relativisticCorrectionHa += sub.occUp * relativisticOrbitalCorrectionHa({ u: st.u, energyHa: st.energyHa, vFull: vEffUp, r, dx, l: sub.l, atomicNumberZ });
+    }
+    if (sub.occDown > 0) {
+      const st = statesDown.get(sub.l)[idx];
+      orbital.energyDownHa = st.energyHa;
+      sumOcc += sub.occDown * st.energyHa;
+      if (relativistic) relativisticCorrectionHa += sub.occDown * relativisticOrbitalCorrectionHa({ u: st.u, energyHa: st.energyHa, vFull: vEffDown, r, dx, l: sub.l, atomicNumberZ });
+    }
+    orbitals.push(orbital);
+  }
+  let integratedElectrons = 0;
+  let spinMoment = 0;
+  let eHartreeDouble = 0;
+  let eXcCorrection = 0;
+  for (let i = 0; i < gridPointsN; i += 1) {
+    const dV = 4 * Math.PI * r[i] * r[i] * r[i] * dx;
+    const rhoTot = rhoUp[i] + rhoDown[i];
+    integratedElectrons += rhoTot * dV;
+    spinMoment += (rhoUp[i] - rhoDown[i]) * dV;
+    eHartreeDouble += 0.5 * rhoTot * vH[i] * dV;
+    eXcCorrection += (xcEnergyPerVolumeSpin(rhoUp[i], rhoDown[i]) - vXCUp[i] * rhoUp[i] - vXCDown[i] * rhoDown[i]) * dV;
+  }
+  const totalEnergyHa = sumOcc - eHartreeDouble + eXcCorrection;
+  return {
+    totalEnergyHa,
+    spinMoment,
+    orbitals,
+    electronCount: nTot,
+    integratedElectrons,
+    atomicNumberZ,
+    ...(relativistic ? { relativisticCorrectionHa, totalEnergyRelHa: totalEnergyHa + relativisticCorrectionHa } : {})
   };
 }
 
@@ -448,13 +647,21 @@ export function solveKohnShamAtomConfig({ atomicNumberZ, configuration, gridPoin
 
 /**
  * Solve any element by atomic number using its ground-state configuration and the logarithmic-grid
- * Kohn–Sham LDA solver. Grid resolution scales mildly with Z so heavy atoms keep their tight cores
- * resolved. Returns the solver result plus the element symbol and configuration.
+ * Kohn–Sham solver. Grid resolution scales mildly with Z so heavy atoms keep their tight cores
+ * resolved. Options:
+ *   - spinPolarized: use LSDA (spin-up/down channels via Hund filling) → returns a spin moment.
+ *   - relativistic: add the scalar-relativistic (mass-velocity + Darwin) correction.
+ * Returns the solver result plus the element symbol and configuration.
  */
 export function solveAtom(atomicNumberZ, options = {}) {
-  const configuration = options.configuration ?? electronConfiguration(atomicNumberZ);
   const gridPointsN = options.gridPointsN ?? Math.round(1200 + 12 * atomicNumberZ);
   const rMaxBohr = options.rMaxBohr ?? Math.max(20, 60 / Math.sqrt(atomicNumberZ));
+  if (options.spinPolarized) {
+    const spinConfiguration = options.spinConfiguration ?? spinElectronConfiguration(atomicNumberZ);
+    const result = solveKohnShamAtomLSDA({ atomicNumberZ, spinConfiguration, gridPointsN, rMaxBohr, ...options });
+    return { symbol: symbolForZ(atomicNumberZ), spinConfiguration, ...result };
+  }
+  const configuration = options.configuration ?? electronConfiguration(atomicNumberZ);
   const result = solveKohnShamAtomLog({ atomicNumberZ, configuration, gridPointsN, rMaxBohr, ...options });
   return { symbol: symbolForZ(atomicNumberZ), configuration, ...result };
 }

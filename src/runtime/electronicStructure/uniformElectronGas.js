@@ -17,6 +17,9 @@ const KF_RS = (9 * Math.PI / 4) ** (1 / 3); // ≈ 1.91916
 // Chachiyo (2016) correlation: simple, parameter-free, matches QMC across all r_s.
 const CHACHIYO_A = (Math.log(2) - 1) / (2 * Math.PI * Math.PI); // ≈ -0.0155383
 const CHACHIYO_B = 20.4562557;
+// Ferromagnetic (fully spin-polarized, ζ=1) Chachiyo parameters.
+const CHACHIYO_A1 = (Math.log(2) - 1) / (4 * Math.PI * Math.PI); // half of A
+const CHACHIYO_B1 = 27.4203609;
 
 /**
  * Wigner–Seitz radius r_s (Bohr) from electron number density n (electrons / Bohr^3):
@@ -44,6 +47,37 @@ export function exchangePerElectronHa(rs) {
 /** Chachiyo correlation energy per electron (Ha). */
 export function correlationPerElectronHa(rs) {
   return CHACHIYO_A * Math.log(1 + CHACHIYO_B / rs + CHACHIYO_B / (rs * rs));
+}
+
+/** Ferromagnetic (ζ=1) Chachiyo correlation energy per electron (Ha). */
+export function correlationPerElectronPolarizedHa(rs) {
+  return CHACHIYO_A1 * Math.log(1 + CHACHIYO_B1 / rs + CHACHIYO_B1 / (rs * rs));
+}
+
+/**
+ * Spin-scaling interpolation function f(ζ) = [(1+ζ)^{4/3}+(1−ζ)^{4/3}−2]/(2^{4/3}−2). f(0)=0
+ * (unpolarized), f(1)=1 (fully polarized). ζ = (n↑−n↓)/n is the spin polarization.
+ */
+export function spinScalingF(zeta) {
+  const denom = 2 ** (4 / 3) - 2;
+  return ((1 + zeta) ** (4 / 3) + (1 - zeta) ** (4 / 3) - 2) / denom;
+}
+
+/** Spin-polarized Dirac exchange per electron (Ha) via exact spin scaling. */
+export function exchangePerElectronSpinHa(rs, zeta) {
+  return exchangePerElectronHa(rs) * 0.5 * ((1 + zeta) ** (4 / 3) + (1 - zeta) ** (4 / 3));
+}
+
+/** Spin-polarized correlation per electron (Ha): interpolate para↔ferro with f(ζ). */
+export function correlationPerElectronSpinHa(rs, zeta) {
+  const e0 = correlationPerElectronHa(rs);
+  const e1 = correlationPerElectronPolarizedHa(rs);
+  return e0 + (e1 - e0) * spinScalingF(zeta);
+}
+
+/** Spin-polarized exchange-correlation energy per electron (Ha). */
+export function xcEnergyPerElectronSpinHa(rs, zeta) {
+  return exchangePerElectronSpinHa(rs, zeta) + correlationPerElectronSpinHa(rs, zeta);
 }
 
 /**

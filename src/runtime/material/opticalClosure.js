@@ -162,19 +162,26 @@ export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 
   if (material === 'fe') {
     return { metalness: 1, roughness: 0.32, transmission: 0, ior: 2.9, opacity: 1, attenuationColor: null, attenuationDistanceM: 0, condensationScatter: 0 };
   }
-  if (material === 'h2o' || material === 'steam') {
+  if (material === 'h2o' || material === 'steam' || material === 'ice') {
     const isVapor = material === 'steam' || phase === 'gas';
-    const n = isVapor ? REFRACTIVE_INDEX.waterVapor : (phase === 'solid' ? REFRACTIVE_INDEX.waterIce : REFRACTIVE_INDEX.waterLiquid);
+    const isSolid = material === 'ice' || phase === 'solid';
+    const n = isVapor ? REFRACTIVE_INDEX.waterVapor : (isSolid ? REFRACTIVE_INDEX.waterIce : REFRACTIVE_INDEX.waterLiquid);
     const fresnelR0 = ((n - 1) / (n + 1)) ** 2; // normal-incidence surface reflectance
     const atten = waterBeerLambertAttenuation();
     // Vapour is optically thin: push the attenuation distance far out so it carries almost no tint.
     const attenuationColor = isVapor ? [1, 1, 1] : atten.attenuationColor;
     const attenuationDistanceM = isVapor ? atten.attenuationDistanceM * 50 : atten.attenuationDistanceM;
-    // Mie scattering off condensed droplets (the visible part of steam). Not yet closure-derived
-    // — placeholder for the condensation microphysics — so it is the only tuned number here.
+    // Multiple-scattering fractions that reduce ballistic transmission (the part of light that
+    // doesn't pass straight through). Both are microstructure terms — not derived from the
+    // molecular optics — so they are called out explicitly:
+    //   - vapour: Mie scattering off condensed micro-droplets (the visible part of steam).
+    //   - ice: multiple scattering off grain boundaries / trapped bubbles, which is why bulk ice
+    //     is translucent white rather than clear like liquid water.
     const condensationScatter = isVapor ? 0.45 : 0;
-    const transmission = Math.min(1, Math.max(0, 1 - fresnelR0 - condensationScatter));
-    return { metalness: 0, roughness: isVapor ? 0.9 : 0.08, transmission, ior: n, opacity: 1, attenuationColor, attenuationDistanceM, condensationScatter };
+    const internalScatter = isSolid ? 0.55 : 0;
+    const transmission = Math.min(1, Math.max(0, 1 - fresnelR0 - condensationScatter - internalScatter));
+    const roughness = isVapor ? 0.9 : (isSolid ? 0.5 : 0.08);
+    return { metalness: 0, roughness, transmission, ior: n, opacity: 1, attenuationColor, attenuationDistanceM, condensationScatter, internalScatter };
   }
   return { metalness: 0, roughness: 0.4, transmission: 0, ior: 1.4, opacity: 0.9, attenuationColor: null, attenuationDistanceM: 0, condensationScatter: 0 };
 }

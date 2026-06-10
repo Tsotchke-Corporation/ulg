@@ -148,7 +148,8 @@ export function particleRenderMaterials(demo) {
   return demo.state.particles.map((p) => {
     if (p.material === 'h2o') {
       const phase = equilibriumFromSpecificEnergy(demo.materialProperties.h2o, p.specificInternalEnergyJPerKg).stablePhase;
-      if (phase === 'gas') return 'steam';
+      if (phase === 'gas') return 'steam'; // optically-thin vapour → condensation cloud
+      if (phase === 'solid') return 'ice'; // translucent white (grain scattering), distinct from clear water
     }
     return p.material;
   });

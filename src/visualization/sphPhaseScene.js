@@ -92,6 +92,7 @@ function materialKeyOf(value) {
 function opticalQueryForKey(key) {
   if (key === 'fe') return { material: 'fe', phase: 'liquid' };
   if (key === 'steam') return { material: 'steam', phase: 'gas' };
+  if (key === 'ice') return { material: 'ice', phase: 'solid' };
   if (key === 'h2o') return { material: 'h2o', phase: 'liquid' };
   return { material: 'default', phase: 'liquid' };
 }
@@ -99,11 +100,15 @@ function opticalQueryForKey(key) {
 function makeSurfaceMaterial(key) {
   const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
   // Transmission / IOR / attenuation come from the optical closure (refractive index + Beer–Lambert
-  // extinction), not hand-picked opacities: water refracts (IOR 1.33) and tints over its path,
-  // iron is opaque metal, steam barely refracts (IOR ≈ 1) and is only visible via condensation
-  // scattering. opacity is still used for the steam cloud where transmission would make it vanish.
+  // extinction + scattering): liquid water refracts clear (IOR 1.33), ice is translucent white from
+  // grain scattering, iron is opaque metal, steam barely refracts and only shows via condensation.
   const optics = opticalRenderParams(opticalQueryForKey(key));
   const usesTransmission = optics.transmission > 0.01;
+  // CRITICAL: only flag the material `transparent` when it actually needs blending. Opaque iron
+  // must stay non-transparent so it renders into the opaque pass — three.js builds the transmission
+  // sample target from opaque objects only, so a transparent iron would be invisible *through* the
+  // ice/water. Steam (suppressed transmission) and any low-opacity surface stay transparent.
+  const transparent = usesTransmission || optics.opacity < 1 || key === 'steam';
   const material = new THREE.MeshPhysicalMaterial({
     vertexColors: true,
     side: THREE.DoubleSide,
@@ -112,12 +117,9 @@ function makeSurfaceMaterial(key) {
     roughness: optics.roughness,
     ior: optics.ior,
     transmission: optics.transmission,
-    thickness: usesTransmission ? 0.4 : 0,
-    transparent: true,
-    depthWrite: config.materialOptions.depthWrite,
-    // With physical transmission the surface is its own see-through; opacity 1. Where transmission
-    // is suppressed (steam's condensation scattering, the opaque default) fall back to the
-    // closure/config opacity so the surface still shows.
+    thickness: usesTransmission ? 0.6 : 0,
+    transparent,
+    depthWrite: transparent ? config.materialOptions.depthWrite : true,
     opacity: usesTransmission ? 1 : (key === 'steam' ? config.opacity : optics.opacity)
   });
   if (optics.attenuationColor) {

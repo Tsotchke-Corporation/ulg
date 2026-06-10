@@ -40,3 +40,24 @@ test('reaction energy is computed from first principles and conserves nuclei', (
   // Nucleus conservation is enforced.
   assert.throws(() => reactionEnergyHa([CO], [H2]), /not balanced/);
 });
+
+import { uhf, atomEnergyHa, atomizationEnergyHa } from '../src/runtime/electronicStructure/molecularHartreeFock.js';
+
+test('UHF atom energies match STO-3G HF references and reduce to RHF for closed shells', () => {
+  assert.ok(Math.abs(atomEnergyHa(1) - (-0.4666)) < 5e-3); // H
+  assert.ok(Math.abs(atomEnergyHa(8) - (-73.804)) < 0.02); // O (triplet)
+  const o = uhf([{ Z: 8, position: [0, 0, 0] }], { multiplicity: 3 });
+  assert.equal(o.nAlpha, 5);
+  assert.equal(o.nBeta, 3);
+  // Closed-shell H2: UHF == RHF.
+  const u = uhf([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }], { multiplicity: 1 });
+  assert.ok(Math.abs(u.totalEnergyHa - rhf([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }]).totalEnergyHa) < 1e-4);
+});
+
+test('atomization energy is derived, bound, and the right order of magnitude', () => {
+  const HA_EV = 27.211386;
+  const h2 = atomizationEnergyHa([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }]);
+  const eV = h2.atomizationEnergyHa * HA_EV;
+  assert.ok(eV > 0, 'H2 must be bound'); // Σ atoms above the molecule
+  assert.ok(eV > 3 && eV < 7, `H2 atomization ${eV.toFixed(2)} eV (exp 4.75; HF/STO-3G qualitative)`);
+});

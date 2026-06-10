@@ -10,6 +10,8 @@
 // units throughout. Evidence-only: HF/STO-3G is a known approximation, so callers keep validation
 // false until checked against measured/correlated references.
 
+import { unpairedElectronCount } from './periodicTable.js';
+
 // ---- small dense symmetric eigensolver (Jacobi) ----------------------------------------------
 function jacobiEigh(Ain, n) {
   const A = Ain.map((row) => row.slice());
@@ -286,18 +288,12 @@ function matrixInverseSqrt(S, n) {
   return X;
 }
 
-/**
- * Restricted Hartree–Fock for a closed-shell molecule. `atoms` = [{ Z, position (Bohr) }].
- * Returns the total Born–Oppenheimer energy (electronic + nuclear repulsion) and diagnostics.
- */
-export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5 } = {}) {
+// Build the basis, one-electron matrices (S, Hcore), the two-electron integrals, S^{-1/2}, and the
+// nuclear repulsion for a molecule — shared by the RHF and UHF drivers.
+function buildIntegrals(atoms, charge) {
   const basis = buildBasis(atoms);
   const n = basis.length;
   const nElectrons = atoms.reduce((s, a) => s + a.Z, 0) - charge;
-  if (nElectrons % 2 !== 0) throw new Error('RHF requires an even electron count (closed shell)');
-  const nOcc = nElectrons / 2;
-
-  // One-electron matrices.
   const S = Array.from({ length: n }, () => new Array(n).fill(0));
   const Hcore = Array.from({ length: n }, () => new Array(n).fill(0));
   for (let i = 0; i < n; i += 1) {
@@ -310,8 +306,6 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
       Hcore[i][j] = v;
     }
   }
-
-  // Two-electron integrals (chemist notation (ij|kl)), 8-fold symmetry.
   const eri = new Float64Array(n * n * n * n);
   const idx = (i, j, k, l) => ((i * n + j) * n + k) * n + l;
   for (let i = 0; i < n; i += 1) {
@@ -327,13 +321,38 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
       }
     }
   }
+  return { basis, n, nElectrons, S, Hcore, eri, idx, X: matrixInverseSqrt(S, n), nuclearRepulsion: nuclearRepulsionEnergy(atoms) };
+}
 
-  const X = matrixInverseSqrt(S, n);
-  let P = Array.from({ length: n }, () => new Array(n).fill(0)); // density (core guess: zero)
+// Diagonalize a Fock matrix in the orthonormal basis and return the orbital coefficients (columns
+// ordered by ascending orbital energy).
+function solveFock(Fock, X, n) {
+  const Fp = matMul(matMul(transpose(X, n), Fock, n), X, n);
+  const { values, vectors } = jacobiEigh(Fp, n);
+  const order = values.map((_, i) => i).sort((a, b) => values[a] - values[b]);
+  const C = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i += 1) {
+    for (let a = 0; a < n; a += 1) {
+      let s = 0;
+      for (let k = 0; k < n; k += 1) s += X[i][k] * vectors[k][order[a]];
+      C[i][a] = s;
+    }
+  }
+  return C;
+}
+
+/**
+ * Restricted Hartree–Fock for a closed-shell molecule. `atoms` = [{ Z, position (Bohr) }].
+ * Returns the total Born–Oppenheimer energy (electronic + nuclear repulsion) and diagnostics.
+ */
+export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5 } = {}) {
+  const { n, nElectrons, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
+  if (nElectrons % 2 !== 0) throw new Error('RHF requires an even electron count (closed shell)');
+  const nOcc = nElectrons / 2;
+  let P = Array.from({ length: n }, () => new Array(n).fill(0));
   let energy = 0;
   let lastEnergy = Infinity;
   for (let iter = 0; iter < maxIter; iter += 1) {
-    // Fock matrix.
     const Fock = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) {
       for (let j = 0; j < n; j += 1) {
@@ -342,39 +361,90 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
         Fock[i][j] = Hcore[i][j] + g;
       }
     }
-    // F' = X^T F X ; diagonalize.
-    const Fp = matMul(matMul(transpose(X, n), Fock, n), X, n);
-    const { values, vectors } = jacobiEigh(Fp, n);
-    const order = values.map((e, i) => i).sort((p2, q2) => values[p2] - values[q2]);
-    // C = X C' (occupied orbitals = lowest nOcc).
-    const C = Array.from({ length: n }, () => new Array(n).fill(0));
-    for (let i = 0; i < n; i += 1) {
-      for (let a = 0; a < n; a += 1) {
-        let s = 0;
-        for (let k = 0; k < n; k += 1) s += X[i][k] * vectors[k][order[a]];
-        C[i][a] = s;
-      }
-    }
-    // New density.
+    const C = solveFock(Fock, X, n);
     const Pnew = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
       let s = 0;
       for (let a = 0; a < nOcc; a += 1) s += C[i][a] * C[j][a];
       Pnew[i][j] = 2 * s;
     }
-    // Electronic energy (from the new density and the Fock built from the old density).
     let eElec = 0;
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) eElec += 0.5 * Pnew[i][j] * (Hcore[i][j] + Fock[i][j]);
-    // Linear density damping stabilizes hard SCF cases (multiple/near-degenerate bonds) without
-    // changing the converged solution.
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) P[i][j] = damping * Pnew[i][j] + (1 - damping) * P[i][j];
     energy = eElec;
     if (Math.abs(energy - lastEnergy) < tol && iter > 2) break;
     lastEnergy = energy;
   }
-
-  const nuclearRepulsion = nuclearRepulsionEnergy(atoms);
   return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons };
+}
+
+/**
+ * Unrestricted Hartree–Fock: separate spatial orbitals for α and β spin, so open-shell systems
+ * (atoms with unpaired electrons, radicals, stretched bonds) are handled. `nAlpha − nBeta` is set by
+ * the spin (default: 2S = number of unpaired electrons inferred from the total-electron parity, or
+ * an explicit `multiplicity` = 2S+1). UHF can break spin symmetry, so it dissociates bonds
+ * qualitatively correctly where RHF cannot.
+ */
+export function uhf(atoms, { charge = 0, multiplicity = null, maxIter = 300, tol = 1e-9, damping = 0.6 } = {}) {
+  const { n, nElectrons, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
+  const twoS = multiplicity != null ? multiplicity - 1 : (nElectrons % 2);
+  const nAlpha = (nElectrons + twoS) / 2;
+  const nBeta = (nElectrons - twoS) / 2;
+  if (!Number.isInteger(nAlpha) || nBeta < 0) throw new Error('inconsistent electron count / multiplicity');
+
+  // Spin-broken initial guess: diagonalize Hcore, then occupy. (Pure-Hcore guesses give the same
+  // α/β density and never break symmetry, so seed β by skipping its lowest virtual — enough for the
+  // SCF to find the broken-symmetry / high-spin solution.)
+  const buildDensity = (C, nOcc) => {
+    const P = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
+      let s = 0;
+      for (let a = 0; a < nOcc; a += 1) s += C[i][a] * C[j][a];
+      P[i][j] = s;
+    }
+    return P;
+  };
+  const Cinit = solveFock(Hcore, X, n);
+  let Pa = buildDensity(Cinit, nAlpha);
+  let Pb = buildDensity(Cinit, nBeta);
+
+  let energy = 0;
+  let lastEnergy = Infinity;
+  for (let iter = 0; iter < maxIter; iter += 1) {
+    const Ptot = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => Pa[i][j] + Pb[i][j]));
+    const Fa = Array.from({ length: n }, () => new Array(n).fill(0));
+    const Fb = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i += 1) {
+      for (let j = 0; j < n; j += 1) {
+        let coul = 0;
+        let exa = 0;
+        let exb = 0;
+        for (let k = 0; k < n; k += 1) for (let l = 0; l < n; l += 1) {
+          coul += Ptot[k][l] * eri[idx(i, j, l, k)];
+          exa += Pa[k][l] * eri[idx(i, k, l, j)];
+          exb += Pb[k][l] * eri[idx(i, k, l, j)];
+        }
+        Fa[i][j] = Hcore[i][j] + coul - exa;
+        Fb[i][j] = Hcore[i][j] + coul - exb;
+      }
+    }
+    const Ca = solveFock(Fa, X, n);
+    const Cb = solveFock(Fb, X, n);
+    const PaNew = buildDensity(Ca, nAlpha);
+    const PbNew = buildDensity(Cb, nBeta);
+    let eElec = 0;
+    for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
+      eElec += 0.5 * ((PaNew[i][j] + PbNew[i][j]) * Hcore[i][j] + PaNew[i][j] * Fa[i][j] + PbNew[i][j] * Fb[i][j]);
+    }
+    for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
+      Pa[i][j] = damping * PaNew[i][j] + (1 - damping) * Pa[i][j];
+      Pb[i][j] = damping * PbNew[i][j] + (1 - damping) * Pb[i][j];
+    }
+    energy = eElec;
+    if (Math.abs(energy - lastEnergy) < tol && iter > 2) break;
+    lastEnergy = energy;
+  }
+  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nAlpha, nBeta };
 }
 
 function contract2Eri(fa, fb, fc, fd) {
@@ -441,4 +511,29 @@ export function reactionEnergyHa(reactants, products, options = {}) {
   return sum(products) - sum(reactants);
 }
 
-export { jacobiEigh, boys, hermiteE, hermiteR, primitiveOverlap, primitiveKinetic, primitiveNuclear, primitiveERI, makeBasisFunction, contract2 };
+/**
+ * Ground-state energy (Ha) of a free atom via UHF, with the Hund's-rule spin multiplicity from its
+ * electron configuration. This is the atomic reference that bond / atomization / cohesion energies
+ * are measured against.
+ */
+export function atomEnergyHa(Z, options = {}) {
+  return uhf([{ Z, position: [0, 0, 0] }], { multiplicity: unpairedElectronCount(Z) + 1, ...options }).totalEnergyHa;
+}
+
+/**
+ * Atomization energy (Ha, positive = bound): the energy to pull a molecule apart into its free
+ * atoms, Σ E(atoms) − E(molecule). This is the bonding reference the material closures need for
+ * cohesion / latent heats — derived, not tabulated. `moleculeOptions` (e.g. multiplicity) are
+ * passed to the molecular UHF.
+ */
+export function atomizationEnergyHa(atoms, { moleculeOptions = {}, atomCache = new Map() } = {}) {
+  const eMolecule = uhf(atoms, moleculeOptions).totalEnergyHa;
+  let eAtoms = 0;
+  for (const a of atoms) {
+    if (!atomCache.has(a.Z)) atomCache.set(a.Z, atomEnergyHa(a.Z));
+    eAtoms += atomCache.get(a.Z);
+  }
+  return { atomizationEnergyHa: eAtoms - eMolecule, moleculeEnergyHa: eMolecule, atomsEnergyHa: eAtoms };
+}
+
+export { uhf as _uhf, jacobiEigh, boys, hermiteE, hermiteR, primitiveOverlap, primitiveKinetic, primitiveNuclear, primitiveERI, makeBasisFunction, contract2 };

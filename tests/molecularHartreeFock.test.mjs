@@ -118,3 +118,17 @@ test('vibrational analysis: H2 has one real stretch mode (HF/STO-3G overestimate
   assert.equal(vibrationsCm1.length, 1); // 3N-5 = 1 for a diatomic
   assert.ok(vibrationsCm1[0] > 4000 && vibrationsCm1[0] < 6500, `H2 stretch ${vibrationsCm1[0].toFixed(0)} cm-1 (exp 4401; HF/STO-3G high)`);
 });
+
+import { bornOppenheimerMD } from '../src/runtime/electronicStructure/molecularHartreeFock.js';
+
+test('Born-Oppenheimer MD: H2 oscillates on the PES with conserved energy', () => {
+  const md = bornOppenheimerMD([{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.6] }], { dtAu: 8, steps: 80 });
+  const Rs = md.trajectory.map((s) => bondLength(s.positions.map((p) => ({ position: p })), 0, 1));
+  const minR = Math.min(...Rs);
+  const maxR = Math.max(...Rs);
+  assert.ok(maxR - minR > 0.2, 'bond should oscillate'); // released from a stretched geometry
+  assert.ok(minR < 1.5, 'compresses past equilibrium');
+  // Velocity Verlet conserves total energy to a small fraction.
+  const drift = md.energyDriftHa / Math.abs(md.trajectory[0].totalHa);
+  assert.ok(drift < 5e-3, `energy drift ${(drift * 100).toFixed(3)}%`);
+});

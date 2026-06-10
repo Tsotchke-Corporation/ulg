@@ -735,6 +735,46 @@ export function vibrationalFrequencies(atoms, { method = (a) => rhf(a).totalEner
   return { vibrationsCm1: vibrations, allModesCm1: all };
 }
 
+/**
+ * Born–Oppenheimer molecular dynamics: propagate the nuclei on the electronic energy surface with
+ * velocity Verlet, forces = −∇E (numerical gradient). Reactions and vibrations play out in time on
+ * the first-principles PES, with the total energy (electronic + nuclear kinetic) conserved. Returns
+ * the trajectory and the energy drift (a conservation check). Atomic units (time in ħ/Hartree).
+ */
+export function bornOppenheimerMD(atoms, { method = (a) => rhf(a).totalEnergyHa, dtAu = 10, steps = 50, velocities = null, gradH = 1e-3 } = {}) {
+  const Zs = atoms.map((a) => a.Z);
+  const masses = atoms.map((a) => ATOMIC_MASS_U[a.Z - 1] * AMU_TO_ELECTRON_MASS);
+  let x = atoms.map((a) => [...a.position]);
+  let v = velocities ? velocities.map((vv) => [...vv]) : atoms.map(() => [0, 0, 0]);
+  const E = (cs) => method(cs.map((p, i) => ({ Z: Zs[i], position: p })));
+  const accel = (coords) => {
+    const g = nuclearGradient(coords, E, gradH);
+    return g.map((gi, i) => gi.map((gid) => -gid / masses[i]));
+  };
+  const kinetic = () => 0.5 * v.reduce((s, vi, i) => s + masses[i] * (vi[0] ** 2 + vi[1] ** 2 + vi[2] ** 2), 0);
+
+  let a = accel(x);
+  const trajectory = [];
+  let minTot = Infinity;
+  let maxTot = -Infinity;
+  for (let step = 0; step <= steps; step += 1) {
+    const potential = E(x);
+    const kin = kinetic();
+    const total = potential + kin;
+    minTot = Math.min(minTot, total);
+    maxTot = Math.max(maxTot, total);
+    trajectory.push({ timeAu: step * dtAu, positions: x.map((p) => [...p]), potentialHa: potential, kineticHa: kin, totalHa: total });
+    if (step === steps) break;
+    // velocity Verlet
+    const xNew = x.map((p, i) => [p[0] + v[i][0] * dtAu + 0.5 * a[i][0] * dtAu * dtAu, p[1] + v[i][1] * dtAu + 0.5 * a[i][1] * dtAu * dtAu, p[2] + v[i][2] * dtAu + 0.5 * a[i][2] * dtAu * dtAu]);
+    const aNew = accel(xNew);
+    v = v.map((vi, i) => [vi[0] + 0.5 * (a[i][0] + aNew[i][0]) * dtAu, vi[1] + 0.5 * (a[i][1] + aNew[i][1]) * dtAu, vi[2] + 0.5 * (a[i][2] + aNew[i][2]) * dtAu]);
+    x = xNew;
+    a = aNew;
+  }
+  return { trajectory, energyDriftHa: maxTot - minTot };
+}
+
 /** Distance (Bohr) between two atoms in a geometry. */
 export function bondLength(atoms, i, j) {
   const a = atoms[i].position;

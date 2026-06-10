@@ -200,7 +200,11 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
 
 export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM = null } = {}) {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x05080a);
+  // A dark slate background rather than near-black: the ice/water surfaces are physically
+  // transmissive (clear), so they take their look from what is behind them — a pure-black void made
+  // them read dark. Transmission samples the background render, so lifting it brightens the glassy
+  // surfaces without faking opacity.
+  scene.background = new THREE.Color(0x18222b);
 
   const width = container.clientWidth || 800;
   const height = container.clientHeight || 520;
@@ -217,10 +221,17 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   controls.enableDamping = true;
   controls.target.copy(center);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
-  const key = new THREE.DirectionalLight(0x96ffe1, 0.9);
+  // Bright, fairly even illumination so the non-emissive surfaces (ice/water) read clearly; a
+  // hemisphere light gives a soft sky/ground fill on top of the flat ambient, and two directional
+  // lights (key + fill) shape the surfaces without leaving any face in the dark.
+  scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+  scene.add(new THREE.HemisphereLight(0xddffff, 0x202a30, 0.9));
+  const key = new THREE.DirectionalLight(0xffffff, 1.1);
   key.position.set(4, 8, 6);
   scene.add(key);
+  const fill = new THREE.DirectionalLight(0xbfe9ff, 0.5);
+  fill.position.set(-6, 3, -4);
+  scene.add(fill);
 
   // Sealed-box domain wireframe (the full 10 m box) + a floor grid.
   const boxGeom = new THREE.BoxGeometry(boxEdgeM, boxEdgeM, boxEdgeM);

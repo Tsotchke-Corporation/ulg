@@ -1,12 +1,14 @@
 # SPH Phase Demo Plan - Ice On Molten Iron In A Sealed Box
 
 Date: 2026-06-08 AKDT
+Updated: 2026-06-08 AKDT
 
 ## Purpose
 
 Build a first-principles ULG demo that simulates a 1 m ice cube resting on a
 1 m molten iron cube inside a sealed, transparent 10 m box initially filled
-with air at 1 atm and -40 F. The visible target is:
+with air at 1 atm and -40 F. Each of the six box faces has its own absolute
+temperature control, exposed as one slider per side. The visible target is:
 
 1. Molten iron glows because its temperature and emissivity produce thermal
    radiation.
@@ -19,8 +21,9 @@ with air at 1 atm and -40 F. The visible target is:
    possible.
 
 The demo must not fake the outcome with scripted phase toggles, arbitrary color
-ramps, or hard-coded pressure curves. Every visible behavior must come from the
-closure, field, carrier, thermodynamic, radiation, and validation chain.
+ramps, arbitrary material constants, or hard-coded pressure curves. Every
+visible behavior and every material property must come from the closure, field,
+carrier, thermodynamic, radiation, mechanical, and validation chain.
 
 ## Non-Negotiables
 
@@ -31,6 +34,14 @@ closure, field, carrier, thermodynamic, radiation, and validation chain.
   simulations, then uses those closures in a conservative carrier runtime.
 - Material properties, EOS, SPH dynamics, phase changes, pressure, and glow
   must stay unvalidated / blocked until their evidence artifacts exist.
+- Color, opacity, viscosity, density, heat capacity, conductivity, bulk modulus,
+  Young's modulus, shear modulus, Poisson ratio, yield behavior, and phase
+  behavior must be derived from low-level validated closures. They cannot be
+  tuned per demo to make the scene look right.
+- The user must be able to set the macro-particle count. Each SPH particle
+  represents a computed number of H2O molecules, Fe atoms, or air molecules.
+  Particle count changes resolution and convergence error; it must not change
+  the underlying material law.
 - If the specified geometry and boundary conditions cannot produce the expected
   final state, the successful result is a failing physics preflight that says
   why. The renderer must not force a cold iron lump or ice shell when the energy
@@ -47,19 +58,21 @@ closure, field, carrier, thermodynamic, radiation, and validation chain.
 | Scenario id | `sph-phase-ice-on-molten-iron` |
 | Box | Transparent sealed cube, 10 m edge, 1000 m3 volume |
 | Initial gas | Air mixture at 1 atm, -40 F / -40 C / 233.15 K |
-| Boundary | Rigid, sealed mass boundary; thermal boundary must be explicit |
-| Ambient | -40 F external reservoir only if wall heat transfer is modeled |
+| Boundary | Rigid, sealed mass boundary with six independent thermal sides |
+| Wall temperature controls | `xMin`, `xMax`, `yMin`, `yMax`, `zMin`, `zMax`, each an absolute temperature in K |
 | Ice cube | 1 m edge, initially resting on iron, initial temperature from config |
 | Iron cube | 1 m edge, molten, initial temperature above Fe liquidus |
+| Particle controls | User-selected macro-particle counts for H2O, Fe, and gas, plus total budget |
 | Gravity | Earth gravity unless scenario config explicitly changes it |
 | Visualization | Three.js/WebGPU particle and volume rendering, no scripted phase visuals |
 
 The boundary condition is critical. A sealed box prevents mass exchange, not
-heat exchange. If the box walls are adiabatic, the final cold gray iron with ice
-around it is probably impossible for the requested 1 m cubes. If the outside
-ambient is intended to cool the system, the box walls need material properties,
-surface area, thermal resistance, and an external -40 F reservoir in the
-simulation. Energy exported through the walls must be reported.
+heat exchange. This demo should not use a single ambient-temperature shortcut.
+Each wall face is a fixed-temperature reservoir selected by the user. The
+runtime must compute heat flux into or out of each side separately and report
+the per-side energy ledger. If all sides are adiabatic or set too warm, the
+final cold gray iron with ice around it is probably impossible for the requested
+1 m cubes.
 
 ## Energy Feasibility Gate
 
@@ -77,7 +90,7 @@ the scenario:
   - liquid water warming,
   - H2O latent heat of vaporization,
   - vapor/gas mixture heating,
-  - wall/environment heat loss if enabled.
+  - heat exported to or imported from each absolute-temperature wall.
 - Emit a `peercompute.ulg.thermodynamic-preflight.v0` artifact before the demo
   is allowed to claim the target final state.
 
@@ -91,9 +104,9 @@ Order-of-magnitude expectation for the requested dimensions:
   before additional steam heating.
 
 That means an adiabatic sealed box should not be expected to end as cold gray
-iron with ice around it. The demo can still reach that outcome if the walls
-conduct enough heat to the -40 F ambient over enough simulated time, but the
-energy sink must be explicit and audited.
+iron with ice around it. The demo can still reach that outcome if the six
+fixed-temperature walls conduct enough heat out of the box over enough simulated
+time, but the energy sink must be explicit and audited per wall.
 
 ## First-Principles Chain
 
@@ -106,6 +119,12 @@ microphysical evidence for:
   ice, and vapor thermodynamics.
 - Fe cohesive, electronic, and lattice information sufficient to derive solid
   and liquid thermodynamics.
+- Elastic and transport response sufficient to derive bulk modulus, Young's
+  modulus, shear modulus, Poisson ratio, viscosity, thermal expansion, sound
+  speed, plastic/yield behavior, and phase-dependent stress response.
+- Optical / radiative response sufficient to derive color, emissivity,
+  absorption, scattering, and temperature-dependent glow for Fe, H2O phases,
+  and steam/air mixtures.
 - Air species properties for N2, O2, Ar, CO2 trace handling if included, and
   H2O vapor mixing.
 - Interface evidence for H2O/Fe heat transfer, wetting, steam-film formation,
@@ -118,6 +137,8 @@ Required artifact families:
 - `moonlab.ulg.fe-microphysics-reference.v0`
 - `moonlab.ulg.air-mixture-reference.v0`
 - `moonlab.ulg.interface-reference.v0`
+- `moonlab.ulg.mechanical-response-reference.v0`
+- `moonlab.ulg.optical-response-reference.v0`
 
 Until those exist and pass, downstream artifacts must carry
 `scientificValidation = false` and `fullPhysicsValidation = false`.
@@ -138,7 +159,10 @@ Required closure groups:
   - heat capacity,
   - thermal conductivity,
   - viscosity,
-  - surface tension.
+  - surface tension,
+  - elastic response for ice including bulk modulus, Young's modulus, shear
+    modulus, Poisson ratio, thermal expansion, and fracture/yield scope if
+    represented.
 - Fe phase / EOS closure:
   - solid/liquid free energy,
   - liquidus/solidus behavior,
@@ -147,6 +171,9 @@ Required closure groups:
   - heat capacity,
   - thermal conductivity,
   - viscosity for liquid Fe,
+  - bulk modulus, Young's modulus, shear modulus, Poisson ratio, yield/plastic
+    response for solid Fe,
+  - surface tension for liquid Fe,
   - emissivity / spectral opacity needed for glow.
 - Air / steam mixture closure:
   - pressure from mixture composition, density, and temperature,
@@ -154,8 +181,24 @@ Required closure groups:
   - diffusion / viscosity,
   - humidity, condensation, and saturation handling.
 - Wall/environment closure:
-  - wall heat capacity, conductivity, thickness, and outside convection if the
-    -40 F ambient is meant to cool the sealed box.
+  - fixed-temperature face ids,
+  - wall heat capacity / conductivity if walls are modeled as finite solids,
+  - Dirichlet heat-transfer boundary coupling for each side.
+- Mechanical closure:
+  - bulk modulus,
+  - Young's modulus,
+  - shear modulus,
+  - Poisson ratio,
+  - viscosity,
+  - yield/plasticity and fracture scope,
+  - speed of sound,
+  - phase-dependent stress response.
+- Optical / rendering closure:
+  - spectral emissivity,
+  - absorption and scattering coefficients,
+  - refractive index / optical constants when needed,
+  - temperature-to-spectral-radiance mapping,
+  - RGB display transform provenance.
 
 Required artifact families:
 
@@ -163,6 +206,8 @@ Required artifact families:
 - `eshkol.ulg.eos-closure.v0`
 - `eshkol.ulg.phase-equilibrium-closure.v0`
 - `eshkol.ulg.transport-closure.v0`
+- `eshkol.ulg.mechanical-closure.v0`
+- `eshkol.ulg.optical-closure.v0`
 - `eshkol.ulg.radiation-closure.v0`
 - `eshkol.ulg.wall-boundary-closure.v0`
 
@@ -187,6 +232,11 @@ Required runtime capabilities:
 
 - Material registry resolving H2O, Fe, air, wall, and interface closures by
   material id and validity domain.
+- Mechanical property sampling for bulk modulus, Young's modulus, shear
+  modulus, Poisson ratio, viscosity, yield/plasticity, thermal expansion, and
+  sound speed.
+- Optical/radiation property sampling for temperature-dependent color,
+  emissivity, absorption, scattering, and opacity.
 - Thermodynamic state conversion:
   - internal energy <-> temperature,
   - density/pressure from EOS,
@@ -200,7 +250,7 @@ Required runtime capabilities:
   - latent heat,
   - pressure work,
   - gravity and contact forces,
-  - wall heat loss.
+  - per-side fixed-temperature wall heat exchange.
 - Closure-domain exit handling:
   - halt or subcycle the affected region,
   - emit refresh/invalidation artifact,
@@ -208,18 +258,30 @@ Required runtime capabilities:
 
 ### 4. Carrier Solver
 
-The SPH carrier must evolve macro-particles using closures; it must not encode
-material behavior directly.
+The SPH carrier must evolve user-configurable macro-particles using closures;
+it must not encode material behavior directly. A particle is a coarse-grained
+representative parcel, not one molecule/atom. It carries mass plus a computed
+`representedEntityCount`:
+
+- H2O particles represent many water molecules.
+- Fe particles represent many iron atoms.
+- Air/steam particles or gas cells represent many gas molecules by species.
+
+The represented count is derived from total material mass, molar mass, species
+composition, and the user-selected particle allocation. Changing particle count
+changes resolution, smoothing length, and convergence error only; material
+properties remain closure-derived.
 
 Particle state fields:
 
 - position, velocity, mass, smoothing length,
+- represented entity count,
 - material id and species composition,
 - density, pressure,
 - internal energy / enthalpy,
 - temperature,
 - phase fractions,
-- stress / viscosity terms,
+- stress, strain, viscosity, modulus, yield/plasticity, and sound-speed terms,
 - radiation source terms,
 - provenance refs for closures sampled during the step.
 
@@ -230,12 +292,76 @@ Required solver features:
 - SPH density and gradient operators with convergence tests.
 - Conservative momentum and energy update.
 - Multi-material contact handling for H2O/Fe/air/wall interfaces.
+- Six fixed-temperature boundary faces:
+  - `xMin`,
+  - `xMax`,
+  - `yMin`,
+  - `yMax`,
+  - `zMin`,
+  - `zMax`.
+  Each face is a user-set absolute-temperature reservoir. Heat flux and energy
+  exchange must be integrated and reported independently per face.
 - Phase-fraction update from thermodynamic equilibrium, not a visual threshold.
 - Steam/water/ice mass exchange preserving H2O mass exactly within tolerance.
 - Solid Fe behavior after freezing, either as an SPH solid model or a
   compatible MPM/rigid aggregate layer with the same conservation artifacts.
 - Adaptive resolution near the ice/iron interface so the 1 m cubes fit inside
   the 10 m box without requiring molecular particle counts.
+- Particle-count controls for total particles and per-material allocation.
+- Convergence reporting across at least two particle-count settings before the
+  demo can claim stable behavior.
+
+### 4A. Particle Resolution Controls
+
+The UI must expose particle controls as simulation-resolution inputs:
+
+- total macro-particle budget,
+- H2O particle count,
+- Fe particle count,
+- gas particle or gas-cell count,
+- optional adaptive refinement budget near the H2O/Fe interface,
+- displayed represented molecules/atoms per particle for each material.
+
+The runtime must derive:
+
+- H2O molecules per H2O particle from ice/water/steam mass and molar mass,
+- Fe atoms per Fe particle from iron mass and molar mass,
+- gas molecules per gas particle/cell from pressure, temperature, volume, and
+  gas mixture EOS.
+
+Acceptance requires a convergence artifact showing whether key outputs change
+with particle count:
+
+- peak pressure,
+- total vapor mass,
+- final Fe solid fraction,
+- wall heat export per side,
+- total energy residual,
+- H2O and Fe mass residuals.
+
+### 4B. Six Wall Temperature Controls
+
+The demo must expose one slider per box side:
+
+- `xMinWallTemperatureK`,
+- `xMaxWallTemperatureK`,
+- `yMinWallTemperatureK`,
+- `yMaxWallTemperatureK`,
+- `zMinWallTemperatureK`,
+- `zMaxWallTemperatureK`.
+
+Sliders may display Fahrenheit/Celsius labels for usability, but the scenario
+artifact and runtime must store absolute Kelvin values. A side set to 233.15 K
+is a fixed -40 F thermal reservoir. Different sides may be set to different
+temperatures, and the solver must not collapse them into one ambient field.
+
+The wall energy report must include:
+
+- heat flux by side,
+- cumulative energy exchanged by side,
+- wall-side closure refs,
+- wall-temperature slider value,
+- whether the boundary is fixed-temperature, finite-capacity, or adiabatic.
 
 ### 5. Sealed-Box Gas And Pressure
 
@@ -284,7 +410,12 @@ Add schema builders under `ulg-gpu-abi/src/index.js` and JSON schemas under
 - `eos_closure.schema.json`
 - `phase_equilibrium_closure.schema.json`
 - `transport_closure.schema.json`
+- `mechanical_closure.schema.json`
+- `optical_closure.schema.json`
 - `radiation_closure.schema.json`
+- `wall_temperature_boundary.schema.json`
+- `particle_resolution_config.schema.json`
+- `particle_convergence_report.schema.json`
 - `thermodynamic_preflight.schema.json`
 - `sph_phase_scenario.schema.json`
 - `sph_phase_simulation_artifact.schema.json`
@@ -294,9 +425,14 @@ Required tests:
 
 - Schema validation for every new artifact.
 - Overclaim guards that reject `materialValidation`, `eosValidation`,
+  `mechanicalValidation`, `opticalValidation`,
   `phaseChangeValidation`, `sphValidation`, `scientificValidation`, or
   `fullPhysicsValidation` unless the required evidence refs are present.
 - Unit and dimensional consistency checks for closure tables.
+- Rejection of particle-count configs that change total material mass when
+  resolution changes.
+- Rejection of wall-boundary configs that omit any of the six side
+  temperatures.
 
 ### ULG Runtime Modules
 
@@ -307,14 +443,18 @@ Add or extend:
 - `src/runtime/material/eos.js`
 - `src/runtime/material/phaseEquilibrium.js`
 - `src/runtime/material/transport.js`
+- `src/runtime/material/mechanical.js`
 - `src/runtime/material/radiation.js`
+- `src/runtime/material/optical.js`
 - `src/runtime/material/thermodynamicPreflight.js`
+- `src/runtime/sph/particleResolution.js`
 - `src/runtime/sph/sphState.js`
 - `src/runtime/sph/sphOperators.js`
 - `src/runtime/sph/sphPhaseCarrier.js`
 - `src/runtime/sph/sphConservation.js`
 - `src/runtime/sph/sealedBoxGas.js`
 - `src/runtime/sph/wallBoundary.js`
+- `src/runtime/sph/wallTemperatureControls.js`
 
 Reuse and extend current primitives:
 
@@ -351,13 +491,29 @@ Required features:
   - `window.__ulgDemo.runSphPhaseDemoPreflight()`
   - `window.__ulgDemo.runSphPhaseDemoStep()`
   - `window.__ulgDemo.runSphPhaseDemo()`
+- Six independent wall-temperature sliders:
+  - left / `xMin`,
+  - right / `xMax`,
+  - bottom / `yMin`,
+  - top / `yMax`,
+  - back / `zMin`,
+  - front / `zMax`.
+- Particle-count controls:
+  - total macro-particle budget,
+  - H2O macro-particles,
+  - Fe macro-particles,
+  - gas macro-particles/cells,
+  - adaptive refinement budget.
 - New visible status rows:
   - preflight pass/fail,
   - pressure,
   - water mass by phase,
   - iron solid fraction,
+  - represented molecules/atoms per macro-particle,
+  - material closure status for optical/mechanical properties,
+  - six wall temperatures,
   - total energy residual,
-  - wall heat export,
+  - wall heat export per side,
   - closure invalidation status.
 - The UI can include a launch button, but it must report readiness blockers
   before allowing a full-physics claim.
@@ -376,7 +532,9 @@ Expected work in `/home/cos/projects/peercompute`:
 - Add compute placement for SPH tiles, gas cells, closure derivation tasks, and
   renderer updates through existing WorkerSupervisor / ComputeManager paths.
 - Add diagnostics panels for pressure, phase fractions, closure validity,
-  conservation residuals, and wall heat export.
+  conservation residuals, particle resolution/convergence, represented
+  molecules/atoms per particle, six wall-temperature settings, and per-side
+  wall heat export.
 - Keep all scientific readiness gates false until ULG artifacts prove the
   material/EOS/SPH/phase stack.
 
@@ -396,7 +554,13 @@ Expected work in `/home/cos/projects/eshkol`:
 - Support tensor/closure memory layouts for multi-output thermodynamic closures.
 - Emit closure artifacts with validity envelopes, derivative outputs, and
   non-stub production handler evidence.
-- Add fixtures for H2O, Fe, air, H2O/Fe interface, and wall boundary closures.
+- Add fixtures for H2O, Fe, air, H2O/Fe interface, wall boundary, mechanical,
+  optical, and radiation closures.
+- Ensure mechanical closures expose bulk modulus, Young's modulus, shear
+  modulus, Poisson ratio, viscosity, yield/plasticity scope, thermal expansion,
+  and sound speed where applicable.
+- Ensure optical closures expose spectral emissivity, absorption/scattering, and
+  display-transform provenance for material color.
 - Keep smoke-only closures separated from scientific production closures.
 
 ### MoonLab
@@ -405,6 +569,9 @@ Expected work in `/home/cos/projects/moonlab`:
 
 - Produce microphysical reference contracts for H2O, Fe, air species, and
   H2O/Fe interface behavior.
+- Produce or import reference contracts for mechanical response and optical /
+  radiative response, including the low-level evidence used to derive material
+  constants and visible color.
 - Provide hashes, tolerances, uncertainty, and provenance.
 - Distinguish reduced reference evidence from full-fidelity quantum coverage.
 - Keep WebGPU parity and full-physics readiness explicit.
@@ -418,9 +585,13 @@ Add focused ULG tests:
 - `tests/materialClosure.test.mjs`
 - `tests/thermodynamicPreflight.test.mjs`
 - `tests/phaseEquilibrium.test.mjs`
+- `tests/mechanicalClosure.test.mjs`
+- `tests/opticalClosure.test.mjs`
+- `tests/particleResolution.test.mjs`
 - `tests/sphOperators.test.mjs`
 - `tests/sphPhaseCarrier.test.mjs`
 - `tests/sealedBoxGas.test.mjs`
+- `tests/wallTemperatureBoundary.test.mjs`
 - `tests/radiationClosure.test.mjs`
 
 Required assertions:
@@ -429,7 +600,18 @@ Required assertions:
   correct units.
 - Adiabatic case refuses to claim the final cold-iron/ice-around-it outcome if
   the enthalpy budget does not support it.
-- Wall-cooled case reports the exact energy exported to ambient.
+- Wall-cooled case reports the exact energy exported/imported by each wall side.
+- Each of the six wall sliders maps to an independent absolute Kelvin boundary.
+- Wall heat flux and cumulative energy are reported independently per side.
+- Particle-count controls preserve total material mass while changing
+  represented molecules/atoms per macro-particle.
+- Changing macro-particle count does not alter closure-derived material
+  constants.
+- Mechanical properties come from closures: bulk modulus, Young's modulus,
+  shear modulus, Poisson ratio, viscosity, thermal expansion, and yield/plastic
+  scope where represented.
+- Optical/color properties come from closures: spectral emissivity, absorption,
+  scattering, opacity, and display-transform provenance.
 - H2O mass is conserved across ice, liquid, vapor, and condensed/frozen deposits.
 - Fe mass is conserved across liquid and solid fractions.
 - Total energy is conserved within tolerance when wall heat export and radiation
@@ -447,6 +629,10 @@ Add ULG and PeerCompute integration coverage:
 - Browser e2e preflight:
   - scenario loads,
   - preflight artifact appears,
+  - all six wall-temperature sliders are visible and reflected in the scenario
+    artifact,
+  - particle-count controls update represented molecule/atom counts without
+    changing total mass,
   - readiness blockers are visible if closures are missing.
 - CPU reference SPH micro-run:
   - small ice/iron/air fixture runs a few steps,
@@ -459,7 +645,8 @@ Add ULG and PeerCompute integration coverage:
 - Multiscale handoff:
   - ULG exports closure/simulation artifacts,
   - PeerCompute ingests them,
-  - packet summaries preserve pressure, phase, conservation, and validity.
+  - packet summaries preserve pressure, phase, conservation, particle
+    resolution, wall temperatures, per-side wall heat export, and validity.
 
 ### Scientific Regression Fixtures
 
@@ -471,6 +658,9 @@ Use small canonical problems before the full 10 m scene:
   EOS at fixed volume.
 - Stefan-style melting/freezing front with known reference behavior.
 - Blackbody/graybody Fe radiance at fixed temperatures.
+- Closure-derived visible color for ice, liquid water, steam, solid Fe, and
+  molten Fe from optical/radiation references.
+- Mechanical-response fixtures for ice and solid Fe modulus/yield behavior.
 - Contact heat-transfer micro-slab H2O/Fe interface.
 
 ## Demo Acceptance Criteria
@@ -478,18 +668,25 @@ Use small canonical problems before the full 10 m scene:
 A demo run is successful only when all of these are true:
 
 - The preflight artifact says the requested final state is thermodynamically
-  possible for the selected wall/environment boundary, or the demo clearly
-  reports that it is not possible.
+  possible for the selected six-side wall-temperature boundary, or the demo
+  clearly reports that it is not possible.
 - Initial state matches:
   - 10 m sealed transparent box,
   - 1 atm air,
-  - -40 F initial gas/ambient,
-  - 1 m ice cube on a 1 m molten Fe cube.
+  - -40 F initial gas,
+  - 1 m ice cube on a 1 m molten Fe cube,
+  - six explicit wall-temperature values.
+- The user can set macro-particle counts, and the run reports represented
+  molecules/atoms per particle plus convergence status.
 - Pressure is computed from sealed-box mass/energy/EOS and increases when steam
   production dominates condensation.
 - Ice/water/steam transitions come from H2O thermodynamic closure state.
 - Fe liquid/solid transition comes from Fe thermodynamic closure state.
 - Iron glow comes from temperature/emissivity radiation output.
+- Ice, water, steam, solid Fe, and molten Fe colors/opacities come from
+  optical/radiation closures, not renderer constants.
+- Viscosity, bulk modulus, Young's modulus, shear modulus, Poisson ratio, and
+  related material behavior come from mechanical/transport closures.
 - Mass conservation residuals stay within configured tolerance.
 - Energy conservation residuals stay within tolerance after wall heat export and
   radiation are included.
@@ -504,17 +701,22 @@ A demo run is successful only when all of these are true:
 
 - Add this plan.
 - Add thermodynamic preflight design to ULG plan/test docs.
+- Add six absolute wall-temperature controls to the demo requirements.
+- Add macro-particle count/resolution controls to the demo requirements.
 - Do not implement visuals yet.
 
 ### P1 - Artifact Contracts
 
 - Add ABI schemas/builders for material closures, EOS closures, phase closures,
-  preflight artifacts, SPH phase simulation artifacts, and conservation reports.
+  mechanical closures, optical closures, wall-temperature boundaries,
+  particle-resolution configs, preflight artifacts, SPH phase simulation
+  artifacts, convergence reports, and conservation reports.
 - Add overclaim guard tests.
 
 ### P2 - Material Closure Pipeline
 
 - Add H2O/Fe/air/wall closure fixtures from MoonLab/Eshkol with provenance.
+- Add mechanical and optical closure fixtures for H2O phases and Fe phases.
 - Implement `MaterialRegistry` on top of `ClosureRegistry`.
 - Add closure validity and refresh behavior for material state sampling.
 
@@ -523,11 +725,15 @@ A demo run is successful only when all of these are true:
 - Implement enthalpy/internal-energy/temperature conversion.
 - Implement phase-equilibrium solver over closure free energies.
 - Implement the scenario energy feasibility preflight.
+- Include six fixed-temperature wall reservoirs and per-side heat ledgers in
+  the preflight.
 
 ### P4 - Conservative SPH Carrier
 
 - Implement SPH density, pressure, gradient, viscosity, and energy operators.
 - Add multi-material contact and wall boundary conditions.
+- Add user-selectable macro-particle resolution with represented entity counts
+  and convergence artifacts.
 - Keep CPU reference authoritative.
 
 ### P5 - Sealed Gas, Phase Change, And Radiation
@@ -535,11 +741,12 @@ A demo run is successful only when all of these are true:
 - Add air/steam mixture EOS pressure.
 - Add evaporation/condensation/freezing/melting via phase equilibrium and latent
   heat.
-- Add radiation/glow from Fe temperature/emissivity closure.
+- Add radiation/glow and material color/opacity from optical/radiation closures.
 
 ### P6 - Browser And Multiscale Demo
 
 - Add ULG browser controls/status for preflight and small CPU run.
+- Add six side sliders and particle-count controls to the visible demo.
 - Add PeerCompute Multiscale scenario and visualization.
 - Start with reduced particle counts, then add adaptive/high-res tiles.
 
@@ -552,17 +759,28 @@ A demo run is successful only when all of these are true:
 
 ## Open Physics Choices To Set Explicitly
 
-- Is the sealed box adiabatic, or do transparent walls conduct heat to the
-  -40 F ambient? The requested final state needs a heat sink.
+- What is the default absolute temperature for each wall side? The likely
+  default is 233.15 K (-40 F) for all six sides, but the user must be able to
+  change them independently.
+- Are fixed-temperature walls infinite thermal reservoirs, or finite-capacity
+  wall materials clamped by external controllers? The slider means absolute
+  side temperature either way, but the energy ledger must label the model.
 - What is the initial iron temperature above liquidus?
 - What is the initial ice temperature: exactly -40 F or a separate configured
   value?
 - What are wall material, thickness, conductivity, emissivity, and heat
-  capacity?
+  capacity if finite wall bodies are represented in addition to fixed
+  temperature faces?
+- What are the default macro-particle counts for H2O, Fe, and gas, and what
+  convergence threshold is required before the demo claims stable behavior?
 - Should the iron solid be represented as SPH elastic solid, MPM solid, or a
   rigid aggregate after solidification?
+- Which mechanical model is in scope first: linear elastic, viscoelastic,
+  plastic/yield, fracture, or a staged sequence with explicit validation flags?
 - What fidelity is required for H2O/Fe interface boiling and steam-film
   insulation?
+- What fidelity is required for optical properties: graybody only first, then
+  spectral absorption/scattering, or full spectral from the start?
 - What pressure limits and wall failure behavior are in scope? The current demo
   assumes an unbreakable sealed box unless explicitly changed.
 
@@ -573,8 +791,13 @@ layer, not particles:
 
 1. Add `peercompute.ulg.thermodynamic-preflight.v0`.
 2. Add a scenario config for the exact 10 m / 1 m / 1 atm / -40 F setup.
-3. Compute the enthalpy budget from closure-backed material constants or
+3. Add six required wall-temperature fields, one per side, stored in Kelvin.
+4. Add particle-resolution config fields and represented molecule/atom counts.
+5. Compute the enthalpy budget from closure-backed material constants or
    explicitly tagged reference fixtures.
-4. Assert that an adiabatic run does not claim the final cold iron/ice state.
-5. Add the wall-cooled boundary option and require reported wall heat export.
-6. Only after this passes, wire the conservative SPH phase carrier.
+6. Assert that a no-heat-sink or insufficient-wall-cooling run does not claim
+   the final cold iron/ice state.
+7. Add fixed-temperature wall-side energy ledgers and require reported heat
+   export/import per side.
+8. Add mechanical/optical closure schemas with overclaim guards.
+9. Only after this passes, wire the conservative SPH phase carrier.

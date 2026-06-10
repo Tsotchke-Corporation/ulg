@@ -39,6 +39,7 @@ export function thermalStep(state, {
   materialProperties,
   wallTemperaturesK,
   boxEdgeM,
+  boxDimsM, // [Lx, Ly, Lz]; falls back to a cube of boxEdgeM
   dtS,
   conductionRate = 1.5e4,
   wallRate = 6e4,
@@ -46,6 +47,7 @@ export function thermalStep(state, {
 } = {}) {
   const particles = state.particles;
   const n = particles.length;
+  const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const h = state.smoothingLengthM;
   const layer = wallLayerM ?? h;
   // Current temperatures + phases (energy → state via the closures), computed once and returned
@@ -78,7 +80,7 @@ export function thermalStep(state, {
     const pi = particles[i];
     for (const f of FACE_AXES) {
       const coord = pi.x[f.axis];
-      const distance = f.atMax ? boxEdgeM - coord : coord;
+      const distance = f.atMax ? dims[f.axis] - coord : coord;
       if (distance >= layer) continue;
       const tWall = wallTemperaturesK[f.id];
       const dE = wallRate * (tWall - temps[i]) * (1 - distance / layer) * dtS; // J into particle

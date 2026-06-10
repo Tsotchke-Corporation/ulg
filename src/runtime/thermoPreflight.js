@@ -44,6 +44,8 @@ export function createSphPhaseScenario(overrides = {}) {
   const ironVolumeFractionOfIce = overrides.ironVolumeFractionOfIce ?? 1 / 8;
   const ironVolumeM3 = overrides.ironVolumeM3 ?? iceVolumeM3 * ironVolumeFractionOfIce;
   const boxEdgeM = overrides.boxEdgeM ?? 10;
+  // Box can be a rectangular cuboid [Lx, Ly, Lz]; a scalar edge keeps it cubic.
+  const boxDimensionsM = overrides.boxDimensionsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const wallModel = overrides.wallModel ?? 'infinite-fixed-temperature-reservoir';
   const defaultWallTempK = overrides.wallTemperatureK ?? FAHRENHEIT_MINUS_40_K;
   const wallFaces = {};
@@ -52,7 +54,7 @@ export function createSphPhaseScenario(overrides = {}) {
   }
   return {
     scenarioId: SPH_PHASE_SCENARIO_ID,
-    box: { edgeM: boxEdgeM, volumeM3: cubeVolumeFromEdge(boxEdgeM) },
+    box: { edgeM: boxEdgeM, dimensionsM: boxDimensionsM, volumeM3: boxDimensionsM[0] * boxDimensionsM[1] * boxDimensionsM[2] },
     gravityMPerS2: overrides.gravityMPerS2 ?? 9.80665,
     ice: {
       material: 'h2o',

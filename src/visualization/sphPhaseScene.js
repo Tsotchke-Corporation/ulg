@@ -75,15 +75,12 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-// Inset the simulation box inside the marching-cubes field cube so surfaces touching a box face
-// (e.g. the ice resting on the floor) aren't clipped at the field boundary. The mesh scale is
-// widened by the same factor (below) so the inset surface still aligns with the box wireframe.
-// The marching-cubes field cube is only marginally larger than the simulation box, so surfaces
-// stay contained within the box wireframe (no large overhang) while a thin margin still keeps a
-// surface resting against a face from being hard-clipped by the boundary cells. With the snug box,
-// the sealed walls clipping a surface flat against a wall is physically correct (the material is
-// contained), so we don't need the big inset that used to push blobs far outside the box.
-const FIELD_PADDING = 0.03;
+// Inset the simulation box inside the marching-cubes field cube so an isosurface that reaches a box
+// face is NOT hard-clipped flat at the field boundary — the metaball is given room on the far side
+// of the wall to close into a rounded surface, so a blob resting against the floor/wall renders as a
+// complete dome instead of a sliced-off plane. The padding is mapped per-axis (below); the mesh
+// scale is widened by 1/(1-2·pad) so the padded [0,1] field still aligns with the box wireframe.
+const FIELD_PADDING = 0.14;
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
@@ -155,13 +152,15 @@ function estimateSurfaceRadiusM(bounds, count, boxEdgeM) {
   return clamp(spacingM * 1.65, boxEdgeM * 0.025, boxEdgeM * 0.11);
 }
 
-export function createContinuousSurfaceBatches({ positionsM, colorsRgb, materials = null, boxEdgeM = 10 } = {}) {
+export function createContinuousSurfaceBatches({ positionsM, colorsRgb, materials = null, boxEdgeM = 10, boxDimsM = null } = {}) {
   if (!positionsM || !colorsRgb) {
     throw new Error('positionsM and colorsRgb are required for SPH continuous surfaces');
   }
   if (positionsM.length !== colorsRgb.length || positionsM.length % 3 !== 0) {
     throw new Error('positionsM and colorsRgb must be matching vec3 arrays');
   }
+  const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
+  const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
   const batches = new Map();
   const particleCount = positionsM.length / 3;
   for (let i = 0; i < particleCount; i += 1) {
@@ -184,9 +183,9 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
     batch.positionsM.push(x, y, z);
     const span = 1 - 2 * FIELD_PADDING;
     batch.normalizedPositions.push(
-      clamp(FIELD_PADDING + (x / boxEdgeM) * span, 0.001, 0.999),
-      clamp(FIELD_PADDING + (y / boxEdgeM) * span, 0.001, 0.999),
-      clamp(FIELD_PADDING + (z / boxEdgeM) * span, 0.001, 0.999)
+      clamp(FIELD_PADDING + (x / dims[0]) * span, 0.001, 0.999),
+      clamp(FIELD_PADDING + (y / dims[1]) * span, 0.001, 0.999),
+      clamp(FIELD_PADDING + (z / dims[2]) * span, 0.001, 0.999)
     );
     batch.colorsRgb.push(
       clamp(colorsRgb[i * 3], 0, 1),
@@ -198,11 +197,13 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
   }
   return [...batches.values()].map((batch) => ({
     ...batch,
-    surfaceRadiusM: estimateSurfaceRadiusM(batch.bounds, batch.count, boxEdgeM)
+    surfaceRadiusM: estimateSurfaceRadiusM(batch.bounds, batch.count, refEdgeM)
   }));
 }
 
-export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM = null } = {}) {
+export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null, surfaceRadiusM = null } = {}) {
+  const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
+  const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
   const scene = new THREE.Scene();
   // A dark slate background rather than near-black: the ice/water surfaces are physically
   // transmissive (clear), so they take their look from what is behind them — a pure-black void made
@@ -213,10 +214,10 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   const width = container.clientWidth || 800;
   const height = container.clientHeight || 520;
   const camera = new THREE.PerspectiveCamera(46, width / height, 0.05, 500);
-  // Aim at the box centre and pull back proportionally so the whole sealed box (and everything
-  // contained in it) is framed, instead of looking at the floor and cropping the top.
-  const center = new THREE.Vector3(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
-  camera.position.set(center.x + boxEdgeM * 0.85, center.y + boxEdgeM * 0.55, center.z + boxEdgeM * 1.15);
+  // Aim at the box centre and pull back proportionally to the largest box edge so the whole sealed
+  // box (and everything contained in it) is framed, instead of looking at the floor and cropping.
+  const center = new THREE.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+  camera.position.set(center.x + refEdgeM * 0.85, center.y + refEdgeM * 0.55, center.z + refEdgeM * 1.15);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -239,16 +240,17 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   fill.position.set(-6, 3, -4);
   scene.add(fill);
 
-  // Sealed-box domain wireframe (the full 10 m box) + a floor grid.
-  const boxGeom = new THREE.BoxGeometry(boxEdgeM, boxEdgeM, boxEdgeM);
+  // Sealed-box domain wireframe (the full Lx×Ly×Lz box) + a floor grid sized to the footprint.
+  const boxGeom = new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
   const box = new THREE.LineSegments(
     new THREE.EdgesGeometry(boxGeom),
     new THREE.LineBasicMaterial({ color: 0x36d6a4, transparent: true, opacity: 0.6 })
   );
-  box.position.set(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
+  box.position.set(dims[0] / 2, dims[1] / 2, dims[2] / 2);
   scene.add(box);
-  const grid = new THREE.GridHelper(boxEdgeM, 20, 0x1d8b6d, 0x0d332b);
-  grid.position.set(boxEdgeM / 2, 0, boxEdgeM / 2);
+  const gridFootprint = Math.max(dims[0], dims[2]);
+  const grid = new THREE.GridHelper(gridFootprint, 20, 0x1d8b6d, 0x0d332b);
+  grid.position.set(dims[0] / 2, 0, dims[2] / 2);
   scene.add(grid);
 
   const surfaces = new Map();
@@ -266,10 +268,11 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
       config.maxPolyCount
     );
     mesh.isolation = config.isolation;
-    // Widen the field cube by 1/(1-2·pad) so the padded normalized positions still map onto the
-    // box [0, boxEdgeM]; centre stays at the box centre.
-    mesh.scale.setScalar(boxEdgeM / (2 * (1 - 2 * FIELD_PADDING)));
-    mesh.position.set(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
+    // Widen the field cube by 1/(1-2·pad) per axis so the padded normalized positions map onto the
+    // box [0, L_axis]; centre stays at the box centre. Anisotropic scale handles a non-cubic box.
+    const widen = 1 / (2 * (1 - 2 * FIELD_PADDING));
+    mesh.scale.set(dims[0] * widen, dims[1] * widen, dims[2] * widen);
+    mesh.position.set(dims[0] / 2, dims[1] / 2, dims[2] / 2);
     mesh.frustumCulled = false;
     mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;
     mesh.userData.materialKey = key;
@@ -287,7 +290,7 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   // continuous density surface from particles, but it does not invent material colour.
   function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null }) {
     const activeKeys = new Set();
-    const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM });
+    const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     for (const batch of batches) {
       const surface = ensureSurface(batch.material);
       const { mesh, config } = surface;
@@ -304,7 +307,7 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
       }
       mesh.reset();
       const radiusM = Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM;
-      const radiusNorm = clamp(radiusM / boxEdgeM, 0.006, 0.14);
+      const radiusNorm = clamp(radiusM / refEdgeM, 0.006, 0.14);
       const strength = (mesh.isolation + config.subtract) * radiusNorm * radiusNorm;
       for (let i = 0; i < batch.count; i += 1) {
         mesh.addBall(

@@ -40,9 +40,10 @@ function combustionReactions() {
 }
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
-function fillCube({ material, min, size, spacing, temperatureK, properties, densityKgPerM3 }) {
+function fillCube({ material, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
   const particles = [];
-  const n = Math.max(2, Math.round(size / spacing));
+  // particlesPerEdge sets the resolution directly (N -> N^3 particles); else derive from spacing.
+  const n = Math.max(1, particlesPerEdge != null ? Math.round(particlesPerEdge) : Math.round(size / spacing));
   const step = size / n;
   const cellVolume = step * step * step;
   const massKg = densityKgPerM3 * cellVolume;
@@ -94,20 +95,19 @@ export function buildSphPhaseDemoState({
   baseMaterial = 'h2o',
   dropTemperatureK,
   baseTemperatureK,
-  ironSpacingM,
-  iceSpacingM,
+  dropParticleEdge = 3, // N -> N^3 particles in the drop block
+  baseParticleEdge = 5, // N -> N^3 particles in the base block
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
-  const boxEdge = scenario.box.edgeM;
+  // Box is a rectangular cuboid [Lx, Ly, Lz] (configurable per axis); a scalar edge stays cubic.
+  const boxDims = scenario.box.dimensionsM ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM];
   const ironEdge = scenario.iron.edgeM;
   const iceEdge = scenario.ice.edgeM;
-  const cx = boxEdge / 2;
-  const cz = boxEdge / 2;
-  // Reduced resolution so the O(N^2) CPU reference carrier runs interactively in the browser.
-  // (Higher counts and the O(N) / GPU hot loop are the performance-upgrade track.)
-  const ironSpacing = ironSpacingM ?? ironEdge / 3;
-  const iceSpacing = iceSpacingM ?? iceEdge / 5;
+  const cx = boxDims[0] / 2;
+  const cz = boxDims[2] / 2;
+  const ironSpacing = ironEdge / dropParticleEdge;
+  const iceSpacing = iceEdge / baseParticleEdge;
 
   // Configurable starting elevation (bottom face) of each block. The base block defaults to resting
   // on the floor; the drop block defaults to a clear gap above it so it visibly falls.
@@ -135,7 +135,7 @@ export function buildSphPhaseDemoState({
     material: dropMaterial,
     min: [cx - ironEdge / 2, ironBase, cz - ironEdge / 2],
     size: ironEdge,
-    spacing: ironSpacing,
+    particlesPerEdge: dropParticleEdge,
     temperatureK: dropTempK,
     properties: dropProps,
     densityKgPerM3: densityAtTemperatureKgPerM3(dropProps, dropTempK)
@@ -144,7 +144,7 @@ export function buildSphPhaseDemoState({
     material: baseMaterial,
     min: [cx - iceEdge / 2, iceBase, cz - iceEdge / 2],
     size: iceEdge,
-    spacing: iceSpacing,
+    particlesPerEdge: baseParticleEdge,
     temperatureK: baseTempK,
     properties: baseProps,
     densityKgPerM3: densityAtTemperatureKgPerM3(baseProps, baseTempK)
@@ -163,7 +163,7 @@ export function buildSphPhaseDemoState({
     scenario,
     closures,
     state,
-    box: { edgeM: boxEdge },
+    box: { dimensionsM: boxDims, edgeM: Math.max(...boxDims) },
     dropMaterial,
     baseMaterial,
     counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
@@ -332,6 +332,7 @@ export function createSphPhaseDemo(options = {}) {
     carrier = createMlsMpmCarrier({
       gridSpacingM,
       boxEdgeM: demo.box.edgeM,
+      boxDimsM: demo.box.dimensionsM,
       dt: carrierDt,
       gravity: options.gravity ?? [0, -9.80665, 0],
       eos,
@@ -377,6 +378,7 @@ export function createSphPhaseDemo(options = {}) {
         materialProperties: demo.materialProperties,
         wallTemperaturesK: demo.scenario.walls.faces,
         boxEdgeM: demo.box.edgeM,
+        boxDimsM: demo.box.dimensionsM,
         dtS: dtStepS,
         conductionRate: options.conductionRate,
         wallRate: options.wallRate
@@ -398,12 +400,12 @@ export function createSphPhaseDemo(options = {}) {
 
       // Display safeguards: reflect at the sealed-box walls and clamp speed so the (reduced,
       // pre-full-EOS) cloud stays bounded and on-screen.
-      const edge = demo.box.edgeM;
+      const dims = demo.box.dimensionsM;
       const maxSpeed = options.maxDisplaySpeedMPerS ?? 25;
       for (const p of demo.state.particles) {
         for (let d = 0; d < 3; d += 1) {
           if (p.x[d] < 0) { p.x[d] = 0; p.v[d] = Math.abs(p.v[d]) * 0.4; }
-          else if (p.x[d] > edge) { p.x[d] = edge; p.v[d] = -Math.abs(p.v[d]) * 0.4; }
+          else if (p.x[d] > dims[d]) { p.x[d] = dims[d]; p.v[d] = -Math.abs(p.v[d]) * 0.4; }
         }
         const speed = Math.hypot(p.v[0], p.v[1], p.v[2]);
         if (speed > maxSpeed) {

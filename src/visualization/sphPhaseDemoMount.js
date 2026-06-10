@@ -21,6 +21,12 @@ const IRON_BASE_DEFAULT_M = 2.5;
 // of the old 10 m domain, so the box wireframe frames the sim and the marching-cubes field spends
 // its resolution where the material actually is.
 const DEMO_BOX_EDGE_M = 5;
+// Default per-axis container dimensions (m). Cubic by default; each axis editable in the panel.
+const BOX_DIM_DEFAULTS_M = { x: 5, y: 5, z: 5 };
+// Default particles per block edge: an N-edge block holds N³ particles. Drop block is denser-looking
+// at a smaller edge; base block fills a larger footprint.
+const DROP_PARTICLE_EDGE_DEFAULT = 3;
+const BASE_PARTICLE_EDGE_DEFAULT = 5;
 // Selectable block materials: the two reference compounds (Fe and H₂O — full referenced closures)
 // plus the FULL set of metallic elements, whose closures are DERIVED on demand from the simulation
 // (jellium + atomic DFT + universal rules) — no per-material tables.
@@ -122,6 +128,10 @@ function buildOverlayShell() {
       <div id="sph-temps" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — apply with Reset</div>
       <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">container box size (m, X·Y·Z) — apply with Reset</div>
+      <div id="sph-box" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">particles per block edge (N → N³ particles) — apply with Reset</div>
+      <div id="sph-counts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
     </aside>
@@ -168,6 +178,40 @@ export function mountSphPhaseDemoOverlay() {
     heightInputs[key] = input;
   }
 
+  const boxEl = overlay.querySelector('#sph-box');
+  const boxInputs = {};
+  for (const [key, label, value] of [['x', 'X', BOX_DIM_DEFAULTS_M.x], ['y', 'Y', BOX_DIM_DEFAULTS_M.y], ['z', 'Z', BOX_DIM_DEFAULTS_M.z]]) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = String(value);
+    input.step = '0.5';
+    input.min = '1';
+    input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    wrap.appendChild(input);
+    boxEl.appendChild(wrap);
+    boxInputs[key] = input;
+  }
+
+  const countsEl = overlay.querySelector('#sph-counts');
+  const countInputs = {};
+  for (const [key, label, value] of [['drop', 'drop edge', DROP_PARTICLE_EDGE_DEFAULT], ['base', 'base edge', BASE_PARTICLE_EDGE_DEFAULT]]) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = String(value);
+    input.step = '1';
+    input.min = '1';
+    input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    wrap.appendChild(input);
+    countsEl.appendChild(wrap);
+    countInputs[key] = input;
+  }
+
   const elementsEl = overlay.querySelector('#sph-elements');
   const elementSelects = {};
   for (const [role, label, def] of [['drop', 'drop block', 'fe'], ['base', 'base block', 'h2o']]) {
@@ -212,7 +256,9 @@ export function mountSphPhaseDemoOverlay() {
     wxmin: wallInputs.xMin, wxmax: wallInputs.xMax, wymin: wallInputs.yMin, wymax: wallInputs.yMax, wzmin: wallInputs.zMin, wzmax: wallInputs.zMax,
     drop: elementSelects.drop, base: elementSelects.base,
     dropt: tempInputs.drop, baset: tempInputs.base,
-    iceh: heightInputs.ice, ironh: heightInputs.iron
+    iceh: heightInputs.ice, ironh: heightInputs.iron,
+    boxx: boxInputs.x, boxy: boxInputs.y, boxz: boxInputs.z,
+    dropn: countInputs.drop, basen: countInputs.base
   };
   function applyUrlToControls() {
     const q = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -230,10 +276,15 @@ export function mountSphPhaseDemoOverlay() {
   applyUrlToControls(); // restore from the URL before the first build
   syncUrlFromControls(); // and reflect the full current state in the URL
 
+  function boxDimensionsFromControls() {
+    const dim = (input, def) => { const v = Number(input.value); return Number.isFinite(v) && v > 0 ? v : def; };
+    return [dim(boxInputs.x, BOX_DIM_DEFAULTS_M.x), dim(boxInputs.y, BOX_DIM_DEFAULTS_M.y), dim(boxInputs.z, BOX_DIM_DEFAULTS_M.z)];
+  }
+
   function scenarioFromControls() {
     const wallFaces = {};
     for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
-    return createSphPhaseScenario({ wallFaces, boxEdgeM: DEMO_BOX_EDGE_M });
+    return createSphPhaseScenario({ wallFaces, boxDimensionsM: boxDimensionsFromControls() });
   }
 
   function driverOptionsFromControls() {
@@ -241,6 +292,8 @@ export function mountSphPhaseDemoOverlay() {
     const ironBaseHeightM = Number(heightInputs.iron.value);
     const dropTemperatureK = Number(tempInputs.drop.value);
     const baseTemperatureK = Number(tempInputs.base.value);
+    const dropEdge = Math.round(Number(countInputs.drop.value));
+    const baseEdge = Math.round(Number(countInputs.base.value));
     return {
       scenario: scenarioFromControls(),
       dropMaterial: elementSelects.drop.value,
@@ -248,12 +301,14 @@ export function mountSphPhaseDemoOverlay() {
       dropTemperatureK: Number.isFinite(dropTemperatureK) ? dropTemperatureK : DROP_TEMP_DEFAULT_K,
       baseTemperatureK: Number.isFinite(baseTemperatureK) ? baseTemperatureK : BASE_TEMP_DEFAULT_K,
       iceBaseHeightM: Number.isFinite(iceBaseHeightM) ? iceBaseHeightM : ICE_BASE_DEFAULT_M,
-      ironBaseHeightM: Number.isFinite(ironBaseHeightM) ? ironBaseHeightM : IRON_BASE_DEFAULT_M
+      ironBaseHeightM: Number.isFinite(ironBaseHeightM) ? ironBaseHeightM : IRON_BASE_DEFAULT_M,
+      dropParticleEdge: Number.isFinite(dropEdge) && dropEdge >= 1 ? dropEdge : DROP_PARTICLE_EDGE_DEFAULT,
+      baseParticleEdge: Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT
     };
   }
 
   let driver = createSphPhaseDemo(driverOptionsFromControls());
-  const scene = createSphPhaseScene(sceneContainer, { boxEdgeM: driver.demo.box.edgeM });
+  let scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM });
   overlay.__sphScene = scene;
 
   function syncParticles() {
@@ -319,6 +374,11 @@ export function mountSphPhaseDemoOverlay() {
     playing = false;
     overlay.querySelector('#sph-play').textContent = 'Play';
     driver = createSphPhaseDemo(driverOptionsFromControls());
+    // The box dimensions may have changed, so rebuild the scene (its field/wireframe/camera are
+    // sized to the box at creation) against the new driver's box.
+    scene.dispose();
+    scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM });
+    overlay.__sphScene = scene;
     syncParticles();
     renderStatus();
   });

@@ -93,6 +93,7 @@ function quadraticWeights(fx) {
 export function createMlsMpmCarrier({
   gridSpacingM,
   boxEdgeM,
+  boxDimsM, // [Lx, Ly, Lz] (rectangular cuboid); falls back to a cube of boxEdgeM
   dt = 4e-4,
   gravity = [0, -9.80665, 0],
   eos,
@@ -103,14 +104,20 @@ export function createMlsMpmCarrier({
   constitutiveOf = () => ({ solid: false }),
   cflFactor = 0.6 // max grid-node displacement per step, as a fraction of a cell (stability guard)
 } = {}) {
+  const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const vMax = (cflFactor * gridSpacingM) / dt;
   const vMax2 = vMax * vMax;
   const dx = gridSpacingM;
   const invDx = 1 / dx;
-  const gn = Math.round(boxEdgeM / dx) + 5; // nodes per axis (with padding); index shift +1
+  // Per-axis node counts (with padding); flat index over gnx·gny·gnz, shifted by +1 for base=-1.
   const shift = 1;
-  const nodeIndex = (i, j, k) => ((i + shift) * gn + (j + shift)) * gn + (k + shift);
-  const inRange = (i) => i + shift >= 0 && i + shift < gn;
+  const gnx = Math.round(dims[0] / dx) + 5;
+  const gny = Math.round(dims[1] / dx) + 5;
+  const gnz = Math.round(dims[2] / dx) + 5;
+  const nodeIndex = (i, j, k) => ((i + shift) * gny + (j + shift)) * gnz + (k + shift);
+  const inRangeX = (i) => i + shift >= 0 && i + shift < gnx;
+  const inRangeY = (j) => j + shift >= 0 && j + shift < gny;
+  const inRangeZ = (k) => k + shift >= 0 && k + shift < gnz;
 
   function ensureParticleState(p) {
     if (p.mpmF === undefined) {
@@ -125,7 +132,7 @@ export function createMlsMpmCarrier({
   function step(state) {
     const particles = state.particles;
     const n = particles.length;
-    const ng = gn * gn * gn;
+    const ng = gnx * gny * gnz;
     const gridMass = new Float64Array(ng);
     const gridMom = new Float64Array(ng * 3); // momentum, then velocity in place
 
@@ -163,11 +170,11 @@ export function createMlsMpmCarrier({
       const wy = quadraticWeights(fy);
       const wz = quadraticWeights(fz);
       for (let a = 0; a < 3; a += 1) {
-        if (!inRange(baseX + a)) continue;
+        if (!inRangeX(baseX + a)) continue;
         for (let b = 0; b < 3; b += 1) {
-          if (!inRange(baseY + b)) continue;
+          if (!inRangeY(baseY + b)) continue;
           for (let c = 0; c < 3; c += 1) {
-            if (!inRange(baseZ + c)) continue;
+            if (!inRangeZ(baseZ + c)) continue;
             const w = wx[a] * wy[b] * wz[c];
             // dpos = node - particle  (Bohr→ m; node at (base+offset)*dx)
             const dposx = (baseX + a - p.x[0] * invDx) * dx;
@@ -185,10 +192,10 @@ export function createMlsMpmCarrier({
     }
 
     // --- grid update: momentum -> velocity, gravity, wall boundary conditions ---
-    for (let i = 0; i < gn; i += 1) {
-      for (let j = 0; j < gn; j += 1) {
-        for (let k = 0; k < gn; k += 1) {
-          const idx = (i * gn + j) * gn + k;
+    for (let i = 0; i < gnx; i += 1) {
+      for (let j = 0; j < gny; j += 1) {
+        for (let k = 0; k < gnz; k += 1) {
+          const idx = (i * gny + j) * gnz + k;
           const m = gridMass[idx];
           if (m <= 0) continue;
           let vx = gridMom[idx * 3] / m + dt * gravity[0];
@@ -205,9 +212,9 @@ export function createMlsMpmCarrier({
           const wx = (i - shift) * dx;
           const wy = (j - shift) * dx;
           const wz = (k - shift) * dx;
-          if ((wx < dx && vx < 0) || (wx > boxEdgeM - dx && vx > 0)) vx = 0;
-          if ((wy < dx && vy < 0) || (wy > boxEdgeM - dx && vy > 0)) vy = 0;
-          if ((wz < dx && vz < 0) || (wz > boxEdgeM - dx && vz > 0)) vz = 0;
+          if ((wx < dx && vx < 0) || (wx > dims[0] - dx && vx > 0)) vx = 0;
+          if ((wy < dx && vy < 0) || (wy > dims[1] - dx && vy > 0)) vy = 0;
+          if ((wz < dx && vz < 0) || (wz > dims[2] - dx && vz > 0)) vz = 0;
           gridMom[idx * 3] = vx;
           gridMom[idx * 3 + 1] = vy;
           gridMom[idx * 3 + 2] = vz;
@@ -230,11 +237,11 @@ export function createMlsMpmCarrier({
       let nvx = 0; let nvy = 0; let nvz = 0;
       const C = new Float64Array(9);
       for (let a = 0; a < 3; a += 1) {
-        if (!inRange(baseX + a)) continue;
+        if (!inRangeX(baseX + a)) continue;
         for (let b = 0; b < 3; b += 1) {
-          if (!inRange(baseY + b)) continue;
+          if (!inRangeY(baseY + b)) continue;
           for (let c = 0; c < 3; c += 1) {
-            if (!inRange(baseZ + c)) continue;
+            if (!inRangeZ(baseZ + c)) continue;
             const w = wx[a] * wy[b] * wz[c];
             const idx = nodeIndex(baseX + a, baseY + b, baseZ + c);
             const gvx = gridMom[idx * 3];
@@ -273,7 +280,7 @@ export function createMlsMpmCarrier({
       // particle pinned at a wall can't keep accumulating inward momentum (an instability source).
       for (let d = 0; d < 3; d += 1) {
         if (p.x[d] < 0) { p.x[d] = 0; if (p.v[d] < 0) p.v[d] = 0; }
-        else if (p.x[d] > boxEdgeM) { p.x[d] = boxEdgeM; if (p.v[d] > 0) p.v[d] = 0; }
+        else if (p.x[d] > dims[d]) { p.x[d] = dims[d]; if (p.v[d] > 0) p.v[d] = 0; }
       }
     }
     state.step = (state.step ?? 0) + 1;
@@ -281,5 +288,5 @@ export function createMlsMpmCarrier({
     return { state };
   }
 
-  return { backend: 'mls-mpm', integrator: 'apic', dt, gridNodesPerAxis: gn, step };
+  return { backend: 'mls-mpm', integrator: 'apic', dt, gridNodesPerAxis: [gnx, gny, gnz], step };
 }

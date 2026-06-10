@@ -78,10 +78,12 @@ function clamp(value, min, max) {
 // Inset the simulation box inside the marching-cubes field cube so surfaces touching a box face
 // (e.g. the ice resting on the floor) aren't clipped at the field boundary. The mesh scale is
 // widened by the same factor (below) so the inset surface still aligns with the box wireframe.
-// Large enough that even a particle resting against a box face (radiusNorm up to ~0.11) keeps its
-// whole metaball inside the field cube, so settled surfaces (ice pooling on the floor) aren't
-// clipped after running for a while.
-const FIELD_PADDING = 0.17;
+// The marching-cubes field cube is only marginally larger than the simulation box, so surfaces
+// stay contained within the box wireframe (no large overhang) while a thin margin still keeps a
+// surface resting against a face from being hard-clipped by the boundary cells. With the snug box,
+// the sealed walls clipping a surface flat against a wall is physically correct (the material is
+// contained), so we don't need the big inset that used to push blobs far outside the box.
+const FIELD_PADDING = 0.03;
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
@@ -211,8 +213,10 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   const width = container.clientWidth || 800;
   const height = container.clientHeight || 520;
   const camera = new THREE.PerspectiveCamera(46, width / height, 0.05, 500);
-  const center = new THREE.Vector3(boxEdgeM / 2, 0.9, boxEdgeM / 2);
-  camera.position.set(center.x + 3.2, center.y + 2.4, center.z + 4.4);
+  // Aim at the box centre and pull back proportionally so the whole sealed box (and everything
+  // contained in it) is framed, instead of looking at the floor and cropping the top.
+  const center = new THREE.Vector3(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
+  camera.position.set(center.x + boxEdgeM * 0.85, center.y + boxEdgeM * 0.55, center.z + boxEdgeM * 1.15);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));

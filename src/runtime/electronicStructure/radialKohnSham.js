@@ -8,6 +8,7 @@
 // Reuses the uniform-electron-gas LDA energy density (uniformElectronGas.js). Atomic units.
 
 import { numberDensityFromRs, uegEnergyPerElectronHa, wignerSeitzRadius } from './uniformElectronGas.js';
+import { electronConfiguration, symbolForZ } from './periodicTable.js';
 
 // LDA exchange-correlation energy per unit volume (Ha/Bohr^3) from the UEG (energy per electron
 // minus the kinetic term = exchange + correlation), and the corresponding potential.
@@ -236,6 +237,132 @@ export const ELEMENT_CONFIGURATIONS = Object.freeze({
   ] }
 });
 
+// ---------------------------------------------------------------------------------------------
+// Logarithmic-grid all-electron solver. A uniform grid wastes points in the valence tail and
+// under-resolves the tight core of heavy atoms; a log grid r_i = e^{x_i} (x uniform) concentrates
+// points near the nucleus, so it stays accurate across the whole periodic table with far fewer
+// points. The radial equation for u = rR, under r = e^x and w = u/sqrt(r), becomes the symmetric
+// Sturm-Liouville form  -w'' + [(l+1/2)^2 + 2 r^2 V_eff] w = E (2 r^2) w, a generalized tridiagonal
+// eigenproblem with positive diagonal weight B = 2 r^2; we fold the weight in (B^{-1/2} A B^{-1/2})
+// to reuse the standard symmetric-tridiagonal eigensolver.
+// ---------------------------------------------------------------------------------------------
+
+function hartreePotentialLog(rho, r, dx) {
+  const n = r.length;
+  // dV factors on the log grid: dr = r dx.  q(r)=∫ρ r'^2 dr' = Σ ρ r'^3 dx ; p(r)=∫_r ρ r' dr' = Σ ρ r'^2 dx.
+  const q = new Float64Array(n);
+  const p = new Float64Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i += 1) { acc += rho[i] * r[i] * r[i] * r[i] * dx; q[i] = acc; }
+  acc = 0;
+  for (let i = n - 1; i >= 0; i -= 1) { acc += rho[i] * r[i] * r[i] * dx; p[i] = acc; }
+  const vH = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) vH[i] = 4 * Math.PI * (q[i] / r[i] + p[i]);
+  return vH;
+}
+
+/**
+ * All-electron Kohn–Sham LDA on a logarithmic radial grid. Accurate across the periodic table.
+ * `configuration` is the { n, l, occupancy } subshell list. Returns total energy, per-subshell
+ * orbital energies, and the integrated electron count.
+ */
+export function solveKohnShamAtomLog({
+  atomicNumberZ,
+  configuration,
+  gridPointsN = 1400,
+  rMinBohr = 1e-5,
+  rMaxBohr = 40,
+  mixing = 0.2,
+  maxScf = 500,
+  tol = 1e-7
+}) {
+  const xMin = Math.log(rMinBohr);
+  const xMax = Math.log(rMaxBohr);
+  const dx = (xMax - xMin) / (gridPointsN - 1);
+  const r = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) r[i] = Math.exp(xMin + i * dx);
+
+  const statesPerL = new Map();
+  for (const sub of configuration) statesPerL.set(sub.l, Math.max(statesPerL.get(sub.l) || 0, sub.n - sub.l));
+
+  // Hydrogenic-ish starting density.
+  let rho = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) rho[i] = atomicNumberZ * (atomicNumberZ ** 3 / Math.PI) * Math.exp(-2 * atomicNumberZ * r[i]);
+
+  let statesByL = new Map();
+  let vH = new Float64Array(gridPointsN);
+  let vXC = new Float64Array(gridPointsN);
+  const invDx2 = 1 / (dx * dx);
+
+  for (let scf = 0; scf < maxScf; scf += 1) {
+    vH = hartreePotentialLog(rho, r, dx);
+    for (let i = 0; i < gridPointsN; i += 1) vXC[i] = xcPotential(rho[i]);
+    statesByL = new Map();
+    for (const [l, count] of statesPerL) {
+      // Folded symmetric-tridiagonal operator  Â = B^{-1/2} A B^{-1/2}, B_ii = 2 r_i^2.
+      const diag = new Float64Array(gridPointsN);
+      const off = new Float64Array(gridPointsN);
+      for (let i = 0; i < gridPointsN; i += 1) {
+        const vEff = -atomicNumberZ / r[i] + vH[i] + vXC[i];
+        // A_ii = 2/dx^2 + (l+1/2)^2 + 2 r^2 V ;  Â_ii = A_ii / (2 r^2)
+        diag[i] = (invDx2 + 0.5 * (l + 0.5) * (l + 0.5)) / (r[i] * r[i]) + vEff;
+        if (i < gridPointsN - 1) off[i] = -invDx2 / (2 * r[i] * r[i + 1]);
+      }
+      const pairs = lowestEigenpairs(diag, off, count, dx);
+      // Recover physical u(r) = ŵ / sqrt(2 r) (B^{-1/2} unfolding, B = 2 r^2), then renormalize
+      // ∫u^2 dr = 1.
+      for (const pair of pairs) {
+        const u = new Float64Array(gridPointsN);
+        for (let i = 0; i < gridPointsN; i += 1) u[i] = pair.u[i] / Math.sqrt(2 * r[i]);
+        let norm = 0;
+        for (let i = 0; i < gridPointsN; i += 1) norm += u[i] * u[i] * r[i] * dx; // ∫u^2 dr, dr = r dx
+        norm = Math.sqrt(norm);
+        for (let i = 0; i < gridPointsN; i += 1) u[i] /= norm;
+        pair.u = u;
+      }
+      statesByL.set(l, pairs);
+    }
+    // New density ρ = Σ occ u^2 / (4π r^2).
+    const rhoNew = new Float64Array(gridPointsN);
+    for (const sub of configuration) {
+      const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+      for (let i = 0; i < gridPointsN; i += 1) rhoNew[i] += (sub.occupancy * state.u[i] * state.u[i]) / (4 * Math.PI * r[i] * r[i]);
+    }
+    let delta = 0;
+    for (let i = 0; i < gridPointsN; i += 1) {
+      delta += Math.abs(rhoNew[i] - rho[i]) * 4 * Math.PI * r[i] * r[i] * r[i] * dx;
+      rho[i] = (1 - mixing) * rho[i] + mixing * rhoNew[i];
+    }
+    if (delta < tol && scf > 8) break;
+  }
+
+  let sumOcc = 0;
+  let electronCount = 0;
+  const orbitals = [];
+  for (const sub of configuration) {
+    const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+    sumOcc += sub.occupancy * state.energyHa;
+    electronCount += sub.occupancy;
+    orbitals.push({ n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa });
+  }
+  let integratedElectrons = 0;
+  let eHartreeDouble = 0;
+  let eXcCorrection = 0;
+  for (let i = 0; i < gridPointsN; i += 1) {
+    const dV = 4 * Math.PI * r[i] * r[i] * r[i] * dx; // 4π r^2 dr, dr = r dx
+    integratedElectrons += rho[i] * dV;
+    eHartreeDouble += 0.5 * rho[i] * vH[i] * dV;
+    eXcCorrection += (xcEnergyPerVolume(rho[i]) - vXC[i] * rho[i]) * dV;
+  }
+  return {
+    totalEnergyHa: sumOcc - eHartreeDouble + eXcCorrection,
+    orbitals,
+    electronCount,
+    integratedElectrons,
+    atomicNumberZ
+  };
+}
+
 function densityFromSubshells(configuration, statesByL, r, gridPointsN) {
   const rho = new Float64Array(gridPointsN);
   for (const sub of configuration) {
@@ -317,4 +444,17 @@ export function solveKohnShamAtomConfig({ atomicNumberZ, configuration, gridPoin
     integratedElectrons,
     atomicNumberZ
   };
+}
+
+/**
+ * Solve any element by atomic number using its ground-state configuration and the logarithmic-grid
+ * Kohn–Sham LDA solver. Grid resolution scales mildly with Z so heavy atoms keep their tight cores
+ * resolved. Returns the solver result plus the element symbol and configuration.
+ */
+export function solveAtom(atomicNumberZ, options = {}) {
+  const configuration = options.configuration ?? electronConfiguration(atomicNumberZ);
+  const gridPointsN = options.gridPointsN ?? Math.round(1200 + 12 * atomicNumberZ);
+  const rMaxBohr = options.rMaxBohr ?? Math.max(20, 60 / Math.sqrt(atomicNumberZ));
+  const result = solveKohnShamAtomLog({ atomicNumberZ, configuration, gridPointsN, rMaxBohr, ...options });
+  return { symbol: symbolForZ(atomicNumberZ), configuration, ...result };
 }

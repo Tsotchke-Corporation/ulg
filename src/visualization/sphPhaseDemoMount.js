@@ -16,6 +16,16 @@ const WALL_DEFAULT_K = 283.15;
 // above it so the drop is visible. Both editable in the panel.
 const ICE_BASE_DEFAULT_M = 0;
 const IRON_BASE_DEFAULT_M = 2.5;
+// Snug simulation box sized to the content (1 m base block + drop block + steam headroom) instead
+// of the old 10 m domain, so the box wireframe frames the sim and the marching-cubes field spends
+// its resolution where the material actually is.
+const DEMO_BOX_EDGE_M = 5;
+// Selectable block materials — the elements/compounds we have full thermodynamic closures for
+// (phases, latent heats, EOS). Defaults reproduce the molten-iron-on-ice scenario.
+const MATERIAL_OPTIONS = [
+  { key: 'fe', label: 'Iron (Fe)' },
+  { key: 'h2o', label: 'Water (H₂O)' }
+];
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -95,6 +105,8 @@ function buildOverlayShell() {
       </div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">materials — apply with Reset</div>
+      <div id="sph-elements" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — apply with Reset</div>
       <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
@@ -143,13 +155,33 @@ export function mountSphPhaseDemoOverlay() {
     heightInputs[key] = input;
   }
 
+  const elementsEl = overlay.querySelector('#sph-elements');
+  const elementSelects = {};
+  for (const [role, label, def] of [['drop', 'drop block', 'fe'], ['base', 'base block', 'h2o']]) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
+    wrap.textContent = label;
+    const select = document.createElement('select');
+    select.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    for (const opt of MATERIAL_OPTIONS) {
+      const o = document.createElement('option');
+      o.value = opt.key;
+      o.textContent = opt.label;
+      if (opt.key === def) o.selected = true;
+      select.appendChild(o);
+    }
+    wrap.appendChild(select);
+    elementsEl.appendChild(wrap);
+    elementSelects[role] = select;
+  }
+
   const statusEl = overlay.querySelector('#sph-status');
   const sceneContainer = overlay.querySelector('#sph-scene');
 
   function scenarioFromControls() {
     const wallFaces = {};
     for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
-    return createSphPhaseScenario({ wallFaces });
+    return createSphPhaseScenario({ wallFaces, boxEdgeM: DEMO_BOX_EDGE_M });
   }
 
   function driverOptionsFromControls() {
@@ -157,6 +189,8 @@ export function mountSphPhaseDemoOverlay() {
     const ironBaseHeightM = Number(heightInputs.iron.value);
     return {
       scenario: scenarioFromControls(),
+      dropMaterial: elementSelects.drop.value,
+      baseMaterial: elementSelects.base.value,
       iceBaseHeightM: Number.isFinite(iceBaseHeightM) ? iceBaseHeightM : ICE_BASE_DEFAULT_M,
       ironBaseHeightM: Number.isFinite(ironBaseHeightM) ? ironBaseHeightM : IRON_BASE_DEFAULT_M
     };
@@ -197,7 +231,7 @@ export function mountSphPhaseDemoOverlay() {
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
       `heat to walls    : ${fmt(pre.energyBudget.heatExportedToWallsJ)} J`,
       `masses (kg)      : Fe ${fmt(pre.masses.ironMassKg)}  ice ${fmt(pre.masses.iceMassKg)}  air ${fmt(pre.masses.airMassKg)}`,
-      `particles        : Fe ${driver.demo.counts.fe}  H2O ${driver.demo.counts.h2o}  total ${driver.demo.counts.total}`,
+      `particles        : ${driver.demo.dropMaterial} ${driver.demo.counts.drop}  ${driver.demo.baseMaterial} ${driver.demo.counts.base}  total ${driver.demo.counts.total}`,
       `molecules/macro  : H2O ${fmt(pre.particleResolution.h2o.entitiesPerMacroParticle)}  Fe ${fmt(pre.particleResolution.fe.entitiesPerMacroParticle)}`,
       `water by phase   : ${water || '—'}`,
       `iron solid frac  : ${fmt(phase.ironSolidFraction, 3)}`,

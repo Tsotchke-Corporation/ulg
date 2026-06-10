@@ -48,9 +48,28 @@ function fillCube({ material, min, size, spacing, temperatureK, properties, dens
  * iron cube on top, both filled with particles. Reduced resolution so the CPU reference carrier runs
  * interactively.
  */
+// Rest density (kg/m^3) of the stable phase of a material at temperature T, from its closure — so
+// each block starts at the correct packing for whatever material/phase it is (molten metal, ice,
+// liquid water, ...).
+function densityAtTemperatureKgPerM3(props, temperatureK) {
+  const u = specificInternalEnergyJPerKg(props, temperatureK);
+  const phase = equilibriumFromSpecificEnergy(props, u).stablePhase;
+  const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
+  return ph.densityKgPerM3;
+}
+
+/**
+ * Build the demo's initial SPH state: a `baseMaterial` block resting on the box floor (cold) and a
+ * `dropMaterial` block above it (hot, so it starts molten/liquid) that falls onto it. The two
+ * block materials are selectable (default iron-on-water); each block's particle mass uses the rest
+ * density of its material's stable phase at its role temperature. Reduced resolution so the CPU
+ * reference carrier runs interactively.
+ */
 export function buildSphPhaseDemoState({
   scenario = createSphPhaseScenario(),
   closures = createReferenceMaterialClosures(),
+  dropMaterial = 'fe',
+  baseMaterial = 'h2o',
   ironSpacingM,
   iceSpacingM,
   iceBaseHeightM,
@@ -66,31 +85,36 @@ export function buildSphPhaseDemoState({
   const ironSpacing = ironSpacingM ?? ironEdge / 3;
   const iceSpacing = iceSpacingM ?? iceEdge / 5;
 
-  // Configurable starting elevation (bottom face) of each block. The ice defaults to resting on
-  // the floor; the iron defaults to a clear gap above the ice top so it visibly falls onto it.
+  // Configurable starting elevation (bottom face) of each block. The base block defaults to resting
+  // on the floor; the drop block defaults to a clear gap above it so it visibly falls.
   const iceBase = iceBaseHeightM ?? 0;
   const ironBase = ironBaseHeightM ?? (iceBase + iceEdge + Math.max(iceEdge, 1.0));
 
-  const ironParticles = fillCube({
-    material: 'fe',
+  const dropProps = closures[dropMaterial].properties;
+  const baseProps = closures[baseMaterial].properties;
+  const dropTempK = scenario.iron.initialTemperatureK; // hot role temperature
+  const baseTempK = scenario.ice.initialTemperatureK; // cold role temperature
+
+  const dropParticles = fillCube({
+    material: dropMaterial,
     min: [cx - ironEdge / 2, ironBase, cz - ironEdge / 2],
     size: ironEdge,
     spacing: ironSpacing,
-    temperatureK: scenario.iron.initialTemperatureK,
-    properties: closures.fe.properties,
-    densityKgPerM3: closures.fe.properties.phases.find((p) => p.name === 'liquid').densityKgPerM3
+    temperatureK: dropTempK,
+    properties: dropProps,
+    densityKgPerM3: densityAtTemperatureKgPerM3(dropProps, dropTempK)
   });
-  const iceParticles = fillCube({
-    material: 'h2o',
+  const baseParticles = fillCube({
+    material: baseMaterial,
     min: [cx - iceEdge / 2, iceBase, cz - iceEdge / 2],
     size: iceEdge,
     spacing: iceSpacing,
-    temperatureK: scenario.ice.initialTemperatureK,
-    properties: closures.h2o.properties,
-    densityKgPerM3: closures.h2o.properties.phases.find((p) => p.name === 'solid').densityKgPerM3
+    temperatureK: baseTempK,
+    properties: baseProps,
+    densityKgPerM3: densityAtTemperatureKgPerM3(baseProps, baseTempK)
   });
 
-  const all = [...iceParticles, ...ironParticles];
+  const all = [...baseParticles, ...dropParticles];
   const smoothingLengthM = 1.6 * Math.min(ironSpacing, iceSpacing);
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   // Carry per-particle temperature + material alongside the SPH state for rendering.
@@ -103,7 +127,9 @@ export function buildSphPhaseDemoState({
     closures,
     state,
     box: { edgeM: boxEdge },
-    counts: { fe: ironParticles.length, h2o: iceParticles.length, total: all.length },
+    dropMaterial,
+    baseMaterial,
+    counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
     materialProperties: { fe: closures.fe.properties, h2o: closures.h2o.properties, air: closures.air.properties }
   };
 }

@@ -9,8 +9,10 @@ import {
 
 test('demo initial state: hot molten-iron block on a cold ice block', () => {
   const demo = buildSphPhaseDemoState();
-  assert.ok(demo.counts.fe > 0 && demo.counts.h2o > 0);
-  assert.equal(demo.counts.total, demo.counts.fe + demo.counts.h2o);
+  assert.ok(demo.counts.drop > 0 && demo.counts.base > 0);
+  assert.equal(demo.counts.total, demo.counts.drop + demo.counts.base);
+  assert.equal(demo.dropMaterial, 'fe');
+  assert.equal(demo.baseMaterial, 'h2o');
   const fe = demo.state.particles.filter((p) => p.material === 'fe');
   const ice = demo.state.particles.filter((p) => p.material === 'h2o');
   assert.ok(fe.every((p) => p.temperatureK === 1850));

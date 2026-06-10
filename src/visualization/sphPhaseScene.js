@@ -239,7 +239,7 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, surfaceRadiusM =
   const boxGeom = new THREE.BoxGeometry(boxEdgeM, boxEdgeM, boxEdgeM);
   const box = new THREE.LineSegments(
     new THREE.EdgesGeometry(boxGeom),
-    new THREE.LineBasicMaterial({ color: 0x1d8b6d, transparent: true, opacity: 0.35 })
+    new THREE.LineBasicMaterial({ color: 0x36d6a4, transparent: true, opacity: 0.6 })
   );
   box.position.set(boxEdgeM / 2, boxEdgeM / 2, boxEdgeM / 2);
   scene.add(box);

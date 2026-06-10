@@ -21,6 +21,30 @@ export const ELEMENT_SYMBOLS = Object.freeze([
   'Rg', 'Cn', 'Nh', 'Fl', 'Mc', 'Lv', 'Ts', 'Og'
 ]);
 
+// Standard atomic weights (u), Z = 1..118; for unstable elements the most-stable-isotope mass
+// number. Used to turn a derived number density into a mass density.
+export const ATOMIC_MASS_U = Object.freeze([
+  1.008, 4.0026, 6.94, 9.0122, 10.81, 12.011, 14.007, 15.999, 18.998, 20.180,
+  22.990, 24.305, 26.982, 28.085, 30.974, 32.06, 35.45, 39.948, 39.098, 40.078,
+  44.956, 47.867, 50.942, 51.996, 54.938, 55.845, 58.933, 58.693, 63.546, 65.38,
+  69.723, 72.630, 74.922, 78.971, 79.904, 83.798, 85.468, 87.62, 88.906, 91.224,
+  92.906, 95.95, 98, 101.07, 102.91, 106.42, 107.87, 112.41, 114.82, 118.71,
+  121.76, 127.60, 126.90, 131.29, 132.91, 137.33, 138.91, 140.12, 140.91, 144.24,
+  145, 150.36, 151.96, 157.25, 158.93, 162.50, 164.93, 167.26, 168.93, 173.05,
+  174.97, 178.49, 180.95, 183.84, 186.21, 190.23, 192.22, 195.08, 196.97, 200.59,
+  204.38, 207.2, 208.98, 209, 210, 222, 223, 226, 227, 232.04,
+  231.04, 238.03, 237, 244, 243, 247, 247, 251, 252, 257,
+  258, 259, 266, 267, 268, 269, 270, 269, 278, 281,
+  282, 285, 286, 289, 290, 293, 294, 294
+]);
+
+const ATOMIC_MASS_UNIT_KG = 1.66053906660e-27;
+
+/** Atomic mass (kg) for atomic number Z. */
+export function atomicMassKg(Z) {
+  return ATOMIC_MASS_U[Z - 1] * ATOMIC_MASS_UNIT_KG;
+}
+
 export const SUBSHELL_CAPACITY = Object.freeze({ 0: 2, 1: 6, 2: 10, 3: 14 });
 const L_LABEL = ['s', 'p', 'd', 'f'];
 
@@ -137,4 +161,18 @@ export function spinElectronConfiguration(Z, options) {
 /** Net spin (Σ(↑−↓)/... here Σ(↑−↓), i.e. 2S) of the ground-state configuration. */
 export function unpairedElectronCount(Z, options) {
   return spinElectronConfiguration(Z, options).reduce((sum, s) => sum + (s.occUp - s.occDown), 0);
+}
+
+/**
+ * Free-electron valence count: the s+p electrons of the outermost principal shell — the
+ * nearly-free conduction electrons of a simple metal. (Partially filled d/f shells of an inner
+ * principal number are treated as core here; that is the free-electron model's limitation for
+ * transition/rare-earth metals, flagged by the closure rather than hidden.)
+ */
+export function valenceElectronCount(Z, options) {
+  const config = electronConfiguration(Z, options);
+  const maxN = config.reduce((m, s) => Math.max(m, s.n), 0);
+  return config
+    .filter((s) => s.n === maxN && (s.l === 0 || s.l === 1))
+    .reduce((sum, s) => sum + s.occupancy, 0);
 }

@@ -25,14 +25,17 @@ const HARTREE_TO_EV = 27.211386245988;
 const BCC_MADELUNG = -0.895929;
 
 /**
- * Energy per valence electron (Ha) of a simple metal at Wigner–Seitz radius r_s.
- * Empty-core correction (Z=1) = (3 r_c^2)/(2 r_s^3): the first-order energy from removing the
- * electron–ion attraction inside the core radius r_c.
+ * Energy per valence electron (Ha) of a simple metal at Wigner–Seitz radius r_s (the electron-gas
+ * r_s). For an ion of charge Z_v the electrostatic (Madelung) energy per electron scales as
+ * Z_v^{2/3}/r_s (the ion sphere has radius Z_v^{1/3} r_s), and the empty-core repulsion scales with
+ * Z_v — so polyvalent metals (Mg, Al) bind more tightly than the monovalent (Z_v=1) form. The
+ * empty-core term (3 Z_v r_c^2)/(2 r_s^3) is the first-order energy from removing the electron–ion
+ * attraction inside the core radius r_c.
  */
-export function simpleMetalEnergyPerElectronHa(rs, { emptyCoreRadiusBohr = 0, madelungCoefficient = BCC_MADELUNG } = {}) {
-  const uegPlusMadelung = uegEnergyPerElectronHa(rs) + madelungCoefficient / rs;
-  const emptyCore = (1.5 * emptyCoreRadiusBohr * emptyCoreRadiusBohr) / (rs * rs * rs);
-  return uegPlusMadelung + emptyCore;
+export function simpleMetalEnergyPerElectronHa(rs, { emptyCoreRadiusBohr = 0, madelungCoefficient = BCC_MADELUNG, valence = 1 } = {}) {
+  const madelung = (madelungCoefficient * valence ** (2 / 3)) / rs;
+  const emptyCore = (1.5 * valence * emptyCoreRadiusBohr * emptyCoreRadiusBohr) / (rs * rs * rs);
+  return uegEnergyPerElectronHa(rs) + madelung + emptyCore;
 }
 
 /**
@@ -75,7 +78,7 @@ export function bulkModulusPa(rsEq, params = {}) {
  * pseudopotential core (the one element-specific input).
  */
 export function simpleMetalColdCurve({ atomicMassKg, valenceElectronsPerAtom = 1, emptyCoreRadiusBohr = 0, madelungCoefficient = BCC_MADELUNG }) {
-  const params = { emptyCoreRadiusBohr, madelungCoefficient };
+  const params = { emptyCoreRadiusBohr, madelungCoefficient, valence: valenceElectronsPerAtom };
   const rsEq = equilibriumRsBohr(params);
   // Volume per atom = Z electrons × volume per electron.
   const volumePerElectronM3 = (4 * Math.PI / 3) * (rsEq * BOHR_TO_M) ** 3;

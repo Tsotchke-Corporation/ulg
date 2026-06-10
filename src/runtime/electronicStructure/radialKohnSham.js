@@ -448,7 +448,8 @@ export function solveKohnShamAtomLog({
   mixing = 0.2,
   maxScf = 500,
   tol = 1e-7,
-  relativistic = false
+  relativistic = false,
+  returnRadialDensity = false
 }) {
   const xMin = Math.log(rMinBohr);
   const xMax = Math.log(rMaxBohr);
@@ -523,6 +524,7 @@ export function solveKohnShamAtomLog({
     electronCount,
     integratedElectrons,
     atomicNumberZ,
+    ...(returnRadialDensity ? { radialGrid: { r: Array.from(r), rho: Array.from(rho), dx } } : {}),
     ...(relativistic ? { relativisticCorrectionHa, totalEnergyRelHa: totalEnergyHa + relativisticCorrectionHa } : {})
   };
 }

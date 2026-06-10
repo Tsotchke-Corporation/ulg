@@ -27,6 +27,8 @@ const DEMO_BOX_EDGE_M = 5;
 const MATERIAL_OPTIONS = [
   { key: 'fe', label: 'Iron (Fe) — ref' },
   { key: 'h2o', label: 'Water (H₂O) — ref' },
+  { key: 'h2', label: 'Hydrogen (H₂) — reacts' },
+  { key: 'o2', label: 'Oxygen (O₂) — reacts' },
   ...metallicElementSymbols()
     .filter((e) => e.Z !== 26) // Fe is offered via the reference closure above
     .map((e) => ({ key: e.symbol, label: `${e.symbol} (Z=${e.Z}) — derived` }))

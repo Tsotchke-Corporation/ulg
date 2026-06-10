@@ -49,7 +49,27 @@ function microphysicsRefsFor(materialKey) {
   return [{ schema: pending, status: 'pending-not-yet-produced' }];
 }
 
+// Diatomic gas closure (H2, O2): heat capacity from equipartition over molecular degrees of freedom
+// (cv = (5/2)R/M for a diatomic near room T — derived, not tabulated); reference STP density for the
+// particle mass. Single gas phase. These are the combustion reactants.
+const DIATOMIC_GASES = {
+  h2: { molarMassKgPerMol: 0.00201588, densityKgPerM3: 0.0899 },
+  o2: { molarMassKgPerMol: 0.0319988, densityKgPerM3: 1.429 }
+};
+function diatomicGasProperties(key) {
+  const d = DIATOMIC_GASES[key];
+  const cv = (5 / 2) * (8.314462618 / d.molarMassKgPerMol);
+  return {
+    molarMassKgPerMol: d.molarMassKgPerMol,
+    idealGas: true,
+    heatCapacityModel: { gas: 'equipartition' },
+    phases: [{ name: 'gas', cpJPerKgK: cv, densityKgPerM3: d.densityKgPerM3, temperatureRange: [0, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }],
+    transitions: []
+  };
+}
+
 function materialProperties(materialKey) {
+  if (DIATOMIC_GASES[materialKey]) return diatomicGasProperties(materialKey);
   const m = REFERENCE_MATERIALS[materialKey];
   if (materialKey === 'h2o') {
     return {
@@ -180,6 +200,8 @@ export function createReferenceMaterialClosures() {
   return {
     h2o: buildMaterialClosure('h2o'),
     fe: buildMaterialClosure('fe'),
-    air: buildMaterialClosure('air')
+    air: buildMaterialClosure('air'),
+    h2: buildMaterialClosure('h2'),
+    o2: buildMaterialClosure('o2')
   };
 }

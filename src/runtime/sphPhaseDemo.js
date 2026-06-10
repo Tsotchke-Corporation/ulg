@@ -20,6 +20,24 @@ import { createPhaseAwareEos } from './sph/multiMaterialEos.js';
 import { createMlsMpmCarrier } from './sph/mlsMpmCarrier.js';
 import { elementMaterialClosure } from './material/elementClosures.js';
 import { zForSymbol } from './electronicStructure/periodicTable.js';
+import { reactiveStep, deriveReactionEnthalpyJPerKg } from './sph/reactiveChemistry.js';
+
+// Combustion reaction network (2 H2 + O2 -> 2 H2O), enthalpy DERIVED from the molecular bonding
+// engine. Cached module-wide (the molecular HF/UHF calc runs once). Activation = H2 autoignition.
+let cachedReactions = null;
+function combustionReactions() {
+  if (cachedReactions) return cachedReactions;
+  const specificEnthalpyJPerKg = deriveReactionEnthalpyJPerKg({
+    reactants: [
+      { atoms: [{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }], count: 2 },
+      { atoms: [{ Z: 8, position: [0, 0, 0] }, { Z: 8, position: [0, 0, 2.28] }], multiplicity: 3, count: 1 }
+    ],
+    products: [{ atoms: [{ Z: 8, position: [0, 0, 0] }, { Z: 1, position: [1.43, 0, 1.108] }, { Z: 1, position: [-1.43, 0, 1.108] }], count: 2 }],
+    productMassKgPerMol: 0.018016
+  });
+  cachedReactions = [{ a: 'h2', b: 'o2', product: 'h2o', activationTemperatureK: 773, specificEnthalpyJPerKg }];
+  return cachedReactions;
+}
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
 function fillCube({ material, min, size, spacing, temperatureK, properties, densityKgPerM3 }) {
@@ -332,6 +350,15 @@ export function createSphPhaseDemo(options = {}) {
     });
   }
   const dtStepS = mechanicalSubsteps * carrierDt; // sim-time advanced per driver.step
+
+  // Reactive chemistry: enabled when the two blocks are a reacting pair (H2 + O2 → H2O). The
+  // enthalpy is derived from the bonding engine; on contact above the activation temperature the
+  // reactant particles become product and release heat (→ temperature → steam → expansion).
+  const blockMaterials = [demo.dropMaterial, demo.baseMaterial];
+  const reactions = (blockMaterials.includes('h2') && blockMaterials.includes('o2')) ? combustionReactions() : [];
+  const reactionContactRadiusM = gridSpacingM * 1.2;
+  const reactionTemperatureOf = (p) => equilibriumFromSpecificEnergy(demo.materialProperties[p.material], p.specificInternalEnergyJPerKg).temperatureK;
+
   return {
     demo,
     preflight() {
@@ -362,6 +389,12 @@ export function createSphPhaseDemo(options = {}) {
       demo.state.particles.forEach((p, i) => {
         if (p.material === 'h2o' && thermal[i].phase === 'gas') p.v[1] += steamBuoyancy * dtStepS;
       });
+
+      // Reactive chemistry: reactant particles in contact above the activation temperature react,
+      // becoming product and releasing the derived reaction enthalpy as heat.
+      if (reactions.length) {
+        reactiveStep(demo.state, { reactions, materialProperties: demo.materialProperties, contactRadiusM: reactionContactRadiusM, temperatureOf: reactionTemperatureOf });
+      }
 
       // Display safeguards: reflect at the sealed-box walls and clamp speed so the (reduced,
       // pre-full-EOS) cloud stays bounded and on-screen.

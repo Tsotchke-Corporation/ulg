@@ -107,11 +107,8 @@ function sturmCount(diag, off, mu) {
   return count;
 }
 
-/**
- * The k lowest eigenpairs of a symmetric tridiagonal matrix (diag d, sub/super-diagonal off,
- * length n-1): eigenvalues by Sturm-sequence bisection, eigenvectors by inverse iteration.
- */
-function lowestEigenpairs(diag, off, k, h) {
+// Gershgorin bracket [lo, hi] containing all eigenvalues of the symmetric tridiagonal (diag, off).
+function gershgorinBounds(diag, off) {
   const n = diag.length;
   let lo = Infinity;
   let hi = -Infinity;
@@ -120,36 +117,78 @@ function lowestEigenpairs(diag, off, k, h) {
     lo = Math.min(lo, diag[i] - radius);
     hi = Math.max(hi, diag[i] + radius);
   }
-  const pairs = [];
-  for (let m = 1; m <= k; m += 1) {
-    let a = lo;
-    let b = hi;
-    for (let iter = 0; iter < 120; iter += 1) {
-      const mid = 0.5 * (a + b);
-      if (sturmCount(diag, off, mid) >= m) b = mid; else a = mid;
-    }
-    const value = 0.5 * (a + b);
-    // Eigenvector by inverse iteration at a shift just off the eigenvalue.
-    const shift = value - 1e-7 * (Math.abs(value) + 1);
-    const shifted = new Float64Array(n);
-    for (let i = 0; i < n; i += 1) shifted[i] = diag[i] - shift;
-    let v = new Float64Array(n);
-    for (let i = 0; i < n; i += 1) v[i] = Math.sin(((m) * Math.PI * (i + 1)) / (n + 1));
-    for (let iter = 0; iter < 12; iter += 1) {
-      const y = solveTridiagonal(shifted, off, v);
-      // Orthogonalize against already-found lower eigenvectors (∫ dr weight = h).
-      for (const prev of pairs) {
+  return { lo, hi };
+}
+
+// Bisections needed to pin an eigenvalue to ~1e-13 absolute, given the bracket width. The folded
+// log-grid operators have a very wide Gershgorin span (~1e16, from the 1/r^2 diagonal at tiny r),
+// so this adapts instead of using a fixed (and either too-coarse or wasteful) count.
+function bisectionIters(span) {
+  return Math.min(160, Math.max(48, Math.ceil(Math.log2(Math.max(span, 1e-300) / 1e-13))));
+}
+
+/**
+ * The m-th lowest eigenpair (1-indexed) of a symmetric tridiagonal matrix: eigenvalue by Sturm-
+ * sequence bisection, eigenvector by inverse iteration at that shift. `lowerVecs` (optional) are
+ * already-found lower eigenvectors to orthogonalize against (needed only for near-degenerate
+ * spectra; atomic radial states of one l are well separated, so the KH solver omits them). `bounds`
+ * can be passed to reuse a precomputed Gershgorin bracket.
+ */
+function nthEigenpair(diag, off, m, h, { lowerVecs = null, bounds = null, bracketHint = null } = {}) {
+  const n = diag.length;
+  let a;
+  let b;
+  // A narrow bracket hint (e.g. the previous SCF/ε-iteration's eigenvalue ± a window) collapses the
+  // bisection from ~95 steps over the huge Gershgorin span to ~40 — but only if it truly brackets
+  // the m-th eigenvalue (sturm(a) < m ≤ sturm(b)); otherwise fall back to the full bracket.
+  if (bracketHint && sturmCount(diag, off, bracketHint[0]) < m && sturmCount(diag, off, bracketHint[1]) >= m) {
+    [a, b] = bracketHint;
+  } else {
+    const { lo, hi } = bounds ?? gershgorinBounds(diag, off);
+    a = lo; b = hi;
+  }
+  const iters = bisectionIters(b - a);
+  for (let iter = 0; iter < iters; iter += 1) {
+    const mid = 0.5 * (a + b);
+    if (sturmCount(diag, off, mid) >= m) b = mid; else a = mid;
+  }
+  const value = 0.5 * (a + b);
+  const shift = value - 1e-7 * (Math.abs(value) + 1);
+  const shifted = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) shifted[i] = diag[i] - shift;
+  let v = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) v[i] = Math.sin((m * Math.PI * (i + 1)) / (n + 1));
+  for (let iter = 0; iter < 12; iter += 1) {
+    const y = solveTridiagonal(shifted, off, v);
+    if (lowerVecs) {
+      for (const prev of lowerVecs) {
         let dot = 0;
-        for (let i = 0; i < n; i += 1) dot += y[i] * prev.u[i] * h;
-        for (let i = 0; i < n; i += 1) y[i] -= dot * prev.u[i];
+        for (let i = 0; i < n; i += 1) dot += y[i] * prev[i] * h;
+        for (let i = 0; i < n; i += 1) y[i] -= dot * prev[i];
       }
-      let norm = 0;
-      for (let i = 0; i < n; i += 1) norm += y[i] * y[i] * h;
-      norm = Math.sqrt(norm);
-      for (let i = 0; i < n; i += 1) v[i] = y[i] / norm;
     }
-    if (v[1] < 0) for (let i = 0; i < n; i += 1) v[i] = -v[i];
-    pairs.push({ energyHa: value, u: v });
+    let norm = 0;
+    for (let i = 0; i < n; i += 1) norm += y[i] * y[i] * h;
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < n; i += 1) v[i] = y[i] / norm;
+  }
+  if (v[1] < 0) for (let i = 0; i < n; i += 1) v[i] = -v[i];
+  return { energyHa: value, u: v };
+}
+
+/**
+ * The k lowest eigenpairs of a symmetric tridiagonal matrix (diag d, sub/super-diagonal off):
+ * eigenvalues by Sturm-sequence bisection, eigenvectors by inverse iteration with Gram-Schmidt
+ * deflation against the lower states.
+ */
+function lowestEigenpairs(diag, off, k, h) {
+  const bounds = gershgorinBounds(diag, off);
+  const pairs = [];
+  const lowerVecs = [];
+  for (let m = 1; m <= k; m += 1) {
+    const pair = nthEigenpair(diag, off, m, h, { lowerVecs, bounds });
+    pairs.push(pair);
+    lowerVecs.push(pair.u);
   }
   return pairs;
 }
@@ -372,8 +411,11 @@ export function radialStatesKH(vElec, r, dx, l, count, atomicNumberZ, initialEne
         diag[i] = aDiag / bDiag;
         if (i < n - 1) off[i] = -invDx2 / (2 * r[i] * r[i + 1] * Math.sqrt(M[i] * M[i + 1]));
       }
-      const pairs = lowestEigenpairs(diag, off, k + 1, dx);
-      const pair = pairs[k];
+      // Only the (k+1)-th eigenpair is needed (atomic radial states of one l are well separated,
+      // so no deflation against the lower ones is required) — far cheaper than all k+1. Warm-start
+      // the bracket from the running energy estimate (consecutive iterations barely move it).
+      const window = Math.max(2, 0.05 * Math.abs(energy));
+      const pair = nthEigenpair(diag, off, k + 1, dx, { bracketHint: [energy - window, energy + window] });
       const newEnergy = pair.energyHa;
       u = pair.u;
       if (Math.abs(newEnergy - energy) < 1e-9 && iter > 1) { energy = newEnergy; break; }

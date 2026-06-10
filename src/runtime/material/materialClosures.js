@@ -54,10 +54,14 @@ function materialProperties(materialKey) {
   if (materialKey === 'h2o') {
     return {
       molarMassKgPerMol: m.molarMassKgPerMol,
+      // Elastic moduli (Pa): bulk modulus K sets the sound speed c=√(K/ρ) and the EOS stiffness;
+      // shear modulus μ sets a solid's rigidity (a liquid has μ=0 → no shear → flows). Measured
+      // reference values (closureBacked, not yet ab-initio — the elastic-tensor-from-DFT track), so
+      // the dynamics' stiffness is a real material property rather than an arbitrary constant.
       phases: [
-        { name: 'solid', cpJPerKgK: m.cpJPerKgK.solid, densityKgPerM3: m.densityKgPerM3.solid, temperatureRange: [0, m.meltingPointK] },
-        { name: 'liquid', cpJPerKgK: m.cpJPerKgK.liquid, densityKgPerM3: m.densityKgPerM3.liquid, temperatureRange: [m.meltingPointK, m.boilingPointK] },
-        { name: 'gas', cpJPerKgK: m.cpJPerKgK.gas, densityKgPerM3: m.densityKgPerM3.gas, temperatureRange: [m.boilingPointK, OPEN_TOP_K] }
+        { name: 'solid', cpJPerKgK: m.cpJPerKgK.solid, densityKgPerM3: m.densityKgPerM3.solid, temperatureRange: [0, m.meltingPointK], bulkModulusPa: 8.8e9, shearModulusPa: 3.5e9 },
+        { name: 'liquid', cpJPerKgK: m.cpJPerKgK.liquid, densityKgPerM3: m.densityKgPerM3.liquid, temperatureRange: [m.meltingPointK, m.boilingPointK], bulkModulusPa: 2.2e9, shearModulusPa: 0 },
+        { name: 'gas', cpJPerKgK: m.cpJPerKgK.gas, densityKgPerM3: m.densityKgPerM3.gas, temperatureRange: [m.boilingPointK, OPEN_TOP_K], bulkModulusPa: null, shearModulusPa: 0 }
       ],
       transitions: [
         { from: 'solid', to: 'liquid', temperatureK: m.meltingPointK, latentHeatJPerKg: m.latentHeatFusionJPerKg },
@@ -83,9 +87,13 @@ function materialProperties(materialKey) {
           debyeTemperatureK: IRON_DEBYE_TEMPERATURE_K,
           // Grüneisen thermal EOS: thermal expansion / ρ(T) derived from these cold-curve inputs
           // (reference density, bulk modulus, Grüneisen γ) — the inputs ideally come from DFT.
-          eos: { gruneisen: 1.7, bulkModulusPa: 170e9, referenceDensityKgPerM3: m.densityKgPerM3.solid, referenceTemperatureK: 293 }
+          eos: { gruneisen: 1.7, bulkModulusPa: 170e9, referenceDensityKgPerM3: m.densityKgPerM3.solid, referenceTemperatureK: 293 },
+          // Elastic moduli (Pa) for the mechanical stiffness: bulk K (= the EOS bulk modulus above)
+          // and shear μ (rigidity). Reference values, closureBacked.
+          bulkModulusPa: 170e9,
+          shearModulusPa: 82e9
         },
-        { name: 'liquid', cpJPerKgK: m.cpJPerKgK.liquid, densityKgPerM3: m.densityKgPerM3.liquid, temperatureRange: [m.meltingPointK, OPEN_TOP_K] }
+        { name: 'liquid', cpJPerKgK: m.cpJPerKgK.liquid, densityKgPerM3: m.densityKgPerM3.liquid, temperatureRange: [m.meltingPointK, OPEN_TOP_K], bulkModulusPa: 110e9, shearModulusPa: 0 }
       ],
       transitions: [
         // Latent heat of fusion derived from the melting point via Richards' rule (ΔS_fus ≈ R for

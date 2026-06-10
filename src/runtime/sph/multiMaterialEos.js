@@ -23,43 +23,41 @@
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 
 const TAIT_EXPONENT = 7;
+const R_GAS = 8.314462618; // J/(mol K)
 
 /**
- * Build a per-particle EOS closure for computeAccelerationsAndEnergyRates. It maps each particle's
- * specific internal energy to a phase (via the closures), looks up that phase's rest density, and
- * returns { pressurePa, soundSpeedMPerS } from the weakly-compressible law above.
+ * Build a per-particle EOS closure for computeAccelerationsAndEnergyRates. The sound speed of each
+ * phase is DERIVED from material properties, not set by hand:
+ *  - condensed (solid/liquid): c = √(K/ρ₀) from the phase's bulk modulus K (closure property).
+ *  - gas: the ideal-gas sound speed c = √(γ R T / M), with γ = cp/cv (cv = cp − R/M) from the
+ *    closure's heat capacity and molar mass.
+ * `soundSpeedScale` is the single demo-stability concession — one global dimensionless factor that
+ * scales every real sound speed down so the timestep is interactive (real GPa/ideal-gas speeds
+ * would force a tiny dt). It scales all materials equally, so the RELATIVE stiffnesses stay
+ * physical (iron stiffer than ice stiffer than water). Returns { pressurePa, soundSpeedMPerS }.
  */
-export function createPhaseAwareEos(materialProperties, {
-  condensedSoundSpeedMPerS = 220,
-  gasSoundSpeedMPerS = 60
-} = {}) {
-  const restDensityCache = new Map();
-  function restDensityOf(material, phase) {
-    const cacheKey = `${material}:${phase}`;
-    if (restDensityCache.has(cacheKey)) return restDensityCache.get(cacheKey);
-    const props = materialProperties[material];
-    const ph = props?.phases?.find((p) => p.name === phase);
-    const value = ph && Number.isFinite(ph.densityKgPerM3) ? ph.densityKgPerM3 : null;
-    restDensityCache.set(cacheKey, value);
-    return value;
-  }
-
+export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, minGasSoundSpeedMPerS = 0 } = {}) {
   return function phaseAwareEos({ density, specificInternalEnergyJPerKg, particle }) {
     const props = materialProperties[particle?.material];
-    let phase = 'liquid';
-    if (props) {
-      phase = equilibriumFromSpecificEnergy(props, specificInternalEnergyJPerKg).stablePhase || 'liquid';
-    }
-    const rho0 = restDensityOf(particle?.material, phase) ?? density;
+    if (!props) return { pressurePa: 0, soundSpeedMPerS: 0 };
+    const eq = equilibriumFromSpecificEnergy(props, specificInternalEnergyJPerKg);
+    const phase = eq.stablePhase || 'liquid';
+    const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
+    const rho0 = Number.isFinite(ph.densityKgPerM3) ? ph.densityKgPerM3 : density;
     if (phase === 'gas') {
-      const c = gasSoundSpeedMPerS;
-      const p = c * c * (density - rho0); // drives liquid-packed steam to expand toward rho0_gas
-      return { pressurePa: Math.max(0, p), soundSpeedMPerS: c };
+      const Rspecific = R_GAS / props.molarMassKgPerMol;
+      const cp = ph.cpJPerKgK;
+      const gamma = cp > Rspecific ? cp / (cp - Rspecific) : 1.33; // cp/cv, cv = cp - R/M
+      const cReal = Math.sqrt(Math.max(gamma * Rspecific * eq.temperatureK, 0));
+      const c = Math.max(cReal * soundSpeedScale, minGasSoundSpeedMPerS);
+      // Drives liquid-packed steam to expand toward the gas rest density.
+      return { pressurePa: Math.max(0, c * c * (density - rho0)), soundSpeedMPerS: c };
     }
-    const c = condensedSoundSpeedMPerS;
+    // Condensed: sound speed from the bulk modulus.
+    const cReal = ph.bulkModulusPa ? Math.sqrt(ph.bulkModulusPa / rho0) : 0;
+    const c = cReal * soundSpeedScale;
     const ratio = density / Math.max(rho0, 1e-9);
     const bulk = (rho0 * c * c) / TAIT_EXPONENT;
-    const p = bulk * (ratio ** TAIT_EXPONENT - 1);
-    return { pressurePa: p, soundSpeedMPerS: c };
+    return { pressurePa: bulk * (ratio ** TAIT_EXPONENT - 1), soundSpeedMPerS: c };
   };
 }

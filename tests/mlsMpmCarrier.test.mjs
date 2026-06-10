@@ -17,7 +17,7 @@ function waterBlock(rho0, spacing, u) {
 test('MLS-MPM: water block falls under gravity (free-fall) and the fluid stays incompressible', () => {
   const closures = createReferenceMaterialClosures();
   const mp = { fe: closures.fe.properties, h2o: closures.h2o.properties, air: closures.air.properties };
-  const eos = createPhaseAwareEos(mp, { condensedSoundSpeedMPerS: 180, gasSoundSpeedMPerS: 70 });
+  const eos = createPhaseAwareEos(mp, { soundSpeedScale: 0.1 });
   const u = specificInternalEnergyJPerKg(mp.h2o, 300);
   const rho0 = 1000;
   const parts = waterBlock(rho0, 0.15, u);
@@ -39,7 +39,7 @@ test('MLS-MPM: water block falls under gravity (free-fall) and the fluid stays i
 test('MLS-MPM: stays stable settling on the floor over a long run (no NaN, no blow-up)', () => {
   const closures = createReferenceMaterialClosures();
   const mp = { fe: closures.fe.properties, h2o: closures.h2o.properties, air: closures.air.properties };
-  const eos = createPhaseAwareEos(mp);
+  const eos = createPhaseAwareEos(mp, { soundSpeedScale: 0.1 });
   const u = specificInternalEnergyJPerKg(mp.h2o, 300);
   const rho0 = 1000;
   const parts = waterBlock(rho0, 0.15, u);

@@ -252,10 +252,20 @@ export function createSphPhaseDemo(options = {}) {
   // density (from the closures), so condensed iron/water stay ~incompressible while vaporized water
   // expands toward the gas density. This is what makes the steam grow in volume and stops the
   // molten iron from puffing up like a gas. Shared by both mechanical backends.
-  const eos = createPhaseAwareEos(demo.materialProperties, {
-    condensedSoundSpeedMPerS: options.condensedSoundSpeedMPerS ?? 180,
-    gasSoundSpeedMPerS: options.gasSoundSpeedMPerS ?? 70
-  });
+  // The mechanical stiffness is derived from each phase's real bulk/shear moduli (closure
+  // properties), not hand-set sound speeds. The ONE demo concession is a single global
+  // `soundSpeedScale`: real condensed sound speeds (km/s) would force a tiny timestep, so we scale
+  // every real sound speed down by one factor chosen so the stiffest material sits at a stable cap.
+  // Relative stiffnesses (iron > ice > water) stay physical; only the absolute timescale is scaled.
+  const realSoundSpeed = (ph) => (ph.bulkModulusPa && ph.densityKgPerM3 ? Math.sqrt(ph.bulkModulusPa / ph.densityKgPerM3) : 0);
+  let maxRealSoundSpeed = 0;
+  for (const props of Object.values(demo.materialProperties)) {
+    for (const ph of props.phases || []) maxRealSoundSpeed = Math.max(maxRealSoundSpeed, realSoundSpeed(ph));
+  }
+  const soundSpeedCapMPerS = options.soundSpeedCapMPerS ?? 220;
+  const soundSpeedScale = maxRealSoundSpeed > 0 ? soundSpeedCapMPerS / maxRealSoundSpeed : 1;
+  const modulusScale = soundSpeedScale * soundSpeedScale; // moduli scale as c^2
+  const eos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS: 40 });
 
   // Mechanical backend: MLS-MPM (default — grid-based, stable for large deformation / multi-material
   // / free-surface, GPU-friendly) or the SPH carrier (conservation reference). Both consume the same
@@ -269,20 +279,18 @@ export function createSphPhaseDemo(options = {}) {
     carrierDt = options.dt ?? 5e-4;
     mechanicalSubsteps = options.mechanicalSubsteps ?? 16;
     // Phase-dependent constitutive model: a particle in its SOLID phase resists shear (corotated
-    // elasticity → it holds its block shape), and as soon as it melts (phase → liquid/gas) it
-    // becomes a fluid and flows. Reduced elastic moduli from the same weakly-compressible sound
-    // speed as the EOS (real GPa stiffness would force a tiny dt), so the shear-wave speed matches
-    // the acoustic one — labelled, validation false.
-    const cSound = options.condensedSoundSpeedMPerS ?? 180;
-    const cShear = cSound * 0.6;
+    // elasticity → it holds its block shape); when it melts (phase → liquid/gas, shear modulus 0) it
+    // becomes a fluid and flows. The elastic moduli are the phase's real shear μ and Lamé
+    // λ = K − ⅔μ (from the closure bulk/shear moduli), scaled by the same global modulusScale as the
+    // EOS — derived material properties, not arbitrary constants.
     const constitutiveOf = (p) => {
       const props = demo.materialProperties[p.material];
       const phase = equilibriumFromSpecificEnergy(props, p.specificInternalEnergyJPerKg).stablePhase;
-      if (phase !== 'solid') return { solid: false };
-      const solidPhase = props.phases.find((ph) => ph.name === 'solid');
-      const rho0 = (solidPhase && solidPhase.densityKgPerM3) || p.restDensityKgPerM3;
-      const mu = rho0 * cShear * cShear;
-      return { solid: true, shearModulusPa: mu, lambdaPa: Math.max(rho0 * (cSound * cSound - 2 * cShear * cShear), 0.1 * mu) };
+      const ph = props.phases.find((q) => q.name === phase);
+      if (phase !== 'solid' || !ph || !(ph.shearModulusPa > 0)) return { solid: false };
+      const mu = ph.shearModulusPa * modulusScale;
+      const lambda = Math.max((ph.bulkModulusPa - (2 / 3) * ph.shearModulusPa) * modulusScale, 0);
+      return { solid: true, shearModulusPa: mu, lambdaPa: lambda };
     };
     carrier = createMlsMpmCarrier({
       gridSpacingM: options.gridSpacingM ?? Math.max(0.15, demo.state.smoothingLengthM),

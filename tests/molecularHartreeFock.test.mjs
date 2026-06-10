@@ -89,3 +89,23 @@ test('geometry optimization predicts molecular structure from first principles',
   assert.ok(oh > 1.7 && oh < 2.0, `OH ${oh.toFixed(3)} bohr`);
   assert.ok(angle > 95 && angle < 112, `HOH angle ${angle.toFixed(1)} deg`);
 });
+
+import { populationAnalysis } from '../src/runtime/electronicStructure/molecularHartreeFock.js';
+
+test('population analysis reads bonding off the wavefunction (charges + bond orders)', () => {
+  const h2mol = [{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }];
+  const h2 = populationAnalysis(rhf(h2mol), h2mol);
+  assert.ok(Math.abs(h2.bondOrders[0][1] - 1) < 0.05, `H2 bond order ${h2.bondOrders[0][1]}`);
+  assert.ok(Math.abs(h2.charges[0]) < 1e-2);
+
+  const wmol = [{ Z: 8, position: [0, 0, 0] }, { Z: 1, position: [1.43, 0, 1.108] }, { Z: 1, position: [-1.43, 0, 1.108] }];
+  const w = populationAnalysis(rhf(wmol), wmol);
+  assert.ok(w.charges[0] < -0.2, 'O should be negative'); // polar O-H
+  assert.ok(w.charges[1] > 0.1 && w.charges[2] > 0.1, 'H should be positive');
+  assert.ok(Math.abs(w.charges[0] + w.charges[1] + w.charges[2]) < 1e-6, 'charge conserved');
+  assert.ok(w.bondOrders[0][1] > 0.8 && w.bondOrders[0][1] < 1.2, 'O-H ~ single bond');
+
+  // Multiple bonds show up as bond order > 2.
+  const n2mol = [{ Z: 7, position: [0, 0, 0] }, { Z: 7, position: [0, 0, 2.07] }];
+  assert.ok(populationAnalysis(rhf(n2mol), n2mol).bondOrders[0][1] > 2, 'N2 multiple bond');
+});

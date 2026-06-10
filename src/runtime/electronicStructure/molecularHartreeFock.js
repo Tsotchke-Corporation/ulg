@@ -262,16 +262,22 @@ const P_DIRECTIONS = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 /** Build the contracted basis functions for a molecule (atoms: [{ Z, position:[x,y,z] }], Bohr). */
 export function buildBasis(atoms) {
   const basis = [];
-  for (const atom of atoms) {
+  atoms.forEach((atom, atomIndex) => {
     const shells = STO3G[atom.Z];
     if (!shells) throw new Error(`No STO-3G basis for Z=${atom.Z} (have H,He,C,N,O)`);
     for (const shell of shells) {
-      basis.push(makeBasisFunction(atom.position, [0, 0, 0], shell.exps, shell.sCoef));
+      const s = makeBasisFunction(atom.position, [0, 0, 0], shell.exps, shell.sCoef);
+      s.atomIndex = atomIndex;
+      basis.push(s);
       if (shell.l === 'sp') {
-        for (const dir of P_DIRECTIONS) basis.push(makeBasisFunction(atom.position, dir, shell.exps, shell.pCoef));
+        for (const dir of P_DIRECTIONS) {
+          const p = makeBasisFunction(atom.position, dir, shell.exps, shell.pCoef);
+          p.atomIndex = atomIndex;
+          basis.push(p);
+        }
       }
     }
-  }
+  });
   return basis;
 }
 
@@ -346,7 +352,7 @@ function solveFock(Fock, X, n) {
  * Returns the total Born–Oppenheimer energy (electronic + nuclear repulsion) and diagnostics.
  */
 export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.5 } = {}) {
-  const { n, nElectrons, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
+  const { basis, n, nElectrons, S, Hcore, eri, idx, X, nuclearRepulsion } = buildIntegrals(atoms, charge);
   if (nElectrons % 2 !== 0) throw new Error('RHF requires an even electron count (closed shell)');
   const nOcc = nElectrons / 2;
   let P = Array.from({ length: n }, () => new Array(n).fill(0));
@@ -354,6 +360,7 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
   let lastEnergy = Infinity;
   let finalC = null;
   let finalEps = null;
+  let finalP = P;
   for (let iter = 0; iter < maxIter; iter += 1) {
     const Fock = Array.from({ length: n }, () => new Array(n).fill(0));
     for (let i = 0; i < n; i += 1) {
@@ -374,12 +381,13 @@ export function rhf(atoms, { charge = 0, maxIter = 200, tol = 1e-8, damping = 0.
     }
     let eElec = 0;
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) eElec += 0.5 * Pnew[i][j] * (Hcore[i][j] + Fock[i][j]);
+    finalP = Pnew;
     for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) P[i][j] = damping * Pnew[i][j] + (1 - damping) * P[i][j];
     energy = eElec;
     if (Math.abs(energy - lastEnergy) < tol && iter > 2) break;
     lastEnergy = energy;
   }
-  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx };
+  return { totalEnergyHa: energy + nuclearRepulsion, electronicEnergyHa: energy, nuclearRepulsionHa: nuclearRepulsion, nBasis: n, nElectrons, nOcc, C: finalC, orbitalEnergies: finalEps, eri, idx, P: finalP, S, basis };
 }
 
 /**
@@ -591,6 +599,33 @@ export function atomizationEnergyHa(atoms, { moleculeOptions = {}, atomCache = n
     eAtoms += atomCache.get(a.Z);
   }
   return { atomizationEnergyHa: eAtoms - eMolecule, moleculeEnergyHa: eMolecule, atomsEnergyHa: eAtoms };
+}
+
+/**
+ * Population analysis from a converged RHF wavefunction: Mulliken partial charges and Mayer bond
+ * orders — how the electrons are shared, read straight off the density. Pass an `rhf` result and the
+ * atom list. Mulliken charge Q_A = Z_A − Σ_{μ∈A}(PS)_μμ; Mayer bond order
+ * B_AB = Σ_{μ∈A}Σ_{ν∈B}(PS)_μν(PS)_νμ (≈ the number of shared electron pairs — a triple bond → ~3).
+ */
+export function populationAnalysis(rhfResult, atoms) {
+  const { P, S, basis, nBasis: n } = rhfResult;
+  const PS = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1) {
+    let s = 0;
+    for (let k = 0; k < n; k += 1) s += P[i][k] * S[k][j];
+    PS[i][j] = s;
+  }
+  const charges = atoms.map((a) => a.Z);
+  for (let i = 0; i < n; i += 1) charges[basis[i].atomIndex] -= PS[i][i];
+  const bondOrders = atoms.map(() => atoms.map(() => 0));
+  for (let i = 0; i < n; i += 1) {
+    for (let j = 0; j < n; j += 1) {
+      const A = basis[i].atomIndex;
+      const B = basis[j].atomIndex;
+      if (A !== B) bondOrders[A][B] += PS[i][j] * PS[j][i];
+    }
+  }
+  return { charges, bondOrders };
 }
 
 // Numerical nuclear gradient dE/dR (central differences). `energyFn` maps a coordinate array

@@ -1,0 +1,66 @@
+{
+  "artifact": {
+    "byteLength": 115004,
+    "path": "magnetar-closure.ulg.json",
+    "sha256": "sha256:43c3070b8279363e6ad25207c561681689af618035a441046fc3163c85265d4b"
+  },
+  "commands": {
+    "artifactHelper": [
+      "/bin/python3",
+      "/home/cos/projects/eshkol/scripts/emit_ulg_closure_artifact.py",
+      "/home/cos/projects/eshkol/examples/magnetar_closure.esk",
+      "--artifact",
+      "/home/cos/projects/ulg/public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.ulg.json",
+      "--wasm-output",
+      "/home/cos/projects/ulg/public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm",
+      "--eshkol-run",
+      "/home/cos/projects/eshkol/build/eshkol-run",
+      "--source-service",
+      "eshkol",
+      "--metadata-json",
+      "/home/cos/projects/eshkol/examples/magnetar_closure.ulg-metadata.json",
+      "--created-at",
+      "2026-06-07T08:04:00Z",
+      "--require-export",
+      "main"
+    ]
+  },
+  "createdAt": "2026-06-07T08:04:00Z",
+  "hostImports": {
+    "byteLength": 19457,
+    "domFree": true,
+    "factory": "createEshkolHostImportObject",
+    "global": "EshkolHostImports",
+    "path": "eshkol-host-imports.js",
+    "sha256": "sha256:96978b87974b6c663f353bec7246ddcba9cffd00796e511bd57bb418566c2b95"
+  },
+  "manualDeploy": {
+    "copyFiles": [
+      "magnetar-closure.ulg.json",
+      "magnetar-closure.wasm",
+      "schemas/ulg/closure_artifact.schema.json",
+      "eshkol-host-imports.js"
+    ],
+    "notes": [
+      "Serve or precache the artifact JSON and WASM module from the same directory.",
+      "The artifact's execution.module.url is relative to the artifact JSON file.",
+      "The host import JS is a DOM-free factory for browser/service-worker instantiation."
+    ],
+    "preserveRelativeUrls": true
+  },
+  "module": {
+    "byteLength": 169528,
+    "path": "magnetar-closure.wasm",
+    "sha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa"
+  },
+  "schema": "eshkol.ulg.closure-bundle.v0",
+  "schemaSnapshot": {
+    "byteLength": 1900,
+    "path": "schemas/ulg/closure_artifact.schema.json",
+    "sha256": "sha256:1761993127ccc6ebba5ea5ca18e9324104cb0122b4b8b66efef03c7fc620d01b"
+  },
+  "source": {
+    "path": "examples/magnetar_closure.esk",
+    "type": "eshkol-source"
+  }
+}

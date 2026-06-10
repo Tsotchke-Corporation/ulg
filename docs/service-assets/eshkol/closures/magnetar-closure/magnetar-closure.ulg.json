@@ -1,0 +1,4711 @@
+{
+  "abiVersion": "0.5",
+  "closureId": "eshkol:a08f9e4ad05688c0",
+  "closureKind": "magnetar-closure-descriptor-fixture",
+  "derivatives": [
+    {
+      "method": "declared-contract-placeholder",
+      "of": "magnetar-closure-update",
+      "order": 1,
+      "shape": [
+        8,
+        8
+      ],
+      "status": "declared-not-computed",
+      "withRespectTo": "magnetar-state-vector"
+    }
+  ],
+  "execution": {
+    "backend": "llvm-wasm",
+    "entryExport": "main",
+    "entrySignature": {
+      "parameters": [
+        "i32",
+        "i32"
+      ],
+      "results": [
+        "i32"
+      ]
+    },
+    "exports": [
+      {
+        "index": 40,
+        "kind": "function",
+        "name": "scheme_main",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64"
+          ],
+          "results": []
+        },
+        "typeIndex": 34
+      },
+      {
+        "index": 41,
+        "kind": "function",
+        "name": "main",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      }
+    ],
+    "hasStartSection": false,
+    "imports": [
+      {
+        "kind": "memory",
+        "limits": {
+          "hasMaximum": false,
+          "minimum": 1
+        },
+        "module": "env",
+        "name": "__linear_memory"
+      },
+      {
+        "kind": "global",
+        "module": "env",
+        "mutable": true,
+        "name": "__stack_pointer",
+        "valueType": "i32"
+      },
+      {
+        "elementType": "funcref",
+        "kind": "table",
+        "limits": {
+          "hasMaximum": false,
+          "minimum": 10
+        },
+        "module": "env",
+        "name": "__indirect_function_table"
+      },
+      {
+        "functionIndex": 0,
+        "kind": "function",
+        "module": "env",
+        "name": "__eshkol_register_parallel_workers",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 6
+      },
+      {
+        "functionIndex": 1,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_is_bignum_tagged",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 100
+      },
+      {
+        "functionIndex": 2,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_rational_to_double",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "f64"
+          ]
+        },
+        "typeIndex": 102
+      },
+      {
+        "functionIndex": 3,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_bignum_to_double",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "f64"
+          ]
+        },
+        "typeIndex": 102
+      },
+      {
+        "functionIndex": 4,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_bignum_binary_tagged",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 5
+      },
+      {
+        "functionIndex": 5,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_is_rational_tagged_ptr",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 100
+      },
+      {
+        "functionIndex": 6,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_rational_binary_tagged_ptr",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 5
+      },
+      {
+        "functionIndex": 7,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_bignum_from_overflow",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i64",
+            "i64",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 103
+      },
+      {
+        "functionIndex": 8,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_allocate",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 9,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_allocate_vector_with_header",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 10,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_shapes_equal",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i64",
+            "i32",
+            "i64"
+          ],
+          "results": [
+            "i64"
+          ]
+        },
+        "typeIndex": 105
+      },
+      {
+        "functionIndex": 11,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_allocate_tensor_with_header",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 100
+      },
+      {
+        "functionIndex": 12,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_broadcast_elementwise_f64",
+        "signature": {
+          "parameters": [
+            "i64",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i64"
+          ]
+        },
+        "typeIndex": 106
+      },
+      {
+        "functionIndex": 13,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_allocate_ad_node_with_header",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 100
+      },
+      {
+        "functionIndex": 14,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_tape_add_node",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 15,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_make_exception_with_header",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 104
+      },
+      {
+        "functionIndex": 16,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_raise",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 1
+      },
+      {
+        "functionIndex": 17,
+        "kind": "function",
+        "module": "env",
+        "name": "ulg_read_f64",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "f64"
+          ]
+        },
+        "typeIndex": 102
+      },
+      {
+        "functionIndex": 18,
+        "kind": "function",
+        "module": "env",
+        "name": "ulg_write_f64",
+        "signature": {
+          "parameters": [
+            "i32",
+            "f64"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 107
+      },
+      {
+        "functionIndex": 19,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_init_stack_size",
+        "signature": {
+          "parameters": [],
+          "results": []
+        },
+        "typeIndex": 101
+      },
+      {
+        "functionIndex": 20,
+        "kind": "function",
+        "module": "env",
+        "name": "get_global_arena",
+        "signature": {
+          "parameters": [],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 108
+      },
+      {
+        "functionIndex": 21,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_lambda_registry_init",
+        "signature": {
+          "parameters": [],
+          "results": []
+        },
+        "typeIndex": 101
+      },
+      {
+        "functionIndex": 22,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_intern_symbol_lookup",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 100
+      },
+      {
+        "functionIndex": 23,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_allocate_cons_with_header",
+        "signature": {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        "typeIndex": 100
+      },
+      {
+        "functionIndex": 24,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_tagged_cons_set_ptr",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i64",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 109
+      },
+      {
+        "functionIndex": 25,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_tagged_cons_set_null",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 2
+      },
+      {
+        "functionIndex": 26,
+        "kind": "function",
+        "module": "env",
+        "name": "eshkol_lambda_registry_add",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 3
+      },
+      {
+        "functionIndex": 27,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_tagged_cons_set_int64",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "i64",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 109
+      },
+      {
+        "functionIndex": 28,
+        "kind": "function",
+        "module": "env",
+        "name": "arena_tagged_cons_set_double",
+        "signature": {
+          "parameters": [
+            "i32",
+            "i32",
+            "f64",
+            "i32"
+          ],
+          "results": []
+        },
+        "typeIndex": 110
+      }
+    ],
+    "instantiate": "WebAssembly.instantiate",
+    "module": {
+      "byteLength": 169528,
+      "sha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa",
+      "url": "magnetar-closure.wasm"
+    },
+    "serviceWorkerSafe": true,
+    "startFunctionIndex": null,
+    "target": "wasm32-unknown-unknown",
+    "wasmMetadata": {
+      "functionCount": 42,
+      "hasStartSection": false,
+      "startFunctionIndex": null,
+      "types": [
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32"
+          ],
+          "results": [
+            "f64"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "i64",
+            "i64",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "i64",
+            "i32",
+            "i64"
+          ],
+          "results": [
+            "i64"
+          ]
+        },
+        {
+          "parameters": [
+            "i64",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i64",
+            "i32",
+            "i32",
+            "i32",
+            "i32"
+          ],
+          "results": [
+            "i64"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "f64"
+          ],
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [],
+          "results": [
+            "i32"
+          ]
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "i64",
+            "i32"
+          ],
+          "results": []
+        },
+        {
+          "parameters": [
+            "i32",
+            "i32",
+            "f64",
+            "i32"
+          ],
+          "results": []
+        }
+      ]
+    }
+  },
+  "inputs": [
+    {
+      "components": [
+        "radius",
+        "massDensity",
+        "pressure",
+        "magneticFlux",
+        "temperature",
+        "metricAlpha",
+        "metricBeta",
+        "closurePhase"
+      ],
+      "dtype": "f64",
+      "id": "magnetar-state-vector",
+      "kind": "tensor",
+      "layout": "dense-row-major",
+      "shape": [
+        8
+      ],
+      "units": "normalized"
+    },
+    {
+      "components": [
+        "timeStep",
+        "radialCellWidth",
+        "fieldCoupling",
+        "damping"
+      ],
+      "dtype": "f64",
+      "id": "closure-control-vector",
+      "kind": "tensor",
+      "layout": "dense-row-major",
+      "shape": [
+        4
+      ],
+      "units": "normalized"
+    }
+  ],
+  "outputs": [
+    {
+      "dtype": "f64",
+      "id": "magnetar-closure-update",
+      "kind": "tensor",
+      "layout": "dense-row-major",
+      "role": "closure-state-delta",
+      "shape": [
+        8
+      ],
+      "units": "normalized delta"
+    },
+    {
+      "dtype": "f64",
+      "id": "closure-residual",
+      "kind": "tensor",
+      "layout": "dense-row-major",
+      "role": "admission-residual",
+      "shape": [
+        1
+      ],
+      "units": "normalized"
+    }
+  ],
+  "provenance": {
+    "codeVersion": "eshkol-ulg-closure-artifact-v0.3",
+    "compileCommand": [
+      "/home/cos/projects/eshkol/build/eshkol-run",
+      "--wasm",
+      "/home/cos/projects/eshkol/examples/magnetar_closure.esk",
+      "-o",
+      "/home/cos/projects/ulg/public/service-assets/eshkol/closures/magnetar-closure/magnetar-closure.wasm"
+    ],
+    "createdAt": "2026-06-07T08:04:00Z",
+    "inputHash": "sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69",
+    "methodHash": "sha256:a08f9e4ad05688c02124ab895ea66ac240845956cc38bd372baa114d80776d5d",
+    "notes": [
+      "Generated from Eshkol AOT WASM output.",
+      "No JIT, eval, dynamic import, or network behavior is required by this artifact."
+    ],
+    "sourceContractCompileFilter": null,
+    "sourceContracts": [
+      {
+        "closureKind": "magnetar-closure-descriptor-fixture",
+        "entryExport": "main",
+        "fullPhysicsValidation": false,
+        "line": 6,
+        "metadataPath": "magnetar_closure.ulg-metadata.json",
+        "schema": "eshkol.ulg.define-ulg-closure-source.v0",
+        "scientificValidation": false,
+        "tensorRuntimeContract": "eshkol:magnetar-closure-tensor-runtime-contract:v0"
+      }
+    ],
+    "sourcePath": "examples/magnetar_closure.esk",
+    "sourceSha256": "sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69",
+    "wasmPath": "magnetar-closure.wasm",
+    "wasmSha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa"
+  },
+  "sourceService": "eshkol",
+  "uncertainty": {
+    "contractConfidence": 1.0,
+    "model": "descriptor-only",
+    "notes": "The fixture records tensor intent, not calibrated physics uncertainty.",
+    "scientificConfidence": 0.0
+  },
+  "validation": {
+    "closureDescriptor": {
+      "descriptorBinding": {
+        "bindingId": "eshkol:magnetar-closure-descriptor-binding:v0",
+        "closureTensorRuntimeContract": {
+          "contractHash": "sha256:7bc3955f9514d894def892e547d26288b305aceb0ae48fb732e2268b0d305985",
+          "contractId": "eshkol:magnetar-closure-tensor-runtime-contract:v0",
+          "coordinateSystem": "normalized-radial-cell",
+          "entryExport": "main",
+          "executionClaim": "deterministic-tensor-runtime-smoke-only",
+          "fullPhysicsValidation": false,
+          "hashSource": "canonical-json-without-contractHash",
+          "inputTensorIds": [
+            "magnetar-state-vector",
+            "closure-control-vector"
+          ],
+          "interpolationTable": {
+            "contentHash": "sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165",
+            "id": "ulg:magnetar-radial-cell-interpolation-table:v0",
+            "sampleCount": 4,
+            "schema": "eshkol.ulg.magnetar-closure-interpolation-table.v0"
+          },
+          "linearMemoryBinding": {
+            "alignmentBytes": 8,
+            "bindingId": "eshkol:magnetar-closure-linear-memory-binding:v0",
+            "elementByteLength": 8,
+            "elementType": "f64",
+            "entryExportConsumesOffsets": true,
+            "entryExportOffsetProbe": {
+              "attemptedEntryArgs": [
+                {
+                  "args": [
+                    131072,
+                    131136
+                  ],
+                  "expectedEntryResult": 0,
+                  "label": "declared-input-byte-offsets"
+                }
+              ],
+              "blocker": "none-for-deterministic-runtime-smoke-production-physics-unvalidated",
+              "changedBytesInDeclaredTensorRange": 64,
+              "entryExport": "main",
+              "entryExportConsumesOffsets": true,
+              "entrySignature": {
+                "parameters": [
+                  "i32",
+                  "i32"
+                ],
+                "results": [
+                  "i32"
+                ]
+              },
+              "expectedOutputTensors": {
+                "closure-residual": [
+                  0.10800000000000001
+                ],
+                "magnetar-closure-update": [
+                  0.010900000000000002,
+                  -0.0092,
+                  0.00062,
+                  -0.00046000000000000007,
+                  0.0044,
+                  -0.00020000000000000017,
+                  0.0001,
+                  0
+                ]
+              },
+              "fullPhysicsValidation": false,
+              "hostImportOptions": {
+                "f64TensorMemoryImports": true,
+                "factory": "createEshkolHostImportObject",
+                "runtimeSmokeStubs": true,
+                "stubScope": "deterministic-f64-linear-memory-smoke"
+              },
+              "observedStdoutInvariantAcrossArgs": false,
+              "outputTensorsProducedByEntryExport": true,
+              "runtimeScope": "deterministic-host-runtime-smoke-stubs",
+              "schema": "eshkol.ulg.tensor-entry-export-offset-probe.v0",
+              "scientificValidation": false,
+              "status": "runtime-smoke-passed"
+            },
+            "executionClaim": "deterministic-tensor-runtime-smoke-only",
+            "fullFidelityMagnetarSimulation": false,
+            "fullPhysicsValidation": false,
+            "memoryImport": {
+              "baseOffset": 131072,
+              "byteOrder": "little-endian",
+              "minimumPages": 3,
+              "module": "env",
+              "name": "__linear_memory",
+              "pageSizeBytes": 65536,
+              "totalByteLength": 168
+            },
+            "runtimeStatus": "deterministic-host-runtime-smoke-executed",
+            "schema": "eshkol.ulg.tensor-linear-memory-binding.v0",
+            "scientificValidation": false,
+            "smokeBinding": {
+              "entryExportConsumesOffsets": true,
+              "outputInitialization": "entry-export-produced",
+              "outputTensorIds": [
+                "magnetar-closure-update",
+                "closure-residual"
+              ],
+              "readbackTensorIds": [
+                "magnetar-state-vector",
+                "closure-control-vector"
+              ],
+              "sampleSource": "validation.closureDescriptor.descriptorBinding.ulgInterpolationTable.samples[0]",
+              "schema": "eshkol.ulg.tensor-linear-memory-smoke-binding.v0",
+              "scientificValidation": false,
+              "status": "entry-export-runtime-smoke-passed",
+              "writeTensorIds": [
+                "magnetar-state-vector",
+                "closure-control-vector"
+              ]
+            },
+            "status": "entry-export-runtime-smoke-passed",
+            "tensors": [
+              {
+                "byteLength": 64,
+                "byteOffset": 131072,
+                "consumedByEntryExport": true,
+                "direction": "input",
+                "dtype": "f64",
+                "elementCount": 8,
+                "elementOffset": 16384,
+                "id": "magnetar-state-vector",
+                "layout": "dense-row-major",
+                "shape": [
+                  8
+                ],
+                "source": "tensorDescriptors.magnetar-state-vector"
+              },
+              {
+                "byteLength": 32,
+                "byteOffset": 131136,
+                "consumedByEntryExport": true,
+                "direction": "input",
+                "dtype": "f64",
+                "elementCount": 4,
+                "elementOffset": 16392,
+                "id": "closure-control-vector",
+                "layout": "dense-row-major",
+                "shape": [
+                  4
+                ],
+                "source": "tensorDescriptors.closure-control-vector"
+              },
+              {
+                "byteLength": 64,
+                "byteOffset": 131168,
+                "consumedByEntryExport": true,
+                "direction": "output",
+                "dtype": "f64",
+                "elementCount": 8,
+                "elementOffset": 16396,
+                "id": "magnetar-closure-update",
+                "layout": "dense-row-major",
+                "shape": [
+                  8
+                ],
+                "source": "tensorDescriptors.magnetar-closure-update"
+              },
+              {
+                "byteLength": 8,
+                "byteOffset": 131232,
+                "consumedByEntryExport": true,
+                "direction": "output",
+                "dtype": "f64",
+                "elementCount": 1,
+                "elementOffset": 16404,
+                "id": "closure-residual",
+                "layout": "dense-row-major",
+                "shape": [
+                  1
+                ],
+                "source": "tensorDescriptors.closure-residual"
+              }
+            ]
+          },
+          "outputTensorIds": [
+            "magnetar-closure-update",
+            "closure-residual"
+          ],
+          "runtimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+          "runtimeStatus": "deterministic-runtime-smoke-executed",
+          "sampleShapeValidation": {
+            "schema": "eshkol.ulg.tensor-sample-shape-validation.v0",
+            "scientificValidation": false,
+            "status": "pass",
+            "validatedInputTensorIds": [
+              "magnetar-state-vector",
+              "closure-control-vector"
+            ],
+            "validatedOutputTensorIds": [
+              "magnetar-closure-update",
+              "closure-residual"
+            ],
+            "validatedSampleCount": 4
+          },
+          "schema": "eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0",
+          "scientificValidation": false,
+          "status": "declared-fixture-contract",
+          "tensorDescriptors": {
+            "closure-control-vector": {
+              "byteLength": 32,
+              "componentCount": 4,
+              "direction": "input",
+              "dtype": "f64",
+              "layout": "dense-row-major",
+              "shape": [
+                4
+              ],
+              "units": "normalized"
+            },
+            "closure-residual": {
+              "byteLength": 8,
+              "componentCount": 1,
+              "direction": "output",
+              "dtype": "f64",
+              "layout": "dense-row-major",
+              "shape": [
+                1
+              ],
+              "units": "normalized"
+            },
+            "magnetar-closure-update": {
+              "byteLength": 64,
+              "componentCount": 8,
+              "direction": "output",
+              "dtype": "f64",
+              "layout": "dense-row-major",
+              "shape": [
+                8
+              ],
+              "units": "normalized delta"
+            },
+            "magnetar-state-vector": {
+              "byteLength": 64,
+              "componentCount": 8,
+              "direction": "input",
+              "dtype": "f64",
+              "layout": "dense-row-major",
+              "shape": [
+                8
+              ],
+              "units": "normalized"
+            }
+          },
+          "tensorMemoryModel": "host-managed-linear-f64"
+        },
+        "fidelityRuntimeScope": {
+          "excludedPhysics": [
+            "charge-conserving-pic",
+            "spectral-angular-radiation-transport",
+            "gr-or-grmhd-spacetime-solve",
+            "full-resistive-mhd-or-force-free-magnetosphere",
+            "validated-production-magnetar-closure"
+          ],
+          "fidelityTier": "host-runtime-smoke-fixture",
+          "fullFidelityMagnetarSimulation": false,
+          "fullPhysicsValidation": false,
+          "hostRuntimeSmokeFixture": true,
+          "readinessClaim": "host-runtime-output-semantics-only",
+          "reducedCalibratedRuntimeFixture": false,
+          "runtimeScope": "eshkol-host-runtime-smoke-fixture",
+          "schema": "ulg.magnetar.fidelity-runtime-scope.v0"
+        },
+        "handoffEnvelope": {
+          "adapterSchema": "peercompute.ulg.demo-handoff-adapter.v0",
+          "artifactKind": "closure",
+          "contentAddressing": "required",
+          "relaySafeTransfer": "required",
+          "schema": "peercompute.ulg.handoff-service-envelope.v0",
+          "sourceSchema": "peercompute.ulg.demo-handoff.v0",
+          "sourceService": "eshkol",
+          "transferManifestSchema": "peercompute.ulg.handoff-transfer-manifest.v0"
+        },
+        "moonlabClosureSurfaceSampleIds": [
+          "moonlab:magnetosphere-mhd-reference",
+          "moonlab:pic-kinetic-plasma-reference",
+          "moonlab:radiation-transport-reference",
+          "moonlab:relativistic-correction-reference"
+        ],
+        "moonlabNormalizedReferenceSuite": {
+          "assetId": "moonlab:magnetar-reference-contracts:normalized-suite:v0",
+          "assetPath": "service-assets/moonlab/magnetar-reference-contracts.json",
+          "contentHash": "sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455",
+          "fidelityRuntimeScope": {
+            "excludedPhysics": [
+              "charge-conserving-pic",
+              "spectral-angular-radiation-transport",
+              "gr-or-grmhd-spacetime-solve",
+              "full-resistive-mhd-or-force-free-magnetosphere",
+              "validated-production-magnetar-closure"
+            ],
+            "fidelityTier": "reduced-calibrated-runtime-fixture",
+            "fullFidelityMagnetarSimulation": false,
+            "fullPhysicsValidation": false,
+            "hostRuntimeSmokeFixture": false,
+            "readinessClaim": "integration-tolerance-gate-only",
+            "reducedCalibratedRuntimeFixture": true,
+            "runtimeScope": "reduced-scalar-reference-suite",
+            "schema": "ulg.magnetar.fidelity-runtime-scope.v0"
+          },
+          "ready": true,
+          "referenceFamilies": [
+            "magnetosphere-mhd",
+            "pic-kinetic-plasma",
+            "radiation-transport",
+            "relativistic-correction"
+          ],
+          "referenceIds": [
+            "magnetosphere-mhd-reference",
+            "pic-kinetic-plasma-reference",
+            "radiation-transport-reference",
+            "relativistic-correction-reference"
+          ],
+          "schema": "moonlab.magnetar.normalized-reference-suite.v0",
+          "status": "reference-contract-suite-ready"
+        },
+        "peercomputeProductTopologyBinding": {
+          "bindingId": "peercompute:magnetar-closure-product-topology:v0",
+          "handoffEnvelopeSchema": "peercompute.ulg.handoff-service-envelope.v0",
+          "inputTensorIds": [
+            "magnetar-state-vector",
+            "closure-control-vector"
+          ],
+          "outputTensorIds": [
+            "magnetar-closure-update",
+            "closure-residual"
+          ],
+          "schema": "peercompute.multiscale.product-topology-binding.v0",
+          "scientificValidation": false,
+          "status": "descriptor-bound-not-executed",
+          "topologyId": "peercompute.multiscale.magnetar-reduced-product-topology.v0"
+        },
+        "productionHandlerBoundary": {
+          "allowedExecutionClaims": [
+            "deterministic-tensor-runtime-smoke-only",
+            "production-candidate-host-import-runtime-smoke-only"
+          ],
+          "blockers": [
+            "full-physics-validation-not-run"
+          ],
+          "derivativeStatus": "declared-not-computed",
+          "dispatchPreflight": {
+            "blockedBy": [
+              "full-physics-validation-not-run"
+            ],
+            "checkResults": [
+              {
+                "check": "artifact-module-sha256-matches-module-ref",
+                "evidenceSource": "artifact.execution.module.sha256",
+                "observed": {
+                  "moduleSha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa",
+                  "provenanceWasmSha256": "sha256:e0a3c7d280678a8c1e40865daeab6601dc8a6a64cfa5b29b7b6bfcaddc86c5aa"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "entry-export-main-signature-i32-i32-to-i32",
+                "evidenceSource": "artifact.execution.entrySignature",
+                "observed": {
+                  "entryExport": "main",
+                  "entrySignature": {
+                    "parameters": [
+                      "i32",
+                      "i32"
+                    ],
+                    "results": [
+                      "i32"
+                    ]
+                  }
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "production-handler-contract-declared",
+                "evidenceSource": "productionHandlerBoundary.productionHandlerContract",
+                "observed": {
+                  "handlerId": "eshkol:magnetar-closure:main:v0",
+                  "schema": "eshkol.ulg.production-handler-contract.v0",
+                  "status": "implemented-runtime-smoke-pending-full-physics"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "non-stub-host-imports-present",
+                "evidenceSource": "productionHandlerBoundary.hostImports",
+                "observed": {
+                  "implementationStatus": "production-candidate-runtime-imports-present",
+                  "productionRuntimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+                  "runtimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+                  "runtimeScope": "production-candidate-host-imports"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "f64-tensor-memory-binding-validated",
+                "evidenceSource": "productionHandlerBoundary.tensorMemoryBinding",
+                "observed": {
+                  "entryExportConsumesOffsets": true,
+                  "status": "entry-export-runtime-smoke-passed"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "production-candidate-runtime-probe-passed",
+                "evidenceSource": "productionHandlerBoundary.productionCandidateRuntimeProbe",
+                "observed": {
+                  "changedBytesInDeclaredTensorRange": 64,
+                  "executionClaim": "production-candidate-host-import-runtime-smoke-only",
+                  "hostImportCallCounts": {
+                    "ulg_read_f64": 12,
+                    "ulg_write_f64": 9
+                  },
+                  "runtimeScope": "production-candidate-host-imports",
+                  "status": "production-candidate-runtime-smoke-passed"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "runtime-smoke-stubs-rejected-for-production",
+                "evidenceSource": "productionHandlerBoundary.dispatchPreflight",
+                "observed": {
+                  "runtimeSmokeStubsAllowed": false
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "handler-ready-flag-true",
+                "evidenceSource": "productionHandlerBoundary.productionHandlerImplementation",
+                "observed": {
+                  "handlerId": "eshkol:magnetar-closure:main:v0",
+                  "handlerReady": true,
+                  "status": "implemented-production-candidate-runtime-smoke"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "check": "runtime-execution-flag-true",
+                "evidenceSource": "productionHandlerBoundary.productionHandlerRuntimeExecution",
+                "observed": {
+                  "entryArgs": [
+                    131072,
+                    131136
+                  ],
+                  "entryResult": 0,
+                  "runtimeExecution": true,
+                  "status": "production-handler-runtime-smoke-executed"
+                },
+                "ready": true,
+                "status": "pass"
+              },
+              {
+                "blocker": "full-physics-validation-not-run",
+                "check": "full-physics-validation-evidence-present",
+                "evidenceSource": "productionHandlerBoundary.fullPhysicsValidationRequirements",
+                "observed": {
+                  "fullPhysicsValidation": false,
+                  "requiredRuntimeEvidenceFamilies": [
+                    "magnetosphere-mhd",
+                    "pic-kinetic-plasma",
+                    "radiation-transport",
+                    "relativistic-correction",
+                    "cross-family-conservation-coupling"
+                  ],
+                  "schema": "eshkol.ulg.full-physics-validation-requirements.v0",
+                  "scientificValidation": false,
+                  "status": "declared-not-run"
+                },
+                "ready": false,
+                "status": "blocked"
+              }
+            ],
+            "checkSummary": {
+              "blockedChecks": [
+                "full-physics-validation-evidence-present"
+              ],
+              "blockedCount": 1,
+              "computedBy": "eshkol-ulg-closure-artifact-v0.3",
+              "passedChecks": [
+                "artifact-module-sha256-matches-module-ref",
+                "entry-export-main-signature-i32-i32-to-i32",
+                "production-handler-contract-declared",
+                "non-stub-host-imports-present",
+                "f64-tensor-memory-binding-validated",
+                "production-candidate-runtime-probe-passed",
+                "runtime-smoke-stubs-rejected-for-production",
+                "handler-ready-flag-true",
+                "runtime-execution-flag-true"
+              ],
+              "passedCount": 9,
+              "ready": false,
+              "schema": "eshkol.ulg.production-handler-dispatch-preflight-check-summary.v0",
+              "status": "blocked",
+              "totalRequiredCheckCount": 10
+            },
+            "currentRuntimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+            "dispatchSchema": "peercompute.ulg.dispatch-service-handler-context.v0",
+            "entryExport": "main",
+            "fullPhysicsValidationRequired": true,
+            "handlerReadyRequired": true,
+            "hostImportsCandidateSource": "productionHandlerBoundary.hostImports.productionCandidate",
+            "moduleContentAddressing": "required",
+            "moduleSha256Field": "artifact.execution.module.sha256",
+            "ready": false,
+            "rejectedRuntimeScopes": [
+              "deterministic-runtime-smoke-stubs"
+            ],
+            "requiredChecks": [
+              "artifact-module-sha256-matches-module-ref",
+              "entry-export-main-signature-i32-i32-to-i32",
+              "production-handler-contract-declared",
+              "non-stub-host-imports-present",
+              "f64-tensor-memory-binding-validated",
+              "production-candidate-runtime-probe-passed",
+              "runtime-smoke-stubs-rejected-for-production",
+              "handler-ready-flag-true",
+              "runtime-execution-flag-true",
+              "full-physics-validation-evidence-present"
+            ],
+            "requiredRuntimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+            "runtimeExecutionRequired": true,
+            "runtimeSmokeStubsAllowed": false,
+            "schema": "eshkol.ulg.production-handler-dispatch-preflight.v0",
+            "scientificValidationRequired": true,
+            "status": "blocked",
+            "tensorMemoryBindingSource": "validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding"
+          },
+          "dispatchSchema": "peercompute.ulg.dispatch-service-handler-context.v0",
+          "entryExport": "main",
+          "fullFidelityMagnetarSimulation": false,
+          "fullPhysicsValidation": false,
+          "fullPhysicsValidationRequirements": {
+            "blockedBy": [
+              "full-physics-validation-not-run"
+            ],
+            "producerSchema": "peercompute.multiscale.scenario-runtime-evidence-manifest.v0",
+            "ready": false,
+            "requiredHashFields": [
+              "referenceHash",
+              "toleranceHash",
+              "runtimeOutputHash",
+              "evidenceHash"
+            ],
+            "requiredRuntimeEvidence": [
+              {
+                "family": "magnetosphere-mhd",
+                "required": true,
+                "schema": "peercompute.multiscale.magnetosphere-mhd.runtime-validation.v0",
+                "status": "required-not-provided"
+              },
+              {
+                "family": "pic-kinetic-plasma",
+                "required": true,
+                "schema": "peercompute.multiscale.pic-kinetic-plasma.runtime-validation.v0",
+                "status": "required-not-provided"
+              },
+              {
+                "family": "radiation-transport",
+                "required": true,
+                "schema": "peercompute.multiscale.radiation-transport.runtime-validation.v0",
+                "status": "required-not-provided"
+              },
+              {
+                "family": "relativistic-correction",
+                "required": true,
+                "schema": "peercompute.multiscale.relativistic-correction.runtime-validation.v0",
+                "status": "required-not-provided"
+              },
+              {
+                "family": "cross-family-conservation-coupling",
+                "required": true,
+                "schema": "peercompute.multiscale.cross-family-conservation-coupling.runtime-validation.v0",
+                "status": "required-not-provided"
+              }
+            ],
+            "requiredRuntimeEvidenceFamilies": [
+              "magnetosphere-mhd",
+              "pic-kinetic-plasma",
+              "radiation-transport",
+              "relativistic-correction",
+              "cross-family-conservation-coupling"
+            ],
+            "requiredValidationSchema": "peercompute.multiscale.scenario-scientific-runtime-validation.v0",
+            "requiredValidationScope": "magnetar-scientific-runtime-reference-validation",
+            "schema": "eshkol.ulg.full-physics-validation-requirements.v0",
+            "status": "declared-not-run",
+            "validationScope": "magnetar-production-handler-full-physics"
+          },
+          "handlerId": "eshkol:magnetar-closure:main:v0",
+          "handlerKind": "wasm-export-tensor-closure",
+          "handlerReady": true,
+          "hostImports": {
+            "factory": "createEshkolHostImportObject",
+            "implementationStatus": "production-candidate-runtime-imports-present",
+            "productionCandidate": {
+              "blockedBy": [
+                "full-physics-validation-not-run"
+              ],
+              "factory": "createEshkolHostImportObject",
+              "implementationStatus": "production-candidate-runtime-imports-present",
+              "productionRuntimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+              "readinessRequires": [
+                "non-stub-host-runtime-imports",
+                "validated-f64-tensor-memory-imports",
+                "full-physics-validation-pass"
+              ],
+              "requiredNonStubImports": [
+                "eshkol_is_bignum_tagged",
+                "eshkol_rational_to_double",
+                "eshkol_bignum_to_double",
+                "eshkol_bignum_binary_tagged",
+                "eshkol_is_rational_tagged_ptr",
+                "eshkol_rational_binary_tagged_ptr",
+                "eshkol_bignum_from_overflow",
+                "arena_allocate",
+                "arena_allocate_vector_with_header",
+                "eshkol_shapes_equal",
+                "arena_allocate_tensor_with_header",
+                "eshkol_broadcast_elementwise_f64",
+                "arena_allocate_ad_node_with_header",
+                "arena_tape_add_node",
+                "eshkol_make_exception_with_header",
+                "eshkol_raise",
+                "eshkol_intern_symbol_lookup",
+                "arena_allocate_cons_with_header",
+                "arena_tagged_cons_set_ptr",
+                "arena_tagged_cons_set_int64",
+                "arena_tagged_cons_set_double",
+                "arena_tagged_cons_set_null",
+                "eshkol_lambda_registry_add"
+              ],
+              "runtimeScope": "production-candidate-host-imports",
+              "runtimeSmokeStubsAllowed": false,
+              "schema": "eshkol.ulg.production-host-import-candidate.v0",
+              "smokeRuntimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-smoke-v0",
+              "status": "production-candidate-runtime-imports-implemented",
+              "tensorMemoryImports": [
+                "ulg_read_f64",
+                "ulg_write_f64"
+              ]
+            },
+            "required": true,
+            "runtimeScope": "production-candidate-host-imports",
+            "source": "bundle.hostImports"
+          },
+          "inputTensorIds": [
+            "magnetar-state-vector",
+            "closure-control-vector"
+          ],
+          "moduleRef": {
+            "contentAddressing": "required",
+            "sha256Field": "artifact.execution.module.sha256",
+            "source": "artifact.execution.module"
+          },
+          "outputTensorIds": [
+            "magnetar-closure-update",
+            "closure-residual"
+          ],
+          "productionCandidateRuntimeProbe": {
+            "blocker": "full-physics-validation-not-run",
+            "changedBytesInDeclaredTensorRange": 64,
+            "entryArgs": [
+              131072,
+              131136
+            ],
+            "entryExport": "main",
+            "executionClaim": "production-candidate-host-import-runtime-smoke-only",
+            "expectedEntryResult": 0,
+            "expectedOutputTensors": {
+              "closure-residual": [
+                0.10800000000000001
+              ],
+              "magnetar-closure-update": [
+                0.010900000000000002,
+                -0.0092,
+                0.00062,
+                -0.00046000000000000007,
+                0.0044,
+                -0.00020000000000000017,
+                0.0001,
+                0
+              ]
+            },
+            "fullFidelityMagnetarSimulation": false,
+            "fullPhysicsValidation": false,
+            "hostImportCallCounts": {
+              "ulg_read_f64": 12,
+              "ulg_write_f64": 9
+            },
+            "hostImportOptions": {
+              "f64TensorMemoryImports": true,
+              "factory": "createEshkolHostImportObject",
+              "productionCandidateRuntimeImports": true,
+              "runtimeSmokeStubs": false
+            },
+            "implementationStatus": "production-candidate-runtime-imports-present",
+            "linearMemoryBindingSource": "validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding",
+            "observedStdout": {
+              "byteLength": 0,
+              "expectedText": "",
+              "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "outputTensorsProducedByEntryExport": true,
+            "productionHandlerReady": true,
+            "productionHandlerRuntimeExecution": true,
+            "runtimeScope": "production-candidate-host-imports",
+            "sampleSource": "validation.closureDescriptor.descriptorBinding.ulgInterpolationTable.samples[0]",
+            "schema": "eshkol.ulg.production-candidate-runtime-probe.v0",
+            "scientificValidation": false,
+            "status": "production-candidate-runtime-smoke-passed"
+          },
+          "productionHandlerContract": {
+            "blockedBy": [
+              "full-physics-validation-not-run"
+            ],
+            "dispatchSchema": "peercompute.ulg.dispatch-service-handler-context.v0",
+            "entryExport": "main",
+            "handlerId": "eshkol:magnetar-closure:main:v0",
+            "inputTensorIds": [
+              "magnetar-state-vector",
+              "closure-control-vector"
+            ],
+            "invocation": {
+              "argumentMode": "linear-memory-offsets",
+              "entryExport": "main",
+              "expectedReturn": 0,
+              "inputOffsetParam": 0,
+              "moduleSource": "artifact.execution.module",
+              "outputOffsetParam": 1,
+              "parameterTypes": [
+                "i32",
+                "i32"
+              ],
+              "resultTypes": [
+                "i32"
+              ]
+            },
+            "outputTensorIds": [
+              "magnetar-closure-update",
+              "closure-residual"
+            ],
+            "requiredEvidence": [
+              "content-addressed-wasm-module",
+              "entry-export-main-signature-i32-i32-to-i32",
+              "production-candidate-host-imports",
+              "validated-f64-tensor-memory-binding",
+              "production-candidate-runtime-probe",
+              "production-magnetar-handler-implementation",
+              "production-handler-runtime-execution",
+              "full-physics-validation-pass"
+            ],
+            "runtimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+            "schema": "eshkol.ulg.production-handler-contract.v0",
+            "status": "implemented-runtime-smoke-pending-full-physics",
+            "tensorMemoryModel": "host-managed-linear-f64"
+          },
+          "productionHandlerImplementation": {
+            "blockedBy": [
+              "full-physics-validation-not-run"
+            ],
+            "dispatchSchema": "peercompute.ulg.dispatch-service-handler-context.v0",
+            "entryExport": "main",
+            "evidence": [
+              "content-addressed-wasm-module",
+              "entry-export-main-signature-i32-i32-to-i32",
+              "production-candidate-host-imports",
+              "validated-f64-tensor-memory-binding",
+              "production-candidate-runtime-probe"
+            ],
+            "executionClaim": "production-candidate-host-import-runtime-smoke-only",
+            "fullFidelityMagnetarSimulation": false,
+            "fullPhysicsValidation": false,
+            "handlerId": "eshkol:magnetar-closure:main:v0",
+            "handlerKind": "wasm-export-tensor-closure",
+            "implementationScope": "deterministic-magnetar-tensor-abi-smoke",
+            "inputTensorIds": [
+              "magnetar-state-vector",
+              "closure-control-vector"
+            ],
+            "invocation": {
+              "argumentMode": "linear-memory-offsets",
+              "entryExport": "main",
+              "expectedReturn": 0,
+              "inputOffsetParam": 0,
+              "moduleSource": "artifact.execution.module",
+              "outputOffsetParam": 1,
+              "parameterTypes": [
+                "i32",
+                "i32"
+              ],
+              "resultTypes": [
+                "i32"
+              ]
+            },
+            "moduleSource": "artifact.execution.module",
+            "outputTensorIds": [
+              "magnetar-closure-update",
+              "closure-residual"
+            ],
+            "runtimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+            "schema": "eshkol.ulg.production-handler-implementation.v0",
+            "scientificValidation": false,
+            "status": "implemented-production-candidate-runtime-smoke",
+            "tensorMemoryModel": "host-managed-linear-f64"
+          },
+          "productionHandlerRuntimeExecution": {
+            "argumentMode": "linear-memory-offsets",
+            "blockedBy": [
+              "full-physics-validation-not-run"
+            ],
+            "changedBytesInDeclaredTensorRange": 64,
+            "entryArgs": [
+              131072,
+              131136
+            ],
+            "entryExport": "main",
+            "entryResult": 0,
+            "executionClaim": "production-candidate-host-import-runtime-smoke-only",
+            "expectedOutputTensors": {
+              "closure-residual": [
+                0.10800000000000001
+              ],
+              "magnetar-closure-update": [
+                0.010900000000000002,
+                -0.0092,
+                0.00062,
+                -0.00046000000000000007,
+                0.0044,
+                -0.00020000000000000017,
+                0.0001,
+                0
+              ]
+            },
+            "fullFidelityMagnetarSimulation": false,
+            "fullPhysicsValidation": false,
+            "handlerId": "eshkol:magnetar-closure:main:v0",
+            "hostImportCallCounts": {
+              "ulg_read_f64": 12,
+              "ulg_write_f64": 9
+            },
+            "hostImportOptions": {
+              "f64TensorMemoryImports": true,
+              "factory": "createEshkolHostImportObject",
+              "productionCandidateRuntimeImports": true,
+              "runtimeSmokeStubs": false
+            },
+            "linearMemoryBindingSource": "validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding",
+            "moduleSource": "artifact.execution.module",
+            "observedStdout": {
+              "byteLength": 0,
+              "expectedText": "",
+              "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "outputTensorsProducedByEntryExport": true,
+            "parameterTypes": [
+              "i32",
+              "i32"
+            ],
+            "resultTypes": [
+              "i32"
+            ],
+            "runtimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+            "runtimeScope": "production-candidate-host-imports",
+            "sampleSource": "validation.closureDescriptor.descriptorBinding.ulgInterpolationTable.samples[0]",
+            "schema": "eshkol.ulg.production-handler-runtime-execution.v0",
+            "scientificValidation": false,
+            "status": "production-handler-runtime-smoke-executed"
+          },
+          "runtimeAbi": "wasm32-unknown-unknown:eshkol-host-imports-production-candidate-v0",
+          "runtimeExecution": true,
+          "schema": "eshkol.ulg.production-handler-boundary.v0",
+          "scientificValidation": false,
+          "status": "production-handler-runtime-smoke-executed",
+          "tensorMemoryBinding": {
+            "entryExportConsumesOffsets": true,
+            "executionClaim": "deterministic-tensor-runtime-smoke-only",
+            "source": "validation.closureDescriptor.descriptorBinding.closureTensorRuntimeContract.linearMemoryBinding",
+            "status": "entry-export-runtime-smoke-passed"
+          },
+          "tensorMemoryModel": "host-managed-linear-f64"
+        },
+        "runtimeBinding": {
+          "derivativeStatus": "declared-not-computed",
+          "entryExportConsumesOffsets": true,
+          "fullPhysicsValidation": false,
+          "linearMemoryBindingStatus": "entry-export-runtime-smoke-passed",
+          "runtimeStatus": "deterministic-runtime-smoke-executed",
+          "schema": "eshkol.ulg.magnetar-closure-runtime-binding.v0",
+          "scientificValidation": false
+        },
+        "schema": "eshkol.ulg.magnetar-closure-descriptor-binding.v0",
+        "tensorRuntimeContract": {
+          "claims": {
+            "fullFidelityMagnetarSimulation": false,
+            "fullPhysicsValidation": false,
+            "hostRuntimeSmokeFixture": true
+          },
+          "contractId": "eshkol:magnetar-closure-tensor-runtime-contract:v0",
+          "derivativeStatus": "declared-not-computed",
+          "entryExport": "main",
+          "inputTensors": [
+            {
+              "components": [
+                "radius",
+                "massDensity",
+                "pressure",
+                "magneticFlux",
+                "temperature",
+                "metricAlpha",
+                "metricBeta",
+                "closurePhase"
+              ],
+              "dtype": "f64",
+              "id": "magnetar-state-vector",
+              "kind": "tensor",
+              "layout": "dense-row-major",
+              "shape": [
+                8
+              ],
+              "source": "artifact.inputs[0]",
+              "units": "normalized"
+            },
+            {
+              "components": [
+                "timeStep",
+                "radialCellWidth",
+                "fieldCoupling",
+                "damping"
+              ],
+              "dtype": "f64",
+              "id": "closure-control-vector",
+              "kind": "tensor",
+              "layout": "dense-row-major",
+              "shape": [
+                4
+              ],
+              "source": "artifact.inputs[1]",
+              "units": "normalized"
+            }
+          ],
+          "outputTensors": [
+            {
+              "dtype": "f64",
+              "id": "magnetar-closure-update",
+              "kind": "tensor",
+              "layout": "dense-row-major",
+              "role": "closure-state-delta",
+              "shape": [
+                8
+              ],
+              "source": "artifact.outputs[0]",
+              "units": "normalized delta"
+            },
+            {
+              "dtype": "f64",
+              "id": "closure-residual",
+              "kind": "tensor",
+              "layout": "dense-row-major",
+              "role": "admission-residual",
+              "shape": [
+                1
+              ],
+              "source": "artifact.outputs[1]",
+              "units": "normalized"
+            }
+          ],
+          "runtimeGuards": {
+            "hasStartSection": false,
+            "requiresDynamicCode": false,
+            "requiresHostImports": true,
+            "serviceWorkerSafe": true
+          },
+          "runtimeStatus": "declared-not-executed",
+          "schema": "eshkol.ulg.magnetar-closure-tensor-runtime-contract.v0",
+          "scientificValidation": false,
+          "status": "descriptor-only",
+          "tableBindings": [
+            {
+              "contentHash": "sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165",
+              "fixtureScope": "reduced-smoke-fixture-not-magnetar-physics",
+              "inputTensorIds": [
+                "magnetar-state-vector",
+                "closure-control-vector"
+              ],
+              "outputTensorIds": [
+                "magnetar-closure-update",
+                "closure-residual"
+              ],
+              "requiredForExecution": false,
+              "sampleCount": 4,
+              "tableId": "ulg:magnetar-radial-cell-interpolation-table:v0",
+              "tableSchema": "eshkol.ulg.magnetar-closure-interpolation-table.v0"
+            }
+          ],
+          "tensorLayout": {
+            "coordinateSystem": "normalized-radial-cell",
+            "dtype": "f64",
+            "storageOrder": "dense-row-major"
+          }
+        },
+        "ulgInterpolationTable": {
+          "contentHash": "sha256:82ca16463d7ffe1d170adb266be61c3959b22a6c352751e99f0f510738a14165",
+          "coordinateSystem": "normalized-radial-cell",
+          "fixtureScope": "reduced-smoke-fixture-not-magnetar-physics",
+          "id": "ulg:magnetar-radial-cell-interpolation-table:v0",
+          "inputTensorIds": [
+            "magnetar-state-vector",
+            "closure-control-vector"
+          ],
+          "outputTensorIds": [
+            "magnetar-closure-update",
+            "closure-residual"
+          ],
+          "sampleCount": 4,
+          "sampleIds": [
+            "moonlab:magnetosphere-mhd-reference",
+            "moonlab:pic-kinetic-plasma-reference",
+            "moonlab:radiation-transport-reference",
+            "moonlab:relativistic-correction-reference"
+          ],
+          "samples": [
+            {
+              "id": "moonlab:magnetosphere-mhd-reference",
+              "inputTensors": {
+                "closure-control-vector": [
+                  0.01,
+                  0.125,
+                  0.2,
+                  0.05
+                ],
+                "magnetar-state-vector": [
+                  0.125,
+                  0.78,
+                  0.31,
+                  0.92,
+                  0.44,
+                  0.98,
+                  0.01,
+                  0.0
+                ]
+              },
+              "outputTensors": {
+                "closure-residual": [
+                  0.0002
+                ],
+                "magnetar-closure-update": [
+                  0.0008,
+                  -0.0012,
+                  0.0003,
+                  -0.0004,
+                  0.0005,
+                  0.0,
+                  0.0,
+                  0.0001
+                ]
+              }
+            },
+            {
+              "id": "moonlab:pic-kinetic-plasma-reference",
+              "inputTensors": {
+                "closure-control-vector": [
+                  0.01,
+                  0.125,
+                  0.24,
+                  0.05
+                ],
+                "magnetar-state-vector": [
+                  0.375,
+                  0.64,
+                  0.28,
+                  0.81,
+                  0.51,
+                  0.96,
+                  0.02,
+                  0.25
+                ]
+              },
+              "outputTensors": {
+                "closure-residual": [
+                  0.0003
+                ],
+                "magnetar-closure-update": [
+                  0.0006,
+                  -0.0009,
+                  0.0004,
+                  -0.0003,
+                  0.0006,
+                  0.0,
+                  0.0,
+                  0.0002
+                ]
+              }
+            },
+            {
+              "id": "moonlab:radiation-transport-reference",
+              "inputTensors": {
+                "closure-control-vector": [
+                  0.01,
+                  0.125,
+                  0.18,
+                  0.06
+                ],
+                "magnetar-state-vector": [
+                  0.625,
+                  0.49,
+                  0.22,
+                  0.68,
+                  0.57,
+                  0.94,
+                  0.03,
+                  0.5
+                ]
+              },
+              "outputTensors": {
+                "closure-residual": [
+                  0.0004
+                ],
+                "magnetar-closure-update": [
+                  0.0004,
+                  -0.0007,
+                  0.0005,
+                  -0.0002,
+                  0.0007,
+                  0.0,
+                  0.0,
+                  0.0003
+                ]
+              }
+            },
+            {
+              "id": "moonlab:relativistic-correction-reference",
+              "inputTensors": {
+                "closure-control-vector": [
+                  0.01,
+                  0.125,
+                  0.16,
+                  0.07
+                ],
+                "magnetar-state-vector": [
+                  0.875,
+                  0.35,
+                  0.19,
+                  0.54,
+                  0.63,
+                  0.91,
+                  0.04,
+                  0.75
+                ]
+              },
+              "outputTensors": {
+                "closure-residual": [
+                  0.0005
+                ],
+                "magnetar-closure-update": [
+                  0.0003,
+                  -0.0005,
+                  0.0006,
+                  -0.0001,
+                  0.0008,
+                  0.0,
+                  0.0,
+                  0.0004
+                ]
+              }
+            }
+          ],
+          "schema": "eshkol.ulg.magnetar-closure-interpolation-table.v0",
+          "scientificValidation": false,
+          "status": "computed-fixture",
+          "tableVersion": "v0"
+        }
+      },
+      "descriptorRole": "magnetar-closure-contract-seed",
+      "entryExport": "main",
+      "fixtureChecksum": 50,
+      "notes": [
+        "Validates descriptor packaging and WASM export only.",
+        "Does not validate magnetar closure physics."
+      ],
+      "schema": "eshkol.ulg.magnetar-closure-descriptor.v0",
+      "scientificValidation": false,
+      "tensorContract": {
+        "coordinateSystem": "normalized-radial-cell",
+        "inputIds": [
+          "magnetar-state-vector",
+          "closure-control-vector"
+        ],
+        "interpolation": "reduced-fixture-table-contract",
+        "outputIds": [
+          "magnetar-closure-update",
+          "closure-residual"
+        ]
+      }
+    },
+    "outputSemantics": {
+      "entryArgs": [
+        131072,
+        131136
+      ],
+      "entryExport": "main",
+      "expectedEntryResult": 0,
+      "notes": [
+        "Validates deterministic host-runtime tensor ABI smoke output only.",
+        "Does not validate magnetar closure physics."
+      ],
+      "schema": "eshkol.ulg.closure-output-semantics.v0",
+      "scientificScope": "none",
+      "scientificValidation": false,
+      "semanticRole": "expected-output-smoke",
+      "semanticScope": "smoke-fixture",
+      "stdout": {
+        "byteLength": 0,
+        "encoding": "utf-8",
+        "expectedText": "",
+        "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "status": "runtime-smoke",
+    "validationMode": "eshkol-deterministic-magnetar-tensor-abi-smoke"
+  },
+  "validity": {
+    "domain": "dimensionless magnetar closure descriptor fixture",
+    "missingRequiredExports": [],
+    "requiredExports": [
+      "main"
+    ],
+    "requiresDynamicCode": false,
+    "requiresEval": false,
+    "requiresHostImports": true,
+    "requiresJit": false,
+    "requiresNetwork": false
+  }
+}

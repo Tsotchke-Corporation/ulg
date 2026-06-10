@@ -1,0 +1,64 @@
+{
+  "artifact": {
+    "byteLength": 56858,
+    "path": "hello.ulg.json",
+    "sha256": "sha256:58f0edb8b32c2d3ead8901e57ae5d9767eed5908ddc30486a20ce32a6cbb145f"
+  },
+  "commands": {
+    "artifactHelper": [
+      "/bin/python3",
+      "/home/cos/projects/eshkol/scripts/emit_ulg_closure_artifact.py",
+      "/home/cos/projects/eshkol/examples/hello.esk",
+      "--artifact",
+      "/home/cos/projects/ulg/public/service-assets/eshkol/closures/hello/hello.ulg.json",
+      "--wasm-output",
+      "/home/cos/projects/ulg/public/service-assets/eshkol/closures/hello/hello.wasm",
+      "--eshkol-run",
+      "/home/cos/projects/eshkol/build/eshkol-run",
+      "--source-service",
+      "eshkol",
+      "--validation-json",
+      "{\"status\":\"pass\",\"validationMode\":\"eshkol-static-closure-smoke\",\"outputSemantics\":{\"schema\":\"eshkol.ulg.closure-output-semantics.v0\",\"semanticScope\":\"smoke-fixture\",\"scientificScope\":\"none\",\"scientificValidation\":false,\"entryExport\":\"main\",\"entryArgs\":[0,0],\"expectedEntryResult\":0,\"stdout\":{\"encoding\":\"utf-8\",\"expectedText\":\"1048560\\n1048544\\n\",\"sha256\":\"sha256:675d2e8686b6a85ffaa5751fba535c108d23ba941f1890d0a102619ec2cdf20d\",\"byteLength\":16},\"notes\":[\"Validates deterministic Eshkol hello runtime output only.\",\"Does not validate magnetar closure physics.\"]}}",
+      "--created-at",
+      "2026-06-06T13:20:36.860897Z"
+    ]
+  },
+  "createdAt": "2026-06-06T13:20:36.860897Z",
+  "hostImports": {
+    "byteLength": 2704,
+    "domFree": true,
+    "factory": "createEshkolHostImportObject",
+    "global": "EshkolHostImports",
+    "path": "eshkol-host-imports.js",
+    "sha256": "sha256:a769ff71f1d1695d512c4197ea6e0169884450deff60376fd90f6ceecd826b4d"
+  },
+  "manualDeploy": {
+    "copyFiles": [
+      "hello.ulg.json",
+      "hello.wasm",
+      "schemas/ulg/closure_artifact.schema.json",
+      "eshkol-host-imports.js"
+    ],
+    "notes": [
+      "Serve or precache the artifact JSON and WASM module from the same directory.",
+      "The artifact's execution.module.url is relative to the artifact JSON file.",
+      "The host import JS is a DOM-free factory for browser/service-worker instantiation."
+    ],
+    "preserveRelativeUrls": true
+  },
+  "module": {
+    "byteLength": 33907,
+    "path": "hello.wasm",
+    "sha256": "sha256:1a4699680cc14ba3cefa78634c1d52425c4d4158e590aa2e3658d3c7cae9f79c"
+  },
+  "schema": "eshkol.ulg.closure-bundle.v0",
+  "schemaSnapshot": {
+    "byteLength": 1900,
+    "path": "schemas/ulg/closure_artifact.schema.json",
+    "sha256": "sha256:1761993127ccc6ebba5ea5ca18e9324104cb0122b4b8b66efef03c7fc620d01b"
+  },
+  "source": {
+    "path": "examples/hello.esk",
+    "type": "eshkol-source"
+  }
+}

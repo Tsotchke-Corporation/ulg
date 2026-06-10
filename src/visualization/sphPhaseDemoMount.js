@@ -10,6 +10,12 @@ import { sphTotals } from '../runtime/sph/sphConservation.js';
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const ICE_TEMP_K = 233.15;
 const IRON_TEMP_K = 1850;
+// Default wall reservoir temperature: 50 °F = 283.15 K (a mild room — melts ice, doesn't boil it).
+const WALL_DEFAULT_K = 283.15;
+// Default starting elevations (m) of each block's bottom face: ice on the floor, iron a clear gap
+// above it so the drop is visible. Both editable in the panel.
+const ICE_BASE_DEFAULT_M = 0;
+const IRON_BASE_DEFAULT_M = 2.5;
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -89,6 +95,8 @@ function buildOverlayShell() {
       </div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — apply with Reset</div>
+      <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
     </aside>
@@ -111,7 +119,7 @@ export function mountSphPhaseDemoOverlay() {
     wrap.textContent = face;
     const input = document.createElement('input');
     input.type = 'number';
-    input.value = String(ICE_TEMP_K);
+    input.value = String(WALL_DEFAULT_K);
     input.step = '5';
     input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
     wrap.appendChild(input);
@@ -119,16 +127,42 @@ export function mountSphPhaseDemoOverlay() {
     wallInputs[face] = input;
   }
 
+  const heightsEl = overlay.querySelector('#sph-heights');
+  const heightInputs = {};
+  for (const [key, label, value] of [['ice', 'ice base', ICE_BASE_DEFAULT_M], ['iron', 'iron base', IRON_BASE_DEFAULT_M]]) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = String(value);
+    input.step = '0.25';
+    input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    wrap.appendChild(input);
+    heightsEl.appendChild(wrap);
+    heightInputs[key] = input;
+  }
+
   const statusEl = overlay.querySelector('#sph-status');
   const sceneContainer = overlay.querySelector('#sph-scene');
 
   function scenarioFromControls() {
     const wallFaces = {};
-    for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || ICE_TEMP_K;
+    for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
     return createSphPhaseScenario({ wallFaces });
   }
 
-  let driver = createSphPhaseDemo({ scenario: scenarioFromControls() });
+  function driverOptionsFromControls() {
+    const iceBaseHeightM = Number(heightInputs.ice.value);
+    const ironBaseHeightM = Number(heightInputs.iron.value);
+    return {
+      scenario: scenarioFromControls(),
+      iceBaseHeightM: Number.isFinite(iceBaseHeightM) ? iceBaseHeightM : ICE_BASE_DEFAULT_M,
+      ironBaseHeightM: Number.isFinite(ironBaseHeightM) ? ironBaseHeightM : IRON_BASE_DEFAULT_M
+    };
+  }
+
+  let driver = createSphPhaseDemo(driverOptionsFromControls());
   const scene = createSphPhaseScene(sceneContainer, { boxEdgeM: driver.demo.box.edgeM });
   overlay.__sphScene = scene;
 
@@ -194,7 +228,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.querySelector('#sph-reset').addEventListener('click', () => {
     playing = false;
     overlay.querySelector('#sph-play').textContent = 'Play';
-    driver = createSphPhaseDemo({ scenario: scenarioFromControls() });
+    driver = createSphPhaseDemo(driverOptionsFromControls());
     syncParticles();
     renderStatus();
   });

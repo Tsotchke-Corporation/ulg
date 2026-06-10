@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
+import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
 
@@ -77,22 +78,53 @@ function clamp(value, min, max) {
 // Inset the simulation box inside the marching-cubes field cube so surfaces touching a box face
 // (e.g. the ice resting on the floor) aren't clipped at the field boundary. The mesh scale is
 // widened by the same factor (below) so the inset surface still aligns with the box wireframe.
-const FIELD_PADDING = 0.08;
+// Large enough that even a particle resting against a box face (radiusNorm up to ~0.11) keeps its
+// whole metaball inside the field cube, so settled surfaces (ice pooling on the floor) aren't
+// clipped after running for a while.
+const FIELD_PADDING = 0.17;
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
 }
 
+// Map a render surface key to the optical-closure query (material + phase) that derives its
+// appearance. 'steam' is gas-phase water; 'h2o' is the liquid/solid bulk.
+function opticalQueryForKey(key) {
+  if (key === 'fe') return { material: 'fe', phase: 'liquid' };
+  if (key === 'steam') return { material: 'steam', phase: 'gas' };
+  if (key === 'h2o') return { material: 'h2o', phase: 'liquid' };
+  return { material: 'default', phase: 'liquid' };
+}
+
 function makeSurfaceMaterial(key) {
   const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
-  return new THREE.MeshPhysicalMaterial({
+  // Transmission / IOR / attenuation come from the optical closure (refractive index + Beer–Lambert
+  // extinction), not hand-picked opacities: water refracts (IOR 1.33) and tints over its path,
+  // iron is opaque metal, steam barely refracts (IOR ≈ 1) and is only visible via condensation
+  // scattering. opacity is still used for the steam cloud where transmission would make it vanish.
+  const optics = opticalRenderParams(opticalQueryForKey(key));
+  const usesTransmission = optics.transmission > 0.01;
+  const material = new THREE.MeshPhysicalMaterial({
     vertexColors: true,
     side: THREE.DoubleSide,
     clearcoat: key === 'fe' ? 0.18 : 0.05,
-    transmission: key === 'h2o' ? 0.12 : 0,
-    thickness: key === 'h2o' ? 0.4 : 0,
-    ...config.materialOptions
+    metalness: optics.metalness,
+    roughness: optics.roughness,
+    ior: optics.ior,
+    transmission: optics.transmission,
+    thickness: usesTransmission ? 0.4 : 0,
+    transparent: true,
+    depthWrite: config.materialOptions.depthWrite,
+    // With physical transmission the surface is its own see-through; opacity 1. Where transmission
+    // is suppressed (steam's condensation scattering, the opaque default) fall back to the
+    // closure/config opacity so the surface still shows.
+    opacity: usesTransmission ? 1 : (key === 'steam' ? config.opacity : optics.opacity)
   });
+  if (optics.attenuationColor) {
+    material.attenuationColor = new THREE.Color(...optics.attenuationColor);
+    material.attenuationDistance = Math.max(0.05, optics.attenuationDistanceM);
+  }
+  return material;
 }
 
 function emptyBounds() {

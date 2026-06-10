@@ -47,7 +47,14 @@ function fillCube({ material, min, size, spacing, temperatureK, properties, dens
  * iron cube on top, both filled with particles. Reduced resolution so the CPU reference carrier runs
  * interactively.
  */
-export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), closures = createReferenceMaterialClosures(), ironSpacingM, iceSpacingM, ironDropGapM = 0.6 } = {}) {
+export function buildSphPhaseDemoState({
+  scenario = createSphPhaseScenario(),
+  closures = createReferenceMaterialClosures(),
+  ironSpacingM,
+  iceSpacingM,
+  iceBaseHeightM,
+  ironBaseHeightM
+} = {}) {
   const boxEdge = scenario.box.edgeM;
   const ironEdge = scenario.iron.edgeM;
   const iceEdge = scenario.ice.edgeM;
@@ -58,10 +65,14 @@ export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), cl
   const ironSpacing = ironSpacingM ?? ironEdge / 3;
   const iceSpacing = iceSpacingM ?? iceEdge / 5;
 
-  // The iron block starts a small gap above the ice and falls onto it under gravity.
+  // Configurable starting elevation (bottom face) of each block. The ice defaults to resting on
+  // the floor; the iron defaults to a clear gap above the ice top so it visibly falls onto it.
+  const iceBase = iceBaseHeightM ?? 0;
+  const ironBase = ironBaseHeightM ?? (iceBase + iceEdge + Math.max(iceEdge, 1.0));
+
   const ironParticles = fillCube({
     material: 'fe',
-    min: [cx - ironEdge / 2, iceEdge + ironDropGapM, cz - ironEdge / 2],
+    min: [cx - ironEdge / 2, ironBase, cz - ironEdge / 2],
     size: ironEdge,
     spacing: ironSpacing,
     temperatureK: scenario.iron.initialTemperatureK,
@@ -70,7 +81,7 @@ export function buildSphPhaseDemoState({ scenario = createSphPhaseScenario(), cl
   });
   const iceParticles = fillCube({
     material: 'h2o',
-    min: [cx - iceEdge / 2, 0, cz - iceEdge / 2],
+    min: [cx - iceEdge / 2, iceBase, cz - iceEdge / 2],
     size: iceEdge,
     spacing: iceSpacing,
     temperatureK: scenario.ice.initialTemperatureK,

@@ -117,6 +117,68 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3 
   return { r: 0.7, g: 0.7, b: 0.7 };
 }
 
+// Refractive indices (real part, visible) of the transparent phases. These set the Fresnel
+// surface reflection — the reason a clear medium is visible at all — and the render IOR. Iron is
+// a metal (opaque, complex index handled by the Drude reflectance above), so it has no transmissive
+// index. Water/ice values are model constants (closureBacked) pending an ab-initio polarizability
+// closure; vapour's index is ~1 (≈air), which is why pure water vapour is nearly invisible.
+const REFRACTIVE_INDEX = Object.freeze({
+  waterLiquid: 1.333,
+  waterIce: 1.309,
+  waterVapor: 1.00025
+});
+
+// Luminous-weighted Beer–Lambert attenuation of water. The characteristic 1/e distance is set by
+// the luminous-weighted mean absorption; the attenuation colour is the tint that light takes on
+// over *that* distance (three.js's attenuationColor semantics) — long enough for the O–H red
+// absorption to show, so the tint is blue. Thin media just push attenuationDistance large.
+function waterBeerLambertAttenuation() {
+  let aSum = 0;
+  let wSum = 0;
+  for (let nm = 380; nm <= 780; nm += 5) {
+    const w = cieY(nm);
+    aSum += waterAbsorption(nm) * w;
+    wSum += w;
+  }
+  const meanAbsorptionPerM = aSum / wSum;
+  const attenuationDistanceM = meanAbsorptionPerM > 0 ? 1 / meanAbsorptionPerM : 1e3;
+  const c = spectralResponseToSrgb((nm) => Math.exp(-waterAbsorption(nm) * attenuationDistanceM));
+  return { attenuationColor: [c.r, c.g, c.b], attenuationDistanceM };
+}
+
+/**
+ * Physically-derived render parameters for a material surface — what the renderer should use
+ * instead of hand-picked opacities. Everything here comes from the optics, not from tuning:
+ *  - metals (iron): opaque (transmission 0, metalness 1); colour is the Drude reflectance.
+ *  - water/ice: transmission + IOR from the refractive index (Fresnel sets the visible surface
+ *    reflection), with a Beer–Lambert attenuation colour/distance for the bulk blue tint.
+ *  - vapour (steam): IOR ≈ 1 so it barely refracts (pure vapour is nearly invisible); the only
+ *    thing that makes steam visible is Mie scattering off *condensed* micro-droplets, modelled
+ *    here as a single labelled `condensationScatter` term — the one value not yet derived from a
+ *    closure (it needs the condensation/nucleation microphysics), so it is called out explicitly.
+ * closureBacked: true; opticalValidation stays false.
+ */
+export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3 } = {}) {
+  if (material === 'fe') {
+    return { metalness: 1, roughness: 0.32, transmission: 0, ior: 2.9, opacity: 1, attenuationColor: null, attenuationDistanceM: 0, condensationScatter: 0 };
+  }
+  if (material === 'h2o' || material === 'steam') {
+    const isVapor = material === 'steam' || phase === 'gas';
+    const n = isVapor ? REFRACTIVE_INDEX.waterVapor : (phase === 'solid' ? REFRACTIVE_INDEX.waterIce : REFRACTIVE_INDEX.waterLiquid);
+    const fresnelR0 = ((n - 1) / (n + 1)) ** 2; // normal-incidence surface reflectance
+    const atten = waterBeerLambertAttenuation();
+    // Vapour is optically thin: push the attenuation distance far out so it carries almost no tint.
+    const attenuationColor = isVapor ? [1, 1, 1] : atten.attenuationColor;
+    const attenuationDistanceM = isVapor ? atten.attenuationDistanceM * 50 : atten.attenuationDistanceM;
+    // Mie scattering off condensed droplets (the visible part of steam). Not yet closure-derived
+    // — placeholder for the condensation microphysics — so it is the only tuned number here.
+    const condensationScatter = isVapor ? 0.45 : 0;
+    const transmission = Math.min(1, Math.max(0, 1 - fresnelR0 - condensationScatter));
+    return { metalness: 0, roughness: isVapor ? 0.9 : 0.08, transmission, ior: n, opacity: 1, attenuationColor, attenuationDistanceM, condensationScatter };
+  }
+  return { metalness: 0, roughness: 0.4, transmission: 0, ior: 1.4, opacity: 0.9, attenuationColor: null, attenuationDistanceM: 0, condensationScatter: 0 };
+}
+
 /**
  * Optical closure artifact (family 'optical'). First-principles derivation, not validated against
  * measured optical constants, so opticalValidation stays false.

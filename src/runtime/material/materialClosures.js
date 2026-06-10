@@ -45,7 +45,7 @@ function microphysicsRefsFor(materialKey) {
   const pending = {
     fe: 'moonlab.ulg.fe-microphysics-reference.v0',
     air: 'moonlab.ulg.air-mixture-reference.v0'
-  }[materialKey];
+  }[materialKey] ?? `moonlab.ulg.${materialKey}-microphysics-reference.v0`;
   return [{ schema: pending, status: 'pending-not-yet-produced' }];
 }
 
@@ -77,6 +77,9 @@ function materialProperties(materialKey) {
       atomsPerFormula: 1,
       heatCapacityModel: { solid: 'debye', liquid: 'constant-reference' },
       densityModel: { solid: 'gruneisen-debye-thermal-expansion', liquid: 'constant-reference' },
+      // Conduction-electron density (iron's 2 free 4s electrons per atom × number density) → the
+      // Drude plasma frequency → its optical colour. Derived, not a fitted plasma frequency.
+      conductionElectronDensityPerM3: 2 * (m.densityKgPerM3.solid / m.molarMassKgPerMol) * 6.02214076e23,
       latentModel: { fusion: 'richards-rule' },
       phases: [
         {
@@ -128,7 +131,7 @@ const VALIDITY_TEMPERATURE_K = {
 function buildMaterialClosure(materialKey) {
   const properties = materialProperties(materialKey);
   const validityDomain = {
-    temperatureK: VALIDITY_TEMPERATURE_K[materialKey],
+    temperatureK: VALIDITY_TEMPERATURE_K[materialKey] ?? [100, 6000],
     pressurePa: [1, 1e8],
     composition: 'pure'
   };

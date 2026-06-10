@@ -18,6 +18,8 @@ import { sphTotals } from './sph/sphConservation.js';
 import { buoyancyAccelerationMPerS2, phaseMassWithSteam, thermalStep } from './sph/thermalPhase.js';
 import { createPhaseAwareEos } from './sph/multiMaterialEos.js';
 import { createMlsMpmCarrier } from './sph/mlsMpmCarrier.js';
+import { elementMaterialClosure } from './material/elementClosures.js';
+import { zForSymbol } from './electronicStructure/periodicTable.js';
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
 function fillCube({ material, min, size, spacing, temperatureK, properties, densityKgPerM3 }) {
@@ -72,6 +74,8 @@ export function buildSphPhaseDemoState({
   closures = createReferenceMaterialClosures(),
   dropMaterial = 'fe',
   baseMaterial = 'h2o',
+  dropTemperatureK,
+  baseTemperatureK,
   ironSpacingM,
   iceSpacingM,
   iceBaseHeightM,
@@ -92,10 +96,22 @@ export function buildSphPhaseDemoState({
   const iceBase = iceBaseHeightM ?? 0;
   const ironBase = ironBaseHeightM ?? (iceBase + iceEdge + Math.max(iceEdge, 1.0));
 
-  const dropProps = closures[dropMaterial].properties;
-  const baseProps = closures[baseMaterial].properties;
-  const dropTempK = scenario.iron.initialTemperatureK; // hot role temperature
-  const baseTempK = scenario.ice.initialTemperatureK; // cold role temperature
+  // Resolve each block's material to a closure: the reference closures (fe/h2o/air) or, for any
+  // other element symbol, a closure DERIVED on the fly from the simulation (elementMaterialClosure:
+  // jellium + atomic DFT + universal rules). No per-material reference tables.
+  const resolved = { ...closures };
+  for (const key of [dropMaterial, baseMaterial]) {
+    if (resolved[key]) continue;
+    const Z = zForSymbol(key);
+    const ec = Z != null ? elementMaterialClosure(Z) : null;
+    if (!ec) throw new Error(`No closure for material '${key}' (not a reference material or metallic element)`);
+    resolved[key] = ec;
+  }
+  const dropProps = resolved[dropMaterial].properties;
+  const baseProps = resolved[baseMaterial].properties;
+  // Initial temperatures: explicit overrides, else the scenario's hot drop / cold base roles.
+  const dropTempK = dropTemperatureK ?? scenario.iron.initialTemperatureK;
+  const baseTempK = baseTemperatureK ?? scenario.ice.initialTemperatureK;
 
   const dropParticles = fillCube({
     material: dropMaterial,
@@ -133,7 +149,7 @@ export function buildSphPhaseDemoState({
     dropMaterial,
     baseMaterial,
     counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
-    materialProperties: { fe: closures.fe.properties, h2o: closures.h2o.properties, air: closures.air.properties }
+    materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };
 }
 
@@ -163,7 +179,9 @@ export function particleColors(demo) {
     if (inc.visible) {
       return { rgb: [...inc.srgb], closureBacked: true, source: 'radiation-closure' };
     }
-    const c = intrinsicColorSrgb({ material: p.material, phase: eq.stablePhase });
+    // Metals: colour derived from the conduction-electron density (Drude plasma frequency). Water/
+    // air: Beer–Lambert / Rayleigh. The electron density comes from the material closure.
+    const c = intrinsicColorSrgb({ material: p.material, phase: eq.stablePhase, conductionElectronDensityPerM3: props.conductionElectronDensityPerM3 });
     return { rgb: [c.r, c.g, c.b], closureBacked: true, source: 'optical-closure' };
   });
 }
@@ -252,32 +270,33 @@ export function createSphPhaseDemo(options = {}) {
   // density (from the closures), so condensed iron/water stay ~incompressible while vaporized water
   // expands toward the gas density. This is what makes the steam grow in volume and stops the
   // molten iron from puffing up like a gas. Shared by both mechanical backends.
-  // The mechanical stiffness is derived from each phase's real bulk/shear moduli (closure
-  // properties), not hand-set sound speeds. The ONE demo concession is a single global
-  // `soundSpeedScale`: real condensed sound speeds (km/s) would force a tiny timestep, so we scale
-  // every real sound speed down by one factor chosen so the stiffest material sits at a stable cap.
-  // Relative stiffnesses (iron > ice > water) stay physical; only the absolute timescale is scaled.
+  // Mechanical backend + timestep, decided up front (the sound-speed scaling depends on dt).
+  const mechanics = options.mechanics ?? 'mlsmpm';
+  const carrierDt = options.dt ?? (mechanics === 'mlsmpm' ? 5e-4 : 3e-4);
+  const mechanicalSubsteps = options.mechanicalSubsteps ?? (mechanics === 'mlsmpm' ? 16 : 24);
+  const gridSpacingM = options.gridSpacingM ?? Math.max(0.15, demo.state.smoothingLengthM);
+  const mechLengthM = mechanics === 'mlsmpm' ? gridSpacingM : demo.state.smoothingLengthM;
+
+  // Mechanical stiffness is derived from each phase's real bulk/shear moduli (closure properties).
+  // The one concession is a global `soundSpeedScale` < 1 (real km/s condensed speeds would force a
+  // microscopic dt). Rather than a fixed cap, we set the artificial sound speed as HIGH as the CFL
+  // allows at the chosen dt:  c_max = cflSafety · Δx / dt.  So a smaller dt automatically uses a
+  // stiffer, less weakly-compressible (more accurate) material, converging to the real moduli as
+  // dt → 0 (soundSpeedScale → 1). One global factor → relative stiffnesses (iron > ice > water) stay
+  // physical; only the absolute compressibility is the (dt-controlled) approximation.
   const realSoundSpeed = (ph) => (ph.bulkModulusPa && ph.densityKgPerM3 ? Math.sqrt(ph.bulkModulusPa / ph.densityKgPerM3) : 0);
   let maxRealSoundSpeed = 0;
   for (const props of Object.values(demo.materialProperties)) {
     for (const ph of props.phases || []) maxRealSoundSpeed = Math.max(maxRealSoundSpeed, realSoundSpeed(ph));
   }
-  const soundSpeedCapMPerS = options.soundSpeedCapMPerS ?? 220;
-  const soundSpeedScale = maxRealSoundSpeed > 0 ? soundSpeedCapMPerS / maxRealSoundSpeed : 1;
+  const cflSafety = options.cflSafety ?? 0.4;
+  const cflMaxSoundSpeedMPerS = (cflSafety * mechLengthM) / carrierDt;
+  const soundSpeedScale = Math.min(1, maxRealSoundSpeed > 0 ? cflMaxSoundSpeedMPerS / maxRealSoundSpeed : 1);
   const modulusScale = soundSpeedScale * soundSpeedScale; // moduli scale as c^2
   const eos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS: 40 });
 
-  // Mechanical backend: MLS-MPM (default — grid-based, stable for large deformation / multi-material
-  // / free-surface, GPU-friendly) or the SPH carrier (conservation reference). Both consume the same
-  // phase-aware EOS. The buoyancy on vaporized water is bolted on for SPH; with MPM the density
-  // contrast drives expansion through the grid, but we keep a gentle buoyancy assist for both.
-  const mechanics = options.mechanics ?? 'mlsmpm';
   let carrier;
-  let carrierDt;
-  let mechanicalSubsteps;
   if (mechanics === 'mlsmpm') {
-    carrierDt = options.dt ?? 5e-4;
-    mechanicalSubsteps = options.mechanicalSubsteps ?? 16;
     // Phase-dependent constitutive model: a particle in its SOLID phase resists shear (corotated
     // elasticity → it holds its block shape); when it melts (phase → liquid/gas, shear modulus 0) it
     // becomes a fluid and flows. The elastic moduli are the phase's real shear μ and Lamé
@@ -293,7 +312,7 @@ export function createSphPhaseDemo(options = {}) {
       return { solid: true, shearModulusPa: mu, lambdaPa: lambda };
     };
     carrier = createMlsMpmCarrier({
-      gridSpacingM: options.gridSpacingM ?? Math.max(0.15, demo.state.smoothingLengthM),
+      gridSpacingM,
       boxEdgeM: demo.box.edgeM,
       dt: carrierDt,
       gravity: options.gravity ?? [0, -9.80665, 0],
@@ -302,8 +321,6 @@ export function createSphPhaseDemo(options = {}) {
       constitutiveOf
     });
   } else {
-    carrierDt = options.dt ?? 3e-4;
-    mechanicalSubsteps = options.mechanicalSubsteps ?? 24;
     carrier = createSphPhaseCarrier({
       dimension: 3,
       gamma: options.gamma ?? 1.4,

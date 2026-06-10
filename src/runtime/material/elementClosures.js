@@ -36,6 +36,13 @@ const EPSILON0 = 8.8541878128e-12;
 const ELECTRON_MASS = 9.1093837015e-31;
 const AVOGADRO = 6.02214076e23;
 const EV_TO_J = 1.602176634e-19;
+const OPEN_TOP_K = 1e6;
+// Universal (material-independent) physical constants used to close the cold-curve model — the same
+// class as Richards'/Trouton's rules already in the codebase. NOT per-element fits.
+const POISSON_RATIO = 0.3; // isotropic-elasticity shear-from-bulk relation
+const LINDEMANN_RATIO = 0.07; // rms-displacement / spacing at melting (Lindemann criterion)
+const LIQUID_DENSITY_FRACTION = 0.95; // ~5% volume expansion on melting
+const RICHARDS_FUSION_ENTROPY = 8.314462618; // ΔS_fus ≈ R per mole (Richards' rule), J/(mol K)
 // Noble gases: closed shells (He's 1s² has valence count 2 but is closed) — outside the
 // free-electron metal model regardless of the raw s+p count.
 const NOBLE_GAS_Z = new Set([2, 10, 18, 36, 54, 86, 118]);
@@ -113,6 +120,19 @@ export function deriveElementProperties(atomicNumberZ, options = {}) {
   // Optical: Drude colour from the conduction-electron density.
   const optical = drudeMetalColorSrgb(valence * numberDensityPerM3);
 
+  // Shear modulus from the derived bulk modulus via the isotropic-elasticity relation with a single
+  // UNIVERSAL Poisson ratio (jellium itself is a fluid → no shear; the deviatoric stiffness comes
+  // from the ion lattice, whose ab-initio elastic tensor is the frontier). One universal relation,
+  // not a per-element constant: μ = K·3(1−2ν)/(2(1+ν)).
+  const shearModulusPa = bulkModulusPa * (3 * (1 - 2 * POISSON_RATIO)) / (2 * (1 + POISSON_RATIO));
+
+  // Melting from the Lindemann criterion using the DERIVED Debye temperature: a Debye solid melts
+  // when the rms thermal displacement reaches a universal fraction x_m of the atomic spacing.
+  // ⟨u²⟩ = 3ℏ²T/(M k_B θ_D²) = (x_m·a)² ⇒ T_m = x_m² a² M k_B θ_D² / (3ℏ²). x_m is the one universal
+  // Lindemann constant (not per-element).
+  const atomicSpacingM = (1 / numberDensityPerM3) ** (1 / 3);
+  const meltingPointK = (LINDEMANN_RATIO * LINDEMANN_RATIO / 3) * atomicSpacingM * atomicSpacingM * massKg * KB * debyeTemperatureK * debyeTemperatureK / (HBAR * HBAR);
+
   return {
     atomicNumberZ,
     symbol,
@@ -124,18 +144,15 @@ export function deriveElementProperties(atomicNumberZ, options = {}) {
     equilibriumWignerSeitzRadiusBohr: cold.equilibriumRsBohr,
     densityKgPerM3,
     bulkModulusPa,
+    shearModulusPa,
     soundSpeedMPerS,
     debyeTemperatureK,
     cpJPerKgK,
+    conductionElectronDensityPerM3: valence * numberDensityPerM3,
     opticalColorSrgb: optical.srgb,
     plasmaFrequencyRadPerS: optical.plasmaRadPerS,
-    // Melting / boiling / latent heats and the true cohesive energy need the atomization reference
-    // (free-atom minus bulk) and finite-temperature free energies — not derivable from this
-    // cold-curve model. Flagged null rather than faked; this is the next frontier (it ties into the
-    // molecular-bonding engine, which gives the atomization energetics).
-    meltingPointK: null,
-    cohesiveEnergyEvPerAtom: null,
-    derivation: 'atomic-DFT core radius -> polyvalent jellium cohesion (density, B) -> Debye (cp) + Drude (colour)',
+    meltingPointK,
+    derivation: 'atomic-DFT core radius -> polyvalent jellium cohesion (density, B) -> Debye (cp, θ_D) -> Lindemann melt + Poisson shear; Drude colour',
     closureBacked: true,
     validation: { eosValidation: false, thermalValidation: false, opticalValidation: false, scientificValidation: false }
   };
@@ -144,4 +161,53 @@ export function deriveElementProperties(atomicNumberZ, options = {}) {
 /** Derive properties for a list of elements (default: the whole table, Z = 1..118). */
 export function deriveAllElementProperties(zList = Array.from({ length: 118 }, (_, i) => i + 1), options = {}) {
   return zList.map((Z) => deriveElementProperties(Z, options));
+}
+
+const elementClosureCache = new Map();
+
+/**
+ * Build a demo-ready material closure (solid + liquid phases) for element Z, with EVERY value
+ * derived from the underlying simulation (jellium + atomic DFT) plus universal physical rules
+ * (Lindemann melting, Poisson shear, Richards fusion entropy) — no per-element reference constants.
+ * Returns null for elements outside the free-electron metal model (noble gases, non-metals).
+ * Cached per Z (the derivation runs an atomic-DFT solve for the core radius).
+ */
+export function elementMaterialClosure(atomicNumberZ, options = {}) {
+  if (elementClosureCache.has(atomicNumberZ)) return elementClosureCache.get(atomicNumberZ);
+  const p = deriveElementProperties(atomicNumberZ, options);
+  if (!p.metallicModelApplicable) { elementClosureCache.set(atomicNumberZ, null); return null; }
+  const meltingPointK = p.meltingPointK;
+  const liquidDensity = p.densityKgPerM3 * LIQUID_DENSITY_FRACTION;
+  // Latent heat of fusion from Richards' rule: ΔH_fus = T_m · ΔS_fus, ΔS_fus ≈ R per mole.
+  const latentHeatFusionJPerKg = (meltingPointK * RICHARDS_FUSION_ENTROPY) / p.molarMassKgPerMol;
+  const properties = {
+    molarMassKgPerMol: p.molarMassKgPerMol,
+    atomsPerFormula: 1,
+    heatCapacityModel: { solid: 'debye', liquid: 'constant-reference' },
+    derivation: p.derivation,
+    // Conduction-electron density → the Drude plasma frequency → the metal's optical colour.
+    conductionElectronDensityPerM3: p.conductionElectronDensityPerM3,
+    phases: [
+      { name: 'solid', cpJPerKgK: p.cpJPerKgK, densityKgPerM3: p.densityKgPerM3, temperatureRange: [0, meltingPointK], debyeTemperatureK: p.debyeTemperatureK, bulkModulusPa: p.bulkModulusPa, shearModulusPa: p.shearModulusPa },
+      { name: 'liquid', cpJPerKgK: p.cpJPerKgK * 1.1, densityKgPerM3: liquidDensity, temperatureRange: [meltingPointK, OPEN_TOP_K], bulkModulusPa: p.bulkModulusPa * 0.8, shearModulusPa: 0 }
+    ],
+    transitions: [
+      { from: 'solid', to: 'liquid', temperatureK: meltingPointK, latentHeatJPerKg: latentHeatFusionJPerKg }
+    ],
+    closureBacked: true,
+    validation: { eosValidation: false, thermalValidation: false, opticalValidation: false, scientificValidation: false }
+  };
+  const closure = { symbol: p.symbol, atomicNumberZ, properties };
+  elementClosureCache.set(atomicNumberZ, closure);
+  return closure;
+}
+
+/** Symbols of all elements the free-electron metal model applies to (valence 1..7, not a noble gas). */
+export function metallicElementSymbols() {
+  const out = [];
+  for (let Z = 1; Z <= 118; Z += 1) {
+    const v = valenceElectronCount(Z);
+    if (v >= 1 && v < 8 && ![2, 10, 18, 36, 54, 86, 118].includes(Z)) out.push({ Z, symbol: symbolForZ(Z) });
+  }
+  return out;
 }

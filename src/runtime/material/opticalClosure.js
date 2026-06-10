@@ -75,10 +75,32 @@ export function drudeReflectance(nm, { plasmaRadPerS, dampingRadPerS }) {
   return ((nRe - 1) ** 2 + kIm ** 2) / ((nRe + 1) ** 2 + kIm ** 2);
 }
 
-// Iron free-electron parameters (effective): plasma frequency from conduction-electron density,
-// damping from the optical relaxation rate. The free-electron model captures iron's high, fairly
-// flat reflectance (~neutral, slightly warm grey); exact constants need measured optical data.
-const IRON_DRUDE = { plasmaRadPerS: 1.5e16, dampingRadPerS: 6e15 };
+const ELECTRON_CHARGE = 1.602176634e-19;
+const EPSILON0 = 8.8541878128e-12;
+const ELECTRON_MASS = 9.1093837015e-31;
+
+/**
+ * Drude plasma frequency (rad/s) of a metal DERIVED from its conduction-electron density:
+ * ω_p = √(n_e e² / ε₀ m_e). No fitted constant — n_e comes from the valence electron count and the
+ * number density (the electronic structure).
+ */
+export function plasmaFrequencyRadPerS(conductionElectronDensityPerM3) {
+  return Math.sqrt((conductionElectronDensityPerM3 * ELECTRON_CHARGE * ELECTRON_CHARGE) / (EPSILON0 * ELECTRON_MASS));
+}
+
+/**
+ * Intrinsic colour (sRGB) of a free-electron metal, derived from its conduction-electron density via
+ * the Drude dielectric function → reflectance → CIE → sRGB. The plasma frequency (which sets the
+ * high, flat reflectance edge → neutral metallic grey) is derived; the optical damping is a single
+ * universal relaxation estimate (γ ≈ ω_p/30 — the interband colour of Cu/Au needs band structure,
+ * the frontier). closureBacked, validation false.
+ */
+export function metalDrudeColorSrgb(conductionElectronDensityPerM3) {
+  const wp = plasmaFrequencyRadPerS(conductionElectronDensityPerM3);
+  const damping = wp / 30;
+  const c = spectralResponseToSrgb((nm) => drudeReflectance(nm, { plasmaRadPerS: wp, dampingRadPerS: damping }));
+  return { r: c.r, g: c.g, b: c.b, plasmaRadPerS: wp };
+}
 
 // Liquid-water absorption coefficient α(λ) (1/m), rising toward the red from O–H vibrational
 // overtone bands (the reason water is blue). Anchor values interpolated linearly.
@@ -100,9 +122,12 @@ function waterAbsorption(nm) {
  * Intrinsic colour (sRGB {r,g,b}) of a material phase, derived first-principles. closureBacked.
  * Optional `pathLengthM` sets the absorption path for transparent media (default 3 m).
  */
-export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3 }) {
-  if (material === 'fe') {
-    return spectralResponseToSrgb((nm) => drudeReflectance(nm, IRON_DRUDE));
+export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3, conductionElectronDensityPerM3 = null }) {
+  // Metals: derive the colour from the conduction-electron density (Drude). The caller passes the
+  // density (from the material closure); a metal without one falls through to the grey default.
+  if (conductionElectronDensityPerM3 > 0) {
+    const c = metalDrudeColorSrgb(conductionElectronDensityPerM3);
+    return { r: c.r, g: c.g, b: c.b };
   }
   if (material === 'h2o') {
     // Bulk water/ice go blue from O–H absorption over a path; ice is clearer (shorter path).
@@ -199,7 +224,7 @@ export function createOpticalClosure() {
     validityDomain: { temperatureK: [0, 6000] },
     units: { color: 'sRGB-0-1', absorption: '1/m' },
     properties: {
-      iron: { model: 'drude-free-electron', ...IRON_DRUDE },
+      metals: { model: 'drude-free-electron', plasmaFrequency: 'derived from conduction-electron density', damping: 'universal omega_p/30 estimate' },
       water: { model: 'beer-lambert-OH-overtone-absorption' },
       air: { model: 'rayleigh-1-over-lambda4' },
       colorPipeline: 'spectral-response -> CIE-1931 -> equal-energy sRGB'

@@ -6,6 +6,7 @@ import { createSphPhaseScene } from './sphPhaseScene.js';
 import { createSphPhaseDemo, particleColors, particleRenderMaterials, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
 import { computeThermodynamicPreflight, createSphPhaseScenario } from '../runtime/thermoPreflight.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
+import { metallicElementSymbols } from '../runtime/material/elementClosures.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const ICE_TEMP_K = 233.15;
@@ -20,12 +21,20 @@ const IRON_BASE_DEFAULT_M = 2.5;
 // of the old 10 m domain, so the box wireframe frames the sim and the marching-cubes field spends
 // its resolution where the material actually is.
 const DEMO_BOX_EDGE_M = 5;
-// Selectable block materials — the elements/compounds we have full thermodynamic closures for
-// (phases, latent heats, EOS). Defaults reproduce the molten-iron-on-ice scenario.
+// Selectable block materials: the two reference compounds (Fe and H₂O — full referenced closures)
+// plus the FULL set of metallic elements, whose closures are DERIVED on demand from the simulation
+// (jellium + atomic DFT + universal rules) — no per-material tables.
 const MATERIAL_OPTIONS = [
-  { key: 'fe', label: 'Iron (Fe)' },
-  { key: 'h2o', label: 'Water (H₂O)' }
+  { key: 'fe', label: 'Iron (Fe) — ref' },
+  { key: 'h2o', label: 'Water (H₂O) — ref' },
+  ...metallicElementSymbols()
+    .filter((e) => e.Z !== 26) // Fe is offered via the reference closure above
+    .map((e) => ({ key: e.symbol, label: `${e.symbol} (Z=${e.Z}) — derived` }))
 ];
+// Default initial temperatures (K): hot drop block (molten iron above its 1811 K liquidus) and cold
+// base block (ice at −40 °F). Editable in the panel.
+const DROP_TEMP_DEFAULT_K = 1850;
+const BASE_TEMP_DEFAULT_K = 233.15;
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -107,6 +116,8 @@ function buildOverlayShell() {
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">materials — apply with Reset</div>
       <div id="sph-elements" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial temperature (K) — apply with Reset</div>
+      <div id="sph-temps" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — apply with Reset</div>
       <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
@@ -175,8 +186,47 @@ export function mountSphPhaseDemoOverlay() {
     elementSelects[role] = select;
   }
 
+  const tempsEl = overlay.querySelector('#sph-temps');
+  const tempInputs = {};
+  for (const [role, label, def] of [['drop', 'drop block T', DROP_TEMP_DEFAULT_K], ['base', 'base block T', BASE_TEMP_DEFAULT_K]]) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
+    wrap.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.value = String(def);
+    input.step = '10';
+    input.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    wrap.appendChild(input);
+    tempsEl.appendChild(wrap);
+    tempInputs[role] = input;
+  }
+
   const statusEl = overlay.querySelector('#sph-status');
   const sceneContainer = overlay.querySelector('#sph-scene');
+
+  // URL state: every control is encoded in the location hash so a refresh restores the full setup.
+  const urlControls = {
+    wxmin: wallInputs.xMin, wxmax: wallInputs.xMax, wymin: wallInputs.yMin, wymax: wallInputs.yMax, wzmin: wallInputs.zMin, wzmax: wallInputs.zMax,
+    drop: elementSelects.drop, base: elementSelects.base,
+    dropt: tempInputs.drop, baset: tempInputs.base,
+    iceh: heightInputs.ice, ironh: heightInputs.iron
+  };
+  function applyUrlToControls() {
+    const q = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    for (const [key, el] of Object.entries(urlControls)) {
+      const v = q.get(key);
+      if (v != null && v !== '') el.value = v;
+    }
+  }
+  function syncUrlFromControls() {
+    const q = new URLSearchParams();
+    for (const [key, el] of Object.entries(urlControls)) q.set(key, el.value);
+    window.history.replaceState(null, '', `#${q.toString()}`);
+  }
+  for (const el of Object.values(urlControls)) el.addEventListener('change', syncUrlFromControls);
+  applyUrlToControls(); // restore from the URL before the first build
+  syncUrlFromControls(); // and reflect the full current state in the URL
 
   function scenarioFromControls() {
     const wallFaces = {};
@@ -187,10 +237,14 @@ export function mountSphPhaseDemoOverlay() {
   function driverOptionsFromControls() {
     const iceBaseHeightM = Number(heightInputs.ice.value);
     const ironBaseHeightM = Number(heightInputs.iron.value);
+    const dropTemperatureK = Number(tempInputs.drop.value);
+    const baseTemperatureK = Number(tempInputs.base.value);
     return {
       scenario: scenarioFromControls(),
       dropMaterial: elementSelects.drop.value,
       baseMaterial: elementSelects.base.value,
+      dropTemperatureK: Number.isFinite(dropTemperatureK) ? dropTemperatureK : DROP_TEMP_DEFAULT_K,
+      baseTemperatureK: Number.isFinite(baseTemperatureK) ? baseTemperatureK : BASE_TEMP_DEFAULT_K,
       iceBaseHeightM: Number.isFinite(iceBaseHeightM) ? iceBaseHeightM : ICE_BASE_DEFAULT_M,
       ironBaseHeightM: Number.isFinite(ironBaseHeightM) ? ironBaseHeightM : IRON_BASE_DEFAULT_M
     };

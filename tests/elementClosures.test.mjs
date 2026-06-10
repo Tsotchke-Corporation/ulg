@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deriveElementProperties } from '../src/runtime/material/elementClosures.js';
+import { deriveElementProperties, elementMaterialClosure } from '../src/runtime/material/elementClosures.js';
 
 // Fast, coarse-grid derivation for the test (light elements only).
 const fast = { gridPointsN: 600, rMaxBohr: 30 };
@@ -37,11 +37,21 @@ test('closed-shell / full-sp atoms are flagged outside the free-electron model, 
   }
 });
 
-test('phase-transition / cohesion properties are flagged null (need atomization), nothing validated', () => {
+test('melting + shear are derived (Lindemann from Debye, Poisson from bulk), nothing validated', () => {
   const al = deriveElementProperties(13, fast);
-  assert.equal(al.meltingPointK, null);
-  assert.equal(al.cohesiveEnergyEvPerAtom, null);
+  assert.ok(al.meltingPointK > 0 && Number.isFinite(al.meltingPointK)); // Lindemann from derived theta_D
+  assert.ok(al.shearModulusPa > 0 && al.shearModulusPa < al.bulkModulusPa); // Poisson shear < bulk
   assert.equal(al.closureBacked, true);
   assert.equal(al.validation.eosValidation, false);
   assert.equal(al.validation.scientificValidation, false);
+});
+
+test('elementMaterialClosure derives a solid+liquid closure for any metal; none for noble gases', () => {
+  const na = elementMaterialClosure(11, fast); // sodium
+  assert.equal(na.symbol, 'Na');
+  assert.equal(na.properties.phases.length, 2);
+  assert.ok(na.properties.phases[0].shearModulusPa > 0); // solid resists shear
+  assert.equal(na.properties.phases[1].shearModulusPa, 0); // liquid flows
+  assert.ok(na.properties.transitions[0].latentHeatJPerKg > 0); // Richards' rule fusion
+  assert.equal(elementMaterialClosure(18, fast), null); // Argon: not a metal
 });

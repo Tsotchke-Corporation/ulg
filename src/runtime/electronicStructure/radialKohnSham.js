@@ -313,6 +313,84 @@ export function relativisticOrbitalCorrectionHa({ u, energyHa, vFull, r, dx, l, 
   return -0.5 * a2 * mv + darwin;
 }
 
+// Radial derivatives of a smooth function f sampled on the log grid (r = e^x, uniform x):
+//   df/dr = (1/r) df/dx ,   d^2f/dr^2 = (1/r^2)(d^2f/dx^2 - df/dx)   (central differences).
+function radialDerivativesLog(f, r, dx) {
+  const n = f.length;
+  const fp = new Float64Array(n);
+  const fpp = new Float64Array(n);
+  for (let i = 1; i < n - 1; i += 1) {
+    const fx = (f[i + 1] - f[i - 1]) / (2 * dx);
+    const fxx = (f[i + 1] - 2 * f[i] + f[i - 1]) / (dx * dx);
+    fp[i] = fx / r[i];
+    fpp[i] = (fxx - fx) / (r[i] * r[i]);
+  }
+  fp[0] = fp[1]; fp[n - 1] = fp[n - 2];
+  fpp[0] = fpp[1]; fpp[n - 1] = fpp[n - 2];
+  return { fp, fpp };
+}
+
+/**
+ * Koelling–Harmon scalar-relativistic radial states for angular momentum l, in the effective
+ * potential V = −Z/r + vElec. Non-perturbative: the energy-dependent relativistic mass
+ * M(r) = 1 + (α²/2)(ε − V) enters the kinetic operator, and the scalar-relativistic mass-velocity
+ * + Darwin physics appears through the M, M', M'' terms (spin-orbit dropped — the KH
+ * approximation). Solved as the symmetric generalized eigenproblem
+ *   −w'' + [(l+1/2)² + r²·U_rel] w = ε·(2 M r²)·w ,   w = (P/√M)/√r ,  u = P = ŵ/√(2r),
+ * folded (B^{-1/2} A B^{-1/2}) to reuse the tridiagonal eigensolver; M depends on ε, so each
+ * orbital's energy is iterated to self-consistency. Returns the lowest `count` states (energy + u).
+ */
+export function radialStatesKH(vElec, r, dx, l, count, atomicNumberZ, initialEnergies) {
+  const n = r.length;
+  const invDx2 = 1 / (dx * dx);
+  const a2h = 0.5 * ALPHA_FINE * ALPHA_FINE;
+  const V = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) V[i] = -atomicNumberZ / r[i] + vElec[i];
+  // V' = Z/r^2 + vElec' ;  V'' = -2Z/r^3 + vElec''  (nuclear part analytic, electronic part numeric).
+  const { fp: vElecP, fpp: vElecPP } = radialDerivativesLog(vElec, r, dx);
+  const Vp = new Float64Array(n);
+  const Vpp = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) {
+    Vp[i] = atomicNumberZ / (r[i] * r[i]) + vElecP[i];
+    Vpp[i] = -2 * atomicNumberZ / (r[i] * r[i] * r[i]) + vElecPP[i];
+  }
+
+  const states = [];
+  for (let k = 0; k < count; k += 1) {
+    let energy = initialEnergies?.[k] ?? -atomicNumberZ * atomicNumberZ / (2 * (k + l + 1) * (k + l + 1));
+    let u = null;
+    for (let iter = 0; iter < 40; iter += 1) {
+      const M = new Float64Array(n);
+      for (let i = 0; i < n; i += 1) M[i] = 1 + a2h * (energy - V[i]);
+      const diag = new Float64Array(n);
+      const off = new Float64Array(n);
+      for (let i = 0; i < n; i += 1) {
+        const mRatio = (-a2h * Vp[i]) / M[i]; // M'/M
+        const Urel = 2 * M[i] * V[i] - mRatio / r[i] + 0.75 * mRatio * mRatio - 0.5 * (-a2h * Vpp[i]) / M[i];
+        const aDiag = 2 * invDx2 + (l + 0.5) * (l + 0.5) + r[i] * r[i] * Urel;
+        const bDiag = 2 * M[i] * r[i] * r[i];
+        diag[i] = aDiag / bDiag;
+        if (i < n - 1) off[i] = -invDx2 / (2 * r[i] * r[i + 1] * Math.sqrt(M[i] * M[i + 1]));
+      }
+      const pairs = lowestEigenpairs(diag, off, k + 1, dx);
+      const pair = pairs[k];
+      const newEnergy = pair.energyHa;
+      u = pair.u;
+      if (Math.abs(newEnergy - energy) < 1e-9 && iter > 1) { energy = newEnergy; break; }
+      energy = newEnergy;
+    }
+    // Recover u = P = ŵ/√(2r) (the √M cancels in the unfolding), normalize ∫u^2 dr = 1.
+    const uPhys = new Float64Array(n);
+    for (let i = 0; i < n; i += 1) uPhys[i] = u[i] / Math.sqrt(2 * r[i]);
+    let norm = 0;
+    for (let i = 0; i < n; i += 1) norm += uPhys[i] * uPhys[i] * r[i] * dx;
+    norm = Math.sqrt(norm);
+    for (let i = 0; i < n; i += 1) uPhys[i] /= norm;
+    states.push({ energyHa: energy, u: uPhys });
+  }
+  return states;
+}
+
 /**
  * All-electron Kohn–Sham LDA on a logarithmic radial grid. Accurate across the periodic table.
  * `configuration` is the { n, l, occupancy } subshell list. Returns total energy, per-subshell
@@ -562,6 +640,93 @@ export function solveKohnShamAtomLSDA({
   };
 }
 
+/**
+ * All-electron Kohn–Sham LDA with the Koelling–Harmon scalar-relativistic treatment on a
+ * logarithmic grid. Unlike the perturbative correction, the relativistic mass enters the kinetic
+ * operator self-consistently (each orbital's energy iterated through M(ε,r)), so it stays accurate
+ * for heavy atoms where first-order perturbation theory breaks down. Returns total energy,
+ * per-subshell orbital energies, and the integrated electron count.
+ */
+export function solveKohnShamAtomKH({
+  atomicNumberZ,
+  configuration,
+  gridPointsN = 1400,
+  rMinBohr = 1e-6,
+  rMaxBohr = 40,
+  mixing = 0.2,
+  maxScf = 500,
+  tol = 1e-7
+}) {
+  const xMin = Math.log(rMinBohr);
+  const dx = (Math.log(rMaxBohr) - xMin) / (gridPointsN - 1);
+  const r = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) r[i] = Math.exp(xMin + i * dx);
+
+  const statesPerL = new Map();
+  for (const sub of configuration) statesPerL.set(sub.l, Math.max(statesPerL.get(sub.l) || 0, sub.n - sub.l));
+
+  let rho = new Float64Array(gridPointsN);
+  for (let i = 0; i < gridPointsN; i += 1) rho[i] = atomicNumberZ * (atomicNumberZ ** 3 / Math.PI) * Math.exp(-2 * atomicNumberZ * r[i]);
+
+  let statesByL = new Map();
+  const prevEnergies = new Map(); // per-l seed energies (warm-start the per-orbital ε iteration)
+  let vH = new Float64Array(gridPointsN);
+  let vXC = new Float64Array(gridPointsN);
+  const vElec = new Float64Array(gridPointsN);
+
+  for (let scf = 0; scf < maxScf; scf += 1) {
+    vH = hartreePotentialLog(rho, r, dx);
+    for (let i = 0; i < gridPointsN; i += 1) {
+      vXC[i] = xcPotential(rho[i]);
+      vElec[i] = vH[i] + vXC[i];
+    }
+    statesByL = new Map();
+    for (const [l, count] of statesPerL) {
+      const states = radialStatesKH(vElec, r, dx, l, count, atomicNumberZ, prevEnergies.get(l));
+      prevEnergies.set(l, states.map((s) => s.energyHa));
+      statesByL.set(l, states);
+    }
+    const rhoNew = new Float64Array(gridPointsN);
+    for (const sub of configuration) {
+      const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+      for (let i = 0; i < gridPointsN; i += 1) rhoNew[i] += (sub.occupancy * state.u[i] * state.u[i]) / (4 * Math.PI * r[i] * r[i]);
+    }
+    let delta = 0;
+    for (let i = 0; i < gridPointsN; i += 1) {
+      delta += Math.abs(rhoNew[i] - rho[i]) * 4 * Math.PI * r[i] * r[i] * r[i] * dx;
+      rho[i] = (1 - mixing) * rho[i] + mixing * rhoNew[i];
+    }
+    if (delta < tol && scf > 8) break;
+  }
+
+  let sumOcc = 0;
+  let electronCount = 0;
+  const orbitals = [];
+  for (const sub of configuration) {
+    const state = statesByL.get(sub.l)[sub.n - sub.l - 1];
+    sumOcc += sub.occupancy * state.energyHa;
+    electronCount += sub.occupancy;
+    orbitals.push({ n: sub.n, l: sub.l, occupancy: sub.occupancy, energyHa: state.energyHa });
+  }
+  let integratedElectrons = 0;
+  let eHartreeDouble = 0;
+  let eXcCorrection = 0;
+  for (let i = 0; i < gridPointsN; i += 1) {
+    const dV = 4 * Math.PI * r[i] * r[i] * r[i] * dx;
+    integratedElectrons += rho[i] * dV;
+    eHartreeDouble += 0.5 * rho[i] * vH[i] * dV;
+    eXcCorrection += (xcEnergyPerVolume(rho[i]) - vXC[i] * rho[i]) * dV;
+  }
+  return {
+    totalEnergyHa: sumOcc - eHartreeDouble + eXcCorrection,
+    orbitals,
+    electronCount,
+    integratedElectrons,
+    atomicNumberZ,
+    relativisticMethod: 'koelling-harmon'
+  };
+}
+
 function densityFromSubshells(configuration, statesByL, r, gridPointsN) {
   const rho = new Float64Array(gridPointsN);
   for (const sub of configuration) {
@@ -662,6 +827,10 @@ export function solveAtom(atomicNumberZ, options = {}) {
     return { symbol: symbolForZ(atomicNumberZ), spinConfiguration, ...result };
   }
   const configuration = options.configuration ?? electronConfiguration(atomicNumberZ);
+  if (options.scalarRelativistic) {
+    const result = solveKohnShamAtomKH({ atomicNumberZ, configuration, gridPointsN, rMaxBohr, ...options });
+    return { symbol: symbolForZ(atomicNumberZ), configuration, ...result };
+  }
   const result = solveKohnShamAtomLog({ atomicNumberZ, configuration, gridPointsN, rMaxBohr, ...options });
   return { symbol: symbolForZ(atomicNumberZ), configuration, ...result };
 }

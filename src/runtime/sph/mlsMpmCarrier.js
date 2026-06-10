@@ -11,6 +11,72 @@
 // mechanical integrator differs. Weakly-compressible fluid constitutive model (stress = −p I),
 // volume tracked by J. Evidence-only: sphValidation/phaseChangeValidation stay false.
 
+// --- 3x3 matrix helpers (row-major length-9) for the solid elastic constitutive model ----------
+function mat3mul(A, B) {
+  const C = new Float64Array(9);
+  for (let i = 0; i < 3; i += 1) for (let j = 0; j < 3; j += 1) {
+    let s = 0;
+    for (let k = 0; k < 3; k += 1) s += A[i * 3 + k] * B[k * 3 + j];
+    C[i * 3 + j] = s;
+  }
+  return C;
+}
+function mat3T(A) { return new Float64Array([A[0], A[3], A[6], A[1], A[4], A[7], A[2], A[5], A[8]]); }
+function mat3det(A) {
+  return A[0] * (A[4] * A[8] - A[5] * A[7]) - A[1] * (A[3] * A[8] - A[5] * A[6]) + A[2] * (A[3] * A[7] - A[4] * A[6]);
+}
+function mat3inv(A) {
+  const d = mat3det(A);
+  const id = 1 / d;
+  return new Float64Array([
+    (A[4] * A[8] - A[5] * A[7]) * id, (A[2] * A[7] - A[1] * A[8]) * id, (A[1] * A[5] - A[2] * A[4]) * id,
+    (A[5] * A[6] - A[3] * A[8]) * id, (A[0] * A[8] - A[2] * A[6]) * id, (A[2] * A[3] - A[0] * A[5]) * id,
+    (A[3] * A[7] - A[4] * A[6]) * id, (A[1] * A[6] - A[0] * A[7]) * id, (A[0] * A[4] - A[1] * A[3]) * id
+  ]);
+}
+// Fixed-corotated elastic Cauchy stress (Stomakhin et al.): P = 2μ(F−R) + λ(J−1)J F^{-T},
+// σ = (1/J) P Fᵀ, with R the polar-decomposition rotation (Newton iteration R ← ½(R + R^{-T})).
+// Fully inlined scalar 3×3 algebra — no per-iteration array allocation (this is a hot path called
+// once per solid particle per substep). Gives a solid that resists shear and springs back.
+function corotatedCauchyStress(F, mu, lambda) {
+  const f0 = F[0]; const f1 = F[1]; const f2 = F[2];
+  const f3 = F[3]; const f4 = F[4]; const f5 = F[5];
+  const f6 = F[6]; const f7 = F[7]; const f8 = F[8];
+  // Polar rotation R (start R = F).
+  let r0 = f0; let r1 = f1; let r2 = f2; let r3 = f3; let r4 = f4; let r5 = f5; let r6 = f6; let r7 = f7; let r8 = f8;
+  for (let it = 0; it < 12; it += 1) {
+    const det = r0 * (r4 * r8 - r5 * r7) - r1 * (r3 * r8 - r5 * r6) + r2 * (r3 * r7 - r4 * r6);
+    const id = 1 / det;
+    // R^{-T} = transpose of R^{-1}.
+    const t0 = (r4 * r8 - r5 * r7) * id; const t3 = (r2 * r7 - r1 * r8) * id; const t6 = (r1 * r5 - r2 * r4) * id;
+    const t1 = (r5 * r6 - r3 * r8) * id; const t4 = (r0 * r8 - r2 * r6) * id; const t7 = (r2 * r3 - r0 * r5) * id;
+    const t2 = (r3 * r7 - r4 * r6) * id; const t5 = (r1 * r6 - r0 * r7) * id; const t8 = (r0 * r4 - r1 * r3) * id;
+    const n0 = 0.5 * (r0 + t0); const n1 = 0.5 * (r1 + t1); const n2 = 0.5 * (r2 + t2);
+    const n3 = 0.5 * (r3 + t3); const n4 = 0.5 * (r4 + t4); const n5 = 0.5 * (r5 + t5);
+    const n6 = 0.5 * (r6 + t6); const n7 = 0.5 * (r7 + t7); const n8 = 0.5 * (r8 + t8);
+    const diff = Math.abs(n0 - r0) + Math.abs(n4 - r4) + Math.abs(n8 - r8);
+    r0 = n0; r1 = n1; r2 = n2; r3 = n3; r4 = n4; r5 = n5; r6 = n6; r7 = n7; r8 = n8;
+    if (diff < 1e-10) break;
+  }
+  const J = f0 * (f4 * f8 - f5 * f7) - f1 * (f3 * f8 - f5 * f6) + f2 * (f3 * f7 - f4 * f6);
+  const jid = 1 / J;
+  // F^{-T}.
+  const ft0 = (f4 * f8 - f5 * f7) * jid; const ft3 = (f2 * f7 - f1 * f8) * jid; const ft6 = (f1 * f5 - f2 * f4) * jid;
+  const ft1 = (f5 * f6 - f3 * f8) * jid; const ft4 = (f0 * f8 - f2 * f6) * jid; const ft7 = (f2 * f3 - f0 * f5) * jid;
+  const ft2 = (f3 * f7 - f4 * f6) * jid; const ft5 = (f1 * f6 - f0 * f7) * jid; const ft8 = (f0 * f4 - f1 * f3) * jid;
+  const c = lambda * (J - 1) * J;
+  const p0 = 2 * mu * (f0 - r0) + c * ft0; const p1 = 2 * mu * (f1 - r1) + c * ft1; const p2 = 2 * mu * (f2 - r2) + c * ft2;
+  const p3 = 2 * mu * (f3 - r3) + c * ft3; const p4 = 2 * mu * (f4 - r4) + c * ft4; const p5 = 2 * mu * (f5 - r5) + c * ft5;
+  const p6 = 2 * mu * (f6 - r6) + c * ft6; const p7 = 2 * mu * (f7 - r7) + c * ft7; const p8 = 2 * mu * (f8 - r8) + c * ft8;
+  // σ = (1/J) P Fᵀ, with (P Fᵀ)[i][j] = Σ_k P[i][k] F[j][k].
+  return new Float64Array([
+    (p0 * f0 + p1 * f1 + p2 * f2) * jid, (p0 * f3 + p1 * f4 + p2 * f5) * jid, (p0 * f6 + p1 * f7 + p2 * f8) * jid,
+    (p3 * f0 + p4 * f1 + p5 * f2) * jid, (p3 * f3 + p4 * f4 + p5 * f5) * jid, (p3 * f6 + p4 * f7 + p5 * f8) * jid,
+    (p6 * f0 + p7 * f1 + p8 * f2) * jid, (p6 * f3 + p7 * f4 + p8 * f5) * jid, (p6 * f6 + p7 * f7 + p8 * f8) * jid
+  ]);
+}
+const IDENTITY3 = () => new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+
 // Quadratic B-spline weights (3 nodes/axis) and their offset positions, given fx = x/dx − base.
 function quadraticWeights(fx) {
   const a = 1.5 - fx;
@@ -31,6 +97,10 @@ export function createMlsMpmCarrier({
   gravity = [0, -9.80665, 0],
   eos,
   restDensityOf, // (particle) -> rest density (kg/m^3) at its initial phase, for V0
+  // (particle) -> { solid, shearModulusPa, lambdaPa }. When solid, a corotated elastic stress is
+  // used (the material holds its shape / resists shear); otherwise the weakly-compressible fluid
+  // pressure is used. Default: everything is a fluid (backwards-compatible).
+  constitutiveOf = () => ({ solid: false }),
   wallRestitution = 0.3
 } = {}) {
   const dx = gridSpacingM;
@@ -41,7 +111,8 @@ export function createMlsMpmCarrier({
   const inRange = (i) => i + shift >= 0 && i + shift < gn;
 
   function ensureParticleState(p) {
-    if (p.mpmJ === undefined) {
+    if (p.mpmF === undefined) {
+      p.mpmF = IDENTITY3(); // deformation gradient (carries elastic shape memory for solids)
       p.mpmJ = 1;
       p.mpmC = new Float64Array(9);
       const rho0 = restDensityOf(p);
@@ -60,15 +131,25 @@ export function createMlsMpmCarrier({
     for (let pi = 0; pi < n; pi += 1) {
       const p = particles[pi];
       ensureParticleState(p);
-      const volume = p.mpmVolume0 * p.mpmJ;
+      const J = mat3det(p.mpmF);
+      const volume = p.mpmVolume0 * J;
       const density = p.massKg / volume; // = rho0 / J
-      const pressure = eos({ density, specificInternalEnergyJPerKg: p.specificInternalEnergyJPerKg, particle: p }).pressurePa;
-      // Affine matrix: APIC (m C) + MLS stress term (stress = -p I; ∇w = (4/dx^2)(x_i-x_p) w).
-      const stressScale = dt * volume * 4 * invDx * invDx * pressure; // adds to the diagonal (pressure pushes out)
+      const con = constitutiveOf(p);
+      p.mpmSolid = con.solid; // cache the phase decision for G2P (avoids a 2nd phase lookup)
+      // Cauchy stress σ: corotated elastic for a solid (resists shear → holds shape), otherwise the
+      // weakly-compressible fluid pressure σ = −p I.
+      let sigma;
+      if (con.solid) {
+        sigma = corotatedCauchyStress(p.mpmF, con.shearModulusPa, con.lambdaPa);
+      } else {
+        const pressure = eos({ density, specificInternalEnergyJPerKg: p.specificInternalEnergyJPerKg, particle: p }).pressurePa;
+        sigma = new Float64Array([-pressure, 0, 0, 0, -pressure, 0, 0, 0, -pressure]);
+      }
+      // Affine matrix: APIC (m C) + MLS internal-force term  −dt·V·(4/dx²)·σ  (∇w = (4/dx²)(x_i−x_p) w).
+      const sScale = -dt * volume * 4 * invDx * invDx;
       const C = p.mpmC;
       const aff = new Float64Array(9);
-      for (let a = 0; a < 9; a += 1) aff[a] = p.massKg * C[a];
-      aff[0] += stressScale; aff[4] += stressScale; aff[8] += stressScale;
+      for (let a = 0; a < 9; a += 1) aff[a] = p.massKg * C[a] + sScale * sigma[a];
 
       const baseX = Math.floor(p.x[0] * invDx - 0.5);
       const baseY = Math.floor(p.x[1] * invDx - 0.5);
@@ -167,9 +248,21 @@ export function createMlsMpmCarrier({
       p.v[0] = nvx; p.v[1] = nvy; p.v[2] = nvz;
       p.mpmC = C;
       p.x[0] += dt * nvx; p.x[1] += dt * nvy; p.x[2] += dt * nvz;
-      // Volume update for the weakly-compressible fluid: J *= (1 + dt tr(C)).
-      p.mpmJ *= 1 + dt * (C[0] + C[4] + C[8]);
-      if (p.mpmJ < 0.1) p.mpmJ = 0.1; // guard against collapse
+      // Deformation-gradient update: F <- (I + dt C) F.
+      const gradX = mat3mul(new Float64Array([1 + dt * C[0], dt * C[1], dt * C[2], dt * C[3], 1 + dt * C[4], dt * C[5], dt * C[6], dt * C[7], 1 + dt * C[8]]), p.mpmF);
+      const solid = p.mpmSolid;
+      if (solid) {
+        p.mpmF = gradX;
+      } else {
+        // Fluids/gas keep no shear memory: collapse F to the volume-only part F = J^{1/3} I, so a
+        // melted solid flows (and a re-frozen one starts fresh). Also lets steam expand (J grows).
+        let J = mat3det(gradX);
+        if (J < 0.05) J = 0.05;
+        const s = Math.cbrt(J);
+        p.mpmF = new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]);
+      }
+      p.mpmJ = mat3det(p.mpmF);
+      if (p.mpmJ < 0.1) { const s = Math.cbrt(0.1); p.mpmF = new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]); p.mpmJ = 0.1; }
       // Keep particles inside the box.
       for (let d = 0; d < 3; d += 1) {
         if (p.x[d] < 0) p.x[d] = 0;

@@ -268,13 +268,30 @@ export function createSphPhaseDemo(options = {}) {
   if (mechanics === 'mlsmpm') {
     carrierDt = options.dt ?? 5e-4;
     mechanicalSubsteps = options.mechanicalSubsteps ?? 16;
+    // Phase-dependent constitutive model: a particle in its SOLID phase resists shear (corotated
+    // elasticity → it holds its block shape), and as soon as it melts (phase → liquid/gas) it
+    // becomes a fluid and flows. Reduced elastic moduli from the same weakly-compressible sound
+    // speed as the EOS (real GPa stiffness would force a tiny dt), so the shear-wave speed matches
+    // the acoustic one — labelled, validation false.
+    const cSound = options.condensedSoundSpeedMPerS ?? 180;
+    const cShear = cSound * 0.6;
+    const constitutiveOf = (p) => {
+      const props = demo.materialProperties[p.material];
+      const phase = equilibriumFromSpecificEnergy(props, p.specificInternalEnergyJPerKg).stablePhase;
+      if (phase !== 'solid') return { solid: false };
+      const solidPhase = props.phases.find((ph) => ph.name === 'solid');
+      const rho0 = (solidPhase && solidPhase.densityKgPerM3) || p.restDensityKgPerM3;
+      const mu = rho0 * cShear * cShear;
+      return { solid: true, shearModulusPa: mu, lambdaPa: Math.max(rho0 * (cSound * cSound - 2 * cShear * cShear), 0.1 * mu) };
+    };
     carrier = createMlsMpmCarrier({
       gridSpacingM: options.gridSpacingM ?? Math.max(0.15, demo.state.smoothingLengthM),
       boxEdgeM: demo.box.edgeM,
       dt: carrierDt,
       gravity: options.gravity ?? [0, -9.80665, 0],
       eos,
-      restDensityOf: (p) => p.restDensityKgPerM3 || demo.materialProperties[p.material].phases[0].densityKgPerM3
+      restDensityOf: (p) => p.restDensityKgPerM3 || demo.materialProperties[p.material].phases[0].densityKgPerM3,
+      constitutiveOf
     });
   } else {
     carrierDt = options.dt ?? 3e-4;

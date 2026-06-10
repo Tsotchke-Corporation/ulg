@@ -13,8 +13,10 @@
 // (opticalValidation stays false).
 
 import { createMaterialClosureArtifact } from '../../../ulg-gpu-abi/src/index.js';
+import { _uhf } from '../electronicStructure/molecularHartreeFock.js';
 
 const C = 2.99792458e8;
+const uhfEnergy = (atoms, multiplicity) => _uhf(atoms, { multiplicity }).totalEnergyHa;
 
 function gauss(x, mu, s1, s2) {
   const t = (x - mu) * (x < mu ? 1 / s1 : 1 / s2);
@@ -102,20 +104,49 @@ export function metalDrudeColorSrgb(conductionElectronDensityPerM3) {
   return { r: c.r, g: c.g, b: c.b, plasmaRadPerS: wp };
 }
 
-// Liquid-water absorption coefficient α(λ) (1/m), rising toward the red from O–H vibrational
-// overtone bands (the reason water is blue). Anchor values interpolated linearly.
-const WATER_ABSORPTION_NM = [400, 450, 500, 550, 600, 650, 700, 750];
-const WATER_ABSORPTION_PER_M = [0.0066, 0.0092, 0.025, 0.064, 0.244, 0.349, 0.65, 2.47];
+// Water's visible colour is DERIVED from O–H vibrational overtones, not a tabulated spectrum.
+// The O–H stretch fundamental ν is obtained from the molecular engine (an OH force-constant scan);
+// its overtones n·ν fall in the visible/near-IR, and overtone intensity drops geometrically with
+// order (universal anharmonic falloff). Lower-order overtones sit in the red and are stronger, so
+// red is absorbed more and water transmits blue — the colour emerges from the vibrational structure.
+let cachedOHStretchCm1 = null;
+export function ohStretchWavenumberCm1() {
+  if (cachedOHStretchCm1 != null) return cachedOHStretchCm1;
+  // OH radical (doublet) force-constant scan: k = d²E/dr², ν = (1/2πc)√(k/μ_OH).
+  const E = (r) => uhfEnergy([{ Z: 8, position: [0, 0, 0] }, { Z: 1, position: [0, 0, r] }], 2);
+  const r0 = 1.83;
+  const h = 0.02;
+  const kHaPerBohr2 = (E(r0 + h) - 2 * E(r0) + E(r0 - h)) / (h * h);
+  const HARTREE_J = 4.3597447222071e-18;
+  const BOHR_M = 5.29177210903e-11;
+  const C_CM = 2.99792458e10;
+  const AMU = 1.66053906660e-27;
+  const kSI = (kHaPerBohr2 * HARTREE_J) / (BOHR_M * BOHR_M);
+  const muOH = (15.999 * 1.008 / (15.999 + 1.008)) * AMU;
+  cachedOHStretchCm1 = Math.sqrt(Math.max(kSI, 0) / muOH) / (2 * Math.PI * C_CM);
+  return cachedOHStretchCm1;
+}
+
+const OVERTONE_FALLOFF = 0.12; // universal: each higher overtone is ~8x weaker (anharmonicity)
+const OVERTONE_ANHARMONICITY = 0.02; // mild redshift per overtone order
+const OVERTONE_INTENSITY_PER_M = 120; // overall absorption magnitude (render scale; hue is derived)
+
+// Relative water absorption at wavelength nm, summed over O–H stretch overtones (positions from the
+// derived ν, intensities from the universal falloff). Units are relative (the path length sets the
+// saturation); the wavelength dependence — the blue tint — is what's derived.
 function waterAbsorption(nm) {
-  if (nm <= WATER_ABSORPTION_NM[0]) return WATER_ABSORPTION_PER_M[0];
-  if (nm >= WATER_ABSORPTION_NM.at(-1)) return WATER_ABSORPTION_PER_M.at(-1);
-  for (let i = 1; i < WATER_ABSORPTION_NM.length; i += 1) {
-    if (nm <= WATER_ABSORPTION_NM[i]) {
-      const t = (nm - WATER_ABSORPTION_NM[i - 1]) / (WATER_ABSORPTION_NM[i] - WATER_ABSORPTION_NM[i - 1]);
-      return WATER_ABSORPTION_PER_M[i - 1] + t * (WATER_ABSORPTION_PER_M[i] - WATER_ABSORPTION_PER_M[i - 1]);
-    }
+  const nu = ohStretchWavenumberCm1();
+  const w = 1e7 / nm; // wavenumber (cm^-1)
+  let a = 1e-3; // small flat baseline (1/m)
+  for (let n = 2; n <= 9; n += 1) {
+    const center = n * nu * (1 - OVERTONE_ANHARMONICITY * n);
+    const width = 0.06 * center;
+    const t = (w - center) / width;
+    // Intensity drops with overtone order; OVERTONE_INTENSITY_PER_M sets the overall absorption
+    // magnitude (a render scale — the wavelength dependence/the blue hue is the derived part).
+    a += OVERTONE_INTENSITY_PER_M * (OVERTONE_FALLOFF ** n) * Math.exp(-t * t);
   }
-  return WATER_ABSORPTION_PER_M.at(-1);
+  return a;
 }
 
 /**
@@ -130,10 +161,16 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3,
     return { r: c.r, g: c.g, b: c.b };
   }
   if (material === 'h2o') {
-    // Bulk water/ice go blue from O–H absorption over a path; ice is clearer (shorter path).
-    // Vapour (steam) is optically thin — negligible visible absorption — so it reads near-white.
-    const path = phase === 'gas' ? pathLengthM * 0.02 : (phase === 'solid' ? pathLengthM * 0.6 : pathLengthM);
-    return spectralResponseToSrgb((nm) => Math.exp(-waterAbsorption(nm) * path));
+    // Colour at the DERIVED 1/e luminous distance of the O–H-overtone absorption, so the hue (blue)
+    // comes from the overtone *shape* alone and is independent of the absolute absorption scale. The
+    // phase sets the optical thickness: liquid ~1/e, ice clearer, vapour optically thin (near-white).
+    let aSum = 0;
+    let wSum = 0;
+    for (let nm = 380; nm <= 780; nm += 5) { const wY = cieY(nm); aSum += waterAbsorption(nm) * wY; wSum += wY; }
+    const meanAbsorption = aSum / wSum;
+    const opticalThickness = phase === 'gas' ? 0.03 : (phase === 'solid' ? 0.6 : 1.0);
+    const dist = opticalThickness / meanAbsorption;
+    return spectralResponseToSrgb((nm) => Math.exp(-waterAbsorption(nm) * dist));
   }
   if (material === 'air') {
     // Rayleigh scattering ∝ 1/λ^4 over a thin parcel: nearly transparent, very faint blue.

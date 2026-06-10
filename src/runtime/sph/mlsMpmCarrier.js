@@ -101,8 +101,10 @@ export function createMlsMpmCarrier({
   // used (the material holds its shape / resists shear); otherwise the weakly-compressible fluid
   // pressure is used. Default: everything is a fluid (backwards-compatible).
   constitutiveOf = () => ({ solid: false }),
-  wallRestitution = 0.3
+  cflFactor = 0.6 // max grid-node displacement per step, as a fraction of a cell (stability guard)
 } = {}) {
+  const vMax = (cflFactor * gridSpacingM) / dt;
+  const vMax2 = vMax * vMax;
   const dx = gridSpacingM;
   const invDx = 1 / dx;
   const gn = Math.round(boxEdgeM / dx) + 5; // nodes per axis (with padding); index shift +1
@@ -192,16 +194,20 @@ export function createMlsMpmCarrier({
           let vx = gridMom[idx * 3] / m + dt * gravity[0];
           let vy = gridMom[idx * 3 + 1] / m + dt * gravity[1];
           let vz = gridMom[idx * 3 + 2] / m + dt * gravity[2];
-          // Sticky/slip walls at the box faces (node world position = (index - shift) * dx).
+          // CFL velocity clamp: no node may move a particle more than ~cflFactor of a cell per step.
+          // This is the key stability guard for energetic flows (impacts, steam expansion) — without
+          // it a spike in velocity jumps particles across grid cells and the sim blows up.
+          const sp2 = vx * vx + vy * vy + vz * vz;
+          if (sp2 > vMax2) { const s = vMax / Math.sqrt(sp2); vx *= s; vy *= s; vz *= s; }
+          // Separating wall BC: zero the into-wall normal component (no reflection → no energy
+          // injected at the boundary, which the reflecting BC could do). Material piles against the
+          // sealed wall instead of bouncing unstably.
           const wx = (i - shift) * dx;
           const wy = (j - shift) * dx;
           const wz = (k - shift) * dx;
-          if (wx < dx && vx < 0) vx = -vx * wallRestitution;
-          if (wx > boxEdgeM - dx && vx > 0) vx = -vx * wallRestitution;
-          if (wy < dx && vy < 0) vy = -vy * wallRestitution;
-          if (wy > boxEdgeM - dx && vy > 0) vy = -vy * wallRestitution;
-          if (wz < dx && vz < 0) vz = -vz * wallRestitution;
-          if (wz > boxEdgeM - dx && vz > 0) vz = -vz * wallRestitution;
+          if ((wx < dx && vx < 0) || (wx > boxEdgeM - dx && vx > 0)) vx = 0;
+          if ((wy < dx && vy < 0) || (wy > boxEdgeM - dx && vy > 0)) vy = 0;
+          if ((wz < dx && vz < 0) || (wz > boxEdgeM - dx && vz > 0)) vz = 0;
           gridMom[idx * 3] = vx;
           gridMom[idx * 3 + 1] = vy;
           gridMom[idx * 3 + 2] = vz;
@@ -263,10 +269,11 @@ export function createMlsMpmCarrier({
       }
       p.mpmJ = mat3det(p.mpmF);
       if (p.mpmJ < 0.1) { const s = Math.cbrt(0.1); p.mpmF = new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]); p.mpmJ = 0.1; }
-      // Keep particles inside the box.
+      // Keep particles inside the box, and kill the into-wall velocity component when clamping so a
+      // particle pinned at a wall can't keep accumulating inward momentum (an instability source).
       for (let d = 0; d < 3; d += 1) {
-        if (p.x[d] < 0) p.x[d] = 0;
-        else if (p.x[d] > boxEdgeM) p.x[d] = boxEdgeM;
+        if (p.x[d] < 0) { p.x[d] = 0; if (p.v[d] < 0) p.v[d] = 0; }
+        else if (p.x[d] > boxEdgeM) { p.x[d] = boxEdgeM; if (p.v[d] > 0) p.v[d] = 0; }
       }
     }
     state.step = (state.step ?? 0) + 1;

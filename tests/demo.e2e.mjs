@@ -1169,7 +1169,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   });
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
-    return Boolean(overlay?.__sphScene?.getOpticalGpuLookup?.()?.execution?.schema);
+    const scene = overlay?.__sphScene;
+    return Boolean(
+      scene?.getOpticalGpuLookup?.()?.execution?.schema
+      && scene?.getSphGpuParticleState?.()?.schema
+      && scene?.getSphGpuParticleUpload?.()?.schema
+    );
   });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -1179,6 +1184,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const opticalGpuLookup = scene?.getOpticalGpuLookup?.();
     const opticalGpuExecution = opticalGpuLookup?.execution;
     const opticalGpuDrawState = scene?.getOpticalGpuDrawState?.();
+    const sphGpuParticleState = scene?.getSphGpuParticleState?.();
+    const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1217,6 +1224,20 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         backend: opticalGpuDrawState?.backend,
         appliedCount: opticalGpuDrawState?.appliedCount
       },
+      sphGpuParticleState: {
+        schema: sphGpuParticleState?.schema,
+        particleCount: sphGpuParticleState?.particleCount,
+        stateStrideFloats: sphGpuParticleState?.stateStrideFloats,
+        thermoStrideFloats: sphGpuParticleState?.thermoStrideFloats,
+        phaseSolidId: sphGpuParticleState?.phaseIds?.solid,
+        firstMaterial: sphGpuParticleState?.metadata?.[0]?.material
+      },
+      sphGpuParticleUpload: {
+        schema: sphGpuParticleUpload?.schema,
+        status: sphGpuParticleUpload?.status,
+        sourceSchema: sphGpuParticleUpload?.sourceSchema,
+        particleCount: sphGpuParticleUpload?.particleCount
+      },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
@@ -1249,6 +1270,17 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.opticalGpuDrawState.sourceExecutionSchema).toBe('peercompute.ulg.optical-gpu-lookup-execution.v0');
   expect(derivedSummary.opticalGpuDrawState.backend).toBe(derivedSummary.opticalGpuLookup.executionBackend);
   expect(derivedSummary.opticalGpuDrawState.appliedCount).toBeGreaterThan(0);
+  expect(derivedSummary.sphGpuParticleState.schema).toBe('peercompute.ulg.sph-gpu-particle-buffer.v0');
+  expect(derivedSummary.sphGpuParticleState.particleCount).toBeGreaterThan(0);
+  expect(derivedSummary.sphGpuParticleState.stateStrideFloats).toBe(8);
+  expect(derivedSummary.sphGpuParticleState.thermoStrideFloats).toBe(12);
+  expect(derivedSummary.sphGpuParticleState.phaseSolidId).toBe(1);
+  expect(derivedSummary.sphGpuParticleUpload.schema).toBe('peercompute.ulg.sph-gpu-particle-buffer-set.v0');
+  expect(derivedSummary.sphGpuParticleUpload.sourceSchema).toBe('peercompute.ulg.sph-gpu-particle-buffer.v0');
+  expect(derivedSummary.sphGpuParticleUpload.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+  expect(['webgpu-uploaded', 'blocked-webgpu-unavailable', 'webgpu-error-fallback']).toContain(
+    derivedSummary.sphGpuParticleUpload.status
+  );
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);

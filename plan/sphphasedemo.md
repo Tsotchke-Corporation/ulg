@@ -297,6 +297,9 @@ Current implementation checkpoint (2026-06-10):
   particle position, velocity, mass, internal energy, material id, closure phase,
   temperature, rest density, phase fractions, smoothing length, and represented
   entity count into f32x4-aligned WebGPU storage-buffer rows.
+- The live SPH overlay now builds that particle snapshot during particle sync,
+  exposes it through `getSphGpuParticleState()`, and optionally uploads it to
+  WebGPU storage buffers through `getSphGpuParticleUpload()`.
 - Each packed table contains closure-derived PBR material records plus spectral
   sample rows suitable for WebGPU storage-buffer upload.
 - The runtime can sample packed records by material/phase id through a CPU
@@ -305,8 +308,8 @@ Current implementation checkpoint (2026-06-10):
   compounds use deterministic f32-exact hashed ids.
 - The demo still renders through Three.js `MeshPhysicalMaterial`; the draw state
   can now come from accepted lookup output, but a WebGPU renderer does not yet
-  consume those buffers directly. The particle GPU buffers are not yet bound to
-  the scene or mechanics loop.
+  consume those buffers directly. The particle GPU buffers are uploaded as a
+  scene snapshot but not yet consumed by a GPU mechanics loop.
 
 Validation remains false until quantitative optical-response evidence exists.
 The current scalar-relativistic atomic Drude-Lorentz path is useful reference

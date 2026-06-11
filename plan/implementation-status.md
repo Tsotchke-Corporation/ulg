@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 22:48 AKDT
+Updated: 2026-06-10 22:55 AKDT
 
 ## Done
 
@@ -51,8 +51,10 @@ Updated: 2026-06-10 22:48 AKDT
   and thermo rows. `sphGpuBuffers.js` packs CPU-authoritative particles into
   WebGPU-ready storage buffers, deriving temperature and phase fractions from
   closure internal energy, sharing optical material ids and phase ids, and
-  keeping scientific/SPH/phase validation false. This is upload plumbing, not a
-  GPU SPH mechanics solver.
+  keeping scientific/SPH/phase validation false. The live SPH overlay now builds
+  the packed snapshot after every particle sync, exposes it through the scene,
+  and optionally uploads it to a cached browser WebGPU device. This is residency
+  plumbing, not a GPU SPH mechanics solver.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

@@ -8002,3 +8002,70 @@ Failures / open questions:
 - This does not encode MLS-MPM deformation state or execute SPH/MPM mechanics
   on WebGPU.
 - No push was attempted.
+
+## 2026-06-10 22:55:25 AKDT - SPH particle GPU snapshot scene upload
+
+Prompt:
+
+- Wire the new SPH GPU particle-buffer ABI into the live demo without moving
+  mechanics to GPU prematurely.
+
+Actions:
+
+- Updated `src/visualization/sphPhaseDemoMount.js` so `syncParticles()` builds
+  a packed SPH GPU particle snapshot from the current CPU-authoritative
+  `demo.state` and active derived material properties.
+- Updated `src/visualization/sphPhaseScene.js` to accept the packed particle
+  snapshot in `setParticles()`, expose it through `getSphGpuParticleState()`,
+  and schedule optional WebGPU storage-buffer upload through
+  `refreshSphGpuParticleBuffers()`.
+- Reused the scene's cached browser WebGPU device path, added upload signature
+  gating, and destroyed prior uploaded buffers when a newer particle state
+  replaces them.
+- Extended browser smoke coverage to assert
+  `peercompute.ulg.sph-gpu-particle-buffer.v0`,
+  `peercompute.ulg.sph-gpu-particle-buffer-set.v0`, particle counts, f32 row
+  strides, phase id metadata, and explicit upload/fallback status.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphGpuBuffers.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphGpuBuffers.test.mjs`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphGpuBuffers.js src/visualization/sphPhaseScene.js src/visualization/sphPhaseDemoMount.js tests/demo.e2e.mjs tests/sphGpuBuffers.test.mjs`
+- `node --test tests/sphGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- Browser HTTPS probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused SPH GPU buffer / renderer tests passed `9/9`.
+- PASS: Browser HTTPS probe reported
+  `particleState.schema=peercompute.ulg.sph-gpu-particle-buffer.v0`,
+  `particleCount=152`,
+  `particleUpload.status=webgpu-uploaded`, and
+  `particleUpload.schema=peercompute.ulg.sph-gpu-particle-buffer-set.v0`.
+- PASS: focused SPH e2e passed against the live HTTPS server (`1/1`).
+- PASS: `npm test` passed `236/236`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The uploaded particle buffers are not yet consumed by WebGPU mechanics or
+  rendering kernels.
+- MLS-MPM deformation state is still not packed; this is the macro-particle
+  thermodynamic/state snapshot only.
+- No push was attempted.

@@ -7,6 +7,7 @@ import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions
 import { createSphPhaseDemo, particleColors, particleRenderDescriptors, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
 import { createSphPhaseScenario } from '../runtime/thermoPreflight.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
+import { buildSphGpuParticleBuffers } from '../runtime/sph/sphGpuBuffers.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const ICE_TEMP_K = 233.15;
@@ -489,8 +490,11 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__sphScene = scene;
   overlay.__sphDriver = driver;
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+  overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
+  overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
+  let pendingSphGpuParticleUploadSignature = null;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -504,6 +508,26 @@ export function mountSphPhaseDemoOverlay() {
       overlay.__sphOpticalGpuLookupError = error instanceof Error ? error.message : String(error);
     }).finally(() => {
       if (pendingOpticalLookupSignature === signature) pendingOpticalLookupSignature = null;
+    });
+  }
+
+  function sphGpuParticleSignature(packed) {
+    return packed
+      ? [packed.particleCount, packed.step, packed.time, packed.state?.byteLength ?? 0, packed.thermo?.byteLength ?? 0].join('|')
+      : null;
+  }
+
+  function scheduleSphGpuParticleUpload() {
+    const packed = scene.getSphGpuParticleState?.();
+    const signature = sphGpuParticleSignature(packed);
+    if (!signature || pendingSphGpuParticleUploadSignature === signature) return;
+    pendingSphGpuParticleUploadSignature = signature;
+    scene.refreshSphGpuParticleBuffers?.({ preferWebGpu: true }).then((upload) => {
+      overlay.__sphGpuParticleUpload = upload;
+    }).catch((error) => {
+      overlay.__sphGpuParticleUploadError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (pendingSphGpuParticleUploadSignature === signature) pendingSphGpuParticleUploadSignature = null;
     });
   }
 
@@ -521,7 +545,10 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphScene = scene;
     overlay.__sphDriver = driver;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+    overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
+    overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     pendingOpticalLookupSignature = null;
+    pendingSphGpuParticleUploadSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -557,6 +584,9 @@ export function mountSphPhaseDemoOverlay() {
     }
     const colors = particleColors(driver.demo);
     const renderDescriptors = particleRenderDescriptors(driver.demo);
+    const sphGpuParticleState = buildSphGpuParticleBuffers(driver.demo.state, {
+      materialProperties: driver.demo.materialProperties
+    });
     const n = driver.demo.state.particles.length;
     const positionsM = new Float32Array(n * 3);
     const colorsRgb = new Float32Array(n * 3);
@@ -575,10 +605,13 @@ export function mountSphPhaseDemoOverlay() {
       colorsRgb,
       materials,
       emissiveByMaterial: surfaceEmissive(driver.demo),
-      materialProperties: driver.demo.materialProperties
+      materialProperties: driver.demo.materialProperties,
+      sphGpuParticleState
     });
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+    overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     scheduleOpticalGpuLookupRefresh();
+    scheduleSphGpuParticleUpload();
   }
 
   function stepDemoForVisualTest(steps = 1) {

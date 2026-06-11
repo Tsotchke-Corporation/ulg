@@ -182,6 +182,7 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   }
   return {
     schema: ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
     sourceSchema: packed.schema,
     particleCount: packed.particleCount,
     stateStrideBytes: packed.stateStrideBytes,

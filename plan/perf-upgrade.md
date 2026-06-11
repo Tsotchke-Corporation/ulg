@@ -128,8 +128,9 @@ GPU-resident SPH particle state buffers.
 The SPH particle-buffer ABI/runtime slice now exists as
 `peercompute.ulg.sph-gpu-particle-buffer.v0`. It packs CPU-authoritative SPH
 particles into f32x4-aligned state and thermo storage-buffer rows using shared
-material/phase ids and closure-derived temperature/phase fractions. It is not
-yet wired into the scene or a GPU mechanics kernel.
+material/phase ids and closure-derived temperature/phase fractions. The live
+SPH overlay now builds and optionally uploads this packed particle snapshot to a
+cached browser WebGPU device. It is not yet consumed by a GPU mechanics kernel.
 
 ## Hot-Loop Kernel Chain
 

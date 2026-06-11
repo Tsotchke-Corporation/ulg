@@ -126,6 +126,7 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
 
   const buffers = uploadSphGpuParticleBuffers(device, packed);
   assert.equal(buffers.schema, ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA);
+  assert.equal(buffers.status, 'webgpu-uploaded');
   assert.equal(buffers.particleCount, packed.particleCount);
   assert.deepEqual(
     writes.map((write) => write.label),

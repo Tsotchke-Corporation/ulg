@@ -8738,3 +8738,62 @@ Failures / open questions:
 - CPU particle state remains authoritative for visible motion, thermal state,
   phase changes, reactions, wall heat, and status.
 - No push was attempted.
+
+## 2026-06-11 01:20:37 AKDT - Multi-step resident MLS-MPM ping-pong wrapper
+
+Prompt:
+
+- Continue toward the GPU-resident architecture; demo breakage is acceptable if
+  it speeds up larger refactors.
+
+Actions:
+
+- Added ABI schema
+  `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0`.
+- Added `runMlsMpmResidentStepsWithOptionalWebGpu()` to repeat the resident
+  P2G -> grid update -> G2P chain.
+- Fed accepted retained G2P output state/mechanics buffers into the next
+  resident step as borrowed next particle uploads.
+- Tracked ping-pong source/next slots and source/next step/time across repeated
+  resident steps.
+- Added compact per-step summaries and a destruction helper for final plus
+  optionally retained intermediate step buffers.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/abi.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/abi.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphGpuBuffers.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks completed.
+- PASS: focused ABI/resident-step tests passed `15/15`.
+- PASS: broader ABI/SPH-buffer/P2G/grid-update/G2P/resident-step tests passed
+  `50/50`.
+- PASS: full `npm test` passed `284/284`.
+- PASS: production build passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The repeated-step wrapper still uses full parity/readback and reports
+  `normalHotLoopReadbackFree=false`.
+- The live scene is not yet wired to request multiple resident steps per frame.
+- CPU state remains authoritative for visible motion, thermal state, phase
+  changes, reactions, wall heat, gas pressure, and status.
+- No push was attempted.

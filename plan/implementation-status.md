@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 23:38 AKDT
+Updated: 2026-06-11 01:20 AKDT
 
 ## Done
 
@@ -1236,3 +1236,38 @@ Not claimed:
 - Full parity readback is still active.
 - CPU state remains authoritative for visible motion, thermal state, phase
   changes, reactions, wall heat, and status.
+
+## 2026-06-11 Update - Multi-Step Resident Ping-Pong
+
+Completed:
+
+- Added `runMlsMpmResidentStepsWithOptionalWebGpu()` as a repeated MLS-MPM
+  resident-step execution wrapper.
+- Added ABI schema
+  `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0`.
+- The repeated-step wrapper feeds each accepted G2P retained state/mechanics
+  output buffer into the next resident step as `nextParticleUploads`.
+- Added sequence summaries that preserve per-step backend, stage status,
+  retained-buffer, diagnostics, and ping-pong metadata without retaining every
+  intermediate buffer by default.
+- Added `destroyMlsMpmResidentStepsBuffers()` for final plus optionally
+  retained intermediate cleanup.
+
+Latest validation:
+
+- PASS: focused ABI/resident-step tests passed `15/15`.
+- PASS: broader ABI/SPH-buffer/P2G/grid-update/G2P/resident-step tests passed
+  `50/50`.
+- PASS: `npm test` passed `284/284`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- This is still a parity/readback evidence path. The wrapper reports
+  `readbackMode=full-parity-readback`,
+  `normalHotLoopReadbackFree=false`, and `gpuAuthoritativeState=false`.
+- The live scene is not wired to run multiple resident steps per visual frame
+  yet.
+- CPU state remains authoritative for visible motion, thermal state, phase
+  changes, reactions, wall heat, gas pressure, and status.

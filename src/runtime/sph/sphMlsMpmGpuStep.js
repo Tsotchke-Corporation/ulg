@@ -1,6 +1,7 @@
 import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
@@ -19,7 +20,8 @@ import { runMlsMpmG2pWithOptionalWebGpu } from './sphG2pGpuKernel.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
-  ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA
+  ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA
 };
 
 const STEP_SCOPE = 'mls-mpm-resident-step-p2g-grid-update-g2p';
@@ -457,4 +459,118 @@ export function destroyMlsMpmResidentStepBuffers(step) {
   } else {
     step?.g2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
   }
+}
+
+function cloneSphParticleStateForNext(source, step) {
+  return {
+    ...source,
+    status: 'gpu-resident-readback-ready',
+    step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
+    time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
+    state: step.state,
+    thermo: source.thermo
+  };
+}
+
+function cloneMlsMpmParticleStateForNext(source, step) {
+  return {
+    ...source,
+    status: 'gpu-resident-readback-ready',
+    step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
+    time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
+    mechanics: step.mechanics
+  };
+}
+
+function summarizeResidentStepForSequence(step, index) {
+  return {
+    index,
+    backend: step.backend,
+    status: step.status,
+    stageStatus: { ...step.stageStatus },
+    stageBackends: { ...step.stageBackends },
+    residentBuffersRetained: step.residentBuffersRetained,
+    stageBuffersRetained: step.stageBuffersRetained,
+    g2pOutputBuffersRetained: step.g2pOutputBuffersRetained,
+    nextParticleBufferMode: step.nextParticleBufferMode,
+    particlePingPong: { ...step.particlePingPong },
+    diagnostics: {
+      particleCount: step.diagnostics?.particleCount ?? 0,
+      gridNodeCount: step.diagnostics?.gridNodeCount ?? 0,
+      activeGridNodeCount: step.diagnostics?.activeGridNodeCount ?? 0,
+      massDeltaKg: step.diagnostics?.massDeltaKg ?? 0,
+      maxSpeedMPerS: step.diagnostics?.maxSpeedMPerS ?? 0,
+      maxDisplacementM: step.diagnostics?.maxDisplacementM ?? 0
+    },
+    readbackMode: step.readbackMode,
+    gpuAuthoritativeState: step.gpuAuthoritativeState,
+    fullPhysicsValidation: false
+  };
+}
+
+export async function runMlsMpmResidentStepsWithOptionalWebGpu({
+  stepCount = 1,
+  retainIntermediateSteps = false,
+  ...args
+} = {}) {
+  const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  let sphParticleState = args.sphParticleState;
+  let mlsMpmParticleState = args.mlsMpmParticleState;
+  let sphParticleUpload = args.sphParticleUpload ?? null;
+  let mlsMpmParticleUpload = args.mlsMpmParticleUpload ?? null;
+  let sourceSlot = args.sourceSlot ?? sphParticleUpload?.slot ?? 0;
+  let finalStep = null;
+  const retainedSteps = [];
+  const stepSummaries = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+      ...args,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      sourceSlot
+    });
+    step.sequenceIndex = index;
+    stepSummaries.push(summarizeResidentStepForSequence(step, index));
+    if (finalStep && !retainIntermediateSteps) {
+      destroyMlsMpmResidentStepBuffers(finalStep);
+    } else if (finalStep) {
+      retainedSteps.push(finalStep);
+    }
+    finalStep = step;
+    sphParticleState = cloneSphParticleStateForNext(sphParticleState, step);
+    mlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, step);
+    sphParticleUpload = step.nextParticleUploads?.sphParticleUpload ?? null;
+    mlsMpmParticleUpload = step.nextParticleUploads?.mlsMpmParticleUpload ?? null;
+    sourceSlot = step.particlePingPong?.nextSlot ?? (sourceSlot === 0 ? 1 : 0);
+  }
+
+  return {
+    schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+    backend: finalStep?.backend || 'cpu-reference',
+    status: 'resident-steps-executed',
+    stepCount: count,
+    completedStepCount: stepSummaries.length,
+    retainIntermediateSteps,
+    retainedIntermediateStepCount: retainedSteps.length,
+    retainedSteps,
+    finalStep,
+    stepSummaries,
+    readbackMode: finalStep?.readbackMode ?? 'full-parity-readback',
+    normalHotLoopReadbackFree: false,
+    gpuAuthoritativeState: false,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function destroyMlsMpmResidentStepsBuffers(execution) {
+  for (const step of execution?.retainedSteps ?? []) {
+    destroyMlsMpmResidentStepBuffers(step);
+  }
+  destroyMlsMpmResidentStepBuffers(execution?.finalStep);
 }

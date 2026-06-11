@@ -1198,3 +1198,33 @@ Remaining before GPU-authoritative motion:
   repeated-step conservation checks.
 - Keep CPU thermal, phase, reaction, wall heat, gas pressure, and render fields
   in sync until those kernels are moved to GPU.
+
+## 2026-06-11 Multi-Step Resident Ping-Pong Checkpoint
+
+Completed:
+
+- Added a repeated resident MLS-MPM execution wrapper over the existing
+  P2G -> grid update -> G2P chain.
+- Each parity-accepted G2P output state/mechanics buffer can now become the
+  next resident-step input buffer.
+- Added source/next ping-pong slot tracking across repeated steps.
+- Added compact per-step summaries so the demo can later expose repeated-step
+  evidence without retaining every intermediate GPU buffer.
+
+Validation evidence:
+
+- Focused ABI/resident-step tests passed `15/15`.
+- Broader ABI/SPH-buffer/P2G/grid-update/G2P/resident-step tests passed
+  `50/50`.
+- Full `npm test` passed `284/284`.
+- Production build passed with the known Vite large-chunk warning.
+- `git diff --check` passed.
+
+Remaining before demo-visible GPU motion:
+
+- Wire the live scene to request N resident steps per visual frame.
+- Add no-readback mode and compact GPU summary-buffer diagnostics.
+- Promote repeated GPU output to visual/mechanical authority only after
+  repeated-step conservation checks.
+- Move thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
+  pressure, and optical/render fields onto resident GPU buffers.

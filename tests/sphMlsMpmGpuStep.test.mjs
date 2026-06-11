@@ -8,7 +8,10 @@ import {
 import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   destroyMlsMpmResidentStepBuffers,
+  destroyMlsMpmResidentStepsBuffers,
+  runMlsMpmResidentStepsWithOptionalWebGpu,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import { projectMlsMpmP2gGridCpu } from '../src/runtime/sph/sphGridGpuKernel.js';
@@ -237,4 +240,91 @@ test('MLS-MPM resident step falls forward through CPU stages after a WebGPU pari
   assert.equal(step.stageBackends.g2p, 'cpu-reference');
   assert.equal(step.residentBuffersRetained, false);
   assert.equal(step.fullPhysicsValidation, false);
+});
+
+test('MLS-MPM resident steps ping-pong retained particle buffers across repeated steps', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const p2gInputs = [];
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    p2gRunner(args) {
+      p2gInputs.push({
+        stateBufferLabel: args.sphParticleUpload?.stateBuffer?.label ?? null,
+        mechanicsBufferLabel: args.mlsMpmParticleUpload?.mechanicsBuffer?.label ?? null
+      });
+      const result = projectMlsMpmP2gGridCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        gridBuffer: tracker.buffer(`p2g-grid-${p2gInputs.length}`),
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      const result = updateMlsMpmGridCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        updatedGridBuffer: tracker.buffer(`updated-grid-${p2gInputs.length}`),
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner(args) {
+      const result = reconstructMlsMpmG2pCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        stateBuffer: tracker.buffer(`g2p-state-${p2gInputs.length}`),
+        mechanicsBuffer: tracker.buffer(`g2p-mechanics-${p2gInputs.length}`),
+        stateBufferByteLength: result.state.byteLength,
+        mechanicsBufferByteLength: result.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(execution.schema, ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA);
+  assert.equal(execution.stepCount, 2);
+  assert.equal(execution.completedStepCount, 2);
+  assert.equal(execution.retainedIntermediateStepCount, 0);
+  assert.equal(execution.finalStep.particlePingPong.sourceSlot, 1);
+  assert.equal(execution.finalStep.particlePingPong.nextSlot, 0);
+  assert.equal(execution.finalStep.particlePingPong.step, 1);
+  assert.equal(execution.finalStep.particlePingPong.nextStep, 2);
+  assert.equal(execution.stepSummaries[0].particlePingPong.sourceSlot, 0);
+  assert.equal(execution.stepSummaries[0].particlePingPong.nextSlot, 1);
+  assert.equal(execution.stepSummaries[1].particlePingPong.sourceSlot, 1);
+  assert.equal(execution.stepSummaries[1].particlePingPong.nextSlot, 0);
+  assert.equal(p2gInputs[0].stateBufferLabel, 'source-state');
+  assert.equal(p2gInputs[1].stateBufferLabel, 'g2p-state-1');
+  assert.equal(p2gInputs[1].mechanicsBufferLabel, 'g2p-mechanics-1');
+  assert.equal(execution.finalStep.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+  assert.equal(tracker.destroyed, 4);
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.equal(tracker.destroyed, 8);
 });

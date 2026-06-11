@@ -40,6 +40,7 @@ import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
@@ -294,6 +295,10 @@ test('MLS-MPM GPU resident step ABI exposes chain execution schemas', () => {
   assert.equal(
     ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
     'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0'
+  );
+  assert.equal(
+    ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0'
   );
 });
 

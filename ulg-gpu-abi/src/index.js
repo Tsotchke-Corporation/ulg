@@ -30,6 +30,7 @@ export const ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA = 'peercompute.
 export const ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-parity.v0';
 export const ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-step.v0';
 export const ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0';
+export const ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',

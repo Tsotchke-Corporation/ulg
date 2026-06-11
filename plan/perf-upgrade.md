@@ -676,6 +676,31 @@ Still remaining:
 - The retained next uploads are not yet swapped into the next resident step.
 - Compact diagnostics are CPU-computed from readback, not GPU summary buffers.
 
+## 2026-06-11 Checkpoint - Multi-Step Resident Ping-Pong
+
+The runtime now has a repeated resident-step execution wrapper that swaps
+accepted retained G2P output particle buffers into the next MLS-MPM resident
+step. This is the first end-to-end ping-pong loop boundary for the mechanics
+chain, but it is still an evidence path with full parity/readback.
+
+Implemented:
+
+- `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0`.
+- `runMlsMpmResidentStepsWithOptionalWebGpu()` for repeated P2G -> grid update
+  -> G2P execution.
+- Source/next slot tracking across repeated steps.
+- Per-step summaries for stage statuses, retained-buffer fields, diagnostics,
+  and ping-pong state.
+- Cleanup for final and optionally retained intermediate resident steps.
+
+Still remaining:
+
+- No-readback hot-loop mode.
+- Compact GPU summary buffers for normal-frame diagnostics.
+- Scene integration for configurable multi-step resident execution.
+- GPU-authoritative visible particle state.
+- Thermal, wall heat, phase, reaction, gas pressure, and render-field kernels.
+
 ## Validation
 
 Required tests and evidence:

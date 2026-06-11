@@ -9,6 +9,7 @@ export const ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA = 'peercompute.ulg.ther
 export const ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA = 'peercompute.ulg.closure-table-wgsl-descriptor.v0';
 export const ULG_OPTICAL_GPU_TABLE_SCHEMA = 'peercompute.ulg.optical-gpu-table.v0';
 export const ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA = 'peercompute.ulg.optical-gpu-buffer-set.v0';
+export const ULG_OPTICAL_GPU_LOOKUP_SCHEMA = 'peercompute.ulg.optical-gpu-lookup.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',
@@ -50,6 +51,26 @@ export const OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'n:f32',
   'k:f32',
   'pad0:f32'
+]);
+export const OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'phaseId:f32',
+  'pad0:f32',
+  'pad1:f32'
+]);
+export const OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT = Object.freeze([
+  'baseColorLinearR:f32',
+  'baseColorLinearG:f32',
+  'baseColorLinearB:f32',
+  'opacity:f32',
+  'metalness:f32',
+  'roughness:f32',
+  'transmission:f32',
+  'ior:f32',
+  'renderModelId:f32',
+  'vertexColorPolicyId:f32',
+  'status:f32',
+  'recordIndex:f32'
 ]);
 
 export const D_TYPES = Object.freeze({

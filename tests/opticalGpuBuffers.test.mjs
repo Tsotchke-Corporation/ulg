@@ -3,11 +3,17 @@ import { test } from 'node:test';
 import {
   OPTICAL_GPU_RECORD_FLOATS,
   OPTICAL_GPU_RECORD_LAYOUT,
+  OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS,
+  OPTICAL_GPU_LOOKUP_QUERY_FLOATS,
   OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS,
   OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
   buildOpticalGpuTable,
+  buildOpticalGpuLookupQueries,
+  opticalLookupWgsl,
+  sampleOpticalGpuTableCpu,
   uploadOpticalGpuTable
 } from '../src/runtime/material/opticalGpuBuffers.js';
 
@@ -88,4 +94,33 @@ test('optical GPU table upload writes records and spectral samples to storage bu
   );
   assert.equal(writes[0].byteLength, table.records.byteLength);
   assert.equal(writes[1].byteLength, table.spectralSamples.byteLength);
+});
+
+test('optical GPU lookup queries sample packed records by material and phase ids', () => {
+  const table = buildOpticalGpuTable([
+    { material: 'h2o', phase: 'liquid' },
+    { material: 'h2o', phase: 'gas' }
+  ]);
+  const lookup = buildOpticalGpuLookupQueries(table, [
+    { material: 'h2o', phase: 'liquid' },
+    { material: 'h2o', phase: 'gas' },
+    { material: 'Au', phase: 'solid' }
+  ]);
+  const result = sampleOpticalGpuTableCpu(table, lookup);
+
+  assert.equal(lookup.schema, ULG_OPTICAL_GPU_LOOKUP_SCHEMA);
+  assert.equal(lookup.queries.length, lookup.queryCount * OPTICAL_GPU_LOOKUP_QUERY_FLOATS);
+  assert.equal(result.outputs.length, lookup.queryCount * OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS);
+  assert.equal(result.backend, 'cpu-reference');
+  assert.ok(result.outputs[3] > 0, 'liquid water opacity output should be populated');
+  assert.equal(result.outputs[11], 0, 'first query should match record index 0');
+  assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS + 11], 1, 'second query should match record index 1');
+  assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 10], 255, 'unknown query should return blocked status');
+  assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 11], -1, 'unknown query should return no record index');
+});
+
+test('optical GPU lookup WGSL consumes packed vec4 rows without struct alignment drift', () => {
+  assert.match(opticalLookupWgsl, /record_index \* 6u/);
+  assert.match(opticalLookupWgsl, /optical_outputs\[query_index \* 3u\]/);
+  assert.match(opticalLookupWgsl, /row1\.x, row1\.y, row1\.z, row2\.z/);
 });

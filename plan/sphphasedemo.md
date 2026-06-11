@@ -275,10 +275,15 @@ Current implementation checkpoint (2026-06-10):
 - The first optical/PBR GPU buffer ABI is implemented:
   `peercompute.ulg.optical-gpu-table.v0` and
   `peercompute.ulg.optical-gpu-buffer-set.v0`.
+- The first optical/PBR GPU lookup ABI is implemented:
+  `peercompute.ulg.optical-gpu-lookup.v0`, with query/output rows and an
+  `opticalLookupWgsl` material/phase lookup kernel.
 - The SPH renderer now builds a packed optical table for active material/phase
   surface batches and exposes it through `getOpticalGpuTable()`.
 - Each packed table contains closure-derived PBR material records plus spectral
   sample rows suitable for WebGPU storage-buffer upload.
+- The runtime can sample packed records by material/phase id through a CPU
+  parity path or a WebGPU dispatch helper.
 - The demo still renders through Three.js `MeshPhysicalMaterial`; WebGPU
   kernels/renderers do not yet consume the table directly in the frame loop.
 

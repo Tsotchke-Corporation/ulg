@@ -398,6 +398,12 @@ Implemented status (2026-06-10):
 - `src/runtime/material/opticalGpuBuffers.js` packs CPU-derived
   `opticalRenderParams()` output into typed arrays and can upload those arrays
   to WebGPU storage buffers.
+- `ulg-gpu-abi/src/wgsl.js` now includes `opticalLookupWgsl`, a compact
+  material/phase lookup kernel over the packed `vec4<f32>` record rows.
+- `src/runtime/material/opticalGpuBuffers.js` also builds lookup query rows,
+  provides a CPU reference sampler for parity, and exposes
+  `runOpticalGpuLookup()` for WebGPU dispatch/readback of compact render
+  parameter rows.
 - `src/visualization/sphPhaseScene.js` now derives one packed optical GPU table
   from each active material/phase surface batch and exposes it via
   `getOpticalGpuTable()`.

@@ -6,6 +6,8 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import {
   CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT,
   OPTICAL_GPU_RECORD_ROW_LAYOUT,
+  OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT,
+  OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT,
   OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT,
   createClosureTableDescriptor,
   createClosureTableSampleBuffer,
@@ -18,8 +20,10 @@ import {
   complex64ToPairs,
   ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
+import { opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -102,8 +106,11 @@ test('closure table WGSL descriptors and sample buffers use a stable f32x4 row l
 test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
   assert.equal(ULG_OPTICAL_GPU_TABLE_SCHEMA, 'peercompute.ulg.optical-gpu-table.v0');
   assert.equal(ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA, 'peercompute.ulg.optical-gpu-buffer-set.v0');
+  assert.equal(ULG_OPTICAL_GPU_LOOKUP_SCHEMA, 'peercompute.ulg.optical-gpu-lookup.v0');
   assert.equal(OPTICAL_GPU_RECORD_ROW_LAYOUT.length, 24);
   assert.equal(OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT.length, 8);
+  assert.equal(OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT.length, 4);
+  assert.equal(OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT.length, 12);
   assert.deepEqual(OPTICAL_GPU_RECORD_ROW_LAYOUT.slice(0, 4), [
     'materialId:f32',
     'phaseId:f32',
@@ -117,6 +124,9 @@ test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
     'absorptionCoefficientPerM:f32',
     'scatteringCoefficientPerM:f32'
   ]);
+  assert.match(opticalLookupWgsl, /@group\(0\) @binding\(0\) var<storage, read> optical_records/);
+  assert.match(opticalLookupWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> optical_outputs/);
+  assert.match(opticalLookupWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

@@ -7477,6 +7477,12 @@ Commands run:
 - `npm test`
 - `npm run build`
 - `git diff --check`
+- Browser WebGPU probe via Playwright against `https://127.0.0.1:5173/`,
+  importing `/src/runtime/material/opticalGpuBuffers.js`, requesting
+  `navigator.gpu`, running `runOpticalGpuLookup()` for liquid H2O, and
+  comparing GPU output to `sampleOpticalGpuTableCpu()`.
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
 - `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
 - `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
 - `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
@@ -7609,4 +7615,76 @@ Failures / open questions:
   CPU/control plane; Three.js still builds `MeshPhysicalMaterial`; the packed
   table is ready for WebGPU kernels but not yet sampled by the frame-loop
   renderer/simulation.
+- No push was attempted.
+
+## 2026-06-10 22:08:05 AKDT - Optical/PBR GPU lookup kernel and parity sampler
+
+Prompt:
+
+- Continuing the user's instruction to stay on the honest core technology path
+  and make the material/optical closure chain fast/GPU-resident over time.
+
+Actions:
+
+- Added `peercompute.ulg.optical-gpu-lookup.v0` ABI constants to
+  `ulg-gpu-abi/src/index.js`, including 4-float query rows
+  (`materialId`, `phaseId`, padding) and 12-float compact output rows
+  (`baseColorLinear`, `opacity`, `metalness`, `roughness`, `transmission`,
+  `ior`, render-model id, vertex-color-policy id, status, record index).
+- Added `opticalLookupWgsl` to `ulg-gpu-abi/src/wgsl.js`. The kernel consumes
+  the packed optical material records as `vec4<f32>` rows, scans by
+  material/phase id, and writes compact render parameter rows. It intentionally
+  avoids WGSL struct-layout ambiguity for the 24-float record.
+- Extended `src/runtime/material/opticalGpuBuffers.js` with
+  `buildOpticalGpuLookupQueries()`, `sampleOpticalGpuTableCpu()`, and
+  `runOpticalGpuLookup()`. The CPU sampler is the parity/reference path; the
+  WebGPU helper creates storage/uniform/readback buffers, dispatches
+  `opticalLookupWgsl`, and returns the compact output rows.
+- Added ABI/WGSL tests and optical GPU lookup tests for query/output layout,
+  CPU sampling parity, unknown-material blocked status, and the vec4 row access
+  contract.
+- Updated `plan/implementation-status.md`, `plan/perf-upgrade.md`, and
+  `plan/sphphasedemo.md` to record that the lookup contract exists while the
+  render/simulation hot loop still does not consume it directly.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `tests/abi.test.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check ulg-gpu-abi/src/index.js ulg-gpu-abi/src/wgsl.js src/runtime/material/opticalGpuBuffers.js tests/abi.test.mjs tests/opticalGpuBuffers.test.mjs`
+- `node --test tests/abi.test.mjs tests/opticalGpuBuffers.test.mjs`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/lookup tests passed `10/10`.
+- PASS: `npm test` passed `221/221`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+- PASS: Browser WebGPU lookup probe executed with `backend=webgpu`,
+  `queryCount=1`, and CPU/GPU `maxDiff=0`.
+- PASS: ICC ULG index refreshed after edits; status reports stale=false at
+  git head `a5f57657c3bbc666d958662a1e48205e50dac8d3`.
+
+Failures / open questions:
+
+- A WGSL source regex in `tests/opticalGpuBuffers.test.mjs` was initially
+  over-escaped; the kernel was correct and the assertion was fixed.
+- The lookup helper has not yet been exercised against a real browser WebGPU
+  device. It is ready for that probe, but current coverage uses CPU parity and
+  WGSL/source contract checks.
+- The frame-loop renderer still reads the packed table only as scene metadata.
+  Direct WebGPU renderer/simulation consumption is the next core slice.
 - No push was attempted.

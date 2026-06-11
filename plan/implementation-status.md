@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 22:00 AKDT
+Updated: 2026-06-10 22:08 AKDT
 
 ## Done
 
@@ -31,11 +31,14 @@ Updated: 2026-06-10 22:00 AKDT
 - Added the first GPU-resident optical/PBR bridge. `ulg-gpu-abi` now declares
   stable `peercompute.ulg.optical-gpu-table.v0` and
   `peercompute.ulg.optical-gpu-buffer-set.v0` row layouts for packed material
-  records and spectral samples. `opticalGpuBuffers.js` packs cached
-  `opticalRenderParams()` results into typed arrays/uploadable WebGPU storage
-  buffers, and the SPH renderer now exposes the packed table for each visible
-  material/phase batch while still using Three.js `MeshPhysicalMaterial` as the
-  interim display layer.
+  records and spectral samples, plus `peercompute.ulg.optical-gpu-lookup.v0`
+  query/output rows and an `opticalLookupWgsl` compute kernel.
+  `opticalGpuBuffers.js` packs cached `opticalRenderParams()` results into
+  typed arrays/uploadable WebGPU storage buffers, samples those resident records
+  by material/phase id through CPU parity or WebGPU dispatch, and the SPH
+  renderer now exposes the packed table for each visible material/phase batch
+  while still using Three.js `MeshPhysicalMaterial` as the interim display
+  layer.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

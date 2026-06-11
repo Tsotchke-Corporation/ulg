@@ -6,7 +6,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { buildOpticalGpuTable } from '../runtime/material/opticalGpuBuffers.js';
+import {
+  buildOpticalGpuLookupQueries,
+  buildOpticalGpuTable,
+  sampleOpticalGpuTableCpu
+} from '../runtime/material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -228,6 +232,17 @@ export function createOpticalGpuTableForSurfaceBatches(batches, { materialProper
   })), { materialProperties: materialProperties || {} });
 }
 
+export function createOpticalGpuLookupForSurfaceBatches(table, batches) {
+  const lookup = buildOpticalGpuLookupQueries(table, batches.map((batch) => ({
+    material: batch.material,
+    phase: batch.phase ?? opticalQueryForDescriptor(batch.descriptor).phase
+  })));
+  return {
+    lookup,
+    cpuReference: sampleOpticalGpuTableCpu(table, lookup)
+  };
+}
+
 export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null, surfaceRadiusM = null, surfaceRadiusScale = 1 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
@@ -290,7 +305,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
 
   const surfaces = new Map();
   let opticalGpuTable = buildOpticalGpuTable([]);
+  let opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, []);
   scene.userData.opticalGpuTable = opticalGpuTable;
+  scene.userData.opticalGpuLookup = opticalGpuLookup;
 
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
@@ -342,7 +359,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
+    opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     scene.userData.opticalGpuTable = opticalGpuTable;
+    scene.userData.opticalGpuLookup = opticalGpuLookup;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -446,6 +465,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     camera,
     getOpticalGpuTable() {
       return opticalGpuTable;
+    },
+    getOpticalGpuLookup() {
+      return opticalGpuLookup;
     }
   };
 }

@@ -1171,6 +1171,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const canvas = overlay.querySelector('canvas');
     const scene = overlay.__sphScene;
     const opticalGpuTable = scene?.getOpticalGpuTable?.();
+    const opticalGpuLookup = scene?.getOpticalGpuLookup?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1189,6 +1190,11 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         recordCount: opticalGpuTable?.recordCount,
         spectralSampleCount: opticalGpuTable?.spectralSampleCount
       },
+      opticalGpuLookup: {
+        schema: opticalGpuLookup?.lookup?.schema,
+        queryCount: opticalGpuLookup?.lookup?.queryCount,
+        outputCount: opticalGpuLookup?.cpuReference?.outputs?.length
+      },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
@@ -1198,6 +1204,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
   expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
   expect(derivedSummary.opticalGpuTable.spectralSampleCount).toBeGreaterThan(0);
+  expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
+  expect(derivedSummary.opticalGpuLookup.queryCount).toBe(derivedSummary.opticalGpuTable.recordCount);
+  expect(derivedSummary.opticalGpuLookup.outputCount).toBe(derivedSummary.opticalGpuLookup.queryCount * 12);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
 });
 

@@ -111,6 +111,17 @@ All frame-loop simulation layers should communicate through WebGPU buffers:
 The CPU should bind these resources and dispatch kernels. It should not inspect
 or transform them per particle each frame.
 
+## Current Optical/PBR Checkpoint
+
+As of 2026-06-10 22:21 AKDT, the optical/PBR chain has its first GPU-facing
+ABI and scene bridge. ULG can pack closure-derived PBR/spectral records into
+stable WebGPU storage-buffer layouts, assign stable element/compound material
+ids, build material/phase lookup rows for active SPH surface batches, and run a
+matching lookup kernel with CPU parity. The visible demo still renders through
+Three.js `MeshPhysicalMaterial`, so this is not yet the final GPU-resident
+renderer or SPH hot loop. The next upgrade is to bind these packed buffers in
+the live frame pipeline instead of only exposing them as scene metadata.
+
 ## Hot-Loop Kernel Chain
 
 A first GPU-resident SPH phase demo should target this dispatch chain:

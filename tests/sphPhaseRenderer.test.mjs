@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   SPH_PHASE_RENDER_MODE,
   createContinuousSurfaceBatches,
+  createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches
 } from '../src/visualization/sphPhaseScene.js';
 
@@ -136,4 +137,37 @@ test('SPH phase renderer derives a packed optical GPU table from surface batches
     ['Au|solid', 'h2o|gas', 'h2o|solid']
   );
   assert.match(table.wgslStructs, /OpticalMaterialRecord/);
+});
+
+test('SPH phase renderer derives optical GPU lookup rows for active surface batches', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 2.8, 2.6
+    ]),
+    colorsRgb: new Float32Array([
+      0.9, 0.9, 0.9,
+      1.0, 0.8, 0.4
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o' },
+      { material: 'Au', phase: 'solid', renderKey: 'Au' }
+    ]
+  });
+  const table = createOpticalGpuTableForSurfaceBatches(batches, {
+    materialProperties: {
+      Au: {
+        conductionElectronDensityPerM3: 5.9e28,
+        opticalInterbandOscillators: []
+      }
+    }
+  });
+  const lookup = createOpticalGpuLookupForSurfaceBatches(table, batches);
+
+  assert.equal(lookup.lookup.schema, 'peercompute.ulg.optical-gpu-lookup.v0');
+  assert.equal(lookup.lookup.queryCount, 2);
+  assert.equal(lookup.cpuReference.outputs.length, 24);
+  assert.equal(lookup.cpuReference.outputs[11], 0);
+  assert.equal(lookup.cpuReference.outputs[23], 1);
 });

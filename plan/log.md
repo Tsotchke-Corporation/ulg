@@ -7742,3 +7742,63 @@ Failures / open questions:
   ontology. They are stable and f32-exact for ULG GPU tables, but PeerCompute
   placement and future material catalogs may need a shared registry.
 - No push was attempted.
+
+## 2026-06-10 22:21:10 AKDT - SPH scene optical lookup metadata bridge
+
+Prompt:
+
+- Continue the GPU-resident material/renderer cleanup after stabilizing optical
+  material ids.
+
+Actions:
+
+- Extended `src/visualization/sphPhaseScene.js` so active SPH surface batches
+  build optical material/phase lookup queries and CPU-reference lookup outputs
+  from the packed optical GPU table.
+- Added `createOpticalGpuLookupForSurfaceBatches()` and exposed the latest
+  lookup payload through `scene.userData.opticalGpuLookup` and
+  `getOpticalGpuLookup()`.
+- Updated SPH renderer and browser smoke tests to assert that lookup query
+  counts match packed optical table record counts and that CPU-reference output
+  rows are present for each active material/phase surface.
+- Updated `plan/implementation-status.md`, `plan/perf-upgrade.md`, and
+  `plan/sphphasedemo.md` to record the bridge without claiming that the live
+  Three.js renderer consumes the WebGPU buffers directly.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs`
+- `node --test tests/sphPhaseRenderer.test.mjs tests/opticalGpuBuffers.test.mjs`
+- Browser HTTPS probe against `https://127.0.0.1:5173/`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused renderer/optical-buffer tests passed `11/11`.
+- PASS: Browser HTTPS probe reported
+  `table.schema=peercompute.ulg.optical-gpu-table.v0`,
+  `table.recordCount=2`,
+  `lookup.schema=peercompute.ulg.optical-gpu-lookup.v0`,
+  `lookup.queryCount=2`, and `lookup.outputCount=24`.
+- PASS: `npm test` passed `223/223`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The lookup bridge is still scene metadata plus CPU-reference output in the
+  live demo. The already-tested WebGPU lookup helper exists, but the frame loop
+  does not yet keep the lookup dispatch and renderer consumption resident.
+- No push was attempted.

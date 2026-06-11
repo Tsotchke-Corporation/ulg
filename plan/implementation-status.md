@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 22:08 AKDT
+Updated: 2026-06-10 22:21 AKDT
 
 ## Done
 
@@ -37,9 +37,10 @@ Updated: 2026-06-10 22:08 AKDT
   typed arrays/uploadable WebGPU storage buffers, samples those resident records
   by material/phase id through CPU parity or WebGPU dispatch, and the SPH
   renderer now exposes the packed table for each visible material/phase batch
-  while still using Three.js `MeshPhysicalMaterial` as the interim display
-  layer. Optical material ids are stable across table rebuilds: elements use
-  atomic number and compounds use deterministic f32-exact hashed ids.
+  plus CPU-reference lookup rows for the active surface batches while still
+  using Three.js `MeshPhysicalMaterial` as the interim display layer. Optical
+  material ids are stable across table rebuilds: elements use atomic number and
+  compounds use deterministic f32-exact hashed ids.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

@@ -280,6 +280,9 @@ Current implementation checkpoint (2026-06-10):
   `opticalLookupWgsl` material/phase lookup kernel.
 - The SPH renderer now builds a packed optical table for active material/phase
   surface batches and exposes it through `getOpticalGpuTable()`.
+- The SPH renderer now also builds active material/phase lookup queries and
+  CPU-reference lookup outputs through `getOpticalGpuLookup()`, using the same
+  lookup ABI that can dispatch on WebGPU.
 - Each packed table contains closure-derived PBR material records plus spectral
   sample rows suitable for WebGPU storage-buffer upload.
 - The runtime can sample packed records by material/phase id through a CPU
@@ -287,7 +290,8 @@ Current implementation checkpoint (2026-06-10):
 - Material ids are stable for GPU residency: elements use atomic number, while
   compounds use deterministic f32-exact hashed ids.
 - The demo still renders through Three.js `MeshPhysicalMaterial`; WebGPU
-  kernels/renderers do not yet consume the table directly in the frame loop.
+  kernels/renderers do not yet consume the table or lookup output directly in
+  the frame loop.
 
 Validation remains false until quantitative optical-response evidence exists.
 The current scalar-relativistic atomic Drude-Lorentz path is useful reference

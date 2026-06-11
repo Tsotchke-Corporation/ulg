@@ -494,6 +494,8 @@ export function createSphPhaseDemo(options = {}) {
     for (const ph of props.phases || []) maxRealSoundSpeed = Math.max(maxRealSoundSpeed, realSoundSpeed(ph));
   }
   const cflSafety = options.cflSafety ?? 0.4;
+  const gridCflFactor = options.gridCflFactor ?? 0.6;
+  const gravityMPerS2 = options.gravity ?? [0, -9.80665, 0];
   const cflMaxSoundSpeedMPerS = (cflSafety * mechLengthM) / carrierDt;
   const soundSpeedScale = Math.min(1, maxRealSoundSpeed > 0 ? cflMaxSoundSpeedMPerS / maxRealSoundSpeed : 1);
   const modulusScale = soundSpeedScale * soundSpeedScale; // moduli scale as c^2
@@ -506,7 +508,9 @@ export function createSphPhaseDemo(options = {}) {
     soundSpeedScale,
     modulusScale,
     minGasSoundSpeedMPerS,
-    cflSafety
+    cflSafety,
+    gridCflFactor,
+    gravityMPerS2
   };
   demo.gpuMechanics = gpuMechanics;
   demo.state.gpuMechanics = gpuMechanics;
@@ -533,16 +537,17 @@ export function createSphPhaseDemo(options = {}) {
       boxEdgeM: demo.box.edgeM,
       boxDimsM: demo.box.dimensionsM,
       dt: carrierDt,
-      gravity: options.gravity ?? [0, -9.80665, 0],
+      gravity: gravityMPerS2,
       eos,
       restDensityOf: (p) => p.restDensityKgPerM3 || demo.materialProperties[p.material].phases[0].densityKgPerM3,
-      constitutiveOf
+      constitutiveOf,
+      cflFactor: gridCflFactor
     });
   } else {
     carrier = createSphPhaseCarrier({
       dimension: 3,
       gamma: options.gamma ?? 1.4,
-      gravity: options.gravity ?? [0, -9.80665, 0],
+      gravity: gravityMPerS2,
       alpha: options.alpha ?? 1.0,
       beta: options.beta ?? 2.0,
       dt: carrierDt,

@@ -1178,6 +1178,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getMlsMpmGpuParticleUpload?.()?.schema
       && scene?.getMlsMpmMechanicsPrediction?.()?.schema
       && scene?.getMlsMpmP2gGridProjection?.()?.schema
+      && scene?.getMlsMpmGridUpdate?.()?.schema
     );
   });
   const derivedSummary = await page.evaluate(() => {
@@ -1194,6 +1195,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmGpuParticleUpload = scene?.getMlsMpmGpuParticleUpload?.();
     const mlsMpmMechanicsPrediction = scene?.getMlsMpmMechanicsPrediction?.();
     const mlsMpmP2gGridProjection = scene?.getMlsMpmP2gGridProjection?.();
+    const mlsMpmGridUpdate = scene?.getMlsMpmGridUpdate?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1298,6 +1300,29 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         sphValidation: mlsMpmP2gGridProjection?.sphValidation,
         phaseChangeValidation: mlsMpmP2gGridProjection?.phaseChangeValidation,
         fullPhysicsValidation: mlsMpmP2gGridProjection?.fullPhysicsValidation
+      },
+      mlsMpmGridUpdate: {
+        schema: mlsMpmGridUpdate?.schema,
+        updateSchema: mlsMpmGridUpdate?.updateSchema,
+        backend: mlsMpmGridUpdate?.backend,
+        webgpuStatus: mlsMpmGridUpdate?.webgpuStatus?.status,
+        paritySchema: mlsMpmGridUpdate?.webgpuParity?.schema,
+        parityStatus: mlsMpmGridUpdate?.webgpuParity?.status,
+        parityMaxGridAbs: mlsMpmGridUpdate?.webgpuParity?.maxGridAbs ?? null,
+        parityTolerance: mlsMpmGridUpdate?.webgpuParity?.tolerance ?? null,
+        particleCount: mlsMpmGridUpdate?.particleCount,
+        gridNodeCount: mlsMpmGridUpdate?.gridNodeCount,
+        gridNodeStrideFloats: mlsMpmGridUpdate?.gridNodeStrideFloats,
+        dt: mlsMpmGridUpdate?.dt,
+        cflFactor: mlsMpmGridUpdate?.cflFactor,
+        p2gProjectionValidation: mlsMpmGridUpdate?.p2gProjectionValidation,
+        stressProjectionValidation: mlsMpmGridUpdate?.stressProjectionValidation,
+        gridUpdateValidation: mlsMpmGridUpdate?.gridUpdateValidation,
+        gridValidation: mlsMpmGridUpdate?.gridValidation,
+        g2pValidation: mlsMpmGridUpdate?.g2pValidation,
+        sphValidation: mlsMpmGridUpdate?.sphValidation,
+        phaseChangeValidation: mlsMpmGridUpdate?.phaseChangeValidation,
+        fullPhysicsValidation: mlsMpmGridUpdate?.fullPhysicsValidation
       },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
@@ -1413,6 +1438,38 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmP2gGridProjection.sphValidation).toBe(false);
   expect(derivedSummary.mlsMpmP2gGridProjection.phaseChangeValidation).toBe(false);
   expect(derivedSummary.mlsMpmP2gGridProjection.fullPhysicsValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.schema).toBe('peercompute.ulg.mls-mpm-gpu-grid-update-execution.v0');
+  expect(derivedSummary.mlsMpmGridUpdate.updateSchema).toBe('peercompute.ulg.mls-mpm-gpu-grid-update.v0');
+  expect(derivedSummary.mlsMpmGridUpdate.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+  expect(derivedSummary.mlsMpmGridUpdate.gridNodeCount).toBe(derivedSummary.mlsMpmP2gGridProjection.gridNodeCount);
+  expect(derivedSummary.mlsMpmGridUpdate.gridNodeStrideFloats).toBe(8);
+  expect(derivedSummary.mlsMpmGridUpdate.dt).toBeGreaterThan(0);
+  expect(derivedSummary.mlsMpmGridUpdate.cflFactor).toBeGreaterThan(0);
+  expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.mlsMpmGridUpdate.backend);
+  expect([
+    'blocked-webgpu-unavailable',
+    'not-requested',
+    'webgpu-device-lost-fallback',
+    'webgpu-error-fallback',
+    'webgpu-executed',
+    'webgpu-parity-failed'
+  ]).toContain(derivedSummary.mlsMpmGridUpdate.webgpuStatus);
+  if (derivedSummary.mlsMpmGridUpdate.backend === 'webgpu') {
+    expect(derivedSummary.mlsMpmGridUpdate.webgpuStatus).toBe('webgpu-executed');
+    expect(derivedSummary.mlsMpmGridUpdate.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-grid-update-parity.v0');
+    expect(derivedSummary.mlsMpmGridUpdate.parityStatus).toBe('pass');
+    expect(derivedSummary.mlsMpmGridUpdate.parityMaxGridAbs).toBeLessThanOrEqual(
+      derivedSummary.mlsMpmGridUpdate.parityTolerance
+    );
+  }
+  expect(derivedSummary.mlsMpmGridUpdate.p2gProjectionValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.stressProjectionValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.gridUpdateValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.gridValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.g2pValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.sphValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.phaseChangeValidation).toBe(false);
+  expect(derivedSummary.mlsMpmGridUpdate.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);

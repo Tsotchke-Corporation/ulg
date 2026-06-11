@@ -22,6 +22,9 @@ export const ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-
 export const ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-projection.v0';
 export const ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-projection-execution.v0';
 export const ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-projection-parity.v0';
+export const ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-update.v0';
+export const ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-update-execution.v0';
+export const ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-update-parity.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',
@@ -147,6 +150,16 @@ export const MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT = Object.freeze([
   'momentumXKgMPerS:f32',
   'momentumYKgMPerS:f32',
   'momentumZKgMPerS:f32',
+  'nodeXM:f32',
+  'nodeYM:f32',
+  'nodeZM:f32',
+  'status:f32'
+]);
+export const MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT = Object.freeze([
+  'massKg:f32',
+  'velocityXMPerS:f32',
+  'velocityYMPerS:f32',
+  'velocityZMPerS:f32',
   'nodeXM:f32',
   'nodeYM:f32',
   'nodeZM:f32',

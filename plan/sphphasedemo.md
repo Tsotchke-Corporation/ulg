@@ -1062,3 +1062,32 @@ Remaining before this satisfies the demo's physical acceptance criteria:
   vapor/condensation pressure, and reaction updates onto GPU-resident buffers.
 - Keep all material properties and optical behavior closure-derived; no
   per-material visual or mechanical patches.
+
+## 2026-06-11 GPU MLS-MPM Grid Update Checkpoint
+
+Completed:
+
+- Added WebGPU grid velocity update after P2G.
+- Applied gravity, CFL speed limiting, and sealed-box wall normal clamping on
+  the grid.
+- Retained the successful P2G grid buffer and successful updated velocity-grid
+  buffer so the next G2P implementation can stay GPU-resident.
+
+Validation evidence:
+
+- Focused ABI/P2G/grid-update tests passed `26/26`.
+- Browser e2e for the default derived-material SPH demo passed against the
+  live HTTPS server.
+- Live WebGPU probe reported P2G and grid update `webgpu-executed`, parity
+  `pass`, retained P2G and update buffers, `maxGridAbs=4.656612873077393e-10`,
+  and `gridNodeCount=13824`.
+- Full `npm test` passed `267/267`; production build passed with the known
+  large-chunk warning.
+
+Remaining before GPU-authoritative motion:
+
+- Implement G2P reconstruction from the retained velocity grid.
+- Replace the current CPU-authoritative visual stepping with the GPU kernel
+  chain after G2P parity is established.
+- Move thermal, wall heat, phase-equilibrium, and reaction updates into
+  resident kernels.

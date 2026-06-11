@@ -1092,3 +1092,38 @@ Not claimed:
   update grid velocities, apply wall/contact constraints, CFL-clamp grid nodes,
   or perform G2P reconstruction.
 - CPU carrier state still drives the visible particles.
+
+## 2026-06-11 Update - WebGPU MLS-MPM Grid Update Slice
+
+Completed:
+
+- Added grid-update ABI schemas and an 8-float grid velocity row layout carrying
+  mass, post-update velocity, node position, and status.
+- Added `mlsMpmGridUpdateWgsl` plus CPU/WebGPU/parity runtime wrappers for the
+  MLS-MPM grid velocity update stage.
+- Implemented the CPU carrier's grid update formula on WebGPU: momentum divided
+  by mass, gravity integration, CFL velocity clamp, and sealed-box into-wall
+  normal velocity clamping.
+- Wired the SPH phase scene and overlay to schedule grid update after P2G and
+  expose `getMlsMpmGridUpdate()`.
+- Added retained GPU output buffers on the successful WebGPU P2G and grid-update
+  paths. P2G now keeps a resident grid buffer for grid update, and grid update
+  keeps a resident velocity-grid buffer for the next G2P slice.
+
+Latest validation:
+
+- PASS: focused ABI/P2G/grid-update tests passed `26/26`.
+- PASS: focused browser e2e passed against `https://127.0.0.1:5173` (`1/1`).
+- PASS: live browser WebGPU probe reported P2G and grid update both
+  `webgpu-executed`, grid-update parity `pass`,
+  `maxGridAbs=4.656612873077393e-10`, P2G retained grid buffer `true`,
+  grid-update retained velocity buffer `true`, both buffer byte lengths
+  `442368`, `gridNodeCount=13824`, and `particleCount=152`.
+- PASS: `npm test` (`267/267`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+
+Not claimed:
+
+- G2P reconstruction is not implemented yet, so the visual simulation remains
+  CPU-authoritative.
+- Thermal/phase/reaction/wall heat updates are still CPU-side in the live demo.

@@ -522,3 +522,69 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   grid_nodes[node_index * 2u + 1u] = vec4<f32>(node_pos.x, node_pos.y, node_pos.z, status);
 }
 `;
+
+export const mlsMpmGridUpdateWgsl = `
+struct GridUpdateParams {
+  grid_node_count: u32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  shift: u32,
+  pad_u0: u32,
+  pad_u1: u32,
+  pad_u2: u32,
+  grid_spacing_m: f32,
+  dt: f32,
+  gravity_x: f32,
+  gravity_y: f32,
+  gravity_z: f32,
+  box_x: f32,
+  box_y: f32,
+  box_z: f32,
+  cfl_factor: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> p2g_grid_nodes: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> updated_grid_nodes: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> params: GridUpdateParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let node_index = global_id.x;
+  if (node_index >= params.grid_node_count) {
+    return;
+  }
+
+  let row0 = p2g_grid_nodes[node_index * 2u];
+  let row1 = p2g_grid_nodes[node_index * 2u + 1u];
+  let mass = row0.x;
+  var velocity = vec3<f32>(0.0, 0.0, 0.0);
+  var status = 0.0;
+
+  if (mass > 0.0) {
+    velocity = row0.yzw / mass + vec3<f32>(params.gravity_x, params.gravity_y, params.gravity_z) * params.dt;
+    let vmax = params.cfl_factor * params.grid_spacing_m / max(params.dt, 1.0e-12);
+    let speed2 = dot(velocity, velocity);
+    if (speed2 > vmax * vmax) {
+      velocity = velocity * (vmax / sqrt(speed2));
+    }
+    let node_pos = row1.xyz;
+    if ((node_pos.x < params.grid_spacing_m && velocity.x < 0.0) || (node_pos.x > params.box_x - params.grid_spacing_m && velocity.x > 0.0)) {
+      velocity.x = 0.0;
+    }
+    if ((node_pos.y < params.grid_spacing_m && velocity.y < 0.0) || (node_pos.y > params.box_y - params.grid_spacing_m && velocity.y > 0.0)) {
+      velocity.y = 0.0;
+    }
+    if ((node_pos.z < params.grid_spacing_m && velocity.z < 0.0) || (node_pos.z > params.box_z - params.grid_spacing_m && velocity.z > 0.0)) {
+      velocity.z = 0.0;
+    }
+    status = 1.0;
+  }
+
+  updated_grid_nodes[node_index * 2u] = vec4<f32>(mass, velocity.x, velocity.y, velocity.z);
+  updated_grid_nodes[node_index * 2u + 1u] = vec4<f32>(row1.x, row1.y, row1.z, status);
+}
+`;

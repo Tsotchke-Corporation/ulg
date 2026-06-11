@@ -403,7 +403,8 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   mlsMpmParticleUpload = null,
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
-  dt = mlsMpmParticleState?.mechanicsDtS ?? 0
+  dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  retainGridBuffer = false
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmP2gGridProjectionWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -434,6 +435,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     size: Math.max(4, outputByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   });
+  let returnedRetainedGridBuffer = false;
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createProjectionParamsArray(gridSpec, sphParticleState.particleCount, dt));
@@ -463,7 +465,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     await readBuffer.mapAsync(GPU_MAP_MODE.READ);
     const gridNodes = new Float32Array(readBuffer.getMappedRange()).slice(0, gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS);
     readBuffer.unmap();
-    return outputEnvelope({
+    const projection = outputEnvelope({
       backend: 'webgpu',
       sphParticleState,
       mlsMpmParticleState,
@@ -471,11 +473,18 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       gridNodes,
       dt
     });
+    if (retainGridBuffer) {
+      projection.gridBuffer = gridBuffer;
+      projection.gridBufferByteLength = outputByteLength;
+      projection.destroyGridBuffer = () => gridBuffer.destroy?.();
+      returnedRetainedGridBuffer = true;
+    }
+    return projection;
   } finally {
     if (!borrowedStateBuffer) stateBuffer.destroy?.();
     if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
     if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-    gridBuffer.destroy?.();
+    if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
     paramsBuffer.destroy?.();
     readBuffer.destroy?.();
   }
@@ -579,6 +588,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   device = null,
   deviceResult = null,
   parityTolerance = 5e-2,
+  retainGridBuffer = false,
   onDeviceLost = null,
   webGpuRunner = runMlsMpmP2gGridProjectionWebGpu
 } = {}) {
@@ -626,6 +636,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
     }
     await Promise.resolve();
     if (lostInfo) {
+      gpuResult.destroyGridBuffer?.();
       return executionFromProjection(cpuReference, {
         cpuReference,
         webgpuStatus: {
@@ -643,7 +654,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       mlsMpmParticleUpload,
       gridSpacingM,
       boxDimsM,
-      dt
+      dt,
+      retainGridBuffer
     });
     await Promise.resolve();
     if (lostInfo) {
@@ -663,6 +675,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       tolerance: parityTolerance
     });
     if (webgpuParity.status !== 'pass') {
+      gpuResult.destroyGridBuffer?.();
       return executionFromProjection(cpuReference, {
         cpuReference,
         gpuResult,

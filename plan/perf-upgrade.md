@@ -579,6 +579,28 @@ Remaining hot-loop work before the demo can run GPU-authoritatively:
 - Compact diagnostics instead of full grid/particle readbacks during normal
   stepping.
 
+## 2026-06-11 Checkpoint - MLS-MPM Grid Update And Resident Buffer Bridge
+
+The grid-update stage now runs as a WebGPU kernel after P2G. It converts grid
+momentum to velocity, applies gravity, CFL speed limiting, and sealed-box wall
+normal clamping. Successful WebGPU P2G and grid-update executions retain their
+GPU buffers so the next G2P kernel can consume them without a CPU re-upload.
+
+Implemented GPU-resident pieces:
+
+- Grid velocity ABI rows and execution/parity schemas.
+- `mlsMpmGridUpdateWgsl` and parity-gated CPU/WebGPU wrappers.
+- Browser scheduling after P2G.
+- Retained P2G grid buffer and retained updated velocity-grid buffer on
+  successful WebGPU parity.
+
+Still remaining:
+
+- G2P reconstruction from the retained velocity grid.
+- Normal runtime stepping without full readback; parity mode still reads back
+  full buffers for evidence.
+- Thermal/phase/reaction kernels and compact diagnostic summaries.
+
 ## Validation
 
 Required tests and evidence:

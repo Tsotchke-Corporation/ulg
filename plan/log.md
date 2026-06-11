@@ -8434,3 +8434,89 @@ Failures / open questions:
   `sphValidation`, `phaseChangeValidation`, and `fullPhysicsValidation` remain
   false.
 - No push was attempted.
+
+## 2026-06-11 00:25:17 AKDT - WebGPU MLS-MPM grid update
+
+Prompt:
+
+- Continue the GPU-resident MLS-MPM path after the stress-aware P2G projection.
+
+Actions:
+
+- Added ABI schemas for
+  `peercompute.ulg.mls-mpm-gpu-grid-update.v0`,
+  `peercompute.ulg.mls-mpm-gpu-grid-update-execution.v0`, and
+  `peercompute.ulg.mls-mpm-gpu-grid-update-parity.v0`.
+- Added `MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT`, carrying mass, post-update
+  velocity, node position, and status.
+- Added `mlsMpmGridUpdateWgsl`, which performs momentum-to-velocity conversion,
+  gravity integration, CFL speed clamp, and sealed-box wall normal clamping.
+- Added `src/runtime/sph/sphGridUpdateGpuKernel.js` with CPU reference,
+  optional WebGPU execution, parity gating, fallback statuses, and explicit
+  non-validation flags.
+- Wired scene/overlay scheduling so grid update runs after P2G and is exposed
+  via `getMlsMpmGridUpdate()`.
+- Added retained output buffers on successful WebGPU P2G and grid-update
+  executions, enabling the next G2P kernel to consume resident GPU buffers.
+- Added cleanup for retained grid buffers on particle reset and scene disposal.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphGpuBuffers.js`
+- `src/runtime/sph/sphGridGpuKernel.js`
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphGridGpuKernel.test.mjs`
+- `tests/sphGridUpdateGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check tests/sphGridUpdateGpuKernel.test.mjs && node --check ulg-gpu-abi/src/wgsl.js`
+- `node --test tests/abi.test.mjs tests/sphGridUpdateGpuKernel.test.mjs`
+- `node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs && node --check src/runtime/sph/sphGpuBuffers.js && node --check src/runtime/sphPhaseDemo.js`
+- `node --test tests/abi.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMechanicsGpuKernel.test.mjs`
+- `node --check src/runtime/sph/sphGridGpuKernel.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js`
+- `node --test tests/abi.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- Browser HTTPS/WebGPU retained-buffer probe against `https://127.0.0.1:5173/`
+- `npm test`
+- `npm run build`
+
+Validation:
+
+- PASS: focused ABI/grid-update tests passed `17/17`.
+- PASS: focused ABI/P2G/grid-update/mechanics/SPH-buffer tests passed `41/41`.
+- PASS: focused ABI/P2G/grid-update tests passed `26/26` after adding retained
+  GPU buffers.
+- PASS: focused SPH browser e2e passed against the live HTTPS server (`1/1`).
+- PASS: Browser HTTPS/WebGPU retained-buffer probe reported P2G
+  `backend=webgpu`, P2G `webgpuStatus=webgpu-executed`,
+  `p2gRetainedGridBuffer=true`, `p2gGridBufferByteLength=442368`, grid update
+  `backend=webgpu`, grid update `webgpuStatus=webgpu-executed`, parity `pass`,
+  `maxGridAbs=4.656612873077393e-10`, `tolerance=0.00001`,
+  `updateRetainedGridBuffer=true`, `updateGridBufferByteLength=442368`,
+  `kernelScope=mls-mpm-grid-velocity-update-gravity-cfl-walls`, `dt=0.0005`,
+  `cflFactor=0.6`, `gridNodeCount=13824`, and `particleCount=152`.
+- PASS: `npm test` passed `267/267`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+
+Failures / open questions:
+
+- Grid update is parity-tested but still not a full validated grid solve.
+- G2P reconstruction remains the next required WebGPU kernel before visual
+  motion can become GPU-authoritative.
+- Normal runtime still performs full readback in parity mode; compact summaries
+  and no-readback stepping remain future work.
+- Thermal conduction, phase equilibrium, wall heat ledgers, and reactions remain
+  CPU-side in the live demo.
+- No push was attempted.

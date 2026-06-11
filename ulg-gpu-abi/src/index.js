@@ -7,6 +7,8 @@ export const ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure
 export const ULG_CLOSURE_REDERIVATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-rederivation-artifact.v0';
 export const ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA = 'peercompute.ulg.thermodynamic-preflight.v0';
 export const ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA = 'peercompute.ulg.closure-table-wgsl-descriptor.v0';
+export const ULG_CLOSURE_LAW_GRAPH_SCHEMA = 'peercompute.ulg.closure-law-graph.v0';
+export const ULG_CLOSURE_LAW_GRAPH_EXECUTION_SCHEMA = 'peercompute.ulg.closure-law-graph-execution.v0';
 export const ULG_OPTICAL_GPU_TABLE_SCHEMA = 'peercompute.ulg.optical-gpu-table.v0';
 export const ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA = 'peercompute.ulg.optical-gpu-buffer-set.v0';
 export const ULG_OPTICAL_GPU_LOOKUP_SCHEMA = 'peercompute.ulg.optical-gpu-lookup.v0';
@@ -51,6 +53,54 @@ export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'derivative:f32',
   'pad0:f32'
 ]);
+export const CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT = Object.freeze([
+  'opId:f32',
+  'inputSlot:f32',
+  'outputSlot:f32',
+  'derivativeSlot:f32',
+  'sampleOffset:f32',
+  'sampleCount:f32',
+  'domainMin:f32',
+  'domainMax:f32',
+  'edgeOffset:f32',
+  'edgeCount:f32',
+  'interpolationId:f32',
+  'statusFlagId:f32',
+  'provenanceIndex:f32',
+  'materialId:f32',
+  'phaseId:f32',
+  'pad0:f32'
+]);
+export const CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT = Object.freeze([
+  'sourceSlot:f32',
+  'destinationNode:f32',
+  'unitId:f32',
+  'sensitivityTag:f32'
+]);
+export const CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT = Object.freeze([
+  'value:f32',
+  'derivative:f32',
+  'status:f32',
+  'pad0:f32'
+]);
+export const CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT = Object.freeze([
+  'nodeId:f32',
+  'status:f32',
+  'observedInput:f32',
+  'limit:f32'
+]);
+export const CLOSURE_LAW_GRAPH_OP_IDS = Object.freeze({
+  tableLinear: 1
+});
+export const CLOSURE_LAW_GRAPH_INTERPOLATION_IDS = Object.freeze({
+  linear: 1
+});
+export const CLOSURE_LAW_GRAPH_STATUS_IDS = Object.freeze({
+  ok: 1,
+  outOfDomainLow: 2,
+  outOfDomainHigh: 3,
+  unsupportedOperation: 4
+});
 export const OPTICAL_GPU_RECORD_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
   'phaseId:f32',
@@ -521,6 +571,196 @@ export function createClosureTableSampleBuffer(samples, {
     buffer[offset + 3] = 0;
   });
   return buffer;
+}
+
+function closureLawGraphOpId(op) {
+  if (typeof op === 'number') return finiteNumber(op, 'node.opId');
+  const id = CLOSURE_LAW_GRAPH_OP_IDS[op || 'tableLinear'];
+  if (!id) throw new RangeError(`Unsupported closure law graph op: ${op}`);
+  return id;
+}
+
+function closureLawGraphInterpolationId(interpolation) {
+  if (typeof interpolation === 'number') return finiteNumber(interpolation, 'node.interpolationId');
+  const id = CLOSURE_LAW_GRAPH_INTERPOLATION_IDS[interpolation || 'linear'];
+  if (!id) throw new RangeError(`Unsupported closure law graph interpolation: ${interpolation}`);
+  return id;
+}
+
+function readGraphIndex(value, label, fallback = 0) {
+  const candidate = value == null ? fallback : Number(value);
+  if (!Number.isInteger(candidate) || candidate < 0) {
+    throw new TypeError(`${label} must be a non-negative integer`);
+  }
+  return candidate;
+}
+
+export function createClosureLawGraphDescriptor({
+  graphId,
+  nodeCount,
+  edgeCount = 0,
+  sampleCount,
+  slotCount,
+  statusCount = nodeCount,
+  strategy = 'flat-webgpu-closure-law-graph',
+  scientificValidation = false,
+  fullPhysicsValidation = false,
+  materialValidation = false,
+  eosValidation = false,
+  sphValidation = false,
+  phaseChangeValidation = false
+} = {}) {
+  if (!graphId) throw new Error('graphId is required');
+  for (const [label, value] of Object.entries({ nodeCount, edgeCount, sampleCount, slotCount, statusCount })) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new TypeError(`${label} must be a non-negative integer`);
+    }
+  }
+  return {
+    schema: ULG_CLOSURE_LAW_GRAPH_SCHEMA,
+    abiVersion: ULG_GPU_ABI_VERSION,
+    status: 'declared-flat-closure-law-graph',
+    strategy,
+    graphId,
+    nodeCount,
+    edgeCount,
+    sampleCount,
+    slotCount,
+    statusCount,
+    nodeLayout: [...CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT],
+    nodeStrideFloats: CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT.length,
+    nodeStrideBytes: CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT.length * D_TYPES.f32.byteSize,
+    edgeLayout: [...CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT],
+    edgeStrideFloats: CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT.length,
+    edgeStrideBytes: CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT.length * D_TYPES.f32.byteSize,
+    sampleLayout: [...CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT],
+    sampleStrideFloats: CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT.length,
+    sampleStrideBytes: CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT.length * D_TYPES.f32.byteSize,
+    slotLayout: [...CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT],
+    slotStrideFloats: CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length,
+    slotStrideBytes: CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length * D_TYPES.f32.byteSize,
+    statusLayout: [...CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT],
+    statusStrideFloats: CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT.length,
+    statusStrideBytes: CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT.length * D_TYPES.f32.byteSize,
+    opIds: { ...CLOSURE_LAW_GRAPH_OP_IDS },
+    interpolationIds: { ...CLOSURE_LAW_GRAPH_INTERPOLATION_IDS },
+    statusIds: { ...CLOSURE_LAW_GRAPH_STATUS_IDS },
+    storageAddressSpace: 'storage',
+    storageAccess: 'read/read_write',
+    scientificValidation: validationFalse(scientificValidation, 'scientificValidation'),
+    fullPhysicsValidation: validationFalse(fullPhysicsValidation, 'fullPhysicsValidation'),
+    materialValidation: validationFalse(materialValidation, 'materialValidation'),
+    eosValidation: validationFalse(eosValidation, 'eosValidation'),
+    sphValidation: validationFalse(sphValidation, 'sphValidation'),
+    phaseChangeValidation: validationFalse(phaseChangeValidation, 'phaseChangeValidation')
+  };
+}
+
+export function createClosureLawGraphNodeBuffer(nodes) {
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    throw new TypeError('nodes must be a non-empty array');
+  }
+  const buffer = new Float32Array(nodes.length * CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT.length);
+  nodes.forEach((node, index) => {
+    const offset = index * CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT.length;
+    buffer[offset] = closureLawGraphOpId(node.opId ?? node.op);
+    buffer[offset + 1] = readGraphIndex(node.inputSlot, `nodes[${index}].inputSlot`);
+    buffer[offset + 2] = readGraphIndex(node.outputSlot, `nodes[${index}].outputSlot`);
+    buffer[offset + 3] = readGraphIndex(node.derivativeSlot, `nodes[${index}].derivativeSlot`);
+    buffer[offset + 4] = readGraphIndex(node.sampleOffset, `nodes[${index}].sampleOffset`);
+    buffer[offset + 5] = readGraphIndex(node.sampleCount, `nodes[${index}].sampleCount`);
+    buffer[offset + 6] = finiteNumber(node.domainMin, `nodes[${index}].domainMin`);
+    buffer[offset + 7] = finiteNumber(node.domainMax, `nodes[${index}].domainMax`);
+    buffer[offset + 8] = readGraphIndex(node.edgeOffset, `nodes[${index}].edgeOffset`, 0);
+    buffer[offset + 9] = readGraphIndex(node.edgeCount, `nodes[${index}].edgeCount`, 0);
+    buffer[offset + 10] = closureLawGraphInterpolationId(node.interpolationId ?? node.interpolation);
+    buffer[offset + 11] = readGraphIndex(node.statusFlagId, `nodes[${index}].statusFlagId`, index);
+    buffer[offset + 12] = readGraphIndex(node.provenanceIndex, `nodes[${index}].provenanceIndex`, 0);
+    buffer[offset + 13] = finiteNumber(node.materialId ?? 0, `nodes[${index}].materialId`);
+    buffer[offset + 14] = finiteNumber(node.phaseId ?? 0, `nodes[${index}].phaseId`);
+    buffer[offset + 15] = 0;
+  });
+  return buffer;
+}
+
+export function createClosureLawGraphEdgeBuffer(edges = []) {
+  const buffer = new Float32Array(Math.max(0, edges.length) * CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT.length);
+  edges.forEach((edge, index) => {
+    const offset = index * CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT.length;
+    buffer[offset] = readGraphIndex(edge.sourceSlot, `edges[${index}].sourceSlot`);
+    buffer[offset + 1] = readGraphIndex(edge.destinationNode, `edges[${index}].destinationNode`);
+    buffer[offset + 2] = readGraphIndex(edge.unitId, `edges[${index}].unitId`, 0);
+    buffer[offset + 3] = readGraphIndex(edge.sensitivityTag, `edges[${index}].sensitivityTag`, 0);
+  });
+  return buffer;
+}
+
+export function createClosureLawGraphSlotBuffer(slotCount, values = {}) {
+  if (!Number.isInteger(slotCount) || slotCount <= 0) {
+    throw new TypeError('slotCount must be a positive integer');
+  }
+  const buffer = new Float32Array(slotCount * CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length);
+  for (let slot = 0; slot < slotCount; slot += 1) {
+    const row = Array.isArray(values) ? values[slot] : values[String(slot)];
+    const offset = slot * CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length;
+    if (typeof row === 'number') {
+      buffer[offset] = finiteNumber(row, `slot[${slot}].value`);
+      buffer[offset + 2] = CLOSURE_LAW_GRAPH_STATUS_IDS.ok;
+    } else if (row && typeof row === 'object') {
+      buffer[offset] = finiteNumber(row.value ?? 0, `slot[${slot}].value`);
+      buffer[offset + 1] = finiteNumber(row.derivative ?? 0, `slot[${slot}].derivative`);
+      buffer[offset + 2] = finiteNumber(row.status ?? CLOSURE_LAW_GRAPH_STATUS_IDS.ok, `slot[${slot}].status`);
+    }
+  }
+  return buffer;
+}
+
+export function createClosureLawGraphStatusBuffer(statusCount) {
+  if (!Number.isInteger(statusCount) || statusCount < 0) {
+    throw new TypeError('statusCount must be a non-negative integer');
+  }
+  return new Float32Array(statusCount * CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT.length);
+}
+
+export function createClosureLawGraphBuffers({
+  graphId,
+  nodes,
+  edges = [],
+  samples,
+  slotCount,
+  initialSlots = {},
+  statusCount = nodes?.length ?? 0,
+  ...descriptorOptions
+} = {}) {
+  const nodeRows = createClosureLawGraphNodeBuffer(nodes);
+  const edgeRows = createClosureLawGraphEdgeBuffer(edges);
+  const sampleRows = createClosureTableSampleBuffer(samples);
+  const slotRows = createClosureLawGraphSlotBuffer(slotCount, initialSlots);
+  const statusRows = createClosureLawGraphStatusBuffer(statusCount);
+  const descriptor = createClosureLawGraphDescriptor({
+    graphId,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    sampleCount: samples.length,
+    slotCount,
+    statusCount,
+    ...descriptorOptions
+  });
+  return {
+    ...descriptor,
+    nodeRows,
+    edgeRows,
+    sampleRows,
+    slotRows,
+    statusRows,
+    nodeRowByteLength: nodeRows.byteLength,
+    edgeRowByteLength: edgeRows.byteLength,
+    sampleRowByteLength: sampleRows.byteLength,
+    slotRowByteLength: slotRows.byteLength,
+    statusRowByteLength: statusRows.byteLength,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export function createProvenanceBlock({

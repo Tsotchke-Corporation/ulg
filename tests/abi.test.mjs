@@ -5,6 +5,10 @@ import { test } from 'node:test';
 import Ajv2020 from 'ajv/dist/2020.js';
 import {
   CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT,
+  CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT,
+  CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT,
+  CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT,
+  CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT,
   OPTICAL_GPU_RECORD_ROW_LAYOUT,
   OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT,
   OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT,
@@ -23,6 +27,8 @@ import {
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
   createClosureTableDescriptor,
+  createClosureLawGraphBuffers,
+  createClosureLawGraphDescriptor,
   createClosureTableSampleBuffer,
   createClosureTableWgslDescriptor,
   createComplex64Vector,
@@ -32,6 +38,7 @@ import {
   createToleranceReport,
   complex64ToPairs,
   ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA,
+  ULG_CLOSURE_LAW_GRAPH_SCHEMA,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
@@ -160,6 +167,61 @@ test('closure table WGSL descriptors and sample buffers use a stable f32x4 row l
   ]);
   assert.throws(() => createClosureTableWgslDescriptor({
     closureId: 'overclaim',
+    fullPhysicsValidation: true
+  }), /fullPhysicsValidation must remain false/);
+});
+
+test('closure-law graph ABI exposes flat WebGPU row layouts', () => {
+  const descriptor = createClosureLawGraphDescriptor({
+    graphId: 'toy-flat-closure-law-graph',
+    nodeCount: 1,
+    edgeCount: 0,
+    sampleCount: 3,
+    slotCount: 3
+  });
+  assert.equal(descriptor.schema, ULG_CLOSURE_LAW_GRAPH_SCHEMA);
+  assert.equal(descriptor.nodeStrideFloats, 16);
+  assert.equal(descriptor.edgeStrideFloats, 4);
+  assert.equal(descriptor.sampleStrideFloats, 4);
+  assert.equal(descriptor.slotStrideFloats, 4);
+  assert.equal(descriptor.statusStrideFloats, 4);
+  assert.equal(CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT.length % 4, 0);
+  assert.equal(CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT.length % 4, 0);
+  assert.equal(CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length % 4, 0);
+  assert.equal(CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT.length % 4, 0);
+  assert.equal(descriptor.fullPhysicsValidation, false);
+
+  const graph = createClosureLawGraphBuffers({
+    graphId: 'toy-flat-closure-law-graph',
+    nodes: [{
+      op: 'tableLinear',
+      inputSlot: 0,
+      outputSlot: 1,
+      derivativeSlot: 2,
+      sampleOffset: 0,
+      sampleCount: 3,
+      domainMin: 0.5,
+      domainMax: 1.5
+    }],
+    samples: [
+      { axis: 0.5, value: 0.125, derivative: -0.5 },
+      { axis: 1, value: 0, derivative: 0 },
+      { axis: 1.5, value: 0.125, derivative: 0.5 }
+    ],
+    slotCount: 3,
+    initialSlots: { 0: 1 }
+  });
+  assert.equal(graph.schema, ULG_CLOSURE_LAW_GRAPH_SCHEMA);
+  assert.equal(graph.nodeRows.length, CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT.length);
+  assert.equal(graph.edgeRows.length, 0);
+  assert.equal(graph.sampleRows.length, 3 * CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT.length);
+  assert.equal(graph.slotRows.length, 3 * CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length);
+  assert.equal(graph.statusRows.length, CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT.length);
+  assert.throws(() => createClosureLawGraphDescriptor({
+    graphId: 'overclaim',
+    nodeCount: 1,
+    sampleCount: 2,
+    slotCount: 2,
     fullPhysicsValidation: true
   }), /fullPhysicsValidation must remain false/);
 });

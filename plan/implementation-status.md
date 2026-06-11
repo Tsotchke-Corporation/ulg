@@ -1624,5 +1624,37 @@ Latest validation:
 Not claimed:
 
 - The render path is still not direct WebGPU volume rendering.
-- The closure-law graph flat-buffer evaluator is planned but not implemented in
-  this slice.
+- At this checkpoint the closure-law graph flat-buffer evaluator was planned
+  but not implemented; the following update records the first implemented
+  table-linear graph slice.
+
+## 2026-06-11 Update - Flat Closure-Law Graph Runtime Slice
+
+Completed:
+
+- Added flat closure-law graph ABI rows and schemas:
+  `peercompute.ulg.closure-law-graph.v0` and execution
+  `peercompute.ulg.closure-law-graph-execution.v0`.
+- Added CPU compile/validation for table-interpolation closure artifacts into
+  flat graph buffers. The compiler rejects unsorted table axes and preserves
+  domain exits as status rows rather than silently clamping.
+- Added CPU and WebGPU evaluators for table-linear closure nodes. WebGPU reads
+  graph node/sample/slot buffers and writes slot/status buffers.
+- Added parity-gated optional WebGPU execution for the flat graph path.
+- Fixed shared WGSL prelude compatibility by renaming reserved field
+  `TensorDescriptor.layout` to `tensor_layout`.
+
+Latest validation:
+
+- PASS: syntax checks for the touched closure graph, closure handle, ABI, WGSL,
+  and test files.
+- PASS: `node --test tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+  (`24/24`).
+- PASS: manual Chromium/WebGPU probe against `https://127.0.0.1:5173/` with
+  WebGPU flags reported `backend = webgpu`, `status = webgpu-accepted`, parity
+  `pass`, `maxSlotAbs = 0`, and `maxStatusAbs = 0`.
+
+Not claimed:
+
+- Only table-linear closure nodes are implemented so far.
+- SPH/MLS-MPM kernels do not yet consume closure-law graph slot buffers.

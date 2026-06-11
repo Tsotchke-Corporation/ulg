@@ -259,6 +259,41 @@ whose closures have been derived and validated, with cache reuse keyed by the
 closure graph/provenance hash. It should not add one-off material branches for
 H2O, Fe, Au, Na, or any other specific demo material.
 
+## 2026-06-11 Checkpoint - Flat Closure-Law Graph ABI And Evaluator
+
+Implemented:
+
+- Added `peercompute.ulg.closure-law-graph.v0` and
+  `peercompute.ulg.closure-law-graph-execution.v0`.
+- Added flat f32x4-aligned node, edge, slot, status, and table-sample row
+  layouts for WebGPU-resident closure evaluation.
+- Added CPU compiler support for table-interpolation closure artifacts. The
+  compiler validates strict sample ordering and domain limits instead of
+  silently sorting or clamping.
+- Added CPU evaluator support for table-linear closure nodes. Domain exits
+  write status rows and set `closureRefreshRecommended = true`.
+- Added a WebGPU evaluator (`closureLawGraphEvalWgsl`) that consumes only flat
+  graph buffers and writes slot/status buffers.
+- Added optional WebGPU execution with CPU parity gating.
+
+Evidence:
+
+- Focused ABI/runtime tests passed `24/24`.
+- Manual Chromium probe against the live HTTPS Vite server initially acquired
+  WebGPU and caught a shared WGSL parse failure because `layout` in
+  `TensorDescriptor` is now a reserved keyword.
+- Renamed that shared WGSL field to `tensor_layout`.
+- Manual Chromium/WebGPU probe then passed with `backend = webgpu`,
+  `status = webgpu-accepted`, parity `pass`, `maxSlotAbs = 0`, and
+  `maxStatusAbs = 0`.
+
+Remaining performance target:
+
+- Only table-linear closure nodes are implemented. The next graph work is to
+  compile EOS/phase/mechanics/optics/radiation/reaction/nuclear closure families
+  into the same graph rows and consume slot buffers from SPH/MLS-MPM kernels
+  without per-frame CPU graph traversal.
+
 ## 2026-06-11 Checkpoint - Resident Render Rows And Layout-Limit Fixes
 
 Implemented:

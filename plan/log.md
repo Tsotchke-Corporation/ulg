@@ -1283,6 +1283,102 @@ Failures / open questions:
   runtime optimization.
 - No push was attempted.
 
+## 2026-06-11 09:57:03 AKDT - Flat closure-law graph ABI and WebGPU evaluator
+
+Prompt handled:
+
+- User clarified that the `/btw` performance target was moving the closure-law
+  graph to a flat WebGPU structure, initially built and validated by CPU.
+- User asked where that fit with the current task. I finished the retained
+  render-row slice first, then started this graph-residency slice.
+
+Actions:
+
+- Used Infinite Context Coder after the retained-render commit. Initial
+  `codebase_tool.py` was not on PATH, then found it under
+  `/home/cos/projects/infinite_context_coder/scripts/codebase_tool.py`,
+  invoked it through `python3`, and reindexed ULG at commit `4406ec9`.
+- Spawned explorer subagent `Erdos` for a read-only audit of the existing
+  closure-table and WebGPU carrier path. The audit recommended flat graph rows,
+  strict domain handling, parity tests, and avoiding silent GPU clamping.
+- Added `peercompute.ulg.closure-law-graph.v0` and
+  `peercompute.ulg.closure-law-graph-execution.v0`.
+- Added flat node, edge, slot, status, and sample-row metadata to the ABI.
+- Added ABI packers for closure-law graph descriptors and buffers.
+- Updated closure table normalization so new compiler callers can preserve
+  input order and reject unsorted tables while existing callers keep sorted
+  behavior by default.
+- Added `src/runtime/closureLawGraph.js` with:
+  - CPU compile/validation from table-interpolation closure artifacts,
+  - CPU table-linear graph evaluator,
+  - status rows for low/high domain exits and unsupported ops,
+  - WebGPU runner consuming flat graph buffers,
+  - CPU/WebGPU parity report and optional WebGPU wrapper.
+- Added `closureLawGraphEvalWgsl`.
+- Browser WebGPU probe initially failed because shared WGSL `TensorDescriptor`
+  used field name `layout`, which Chromium now treats as a reserved keyword.
+  Renamed it to `tensor_layout` and reran the probe successfully.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/closureHandle.js`
+- `src/runtime/closureLawGraph.js`
+- `tests/abi.test.mjs`
+- `tests/closureLawGraph.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+- `python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+- `python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py pack-context --repo ulg --task "flat closure law graph WebGPU closure table carrier kernel ABI" --include-file ...`
+- `rg -n "ClosureRegistry|closure graph|closureGraph|build.*Closure|sample.*Closure|closure table|Closure" src/runtime tests ulg-gpu-abi/src -g '*.js' -g '*.mjs'`
+- `node --check src/runtime/closureLawGraph.js`
+- `node --check src/runtime/closureHandle.js`
+- `node --check ulg-gpu-abi/src/index.js`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/closureLawGraph.test.mjs`
+- `node --test tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+- `curl -k -I --max-time 5 https://127.0.0.1:5173/`
+- Manual Chromium probe without WebGPU flags against `https://127.0.0.1:5173/`
+  to import and run the flat graph path.
+- Manual Chromium probe with `--enable-unsafe-webgpu`,
+  `--ignore-gpu-blocklist`, `--enable-features=Vulkan,UseSkiaRenderer`, and
+  `--use-vulkan=native`.
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+
+Validation:
+
+- PASS: ICC staleness cleared after reindex:
+  `index_git_sha = current_git_sha = 4406ec910c9762f9f5da51f7d7c2fa615b8aa5f1`.
+- PASS: syntax checks for touched closure graph, closure handle, ABI, WGSL, and
+  closure graph test files.
+- PASS: focused ABI/runtime tests passed `24/24`.
+- PASS: live HTTPS server responded `HTTP/2 200`.
+- PASS: first manual browser probe without WebGPU flags imported the runtime and
+  evaluated the CPU fallback; WebGPU adapter was unavailable.
+- FAIL then fixed: flagged WebGPU probe acquired an adapter but failed WGSL
+  parsing because `layout` was reserved in `TensorDescriptor`.
+- PASS after fix: flagged WebGPU probe reported `backend = webgpu`, `status =
+  webgpu-accepted`, `webgpuStatus.status = webgpu-executed`, parity `pass`,
+  `maxSlotAbs = 0`, `maxStatusAbs = 0`, and slots `[1.25, 0.0625, 0.25]`.
+
+Failures / open questions:
+
+- Only table-linear graph nodes are implemented. EOS/phase/mechanics/optics,
+  reaction, radiation, decay/fission/fusion, and other closure families still
+  need graph compilation/evaluation.
+- SPH and MLS-MPM kernels do not yet consume closure graph slot buffers.
+- Headless Chromium needed explicit WebGPU flags for the manual probe on this
+  host; the default launch had `navigator.gpu` but `requestAdapter()` returned
+  null.
+- No push was attempted.
+
 ## 2026-06-10 20:31:18 AKDT - Scalar-relativistic interband optical response
 
 Prompt:

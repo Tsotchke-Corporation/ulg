@@ -3,7 +3,7 @@ struct TensorDescriptor {
   offset_words: u32,
   length_words: u32,
   dtype: u32,
-  layout: u32,
+  tensor_layout: u32,
 };
 
 struct ClosureTableSample {
@@ -97,6 +97,147 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   right_v = right_v + 0.5 * (second.y / bodies[1].mass) * dt;
   bodies[0].v = left_v;
   bodies[1].v = right_v;
+}
+`;
+
+export const closureLawGraphEvalWgsl = `
+${commonWgsl}
+
+struct ClosureLawGraphNode {
+  op_id: f32,
+  input_slot: f32,
+  output_slot: f32,
+  derivative_slot: f32,
+  sample_offset: f32,
+  sample_count: f32,
+  domain_min: f32,
+  domain_max: f32,
+  edge_offset: f32,
+  edge_count: f32,
+  interpolation_id: f32,
+  status_flag_id: f32,
+  provenance_index: f32,
+  material_id: f32,
+  phase_id: f32,
+  _pad0: f32,
+};
+
+struct ClosureLawGraphEdge {
+  source_slot: f32,
+  destination_node: f32,
+  unit_id: f32,
+  sensitivity_tag: f32,
+};
+
+struct ClosureLawGraphSlot {
+  value: f32,
+  derivative: f32,
+  status: f32,
+  _pad0: f32,
+};
+
+struct ClosureLawGraphStatus {
+  node_id: f32,
+  status: f32,
+  observed_input: f32,
+  limit: f32,
+};
+
+struct ClosureLawGraphParams {
+  node_count: u32,
+  slot_count: u32,
+  sample_count: u32,
+  status_count: u32,
+};
+
+@group(0) @binding(0) var<storage, read> graph_nodes: array<ClosureLawGraphNode>;
+@group(0) @binding(1) var<storage, read> graph_edges: array<ClosureLawGraphEdge>;
+@group(0) @binding(2) var<storage, read> graph_samples: array<ClosureTableSample>;
+@group(0) @binding(3) var<storage, read_write> graph_slots: array<ClosureLawGraphSlot>;
+@group(0) @binding(4) var<storage, read_write> graph_status: array<ClosureLawGraphStatus>;
+@group(0) @binding(5) var<uniform> graph_params: ClosureLawGraphParams;
+
+fn graph_u32(value: f32) -> u32 {
+  return u32(max(value, 0.0));
+}
+
+fn write_node_status(node_index: u32, status: f32, observed_input: f32, limit: f32) {
+  if (node_index >= graph_params.status_count) {
+    return;
+  }
+  graph_status[node_index].node_id = f32(node_index);
+  graph_status[node_index].status = status;
+  graph_status[node_index].observed_input = observed_input;
+  graph_status[node_index].limit = limit;
+}
+
+fn sample_table_linear(node: ClosureLawGraphNode, x: f32) -> vec2<f32> {
+  let offset = graph_u32(node.sample_offset);
+  let count = graph_u32(node.sample_count);
+  var left_index = offset;
+  var right_index = offset + count - 1u;
+  for (var index = offset; index + 1u < offset + count; index = index + 1u) {
+    let left_axis = graph_samples[index].axis;
+    let right_axis = graph_samples[index + 1u].axis;
+    if (x >= left_axis && x <= right_axis) {
+      left_index = index;
+      right_index = index + 1u;
+      break;
+    }
+  }
+  let left = graph_samples[left_index];
+  let right = graph_samples[right_index];
+  if (right.axis == left.axis) {
+    return vec2<f32>(left.value, left.derivative);
+  }
+  let t = clamp((x - left.axis) / (right.axis - left.axis), 0.0, 1.0);
+  return vec2<f32>(
+    left.value + t * (right.value - left.value),
+    left.derivative + t * (right.derivative - left.derivative)
+  );
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+  for (var node_index = 0u; node_index < graph_params.node_count; node_index = node_index + 1u) {
+    let node = graph_nodes[node_index];
+    let input_slot = graph_u32(node.input_slot);
+    let output_slot = graph_u32(node.output_slot);
+    let derivative_slot = graph_u32(node.derivative_slot);
+    let sample_count = graph_u32(node.sample_count);
+    if (node.op_id != 1.0 || sample_count < 2u) {
+      write_node_status(node_index, 4.0, node.op_id, 0.0);
+      continue;
+    }
+    if (input_slot >= graph_params.slot_count || output_slot >= graph_params.slot_count || derivative_slot >= graph_params.slot_count) {
+      write_node_status(node_index, 4.0, f32(input_slot), 0.0);
+      continue;
+    }
+    let x = graph_slots[input_slot].value;
+    if (x < node.domain_min) {
+      graph_slots[output_slot].status = 2.0;
+      graph_slots[derivative_slot].status = 2.0;
+      write_node_status(node_index, 2.0, x, node.domain_min);
+      continue;
+    }
+    if (x > node.domain_max) {
+      graph_slots[output_slot].status = 3.0;
+      graph_slots[derivative_slot].status = 3.0;
+      write_node_status(node_index, 3.0, x, node.domain_max);
+      continue;
+    }
+    let sampled = sample_table_linear(node, x);
+    graph_slots[output_slot].value = sampled.x;
+    graph_slots[output_slot].derivative = sampled.y;
+    graph_slots[output_slot].status = 1.0;
+    graph_slots[derivative_slot].value = sampled.y;
+    graph_slots[derivative_slot].derivative = 0.0;
+    graph_slots[derivative_slot].status = 1.0;
+    write_node_status(node_index, 1.0, x, 0.0);
+  }
 }
 `;
 

@@ -41,18 +41,22 @@ function readDerivativeValues(table, derivativeName) {
   return null;
 }
 
-function normalizeSamples(table = {}) {
+function maybeSortSamples(samples, sort) {
+  return sort ? samples.sort((left, right) => left.axis - right.axis) : samples;
+}
+
+function normalizeSamples(table = {}, { sort = true } = {}) {
   const axisName = readAxisName(table);
   const outputName = table.outputName || table.valueName || 'energy';
   const derivativeName = table.derivativeName || 'dEdr';
   if (Array.isArray(table.samples)) {
-    return table.samples.map((sample, index) => ({
+    return maybeSortSamples(table.samples.map((sample, index) => ({
       axis: finiteNumber(sample[axisName] ?? sample.r ?? sample.x, `sample[${index}].${axisName}`),
       value: finiteNumber(sample[outputName] ?? sample.energy ?? sample.value, `sample[${index}].${outputName}`),
       derivative: sample[derivativeName] == null
         ? null
         : finiteNumber(sample[derivativeName], `sample[${index}].${derivativeName}`)
-    })).sort((left, right) => left.axis - right.axis);
+    })), sort);
   }
   const axisValues = readAxisValues(table, axisName);
   const outputValues = readOutputValues(table, outputName);
@@ -60,16 +64,16 @@ function normalizeSamples(table = {}) {
     throw new Error('table-interpolation closures require matched axis and output samples');
   }
   const derivativeValues = readDerivativeValues(table, derivativeName);
-  return axisValues.map((axis, index) => ({
+  return maybeSortSamples(axisValues.map((axis, index) => ({
     axis: finiteNumber(axis, `axis[${index}]`),
     value: finiteNumber(outputValues[index], `${outputName}[${index}]`),
     derivative: derivativeValues?.[index] == null
       ? null
       : finiteNumber(derivativeValues[index], `${derivativeName}[${index}]`)
-  })).sort((left, right) => left.axis - right.axis);
+  })), sort);
 }
 
-export function normalizeClosureTableSamples(table = {}) {
+export function normalizeClosureTableSamples(table = {}, options = {}) {
   const axisName = readAxisName(table);
   const outputName = table.outputName || table.valueName || 'energy';
   const derivativeName = table.derivativeName || 'dEdr';
@@ -77,7 +81,7 @@ export function normalizeClosureTableSamples(table = {}) {
     axisName,
     outputName,
     derivativeName,
-    samples: normalizeSamples(table)
+    samples: normalizeSamples(table, options)
   };
 }
 

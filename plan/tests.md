@@ -1664,3 +1664,25 @@ Flat closure-law graph gates for the next major performance slice:
 - Regression tests should reject material-specific branches for individual demo
   substances when the same behavior can be expressed through derived closure
   rows.
+
+Implemented first flat-graph gates:
+
+- `tests/abi.test.mjs` now covers `peercompute.ulg.closure-law-graph.v0`, flat
+  node/edge/sample/slot/status row layouts, descriptor stride metadata, and
+  validation-flag overclaim rejection.
+- `tests/closureLawGraph.test.mjs` covers strict CPU compilation from
+  table-interpolation closures, rejection of unsorted table axes, CPU
+  table-linear graph evaluation, domain-exit status/refresh reporting,
+  optional WebGPU parity acceptance through an injected runner, and parity drift
+  fallback.
+- Manual Chromium/WebGPU probe against the live HTTPS Vite server executed
+  `closureLawGraphEvalWgsl` with real WebGPU after enabling headless WebGPU
+  flags and passed CPU/WebGPU parity exactly.
+
+Validation status:
+
+- PASS: `node --test tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+  (`24/24`).
+- PASS: manual Chromium/WebGPU probe reported `backend = webgpu`,
+  `webgpuStatus.status = webgpu-executed`, parity `pass`, `maxSlotAbs = 0`,
+  and `maxStatusAbs = 0`.

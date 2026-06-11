@@ -1229,6 +1229,32 @@ Remaining before demo-visible GPU motion:
 - Move thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
   pressure, and optical/render fields onto resident GPU buffers.
 
+## 2026-06-11 Generic Resident Render-Field Checkpoint
+
+Completed:
+
+- Added a generic SPH render-field ABI and WGSL path. Surface rows are keyed by
+  material id and phase id, not by special-case material names.
+- The resident WebGPU render branch now converts compact render rows into
+  flattened density/palette fields on GPU, then feeds the existing Three.js
+  MarchingCubes bridge.
+- The default Fe/H2O browser probe reports `resident-gpu-render-field`,
+  `renderFieldByteLength = 1048576`, visible H2O and Fe surfaces, and H2O
+  `renderAlpha = 1`.
+- The Na/H2O browser probe reports field-rendered `h2o`, `Na`, and derived
+  `naoh` surfaces, proving the path preserves arbitrary material/product ids.
+- The resident field bridge is capped at 32 cells per axis per surface so the
+  interim readback remains bounded.
+
+Remaining before this satisfies the demo's renderer/performance target:
+
+- Replace the Three.js MarchingCubes bridge with direct WebGPU draw or volume
+  buffers.
+- Avoid render-field readback in the normal frame loop.
+- Move per-cell optical/radiation color, incandescence, gas scattering, and
+  steam/cloud opacity into GPU-resident closure sampling instead of per-surface
+  bridge colors.
+
 ## 2026-06-11 Scene-Scheduled Multi-Step Resident Chain
 
 Completed:

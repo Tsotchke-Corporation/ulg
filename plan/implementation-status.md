@@ -1558,3 +1558,38 @@ Not claimed:
   step is direct GPU-driven draw buffers rather than CPU-side surface rebuilds.
 - Cherenkov, radioactive decay, fission, fusion, activation, and ionizing
   radiation remain planned closure families, not implemented solvers.
+
+## 2026-06-11 Update - Generic Resident SPH Render Field
+
+Completed:
+
+- Added `peercompute.ulg.sph-gpu-render-field.v0` and execution schema for
+  generic material/phase render fields.
+- Added `sphRenderFieldWgsl`, which consumes compact resident render rows and a
+  surface table keyed by material id + phase id, then writes flattened
+  density/palette fields.
+- Added runtime helpers to build surface tables, CPU reference fields, WebGPU
+  field output, and per-surface field slices without material-specific
+  interaction branches.
+- Wired the resident scene renderer so successful WebGPU resident steps render
+  via `resident-gpu-render-field`; compact rows and CPU particles remain
+  fallback paths.
+- Added a generic resident bridge resolution cap of 32 cells per axis, reducing
+  default Fe/H2O field readback to `1048576` bytes while preserving visible H2O.
+
+Latest validation:
+
+- PASS: syntax checks for touched runtime/scene/test files.
+- PASS: focused ABI/render tests passed `23/23`.
+- PASS: focused scene renderer tests passed `6/6`.
+- PASS: focused HTTPS Chromium e2e passed `1/1`.
+- PASS: manual Fe/H2O and Na/H2O browser probes showed
+  `resident-gpu-render-field` with material keys preserved and visible H2O.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- The renderer is still not direct WebGPU draw/volume rendering. It reads the
+  field back to CPU and still uses Three.js MarchingCubes polygonization.
+- Per-cell temperature-varying optical/radiation color and gas
+  condensation/scattering remain future GPU closure-sampling work.

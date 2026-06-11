@@ -755,6 +755,117 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphRenderFieldWgsl = `
+struct RenderFieldParams {
+  particle_count: u32,
+  surface_count: u32,
+  total_field_cells: u32,
+  _pad0: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  _pad1: f32,
+  _pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> render_rows: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: RenderFieldParams;
+
+fn render_row0(particle_index: u32) -> vec4<f32> {
+  return render_rows[particle_index * 3u];
+}
+
+fn render_row1(particle_index: u32) -> vec4<f32> {
+  return render_rows[particle_index * 3u + 1u];
+}
+
+fn surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn surface_row1(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 1u];
+}
+
+fn surface_row2(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 2u];
+}
+
+fn smooth_palette_weight(ratio: f32) -> f32 {
+  let t = clamp(ratio, 0.0, 1.0);
+  return 1.0 - t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let cell_index = global_id.x;
+  let surface_index = global_id.y;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+
+  let s0 = surface_row0(surface_index);
+  let s1 = surface_row1(surface_index);
+  let s2 = surface_row2(surface_index);
+  let field_offset = u32(s0.z);
+  let field_cell_count = u32(s0.w);
+  if (cell_index >= field_cell_count) {
+    return;
+  }
+
+  let resolution = max(u32(s1.x), 1u);
+  let xy_count = resolution * resolution;
+  let z = cell_index / xy_count;
+  let rem = cell_index - z * xy_count;
+  let y = rem / resolution;
+  let x = rem - y * resolution;
+  let inv_resolution = 1.0 / f32(resolution);
+  let cell = vec3<f32>(
+    f32(x) * inv_resolution,
+    f32(y) * inv_resolution,
+    f32(z) * inv_resolution
+  );
+
+  let material_id = s0.x;
+  let phase_id = s0.y;
+  let subtract = max(s1.z, 1.0e-12);
+  let strength = s1.w;
+  let support_norm = sqrt(abs(strength) / subtract);
+  let color = vec3<f32>(s2.y, s2.z, s2.w);
+  let span = 1.0 - 2.0 * params.field_padding;
+  let ref_edge = max(params.ref_edge_m, 1.0e-12);
+
+  var density = 0.0;
+  var palette = vec3<f32>(0.0, 0.0, 0.0);
+  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+    let row0 = render_row0(particle_index);
+    let row1 = render_row1(particle_index);
+    if (row1.x != material_id || row1.y != phase_id) {
+      continue;
+    }
+    let particle = vec3<f32>(
+      clamp(params.field_padding + (row0.x / ref_edge) * span, 0.001, 0.999),
+      clamp(params.field_padding + (row0.y / ref_edge) * span, 0.001, 0.999),
+      clamp(params.field_padding + (row0.z / ref_edge) * span, 0.001, 0.999)
+    );
+    let delta = cell - particle;
+    let dist2 = dot(delta, delta);
+    let value = strength / (0.000001 + dist2) - subtract;
+    if (value > 0.0) {
+      density = density + value;
+      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
+      palette = palette + color * smooth_palette_weight(ratio);
+    }
+  }
+
+  let out_index = field_offset + cell_index;
+  if (out_index < params.total_field_cells) {
+    render_field_cells[out_index] = vec4<f32>(density, palette);
+  }
+}
+`;
+
 export const mlsMpmMechanicsPredictWgsl = `
 struct MechanicsParams {
   particle_count: u32,

@@ -9432,3 +9432,92 @@ Failures / open questions:
 - Direct GPU-driven rendering is still pending; compact resident render rows are
   still read back for Three.js surface reconstruction.
 - No push was attempted.
+
+## 2026-06-11 09:24 AKDT - Generic resident SPH render-field bridge
+
+Prompt:
+
+- "alright. proceed. remember we're trying to provide general solutions to
+  everything. no one off patching for specific materials or interactions"
+
+What happened:
+
+- Added a generic SPH render-field ABI keyed by material id and phase id, not
+  material names or pair-specific interactions.
+- Added `sphRenderFieldWgsl`, which consumes compact render rows plus a
+  material/phase surface table and writes flattened density/palette field cells.
+- Added runtime helpers to build render-field surface tables, build CPU
+  reference fields, run the WebGPU render-field splat, split field output by
+  surface, and report execution without claiming scientific/SPH validation.
+- Wired the resident render branch so WebGPU resident rows now feed a generic
+  material/phase render field before the interim Three.js MarchingCubes bridge.
+  CPU-particle and compact-row rendering remain fallback paths.
+- Capped resident field resolution generically at 32 cells per axis, reducing
+  the default Fe/H2O field readback from about 3.1 MB to 1.0 MB while keeping
+  continuous visible H2O surfaces.
+- Confirmed Na/H2O also renders via the field bridge with `h2o`, `Na`, and
+  derived `naoh` material keys present. NaOH gas stays optically transparent
+  because the generic gas condensation/scattering closure is still not
+  implemented.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/sph/sphRenderGpuKernel.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphRenderGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check ulg-gpu-abi/src/index.js`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/abi.test.mjs`
+- `node --check tests/sphRenderGpuKernel.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/abi.test.mjs tests/sphRenderGpuKernel.test.mjs`
+- `node --test tests/sphPhaseRenderer.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs --project=chromium -g "SPH phase demo runs derived material properties by default"`
+- Manual Playwright initial-overlay probes against `https://127.0.0.1:5173/`
+  and the Na/H2O URL.
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks for the touched renderer/runtime/test files.
+- PASS: ABI/render kernel focused tests passed `23/23`.
+- PASS: SPH scene renderer tests passed `6/6`.
+- PASS: focused HTTPS Chromium e2e passed `1/1`.
+- PASS: manual default Fe/H2O probe reported resident WebGPU/no-full-readback
+  steps, `source = resident-gpu-render-field`, `renderFieldByteLength =
+  1048576`, visible H2O and Fe field surfaces, H2O `renderAlpha = 1`, and H2O
+  `materialTransmission > 0.97`.
+- PASS: manual Na/H2O probe reported field-rendered `h2o`, `Na`, and derived
+  `naoh` surfaces with material keys preserved.
+- PASS: screenshot review showed the capped field bridge still renders a
+  continuous H2O volume (`/tmp/ulg-render-field-capped.png` and
+  `/tmp/ulg-na-h2o-render-field-initial.png`).
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This is still an interim bridge. It removes the JavaScript per-particle
+  `addBall()` loop from the resident render path, but it still reads a field
+  buffer back to the CPU and still runs Three.js MarchingCubes polygonization.
+- Direct GPU-driven volume/surface rendering remains the next required
+  performance step for 60 Hz.
+- Render-field color is currently per material/phase surface; fully
+  temperature-varying per-cell optical/radiation color needs a GPU
+  optical/radiation closure sampling pass.
+- Gas/steam visibility still needs a general condensation/scattering closure.
+- No push was attempted.

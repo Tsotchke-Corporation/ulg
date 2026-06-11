@@ -1201,7 +1201,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const overlay = document.querySelector('#sph-phase-overlay');
     const steps = overlay?.__sphScene?.getMlsMpmResidentSteps?.();
     if (!steps?.schema || steps.backend !== 'webgpu') return true;
-    return overlay?.__sphScene?.getSphResidentRenderState?.()?.source === 'resident-gpu-render-rows';
+    return overlay?.__sphScene?.getSphResidentRenderState?.()?.source === 'resident-gpu-render-field';
   });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
@@ -1231,6 +1231,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           visible: node.visible,
           renderSource: node.userData.renderSource ?? null,
           renderRowsBackend: node.userData.renderRowsBackend ?? null,
+          renderFieldBackend: node.userData.renderFieldBackend ?? null,
           lookupOutputRecordIndex: node.userData.opticalGpuLookupOutput?.recordIndex ?? null,
           lookupBackend: node.userData.opticalGpuExecutionBackend ?? null,
           renderAlpha: node.userData.opticalGpuLookupOutput?.renderAlpha ?? null,
@@ -1478,6 +1479,13 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         surfaceCount: sphResidentRenderState?.surfaceCount,
         rowStrideFloats: sphResidentRenderState?.rowStrideFloats,
         renderRowByteLength: sphResidentRenderState?.renderRowByteLength,
+        renderFieldCellStrideFloats: sphResidentRenderState?.renderFieldCellStrideFloats,
+        renderFieldByteLength: sphResidentRenderState?.renderFieldByteLength,
+        renderFieldReadback: sphResidentRenderState?.renderFieldReadback,
+        renderFieldStatus: sphResidentRenderState?.renderFieldStatus,
+        renderFieldBackend: sphResidentRenderState?.renderFieldBackend,
+        renderFieldSurfaceCount: sphResidentRenderState?.renderFieldSurfaceCount,
+        renderFieldTotalCells: sphResidentRenderState?.renderFieldTotalCells,
         compactRenderReadback: sphResidentRenderState?.compactRenderReadback,
         gpuAuthoritativeState: sphResidentRenderState?.gpuAuthoritativeState,
         materialKeys: sphResidentRenderState?.materialKeys,
@@ -1762,7 +1770,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
     expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
-    expect(derivedSummary.statusText).toContain('render source    : resident-gpu-render-rows');
+    expect(derivedSummary.statusText).toContain('render source    : resident-gpu-render-field');
     expect(derivedSummary.statusText).toContain('render authoritative: true');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
     expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('previous-gpu-resident-output');
@@ -1813,14 +1821,23 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       derivedSummary.mlsMpmResidentStep.particlePingPong.time
     );
     expect(derivedSummary.sphResidentRenderState.schema).toBe('peercompute.ulg.sph-resident-render-state.v0');
-    expect(derivedSummary.sphResidentRenderState.status).toBe('resident-render-rows-applied');
-    expect(derivedSummary.sphResidentRenderState.source).toBe('resident-gpu-render-rows');
-    expect(derivedSummary.sphResidentRenderState.sourceExecutionSchema).toBe('peercompute.ulg.sph-gpu-render-rows.v0');
+    expect(derivedSummary.sphResidentRenderState.status).toBe('resident-render-field-applied');
+    expect(derivedSummary.sphResidentRenderState.source).toBe('resident-gpu-render-field');
+    expect(derivedSummary.sphResidentRenderState.sourceExecutionSchema).toBe('peercompute.ulg.sph-gpu-render-field.v0');
     expect(derivedSummary.sphResidentRenderState.backend).toBe('webgpu');
     expect(derivedSummary.sphResidentRenderState.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
     expect(derivedSummary.sphResidentRenderState.surfaceCount).toBeGreaterThan(0);
     expect(derivedSummary.sphResidentRenderState.rowStrideFloats).toBe(12);
     expect(derivedSummary.sphResidentRenderState.renderRowByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentRenderState.renderFieldCellStrideFloats).toBe(4);
+    expect(derivedSummary.sphResidentRenderState.renderFieldByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentRenderState.renderFieldReadback).toBe(true);
+    expect(derivedSummary.sphResidentRenderState.renderFieldStatus).toBe('render-field-built');
+    expect(derivedSummary.sphResidentRenderState.renderFieldBackend).toBe('webgpu');
+    expect(derivedSummary.sphResidentRenderState.renderFieldSurfaceCount).toBe(
+      derivedSummary.sphResidentRenderState.surfaceCount
+    );
+    expect(derivedSummary.sphResidentRenderState.renderFieldTotalCells).toBeGreaterThan(0);
     expect(derivedSummary.sphResidentRenderState.compactRenderReadback).toBe(true);
     expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
     expect(derivedSummary.sphResidentRenderState.scientificValidation).toBe(false);
@@ -1828,8 +1845,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentRenderState.phaseChangeValidation).toBe(false);
     expect(derivedSummary.sphResidentRenderState.fullPhysicsValidation).toBe(false);
     expect(derivedSummary.visibleSurfaces.every((surface) => (
-      surface.renderSource === 'resident-gpu-render-rows'
+      surface.renderSource === 'resident-gpu-render-field'
       && surface.renderRowsBackend === 'webgpu'
+      && surface.renderFieldBackend === 'webgpu'
     ))).toBe(true);
   } else {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=full-parity-readback');

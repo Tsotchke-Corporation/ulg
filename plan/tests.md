@@ -1613,3 +1613,20 @@ carrier-runtime slice.
 - Validation passed: syntax checks for touched files, `node --test
   tests/sphPhaseRenderer.test.mjs` (`6/6`), focused HTTPS Chromium e2e (`1/1`),
   `git diff --check`, `npm run build`, and full `npm test` (`309/309`).
+
+## 2026-06-11 Generic Resident Render-Field Bridge
+
+- Added ABI coverage for `peercompute.ulg.sph-gpu-render-field.v0` and
+  `peercompute.ulg.sph-gpu-render-field-execution.v0`, including generic
+  material/phase surface rows, field-cell rows, and WGSL binding checks.
+- Added `tests/sphRenderGpuKernel.test.mjs` coverage for generic surface-table
+  packing, CPU render-field splatting by material id + phase id, field splitting
+  for the Three.js bridge, and optional WebGPU execution via injected runner.
+- Updated the SPH browser e2e so a successful WebGPU resident branch must report
+  `source = resident-gpu-render-field`, WebGPU render-field backend, nonzero
+  field byte length, and visible field-backed surfaces.
+- Validation passed: syntax checks for touched files, `node --test
+  tests/abi.test.mjs tests/sphRenderGpuKernel.test.mjs` (`23/23`),
+  `node --test tests/sphPhaseRenderer.test.mjs` (`6/6`), focused HTTPS
+  Chromium e2e (`1/1`), manual Fe/H2O and Na/H2O browser probes, and
+  `git diff --check`.

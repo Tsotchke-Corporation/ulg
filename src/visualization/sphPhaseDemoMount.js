@@ -989,6 +989,8 @@ export function mountSphPhaseDemoOverlay() {
     const renderRowsStatus = residentRenderState?.status || 'pending';
     const renderRowsBackend = residentRenderState?.backend || 'pending';
     const renderRowsCount = residentRenderState?.particleCount ?? 0;
+    const renderFieldCells = residentRenderState?.renderFieldTotalCells ?? 0;
+    const renderFieldReadback = residentRenderState?.renderFieldReadback ?? false;
     const renderAuthoritative = Boolean(residentRenderState?.gpuAuthoritativeState);
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
@@ -1010,7 +1012,7 @@ export function mountSphPhaseDemoOverlay() {
       `resident thermal : status=${residentThermalStatus} backend=${residentThermalBackend} next=${residentThermalBufferMode}`,
       `resident reaction: status=${residentReactionStatus} backend=${residentReactionBackend} reactions=${reactionTable?.reactionCount ?? 0}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
-      `render source    : ${renderSource} status=${renderRowsStatus} backend=${renderRowsBackend} rows=${renderRowsCount}`,
+      `render source    : ${renderSource} status=${renderRowsStatus} backend=${renderRowsBackend} rows=${renderRowsCount} field-cells=${renderFieldCells} field-readback=${Boolean(renderFieldReadback)}`,
       `render authoritative: ${renderAuthoritative}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,

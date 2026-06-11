@@ -15,7 +15,9 @@ import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
   SPH_GPU_RENDER_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
@@ -61,6 +63,8 @@ import {
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
@@ -77,6 +81,7 @@ import {
   mlsMpmResidentSummaryWgsl,
   opticalLookupWgsl,
   sphReactionStepWgsl,
+  sphRenderFieldWgsl,
   sphRenderRowsWgsl,
   sphThermalStepWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
@@ -303,6 +308,49 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(1\) var<storage, read> sph_thermo/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> render_rows/);
   assert.match(sphRenderRowsWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('SPH GPU render field ABI exposes material-phase surface fields', () => {
+  assert.equal(ULG_SPH_GPU_RENDER_FIELD_SCHEMA, 'peercompute.ulg.sph-gpu-render-field.v0');
+  assert.equal(
+    ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-field-execution.v0'
+  );
+  assert.equal(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.slice(0, 8), [
+    'materialId:f32',
+    'phaseId:f32',
+    'fieldOffset:f32',
+    'fieldCellCount:f32',
+    'resolution:f32',
+    'isolation:f32',
+    'subtract:f32',
+    'strength:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.slice(8), [
+    'radiusNorm:f32',
+    'colorLinearR:f32',
+    'colorLinearG:f32',
+    'colorLinearB:f32',
+    'status:f32',
+    'pad0:f32',
+    'pad1:f32',
+    'pad2:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT, [
+    'density:f32',
+    'paletteLinearR:f32',
+    'paletteLinearG:f32',
+    'paletteLinearB:f32'
+  ]);
+  assert.match(sphRenderFieldWgsl, /struct RenderFieldParams/);
+  assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(0\) var<storage, read> render_rows/);
+  assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(1\) var<storage, read> render_surfaces/);
+  assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> render_field_cells/);
+  assert.match(sphRenderFieldWgsl, /material_id/);
+  assert.match(sphRenderFieldWgsl, /phase_id/);
+  assert.match(sphRenderFieldWgsl, /@compute @workgroup_size\(64, 1, 1\)/);
 });
 
 test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {

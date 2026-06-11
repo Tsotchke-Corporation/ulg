@@ -34,8 +34,11 @@ import {
 import { buildSphThermalMaterialTable } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import {
+  buildSphRenderFieldSurfaceTable,
+  buildSphRenderFieldWebGpu,
   decodeSphRenderRows,
-  extractSphRenderRowsWebGpu
+  extractSphRenderRowsWebGpu,
+  splitSphRenderFieldBySurface
 } from '../runtime/sph/sphRenderGpuKernel.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
@@ -93,6 +96,7 @@ function normalizeResidentReadbackMode(value) {
 // padding must exceed that to fully contain the dome. Resolutions are raised to keep box detail
 // since the box now occupies only (1−2·pad) of each field axis.
 const FIELD_PADDING = 0.22;
+const RESIDENT_RENDER_FIELD_MAX_RESOLUTION = 32;
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
@@ -1529,20 +1533,27 @@ export function createSphPhaseScene(container, {
     }
   }
 
-  function ensureSurface(descriptorOrKey, properties = null) {
+  function ensureSurface(descriptorOrKey, properties = null, configOverride = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
     const key = descriptor.surfaceKey;
+    const config = configOverride || SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
     let surface = surfaces.get(key);
     if (surface) {
-      if (surface.properties !== properties) {
+      if (
+        surface.properties !== properties
+        || surface.config.resolution !== config.resolution
+        || surface.config.isolation !== config.isolation
+        || surface.config.subtract !== config.subtract
+        || surface.config.maxPolyCount !== config.maxPolyCount
+      ) {
+        scene.remove(surface.mesh);
+        surface.mesh.geometry?.dispose?.();
         surface.mesh.material.dispose();
-        surface.mesh.material = makeSurfaceMaterial(descriptor, properties);
-        surface.properties = properties;
-        surface.descriptor = descriptor;
+        surfaces.delete(key);
+      } else {
+        return surface;
       }
-      return surface;
     }
-    const config = SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
     const mesh = new MarchingCubes(
       config.resolution,
       makeSurfaceMaterial(descriptor, properties),
@@ -1638,6 +1649,113 @@ export function createSphPhaseScene(container, {
       mesh.userData.particleCount = batch.count;
       mesh.userData.surfaceRadiusM = radiusM;
       activeKeys.add(batch.surfaceKey);
+    }
+    for (const [key, surface] of surfaces) {
+      if (!activeKeys.has(key)) {
+        surface.mesh.reset();
+        surface.mesh.update();
+        surface.mesh.visible = false;
+        surface.mesh.userData.renderSource = renderSource;
+      }
+    }
+  }
+
+  function averageBatchColor(batch) {
+    if (!batch?.colorsRgb?.length || !batch.count) return [1, 1, 1];
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (let i = 0; i < batch.count; i += 1) {
+      r += batch.colorsRgb[i * 3];
+      g += batch.colorsRgb[i * 3 + 1];
+      b += batch.colorsRgb[i * 3 + 2];
+    }
+    return [r / batch.count, g / batch.count, b / batch.count].map((value) => clamp(value, 0, 1));
+  }
+
+  function createRenderFieldSurfaceTableForBatches(batches) {
+    const descriptors = batches.map((batch) => {
+      const config = SURFACE_CONFIG[batch.renderKey] || SURFACE_CONFIG.default;
+      const radiusM = (Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM) * radiusScale;
+      const radiusNorm = clamp(radiusM / refEdgeM, 0.006, 0.14);
+      return {
+        surfaceKey: batch.surfaceKey,
+        material: batch.material,
+        phase: batch.phase,
+        renderKey: batch.renderKey,
+        resolution: Math.min(config.resolution, RESIDENT_RENDER_FIELD_MAX_RESOLUTION),
+        isolation: config.isolation,
+        subtract: config.subtract,
+        radiusNorm,
+        strength: (config.isolation + config.subtract) * radiusNorm * radiusNorm,
+        colorLinear: averageBatchColor(batch),
+        status: 1
+      };
+    });
+    return buildSphRenderFieldSurfaceTable(descriptors);
+  }
+
+  function applySurfaceFields(surfaceFields, {
+    emissiveByMaterial = null,
+    materialProperties = null,
+    renderSource = 'resident-gpu-render-field',
+    renderRowsExecution = null,
+    renderFieldExecution = null
+  } = {}) {
+    const activeKeys = new Set();
+    const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
+      `${record.material}|${record.phase}`,
+      record
+    ]));
+    for (const fieldSurface of surfaceFields) {
+      const descriptor = renderDescriptorOf({
+        material: fieldSurface.material,
+        phase: fieldSurface.phase,
+        renderKey: fieldSurface.renderKey
+      });
+      const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
+      const baseConfig = SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
+      const surface = ensureSurface(descriptor, properties, {
+        ...baseConfig,
+        resolution: fieldSurface.resolution
+      });
+      const { mesh } = surface;
+      if (mesh.field.length !== fieldSurface.field.length || mesh.palette.length !== fieldSurface.palette.length) {
+        throw new Error(`Render field size mismatch for ${descriptor.surfaceKey}`);
+      }
+      mesh.userData.optical = mesh.material.userData.optical;
+      mesh.userData.materialKey = descriptor.material;
+      mesh.userData.renderKey = descriptor.renderKey;
+      mesh.userData.phase = descriptor.phase;
+      mesh.userData.renderSource = renderSource;
+      mesh.userData.renderRowsExecutionSchema = renderRowsExecution?.schema || null;
+      mesh.userData.renderRowsBackend = renderRowsExecution?.backend || null;
+      mesh.userData.renderFieldExecutionSchema = renderFieldExecution?.schema || null;
+      mesh.userData.renderFieldBackend = renderFieldExecution?.backend || null;
+      mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(`${descriptor.material}|${descriptor.phase}`) || null;
+      const emissive = emissiveByMaterial?.[descriptor.material] ?? emissiveByMaterial?.[descriptor.renderKey] ?? null;
+      if (emissive) {
+        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
+        mesh.material.emissiveIntensity = 1.8;
+      } else {
+        mesh.material.emissive.setRGB(0, 0, 0);
+        mesh.material.emissiveIntensity = 0;
+      }
+      mesh.reset();
+      mesh.field.set(fieldSurface.field);
+      mesh.palette.set(fieldSurface.palette);
+      mesh.update();
+      let maxDensity = 0;
+      for (let i = 0; i < fieldSurface.field.length; i += 1) {
+        if (fieldSurface.field[i] > maxDensity) maxDensity = fieldSurface.field[i];
+      }
+      mesh.visible = maxDensity >= fieldSurface.isolation;
+      mesh.userData.particleCount = null;
+      mesh.userData.surfaceRadiusM = fieldSurface.radiusNorm * refEdgeM;
+      mesh.userData.renderFieldResolution = fieldSurface.resolution;
+      mesh.userData.renderFieldCells = fieldSurface.fieldCellCount;
+      mesh.userData.renderFieldMaxDensity = maxDensity;
+      activeKeys.add(descriptor.surfaceKey);
     }
     for (const [key, surface] of surfaces) {
       if (!activeKeys.has(key)) {
@@ -1781,12 +1899,48 @@ export function createSphPhaseScene(container, {
         boxDimsM: dims
       });
       rebuildOpticalStateForSurfaceBatches(batches, { materialProperties });
-      applySurfaceBatches(batches, {
-        emissiveByMaterial: decoded.emissiveByMaterial,
-        materialProperties,
-        renderSource: 'resident-gpu-render-rows',
-        renderRowsExecution
-      });
+      const surfaceTable = createRenderFieldSurfaceTableForBatches(batches);
+      let renderFieldExecution = null;
+      let renderFieldSource = 'resident-gpu-render-field';
+      try {
+        renderFieldExecution = await buildSphRenderFieldWebGpu({
+          device: resolvedDeviceResult.device,
+          renderRows: renderRowsExecution.renderRows,
+          surfaceTable,
+          particleCount: renderRowsExecution.particleCount,
+          fieldPadding: FIELD_PADDING,
+          refEdgeM
+        });
+        const surfaceFields = splitSphRenderFieldBySurface(renderFieldExecution);
+        applySurfaceFields(surfaceFields, {
+          emissiveByMaterial: decoded.emissiveByMaterial,
+          materialProperties,
+          renderSource: renderFieldSource,
+          renderRowsExecution,
+          renderFieldExecution
+        });
+      } catch (fieldError) {
+        renderFieldSource = 'resident-gpu-render-rows';
+        applySurfaceBatches(batches, {
+          emissiveByMaterial: decoded.emissiveByMaterial,
+          materialProperties,
+          renderSource: renderFieldSource,
+          renderRowsExecution
+        });
+        renderFieldExecution = {
+          schema: 'peercompute.ulg.sph-gpu-render-field.v0',
+          backend: 'cpu-fallback',
+          status: 'render-field-fallback-to-render-rows',
+          reason: fieldError instanceof Error ? fieldError.message : String(fieldError),
+          surfaceCount: surfaceTable.surfaceCount,
+          totalFieldCells: surfaceTable.totalFieldCells,
+          renderFieldReadback: false,
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
       await refreshOpticalGpuLookup({
         preferWebGpu,
         navigatorRef: overrideNavigatorRef,
@@ -1795,14 +1949,27 @@ export function createSphPhaseScene(container, {
       });
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
-        status: 'resident-render-rows-applied',
-        source: 'resident-gpu-render-rows',
-        sourceExecutionSchema: renderRowsExecution.schema,
-        backend: renderRowsExecution.backend,
+        status: renderFieldSource === 'resident-gpu-render-field'
+          ? 'resident-render-field-applied'
+          : 'resident-render-rows-applied',
+        source: renderFieldSource,
+        sourceExecutionSchema: renderFieldSource === 'resident-gpu-render-field'
+          ? renderFieldExecution.schema
+          : renderRowsExecution.schema,
+        backend: renderFieldSource === 'resident-gpu-render-field'
+          ? renderFieldExecution.backend
+          : renderRowsExecution.backend,
         particleCount: decoded.particleCount,
         surfaceCount: batches.length,
         rowStrideFloats: renderRowsExecution.rowStrideFloats,
         renderRowByteLength: renderRowsExecution.renderRowByteLength,
+        renderFieldCellStrideFloats: renderFieldExecution?.rowStrideFloats ?? null,
+        renderFieldByteLength: renderFieldExecution?.fieldRowByteLength ?? 0,
+        renderFieldReadback: Boolean(renderFieldExecution?.renderFieldReadback),
+        renderFieldStatus: renderFieldExecution?.status ?? null,
+        renderFieldBackend: renderFieldExecution?.backend ?? null,
+        renderFieldSurfaceCount: renderFieldExecution?.surfaceCount ?? surfaceTable.surfaceCount,
+        renderFieldTotalCells: renderFieldExecution?.totalFieldCells ?? surfaceTable.totalFieldCells,
         compactRenderReadback: true,
         materialKeys: [...new Set(decoded.materials.map((descriptor) => descriptor.material))],
         phaseKeys: [...new Set(decoded.materials.map((descriptor) => descriptor.phase))],

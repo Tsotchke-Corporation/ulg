@@ -229,6 +229,43 @@ Remaining performance target:
 - Keep compact CPU summaries for diagnostics, not per-particle or per-surface
   state reconstruction.
 
+## 2026-06-11 Checkpoint - Generic Resident SPH Render Field Bridge
+
+Implemented:
+
+- Added `peercompute.ulg.sph-gpu-render-field.v0` and
+  `peercompute.ulg.sph-gpu-render-field-execution.v0`.
+- Added generic material/phase surface rows and field-cell rows:
+  surface records carry material id, phase id, field offset/count, resolution,
+  isolation/subtract/strength, radius, and derived display color; field cells
+  carry density plus palette contribution.
+- Added `sphRenderFieldWgsl`, a WebGPU splat kernel that matches compact render
+  rows to surfaces by `(materialId, phaseId)` and writes flattened
+  density/palette fields.
+- Wired the live resident render branch so accepted resident WebGPU state now
+  renders through `resident-gpu-render-field` before the interim Three.js
+  MarchingCubes bridge. Compact rows and CPU particles remain fallback paths.
+- Capped resident bridge field resolution at 32 cells per axis to keep bridge
+  readback bounded while direct GPU rendering is still pending.
+
+Evidence:
+
+- Focused ABI/render tests passed `23/23`.
+- Focused renderer tests passed `6/6`.
+- Focused HTTPS Chromium e2e passed `1/1` and now asserts
+  `resident-gpu-render-field` for the WebGPU resident branch.
+- Manual default Fe/H2O browser probe showed field readback reduced to
+  `1048576` bytes for two surfaces, with visible H2O and Fe surfaces.
+- Manual Na/H2O browser probe showed field-rendered `h2o`, `Na`, and derived
+  `naoh` surfaces.
+
+Remaining performance target:
+
+- This bridge still reads back field cells and still uses Three.js CPU
+  polygonization. The next slice should replace the Three.js MarchingCubes
+  bridge with direct WebGPU draw/volume buffers and move color/emission sampling
+  to GPU-resident optical/radiation closure buffers.
+
 ## GPU-Resident Nuclear And Ionizing-Radiation Target
 
 Nuclear physics is a separate closure family from chemical/electronic material

@@ -735,7 +735,7 @@ struct ReactionParams {
   reaction_count: u32,
   product_phase_count: u32,
   material_count: u32,
-  segment_count: u32,
+  response_count: u32,
   reset_mechanics: u32,
   _pad0: u32,
   _pad1: u32,
@@ -762,13 +762,15 @@ struct ProductMechanics {
 @group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> reaction_records: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read> material_records: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read> thermal_segments: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> phase_response_records: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> phase_responses: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> proposals: array<vec4<f32>>;
 @group(0) @binding(8) var<storage, read_write> out_sph_state: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(10) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(11) var<uniform> params: ReactionParams;
+@group(0) @binding(12) var<storage, read> thermal_graph_nodes: array<vec4<f32>>;
+@group(0) @binding(13) var<storage, read> thermal_graph_samples: array<vec4<f32>>;
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return sph_state[index * 2u];
@@ -814,16 +816,54 @@ fn product_phase_row2(record_index: u32) -> vec4<f32> {
   return reaction_records[(params.reaction_count + record_index) * 3u + 2u];
 }
 
-fn segment_row0(segment_index: u32) -> vec4<f32> {
-  return thermal_segments[segment_index * 3u];
+fn response_row0(response_index: u32) -> vec4<f32> {
+  return phase_responses[response_index * 4u];
 }
 
-fn segment_row1(segment_index: u32) -> vec4<f32> {
-  return thermal_segments[segment_index * 3u + 1u];
+fn response_row1(response_index: u32) -> vec4<f32> {
+  return phase_responses[response_index * 4u + 1u];
 }
 
-fn segment_row2(segment_index: u32) -> vec4<f32> {
-  return thermal_segments[segment_index * 3u + 2u];
+fn response_row2(response_index: u32) -> vec4<f32> {
+  return phase_responses[response_index * 4u + 2u];
+}
+
+fn response_row3(response_index: u32) -> vec4<f32> {
+  return phase_responses[response_index * 4u + 3u];
+}
+
+fn graph_node_row1(graph_index: u32) -> vec4<f32> {
+  return thermal_graph_nodes[graph_index * 4u + 1u];
+}
+
+fn sample_temperature_from_graph(graph_index: u32, specific_internal_energy: f32) -> f32 {
+  let node1 = graph_node_row1(graph_index);
+  let sample_offset = u32(max(node1.x, 0.0));
+  let sample_count = u32(max(node1.y, 0.0));
+  if (sample_count < 2u) {
+    return 0.0;
+  }
+  let domain_min = node1.z;
+  let domain_max = node1.w;
+  let x = clamp(specific_internal_energy, domain_min, domain_max);
+  var left_index = sample_offset;
+  var right_index = sample_offset + sample_count - 1u;
+  for (var index = sample_offset; index + 1u < sample_offset + sample_count; index = index + 1u) {
+    let left_axis = thermal_graph_samples[index].x;
+    let right_axis = thermal_graph_samples[index + 1u].x;
+    if (x >= left_axis && x <= right_axis) {
+      left_index = index;
+      right_index = index + 1u;
+      break;
+    }
+  }
+  let left = thermal_graph_samples[left_index];
+  let right = thermal_graph_samples[right_index];
+  if (right.x == left.x) {
+    return left.y;
+  }
+  let t = clamp((x - left.x) / (right.x - left.x), 0.0, 1.0);
+  return left.y + t * (right.y - left.y);
 }
 
 fn phase_mask_satisfied(mask_f: f32, phase_id_f: f32) -> bool {
@@ -847,20 +887,20 @@ fn phase_fraction(phase_id: f32, solid: f32, liquid: f32, gas: f32, plasma: f32)
 }
 
 fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -> ThermalRows {
-  var material_segment_offset = 0u;
-  var material_segment_count = 0u;
+  var material_response_offset = 0u;
+  var material_response_count = 0u;
   var found_material = false;
   for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
-    let record = material_records[record_index];
+    let record = phase_response_records[record_index];
     if (record.x == material_id) {
-      material_segment_offset = u32(record.y);
-      material_segment_count = u32(record.z);
+      material_response_offset = u32(record.y);
+      material_response_count = u32(record.z);
       found_material = true;
       break;
     }
   }
 
-  if (!found_material || material_segment_count == 0u) {
+  if (!found_material || material_response_count == 0u) {
     return ThermalRows(
       vec4<f32>(material_id, 0.0, 0.0, 0.0),
       vec4<f32>(0.0, 0.0, 0.0, 0.0),
@@ -868,51 +908,47 @@ fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -
     );
   }
 
-  var selected = material_segment_offset;
-  for (var local = 0u; local < material_segment_count; local = local + 1u) {
-    let candidate = material_segment_offset + local;
-    let row1 = segment_row1(candidate);
+  var selected = material_response_offset;
+  for (var local = 0u; local < material_response_count; local = local + 1u) {
+    let candidate = material_response_offset + local;
+    let row1 = response_row1(candidate);
     selected = candidate;
-    if (next_u <= row1.y || local + 1u == material_segment_count) {
+    if (next_u <= row1.y || local + 1u == material_response_count) {
       break;
     }
   }
 
-  let seg0 = segment_row0(selected);
-  let seg1 = segment_row1(selected);
-  let seg2 = segment_row2(selected);
-  let denom = max(seg1.y - seg1.x, 1.0e-12);
-  let alpha = clamp((next_u - seg1.x) / denom, 0.0, 1.0);
-  let segment_type = seg0.y;
-  var temperature_k = seg1.z + alpha * (seg1.w - seg1.z);
-  var solid = 0.0;
-  var liquid = 0.0;
-  var gas = 0.0;
-  var plasma = 0.0;
-  var phase_id = seg0.z;
-  var rest_density = seg2.x;
-
-  if (segment_type == 2.0) {
-    temperature_k = seg1.z;
-    let from_fraction = 1.0 - alpha;
-    let to_fraction = alpha;
-    solid = phase_fraction(seg0.z, from_fraction, 0.0, 0.0, 0.0)
-      + phase_fraction(seg0.w, to_fraction, 0.0, 0.0, 0.0);
-    liquid = phase_fraction(seg0.z, 0.0, from_fraction, 0.0, 0.0)
-      + phase_fraction(seg0.w, 0.0, to_fraction, 0.0, 0.0);
-    gas = phase_fraction(seg0.z, 0.0, 0.0, from_fraction, 0.0)
-      + phase_fraction(seg0.w, 0.0, 0.0, to_fraction, 0.0);
-    plasma = phase_fraction(seg0.z, 0.0, 0.0, 0.0, from_fraction)
-      + phase_fraction(seg0.w, 0.0, 0.0, 0.0, to_fraction);
-    if (alpha >= 0.5) {
-      phase_id = seg0.w;
-      rest_density = seg2.y;
-    }
-  } else {
-    solid = phase_fraction(seg0.z, 1.0, 0.0, 0.0, 0.0);
-    liquid = phase_fraction(seg0.z, 0.0, 1.0, 0.0, 0.0);
-    gas = phase_fraction(seg0.z, 0.0, 0.0, 1.0, 0.0);
-    plasma = phase_fraction(seg0.z, 0.0, 0.0, 0.0, 1.0);
+  let response0 = response_row0(selected);
+  let response1 = response_row1(selected);
+  let response2 = response_row2(selected);
+  let response3 = response_row3(selected);
+  if (response0.w != 1.0 || response0.z < 0.0) {
+    return ThermalRows(
+      vec4<f32>(material_id, 0.0, 0.0, 0.0),
+      vec4<f32>(0.0, 0.0, 0.0, 0.0),
+      vec4<f32>(source_row2.x, source_row2.y, 255.0, 0.0)
+    );
+  }
+  let denom = max(response1.y - response1.x, 1.0e-12);
+  let alpha = clamp((next_u - response1.x) / denom, 0.0, 1.0);
+  let temperature_k = sample_temperature_from_graph(u32(response0.z), next_u);
+  let from_fraction = clamp(response3.x * alpha + response3.y, 0.0, 1.0);
+  let to_fraction = clamp(response3.z * alpha + response3.w, 0.0, 1.0);
+  let solid = phase_fraction(response1.z, from_fraction, 0.0, 0.0, 0.0)
+    + phase_fraction(response1.w, to_fraction, 0.0, 0.0, 0.0);
+  let liquid = phase_fraction(response1.z, 0.0, from_fraction, 0.0, 0.0)
+    + phase_fraction(response1.w, 0.0, to_fraction, 0.0, 0.0);
+  let gas = phase_fraction(response1.z, 0.0, 0.0, from_fraction, 0.0)
+    + phase_fraction(response1.w, 0.0, 0.0, to_fraction, 0.0);
+  let plasma = phase_fraction(response1.z, 0.0, 0.0, 0.0, from_fraction)
+    + phase_fraction(response1.w, 0.0, 0.0, 0.0, to_fraction);
+  var phase_id = response1.z;
+  var rest_density = response2.x;
+  if (response0.y == 2.0 && alpha >= 0.5 && response2.w == 1.0) {
+    phase_id = response1.w;
+  }
+  if (response0.y == 2.0 && alpha >= 0.5 && response2.z == 1.0) {
+    rest_density = response2.y;
   }
 
   return ThermalRows(

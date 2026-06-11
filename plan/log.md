@@ -10099,3 +10099,72 @@ Validation:
 Failures / open questions:
 
 - No push was attempted.
+
+## 2026-06-11 11:04 AKDT - Reaction product phase reset now uses thermal response graphs
+
+Prompt:
+
+- Continue after the GH Pages build and current five-task queue, preserving
+  local-only commits and the live HTTPS Vite demo.
+
+What happened:
+
+- Migrated the SPH reaction product thermo reset away from legacy thermal
+  segment interpolation.
+- The reaction CPU reference now builds or accepts the same
+  `thermalClosureGraphSet`, graph bank, and thermal phase-response table used by
+  the SPH thermal step.
+- The reaction WebGPU resolve kernel now consumes phase-response records,
+  phase-response rows, thermal graph nodes, and thermal graph samples. Product
+  temperature is sampled from the graph bank, while phase fractions, stable
+  phase, and density come from the response table.
+- The resident SPH/MLS-MPM scene now passes the cached thermal graph/response
+  artifacts into both thermal and reaction stages.
+- A sidecar read-only agent audited the later z-buffer task and reported that
+  transparent/transmissive surfaces and the container need explicit
+  `renderOrder` plus stricter transparent `depthWrite` policy after the current
+  GPU-runtime tasks are complete.
+
+Files touched:
+
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/sphReactionGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/wgsl.js`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphReactionGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/abi.test.mjs && node --check tests/sphReactionGpuKernel.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphThermalGpuKernel.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `git diff --check`
+- `npm test`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 11:04:56 AKDT`.
+
+Validation:
+
+- PASS: syntax checks for touched runtime, scene, WGSL, and test files.
+- PASS: focused ABI/reaction/thermal tests passed `29/29`.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/` after rerunning from a stable source tree. An
+  earlier focused e2e attempt timed out because Vite HMR reloaded the page
+  while source files were still being edited.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` passed `326/326`.
+
+Failures / open questions:
+
+- Reaction now shares the thermal response graph/table semantics, but the
+  response/graph buffers are still uploaded per invocation. Persisting those GPU
+  buffers across resident steps is the next task.
+- No push was attempted.

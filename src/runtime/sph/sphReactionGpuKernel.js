@@ -20,8 +20,12 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import {
+  buildSphThermalClosureGraphBank,
+  buildSphThermalClosureGraphBuffers,
+  buildSphThermalPhaseResponseTable,
+  resolveThermalStateFromGraphPhaseResponseCpu,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
-  resolveThermalStateFromTable
+  ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA
 } from './sphThermalGpuKernel.js';
 
 export {
@@ -89,6 +93,12 @@ function assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionT
   }
   if (thermalMaterialTable?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
     throw new TypeError('SPH reaction step requires a packed thermal material table');
+  }
+}
+
+function assertOptionalThermalPhaseResponseTable(table) {
+  if (table && table.schema !== ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA) {
+    throw new TypeError('SPH reaction step requires a packed thermal phase-response table');
   }
 }
 
@@ -448,6 +458,9 @@ function outputEnvelope({
   mlsMpmParticleState,
   reactionTable,
   thermalMaterialTable,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null,
   state,
   thermo,
   mechanics,
@@ -473,11 +486,16 @@ function outputEnvelope({
     sourceMechanicsSchema: mlsMpmParticleState.schema,
     reactionTableSchema: reactionTable.schema,
     thermalMaterialTableSchema: thermalMaterialTable.schema,
+    thermalClosureGraphSetSchema: thermalClosureGraphSet?.schema ?? null,
+    thermalClosureGraphBankSchema: thermalClosureGraphBank?.schema ?? null,
+    thermalPhaseResponseTableSchema: thermalPhaseResponseTable?.schema ?? null,
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
     productPhaseCount: reactionTable.productPhaseCount,
     materialCount: thermalMaterialTable.materialCount,
     segmentCount: thermalMaterialTable.segmentCount,
+    responseCount: thermalPhaseResponseTable?.responseCount ?? null,
+    thermalGraphCount: thermalClosureGraphBank?.graphCount ?? thermalClosureGraphSet?.graphCount ?? null,
     sourceStep: sphParticleState.step ?? 0,
     step: (sphParticleState.step ?? 0) + 1,
     sourceTime: sphParticleState.time ?? 0,
@@ -519,9 +537,16 @@ export function runSphReactionStepCpu({
   sphParticleState,
   mlsMpmParticleState,
   reactionTable,
-  thermalMaterialTable
+  thermalMaterialTable,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
+  assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
+  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
+  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
   const state = new Float32Array(sphParticleState.state);
   const thermo = new Float32Array(sphParticleState.thermo);
   const mechanics = new Float32Array(mlsMpmParticleState.mechanics);
@@ -546,7 +571,12 @@ export function runSphReactionStepCpu({
     const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
     const nextU = sphParticleState.state[stateOffset + 7] - rx.specificEnthalpyJPerKg;
     state[stateOffset + 7] = nextU;
-    const resolved = resolveThermalStateFromTable(thermalMaterialTable, rx.productMaterialId, nextU);
+    const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
+      graphSet: resolvedGraphSet,
+      responseTable: resolvedPhaseResponseTable,
+      materialId: rx.productMaterialId,
+      specificInternalEnergyJPerKg: nextU
+    });
     writeResolvedThermoRow(thermo, index, rx.productMaterialId, resolved, [
       sphParticleState.thermo[thermoOffset + 8],
       sphParticleState.thermo[thermoOffset + 9]
@@ -567,6 +597,9 @@ export function runSphReactionStepCpu({
     mlsMpmParticleState,
     reactionTable,
     thermalMaterialTable,
+    thermalClosureGraphSet: resolvedGraphSet,
+    thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable,
     state,
     thermo,
     mechanics,
@@ -635,11 +668,15 @@ export async function runSphReactionStepWebGpu({
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
   sourceMechanicsBuffer = null,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null,
   retainOutputParticleBuffers = false,
   resetMechanics = true,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
+  assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionStepWebGpu requires a WebGPU-like device');
   }
@@ -650,13 +687,18 @@ export async function runSphReactionStepWebGpu({
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-thermo', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-mechanics', mlsMpmParticleState.mechanics);
+  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
+  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
   const reactionRecordBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-records-and-product-phases',
     reactionTable.combinedRecords || new Float32Array([...reactionTable.records, ...reactionTable.productPhaseRecords])
   );
-  const thermalRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-records', thermalMaterialTable.records);
-  const thermalSegmentBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-segments', thermalMaterialTable.segments);
+  const phaseResponseRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-phase-response-records', resolvedPhaseResponseTable.records);
+  const phaseResponseBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-phase-responses', resolvedPhaseResponseTable.responses);
+  const graphNodeBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-graph-nodes', resolvedGraphBank.nodeRows);
+  const graphSampleBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-graph-samples', resolvedGraphBank.sampleRows);
   const proposalBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-proposals',
@@ -675,8 +717,8 @@ export async function runSphReactionStepWebGpu({
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
     productPhaseCount: reactionTable.productPhaseCount,
-    materialCount: thermalMaterialTable.materialCount,
-    segmentCount: thermalMaterialTable.segmentCount,
+    materialCount: resolvedPhaseResponseTable.materialCount,
+    segmentCount: resolvedPhaseResponseTable.responseCount,
     resetMechanics
   }));
 
@@ -699,7 +741,9 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(8, 'storage'),
     computeBufferBinding(9, 'storage'),
     computeBufferBinding(10, 'storage'),
-    computeBufferBinding(11, 'uniform')
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(12, 'read-only-storage'),
+    computeBufferBinding(13, 'read-only-storage')
   ];
   const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createExplicitComputePipeline(device, {
     label: 'ulg-sph-reaction-propose',
@@ -730,13 +774,15 @@ export async function runSphReactionStepWebGpu({
       { binding: 1, resource: { buffer: thermoBuffer } },
       { binding: 2, resource: { buffer: mechanicsBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
-      { binding: 5, resource: { buffer: thermalRecordBuffer } },
-      { binding: 6, resource: { buffer: thermalSegmentBuffer } },
+      { binding: 5, resource: { buffer: phaseResponseRecordBuffer } },
+      { binding: 6, resource: { buffer: phaseResponseBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
       { binding: 8, resource: { buffer: outStateBuffer } },
       { binding: 9, resource: { buffer: outThermoBuffer } },
       { binding: 10, resource: { buffer: outMechanicsBuffer } },
-      { binding: 11, resource: { buffer: paramsBuffer } }
+      { binding: 11, resource: { buffer: paramsBuffer } },
+      { binding: 12, resource: { buffer: graphNodeBuffer } },
+      { binding: 13, resource: { buffer: graphSampleBuffer } }
     ]
   });
   const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
@@ -774,7 +820,15 @@ export async function runSphReactionStepWebGpu({
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
   if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-  for (const buffer of [reactionRecordBuffer, thermalRecordBuffer, thermalSegmentBuffer, proposalBuffer, paramsBuffer]) {
+  for (const buffer of [
+    reactionRecordBuffer,
+    phaseResponseRecordBuffer,
+    phaseResponseBuffer,
+    graphNodeBuffer,
+    graphSampleBuffer,
+    proposalBuffer,
+    paramsBuffer
+  ]) {
     buffer.destroy?.();
   }
   if (!retainOutputParticleBuffers) {
@@ -789,6 +843,9 @@ export async function runSphReactionStepWebGpu({
     mlsMpmParticleState,
     reactionTable,
     thermalMaterialTable,
+    thermalClosureGraphSet: resolvedGraphSet,
+    thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable,
     state,
     thermo,
     mechanics,

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 03:22 AKDT
+Updated: 2026-06-11 11:04 AKDT
 
 ## Done
 
@@ -94,14 +94,14 @@ Updated: 2026-06-11 03:22 AKDT
   `sphReactionGpuKernel.js` builds those tables from the first-principles
   reaction network and derived product closures, runs a deterministic
   mutual-nearest contact proposal/resolve kernel on WebGPU, resolves product
-  thermo rows through the existing thermal table, and resets retained MLS-MPM
-  mechanics rows from derived product phase properties. The resident MLS-MPM
-  chain now runs P2G -> grid update -> G2P -> thermal -> reaction without full
-  particle readback when WebGPU is available, then continues from
-  `retained-reaction-output-buffers`. Verified in Chromium with Na + liquid
-  H2O: all five resident stages ran on WebGPU, no full readback, and the
-  reaction stage retained output buffers. Scientific/material/chemistry/
-  phase/full-physics validation remain false.
+  thermo rows through the shared thermal phase-response table plus thermal
+  graph bank, and resets retained MLS-MPM mechanics rows from derived product
+  phase properties. The resident MLS-MPM chain now runs P2G -> grid update ->
+  G2P -> thermal -> reaction without full particle readback when WebGPU is
+  available, then continues from `retained-reaction-output-buffers`. Verified
+  in Chromium with Na + liquid H2O: all five resident stages ran on WebGPU, no
+  full readback, and the reaction stage retained output buffers. Scientific/
+  material/chemistry/phase/full-physics validation remain false.
 - Spawned sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - Used ICC repo registry/status and architecture summaries for MoonLab and peercompute.
 - Added a vanilla Vite/three.js ULG app.
@@ -1798,3 +1798,42 @@ Not claimed:
   reset. That is the next thermal-response consumer to migrate.
 - The thermal kernel still uploads response/graph buffers on each WebGPU
   invocation unless callers pass cached artifacts, which the scene now does.
+
+## 2026-06-11 Update - SPH Reaction Response/Graph Binding
+
+Completed:
+
+- Updated `sphReactionStepWgsl` so the reaction resolve pass binds thermal
+  phase-response records, phase-response rows, thermal graph node rows, and
+  thermal graph sample rows.
+- Product material conversion now resolves temperature from the packed thermal
+  graph bank and phase/density/fraction state from the thermal phase-response
+  table instead of reinterpreting legacy segment rows.
+- `runSphReactionStepCpu()` and `runSphReactionStepWebGpu()` now build or
+  accept `thermalClosureGraphSet`, graph bank, and
+  `thermalPhaseResponseTable` artifacts, and report their schemas/counts in the
+  reaction execution envelope.
+- The SPH phase scene now passes the cached thermal graph/response artifacts
+  into both resident thermal and resident reaction steps.
+- Focused tests now assert that reaction WGSL no longer references
+  `thermal_segments`, that it binds response/graph buffers, and that explicit
+  graph/response artifacts produce the same reaction CPU output as generated
+  artifacts.
+
+Latest validation:
+
+- PASS: syntax checks for touched runtime, scene, WGSL, and tests.
+- PASS: `node --test tests/abi.test.mjs tests/sphReactionGpuKernel.test.mjs
+  tests/sphThermalGpuKernel.test.mjs` (`29/29`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` (`1/1`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`326/326`).
+
+Not claimed:
+
+- Thermal response/graph buffers are still uploaded per invocation. The next
+  task is persistent GPU-side response/graph buffer ownership across resident
+  thermal and reaction steps.
+- The renderer still needs the queued transparent z-buffer/render-order fix
+  after the five current GPU-runtime tasks are complete.

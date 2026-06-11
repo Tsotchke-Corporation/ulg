@@ -1352,6 +1352,11 @@ export function createSphPhaseScene(container, {
           thermalPhaseResponseTable: sphThermalPhaseResponseTable
         },
         reactionTable: sphReactionTable,
+        reactionStepOptions: {
+          thermalClosureGraphSet: sphThermalClosureGraphBuffers,
+          thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+        },
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1497,6 +1502,11 @@ export function createSphPhaseScene(container, {
           thermalPhaseResponseTable: sphThermalPhaseResponseTable
         },
         reactionTable: sphReactionTable,
+        reactionStepOptions: {
+          thermalClosureGraphSet: sphThermalClosureGraphBuffers,
+          thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+        },
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,

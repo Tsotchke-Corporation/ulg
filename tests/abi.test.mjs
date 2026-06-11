@@ -380,7 +380,12 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'eosModelId:f32'
   ]);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(3\) var<storage, read> reaction_records/);
+  assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(5\) var<storage, read> phase_response_records/);
+  assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(6\) var<storage, read> phase_responses/);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(7\) var<storage, read_write> proposals/);
+  assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(12\) var<storage, read> thermal_graph_nodes/);
+  assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(13\) var<storage, read> thermal_graph_samples/);
+  assert.doesNotMatch(sphReactionStepWgsl, /thermal_segments/);
   assert.match(sphReactionStepWgsl, /fn propose/);
   assert.match(sphReactionStepWgsl, /fn resolve/);
   assert.match(sphReactionStepWgsl, /@compute @workgroup_size\(64\)/);

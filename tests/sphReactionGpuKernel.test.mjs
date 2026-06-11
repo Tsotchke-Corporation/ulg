@@ -5,7 +5,11 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
-import { buildSphThermalMaterialTable } from '../src/runtime/sph/sphThermalGpuKernel.js';
+import {
+  buildSphThermalClosureGraphBuffers,
+  buildSphThermalMaterialTable,
+  buildSphThermalPhaseResponseTable
+} from '../src/runtime/sph/sphThermalGpuKernel.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -151,17 +155,54 @@ test('SPH reaction CPU step converts only mutual nearest contact pairs and reset
   assert.equal(result.proposals[8], -1);
 });
 
+test('SPH reaction CPU step resolves product phase state from thermal graph response artifacts', () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(thermalMaterialTable, thermalClosureGraphSet);
+  const generated = runSphReactionStepCpu({
+    ...packed,
+    reactionTable: reactionTable(),
+    thermalMaterialTable
+  });
+  const explicit = runSphReactionStepCpu({
+    ...packed,
+    reactionTable: reactionTable(),
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable
+  });
+
+  assert.equal(explicit.thermalPhaseResponseTableSchema, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0');
+  assert.equal(explicit.thermalClosureGraphSetSchema, 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0');
+  assert.equal(explicit.thermalClosureGraphBankSchema, 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0');
+  assert.equal(explicit.responseCount, thermalPhaseResponseTable.responseCount);
+  assert.equal(explicit.thermalGraphCount, thermalClosureGraphSet.graphBank.graphCount);
+  assert.deepEqual(Array.from(explicit.state), Array.from(generated.state));
+  assert.deepEqual(Array.from(explicit.thermo), Array.from(generated.thermo));
+  assert.deepEqual(Array.from(explicit.mechanics), Array.from(generated.mechanics));
+});
+
 test('SPH reaction optional WebGPU accepts a parity-passing reaction runner', async () => {
   const packed = packedThreeParticles();
   const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const thermalClosureGraphSet = buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const thermalPhaseResponseTable = buildSphThermalPhaseResponseTable(thermalMaterialTable, thermalClosureGraphSet);
   const table = reactionTable();
   const execution = await runSphReactionStepWithOptionalWebGpu({
     ...packed,
     reactionTable: table,
     thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank: thermalClosureGraphSet.graphBank,
+    thermalPhaseResponseTable,
     preferWebGpu: true,
     device: {},
     webGpuRunner(args) {
+      assert.equal(args.thermalClosureGraphSet, thermalClosureGraphSet);
+      assert.equal(args.thermalClosureGraphBank, thermalClosureGraphSet.graphBank);
+      assert.equal(args.thermalPhaseResponseTable, thermalPhaseResponseTable);
       const result = runSphReactionStepCpu(args);
       return { ...result, backend: 'webgpu' };
     }

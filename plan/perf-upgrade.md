@@ -601,6 +601,30 @@ Still remaining:
   full buffers for evidence.
 - Thermal/phase/reaction kernels and compact diagnostic summaries.
 
+## 2026-06-11 Checkpoint - MLS-MPM G2P Reconstruction
+
+The G2P stage now runs as a WebGPU kernel after the retained grid-update
+velocity buffer. It reconstructs particle velocity, affine `C`, deformation
+gradient `F`, and volume ratio `J`, then applies sealed-box position and inward
+velocity clamps. This completes the first parity-proven MLS-MPM kernel chain
+shape: P2G stress projection, grid velocity update, and G2P reconstruction.
+
+Implemented GPU-resident pieces:
+
+- G2P ABI execution and parity schemas.
+- `mlsMpmG2pReconstructWgsl` and parity-gated CPU/WebGPU wrappers.
+- Browser scheduling after grid update.
+- Scene and overlay accessors exposing `getMlsMpmG2pReconstruction()`.
+
+Still remaining:
+
+- The chain is not yet a single GPU-authoritative stepping path.
+- Normal runtime still performs full readback for parity evidence.
+- Repeated-step conservation checks are needed before visual state can be
+  accepted from GPU output.
+- Thermal/phase/reaction kernels, gas pressure, wall heat ledgers, and render
+  fields remain outside the resident GPU hot loop.
+
 ## Validation
 
 Required tests and evidence:

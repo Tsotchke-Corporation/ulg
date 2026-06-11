@@ -35,6 +35,9 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+  ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
+  ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
@@ -43,7 +46,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
-import { mlsMpmGridUpdateWgsl, mlsMpmMechanicsPredictWgsl, mlsMpmP2gGridProjectionWgsl, opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import { mlsMpmG2pReconstructWgsl, mlsMpmGridUpdateWgsl, mlsMpmMechanicsPredictWgsl, mlsMpmP2gGridProjectionWgsl, opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -265,6 +268,23 @@ test('MLS-MPM GPU grid update ABI exposes f32x4-aligned velocity rows', () => {
   assert.match(mlsMpmGridUpdateWgsl, /var<storage, read> p2g_grid_nodes/);
   assert.match(mlsMpmGridUpdateWgsl, /var<storage, read_write> updated_grid_nodes/);
   assert.match(mlsMpmGridUpdateWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('MLS-MPM GPU G2P reconstruction ABI exposes execution schemas and WGSL bindings', () => {
+  assert.equal(ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction.v0');
+  assert.equal(
+    ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-execution.v0'
+  );
+  assert.equal(
+    ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-parity.v0'
+  );
+  assert.match(mlsMpmG2pReconstructWgsl, /struct G2pParams/);
+  assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read> updated_grid_nodes/);
+  assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
+  assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
+  assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

@@ -8520,3 +8520,73 @@ Failures / open questions:
 - Thermal conduction, phase equilibrium, wall heat ledgers, and reactions remain
   CPU-side in the live demo.
 - No push was attempted.
+
+## 2026-06-11 00:43:17 AKDT - WebGPU MLS-MPM G2P reconstruction
+
+Prompt:
+
+- Continue the GPU-resident MLS-MPM path after the retained grid-update
+  velocity buffer.
+
+Actions:
+
+- Added ABI schemas for
+  `peercompute.ulg.mls-mpm-gpu-g2p-reconstruction.v0`,
+  `peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-execution.v0`, and
+  `peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-parity.v0`.
+- Added `mlsMpmG2pReconstructWgsl`, which gathers the updated grid velocity
+  field back to particles.
+- Added `src/runtime/sph/sphG2pGpuKernel.js` with CPU reference, optional
+  WebGPU execution, parity gating, and explicit non-validation flags.
+- Reconstructed particle velocity, affine `C`, deformation gradient `F`, and
+  volume ratio `J` from the retained grid-update velocity buffer.
+- Wired scene/overlay scheduling so G2P runs after grid update and is exposed
+  through `getMlsMpmG2pReconstruction()`.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphG2pGpuKernel.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphG2pGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --test tests/abi.test.mjs tests/sphG2pGpuKernel.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs`
+- Browser HTTPS/WebGPU G2P probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+
+Validation:
+
+- PASS: focused ABI/G2P tests passed `18/18`.
+- PASS: focused ABI/G2P/P2G/grid-update tests passed `35/35`.
+- PASS: focused SPH browser e2e passed against the live HTTPS server (`1/1`).
+- PASS: Browser HTTPS/WebGPU G2P probe reported G2P `backend=webgpu`,
+  `status=webgpu-executed`, parity `pass`,
+  `maxStateAbs=0.004903326742351055`,
+  `maxMechanicsAbs=0.016690582036972046`, tolerance `0.05`,
+  `particleCount=152`, `gridNodeCount=13824`, and `dt=0.0005`.
+- PASS: `npm test` passed `276/276`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+
+Failures / open questions:
+
+- The visual simulation is still CPU-authoritative.
+- The P2G, grid-update, and G2P kernels need to be chained into one resident
+  MLS-MPM step before normal runtime can stop full-buffer readbacks.
+- Repeated-step conservation and compact diagnostic checks are still required
+  before accepting GPU output as visible state.
+- Thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
+  pressure, and rendering fields remain outside the resident GPU hot loop.
+- No push was attempted.

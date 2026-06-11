@@ -25,6 +25,9 @@ export const ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA = 'peercompute.ulg.ml
 export const ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-update.v0';
 export const ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-update-execution.v0';
 export const ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-grid-update-parity.v0';
+export const ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction.v0';
+export const ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-execution.v0';
+export const ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-parity.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',

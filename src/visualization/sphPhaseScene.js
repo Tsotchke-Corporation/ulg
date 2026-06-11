@@ -25,6 +25,7 @@ import {
 import { runMlsMpmMechanicsPredictWithOptionalWebGpu } from '../runtime/sph/sphMechanicsGpuKernel.js';
 import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from '../runtime/sph/sphGridGpuKernel.js';
 import { runMlsMpmGridUpdateWithOptionalWebGpu } from '../runtime/sph/sphGridUpdateGpuKernel.js';
+import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -358,6 +359,9 @@ export function createSphPhaseScene(container, {
   let mlsMpmGridUpdate = null;
   let mlsMpmGridUpdateSignature = null;
   let pendingMlsMpmGridUpdate = null;
+  let mlsMpmG2pReconstruction = null;
+  let mlsMpmG2pReconstructionSignature = null;
+  let pendingMlsMpmG2pReconstruction = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -369,6 +373,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmMechanicsPrediction = null;
   scene.userData.mlsMpmP2gGridProjection = null;
   scene.userData.mlsMpmGridUpdate = null;
+  scene.userData.mlsMpmG2pReconstruction = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -575,6 +580,24 @@ export function createSphPhaseScene(container, {
       dt,
       gravityMPerS2.join(','),
       cflFactor,
+      dims.join(',')
+    ].join('|');
+  }
+
+  function mlsMpmG2pReconstructionSignatureFor({
+    sphParticleState = sphGpuParticleState,
+    mlsMpmParticleState = mlsMpmGpuParticleState,
+    gridUpdate = mlsMpmGridUpdate,
+    dt = gridUpdate?.dt ?? mlsMpmParticleState?.mechanicsDtS ?? 0
+  } = {}) {
+    const sphSignature = sphGpuParticleSignature(sphParticleState);
+    const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
+    if (!sphSignature || !mlsSignature || !gridUpdate?.schema) return null;
+    return [
+      sphSignature,
+      mlsSignature,
+      gridUpdate.signature ?? `${gridUpdate.schema}|${gridUpdate.backend}|${gridUpdate.gridNodeCount}|${gridUpdate.dt ?? 0}`,
+      dt,
       dims.join(',')
     ].join('|');
   }
@@ -985,6 +1008,88 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function refreshMlsMpmG2pReconstruction({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    gridUpdate = mlsMpmGridUpdate,
+    dt = gridUpdate?.dt ?? mlsMpmGpuParticleState?.mechanicsDtS ?? 0,
+    parityTolerance = 5e-2,
+    webGpuRunner = undefined
+  } = {}) {
+    if (!sphGpuParticleState || !mlsMpmGpuParticleState || !gridUpdate?.schema) {
+      mlsMpmG2pReconstruction = null;
+      scene.userData.mlsMpmG2pReconstruction = null;
+      return null;
+    }
+    const signature = mlsMpmG2pReconstructionSignatureFor({ gridUpdate, dt });
+    if (!force && mlsMpmG2pReconstructionSignature === signature && mlsMpmG2pReconstruction) {
+      return mlsMpmG2pReconstruction;
+    }
+    if (!force && pendingMlsMpmG2pReconstruction?.signature === signature) {
+      return pendingMlsMpmG2pReconstruction.promise;
+    }
+    const promise = (async () => {
+      const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
+        ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
+        : deviceResult;
+      const resolvedSphUpload = preferWebGpu
+        ? await refreshSphGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : sphGpuParticleUpload;
+      const resolvedMlsUpload = preferWebGpu
+        ? await refreshMlsMpmGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : mlsMpmGpuParticleUpload;
+      const execution = await runMlsMpmG2pWithOptionalWebGpu({
+        sphParticleState: sphGpuParticleState,
+        mlsMpmParticleState: mlsMpmGpuParticleState,
+        gridUpdate,
+        sphParticleUpload: resolvedSphUpload,
+        mlsMpmParticleUpload: resolvedMlsUpload,
+        updatedGridBuffer: gridUpdate?.gpuResult?.updatedGridBuffer ?? gridUpdate?.updatedGridBuffer ?? null,
+        dt,
+        boxDimsM: dims,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult: resolvedDeviceResult,
+        parityTolerance,
+        webGpuRunner,
+        onDeviceLost() {
+          opticalGpuDeviceResultPromise = null;
+        }
+      });
+      execution.signature = signature;
+      if (!running || mlsMpmG2pReconstructionSignatureFor({ gridUpdate, dt }) !== signature) {
+        return {
+          ...execution,
+          stale: true
+        };
+      }
+      mlsMpmG2pReconstruction = execution;
+      mlsMpmG2pReconstructionSignature = signature;
+      scene.userData.mlsMpmG2pReconstruction = execution;
+      return execution;
+    })();
+    pendingMlsMpmG2pReconstruction = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingMlsMpmG2pReconstruction?.promise === promise) pendingMlsMpmG2pReconstruction = null;
+    }
+  }
+
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
     const key = descriptor.surfaceKey;
@@ -1076,6 +1181,9 @@ export function createSphPhaseScene(container, {
     mlsMpmGridUpdate = null;
     mlsMpmGridUpdateSignature = null;
     scene.userData.mlsMpmGridUpdate = null;
+    mlsMpmG2pReconstruction = null;
+    mlsMpmG2pReconstructionSignature = null;
+    scene.userData.mlsMpmG2pReconstruction = null;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -1213,12 +1321,16 @@ export function createSphPhaseScene(container, {
     getMlsMpmGridUpdate() {
       return mlsMpmGridUpdate;
     },
+    getMlsMpmG2pReconstruction() {
+      return mlsMpmG2pReconstruction;
+    },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,
     refreshMlsMpmMechanicsPrediction,
     refreshMlsMpmP2gGridProjection,
     refreshMlsMpmGridUpdate,
+    refreshMlsMpmG2pReconstruction,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

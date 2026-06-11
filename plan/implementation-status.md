@@ -1127,3 +1127,36 @@ Not claimed:
 - G2P reconstruction is not implemented yet, so the visual simulation remains
   CPU-authoritative.
 - Thermal/phase/reaction/wall heat updates are still CPU-side in the live demo.
+
+## 2026-06-11 Update - WebGPU MLS-MPM G2P Reconstruction Slice
+
+Completed:
+
+- Added a G2P reconstruction ABI and WGSL kernel for the MLS-MPM GPU path.
+- Added `src/runtime/sph/sphG2pGpuKernel.js` with CPU reference, optional
+  WebGPU execution, parity gating, and fallback statuses.
+- Consumed the retained grid-update velocity buffer directly when WebGPU
+  execution is available.
+- Reconstructed velocity, affine `C`, deformation gradient `F`, and volume ratio
+  `J`, including sealed-box position and inward velocity clamps.
+- Wired scene/overlay scheduling so G2P runs after grid update and is exposed
+  through `getMlsMpmG2pReconstruction()`.
+
+Latest validation:
+
+- PASS: focused ABI/G2P tests passed `18/18`.
+- PASS: focused ABI/G2P/P2G/grid-update tests passed `35/35`.
+- PASS: focused browser e2e passed against `https://127.0.0.1:5173` (`1/1`).
+- PASS: live browser WebGPU probe reported G2P `webgpu-executed`, parity
+  `pass`, `maxStateAbs=0.004903326742351055`,
+  `maxMechanicsAbs=0.016690582036972046`, tolerance `0.05`,
+  `particleCount=152`, and `gridNodeCount=13824`.
+- PASS: `npm test` (`276/276`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+
+Not claimed:
+
+- The visible SPH demo is still CPU-authoritative.
+- P2G, grid update, and G2P need to be chained into one resident step with
+  compact diagnostics before it can be used as the normal hot loop.
+- Thermal/phase/reaction/wall heat updates remain CPU-side in the live demo.

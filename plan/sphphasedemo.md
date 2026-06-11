@@ -1091,3 +1091,38 @@ Remaining before GPU-authoritative motion:
   chain after G2P parity is established.
 - Move thermal, wall heat, phase-equilibrium, and reaction updates into
   resident kernels.
+
+## 2026-06-11 GPU MLS-MPM G2P Reconstruction Checkpoint
+
+Completed:
+
+- Added WebGPU G2P reconstruction after the retained grid-update velocity
+  buffer.
+- Reconstructed particle velocity, affine `C`, deformation gradient `F`, and
+  volume ratio `J` from the updated grid.
+- Applied the same sealed-box particle position clamp and into-wall velocity
+  zeroing used by the CPU reference.
+- Preserved the current reduced interactive stiffness model while keeping
+  material constants closure-derived in the packed mechanics rows.
+
+Validation evidence:
+
+- Focused ABI/G2P tests passed `18/18`.
+- Focused ABI/G2P/P2G/grid-update tests passed `35/35`.
+- Browser e2e for the default derived-material SPH demo passed against the
+  live HTTPS server.
+- Live WebGPU probe reported G2P `webgpu-executed`, parity `pass`,
+  `maxStateAbs=0.004903326742351055`, `maxMechanicsAbs=0.016690582036972046`,
+  tolerance `0.05`, `particleCount=152`, and `gridNodeCount=13824`.
+- Full `npm test` passed `276/276`; production build passed with the known
+  large-chunk warning.
+
+Remaining before GPU-authoritative motion:
+
+- Chain P2G, grid update, and G2P as one resident MLS-MPM step artifact.
+- Stop readback of full buffers during normal stepping; keep full readback only
+  for parity/evidence mode and read compact diagnostics during the hot loop.
+- Swap the live visual state from CPU-authoritative stepping to accepted GPU
+  candidate states after repeated-step parity and conservation checks.
+- Move thermal, wall heat, phase-equilibrium, reaction, gas pressure, and render
+  fields onto resident GPU buffers.

@@ -588,3 +588,193 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   updated_grid_nodes[node_index * 2u + 1u] = vec4<f32>(row1.x, row1.y, row1.z, status);
 }
 `;
+
+export const mlsMpmG2pReconstructWgsl = `
+struct G2pParams {
+  particle_count: u32,
+  grid_node_count: u32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  shift: u32,
+  pad_u0: u32,
+  pad_u1: u32,
+  grid_spacing_m: f32,
+  inv_grid_spacing_m: f32,
+  dt: f32,
+  box_x: f32,
+  box_y: f32,
+  box_z: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> updated_grid_nodes: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> out_sph_state: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: G2pParams;
+
+fn g2p_quadratic_weights(fx: f32) -> vec3<f32> {
+  let a = 1.5 - fx;
+  let b = fx - 1.0;
+  let c = fx - 0.5;
+  return vec3<f32>(0.5 * a * a, 0.75 - b * b, 0.5 * c * c);
+}
+
+fn g2p_weight_at(weights: vec3<f32>, offset: i32) -> f32 {
+  if (offset == 0) { return weights.x; }
+  if (offset == 1) { return weights.y; }
+  if (offset == 2) { return weights.z; }
+  return 0.0;
+}
+
+fn g2p_det3(
+  f00: f32, f01: f32, f02: f32,
+  f10: f32, f11: f32, f12: f32,
+  f20: f32, f21: f32, f22: f32
+) -> f32 {
+  return f00 * (f11 * f22 - f12 * f21)
+    - f01 * (f10 * f22 - f12 * f20)
+    + f02 * (f10 * f21 - f11 * f20);
+}
+
+fn g2p_cubic_root_positive(value: f32) -> f32 {
+  return exp(log(max(value, 1.0e-12)) / 3.0);
+}
+
+fn g2p_grid_index(i: i32, j: i32, k: i32) -> u32 {
+  return (u32(i + i32(params.shift)) * params.grid_ny + u32(j + i32(params.shift))) * params.grid_nz + u32(k + i32(params.shift));
+}
+
+fn g2p_in_range(i: i32, j: i32, k: i32) -> bool {
+  let ii = i + i32(params.shift);
+  let jj = j + i32(params.shift);
+  let kk = k + i32(params.shift);
+  return ii >= 0 && jj >= 0 && kk >= 0
+    && ii < i32(params.grid_nx)
+    && jj < i32(params.grid_ny)
+    && kk < i32(params.grid_nz);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let state_base = particle_index * 2u;
+  let mechanics_base = particle_index * 8u;
+  let pos_mass = sph_state[state_base];
+  let vel_u = sph_state[state_base + 1u];
+  let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;
+  let row0 = mls_mechanics[mechanics_base];
+  let row1 = mls_mechanics[mechanics_base + 1u];
+  let row2 = mls_mechanics[mechanics_base + 2u];
+  let row3 = mls_mechanics[mechanics_base + 3u];
+  let row4 = mls_mechanics[mechanics_base + 4u];
+  let row5 = mls_mechanics[mechanics_base + 5u];
+  let row6 = mls_mechanics[mechanics_base + 6u];
+  let row7 = mls_mechanics[mechanics_base + 7u];
+
+  let p_grid = pos_mass.xyz * params.inv_grid_spacing_m;
+  let base_x = i32(floor(p_grid.x - 0.5));
+  let base_y = i32(floor(p_grid.y - 0.5));
+  let base_z = i32(floor(p_grid.z - 0.5));
+  let wx = g2p_quadratic_weights(p_grid.x - f32(base_x));
+  let wy = g2p_quadratic_weights(p_grid.y - f32(base_y));
+  let wz = g2p_quadratic_weights(p_grid.z - f32(base_z));
+
+  var velocity = vec3<f32>(0.0, 0.0, 0.0);
+  var c00 = 0.0; var c01 = 0.0; var c02 = 0.0;
+  var c10 = 0.0; var c11 = 0.0; var c12 = 0.0;
+  var c20 = 0.0; var c21 = 0.0; var c22 = 0.0;
+
+  for (var a = 0i; a < 3i; a = a + 1i) {
+    for (var b = 0i; b < 3i; b = b + 1i) {
+      for (var c = 0i; c < 3i; c = c + 1i) {
+        let node_i = base_x + a;
+        let node_j = base_y + b;
+        let node_k = base_z + c;
+        if (!g2p_in_range(node_i, node_j, node_k)) {
+          continue;
+        }
+        let weight = g2p_weight_at(wx, a) * g2p_weight_at(wy, b) * g2p_weight_at(wz, c);
+        if (weight == 0.0) {
+          continue;
+        }
+        let idx = g2p_grid_index(node_i, node_j, node_k);
+        let grid_row = updated_grid_nodes[idx * 2u];
+        let grid_velocity = grid_row.yzw;
+        velocity = velocity + weight * grid_velocity;
+        let dpos = (vec3<f32>(f32(node_i), f32(node_j), f32(node_k)) - p_grid) * params.grid_spacing_m;
+        let s = 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m * weight;
+        c00 = c00 + s * grid_velocity.x * dpos.x;
+        c01 = c01 + s * grid_velocity.x * dpos.y;
+        c02 = c02 + s * grid_velocity.x * dpos.z;
+        c10 = c10 + s * grid_velocity.y * dpos.x;
+        c11 = c11 + s * grid_velocity.y * dpos.y;
+        c12 = c12 + s * grid_velocity.y * dpos.z;
+        c20 = c20 + s * grid_velocity.z * dpos.x;
+        c21 = c21 + s * grid_velocity.z * dpos.y;
+        c22 = c22 + s * grid_velocity.z * dpos.z;
+      }
+    }
+  }
+
+  var position = pos_mass.xyz + params.dt * velocity;
+  if (position.x < 0.0) { position.x = 0.0; if (velocity.x < 0.0) { velocity.x = 0.0; } }
+  if (position.x > params.box_x) { position.x = params.box_x; if (velocity.x > 0.0) { velocity.x = 0.0; } }
+  if (position.y < 0.0) { position.y = 0.0; if (velocity.y < 0.0) { velocity.y = 0.0; } }
+  if (position.y > params.box_y) { position.y = params.box_y; if (velocity.y > 0.0) { velocity.y = 0.0; } }
+  if (position.z < 0.0) { position.z = 0.0; if (velocity.z < 0.0) { velocity.z = 0.0; } }
+  if (position.z > params.box_z) { position.z = params.box_z; if (velocity.z > 0.0) { velocity.z = 0.0; } }
+
+  let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
+  let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
+  let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
+  let g00 = 1.0 + params.dt * c00; let g01 = params.dt * c01; let g02 = params.dt * c02;
+  let g10 = params.dt * c10; let g11 = 1.0 + params.dt * c11; let g12 = params.dt * c12;
+  let g20 = params.dt * c20; let g21 = params.dt * c21; let g22 = 1.0 + params.dt * c22;
+
+  var nf00 = g00 * f00 + g01 * f10 + g02 * f20;
+  var nf01 = g00 * f01 + g01 * f11 + g02 * f21;
+  var nf02 = g00 * f02 + g01 * f12 + g02 * f22;
+  var nf10 = g10 * f00 + g11 * f10 + g12 * f20;
+  var nf11 = g10 * f01 + g11 * f11 + g12 * f21;
+  var nf12 = g10 * f02 + g11 * f12 + g12 * f22;
+  var nf20 = g20 * f00 + g21 * f10 + g22 * f20;
+  var nf21 = g20 * f01 + g21 * f11 + g22 * f21;
+  var nf22 = g20 * f02 + g21 * f12 + g22 * f22;
+  var next_j = g2p_det3(nf00, nf01, nf02, nf10, nf11, nf12, nf20, nf21, nf22);
+  if (row5.x < 0.5) {
+    next_j = max(next_j, 0.05);
+    let s = g2p_cubic_root_positive(next_j);
+    nf00 = s; nf01 = 0.0; nf02 = 0.0;
+    nf10 = 0.0; nf11 = s; nf12 = 0.0;
+    nf20 = 0.0; nf21 = 0.0; nf22 = s;
+  }
+  next_j = g2p_det3(nf00, nf01, nf02, nf10, nf11, nf12, nf20, nf21, nf22);
+  if (next_j < 0.1) {
+    let s = g2p_cubic_root_positive(0.1);
+    nf00 = s; nf01 = 0.0; nf02 = 0.0;
+    nf10 = 0.0; nf11 = s; nf12 = 0.0;
+    nf20 = 0.0; nf21 = 0.0; nf22 = s;
+    next_j = 0.1;
+  }
+
+  out_sph_state[state_base] = vec4<f32>(position.x, position.y, position.z, pos_mass.w);
+  out_sph_state[state_base + 1u] = vec4<f32>(velocity.x, velocity.y, velocity.z, vel_u.w);
+  out_mls_mechanics[mechanics_base] = vec4<f32>(nf00, nf01, nf02, nf10);
+  out_mls_mechanics[mechanics_base + 1u] = vec4<f32>(nf11, nf12, nf20, nf21);
+  out_mls_mechanics[mechanics_base + 2u] = vec4<f32>(nf22, c00, c01, c02);
+  out_mls_mechanics[mechanics_base + 3u] = vec4<f32>(c10, c11, c12, c20);
+  out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(c21, c22, next_j, row4.w);
+  out_mls_mechanics[mechanics_base + 5u] = row5;
+  out_mls_mechanics[mechanics_base + 6u] = row6;
+  out_mls_mechanics[mechanics_base + 7u] = row7;
+}
+`;

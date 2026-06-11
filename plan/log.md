@@ -10053,3 +10053,49 @@ Failures / open questions:
   uploaded to GPU per thermal invocation. Persisting those buffers across
   resident steps is still open.
 - No push was attempted.
+
+## 2026-06-11 10:50 AKDT - GH Pages build checkpoint
+
+Prompt:
+
+- "good job. make a gh pages build to the docs folder and proceed. and when
+  you're done with your five tasks take a look at the zbuffer there might be a
+  render order issue for transparent materials and objects inside them."
+
+What happened:
+
+- Verified clean starting state at `79d1bf1` with `git status --short --branch`
+  reporting `## main...origin/main [ahead 35]`.
+- Verified Infinite Context Coder was current at `79d1bf1`.
+- Ran the GH Pages build to `docs/`.
+- The build updated `docs/index.html`, removed the old hashed JS asset, and
+  created the new hashed JS asset.
+
+Files touched:
+
+- `docs/index.html`
+- `docs/assets/pages-BDlV6ZpG.js`
+- `docs/assets/pages-BRYarzzp.js`
+- `plan/log.md`
+
+Commands run:
+
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 10:50:32 AKDT`.
+- `git status --short --branch`
+- `python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+- `npm run build:pages`
+- `git status --short`
+- `find docs -maxdepth 2 -type f | sort | sed -n '1,80p'`
+- `git diff --stat -- docs`
+- `git diff -- docs/index.html docs/.nojekyll | sed -n '1,160p'`
+
+Validation:
+
+- PASS: `npm run build:pages` completed successfully and wrote
+  `docs/index.html` plus `docs/assets/pages-BRYarzzp.js`.
+- NOTE: Vite reported the existing large-chunk warning.
+
+Failures / open questions:
+
+- No push was attempted.

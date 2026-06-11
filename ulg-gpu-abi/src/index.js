@@ -22,6 +22,8 @@ export const ULG_SPH_GPU_REACTION_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-reacti
 export const ULG_SPH_GPU_REACTION_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step.v0';
 export const ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step-execution.v0';
 export const ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step-parity.v0';
+export const ULG_SPH_GPU_RENDER_ROWS_SCHEMA = 'peercompute.ulg.sph-gpu-render-rows.v0';
+export const ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-rows-execution.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0';
 export const ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0';
@@ -174,6 +176,20 @@ export const SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT = Object.freeze([
   'status:f32',
   'pad0:f32',
   'pad1:f32'
+]);
+export const SPH_GPU_RENDER_ROW_LAYOUT = Object.freeze([
+  'positionXM:f32',
+  'positionYM:f32',
+  'positionZM:f32',
+  'massKg:f32',
+  'materialId:f32',
+  'phaseId:f32',
+  'temperatureK:f32',
+  'status:f32',
+  'restDensityKgPerM3:f32',
+  'phaseFractionGas:f32',
+  'representedEntityCount:f32',
+  'pad0:f32'
 ]);
 export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
   'deformationF00:f32',

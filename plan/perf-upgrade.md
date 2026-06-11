@@ -195,6 +195,40 @@ A first GPU-resident SPH phase demo should target this dispatch chain:
 CPU readback should happen after step 12 and only for the small summary buffers,
 ideally every N frames rather than every frame.
 
+## 2026-06-11 Checkpoint - Resident Render Rows And Layout-Limit Fixes
+
+Implemented:
+
+- Compact SPH render rows are extracted from retained WebGPU SPH state/thermo
+  buffers and decoded into continuous Three.js volume surfaces.
+- The resident Na + water path now renders `h2o`, `Na`, and derived `naoh`
+  surfaces instead of collapsing to `unknown` rows after invalid WebGPU
+  pipelines.
+- Reaction rows and product-phase mechanics rows share one storage buffer, so
+  the reaction resolve pass fits an adapter with
+  `maxStorageBuffersPerShaderStage = 10`.
+- SPH/MLS-MPM resident hot-path kernels use explicit compute bind group layouts
+  instead of `layout: 'auto'`, avoiding per-entrypoint binding pruning.
+- The SPH WebGL renderer no longer requests `preserveDrawingBuffer`.
+
+Profiler evidence:
+
+- Manual Chromium/WebGPU probe: zero WebGPU bind-group/validation warnings after
+  the explicit-layout pass.
+- Browser CPU/trace profile after resident render activation: JS script work was
+  about `33 ms` in the sampled window; the remaining large costs were
+  GPU-process/WebGL flush/readback stalls in headless Chromium.
+- Disabling SPH `preserveDrawingBuffer` reduced observed `GLES2::ReadPixels`
+  calls in the sampled headless trace from `18` to `5`.
+
+Remaining performance target:
+
+- Remove the compact render-row readback and Three.js surface rebuild from the
+  normal hot loop by generating draw/instance/field buffers directly from
+  resident WebGPU state.
+- Keep compact CPU summaries for diagnostics, not per-particle or per-surface
+  state reconstruction.
+
 ## GPU-Resident Nuclear And Ionizing-Radiation Target
 
 Nuclear physics is a separate closure family from chemical/electronic material
@@ -232,6 +266,51 @@ This is not a near-term shortcut. Reliable fission/fusion/decay closures require
 nuclear-structure references, cross-section evidence, transport benchmarks, and
 strict conservation tests. Until those exist, scenarios that need them should
 produce blocked or degraded artifacts rather than invented reaction rates.
+
+### Cherenkov / Optical Radiation Closure
+
+Cherenkov light should be treated as a radiation/optical transport closure, not
+as an element color patch.
+
+Required GPU-resident inputs:
+
+- charged-particle species, energy, direction, and velocity from radioactive
+  decay, fission/fusion products, activation, or external beam closures,
+- wavelength-dependent refractive index `n(lambda)` from the same
+  first-principles optical closure used by PBR/transparency,
+- medium absorption/scattering coefficients from optical/radiation transport
+  closures,
+- particle stopping power / energy-loss closure for the active material phase,
+- compact photon/radiation group buffers for visible and non-visible emission.
+
+GPU hot-loop behavior:
+
+1. For each charged-particle group, compute `beta = v / c`.
+2. For each optical wavelength/radiation group, emit Cherenkov photons only
+   where `beta * n(lambda) > 1`.
+3. Use the Frank-Tamm spectral emission form for `d^2N / (dx d lambda)` within
+   the closure's valid wavelength/energy domain.
+4. Subtract emitted energy from the charged-particle/radiation-energy ledger.
+5. Transport or locally deposit photons through the radiation/optical transport
+   buffers.
+6. Feed visible groups into the renderer through the same emission path as
+   blackbody/incandescence and optical fluorescence.
+
+Validation requirements:
+
+- threshold tests for materials with `n(lambda) <= 1 / beta` and
+  `n(lambda) > 1 / beta`,
+- energy conservation between charged-particle loss, photon emission, and
+  deposited heat,
+- spectrum sanity against analytic Frank-Tamm references for a constant-index
+  medium,
+- no Cherenkov artifact when the nuclear/radiation source closure is blocked or
+  outside domain.
+
+If the stack later supports explicit photon transport from low-level EM
+simulation, this closure can become a reduced model of that deeper chain. Until
+then it is the honest bridge between radioactive/charged-particle sources and
+optical rendering.
 
 ## Contract And Closure Rules
 

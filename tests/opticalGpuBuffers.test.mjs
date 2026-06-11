@@ -17,6 +17,7 @@ import {
   createOpticalGpuLookupParityReport,
   decodeOpticalGpuLookupOutputRows,
   opticalLookupWgsl,
+  requestOpticalGpuDevice,
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
   stableOpticalMaterialId,
@@ -68,6 +69,32 @@ test('optical GPU table packs derived PBR records and spectral samples', () => {
   assert.ok(gold.renderModelId > 0);
   assert.equal(table.scientificValidation, false);
   assert.equal(table.fullPhysicsValidation, false);
+});
+
+test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit when supported', async () => {
+  const device = { lost: new Promise(() => {}) };
+  let requestDescriptor = null;
+  const result = await requestOpticalGpuDevice({
+    gpu: {
+      async requestAdapter() {
+        return {
+          limits: { maxStorageBuffersPerShaderStage: 10 },
+          async requestDevice(descriptor) {
+            requestDescriptor = descriptor;
+            return device;
+          }
+        };
+      }
+    }
+  });
+
+  assert.equal(result.status, 'webgpu-device-ready');
+  assert.equal(result.device, device);
+  assert.deepEqual(requestDescriptor, {
+    requiredLimits: { maxStorageBuffersPerShaderStage: 10 }
+  });
+  assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 10);
 });
 
 test('optical GPU table deduplicates material-phase records and preserves stable ids', () => {

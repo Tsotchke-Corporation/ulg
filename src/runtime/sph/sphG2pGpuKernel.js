@@ -9,6 +9,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmG2pReconstructWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
+import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -355,9 +356,22 @@ export async function runMlsMpmG2pWebGpu({
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({ particleCount: sphParticleState.particleCount, gridUpdate, dt: dtSeconds, boxDimsM: dims }));
     const module = device.createShaderModule({ code: mlsMpmG2pReconstructWgsl });
-    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      label: 'ulg-mls-mpm-g2p-reconstruct',
+      module,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'storage'),
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'uniform')
+      ]
+    });
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: stateBuffer } },
         { binding: 1, resource: { buffer: thermoBuffer } },

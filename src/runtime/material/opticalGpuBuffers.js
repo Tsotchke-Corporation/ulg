@@ -11,6 +11,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { opticalLookupWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { zForSymbol } from '../electronicStructure/periodicTable.js';
+import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { opticalRenderParams } from './opticalClosure.js';
 
 export {
@@ -489,6 +490,9 @@ function watchDeviceLost(device, onDeviceLost) {
   });
 }
 
+const DEFAULT_STORAGE_BUFFERS_PER_STAGE = 8;
+const RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE = 10;
+
 export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigator, { onDeviceLost = null } = {}) {
   if (!navigatorRef?.gpu) {
     return { status: 'blocked-webgpu-unavailable', reason: 'navigator.gpu unavailable', device: null };
@@ -497,11 +501,30 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
   if (!adapter) {
     return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
   }
-  const device = await adapter.requestDevice();
+  const adapterStorageLimit = Number(adapter.limits?.maxStorageBuffersPerShaderStage || 0);
+  const requiredLimits = {};
+  if (adapterStorageLimit >= RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE) {
+    requiredLimits.maxStorageBuffersPerShaderStage = Math.max(
+      DEFAULT_STORAGE_BUFFERS_PER_STAGE,
+      RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE
+    );
+  }
+  const deviceDescriptor = Object.keys(requiredLimits).length > 0
+    ? { requiredLimits }
+    : undefined;
+  const device = await adapter.requestDevice(deviceDescriptor);
   if (typeof onDeviceLost === 'function') {
     watchDeviceLost(device, onDeviceLost);
   }
-  return { status: 'webgpu-device-ready', reason: 'device acquired', device };
+  return {
+    status: 'webgpu-device-ready',
+    reason: 'device acquired',
+    device,
+    requiredLimits,
+    adapterLimits: {
+      maxStorageBuffersPerShaderStage: adapterStorageLimit || null
+    }
+  };
 }
 
 function writeStorageBuffer(device, label, data) {
@@ -580,12 +603,19 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
       queryCount: lookup.queryCount
     }));
     const module = device.createShaderModule({ code: opticalLookupWgsl });
-    const pipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: { module, entryPoint: 'main' }
+    const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      label: 'ulg-optical-lookup',
+      module,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform')
+      ]
     });
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: recordBuffer } },
         { binding: 1, resource: { buffer: queryBuffer } },

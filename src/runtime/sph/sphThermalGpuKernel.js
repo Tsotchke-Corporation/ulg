@@ -12,6 +12,7 @@ import {
 import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
 import { orderedSegments } from '../material/thermoState.js';
+import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -526,9 +527,22 @@ export async function runSphThermalStepWebGpu({
   }));
 
   const module = device.createShaderModule({ label: 'ulg-sph-thermal-step', code: sphThermalStepWgsl });
-  const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-thermal-step',
+    module,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'read-only-storage'),
+      computeBufferBinding(4, 'storage'),
+      computeBufferBinding(5, 'storage'),
+      computeBufferBinding(6, 'uniform')
+    ]
+  });
   const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
+    layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: thermoBuffer } },

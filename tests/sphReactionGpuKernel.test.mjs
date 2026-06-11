@@ -107,6 +107,7 @@ test('SPH reaction table packs derived reaction and product phase mechanics rows
   assert.equal(table.status, 'derived-reaction-table-ready');
   assert.equal(table.reactionCount, 1);
   assert.equal(table.productPhaseCount, 1);
+  assert.equal(table.combinedRecordCount, 2);
   assert.equal(table.records[0], stableOpticalMaterialId('a'));
   assert.equal(table.records[1], stableOpticalMaterialId('b'));
   assert.equal(table.records[2], stableOpticalMaterialId('ab'));
@@ -115,6 +116,10 @@ test('SPH reaction table packs derived reaction and product phase mechanics rows
   assert.equal(table.productPhaseRecords[1], GPU_PHASE_IDS.liquid);
   assert.equal(table.productPhaseRecords[2], 500);
   assert.equal(table.productPhaseRecords[3], 5e5);
+  assert.deepEqual(
+    Array.from(table.combinedRecords.slice(table.records.length, table.records.length + 4)),
+    Array.from(table.productPhaseRecords.slice(0, 4))
+  );
   assert.equal(table.scientificValidation, false);
   assert.equal(table.chemistryValidation, false);
 });

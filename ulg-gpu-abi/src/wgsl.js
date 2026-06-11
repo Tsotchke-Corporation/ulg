@@ -396,7 +396,6 @@ struct ProductMechanics {
 @group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> reaction_records: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> product_phase_records: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> material_records: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> thermal_segments: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> proposals: array<vec4<f32>>;
@@ -438,15 +437,15 @@ fn reaction_row2(reaction_index: u32) -> vec4<f32> {
 }
 
 fn product_phase_row0(record_index: u32) -> vec4<f32> {
-  return product_phase_records[record_index * 3u];
+  return reaction_records[(params.reaction_count + record_index) * 3u];
 }
 
 fn product_phase_row1(record_index: u32) -> vec4<f32> {
-  return product_phase_records[record_index * 3u + 1u];
+  return reaction_records[(params.reaction_count + record_index) * 3u + 1u];
 }
 
 fn product_phase_row2(record_index: u32) -> vec4<f32> {
-  return product_phase_records[record_index * 3u + 2u];
+  return reaction_records[(params.reaction_count + record_index) * 3u + 2u];
 }
 
 fn segment_row0(segment_index: u32) -> vec4<f32> {
@@ -723,6 +722,36 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
       out_mls_mechanics[mechanics_base + row] = mls_mechanics[mechanics_base + row];
     }
   }
+}
+`;
+
+export const sphRenderRowsWgsl = `
+struct RenderRowsParams {
+  particle_count: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> render_rows: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: RenderRowsParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let pos_mass = sph_state[particle_index * 2u];
+  let thermo0 = sph_thermo[particle_index * 3u];
+  let thermo1 = sph_thermo[particle_index * 3u + 1u];
+  let thermo2 = sph_thermo[particle_index * 3u + 2u];
+  render_rows[particle_index * 3u] = pos_mass;
+  render_rows[particle_index * 3u + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
+  render_rows[particle_index * 3u + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, 0.0);
 }
 `;
 

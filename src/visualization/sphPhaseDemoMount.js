@@ -494,6 +494,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
   overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
   overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
+  overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
   overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
   overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
   overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -716,7 +717,7 @@ export function mountSphPhaseDemoOverlay() {
       stepCount: normalizedStepCount,
       readbackMode,
       continueFromResidentState
-    }).then((execution) => {
+    }).then(async (execution) => {
       overlay.__mlsMpmResidentSteps = execution;
       overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
       overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.finalStep?.p2gGridProjection || null;
@@ -733,6 +734,19 @@ export function mountSphPhaseDemoOverlay() {
         && continuationBudget > 0
         && generation === particleSyncGeneration
       );
+      if (execution?.backend === 'webgpu' && generation === particleSyncGeneration) {
+        try {
+          overlay.__sphResidentRenderState = await scene.refreshSphResidentRenderState?.({
+            preferWebGpu: true,
+            residentSteps: execution,
+            materialProperties: driver?.demo?.materialProperties || {}
+          });
+        } catch (error) {
+          overlay.__sphResidentRenderStateError = error instanceof Error ? error.message : String(error);
+        }
+      } else {
+        overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
+      }
       renderStatus();
     }).catch((error) => {
       overlay.__mlsMpmResidentStepsError = error instanceof Error ? error.message : String(error);
@@ -770,6 +784,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
+    overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -822,6 +837,7 @@ export function mountSphPhaseDemoOverlay() {
         materials: [],
         reactions: []
       });
+      overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
       return;
     }
     const colors = particleColors(driver.demo);
@@ -859,6 +875,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
+    overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
@@ -919,6 +936,7 @@ export function mountSphPhaseDemoOverlay() {
     const materialPhases = formatMaterialPhaseMasses(phase.byMaterialPhase);
     const residentSteps = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || null;
     const residentStep = scene.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || null;
+    const residentRenderState = scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
     const residentRequestedReadback = residentSteps?.requestedReadbackMode
       || residentStep?.requestedReadbackMode
       || overlay.__mlsMpmResidentRequestedReadbackMode
@@ -967,6 +985,11 @@ export function mountSphPhaseDemoOverlay() {
       || residentStep?.reactionStep?.result?.backend
       || (reactionTable?.reactionCount > 0 ? 'pending' : 'not-required');
     const residentThermalBufferMode = residentStep?.nextParticleBufferMode || 'pending';
+    const renderSource = residentRenderState?.source || 'cpu-particles';
+    const renderRowsStatus = residentRenderState?.status || 'pending';
+    const renderRowsBackend = residentRenderState?.backend || 'pending';
+    const renderRowsCount = residentRenderState?.particleCount ?? 0;
+    const renderAuthoritative = Boolean(residentRenderState?.gpuAuthoritativeState);
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
@@ -987,6 +1010,8 @@ export function mountSphPhaseDemoOverlay() {
       `resident thermal : status=${residentThermalStatus} backend=${residentThermalBackend} next=${residentThermalBufferMode}`,
       `resident reaction: status=${residentReactionStatus} backend=${residentReactionBackend} reactions=${reactionTable?.reactionCount ?? 0}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
+      `render source    : ${renderSource} status=${renderRowsStatus} backend=${renderRowsBackend} rows=${renderRowsCount}`,
+      `render authoritative: ${renderAuthoritative}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,
       ``,

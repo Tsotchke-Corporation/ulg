@@ -1496,3 +1496,65 @@ Not claimed:
   evidence-level and keeps scientific/material/phase validation flags false.
 - `gpuAuthoritativeState` remains false because the visible Three.js renderer
   still consumes CPU-side visual particles.
+
+## 2026-06-11 Update - Resident Reaction/Render Rows And WebGPU Layout Hardening
+
+Completed:
+
+- Added compact SPH render-row ABI/runtime extraction:
+  `peercompute.ulg.sph-gpu-render-rows.v0` and
+  `peercompute.ulg.sph-gpu-render-rows-execution.v0`.
+- Added a WebGPU render-row kernel that extracts position, mass, material id,
+  phase id, temperature, rest density, gas fraction, and represented entity
+  count from retained resident SPH state/thermo buffers.
+- Refactored the continuous SPH scene surfaces so CPU visual particles and
+  resident GPU render rows use the same batching, optical lookup, emissive, and
+  MarchingCubes path.
+- Wired the demo scheduler so successful no-full-readback resident WebGPU steps
+  refresh the visible surfaces from compact render rows instead of clearing back
+  to CPU visual particles.
+- Fixed the Na + water resident reaction/render bug where invalid WebGPU
+  pipelines left render rows as `unknown`. The reaction table now packs product
+  phase mechanics rows into the same GPU storage buffer as reaction rows, which
+  keeps the resolve pass at this browser adapter's 10-storage-buffer limit.
+- Replaced SPH/MLS-MPM hot-path `layout: 'auto'` pipelines with explicit
+  compute bind group layouts for mechanics, P2G, grid update, G2P, thermal,
+  reaction, compact summary, optical lookup, and render-row extraction.
+- `requestOpticalGpuDevice()` now requests
+  `maxStorageBuffersPerShaderStage: 10` when the adapter supports it, so the
+  resident reaction resolve pass gets the required device limit.
+- Disabled `preserveDrawingBuffer` for the SPH Three.js renderer. Profiling
+  showed headless WebGL readback/flush stalls dominating the trace while JS
+  execution remained small.
+
+Latest validation:
+
+- PASS: focused kernel/layout tests including ABI, optical GPU buffers, reaction
+  GPU, mechanics, grid, grid update, resident steps, render rows, and thermal
+  paths.
+- PASS: final full Node test suite passed `308/308`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: focused HTTPS Chromium e2e passed after the renderer perf change:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1
+  npx playwright test --config tests/playwright.config.mjs --project=chromium
+  -g "SPH phase demo runs derived material properties by default"` (`1/1`,
+  about 1.2 minutes).
+- PASS: manual Chromium/WebGPU Na + water probe reported resident render rows
+  from WebGPU with material keys `h2o`, `Na`, and `naoh`, phase keys `liquid`,
+  `gas`, and `solid`, three visible resident surfaces, optical lookup row
+  indices attached, and zero WebGPU bind group/validation warnings.
+- PERF: browser profiling after resident render activation showed JS script
+  time around `33 ms` over the sampled window; GPU-process stalls are dominated
+  by headless WebGL readback/flush behavior. Turning off SPH
+  `preserveDrawingBuffer` reduced observed `GLES2::ReadPixels` calls in the
+  sampled window from `18` to `5`.
+
+Not claimed:
+
+- `gpuAuthoritativeState` in the overlay still means the full simulation state
+  is not yet fully GPU-authoritative across all diagnostics; the new render
+  state itself is GPU-authoritative and compact-readback backed.
+- Render rows still perform a compact readback into Three.js. The next renderer
+  step is direct GPU-driven draw buffers rather than CPU-side surface rebuilds.
+- Cherenkov, radioactive decay, fission, fusion, activation, and ionizing
+  radiation remain planned closure families, not implemented solvers.

@@ -13,6 +13,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -274,12 +275,14 @@ export function buildSphReactionTable(reactions = [], {
     status: records.length ? 'derived-reaction-table-ready' : 'no-derived-reactions',
     reactionCount: records.length / SPH_REACTION_RECORD_FLOATS,
     productPhaseCount: productPhaseRecords.length / SPH_REACTION_PRODUCT_PHASE_FLOATS,
+    combinedRecordCount: (records.length + productPhaseRecords.length) / SPH_REACTION_RECORD_FLOATS,
     recordLayout: [...SPH_GPU_REACTION_RECORD_ROW_LAYOUT],
     productPhaseLayout: [...SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT],
     recordStrideFloats: SPH_REACTION_RECORD_FLOATS,
     productPhaseStrideFloats: SPH_REACTION_PRODUCT_PHASE_FLOATS,
     records: new Float32Array(records),
     productPhaseRecords: new Float32Array(productPhaseRecords),
+    combinedRecords: new Float32Array([...records, ...productPhaseRecords]),
     metadata,
     productPhaseMetadata,
     scientificValidation: false,
@@ -647,8 +650,11 @@ export async function runSphReactionStepWebGpu({
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-thermo', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-mechanics', mlsMpmParticleState.mechanics);
-  const reactionRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-records', reactionTable.records);
-  const productPhaseBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-product-phases', reactionTable.productPhaseRecords);
+  const reactionRecordBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-reaction-records-and-product-phases',
+    reactionTable.combinedRecords || new Float32Array([...reactionTable.records, ...reactionTable.productPhaseRecords])
+  );
   const thermalRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-records', thermalMaterialTable.records);
   const thermalSegmentBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-segments', thermalMaterialTable.segments);
   const proposalBuffer = writeStorageBuffer(
@@ -675,16 +681,55 @@ export async function runSphReactionStepWebGpu({
   }));
 
   const module = device.createShaderModule({ label: 'ulg-sph-reaction-step', code: sphReactionStepWgsl });
-  const proposePipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'propose' } });
-  const resolvePipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'resolve' } });
-  const bindEntries = (layout) => ({
+  const reactionBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(11, 'uniform')
+  ];
+  const reactionResolveBindings = [
+    computeBufferBinding(0, 'read-only-storage'),
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(2, 'read-only-storage'),
+    computeBufferBinding(3, 'read-only-storage'),
+    computeBufferBinding(5, 'read-only-storage'),
+    computeBufferBinding(6, 'read-only-storage'),
+    computeBufferBinding(7, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform')
+  ];
+  const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-reaction-propose',
+    module,
+    entryPoint: 'propose',
+    bindings: reactionBindings
+  });
+  const { pipeline: resolvePipeline, bindGroupLayout: resolveBindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-reaction-resolve',
+    module,
+    entryPoint: 'resolve',
+    bindings: reactionResolveBindings
+  });
+  const proposeBindEntries = (layout) => ({
+    layout,
+    entries: [
+      { binding: 0, resource: { buffer: stateBuffer } },
+      { binding: 1, resource: { buffer: thermoBuffer } },
+      { binding: 3, resource: { buffer: reactionRecordBuffer } },
+      { binding: 7, resource: { buffer: proposalBuffer } },
+      { binding: 11, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const resolveBindEntries = (layout) => ({
     layout,
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: thermoBuffer } },
       { binding: 2, resource: { buffer: mechanicsBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
-      { binding: 4, resource: { buffer: productPhaseBuffer } },
       { binding: 5, resource: { buffer: thermalRecordBuffer } },
       { binding: 6, resource: { buffer: thermalSegmentBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
@@ -694,8 +739,8 @@ export async function runSphReactionStepWebGpu({
       { binding: 11, resource: { buffer: paramsBuffer } }
     ]
   });
-  const proposeBindGroup = device.createBindGroup(bindEntries(proposePipeline.getBindGroupLayout(0)));
-  const resolveBindGroup = device.createBindGroup(bindEntries(resolvePipeline.getBindGroupLayout(0)));
+  const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
+  const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(proposePipeline);
@@ -729,7 +774,7 @@ export async function runSphReactionStepWebGpu({
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
   if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-  for (const buffer of [reactionRecordBuffer, productPhaseBuffer, thermalRecordBuffer, thermalSegmentBuffer, proposalBuffer, paramsBuffer]) {
+  for (const buffer of [reactionRecordBuffer, thermalRecordBuffer, thermalSegmentBuffer, proposalBuffer, paramsBuffer]) {
     buffer.destroy?.();
   }
   if (!retainOutputParticleBuffers) {

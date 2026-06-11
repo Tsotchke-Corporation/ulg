@@ -33,6 +33,10 @@ import {
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import { buildSphThermalMaterialTable } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
+import {
+  decodeSphRenderRows,
+  extractSphRenderRowsWebGpu
+} from '../runtime/sph/sphRenderGpuKernel.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -310,7 +314,7 @@ export function createSphPhaseScene(container, {
   const center = new THREE.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
   camera.position.set(center.x + refEdgeM * 0.85, center.y + refEdgeM * 0.55, center.z + refEdgeM * 1.15);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(width, height);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -385,6 +389,7 @@ export function createSphPhaseScene(container, {
   let pendingMlsMpmResidentSteps = null;
   let sphThermalMaterialTable = null;
   let sphReactionTable = null;
+  let sphResidentRenderState = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -402,6 +407,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphReactionTable = null;
+  scene.userData.sphResidentRenderState = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -1536,66 +1542,23 @@ export function createSphPhaseScene(container, {
   ensureSurface('h2o');
   ensureSurface('fe');
 
-  // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
-  // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
-  // continuous density surface from particles, but it does not invent material colour.
-  function setParticles({
-    positionsM,
-    colorsRgb,
-    materials = null,
-    emissiveByMaterial = null,
-    materialProperties = null,
-    reactions = null,
-    reactionContactRadiusM = null,
-    sphGpuParticleState: nextSphGpuParticleState = null,
-    mlsMpmGpuParticleState: nextMlsMpmGpuParticleState = null
-  }) {
-    const activeKeys = new Set();
-    const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
+  function rebuildOpticalStateForSurfaceBatches(batches, { materialProperties = null } = {}) {
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
-    sphThermalMaterialTable = materialProperties
-      ? buildSphThermalMaterialTable(materialProperties)
-      : null;
-    sphReactionTable = materialProperties
-      ? buildSphReactionTable(reactions || [], {
-        materialProperties,
-        contactRadiusM: reactionContactRadiusM ?? nextSphGpuParticleState?.smoothingLengthM ?? 0
-      })
-      : null;
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     opticalGpuLookupGeneration += 1;
     scene.userData.opticalGpuTable = opticalGpuTable;
-    scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
-    scene.userData.sphReactionTable = sphReactionTable;
     scene.userData.opticalGpuLookup = opticalGpuLookup;
     scene.userData.opticalGpuLookupExecution = null;
     scene.userData.opticalGpuLookupDrawState = null;
-    if (
-      sphGpuParticleUpload?.status === 'webgpu-uploaded'
-      && sphGpuParticleUploadSignature !== sphGpuParticleSignature(nextSphGpuParticleState)
-    ) {
-      destroySphGpuParticleBuffers(sphGpuParticleUpload);
-    }
-    sphGpuParticleState = nextSphGpuParticleState;
-    scene.userData.sphGpuParticleState = sphGpuParticleState;
-    sphGpuParticleUpload = null;
-    sphGpuParticleUploadSignature = null;
-    scene.userData.sphGpuParticleUpload = null;
-    if (
-      mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded'
-      && mlsMpmGpuParticleUploadSignature !== mlsMpmGpuParticleSignature(nextMlsMpmGpuParticleState)
-    ) {
-      destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
-    }
-    mlsMpmGpuParticleState = nextMlsMpmGpuParticleState;
-    scene.userData.mlsMpmGpuParticleState = mlsMpmGpuParticleState;
-    mlsMpmGpuParticleUpload = null;
-    mlsMpmGpuParticleUploadSignature = null;
-    scene.userData.mlsMpmGpuParticleUpload = null;
-    mlsMpmMechanicsPrediction = null;
-    mlsMpmMechanicsPredictionSignature = null;
-    scene.userData.mlsMpmMechanicsPrediction = null;
-    clearMlsMpmResidentExecutionArtifacts();
+  }
+
+  function applySurfaceBatches(batches, {
+    emissiveByMaterial = null,
+    materialProperties = null,
+    renderSource = 'cpu-particles',
+    renderRowsExecution = null
+  } = {}) {
+    const activeKeys = new Set();
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -1608,10 +1571,10 @@ export function createSphPhaseScene(container, {
       mesh.userData.materialKey = batch.material;
       mesh.userData.renderKey = batch.renderKey;
       mesh.userData.phase = batch.phase;
+      mesh.userData.renderSource = renderSource;
+      mesh.userData.renderRowsExecutionSchema = renderRowsExecution?.schema || null;
+      mesh.userData.renderRowsBackend = renderRowsExecution?.backend || null;
       mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(`${batch.material}|${batch.phase}`) || null;
-      // Incandescent surfaces (hot iron) glow: the radiation closure supplies the emissive colour,
-      // which is added on top of the BRDF, so a fully-metallic surface still lights up instead of
-      // rendering dark. A null/absent entry means the surface is below the glow threshold.
       const emissive = emissiveByMaterial?.[batch.material] ?? emissiveByMaterial?.[batch.renderKey] ?? null;
       if (emissive) {
         mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
@@ -1651,7 +1614,192 @@ export function createSphPhaseScene(container, {
         surface.mesh.reset();
         surface.mesh.update();
         surface.mesh.visible = false;
+        surface.mesh.userData.renderSource = renderSource;
       }
+    }
+  }
+
+  // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
+  // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
+  // continuous density surface from particles, but it does not invent material colour.
+  function setParticles({
+    positionsM,
+    colorsRgb,
+    materials = null,
+    emissiveByMaterial = null,
+    materialProperties = null,
+    reactions = null,
+    reactionContactRadiusM = null,
+    sphGpuParticleState: nextSphGpuParticleState = null,
+    mlsMpmGpuParticleState: nextMlsMpmGpuParticleState = null
+  }) {
+    const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
+    sphThermalMaterialTable = materialProperties
+      ? buildSphThermalMaterialTable(materialProperties)
+      : null;
+    sphReactionTable = materialProperties
+      ? buildSphReactionTable(reactions || [], {
+        materialProperties,
+        contactRadiusM: reactionContactRadiusM ?? nextSphGpuParticleState?.smoothingLengthM ?? 0
+      })
+      : null;
+    rebuildOpticalStateForSurfaceBatches(batches, { materialProperties });
+    scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
+    scene.userData.sphReactionTable = sphReactionTable;
+    sphResidentRenderState = null;
+    scene.userData.sphResidentRenderState = null;
+    if (
+      sphGpuParticleUpload?.status === 'webgpu-uploaded'
+      && sphGpuParticleUploadSignature !== sphGpuParticleSignature(nextSphGpuParticleState)
+    ) {
+      destroySphGpuParticleBuffers(sphGpuParticleUpload);
+    }
+    sphGpuParticleState = nextSphGpuParticleState;
+    scene.userData.sphGpuParticleState = sphGpuParticleState;
+    sphGpuParticleUpload = null;
+    sphGpuParticleUploadSignature = null;
+    scene.userData.sphGpuParticleUpload = null;
+    if (
+      mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded'
+      && mlsMpmGpuParticleUploadSignature !== mlsMpmGpuParticleSignature(nextMlsMpmGpuParticleState)
+    ) {
+      destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
+    }
+    mlsMpmGpuParticleState = nextMlsMpmGpuParticleState;
+    scene.userData.mlsMpmGpuParticleState = mlsMpmGpuParticleState;
+    mlsMpmGpuParticleUpload = null;
+    mlsMpmGpuParticleUploadSignature = null;
+    scene.userData.mlsMpmGpuParticleUpload = null;
+    mlsMpmMechanicsPrediction = null;
+    mlsMpmMechanicsPredictionSignature = null;
+    scene.userData.mlsMpmMechanicsPrediction = null;
+    clearMlsMpmResidentExecutionArtifacts();
+    applySurfaceBatches(batches, {
+      emissiveByMaterial,
+      materialProperties,
+      renderSource: 'cpu-particles'
+    });
+  }
+
+  async function refreshSphResidentRenderState({
+    preferWebGpu = true,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    residentSteps = mlsMpmResidentSteps,
+    materialProperties = null
+  } = {}) {
+    const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
+    const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
+    const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
+      || finalStep?.nextParticleUploads?.sphParticleUpload
+      || null;
+    if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
+      sphResidentRenderState = {
+        schema: 'peercompute.ulg.sph-resident-render-state.v0',
+        status: 'resident-render-rows-unavailable',
+        source: 'cpu-particles',
+        reason: 'retained resident SPH buffers are not available',
+        particleCount: nextSphParticleState?.particleCount ?? 0,
+        gpuAuthoritativeState: false,
+        compactRenderReadback: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+      scene.userData.sphResidentRenderState = sphResidentRenderState;
+      return sphResidentRenderState;
+    }
+    const resolvedDeviceResult = device
+      ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+      : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
+    if (!resolvedDeviceResult?.device) {
+      sphResidentRenderState = {
+        schema: 'peercompute.ulg.sph-resident-render-state.v0',
+        status: 'resident-render-webgpu-unavailable',
+        source: 'cpu-particles',
+        reason: resolvedDeviceResult?.reason || 'WebGPU render-row extraction not available',
+        particleCount: nextSphParticleState.particleCount,
+        gpuAuthoritativeState: false,
+        compactRenderReadback: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+      scene.userData.sphResidentRenderState = sphResidentRenderState;
+      return sphResidentRenderState;
+    }
+    try {
+      const renderRowsExecution = await extractSphRenderRowsWebGpu({
+        device: resolvedDeviceResult.device,
+        sphParticleState: nextSphParticleState,
+        sphParticleUpload: nextSphUpload,
+        sourceStateBuffer: nextSphUpload.stateBuffer,
+        sourceThermoBuffer: nextSphUpload.thermoBuffer
+      });
+      const decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
+        materialProperties: materialProperties || {},
+        reactionTable: sphReactionTable
+      });
+      const batches = createContinuousSurfaceBatches({
+        positionsM: decoded.positionsM,
+        colorsRgb: decoded.colorsRgb,
+        materials: decoded.materials,
+        boxEdgeM,
+        boxDimsM: dims
+      });
+      rebuildOpticalStateForSurfaceBatches(batches, { materialProperties });
+      applySurfaceBatches(batches, {
+        emissiveByMaterial: decoded.emissiveByMaterial,
+        materialProperties,
+        renderSource: 'resident-gpu-render-rows',
+        renderRowsExecution
+      });
+      await refreshOpticalGpuLookup({
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult: resolvedDeviceResult
+      });
+      sphResidentRenderState = {
+        schema: 'peercompute.ulg.sph-resident-render-state.v0',
+        status: 'resident-render-rows-applied',
+        source: 'resident-gpu-render-rows',
+        sourceExecutionSchema: renderRowsExecution.schema,
+        backend: renderRowsExecution.backend,
+        particleCount: decoded.particleCount,
+        surfaceCount: batches.length,
+        rowStrideFloats: renderRowsExecution.rowStrideFloats,
+        renderRowByteLength: renderRowsExecution.renderRowByteLength,
+        compactRenderReadback: true,
+        materialKeys: [...new Set(decoded.materials.map((descriptor) => descriptor.material))],
+        phaseKeys: [...new Set(decoded.materials.map((descriptor) => descriptor.phase))],
+        gpuAuthoritativeState: true,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+      scene.userData.sphResidentRenderState = sphResidentRenderState;
+      return sphResidentRenderState;
+    } catch (error) {
+      sphResidentRenderState = {
+        schema: 'peercompute.ulg.sph-resident-render-state.v0',
+        status: 'resident-render-rows-error',
+        source: 'cpu-particles',
+        reason: error instanceof Error ? error.message : String(error),
+        particleCount: nextSphParticleState.particleCount,
+        gpuAuthoritativeState: false,
+        compactRenderReadback: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+      scene.userData.sphResidentRenderState = sphResidentRenderState;
+      return sphResidentRenderState;
     }
   }
 
@@ -1748,6 +1896,9 @@ export function createSphPhaseScene(container, {
     getMlsMpmResidentRequestedReadbackMode() {
       return scene.userData.mlsMpmResidentRequestedReadbackMode;
     },
+    getSphResidentRenderState() {
+      return sphResidentRenderState;
+    },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,
@@ -1757,6 +1908,7 @@ export function createSphPhaseScene(container, {
     refreshMlsMpmG2pReconstruction,
     refreshMlsMpmResidentStep,
     refreshMlsMpmResidentSteps,
+    refreshSphResidentRenderState,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

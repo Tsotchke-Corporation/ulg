@@ -9265,3 +9265,98 @@ Failures / open questions:
 - The thermal material table is closure-derived but evidence-level; validation
   flags remain false.
 - No push was attempted.
+
+## 2026-06-11 08:08 AKDT - Resident reaction/render rows, explicit WebGPU layouts, profile pass
+
+Prompt:
+
+- Pick up from the interrupted GPU-resident SPH work, keep local-only commits,
+  continue using ICC, fix the renderer path that showed only the latest/unknown
+  material, add Cherenkov/radiation closure planning, and run a profiler before
+  optimizing.
+
+Actions:
+
+- Continued from the resident render-row slice: added compact
+  `peercompute.ulg.sph-gpu-render-rows.v0` ABI rows and a WebGPU extraction
+  kernel that reads retained SPH state/thermo buffers.
+- Refactored `sphPhaseScene` so CPU particles and resident render rows share
+  continuous MarchingCubes batching, optical GPU lookup, material/emissive
+  application, and surface metadata.
+- Wired the demo scheduler so no-full-readback resident WebGPU steps refresh
+  visible surfaces from compact render rows.
+- Fixed the Na + water resident WebGPU reaction/render bug:
+  - requested `maxStorageBuffersPerShaderStage: 10` when supported,
+  - packed reaction rows and derived product-phase mechanics rows into one GPU
+    storage buffer,
+  - kept the reaction resolve pass to 10 storage buffers on the tested adapter,
+  - added regression coverage for the compact combined reaction buffer.
+- Added a shared explicit compute-layout helper and removed `layout: 'auto'`
+  from the SPH/MLS-MPM resident hot path: mechanics, P2G, grid update, G2P,
+  thermal, reaction, compact summary, optical lookup, and render-row extraction.
+- Ran a Chromium/WebGPU Na + water probe. Before the fix, render rows decoded
+  as `unknown` and browser console showed bind-group validation failures. After
+  the fix, render rows decoded `h2o`, `Na`, and `naoh` with liquid/gas/solid
+  phases, optical lookup rows were attached to visible surfaces, and no WebGPU
+  validation warnings remained.
+- Ran a browser CPU/trace profile after the resident render bridge was active.
+  JS script time was small; the trace was dominated by headless WebGL
+  `ReadPixels`/flush stalls. Disabled `preserveDrawingBuffer` for the SPH
+  Three.js renderer, which reduced observed `GLES2::ReadPixels` calls in the
+  sampled headless trace from `18` to `5`.
+- Documented the Cherenkov/radioactive-radiation path as a closure requirement:
+  decay/fission/fusion/activation closures emit charged particles/photons,
+  optical closures provide wavelength-dependent refractive index, and a
+  Frank-Tamm-style Cherenkov closure emits photons only when
+  `beta * n(lambda) > 1`.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/runtime/sph/sphG2pGpuKernel.js`
+- `src/runtime/sph/sphGridGpuKernel.js`
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/runtime/sph/sphMechanicsGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuSummary.js`
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/runtime/sph/sphRenderGpuKernel.js`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `src/runtime/webgpuComputeLayout.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `tests/sphReactionGpuKernel.test.mjs`
+- `tests/sphRenderGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Validation so far:
+
+- PASS: focused kernel/layout tests for ABI, optical GPU buffers, reaction,
+  mechanics, grid, grid update, resident step, render rows, and thermal paths.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: final `npm test` passed `308/308`.
+- PASS: final `git diff --check`.
+- PASS: focused HTTPS Chromium e2e passed after the renderer perf change
+  (`1/1`, about 1.2 minutes).
+- PASS: manual WebGPU Na + water probe showed resident render rows from WebGPU
+  with material keys `h2o`, `Na`, and `naoh`, phase keys `liquid`, `gas`, and
+  `solid`, visible resident surfaces for all three materials, attached optical
+  lookup output indices, and zero WebGPU validation warnings.
+
+Failures / open questions:
+
+- Direct GPU-driven rendering is still pending; render rows are compact but
+  still read back to rebuild Three.js MarchingCubes surfaces.
+- Browser profiling in headless Chromium is dominated by GPU-process/WebGL
+  flush stalls, so native/on-device frame timing is still needed for a real
+  60 Hz target.
+- Nuclear, Cherenkov, fission, fusion, radioactive-decay, activation, and
+  ionizing-radiation handling remain planned closure families, not implemented
+  solvers.
+- No push was attempted.

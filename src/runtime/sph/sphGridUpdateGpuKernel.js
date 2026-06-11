@@ -9,6 +9,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmGridUpdateWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
+import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import { MLS_MPM_GPU_GRID_NODE_FLOATS } from './sphGridGpuKernel.js';
 
 export {
@@ -264,12 +265,18 @@ export async function runMlsMpmGridUpdateWebGpu({
       cflFactor: cfl
     }));
     const module = device.createShaderModule({ code: mlsMpmGridUpdateWgsl });
-    const pipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: { module, entryPoint: 'main' }
+    const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      label: 'ulg-mls-mpm-grid-update',
+      module,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'storage'),
+        computeBufferBinding(2, 'uniform')
+      ]
     });
     const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceGridBuffer } },
         { binding: 1, resource: { buffer: updatedGridBuffer } },

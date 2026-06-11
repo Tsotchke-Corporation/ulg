@@ -15,6 +15,7 @@ import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_RENDER_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
@@ -59,6 +60,8 @@ import {
   ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+  ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
@@ -74,6 +77,7 @@ import {
   mlsMpmResidentSummaryWgsl,
   opticalLookupWgsl,
   sphReactionStepWgsl,
+  sphRenderRowsWgsl,
   sphThermalStepWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
 
@@ -268,6 +272,37 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionStepWgsl, /fn propose/);
   assert.match(sphReactionStepWgsl, /fn resolve/);
   assert.match(sphReactionStepWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('SPH GPU render rows ABI exposes compact render-state rows', () => {
+  assert.equal(ULG_SPH_GPU_RENDER_ROWS_SCHEMA, 'peercompute.ulg.sph-gpu-render-rows.v0');
+  assert.equal(
+    ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-rows-execution.v0'
+  );
+  assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_RENDER_ROW_LAYOUT.slice(0, 8), [
+    'positionXM:f32',
+    'positionYM:f32',
+    'positionZM:f32',
+    'massKg:f32',
+    'materialId:f32',
+    'phaseId:f32',
+    'temperatureK:f32',
+    'status:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_ROW_LAYOUT.slice(8), [
+    'restDensityKgPerM3:f32',
+    'phaseFractionGas:f32',
+    'representedEntityCount:f32',
+    'pad0:f32'
+  ]);
+  assert.match(sphRenderRowsWgsl, /struct RenderRowsParams/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(0\) var<storage, read> sph_state/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(1\) var<storage, read> sph_thermo/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> render_rows/);
+  assert.match(sphRenderRowsWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {

@@ -1197,6 +1197,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     return steps.continuedFromResidentState === true
       && steps.residentSourceMode === 'previous-gpu-resident-output';
   });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const steps = overlay?.__sphScene?.getMlsMpmResidentSteps?.();
+    if (!steps?.schema || steps.backend !== 'webgpu') return true;
+    return overlay?.__sphScene?.getSphResidentRenderState?.()?.source === 'resident-gpu-render-rows';
+  });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
@@ -1216,12 +1222,15 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmG2pReconstruction = scene?.getMlsMpmG2pReconstruction?.();
     const mlsMpmResidentStep = scene?.getMlsMpmResidentStep?.();
     const mlsMpmResidentSteps = scene?.getMlsMpmResidentSteps?.();
+    const sphResidentRenderState = scene?.getSphResidentRenderState?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
         visibleSurfaces.push({
           materialKey: node.userData.materialKey,
           visible: node.visible,
+          renderSource: node.userData.renderSource ?? null,
+          renderRowsBackend: node.userData.renderRowsBackend ?? null,
           lookupOutputRecordIndex: node.userData.opticalGpuLookupOutput?.recordIndex ?? null,
           lookupBackend: node.userData.opticalGpuExecutionBackend ?? null
         });
@@ -1456,6 +1465,25 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         phaseChangeValidation: mlsMpmResidentSteps?.phaseChangeValidation,
         fullPhysicsValidation: mlsMpmResidentSteps?.fullPhysicsValidation
       },
+      sphResidentRenderState: {
+        schema: sphResidentRenderState?.schema,
+        status: sphResidentRenderState?.status,
+        source: sphResidentRenderState?.source,
+        sourceExecutionSchema: sphResidentRenderState?.sourceExecutionSchema,
+        backend: sphResidentRenderState?.backend,
+        particleCount: sphResidentRenderState?.particleCount,
+        surfaceCount: sphResidentRenderState?.surfaceCount,
+        rowStrideFloats: sphResidentRenderState?.rowStrideFloats,
+        renderRowByteLength: sphResidentRenderState?.renderRowByteLength,
+        compactRenderReadback: sphResidentRenderState?.compactRenderReadback,
+        gpuAuthoritativeState: sphResidentRenderState?.gpuAuthoritativeState,
+        materialKeys: sphResidentRenderState?.materialKeys,
+        phaseKeys: sphResidentRenderState?.phaseKeys,
+        scientificValidation: sphResidentRenderState?.scientificValidation,
+        sphValidation: sphResidentRenderState?.sphValidation,
+        phaseChangeValidation: sphResidentRenderState?.phaseChangeValidation,
+        fullPhysicsValidation: sphResidentRenderState?.fullPhysicsValidation
+      },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
@@ -1466,6 +1494,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback');
   expect(derivedSummary.statusText).toContain('resident source  :');
   expect(derivedSummary.statusText).toContain('compact summary  :');
+  expect(derivedSummary.statusText).toContain('render source    :');
+  expect(derivedSummary.statusText).toContain('render authoritative:');
   expect(derivedSummary.statusText).toContain('gpu authoritative: false');
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
   expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
@@ -1729,6 +1759,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
     expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
+    expect(derivedSummary.statusText).toContain('render source    : resident-gpu-render-rows');
+    expect(derivedSummary.statusText).toContain('render authoritative: true');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
     expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('previous-gpu-resident-output');
     expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(true);
@@ -1777,10 +1809,30 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextTime).toBeGreaterThan(
       derivedSummary.mlsMpmResidentStep.particlePingPong.time
     );
+    expect(derivedSummary.sphResidentRenderState.schema).toBe('peercompute.ulg.sph-resident-render-state.v0');
+    expect(derivedSummary.sphResidentRenderState.status).toBe('resident-render-rows-applied');
+    expect(derivedSummary.sphResidentRenderState.source).toBe('resident-gpu-render-rows');
+    expect(derivedSummary.sphResidentRenderState.sourceExecutionSchema).toBe('peercompute.ulg.sph-gpu-render-rows.v0');
+    expect(derivedSummary.sphResidentRenderState.backend).toBe('webgpu');
+    expect(derivedSummary.sphResidentRenderState.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+    expect(derivedSummary.sphResidentRenderState.surfaceCount).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentRenderState.rowStrideFloats).toBe(12);
+    expect(derivedSummary.sphResidentRenderState.renderRowByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentRenderState.compactRenderReadback).toBe(true);
+    expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
+    expect(derivedSummary.sphResidentRenderState.scientificValidation).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.sphValidation).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.phaseChangeValidation).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.fullPhysicsValidation).toBe(false);
+    expect(derivedSummary.visibleSurfaces.every((surface) => (
+      surface.renderSource === 'resident-gpu-render-rows'
+      && surface.renderRowsBackend === 'webgpu'
+    ))).toBe(true);
   } else {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=full-parity-readback');
     expect(derivedSummary.statusText).toContain('resident source  : cpu-packed-state continued=false');
     expect(derivedSummary.statusText).toContain('render readback  : available=true hot-loop-no-full=false');
+    expect(derivedSummary.statusText).toContain('render authoritative: false');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('full-parity-readback');
     expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('cpu-packed-state');
     expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(false);

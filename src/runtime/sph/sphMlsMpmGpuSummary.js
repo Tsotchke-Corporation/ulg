@@ -14,6 +14,7 @@ import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS
 } from './sphGpuBuffers.js';
+import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -189,12 +190,22 @@ export async function runMlsMpmResidentSummaryWebGpu({
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSummaryParamsArray({ particleCount, gridNodeCount, partialCount }));
     const partialsModule = device.createShaderModule({ code: mlsMpmResidentSummaryPartialsWgsl });
-    const partialsPipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: partialsModule, entryPoint: 'main' }
+    const { pipeline: partialsPipeline, bindGroupLayout: partialsBindGroupLayout } = createExplicitComputePipeline(device, {
+      label: 'ulg-mls-mpm-resident-summary-partials',
+      module: partialsModule,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'read-only-storage'),
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'uniform')
+      ]
     });
     const partialsBindGroup = device.createBindGroup({
-      layout: partialsPipeline.getBindGroupLayout(0),
+      layout: partialsBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: sourceStateBuffer } },
         { binding: 1, resource: { buffer: nextStateBuffer } },
@@ -206,12 +217,18 @@ export async function runMlsMpmResidentSummaryWebGpu({
       ]
     });
     const finalizeModule = device.createShaderModule({ code: mlsMpmResidentSummaryFinalizeWgsl });
-    const finalizePipeline = device.createComputePipeline({
-      layout: 'auto',
-      compute: { module: finalizeModule, entryPoint: 'main' }
+    const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createExplicitComputePipeline(device, {
+      label: 'ulg-mls-mpm-resident-summary-finalize',
+      module: finalizeModule,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'storage'),
+        computeBufferBinding(2, 'uniform')
+      ]
     });
     const finalizeBindGroup = device.createBindGroup({
-      layout: finalizePipeline.getBindGroupLayout(0),
+      layout: finalizeBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: partialsBuffer } },
         { binding: 1, resource: { buffer: summaryBuffer } },

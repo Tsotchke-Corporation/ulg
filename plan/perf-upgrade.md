@@ -125,6 +125,12 @@ final GPU-resident renderer or SPH hot loop. The next upgrade is to bind these
 packed buffers and lookup outputs into WebGPU draw resources directly, then add
 GPU-resident SPH particle state buffers.
 
+The SPH particle-buffer ABI/runtime slice now exists as
+`peercompute.ulg.sph-gpu-particle-buffer.v0`. It packs CPU-authoritative SPH
+particles into f32x4-aligned state and thermo storage-buffer rows using shared
+material/phase ids and closure-derived temperature/phase fractions. It is not
+yet wired into the scene or a GPU mechanics kernel.
+
 ## Hot-Loop Kernel Chain
 
 A first GPU-resident SPH phase demo should target this dispatch chain:

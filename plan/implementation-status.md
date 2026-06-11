@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 22:43 AKDT
+Updated: 2026-06-10 22:48 AKDT
 
 ## Done
 
@@ -45,6 +45,14 @@ Updated: 2026-06-10 22:43 AKDT
   is still an interim display layer, not a WebGPU renderer. Optical material ids
   are stable across table rebuilds: elements use atomic number and compounds use
   deterministic f32-exact hashed ids.
+- Added the first SPH GPU particle-buffer ABI/runtime packer. `ulg-gpu-abi`
+  now declares `peercompute.ulg.sph-gpu-particle-buffer.v0` and
+  `peercompute.ulg.sph-gpu-particle-buffer-set.v0` with f32x4-aligned state
+  and thermo rows. `sphGpuBuffers.js` packs CPU-authoritative particles into
+  WebGPU-ready storage buffers, deriving temperature and phase fractions from
+  closure internal energy, sharing optical material ids and phase ids, and
+  keeping scientific/SPH/phase validation false. This is upload plumbing, not a
+  GPU SPH mechanics solver.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

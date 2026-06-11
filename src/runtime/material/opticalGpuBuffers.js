@@ -78,7 +78,7 @@ const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
 
-const PHASE_IDS = Object.freeze({
+export const GPU_PHASE_IDS = Object.freeze({
   unknown: 0,
   solid: 1,
   liquid: 2,
@@ -123,8 +123,8 @@ function linearRgb(values, fallback = [0, 0, 0]) {
   return [srgbToLinear(source[0]), srgbToLinear(source[1]), srgbToLinear(source[2])];
 }
 
-function phaseId(phase) {
-  return PHASE_IDS[phase] ?? PHASE_IDS.unknown;
+export function gpuPhaseId(phase) {
+  return GPU_PHASE_IDS[phase] ?? GPU_PHASE_IDS.unknown;
 }
 
 function stableEnumId(map, value) {
@@ -228,7 +228,7 @@ export function buildOpticalGpuTable(descriptors, {
     );
     appendRecord(recordValues, [
       materialId,
-      phaseId(phase),
+      gpuPhaseId(phase),
       spectralOffset,
       spectralCount,
       base[0],
@@ -256,7 +256,7 @@ export function buildOpticalGpuTable(descriptors, {
       material,
       phase,
       materialId,
-      phaseId: phaseId(phase),
+      phaseId: gpuPhaseId(phase),
       recordIndex: records.length,
       spectralOffset,
       spectralCount,
@@ -316,7 +316,7 @@ export function buildOpticalGpuLookupQueries(table, descriptors) {
   for (const descriptor of descriptors) {
     const { material, phase } = queryDescriptorKey(descriptor);
     const materialId = materialIds.get(material) ?? 0;
-    const id = phaseId(phase);
+    const id = gpuPhaseId(phase);
     values.push(materialId, id, 0, 0);
     metadata.push({ material, phase, materialId, phaseId: id });
   }

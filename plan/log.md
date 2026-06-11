@@ -7942,3 +7942,63 @@ Failures / open questions:
 - SPH dynamics, EOS sampling, phase updates, and neighbor search remain
   CPU-authoritative.
 - No push was attempted.
+
+## 2026-06-10 22:48:10 AKDT - SPH GPU particle buffer ABI
+
+Prompt:
+
+- Continue toward a GPU-resident SPH stack after optical lookup draw-state
+  integration, without pretending CPU mechanics have moved to WebGPU.
+
+Actions:
+
+- Added ABI constants and f32x4-aligned layouts for
+  `peercompute.ulg.sph-gpu-particle-buffer.v0` and
+  `peercompute.ulg.sph-gpu-particle-buffer-set.v0`.
+- Exported shared GPU phase ids from `opticalGpuBuffers.js` so SPH particle
+  buffers and optical lookup rows cannot drift on phase encoding.
+- Added `src/runtime/sph/sphGpuBuffers.js`, which packs CPU-authoritative SPH
+  particles into state and thermo typed arrays: position, velocity, mass,
+  specific internal energy, material id, phase id, closure-derived temperature,
+  rest density, phase fractions, smoothing length, represented entity count, and
+  status.
+- Added upload/destroy helpers for WebGPU-like storage buffers plus a decode
+  helper for tests and diagnostics.
+- Added ABI and focused SPH GPU buffer tests for row layout, initial demo
+  packing, closure-derived temperature/phase, missing-property status, upload
+  byte lengths, and buffer destruction.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/runtime/sph/sphGpuBuffers.js`
+- `tests/abi.test.mjs`
+- `tests/sphGpuBuffers.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `node --check ulg-gpu-abi/src/index.js src/runtime/material/opticalGpuBuffers.js src/runtime/sph/sphGpuBuffers.js tests/abi.test.mjs tests/sphGpuBuffers.test.mjs`
+- `node --test tests/abi.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphGpuBuffers.test.mjs`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/optical/SPH-GPU-buffer tests passed `24/24`.
+- PASS: `npm test` passed `236/236`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The new particle buffers are not yet bound to the scene or reused across
+  frames.
+- This does not encode MLS-MPM deformation state or execute SPH/MPM mechanics
+  on WebGPU.
+- No push was attempted.

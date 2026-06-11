@@ -291,6 +291,12 @@ Current implementation checkpoint (2026-06-10):
 - The accepted lookup output is decoded into
   `peercompute.ulg.optical-gpu-draw-state.v0` rows and applied to the matching
   visible continuous surfaces by active surface key.
+- The first SPH particle GPU buffer ABI/runtime packer is implemented:
+  `peercompute.ulg.sph-gpu-particle-buffer.v0` and
+  `peercompute.ulg.sph-gpu-particle-buffer-set.v0`. It packs CPU-authored
+  particle position, velocity, mass, internal energy, material id, closure phase,
+  temperature, rest density, phase fractions, smoothing length, and represented
+  entity count into f32x4-aligned WebGPU storage-buffer rows.
 - Each packed table contains closure-derived PBR material records plus spectral
   sample rows suitable for WebGPU storage-buffer upload.
 - The runtime can sample packed records by material/phase id through a CPU
@@ -299,7 +305,8 @@ Current implementation checkpoint (2026-06-10):
   compounds use deterministic f32-exact hashed ids.
 - The demo still renders through Three.js `MeshPhysicalMaterial`; the draw state
   can now come from accepted lookup output, but a WebGPU renderer does not yet
-  consume those buffers directly.
+  consume those buffers directly. The particle GPU buffers are not yet bound to
+  the scene or mechanics loop.
 
 Validation remains false until quantitative optical-response evidence exists.
 The current scalar-relativistic atomic Drude-Lorentz path is useful reference

@@ -12,6 +12,8 @@ export const ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA = 'peercompute.ulg.optical-gpu-bu
 export const ULG_OPTICAL_GPU_LOOKUP_SCHEMA = 'peercompute.ulg.optical-gpu-lookup.v0';
 export const ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-execution.v0';
 export const ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-parity.v0';
+export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer.v0';
+export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',
@@ -73,6 +75,30 @@ export const OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT = Object.freeze([
   'vertexColorPolicyId:f32',
   'status:f32',
   'recordIndex:f32'
+]);
+export const SPH_GPU_PARTICLE_STATE_ROW_LAYOUT = Object.freeze([
+  'positionXM:f32',
+  'positionYM:f32',
+  'positionZM:f32',
+  'massKg:f32',
+  'velocityXMPerS:f32',
+  'velocityYMPerS:f32',
+  'velocityZMPerS:f32',
+  'specificInternalEnergyJPerKg:f32'
+]);
+export const SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'phaseId:f32',
+  'temperatureK:f32',
+  'restDensityKgPerM3:f32',
+  'phaseFractionSolid:f32',
+  'phaseFractionLiquid:f32',
+  'phaseFractionGas:f32',
+  'phaseFractionPlasma:f32',
+  'smoothingLengthM:f32',
+  'representedEntityCount:f32',
+  'status:f32',
+  'pad0:f32'
 ]);
 
 export const D_TYPES = Object.freeze({

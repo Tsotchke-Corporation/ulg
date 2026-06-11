@@ -9,6 +9,8 @@ import {
   OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT,
   OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT,
   OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   createClosureTableDescriptor,
   createClosureTableSampleBuffer,
   createClosureTableWgslDescriptor,
@@ -23,7 +25,9 @@ import {
   ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
-  ULG_OPTICAL_GPU_TABLE_SCHEMA
+  ULG_OPTICAL_GPU_TABLE_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import { opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
@@ -131,6 +135,27 @@ test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
   assert.match(opticalLookupWgsl, /@group\(0\) @binding\(0\) var<storage, read> optical_records/);
   assert.match(opticalLookupWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> optical_outputs/);
   assert.match(opticalLookupWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
+  assert.equal(ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA, 'peercompute.ulg.sph-gpu-particle-buffer.v0');
+  assert.equal(ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA, 'peercompute.ulg.sph-gpu-particle-buffer-set.v0');
+  assert.equal(SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length, 8);
+  assert.equal(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.slice(0, 4), [
+    'positionXM:f32',
+    'positionYM:f32',
+    'positionZM:f32',
+    'massKg:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.slice(0, 4), [
+    'materialId:f32',
+    'phaseId:f32',
+    'temperatureK:f32',
+    'restDensityKgPerM3:f32'
+  ]);
 });
 
 test('schema sketches validate representative artifacts', () => {

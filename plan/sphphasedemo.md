@@ -288,15 +288,18 @@ Current implementation checkpoint (2026-06-10):
   WebGPU output only after CPU parity
   (`peercompute.ulg.optical-gpu-lookup-parity.v0`), and otherwise keeps the CPU
   reference output.
+- The accepted lookup output is decoded into
+  `peercompute.ulg.optical-gpu-draw-state.v0` rows and applied to the matching
+  visible continuous surfaces by active surface key.
 - Each packed table contains closure-derived PBR material records plus spectral
   sample rows suitable for WebGPU storage-buffer upload.
 - The runtime can sample packed records by material/phase id through a CPU
   parity path or a WebGPU dispatch helper.
 - Material ids are stable for GPU residency: elements use atomic number, while
   compounds use deterministic f32-exact hashed ids.
-- The demo still renders through Three.js `MeshPhysicalMaterial`; the lookup
-  output is executed and exposed, but a WebGPU renderer does not yet consume it
-  directly for draw state.
+- The demo still renders through Three.js `MeshPhysicalMaterial`; the draw state
+  can now come from accepted lookup output, but a WebGPU renderer does not yet
+  consume those buffers directly.
 
 Validation remains false until quantitative optical-response evidence exists.
 The current scalar-relativistic atomic Drude-Lorentz path is useful reference

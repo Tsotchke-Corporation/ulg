@@ -118,11 +118,12 @@ ABI, scene bridge, and live optional browser WebGPU execution path. ULG can pack
 closure-derived PBR/spectral records into stable WebGPU storage-buffer layouts,
 assign stable element/compound material ids, build material/phase lookup rows
 for active SPH surface batches, execute the lookup kernel in Chromium WebGPU,
-and accept the result only after CPU parity passes. The visible demo still
-renders through Three.js `MeshPhysicalMaterial`, so this is not yet the final
-GPU-resident renderer or SPH hot loop. The next upgrade is to bind these packed
-buffers and lookup outputs into the live render/simulation frame pipeline
-instead of exposing them as scene metadata.
+accept the result only after CPU parity passes, and decode the accepted output
+into draw-state rows applied to the visible Three.js surfaces. The visible demo
+still renders through Three.js `MeshPhysicalMaterial`, so this is not yet the
+final GPU-resident renderer or SPH hot loop. The next upgrade is to bind these
+packed buffers and lookup outputs into WebGPU draw resources directly, then add
+GPU-resident SPH particle state buffers.
 
 ## Hot-Loop Kernel Chain
 

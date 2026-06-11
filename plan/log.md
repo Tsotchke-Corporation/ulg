@@ -7875,3 +7875,70 @@ Failures / open questions:
 - This does not move SPH dynamics, EOS, phase updates, or neighbor search onto
   WebGPU yet.
 - No push was attempted.
+
+## 2026-06-10 22:43:17 AKDT - Optical lookup draw-state application
+
+Prompt:
+
+- Continue from browser WebGPU optical lookup execution and make the accepted
+  lookup result feed renderer draw state instead of remaining only scene
+  metadata.
+
+Actions:
+
+- Added `decodeOpticalGpuLookupOutputRows()` to
+  `src/runtime/material/opticalGpuBuffers.js` so compact lookup output rows can
+  be interpreted as material/phase draw-state records with query metadata.
+- Extended `src/visualization/sphPhaseScene.js` so accepted lookup execution
+  rows are mapped back to active surface keys, applied to each visible
+  `MeshPhysicalMaterial`, and recorded as
+  `peercompute.ulg.optical-gpu-draw-state.v0` scene metadata.
+- Added `getOpticalGpuDrawState()` and per-surface
+  `userData.opticalGpuLookupOutput` / `opticalGpuExecutionBackend` inspection
+  fields for browser tests and handoff diagnostics.
+- Updated unit, renderer, and browser smoke tests to assert decoded rows,
+  surface-key mapping, draw-state schema, applied-count, and visible-surface
+  backend/record-index wiring.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+
+Commands run:
+
+- `node --check src/runtime/material/opticalGpuBuffers.js src/visualization/sphPhaseScene.js tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs tests/demo.e2e.mjs`
+- `node --test tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- Browser HTTPS probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused optical/renderer tests passed `19/19`.
+- PASS: Browser HTTPS probe executed lookup on `backend=webgpu`,
+  `status=webgpu-executed`, `parityStatus=pass`, and reported
+  `peercompute.ulg.optical-gpu-draw-state.v0` with `appliedCount=2` and both
+  visible surfaces carrying WebGPU lookup output record indices.
+- PASS: focused SPH e2e passed against the live HTTPS server (`1/1`).
+- PASS: `npm test` passed `231/231`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This still applies draw state to Three.js materials on the CPU side after
+  lookup completion. A future slice must bind the packed lookup output into
+  actual WebGPU draw resources.
+- SPH dynamics, EOS sampling, phase updates, and neighbor search remain
+  CPU-authoritative.
+- No push was attempted.

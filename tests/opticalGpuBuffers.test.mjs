@@ -15,6 +15,7 @@ import {
   buildOpticalGpuTable,
   buildOpticalGpuLookupQueries,
   createOpticalGpuLookupParityReport,
+  decodeOpticalGpuLookupOutputRows,
   opticalLookupWgsl,
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
@@ -143,6 +144,23 @@ test('optical GPU lookup queries sample packed records by material and phase ids
   assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS + 11], 1, 'second query should match record index 1');
   assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 10], 255, 'unknown query should return blocked status');
   assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 11], -1, 'unknown query should return no record index');
+});
+
+test('optical GPU lookup output rows decode draw-state fields with query metadata', () => {
+  const { lookup, cpuReference } = createLookupFixture();
+  const rows = decodeOpticalGpuLookupOutputRows(cpuReference, lookup);
+
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].material, 'h2o');
+  assert.equal(rows[0].phase, 'liquid');
+  assert.deepEqual(rows[0].baseColorLinear.map((value) => Number.isFinite(value)), [true, true, true]);
+  assert.ok(rows[0].opacity > 0);
+  assert.equal(rows[0].recordIndex, 0);
+  assert.equal(rows[1].phase, 'gas');
+});
+
+test('optical GPU lookup output decoder rejects missing output buffers', () => {
+  assert.throws(() => decodeOpticalGpuLookupOutputRows({ outputs: [] }), /Float32Array lookup outputs/);
 });
 
 test('optical GPU lookup WGSL consumes packed vec4 rows without struct alignment drift', () => {

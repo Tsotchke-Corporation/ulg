@@ -167,6 +167,7 @@ test('SPH phase renderer derives optical GPU lookup rows for active surface batc
 
   assert.equal(lookup.lookup.schema, 'peercompute.ulg.optical-gpu-lookup.v0');
   assert.equal(lookup.lookup.queryCount, 2);
+  assert.deepEqual(lookup.surfaceKeys, batches.map((batch) => batch.surfaceKey));
   assert.equal(lookup.cpuReference.outputs.length, 24);
   assert.equal(lookup.cpuReference.outputs[11], 0);
   assert.equal(lookup.cpuReference.outputs[23], 1);

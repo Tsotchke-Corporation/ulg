@@ -9,6 +9,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import {
   buildOpticalGpuLookupQueries,
   buildOpticalGpuTable,
+  decodeOpticalGpuLookupOutputRows,
   requestOpticalGpuDevice,
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu
@@ -242,6 +243,7 @@ export function createOpticalGpuLookupForSurfaceBatches(table, batches) {
   return {
     lookup,
     cpuReference: sampleOpticalGpuTableCpu(table, lookup),
+    surfaceKeys: batches.map((batch) => batch.surfaceKey),
     signature: opticalGpuLookupSignature(table, lookup)
   };
 }
@@ -331,6 +333,48 @@ export function createSphPhaseScene(container, {
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
+  scene.userData.opticalGpuLookupDrawState = null;
+
+  function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
+    if (!execution?.outputs) return [];
+    const rows = decodeOpticalGpuLookupOutputRows(execution, lookupState.lookup);
+    const applied = [];
+    for (const row of rows) {
+      const surfaceKey = lookupState.surfaceKeys?.[row.queryIndex];
+      const surface = surfaceKey ? surfaces.get(surfaceKey) : null;
+      if (!surface || row.status === 255 || row.recordIndex < 0) continue;
+      const { mesh } = surface;
+      const material = mesh.material;
+      material.color.setRGB(
+        clamp(row.baseColorLinear[0], 0, 1),
+        clamp(row.baseColorLinear[1], 0, 1),
+        clamp(row.baseColorLinear[2], 0, 1),
+        THREE.LinearSRGBColorSpace
+      );
+      material.opacity = clamp(row.opacity, 0, 1);
+      material.transparent = row.transmission > 0.01 || material.opacity < 0.999;
+      material.depthWrite = !material.transparent || material.opacity > 0.5;
+      material.metalness = clamp(row.metalness, 0, 1);
+      material.roughness = clamp(row.roughness, 0, 1);
+      material.transmission = clamp(row.transmission, 0, 1);
+      material.ior = Math.max(1, row.ior || 1);
+      material.vertexColors = row.vertexColorPolicyId === 2;
+      material.needsUpdate = true;
+      mesh.userData.opticalGpuLookupOutput = row;
+      mesh.userData.opticalGpuExecutionBackend = execution.backend;
+      applied.push({ surfaceKey, row });
+    }
+    scene.userData.opticalGpuLookupDrawState = {
+      schema: 'peercompute.ulg.optical-gpu-draw-state.v0',
+      sourceExecutionSchema: execution.schema,
+      backend: execution.backend,
+      appliedCount: applied.length,
+      rows,
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    };
+    return applied;
+  }
 
   function requestCachedOpticalGpuDevice(ref = navigatorRef) {
     if (!opticalGpuDeviceResultPromise) {
@@ -409,6 +453,7 @@ export function createSphPhaseScene(container, {
       };
       scene.userData.opticalGpuLookup = opticalGpuLookup;
       scene.userData.opticalGpuLookupExecution = execution;
+      applyOpticalGpuLookupExecution(execution, opticalGpuLookup);
       return opticalGpuLookup;
     })();
     pendingOpticalGpuLookup = { signature, promise };
@@ -474,6 +519,7 @@ export function createSphPhaseScene(container, {
     scene.userData.opticalGpuTable = opticalGpuTable;
     scene.userData.opticalGpuLookup = opticalGpuLookup;
     scene.userData.opticalGpuLookupExecution = null;
+    scene.userData.opticalGpuLookupDrawState = null;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -580,6 +626,9 @@ export function createSphPhaseScene(container, {
     },
     getOpticalGpuLookup() {
       return opticalGpuLookup;
+    },
+    getOpticalGpuDrawState() {
+      return scene.userData.opticalGpuLookupDrawState;
     },
     refreshOpticalGpuLookup,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice

@@ -423,6 +423,36 @@ export function createOpticalGpuLookupParityReport({ cpuReference, gpuResult, to
   };
 }
 
+export function decodeOpticalGpuLookupOutputRows(result, lookup = null) {
+  const outputs = result?.outputs;
+  if (!(outputs instanceof Float32Array)) {
+    throw new TypeError('decodeOpticalGpuLookupOutputRows requires Float32Array lookup outputs');
+  }
+  const queryCount = result.queryCount ?? lookup?.queryCount ?? (outputs.length / OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS);
+  const rows = [];
+  for (let queryIndex = 0; queryIndex < queryCount; queryIndex += 1) {
+    const offset = queryIndex * OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS;
+    rows.push({
+      queryIndex,
+      material: lookup?.metadata?.[queryIndex]?.material ?? null,
+      phase: lookup?.metadata?.[queryIndex]?.phase ?? null,
+      materialId: lookup?.metadata?.[queryIndex]?.materialId ?? null,
+      phaseId: lookup?.metadata?.[queryIndex]?.phaseId ?? null,
+      baseColorLinear: [outputs[offset], outputs[offset + 1], outputs[offset + 2]],
+      opacity: outputs[offset + 3],
+      metalness: outputs[offset + 4],
+      roughness: outputs[offset + 5],
+      transmission: outputs[offset + 6],
+      ior: outputs[offset + 7],
+      renderModelId: outputs[offset + 8],
+      vertexColorPolicyId: outputs[offset + 9],
+      status: outputs[offset + 10],
+      recordIndex: outputs[offset + 11]
+    });
+  }
+  return rows;
+}
+
 function lookupExecutionFromResult(result, {
   cpuReference = null,
   gpuResult = null,

@@ -1178,12 +1178,15 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const opticalGpuTable = scene?.getOpticalGpuTable?.();
     const opticalGpuLookup = scene?.getOpticalGpuLookup?.();
     const opticalGpuExecution = opticalGpuLookup?.execution;
+    const opticalGpuDrawState = scene?.getOpticalGpuDrawState?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
         visibleSurfaces.push({
           materialKey: node.userData.materialKey,
-          visible: node.visible
+          visible: node.visible,
+          lookupOutputRecordIndex: node.userData.opticalGpuLookupOutput?.recordIndex ?? null,
+          lookupBackend: node.userData.opticalGpuExecutionBackend ?? null
         });
       }
     });
@@ -1207,6 +1210,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         parityStatus: opticalGpuExecution?.webgpuParity?.status,
         parityMaxOutputAbs: opticalGpuExecution?.webgpuParity?.maxOutputAbs ?? null,
         parityTolerance: opticalGpuExecution?.webgpuParity?.tolerance ?? null
+      },
+      opticalGpuDrawState: {
+        schema: opticalGpuDrawState?.schema,
+        sourceExecutionSchema: opticalGpuDrawState?.sourceExecutionSchema,
+        backend: opticalGpuDrawState?.backend,
+        appliedCount: opticalGpuDrawState?.appliedCount
       },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
@@ -1236,7 +1245,13 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.opticalGpuLookup.parityStatus).toBe('pass');
     expect(derivedSummary.opticalGpuLookup.parityMaxOutputAbs).toBeLessThanOrEqual(derivedSummary.opticalGpuLookup.parityTolerance);
   }
+  expect(derivedSummary.opticalGpuDrawState.schema).toBe('peercompute.ulg.optical-gpu-draw-state.v0');
+  expect(derivedSummary.opticalGpuDrawState.sourceExecutionSchema).toBe('peercompute.ulg.optical-gpu-lookup-execution.v0');
+  expect(derivedSummary.opticalGpuDrawState.backend).toBe(derivedSummary.opticalGpuLookup.executionBackend);
+  expect(derivedSummary.opticalGpuDrawState.appliedCount).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
+  expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
+  expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);
 });
 
 test('SPH phase demo reacts room-temperature Na + H2O through derived product closure', async ({ page }) => {

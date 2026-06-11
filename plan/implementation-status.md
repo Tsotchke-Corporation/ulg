@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 22:36 AKDT
+Updated: 2026-06-10 22:43 AKDT
 
 ## Done
 
@@ -40,9 +40,11 @@ Updated: 2026-06-10 22:36 AKDT
   plus lookup rows for the active surface batches. The live SPH overlay now
   schedules optional browser WebGPU lookup execution with CPU parity, cached
   device acquisition, stale-generation rejection, and CPU fallback. The visible
-  renderer still uses Three.js `MeshPhysicalMaterial` as the interim display
-  layer. Optical material ids are stable across table rebuilds: elements use
-  atomic number and compounds use deterministic f32-exact hashed ids.
+  renderer decodes the accepted lookup rows into draw-state metadata and applies
+  those rows to the corresponding Three.js `MeshPhysicalMaterial` surfaces. This
+  is still an interim display layer, not a WebGPU renderer. Optical material ids
+  are stable across table rebuilds: elements use atomic number and compounds use
+  deterministic f32-exact hashed ids.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

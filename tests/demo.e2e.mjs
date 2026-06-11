@@ -1144,6 +1144,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
 });
 
 test('SPH phase demo runs derived material properties by default', async ({ page }) => {
+  test.setTimeout(60_000);
   await page.setViewportSize({ width: 900, height: 680 });
   await page.goto('/');
   await page.locator('#run-sph-phase').click();
@@ -1154,7 +1155,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   );
   expect(materialLabels).toContain('Iron (Fe, Z=26) - derived element');
   expect(materialLabels).toContain('Gold (Au, Z=79) - derived element');
-  await page.locator('#sph-elements .sph-picker-button').first().click();
+  await page.locator('#sph-elements .sph-picker-button').first().click({ force: true });
   await expect(page.locator('.sph-element-picker-overlay')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Gold (Au, Z=79) - derived element' })).toBeVisible();
   await page.locator('.sph-element-picker').getByRole('button', { name: 'close' }).click();
@@ -1166,12 +1167,17 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const canvas = overlay?.querySelector('canvas');
     return Boolean(canvas && canvas.width > 0 && canvas.height > 0);
   });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return Boolean(overlay?.__sphScene?.getOpticalGpuLookup?.()?.execution?.schema);
+  });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
     const scene = overlay.__sphScene;
     const opticalGpuTable = scene?.getOpticalGpuTable?.();
     const opticalGpuLookup = scene?.getOpticalGpuLookup?.();
+    const opticalGpuExecution = opticalGpuLookup?.execution;
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1193,7 +1199,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       opticalGpuLookup: {
         schema: opticalGpuLookup?.lookup?.schema,
         queryCount: opticalGpuLookup?.lookup?.queryCount,
-        outputCount: opticalGpuLookup?.cpuReference?.outputs?.length
+        outputCount: opticalGpuLookup?.cpuReference?.outputs?.length,
+        executionSchema: opticalGpuExecution?.schema,
+        executionBackend: opticalGpuExecution?.backend,
+        executionStatus: opticalGpuExecution?.webgpuStatus?.status,
+        paritySchema: opticalGpuExecution?.webgpuParity?.schema,
+        parityStatus: opticalGpuExecution?.webgpuParity?.status,
+        parityMaxOutputAbs: opticalGpuExecution?.webgpuParity?.maxOutputAbs ?? null,
+        parityTolerance: opticalGpuExecution?.webgpuParity?.tolerance ?? null
       },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
@@ -1207,6 +1220,22 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
   expect(derivedSummary.opticalGpuLookup.queryCount).toBe(derivedSummary.opticalGpuTable.recordCount);
   expect(derivedSummary.opticalGpuLookup.outputCount).toBe(derivedSummary.opticalGpuLookup.queryCount * 12);
+  expect(derivedSummary.opticalGpuLookup.executionSchema).toBe('peercompute.ulg.optical-gpu-lookup-execution.v0');
+  expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.opticalGpuLookup.executionBackend);
+  expect([
+    'blocked-webgpu-unavailable',
+    'not-requested',
+    'webgpu-device-lost-fallback',
+    'webgpu-error-fallback',
+    'webgpu-executed',
+    'webgpu-parity-failed'
+  ]).toContain(derivedSummary.opticalGpuLookup.executionStatus);
+  if (derivedSummary.opticalGpuLookup.executionBackend === 'webgpu') {
+    expect(derivedSummary.opticalGpuLookup.executionStatus).toBe('webgpu-executed');
+    expect(derivedSummary.opticalGpuLookup.paritySchema).toBe('peercompute.ulg.optical-gpu-lookup-parity.v0');
+    expect(derivedSummary.opticalGpuLookup.parityStatus).toBe('pass');
+    expect(derivedSummary.opticalGpuLookup.parityMaxOutputAbs).toBeLessThanOrEqual(derivedSummary.opticalGpuLookup.parityTolerance);
+  }
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
 });
 

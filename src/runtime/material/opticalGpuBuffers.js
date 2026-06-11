@@ -4,6 +4,8 @@ import {
   OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT,
   OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -11,7 +13,13 @@ import { opticalLookupWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { zForSymbol } from '../electronicStructure/periodicTable.js';
 import { opticalRenderParams } from './opticalClosure.js';
 
-export { ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA, ULG_OPTICAL_GPU_LOOKUP_SCHEMA, ULG_OPTICAL_GPU_TABLE_SCHEMA };
+export {
+  ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
+  ULG_OPTICAL_GPU_TABLE_SCHEMA
+};
 export const OPTICAL_GPU_RECORD_FLOATS = OPTICAL_GPU_RECORD_ROW_LAYOUT.length;
 export const OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS = OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT.length;
 export const OPTICAL_GPU_LOOKUP_QUERY_FLOATS = OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT.length;
@@ -377,6 +385,95 @@ export function sampleOpticalGpuTableCpu(table, lookup) {
   };
 }
 
+export function createOpticalGpuLookupParityReport({ cpuReference, gpuResult, tolerance = 1e-6 } = {}) {
+  const cpuOutputs = cpuReference?.outputs;
+  const gpuOutputs = gpuResult?.outputs;
+  if (!(cpuOutputs instanceof Float32Array) || !(gpuOutputs instanceof Float32Array)) {
+    return {
+      schema: ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
+      status: 'fail',
+      tolerance,
+      maxOutputAbs: Number.POSITIVE_INFINITY,
+      lengthMismatch: true,
+      cpuBackend: cpuReference?.backend || null,
+      gpuBackend: gpuResult?.backend || null,
+      reason: 'missing lookup output buffers',
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const comparisonCount = Math.min(cpuOutputs.length, gpuOutputs.length);
+  let maxOutputAbs = 0;
+  for (let index = 0; index < comparisonCount; index += 1) {
+    maxOutputAbs = Math.max(maxOutputAbs, Math.abs(cpuOutputs[index] - gpuOutputs[index]));
+  }
+  const lengthMismatch = cpuOutputs.length !== gpuOutputs.length;
+  const passed = !lengthMismatch && maxOutputAbs <= tolerance;
+  return {
+    schema: ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
+    status: passed ? 'pass' : 'fail',
+    tolerance,
+    maxOutputAbs,
+    lengthMismatch,
+    outputCount: cpuOutputs.length,
+    cpuBackend: cpuReference.backend,
+    gpuBackend: gpuResult.backend,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function lookupExecutionFromResult(result, {
+  cpuReference = null,
+  gpuResult = null,
+  webgpuStatus,
+  webgpuParity = null
+} = {}) {
+  return {
+    schema: ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
+    lookupResultSchema: result?.schema || ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
+    backend: result?.backend || 'cpu-reference',
+    outputLayout: [...OPTICAL_GPU_LOOKUP_OUTPUT_LAYOUT],
+    outputStrideFloats: OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS,
+    queryCount: result?.queryCount ?? 0,
+    outputs: result?.outputs ?? new Float32Array(),
+    cpuReference,
+    gpuResult,
+    webgpuStatus,
+    webgpuParity,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function describeDeviceLost(info) {
+  return info?.reason || info?.message || 'device lost';
+}
+
+function watchDeviceLost(device, onDeviceLost) {
+  if (!device?.lost?.then) return;
+  device.lost.then((info) => {
+    onDeviceLost(info);
+  }).catch((error) => {
+    onDeviceLost(error);
+  });
+}
+
+export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigator, { onDeviceLost = null } = {}) {
+  if (!navigatorRef?.gpu) {
+    return { status: 'blocked-webgpu-unavailable', reason: 'navigator.gpu unavailable', device: null };
+  }
+  const adapter = await navigatorRef.gpu.requestAdapter();
+  if (!adapter) {
+    return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
+  }
+  const device = await adapter.requestDevice();
+  if (typeof onDeviceLost === 'function') {
+    watchDeviceLost(device, onDeviceLost);
+  }
+  return { status: 'webgpu-device-ready', reason: 'device acquired', device };
+}
+
 function writeStorageBuffer(device, label, data) {
   const byteLength = Math.max(4, data.byteLength);
   const buffer = device.createBuffer({
@@ -493,5 +590,110 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
     outputBuffer.destroy?.();
     paramsBuffer.destroy?.();
     readBuffer.destroy?.();
+  }
+}
+
+export async function runOpticalGpuLookupWithOptionalWebGpu({
+  table,
+  lookup,
+  cpuReference = null,
+  preferWebGpu = false,
+  navigatorRef = globalThis.navigator,
+  device = null,
+  deviceResult = null,
+  parityTolerance = 1e-6,
+  onDeviceLost = null,
+  webGpuRunner = runOpticalGpuLookup
+} = {}) {
+  const cpuResult = cpuReference || sampleOpticalGpuTableCpu(table, lookup);
+  if (!preferWebGpu) {
+    return lookupExecutionFromResult(cpuResult, {
+      cpuReference: cpuResult,
+      webgpuStatus: {
+        status: 'not-requested',
+        reason: 'WebGPU optical lookup path not requested'
+      }
+    });
+  }
+  try {
+    let lostInfo = null;
+    const resolvedDeviceResult = device
+      ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+      : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
+    if (resolvedDeviceResult.device) {
+      watchDeviceLost(resolvedDeviceResult.device, (info) => {
+        lostInfo = info;
+        if (typeof onDeviceLost === 'function') onDeviceLost(info);
+      });
+    }
+    if (!resolvedDeviceResult.device) {
+      return lookupExecutionFromResult(cpuResult, {
+        cpuReference: cpuResult,
+        webgpuStatus: {
+          status: resolvedDeviceResult.status,
+          reason: resolvedDeviceResult.reason,
+          fallback: 'cpu-reference'
+        }
+      });
+    }
+    await Promise.resolve();
+    if (lostInfo) {
+      return lookupExecutionFromResult(cpuResult, {
+        cpuReference: cpuResult,
+        webgpuStatus: {
+          status: 'webgpu-device-lost-fallback',
+          reason: describeDeviceLost(lostInfo),
+          fallback: 'cpu-reference'
+        }
+      });
+    }
+    const gpuResult = await webGpuRunner({ device: resolvedDeviceResult.device, table, lookup });
+    await Promise.resolve();
+    if (lostInfo) {
+      return lookupExecutionFromResult(cpuResult, {
+        cpuReference: cpuResult,
+        gpuResult,
+        webgpuStatus: {
+          status: 'webgpu-device-lost-fallback',
+          reason: describeDeviceLost(lostInfo),
+          fallback: 'cpu-reference'
+        }
+      });
+    }
+    const webgpuParity = createOpticalGpuLookupParityReport({
+      cpuReference: cpuResult,
+      gpuResult,
+      tolerance: parityTolerance
+    });
+    if (webgpuParity.status !== 'pass') {
+      return lookupExecutionFromResult(cpuResult, {
+        cpuReference: cpuResult,
+        gpuResult,
+        webgpuStatus: {
+          status: 'webgpu-parity-failed',
+          reason: 'CPU/WebGPU optical lookup parity exceeded tolerance',
+          fallback: 'cpu-reference'
+        },
+        webgpuParity
+      });
+    }
+    return lookupExecutionFromResult(gpuResult, {
+      cpuReference: cpuResult,
+      gpuResult,
+      webgpuStatus: {
+        status: 'webgpu-executed',
+        reason: 'CPU/WebGPU optical lookup parity passed'
+      },
+      webgpuParity
+    });
+  } catch (error) {
+    return lookupExecutionFromResult(cpuResult, {
+      cpuReference: cpuResult,
+      webgpuStatus: {
+        status: 'webgpu-error-fallback',
+        reason: error instanceof Error ? error.message : String(error),
+        fallback: 'cpu-reference'
+      }
+    });
   }
 }

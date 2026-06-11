@@ -20,6 +20,8 @@ import {
   complex64ToPairs,
   ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -107,6 +109,8 @@ test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
   assert.equal(ULG_OPTICAL_GPU_TABLE_SCHEMA, 'peercompute.ulg.optical-gpu-table.v0');
   assert.equal(ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA, 'peercompute.ulg.optical-gpu-buffer-set.v0');
   assert.equal(ULG_OPTICAL_GPU_LOOKUP_SCHEMA, 'peercompute.ulg.optical-gpu-lookup.v0');
+  assert.equal(ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA, 'peercompute.ulg.optical-gpu-lookup-execution.v0');
+  assert.equal(ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA, 'peercompute.ulg.optical-gpu-lookup-parity.v0');
   assert.equal(OPTICAL_GPU_RECORD_ROW_LAYOUT.length, 24);
   assert.equal(OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT.length, 8);
   assert.equal(OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT.length, 4);

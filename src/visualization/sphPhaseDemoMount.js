@@ -488,7 +488,24 @@ export function mountSphPhaseDemoOverlay() {
   let scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(), surfaceRadiusScale: blobScaleOf() });
   overlay.__sphScene = scene;
   overlay.__sphDriver = driver;
+  overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
   let rebuildTimer = null;
+  let pendingOpticalLookupSignature = null;
+
+  function scheduleOpticalGpuLookupRefresh() {
+    const lookupState = scene.getOpticalGpuLookup?.();
+    const signature = lookupState?.signature;
+    if (!signature) return;
+    if (lookupState.execution?.signature === signature || pendingOpticalLookupSignature === signature) return;
+    pendingOpticalLookupSignature = signature;
+    scene.refreshOpticalGpuLookup?.({ preferWebGpu: true }).then((nextLookupState) => {
+      overlay.__sphOpticalGpuLookup = nextLookupState;
+    }).catch((error) => {
+      overlay.__sphOpticalGpuLookupError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (pendingOpticalLookupSignature === signature) pendingOpticalLookupSignature = null;
+    });
+  }
 
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
@@ -503,6 +520,8 @@ export function mountSphPhaseDemoOverlay() {
     scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(), surfaceRadiusScale: blobScaleOf() });
     overlay.__sphScene = scene;
     overlay.__sphDriver = driver;
+    overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+    pendingOpticalLookupSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -558,6 +577,8 @@ export function mountSphPhaseDemoOverlay() {
       emissiveByMaterial: surfaceEmissive(driver.demo),
       materialProperties: driver.demo.materialProperties
     });
+    overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+    scheduleOpticalGpuLookupRefresh();
   }
 
   function stepDemoForVisualTest(steps = 1) {

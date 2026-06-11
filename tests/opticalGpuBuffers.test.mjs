@@ -8,15 +8,32 @@ import {
   OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS,
   OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT,
   ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA,
+  ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
   buildOpticalGpuTable,
   buildOpticalGpuLookupQueries,
+  createOpticalGpuLookupParityReport,
   opticalLookupWgsl,
+  runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
   stableOpticalMaterialId,
   uploadOpticalGpuTable
 } from '../src/runtime/material/opticalGpuBuffers.js';
+
+function createLookupFixture() {
+  const table = buildOpticalGpuTable([
+    { material: 'h2o', phase: 'liquid' },
+    { material: 'h2o', phase: 'gas' }
+  ]);
+  const lookup = buildOpticalGpuLookupQueries(table, [
+    { material: 'h2o', phase: 'liquid' },
+    { material: 'h2o', phase: 'gas' }
+  ]);
+  const cpuReference = sampleOpticalGpuTableCpu(table, lookup);
+  return { table, lookup, cpuReference };
+}
 
 test('optical GPU table packs derived PBR records and spectral samples', () => {
   const table = buildOpticalGpuTable([
@@ -132,4 +149,144 @@ test('optical GPU lookup WGSL consumes packed vec4 rows without struct alignment
   assert.match(opticalLookupWgsl, /record_index \* 6u/);
   assert.match(opticalLookupWgsl, /optical_outputs\[query_index \* 3u\]/);
   assert.match(opticalLookupWgsl, /row1\.x, row1\.y, row1\.z, row2\.z/);
+});
+
+test('optional optical GPU lookup returns CPU reference when WebGPU is not requested', async () => {
+  const { table, lookup, cpuReference } = createLookupFixture();
+  const result = await runOpticalGpuLookupWithOptionalWebGpu({
+    table,
+    lookup,
+    cpuReference,
+    preferWebGpu: false,
+    navigatorRef: {
+      gpu: {
+        async requestAdapter() {
+          throw new Error('should not request WebGPU');
+        }
+      }
+    }
+  });
+
+  assert.equal(result.schema, ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA);
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.webgpuStatus.status, 'not-requested');
+  assert.equal(result.outputs.length, cpuReference.outputs.length);
+  assert.equal(result.scientificValidation, false);
+});
+
+test('optional optical GPU lookup falls back to CPU when navigator.gpu is unavailable', async () => {
+  const { table, lookup, cpuReference } = createLookupFixture();
+  const result = await runOpticalGpuLookupWithOptionalWebGpu({
+    table,
+    lookup,
+    cpuReference,
+    preferWebGpu: true,
+    navigatorRef: {}
+  });
+
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.webgpuStatus.status, 'blocked-webgpu-unavailable');
+  assert.equal(result.webgpuStatus.fallback, 'cpu-reference');
+  assert.equal(result.outputs.length, cpuReference.outputs.length);
+});
+
+test('optional optical GPU lookup accepts WebGPU only after parity passes', async () => {
+  const { table, lookup, cpuReference } = createLookupFixture();
+  const result = await runOpticalGpuLookupWithOptionalWebGpu({
+    table,
+    lookup,
+    cpuReference,
+    preferWebGpu: true,
+    deviceResult: {
+      status: 'webgpu-device-ready',
+      reason: 'fake device',
+      device: { lost: new Promise(() => {}) }
+    },
+    async webGpuRunner() {
+      return {
+        ...cpuReference,
+        backend: 'webgpu',
+        outputs: new Float32Array(cpuReference.outputs)
+      };
+    },
+    parityTolerance: 1e-8
+  });
+
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.webgpuStatus.status, 'webgpu-executed');
+  assert.equal(result.webgpuParity.schema, ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA);
+  assert.equal(result.webgpuParity.status, 'pass');
+  assert.equal(result.webgpuParity.maxOutputAbs, 0);
+});
+
+test('optional optical GPU lookup rejects parity drift and keeps CPU output', async () => {
+  const { table, lookup, cpuReference } = createLookupFixture();
+  const drifted = new Float32Array(cpuReference.outputs);
+  drifted[0] += 0.5;
+  const result = await runOpticalGpuLookupWithOptionalWebGpu({
+    table,
+    lookup,
+    cpuReference,
+    preferWebGpu: true,
+    deviceResult: {
+      status: 'webgpu-device-ready',
+      reason: 'fake device',
+      device: { lost: new Promise(() => {}) }
+    },
+    async webGpuRunner() {
+      return {
+        ...cpuReference,
+        backend: 'webgpu',
+        outputs: drifted
+      };
+    },
+    parityTolerance: 1e-8
+  });
+
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.webgpuStatus.status, 'webgpu-parity-failed');
+  assert.equal(result.webgpuParity.status, 'fail');
+  assert.ok(result.webgpuParity.maxOutputAbs > 0.1);
+  assert.equal(result.outputs[0], cpuReference.outputs[0]);
+});
+
+test('optional optical GPU lookup reports device-lost CPU fallback', async () => {
+  const { table, lookup, cpuReference } = createLookupFixture();
+  const losses = [];
+  const result = await runOpticalGpuLookupWithOptionalWebGpu({
+    table,
+    lookup,
+    cpuReference,
+    preferWebGpu: true,
+    deviceResult: {
+      status: 'webgpu-device-ready',
+      reason: 'fake device',
+      device: { lost: Promise.resolve({ reason: 'destroyed' }) }
+    },
+    onDeviceLost(info) {
+      losses.push(info.reason);
+    },
+    async webGpuRunner() {
+      throw new Error('runner should not execute after immediate device loss');
+    }
+  });
+
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.webgpuStatus.status, 'webgpu-device-lost-fallback');
+  assert.equal(result.webgpuStatus.reason, 'destroyed');
+  assert.deepEqual(losses, ['destroyed']);
+});
+
+test('optical GPU lookup parity report is explicit and non-scientific', () => {
+  const { cpuReference } = createLookupFixture();
+  const parity = createOpticalGpuLookupParityReport({
+    cpuReference,
+    gpuResult: { ...cpuReference, backend: 'webgpu', outputs: new Float32Array(cpuReference.outputs) },
+    tolerance: 1e-8
+  });
+
+  assert.equal(parity.schema, ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA);
+  assert.equal(parity.status, 'pass');
+  assert.equal(parity.scientificValidation, false);
+  assert.equal(parity.fullPhysicsValidation, false);
 });

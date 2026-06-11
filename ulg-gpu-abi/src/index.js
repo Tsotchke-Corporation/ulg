@@ -10,6 +10,8 @@ export const ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA = 'peercompute.ulg.closure
 export const ULG_OPTICAL_GPU_TABLE_SCHEMA = 'peercompute.ulg.optical-gpu-table.v0';
 export const ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA = 'peercompute.ulg.optical-gpu-buffer-set.v0';
 export const ULG_OPTICAL_GPU_LOOKUP_SCHEMA = 'peercompute.ulg.optical-gpu-lookup.v0';
+export const ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-execution.v0';
+export const ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-parity.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',

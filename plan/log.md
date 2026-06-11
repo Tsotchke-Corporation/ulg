@@ -7802,3 +7802,76 @@ Failures / open questions:
   live demo. The already-tested WebGPU lookup helper exists, but the frame loop
   does not yet keep the lookup dispatch and renderer consumption resident.
 - No push was attempted.
+
+## 2026-06-10 22:36:08 AKDT - Browser WebGPU optical lookup execution
+
+Prompt:
+
+- Keep moving toward a GPU-resident optical/PBR chain for all elements and
+  molecules without faking material properties.
+
+Actions:
+
+- Added ABI constants for
+  `peercompute.ulg.optical-gpu-lookup-execution.v0` and
+  `peercompute.ulg.optical-gpu-lookup-parity.v0`.
+- Extended `src/runtime/material/opticalGpuBuffers.js` with
+  `runOpticalGpuLookupWithOptionalWebGpu()`, WebGPU device probing, CPU
+  fallback statuses, device-lost fallback, parity reporting, and CPU/WebGPU
+  output comparison.
+- Extended `src/visualization/sphPhaseScene.js` with a cached optional WebGPU
+  lookup execution hook. It keeps CPU lookup output current, requests a browser
+  WebGPU device once per scene, rejects stale async completions by generation,
+  and avoids repeated dispatches when the active optical table signature has not
+  changed.
+- Wired `src/visualization/sphPhaseDemoMount.js` to schedule the optional
+  lookup refresh after particle sync without blocking the simulation UI.
+- Made the Playwright config environment-overridable so the e2e suite can run
+  against the live HTTPS Vite server on `0.0.0.0:5173`.
+- Updated browser smoke coverage to assert lookup execution schema, accepted
+  CPU fallback statuses, and WebGPU parity when WebGPU executes.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `tests/playwright.config.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `node --check src/runtime/material/opticalGpuBuffers.js src/visualization/sphPhaseScene.js src/visualization/sphPhaseDemoMount.js tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs tests/demo.e2e.mjs tests/abi.test.mjs`
+- `node --test tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs tests/abi.test.mjs`
+- Browser HTTPS probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/optical/renderer tests passed `22/22`.
+- PASS: Browser HTTPS probe executed the optical lookup on `backend=webgpu`,
+  reported `status=webgpu-executed`, `parityStatus=pass`,
+  `maxOutputAbs=0`, and `outputCount=24`.
+- PASS: focused SPH e2e passed against the live HTTPS server (`1/1`).
+- PASS: `npm test` passed `229/229`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The WebGPU lookup result is now executed and parity-accepted, but
+  `MeshPhysicalMaterial` still consumes CPU-side material settings. The next
+  renderer slice should bind the lookup output into the actual draw-state path.
+- This does not move SPH dynamics, EOS, phase updates, or neighbor search onto
+  WebGPU yet.
+- No push was attempted.

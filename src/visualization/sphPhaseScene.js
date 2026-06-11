@@ -9,6 +9,8 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import {
   buildOpticalGpuLookupQueries,
   buildOpticalGpuTable,
+  requestOpticalGpuDevice,
+  runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu
 } from '../runtime/material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
@@ -239,11 +241,28 @@ export function createOpticalGpuLookupForSurfaceBatches(table, batches) {
   })));
   return {
     lookup,
-    cpuReference: sampleOpticalGpuTableCpu(table, lookup)
+    cpuReference: sampleOpticalGpuTableCpu(table, lookup),
+    signature: opticalGpuLookupSignature(table, lookup)
   };
 }
 
-export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null, surfaceRadiusM = null, surfaceRadiusScale = 1 } = {}) {
+function opticalGpuLookupSignature(table, lookup) {
+  return [
+    table.recordCount,
+    lookup.queryCount,
+    Array.from(lookup.queries).join(','),
+    Array.from(table.records).join(',')
+  ].join('|');
+}
+
+export function createSphPhaseScene(container, {
+  boxEdgeM = 10,
+  boxDimsM = null,
+  surfaceRadiusM = null,
+  surfaceRadiusScale = 1,
+  preferWebGpuOpticalLookup = true,
+  navigatorRef = globalThis.navigator
+} = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
   let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
@@ -306,8 +325,99 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
   const surfaces = new Map();
   let opticalGpuTable = buildOpticalGpuTable([]);
   let opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, []);
+  let opticalGpuLookupGeneration = 0;
+  let pendingOpticalGpuLookup = null;
+  let opticalGpuDeviceResultPromise = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
+  scene.userData.opticalGpuLookupExecution = null;
+
+  function requestCachedOpticalGpuDevice(ref = navigatorRef) {
+    if (!opticalGpuDeviceResultPromise) {
+      opticalGpuDeviceResultPromise = requestOpticalGpuDevice(ref).then((result) => {
+        if (result.device?.lost?.then) {
+          result.device.lost.finally(() => {
+            if (opticalGpuDeviceResultPromise) opticalGpuDeviceResultPromise = null;
+          }).catch(() => {});
+        }
+        return result;
+      }).catch((error) => {
+        opticalGpuDeviceResultPromise = null;
+        return {
+          status: 'webgpu-error-fallback',
+          reason: error instanceof Error ? error.message : String(error),
+          device: null
+        };
+      });
+    }
+    return opticalGpuDeviceResultPromise;
+  }
+
+  async function refreshOpticalGpuLookup({
+    preferWebGpu = preferWebGpuOpticalLookup,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    parityTolerance = 1e-6,
+    webGpuRunner = undefined
+  } = {}) {
+    const generation = opticalGpuLookupGeneration;
+    const currentTable = opticalGpuTable;
+    const currentLookup = opticalGpuLookup;
+    const signature = currentLookup.signature;
+    if (
+      !force
+      && currentLookup.execution?.signature === signature
+    ) {
+      return currentLookup;
+    }
+    if (!force && pendingOpticalGpuLookup?.signature === signature) {
+      return pendingOpticalGpuLookup.promise;
+    }
+    const promise = (async () => {
+      const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
+        ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
+        : deviceResult;
+      const execution = await runOpticalGpuLookupWithOptionalWebGpu({
+        table: currentTable,
+        lookup: currentLookup.lookup,
+        cpuReference: currentLookup.cpuReference,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult: resolvedDeviceResult,
+        parityTolerance,
+        webGpuRunner,
+        onDeviceLost() {
+          opticalGpuDeviceResultPromise = null;
+        }
+      });
+      execution.signature = signature;
+      if (!running || generation !== opticalGpuLookupGeneration || opticalGpuLookup.signature !== signature) {
+        return {
+          ...currentLookup,
+          execution: {
+            ...execution,
+            stale: true
+          }
+        };
+      }
+      opticalGpuLookup = {
+        ...currentLookup,
+        execution
+      };
+      scene.userData.opticalGpuLookup = opticalGpuLookup;
+      scene.userData.opticalGpuLookupExecution = execution;
+      return opticalGpuLookup;
+    })();
+    pendingOpticalGpuLookup = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingOpticalGpuLookup?.promise === promise) pendingOpticalGpuLookup = null;
+    }
+  }
 
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
@@ -360,8 +470,10 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
+    opticalGpuLookupGeneration += 1;
     scene.userData.opticalGpuTable = opticalGpuTable;
     scene.userData.opticalGpuLookup = opticalGpuLookup;
+    scene.userData.opticalGpuLookupExecution = null;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -468,6 +580,8 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     },
     getOpticalGpuLookup() {
       return opticalGpuLookup;
-    }
+    },
+    refreshOpticalGpuLookup,
+    requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

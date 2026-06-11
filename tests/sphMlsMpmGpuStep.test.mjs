@@ -6,6 +6,7 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
@@ -377,6 +378,155 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
   assert.equal(step.diagnostics.compactGpuSummaryAvailable, false);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
   assert.equal(tracker.destroyed, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(tracker.destroyed, 4);
+});
+
+test('MLS-MPM resident step can attach a compact GPU summary without full state readback', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  let summaryCalls = 0;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    p2gRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'projected',
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        gridNodes: new Float32Array(),
+        gridBuffer: tracker.buffer('p2g-grid-summary'),
+        gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+        backend: 'webgpu',
+        status: 'updated',
+        sourceSchema: args.p2gGridProjection.schema,
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        updatedGridNodes: new Float32Array(),
+        updatedGridBuffer: tracker.buffer('updated-grid-summary'),
+        updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner(args) {
+      return {
+        schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'reconstructed',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: 512,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridShift: 1,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        mechanicsStrideFloats: 32,
+        state: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('g2p-state-summary'),
+        mechanicsBuffer: tracker.buffer('g2p-mechanics-summary'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    },
+    summaryRunner(args) {
+      summaryCalls += 1;
+      assert.equal(args.sphParticleUpload.stateBuffer.label, 'source-state');
+      assert.equal(args.mlsMpmParticleUpload.mechanicsBuffer.label, 'source-mechanics');
+      assert.equal(args.gridUpdate.gpuResult.updatedGridBuffer.label, 'updated-grid-summary');
+      assert.equal(args.g2pReconstruction.stateBuffer.label, 'g2p-state-summary');
+      return {
+        schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
+        backend: 'webgpu',
+        status: 'compact-summary-ready',
+        particleCount: 1,
+        gridNodeCount: 512,
+        activeGridNodeCount: 7,
+        sourceMassKg: 8,
+        nextMassKg: 8,
+        massDeltaKg: 0,
+        sourceMomentumKgMPerS: [16, 0, 0],
+        nextMomentumKgMPerS: [15, 0, 0],
+        momentumDeltaKgMPerS: [-1, 0, 0],
+        maxSpeedMPerS: 1.875,
+        maxDisplacementM: 0.1875,
+        minVolumeRatioJ: 0.98,
+        maxVolumeRatioJ: 1.02,
+        readbackMode: 'compact-summary-readback',
+        compactGpuSummaryAvailable: true,
+        compactReadbackByteLength: 80,
+        reductionStrategy: 'single-invocation-gpu-loop',
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+  });
+
+  assert.equal(summaryCalls, 1);
+  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.state.length, 0);
+  assert.equal(step.mechanics.length, 0);
+  assert.equal(step.compactGpuSummary.status, 'compact-summary-ready');
+  assert.equal(step.diagnostics.compactGpuSummaryAvailable, true);
+  assert.equal(step.diagnostics.compactGpuSummaryStatus, 'compact-summary-ready');
+  assert.equal(step.diagnostics.compactGpuSummaryReadbackMode, 'compact-summary-readback');
+  assert.equal(step.diagnostics.compactReadbackByteLength, 80);
+  assert.equal(step.diagnostics.activeGridNodeCount, 7);
+  assert.equal(step.diagnostics.massDeltaKg, 0);
+  assert.equal(step.diagnostics.maxSpeedMPerS, 1.875);
+  assert.deepEqual(step.diagnostics.momentumDeltaKgMPerS, [-1, 0, 0]);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 4);
 });

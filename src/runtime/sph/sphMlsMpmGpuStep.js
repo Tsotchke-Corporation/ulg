@@ -17,11 +17,16 @@ import {
 import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from './sphGridGpuKernel.js';
 import { runMlsMpmGridUpdateWithOptionalWebGpu } from './sphGridUpdateGpuKernel.js';
 import { runMlsMpmG2pWithOptionalWebGpu } from './sphG2pGpuKernel.js';
+import {
+  ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+  runMlsMpmResidentSummaryWebGpu
+} from './sphMlsMpmGpuSummary.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
-  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA
+  ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA
 };
 
 const STEP_SCOPE = 'mls-mpm-resident-step-p2g-grid-update-g2p';
@@ -122,9 +127,37 @@ export function compactMlsMpmResidentStepDiagnostics({
   p2gGridProjection,
   gridUpdate,
   g2pReconstruction,
+  compactGpuSummary = null,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  if (compactGpuSummary?.compactGpuSummaryAvailable) {
+    return {
+      particleCount: compactGpuSummary.particleCount,
+      gridNodeCount: compactGpuSummary.gridNodeCount,
+      activeGridNodeCount: compactGpuSummary.activeGridNodeCount,
+      sourceMassKg: compactGpuSummary.sourceMassKg,
+      nextMassKg: compactGpuSummary.nextMassKg,
+      massDeltaKg: compactGpuSummary.massDeltaKg,
+      sourceMomentumKgMPerS: compactGpuSummary.sourceMomentumKgMPerS,
+      nextMomentumKgMPerS: compactGpuSummary.nextMomentumKgMPerS,
+      momentumDeltaKgMPerS: compactGpuSummary.momentumDeltaKgMPerS,
+      maxSpeedMPerS: compactGpuSummary.maxSpeedMPerS,
+      maxDisplacementM: compactGpuSummary.maxDisplacementM,
+      minVolumeRatioJ: compactGpuSummary.minVolumeRatioJ,
+      maxVolumeRatioJ: compactGpuSummary.maxVolumeRatioJ,
+      readbackMode,
+      compactGpuSummaryAvailable: true,
+      compactGpuSummaryStatus: compactGpuSummary.status,
+      compactGpuSummaryReadbackMode: compactGpuSummary.readbackMode,
+      compactReadbackByteLength: compactGpuSummary.compactReadbackByteLength ?? 0,
+      compactSummaryReductionStrategy: compactGpuSummary.reductionStrategy ?? null,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
   if (readbackMode === NO_FULL_READBACK_MODE) {
     return {
       particleCount: sphParticleState.particleCount,
@@ -142,6 +175,8 @@ export function compactMlsMpmResidentStepDiagnostics({
       maxVolumeRatioJ: null,
       readbackMode,
       compactGpuSummaryAvailable: false,
+      compactGpuSummaryStatus: compactGpuSummary?.status ?? 'not-run',
+      compactGpuSummaryReason: compactGpuSummary?.reason ?? null,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -162,6 +197,8 @@ export function compactMlsMpmResidentStepDiagnostics({
     ...particleSummary,
     readbackMode,
     compactGpuSummaryAvailable: false,
+    compactGpuSummaryStatus: compactGpuSummary?.status ?? 'not-run',
+    compactGpuSummaryReason: compactGpuSummary?.reason ?? null,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -260,6 +297,7 @@ function residentStepEnvelope({
   p2gGridProjection,
   gridUpdate,
   g2pReconstruction,
+  compactGpuSummary = null,
   dt,
   gravityMPerS2,
   boxDimsM,
@@ -301,6 +339,7 @@ function residentStepEnvelope({
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
+    compactGpuSummary,
     readbackMode
   });
 
@@ -344,6 +383,7 @@ function residentStepEnvelope({
     nextParticleStateBufferByteLength: g2pOutput.stateBufferByteLength,
     nextParticleMechanicsBufferByteLength: g2pOutput.mechanicsBufferByteLength,
     readbackMode,
+    compactGpuSummary,
     normalHotLoopReadbackFree: noFullReadback,
     renderStateReadbackAvailable: !noFullReadback,
     gpuAuthoritativeState: false,
@@ -379,6 +419,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   p2gRunner = undefined,
   gridUpdateRunner = undefined,
   g2pRunner = undefined,
+  summaryRunner = runMlsMpmResidentSummaryWebGpu,
   sourceSlot = sphParticleUpload?.slot ?? 0,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -467,12 +508,46 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     }
   });
 
+  const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
+  const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;
+  let compactGpuSummary = null;
+  if (
+    requestedReadbackMode === NO_FULL_READBACK_MODE
+    && typeof summaryRunner === 'function'
+    && (hasWebGpuLikeSummaryDevice || customSummaryRunner)
+  ) {
+    try {
+      compactGpuSummary = await summaryRunner({
+        device: resolvedDevice,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        gridUpdate,
+        g2pReconstruction
+      });
+    } catch (error) {
+      compactGpuSummary = {
+        schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'compact-summary-unavailable',
+        reason: error instanceof Error ? error.message : String(error),
+        compactGpuSummaryAvailable: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+  }
+
   return residentStepEnvelope({
     sphParticleState,
     mlsMpmParticleState,
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
+    compactGpuSummary,
     dt: dtSeconds,
     gravityMPerS2: gravity,
     boxDimsM: dims,
@@ -539,10 +614,12 @@ function summarizeResidentStepForSequence(step, index) {
     diagnostics: {
       particleCount: step.diagnostics?.particleCount ?? 0,
       gridNodeCount: step.diagnostics?.gridNodeCount ?? 0,
-      activeGridNodeCount: step.diagnostics?.activeGridNodeCount ?? 0,
-      massDeltaKg: step.diagnostics?.massDeltaKg ?? 0,
-      maxSpeedMPerS: step.diagnostics?.maxSpeedMPerS ?? 0,
-      maxDisplacementM: step.diagnostics?.maxDisplacementM ?? 0
+      activeGridNodeCount: step.diagnostics?.activeGridNodeCount ?? null,
+      massDeltaKg: step.diagnostics?.massDeltaKg ?? null,
+      maxSpeedMPerS: step.diagnostics?.maxSpeedMPerS ?? null,
+      maxDisplacementM: step.diagnostics?.maxDisplacementM ?? null,
+      compactGpuSummaryAvailable: step.diagnostics?.compactGpuSummaryAvailable ?? false,
+      compactGpuSummaryStatus: step.diagnostics?.compactGpuSummaryStatus ?? null
     },
     readbackMode: step.readbackMode,
     normalHotLoopReadbackFree: step.normalHotLoopReadbackFree,

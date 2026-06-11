@@ -12,6 +12,7 @@ import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   createClosureTableDescriptor,
@@ -41,6 +42,8 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
@@ -49,7 +52,14 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
-import { mlsMpmG2pReconstructWgsl, mlsMpmGridUpdateWgsl, mlsMpmMechanicsPredictWgsl, mlsMpmP2gGridProjectionWgsl, opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import {
+  mlsMpmG2pReconstructWgsl,
+  mlsMpmGridUpdateWgsl,
+  mlsMpmMechanicsPredictWgsl,
+  mlsMpmP2gGridProjectionWgsl,
+  mlsMpmResidentSummaryWgsl,
+  opticalLookupWgsl
+} from '../ulg-gpu-abi/src/wgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -300,6 +310,28 @@ test('MLS-MPM GPU resident step ABI exposes chain execution schemas', () => {
     ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
     'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0'
   );
+});
+
+test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () => {
+  assert.equal(ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-resident-summary.v0');
+  assert.equal(
+    ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-resident-summary-execution.v0'
+  );
+  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 20);
+  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(0, 4), [
+    'particleCount:f32',
+    'gridNodeCount:f32',
+    'activeGridNodeCount:f32',
+    'sourceMassKg:f32'
+  ]);
+  assert.match(mlsMpmResidentSummaryWgsl, /struct ResidentSummaryParams/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> source_sph_state/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> next_sph_state/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> updated_grid_nodes/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read_write> resident_summary/);
+  assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(1\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

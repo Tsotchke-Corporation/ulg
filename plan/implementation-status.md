@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 01:47 AKDT
+Updated: 2026-06-11 02:03 AKDT
 
 ## Done
 
@@ -1339,3 +1339,55 @@ Not claimed:
   metadata-only in no-full-readback mode.
 - `gpuAuthoritativeState` remains false and render state is not GPU
   authoritative.
+
+## 2026-06-11 Update - SPH Demo No-Full-Readback + Compact Summary
+
+Completed:
+
+- Added `peercompute.ulg.mls-mpm-gpu-resident-summary.v0` and a compact
+  f32x4-aligned resident summary row layout.
+- Added a browser WebGPU compact summary pass for resident MLS-MPM steps. It
+  reads retained source/output particle buffers plus the updated grid buffer
+  and returns only the compact diagnostic row, not full particle/grid arrays.
+- Resident diagnostics now use compact GPU summary values in
+  no-full-readback mode when available: active grid nodes, source/next mass,
+  momentum delta, max speed, max displacement, and min/max volume ratio.
+- The SPH phase scene now defaults resident-step requests to
+  `readbackMode: 'no-full-readback'` and includes that request in resident
+  execution cache signatures.
+- The SPH phase demo scheduler explicitly requests no-full-readback for the
+  two-step resident chain and exposes requested versus actual readback mode.
+- Overlay status now reports resident backend, requested/actual readback mode,
+  render-readback availability, hot-loop no-full status, and
+  `gpuAuthoritativeState`.
+- Browser e2e coverage now requires the no-full request, accepts no-full
+  WebGPU substages without parity readback, requires the compact WebGPU summary
+  on real WebGPU execution, and keeps CPU/mixed fallback on the honest
+  full-readback diagnostics path.
+
+Latest validation:
+
+- PASS: `npm test` passed `288/288`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  passed `19/19`.
+- PASS: `node --check src/visualization/sphPhaseScene.js &&
+  node --check src/visualization/sphPhaseDemoMount.js &&
+  node --check tests/demo.e2e.mjs`.
+- PASS: focused HTTPS browser e2e passed against the live server:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1
+  npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo
+  runs derived material properties by default"` (`1/1`).
+- PASS: Vite HTTPS server remains bound to `0.0.0.0:5173`; local
+  `https://127.0.0.1:5173/` and VPN `https://100.86.83.35:5173/` returned
+  `200`.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- `gpuAuthoritativeState` remains false; no render-authoritative physics is
+  claimed.
+- The compact summary pass is a first GPU-resident diagnostic bridge. Its
+  current reduction strategy is a single-invocation GPU loop, not the final
+  high-throughput tiled/parallel reduction for large particle counts.
+- Full particle/grid arrays are still not read back in normal no-full mode.

@@ -31,6 +31,8 @@ export const ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA = 'peercompute.ulg
 export const ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-step.v0';
 export const ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0';
 export const ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0';
+export const ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-summary.v0';
+export const ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-resident-summary-execution.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',
@@ -169,6 +171,28 @@ export const MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT = Object.freeze([
   'nodeXM:f32',
   'nodeYM:f32',
   'nodeZM:f32',
+  'status:f32'
+]);
+export const MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'particleCount:f32',
+  'gridNodeCount:f32',
+  'activeGridNodeCount:f32',
+  'sourceMassKg:f32',
+  'nextMassKg:f32',
+  'massDeltaKg:f32',
+  'sourceMomentumXKgMPerS:f32',
+  'sourceMomentumYKgMPerS:f32',
+  'sourceMomentumZKgMPerS:f32',
+  'nextMomentumXKgMPerS:f32',
+  'nextMomentumYKgMPerS:f32',
+  'nextMomentumZKgMPerS:f32',
+  'momentumDeltaXKgMPerS:f32',
+  'momentumDeltaYKgMPerS:f32',
+  'momentumDeltaZKgMPerS:f32',
+  'maxSpeedMPerS:f32',
+  'maxDisplacementM:f32',
+  'minVolumeRatioJ:f32',
+  'maxVolumeRatioJ:f32',
   'status:f32'
 ]);
 

@@ -8920,3 +8920,82 @@ Failures / open questions:
   diagnostics are metadata-only.
 - GPU state is still not render-authoritative or physics-authoritative.
 - No push was attempted.
+
+## 2026-06-11 02:03 AKDT - Compact resident summary and no-full-readback demo default
+
+Prompt:
+
+- Continue the GPU-resident refactor; demo breakage is acceptable when it
+  speeds the core architecture.
+
+Actions:
+
+- Added compact resident MLS-MPM summary ABI schemas and a f32x4-aligned
+  summary row layout.
+- Added `mlsMpmResidentSummaryWgsl` and
+  `runMlsMpmResidentSummaryWebGpu()` to read a small diagnostic row from
+  retained WebGPU buffers instead of reading full particle/grid arrays.
+- Wired resident-step diagnostics to use the compact GPU summary when
+  no-full-readback mode is active.
+- Kept no-full-readback particle and grid arrays empty/stale on the CPU side;
+  the compact summary only carries diagnostic evidence.
+- Wired the SPH phase scene/demo scheduler to request
+  `readbackMode: 'no-full-readback'` by default for the two-step resident
+  chain and to expose requested versus actual readback mode.
+- Updated browser e2e assertions to require compact summary diagnostics on
+  real WebGPU resident execution while preserving CPU/full-readback fallback
+  expectations.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/sph/sphMlsMpmGpuSummary.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check
+  src/runtime/sph/sphMlsMpmGpuStep.js && node --check ulg-gpu-abi/src/wgsl.js
+  && node --check ulg-gpu-abi/src/index.js`
+- `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `node --check src/visualization/sphPhaseScene.js && node --check
+  src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173
+  npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs
+  -g "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `curl -k -s -o /dev/null -w '%{http_code} %{url_effective}\n'
+  https://127.0.0.1:5173/`
+- `curl -k --max-time 10 -s -o /dev/null -w '%{http_code}
+  %{url_effective}\n' https://100.86.83.35:5173/`
+- `git diff --check`
+
+Validation:
+
+- PASS: full Node test suite passed `288/288`.
+- PASS: production build passed with the existing Vite large-chunk warning.
+- PASS: focused ABI/resident-step tests passed `19/19`.
+- PASS: focused HTTPS Chromium/WebGPU e2e passed (`1/1`, about 1.2 minutes).
+- PASS: local HTTPS and VPN HTTPS both returned `200`; Vite remained bound to
+  `0.0.0.0:5173`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The compact summary reduction is currently a single-invocation GPU loop. It
+  is honest and GPU-resident, but it is not the final high-throughput tiled
+  reduction needed for large particle counts.
+- `gpuAuthoritativeState` remains false; render-authoritative physics still
+  needs a GPU-driven render state path.
+- Thermal, phase, reaction, wall heat, gas pressure, and material closure state
+  are not yet driven by this resident MLS-MPM path.
+- No push was attempted.

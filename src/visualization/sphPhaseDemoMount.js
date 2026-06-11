@@ -2,7 +2,7 @@
 // retro-terminal control panel (six wall temperatures + reduced-resolution controls), and live
 // status rows. Also exposes a headless API on window.__ulgDemo for e2e/status checks.
 
-import { createSphPhaseScene } from './sphPhaseScene.js';
+import { SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT, createSphPhaseScene } from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import { createSphPhaseDemo, particleColors, particleRenderDescriptors, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
 import { createSphPhaseScenario } from '../runtime/thermoPreflight.js';
@@ -501,6 +501,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
   overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
   overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
+  overlay.__mlsMpmResidentRequestedReadbackMode = scene.getMlsMpmResidentRequestedReadbackMode?.() || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
@@ -666,7 +667,10 @@ export function mountSphPhaseDemoOverlay() {
     });
   }
 
-  function mlsMpmResidentStepsSignature(stepCount = RESIDENT_STEPS_PER_SCHEDULE) {
+  function mlsMpmResidentStepsSignature({
+    stepCount = RESIDENT_STEPS_PER_SCHEDULE,
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+  } = {}) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
     const sphSignature = sphGpuParticleSignature(sph);
@@ -679,26 +683,38 @@ export function mountSphPhaseDemoOverlay() {
       mls?.mechanicsDtS ?? 0,
       (mls?.gravityMPerS2 ?? [0, -9.80665, 0]).join(','),
       mls?.gridCflFactor ?? 0.6,
-      Math.max(1, Math.round(Number(stepCount) || 1))
+      Math.max(1, Math.round(Number(stepCount) || 1)),
+      readbackMode
     ].join('|');
   }
 
-  function scheduleMlsMpmResidentSteps(stepCount = RESIDENT_STEPS_PER_SCHEDULE) {
+  function scheduleMlsMpmResidentSteps({
+    stepCount = RESIDENT_STEPS_PER_SCHEDULE,
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+  } = {}) {
     const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
-    const signature = mlsMpmResidentStepsSignature(normalizedStepCount);
+    const signature = mlsMpmResidentStepsSignature({
+      stepCount: normalizedStepCount,
+      readbackMode
+    });
     if (!signature || pendingMlsMpmResidentStepsSignature === signature) return;
+    overlay.__mlsMpmResidentRequestedReadbackMode = readbackMode;
     pendingMlsMpmResidentStepsSignature = signature;
     scene.refreshMlsMpmResidentSteps?.({
       preferWebGpu: true,
-      stepCount: normalizedStepCount
+      stepCount: normalizedStepCount,
+      readbackMode
     }).then((execution) => {
       overlay.__mlsMpmResidentSteps = execution;
       overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
       overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.finalStep?.p2gGridProjection || null;
       overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || execution?.finalStep?.gridUpdate || null;
       overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || execution?.finalStep?.g2pReconstruction || null;
+      overlay.__mlsMpmResidentRequestedReadbackMode = execution?.requestedReadbackMode || readbackMode;
+      renderStatus();
     }).catch((error) => {
       overlay.__mlsMpmResidentStepsError = error instanceof Error ? error.message : String(error);
+      renderStatus();
     }).finally(() => {
       if (pendingMlsMpmResidentStepsSignature === signature) pendingMlsMpmResidentStepsSignature = null;
     });
@@ -728,6 +744,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
     overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
     overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
+    overlay.__mlsMpmResidentRequestedReadbackMode = scene.getMlsMpmResidentRequestedReadbackMode?.() || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
     pendingOpticalLookupSignature = null;
     pendingSphGpuParticleUploadSignature = null;
     pendingMlsMpmGpuParticleUploadSignature = null;
@@ -855,6 +872,23 @@ export function mountSphPhaseDemoOverlay() {
     const ledger = pre.energyBudget.wallLedger.map((w) => `  ${w.faceId} ${w.role} ${fmt(w.heatJ)}J`).join('\n');
     const water = Object.entries(waterPhases).map(([ph, m]) => `${ph} ${fmt(m)}kg`).join('  ');
     const materialPhases = formatMaterialPhaseMasses(phase.byMaterialPhase);
+    const residentSteps = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || null;
+    const residentStep = scene.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || null;
+    const residentRequestedReadback = residentSteps?.requestedReadbackMode
+      || residentStep?.requestedReadbackMode
+      || overlay.__mlsMpmResidentRequestedReadbackMode
+      || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+    const residentActualReadback = residentSteps?.readbackMode || residentStep?.readbackMode || 'pending';
+    const residentBackend = residentSteps?.backend || residentStep?.backend || 'pending';
+    const renderStateReadbackAvailable = residentSteps?.renderStateReadbackAvailable
+      ?? residentStep?.renderStateReadbackAvailable
+      ?? null;
+    const normalHotLoopReadbackFree = residentSteps?.normalHotLoopReadbackFree
+      ?? residentStep?.normalHotLoopReadbackFree
+      ?? false;
+    const gpuAuthoritativeState = residentSteps?.gpuAuthoritativeState
+      ?? residentStep?.gpuAuthoritativeState
+      ?? false;
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
@@ -868,6 +902,10 @@ export function mountSphPhaseDemoOverlay() {
       `iron solid frac  : ${fmt(phase.ironSolidFraction, 3)}`,
       `total energy     : ${fmt(totals.totalEnergyJ)} J`,
       `momentum |p|     : ${fmt(totals.momentumMagnitudeKgMPerS)} kg·m/s`,
+      `resident backend : ${residentBackend}`,
+      `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
+      `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
+      `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,
       ``,
       `validation       : scientific=false sph=false phase=false (evidence-only)`

@@ -778,3 +778,101 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   out_mls_mechanics[mechanics_base + 7u] = row7;
 }
 `;
+
+export const mlsMpmResidentSummaryWgsl = `
+struct ResidentSummaryParams {
+  particle_count: u32,
+  grid_node_count: u32,
+  pad_u0: u32,
+  pad_u1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> source_sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> next_sph_state: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> source_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> next_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> updated_grid_nodes: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> resident_summary: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: ResidentSummaryParams;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+
+  var active_grid_nodes = 0.0;
+  for (var node_index = 0u; node_index < params.grid_node_count; node_index = node_index + 1u) {
+    let row0 = updated_grid_nodes[node_index * 2u];
+    if (row0.x > 0.0) {
+      active_grid_nodes = active_grid_nodes + 1.0;
+    }
+  }
+
+  var source_mass = 0.0;
+  var next_mass = 0.0;
+  var source_momentum = vec3<f32>(0.0);
+  var next_momentum = vec3<f32>(0.0);
+  var max_speed2 = 0.0;
+  var max_displacement2 = 0.0;
+  var min_volume_ratio_j = 3.4028234663852886e38;
+  var max_volume_ratio_j = 0.0;
+
+  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+    let state_base = particle_index * 2u;
+    let mechanics_base = particle_index * 8u;
+    let source_pos_mass = source_sph_state[state_base];
+    let source_vel_u = source_sph_state[state_base + 1u];
+    let next_pos_mass = next_sph_state[state_base];
+    let next_vel_u = next_sph_state[state_base + 1u];
+
+    source_mass = source_mass + source_pos_mass.w;
+    next_mass = next_mass + next_pos_mass.w;
+    source_momentum = source_momentum + source_pos_mass.w * source_vel_u.xyz;
+    next_momentum = next_momentum + next_pos_mass.w * next_vel_u.xyz;
+    max_speed2 = max(max_speed2, dot(next_vel_u.xyz, next_vel_u.xyz));
+    let displacement = next_pos_mass.xyz - source_pos_mass.xyz;
+    max_displacement2 = max(max_displacement2, dot(displacement, displacement));
+
+    let next_j = next_mls_mechanics[mechanics_base + 4u].z;
+    min_volume_ratio_j = min(min_volume_ratio_j, next_j);
+    max_volume_ratio_j = max(max_volume_ratio_j, next_j);
+  }
+
+  if (params.particle_count == 0u) {
+    min_volume_ratio_j = 0.0;
+  }
+
+  let momentum_delta = next_momentum - source_momentum;
+  resident_summary[0u] = vec4<f32>(
+    f32(params.particle_count),
+    f32(params.grid_node_count),
+    active_grid_nodes,
+    source_mass
+  );
+  resident_summary[1u] = vec4<f32>(
+    next_mass,
+    next_mass - source_mass,
+    source_momentum.x,
+    source_momentum.y
+  );
+  resident_summary[2u] = vec4<f32>(
+    source_momentum.z,
+    next_momentum.x,
+    next_momentum.y,
+    next_momentum.z
+  );
+  resident_summary[3u] = vec4<f32>(
+    momentum_delta.x,
+    momentum_delta.y,
+    momentum_delta.z,
+    sqrt(max_speed2)
+  );
+  resident_summary[4u] = vec4<f32>(
+    sqrt(max_displacement2),
+    min_volume_ratio_j,
+    max_volume_ratio_j,
+    1.0
+  );
+}
+`;

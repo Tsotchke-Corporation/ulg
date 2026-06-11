@@ -1184,6 +1184,11 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getMlsMpmResidentSteps?.()?.schema
     );
   });
+  await page.waitForFunction(() => {
+    const text = document.querySelector('#sph-status')?.textContent ?? '';
+    return text.includes('resident readback: requested=no-full-readback actual=')
+      && !text.includes('actual=pending');
+  });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
@@ -1217,6 +1222,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       driverReady: Boolean(overlay.__sphDriver),
+      overlayResidentRequestedReadbackMode: overlay.__mlsMpmResidentRequestedReadbackMode,
+      statusText: overlay.querySelector('#sph-status')?.textContent ?? '',
       opticalGpuTable: {
         schema: opticalGpuTable?.schema,
         recordCount: opticalGpuTable?.recordCount,
@@ -1296,6 +1303,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         parityStatus: mlsMpmP2gGridProjection?.webgpuParity?.status,
         parityMaxGridAbs: mlsMpmP2gGridProjection?.webgpuParity?.maxGridAbs ?? null,
         parityTolerance: mlsMpmP2gGridProjection?.webgpuParity?.tolerance ?? null,
+        readbackMode: mlsMpmP2gGridProjection?.readbackMode,
+        normalHotLoopReadbackFree: mlsMpmP2gGridProjection?.normalHotLoopReadbackFree,
         particleCount: mlsMpmP2gGridProjection?.particleCount,
         gridNodeCount: mlsMpmP2gGridProjection?.gridNodeCount,
         gridNodeStrideFloats: mlsMpmP2gGridProjection?.gridNodeStrideFloats,
@@ -1316,6 +1325,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         parityStatus: mlsMpmGridUpdate?.webgpuParity?.status,
         parityMaxGridAbs: mlsMpmGridUpdate?.webgpuParity?.maxGridAbs ?? null,
         parityTolerance: mlsMpmGridUpdate?.webgpuParity?.tolerance ?? null,
+        readbackMode: mlsMpmGridUpdate?.readbackMode,
+        normalHotLoopReadbackFree: mlsMpmGridUpdate?.normalHotLoopReadbackFree,
         particleCount: mlsMpmGridUpdate?.particleCount,
         gridNodeCount: mlsMpmGridUpdate?.gridNodeCount,
         gridNodeStrideFloats: mlsMpmGridUpdate?.gridNodeStrideFloats,
@@ -1340,6 +1351,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         parityMaxStateAbs: mlsMpmG2pReconstruction?.webgpuParity?.maxStateAbs ?? null,
         parityMaxMechanicsAbs: mlsMpmG2pReconstruction?.webgpuParity?.maxMechanicsAbs ?? null,
         parityTolerance: mlsMpmG2pReconstruction?.webgpuParity?.tolerance ?? null,
+        readbackMode: mlsMpmG2pReconstruction?.readbackMode,
+        normalHotLoopReadbackFree: mlsMpmG2pReconstruction?.normalHotLoopReadbackFree,
         particleCount: mlsMpmG2pReconstruction?.particleCount,
         gridNodeCount: mlsMpmG2pReconstruction?.gridNodeCount,
         stateStrideFloats: mlsMpmG2pReconstruction?.stateStrideFloats,
@@ -1369,8 +1382,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         nextParticleStateBufferByteLength: mlsMpmResidentStep?.nextParticleStateBufferByteLength,
         nextParticleMechanicsBufferByteLength: mlsMpmResidentStep?.nextParticleMechanicsBufferByteLength,
         particlePingPong: mlsMpmResidentStep?.particlePingPong,
+        requestedReadbackMode: mlsMpmResidentStep?.requestedReadbackMode,
         readbackMode: mlsMpmResidentStep?.readbackMode,
         normalHotLoopReadbackFree: mlsMpmResidentStep?.normalHotLoopReadbackFree,
+        renderStateReadbackAvailable: mlsMpmResidentStep?.renderStateReadbackAvailable,
         gpuAuthoritativeState: mlsMpmResidentStep?.gpuAuthoritativeState,
         particleCount: mlsMpmResidentStep?.particleCount,
         gridNodeCount: mlsMpmResidentStep?.gridNodeCount,
@@ -1383,6 +1398,11 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           massDeltaKg: mlsMpmResidentStep?.diagnostics?.massDeltaKg,
           maxSpeedMPerS: mlsMpmResidentStep?.diagnostics?.maxSpeedMPerS,
           maxDisplacementM: mlsMpmResidentStep?.diagnostics?.maxDisplacementM,
+          readbackMode: mlsMpmResidentStep?.diagnostics?.readbackMode,
+          compactGpuSummaryAvailable: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryAvailable,
+          compactGpuSummaryStatus: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryStatus,
+          compactGpuSummaryReadbackMode: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryReadbackMode,
+          compactReadbackByteLength: mlsMpmResidentStep?.diagnostics?.compactReadbackByteLength,
           fullPhysicsValidation: mlsMpmResidentStep?.diagnostics?.fullPhysicsValidation
         },
         p2gProjectionValidation: mlsMpmResidentStep?.p2gProjectionValidation,
@@ -1405,8 +1425,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         finalStepSchema: mlsMpmResidentSteps?.finalStep?.schema,
         finalStepStatus: mlsMpmResidentSteps?.finalStep?.status,
         stepSummaries: mlsMpmResidentSteps?.stepSummaries,
+        requestedReadbackMode: mlsMpmResidentSteps?.requestedReadbackMode,
         readbackMode: mlsMpmResidentSteps?.readbackMode,
         normalHotLoopReadbackFree: mlsMpmResidentSteps?.normalHotLoopReadbackFree,
+        renderStateReadbackAvailable: mlsMpmResidentSteps?.renderStateReadbackAvailable,
         gpuAuthoritativeState: mlsMpmResidentSteps?.gpuAuthoritativeState,
         scientificValidation: mlsMpmResidentSteps?.scientificValidation,
         sphValidation: mlsMpmResidentSteps?.sphValidation,
@@ -1419,6 +1441,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.canvasWidth).toBeGreaterThan(100);
   expect(derivedSummary.canvasHeight).toBeGreaterThan(100);
   expect(derivedSummary.driverReady).toBe(true);
+  expect(derivedSummary.overlayResidentRequestedReadbackMode).toBe('no-full-readback');
+  expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback');
+  expect(derivedSummary.statusText).toContain('gpu authoritative: false');
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
   expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
   expect(derivedSummary.opticalGpuTable.spectralSampleCount).toBeGreaterThan(0);
@@ -1510,15 +1535,28 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     'webgpu-device-lost-fallback',
     'webgpu-error-fallback',
     'webgpu-executed',
+    'webgpu-executed-no-full-readback',
     'webgpu-parity-failed'
   ]).toContain(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus);
   if (derivedSummary.mlsMpmP2gGridProjection.backend === 'webgpu') {
-    expect(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus).toBe('webgpu-executed');
+    expect([
+      'webgpu-executed',
+      'webgpu-executed-no-full-readback'
+    ]).toContain(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus);
     expect(derivedSummary.mlsMpmP2gGridProjection.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-grid-projection-parity.v0');
-    expect(derivedSummary.mlsMpmP2gGridProjection.parityStatus).toBe('pass');
-    expect(derivedSummary.mlsMpmP2gGridProjection.parityMaxGridAbs).toBeLessThanOrEqual(
-      derivedSummary.mlsMpmP2gGridProjection.parityTolerance
-    );
+    if (derivedSummary.mlsMpmP2gGridProjection.readbackMode === 'no-full-readback') {
+      expect(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus).toBe('webgpu-executed-no-full-readback');
+      expect(derivedSummary.mlsMpmP2gGridProjection.parityStatus).toBe('not-run-no-full-readback');
+      expect(derivedSummary.mlsMpmP2gGridProjection.parityMaxGridAbs).toBe(null);
+      expect(derivedSummary.mlsMpmP2gGridProjection.normalHotLoopReadbackFree).toBe(true);
+    } else {
+      expect(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus).toBe('webgpu-executed');
+      expect(derivedSummary.mlsMpmP2gGridProjection.parityStatus).toBe('pass');
+      expect(derivedSummary.mlsMpmP2gGridProjection.parityMaxGridAbs).toBeLessThanOrEqual(
+        derivedSummary.mlsMpmP2gGridProjection.parityTolerance
+      );
+      expect(derivedSummary.mlsMpmP2gGridProjection.normalHotLoopReadbackFree).toBe(false);
+    }
   }
   expect(derivedSummary.mlsMpmP2gGridProjection.p2gProjectionValidation).toBe(false);
   expect(derivedSummary.mlsMpmP2gGridProjection.stressProjectionValidation).toBe(false);
@@ -1541,15 +1579,28 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     'webgpu-device-lost-fallback',
     'webgpu-error-fallback',
     'webgpu-executed',
+    'webgpu-executed-no-full-readback',
     'webgpu-parity-failed'
   ]).toContain(derivedSummary.mlsMpmGridUpdate.webgpuStatus);
   if (derivedSummary.mlsMpmGridUpdate.backend === 'webgpu') {
-    expect(derivedSummary.mlsMpmGridUpdate.webgpuStatus).toBe('webgpu-executed');
+    expect([
+      'webgpu-executed',
+      'webgpu-executed-no-full-readback'
+    ]).toContain(derivedSummary.mlsMpmGridUpdate.webgpuStatus);
     expect(derivedSummary.mlsMpmGridUpdate.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-grid-update-parity.v0');
-    expect(derivedSummary.mlsMpmGridUpdate.parityStatus).toBe('pass');
-    expect(derivedSummary.mlsMpmGridUpdate.parityMaxGridAbs).toBeLessThanOrEqual(
-      derivedSummary.mlsMpmGridUpdate.parityTolerance
-    );
+    if (derivedSummary.mlsMpmGridUpdate.readbackMode === 'no-full-readback') {
+      expect(derivedSummary.mlsMpmGridUpdate.webgpuStatus).toBe('webgpu-executed-no-full-readback');
+      expect(derivedSummary.mlsMpmGridUpdate.parityStatus).toBe('not-run-no-full-readback');
+      expect(derivedSummary.mlsMpmGridUpdate.parityMaxGridAbs).toBe(null);
+      expect(derivedSummary.mlsMpmGridUpdate.normalHotLoopReadbackFree).toBe(true);
+    } else {
+      expect(derivedSummary.mlsMpmGridUpdate.webgpuStatus).toBe('webgpu-executed');
+      expect(derivedSummary.mlsMpmGridUpdate.parityStatus).toBe('pass');
+      expect(derivedSummary.mlsMpmGridUpdate.parityMaxGridAbs).toBeLessThanOrEqual(
+        derivedSummary.mlsMpmGridUpdate.parityTolerance
+      );
+      expect(derivedSummary.mlsMpmGridUpdate.normalHotLoopReadbackFree).toBe(false);
+    }
   }
   expect(derivedSummary.mlsMpmGridUpdate.p2gProjectionValidation).toBe(false);
   expect(derivedSummary.mlsMpmGridUpdate.stressProjectionValidation).toBe(false);
@@ -1573,18 +1624,32 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     'webgpu-device-lost-fallback',
     'webgpu-error-fallback',
     'webgpu-executed',
+    'webgpu-executed-no-full-readback',
     'webgpu-parity-failed'
   ]).toContain(derivedSummary.mlsMpmG2pReconstruction.webgpuStatus);
   if (derivedSummary.mlsMpmG2pReconstruction.backend === 'webgpu') {
-    expect(derivedSummary.mlsMpmG2pReconstruction.webgpuStatus).toBe('webgpu-executed');
+    expect([
+      'webgpu-executed',
+      'webgpu-executed-no-full-readback'
+    ]).toContain(derivedSummary.mlsMpmG2pReconstruction.webgpuStatus);
     expect(derivedSummary.mlsMpmG2pReconstruction.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-g2p-reconstruction-parity.v0');
-    expect(derivedSummary.mlsMpmG2pReconstruction.parityStatus).toBe('pass');
-    expect(derivedSummary.mlsMpmG2pReconstruction.parityMaxStateAbs).toBeLessThanOrEqual(
-      derivedSummary.mlsMpmG2pReconstruction.parityTolerance
-    );
-    expect(derivedSummary.mlsMpmG2pReconstruction.parityMaxMechanicsAbs).toBeLessThanOrEqual(
-      derivedSummary.mlsMpmG2pReconstruction.parityTolerance
-    );
+    if (derivedSummary.mlsMpmG2pReconstruction.readbackMode === 'no-full-readback') {
+      expect(derivedSummary.mlsMpmG2pReconstruction.webgpuStatus).toBe('webgpu-executed-no-full-readback');
+      expect(derivedSummary.mlsMpmG2pReconstruction.parityStatus).toBe('not-run-no-full-readback');
+      expect(derivedSummary.mlsMpmG2pReconstruction.parityMaxStateAbs).toBe(null);
+      expect(derivedSummary.mlsMpmG2pReconstruction.parityMaxMechanicsAbs).toBe(null);
+      expect(derivedSummary.mlsMpmG2pReconstruction.normalHotLoopReadbackFree).toBe(true);
+    } else {
+      expect(derivedSummary.mlsMpmG2pReconstruction.webgpuStatus).toBe('webgpu-executed');
+      expect(derivedSummary.mlsMpmG2pReconstruction.parityStatus).toBe('pass');
+      expect(derivedSummary.mlsMpmG2pReconstruction.parityMaxStateAbs).toBeLessThanOrEqual(
+        derivedSummary.mlsMpmG2pReconstruction.parityTolerance
+      );
+      expect(derivedSummary.mlsMpmG2pReconstruction.parityMaxMechanicsAbs).toBeLessThanOrEqual(
+        derivedSummary.mlsMpmG2pReconstruction.parityTolerance
+      );
+      expect(derivedSummary.mlsMpmG2pReconstruction.normalHotLoopReadbackFree).toBe(false);
+    }
   }
   expect(derivedSummary.mlsMpmG2pReconstruction.p2gProjectionValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.stressProjectionValidation).toBe(false);
@@ -1611,8 +1676,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[0].particlePingPong.nextSlot).toBe(1);
   expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.sourceSlot).toBe(1);
   expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.nextSlot).toBe(0);
-  expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('full-parity-readback');
-  expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.requestedReadbackMode).toBe('no-full-readback');
   expect(derivedSummary.mlsMpmResidentSteps.gpuAuthoritativeState).toBe(false);
   expect(derivedSummary.mlsMpmResidentSteps.scientificValidation).toBe(false);
   expect(derivedSummary.mlsMpmResidentSteps.sphValidation).toBe(false);
@@ -1631,16 +1695,34 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmResidentStep.mechanicsStrideFloats).toBe(32);
   expect(derivedSummary.mlsMpmResidentStep.diagnostics.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
   expect(derivedSummary.mlsMpmResidentStep.diagnostics.gridNodeCount).toBe(derivedSummary.mlsMpmGridUpdate.gridNodeCount);
-  expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
-  expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
-  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);
-  expect(derivedSummary.mlsMpmResidentStep.readbackMode).toBe('full-parity-readback');
-  expect(derivedSummary.mlsMpmResidentStep.normalHotLoopReadbackFree).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.requestedReadbackMode).toBe('no-full-readback');
   expect(derivedSummary.mlsMpmResidentStep.gpuAuthoritativeState).toBe(false);
   if (derivedSummary.mlsMpmResidentStep.backend === 'webgpu') {
-    expect(derivedSummary.mlsMpmResidentStep.stageStatus.p2g).toBe('webgpu-executed');
-    expect(derivedSummary.mlsMpmResidentStep.stageStatus.gridUpdate).toBe('webgpu-executed');
-    expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed');
+    expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=no-full-readback');
+    expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
+    expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
+    expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(true);
+    expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(false);
+    expect(derivedSummary.mlsMpmResidentSteps.stepSummaries.every((summary) => (
+      summary.requestedReadbackMode === 'no-full-readback'
+      && summary.readbackMode === 'no-full-readback'
+      && summary.normalHotLoopReadbackFree === true
+      && summary.renderStateReadbackAvailable === false
+    ))).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.readbackMode).toBe('no-full-readback');
+    expect(derivedSummary.mlsMpmResidentStep.normalHotLoopReadbackFree).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.renderStateReadbackAvailable).toBe(false);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.readbackMode).toBe('no-full-readback');
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryAvailable).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryStatus).toBe('compact-summary-ready');
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryReadbackMode).toBe('compact-summary-readback');
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactReadbackByteLength).toBe(80);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
+    expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
+    expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.p2g).toBe('webgpu-executed-no-full-readback');
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.gridUpdate).toBe('webgpu-executed-no-full-readback');
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed-no-full-readback');
     expect(derivedSummary.mlsMpmResidentStep.residentBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.stageBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.g2pOutputBuffersRetained).toBe(true);
@@ -1656,6 +1738,19 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextTime).toBeGreaterThan(
       derivedSummary.mlsMpmResidentStep.particlePingPong.time
     );
+  } else {
+    expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=full-parity-readback');
+    expect(derivedSummary.statusText).toContain('render readback  : available=true hot-loop-no-full=false');
+    expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('full-parity-readback');
+    expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(false);
+    expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.readbackMode).toBe('full-parity-readback');
+    expect(derivedSummary.mlsMpmResidentStep.normalHotLoopReadbackFree).toBe(false);
+    expect(derivedSummary.mlsMpmResidentStep.renderStateReadbackAvailable).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.readbackMode).toBe('full-parity-readback');
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
+    expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
+    expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);
   }
   expect(derivedSummary.mlsMpmResidentStep.p2gProjectionValidation).toBe(false);
   expect(derivedSummary.mlsMpmResidentStep.stressProjectionValidation).toBe(false);

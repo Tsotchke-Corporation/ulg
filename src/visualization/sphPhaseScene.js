@@ -34,6 +34,10 @@ import {
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
+export const SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT = 'no-full-readback';
+
+const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
+const RESIDENT_NO_FULL_READBACK_MODE = 'no-full-readback';
 
 const SURFACE_CONFIG = {
   h2o: {
@@ -67,6 +71,10 @@ const SURFACE_CONFIG = {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeResidentReadbackMode(value) {
+  return value === RESIDENT_FULL_READBACK_MODE ? RESIDENT_FULL_READBACK_MODE : RESIDENT_NO_FULL_READBACK_MODE;
 }
 
 // Inset the simulation box inside the marching-cubes field cube so an isosurface that reaches a box
@@ -387,6 +395,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmG2pReconstruction = null;
   scene.userData.mlsMpmResidentStep = null;
   scene.userData.mlsMpmResidentSteps = null;
+  scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -621,11 +630,13 @@ export function createSphPhaseScene(container, {
     gridSpacingM = sphParticleState?.smoothingLengthM ?? 0,
     dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
     gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
-    cflFactor = mlsMpmParticleState?.gridCflFactor || 0.6
+    cflFactor = mlsMpmParticleState?.gridCflFactor || 0.6,
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
   } = {}) {
     const sphSignature = sphGpuParticleSignature(sphParticleState);
     const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
     if (!sphSignature || !mlsSignature) return null;
+    const normalizedReadbackMode = normalizeResidentReadbackMode(readbackMode);
     return [
       sphSignature,
       mlsSignature,
@@ -633,6 +644,7 @@ export function createSphPhaseScene(container, {
       dt,
       gravityMPerS2.join(','),
       cflFactor,
+      normalizedReadbackMode,
       dims.join(',')
     ].join('|');
   }
@@ -1206,6 +1218,7 @@ export function createSphPhaseScene(container, {
     dt = mlsMpmGpuParticleState?.mechanicsDtS ?? 0,
     gravityMPerS2 = mlsMpmGpuParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
     cflFactor = mlsMpmGpuParticleState?.gridCflFactor || 0.6,
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     parityTolerances = undefined,
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
@@ -1215,11 +1228,14 @@ export function createSphPhaseScene(container, {
       clearMlsMpmResidentExecutionArtifacts();
       return null;
     }
+    const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+    scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     const signature = mlsMpmResidentStepSignatureFor({
       gridSpacingM,
       dt,
       gravityMPerS2,
-      cflFactor
+      cflFactor,
+      readbackMode: requestedReadbackMode
     });
     if (!force && mlsMpmResidentStepSignature === signature && mlsMpmResidentStep) {
       return mlsMpmResidentStep;
@@ -1261,6 +1277,7 @@ export function createSphPhaseScene(container, {
         navigatorRef: overrideNavigatorRef,
         device,
         deviceResult: resolvedDeviceResult,
+        readbackMode: requestedReadbackMode,
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1269,10 +1286,17 @@ export function createSphPhaseScene(container, {
           opticalGpuDeviceResultPromise = null;
         }
       });
+      execution.requestedReadbackMode = requestedReadbackMode;
       execution.signature = signature;
       if (
         !running
-        || mlsMpmResidentStepSignatureFor({ gridSpacingM, dt, gravityMPerS2, cflFactor }) !== signature
+        || mlsMpmResidentStepSignatureFor({
+          gridSpacingM,
+          dt,
+          gravityMPerS2,
+          cflFactor,
+          readbackMode: requestedReadbackMode
+        }) !== signature
       ) {
         return {
           ...execution,
@@ -1301,6 +1325,7 @@ export function createSphPhaseScene(container, {
     dt = mlsMpmGpuParticleState?.mechanicsDtS ?? 0,
     gravityMPerS2 = mlsMpmGpuParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
     cflFactor = mlsMpmGpuParticleState?.gridCflFactor || 0.6,
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     parityTolerances = undefined,
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
@@ -1313,11 +1338,14 @@ export function createSphPhaseScene(container, {
       return null;
     }
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
+    const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+    scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     const signature = mlsMpmResidentStepsSignatureFor({
       gridSpacingM,
       dt,
       gravityMPerS2,
       cflFactor,
+      readbackMode: requestedReadbackMode,
       stepCount: normalizedStepCount,
       retainIntermediateSteps
     });
@@ -1361,6 +1389,7 @@ export function createSphPhaseScene(container, {
         navigatorRef: overrideNavigatorRef,
         device,
         deviceResult: resolvedDeviceResult,
+        readbackMode: requestedReadbackMode,
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1371,6 +1400,11 @@ export function createSphPhaseScene(container, {
           opticalGpuDeviceResultPromise = null;
         }
       });
+      execution.requestedReadbackMode = requestedReadbackMode;
+      if (execution.finalStep) execution.finalStep.requestedReadbackMode = requestedReadbackMode;
+      for (const summary of execution.stepSummaries ?? []) {
+        summary.requestedReadbackMode = requestedReadbackMode;
+      }
       execution.signature = signature;
       if (
         !running
@@ -1379,6 +1413,7 @@ export function createSphPhaseScene(container, {
           dt,
           gravityMPerS2,
           cflFactor,
+          readbackMode: requestedReadbackMode,
           stepCount: normalizedStepCount,
           retainIntermediateSteps
         }) !== signature
@@ -1627,6 +1662,9 @@ export function createSphPhaseScene(container, {
     },
     getMlsMpmResidentSteps() {
       return mlsMpmResidentSteps;
+    },
+    getMlsMpmResidentRequestedReadbackMode() {
+      return scene.userData.mlsMpmResidentRequestedReadbackMode;
     },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,

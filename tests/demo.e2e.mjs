@@ -1360,7 +1360,13 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         stageStatus: mlsMpmResidentStep?.stageStatus,
         stageBackends: mlsMpmResidentStep?.stageBackends,
         residentBuffersRetained: mlsMpmResidentStep?.residentBuffersRetained,
+        stageBuffersRetained: mlsMpmResidentStep?.stageBuffersRetained,
+        g2pOutputBuffersRetained: mlsMpmResidentStep?.g2pOutputBuffersRetained,
         residentBufferMode: mlsMpmResidentStep?.residentBufferMode,
+        nextParticleBufferMode: mlsMpmResidentStep?.nextParticleBufferMode,
+        nextParticleStateBufferByteLength: mlsMpmResidentStep?.nextParticleStateBufferByteLength,
+        nextParticleMechanicsBufferByteLength: mlsMpmResidentStep?.nextParticleMechanicsBufferByteLength,
+        particlePingPong: mlsMpmResidentStep?.particlePingPong,
         readbackMode: mlsMpmResidentStep?.readbackMode,
         normalHotLoopReadbackFree: mlsMpmResidentStep?.normalHotLoopReadbackFree,
         gpuAuthoritativeState: mlsMpmResidentStep?.gpuAuthoritativeState,
@@ -1591,7 +1597,20 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.gridUpdate).toBe('webgpu-executed');
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed');
     expect(derivedSummary.mlsMpmResidentStep.residentBuffersRetained).toBe(true);
-    expect(derivedSummary.mlsMpmResidentStep.residentBufferMode).toBe('retained-stage-buffers');
+    expect(derivedSummary.mlsMpmResidentStep.stageBuffersRetained).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.g2pOutputBuffersRetained).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.residentBufferMode).toBe('retained-stage-and-output-buffers');
+    expect(derivedSummary.mlsMpmResidentStep.nextParticleBufferMode).toBe('retained-g2p-output-buffers');
+    expect(derivedSummary.mlsMpmResidentStep.nextParticleStateBufferByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.mlsMpmResidentStep.nextParticleMechanicsBufferByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.sourceSlot).toBe(0);
+    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextSlot).toBe(1);
+    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextStep).toBe(
+      derivedSummary.mlsMpmResidentStep.particlePingPong.step + 1
+    );
+    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextTime).toBeGreaterThan(
+      derivedSummary.mlsMpmResidentStep.particlePingPong.time
+    );
   }
   expect(derivedSummary.mlsMpmResidentStep.p2gProjectionValidation).toBe(false);
   expect(derivedSummary.mlsMpmResidentStep.stressProjectionValidation).toBe(false);

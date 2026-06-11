@@ -200,16 +200,65 @@ test('optional MLS-MPM G2P accepts a parity-passing WebGPU result', async () => 
   assert.equal(execution.webgpuParity.status, 'pass');
 });
 
-test('optional MLS-MPM G2P rejects parity drift and keeps CPU output', async () => {
+test('optional MLS-MPM G2P exposes retained output buffers after parity passes', async () => {
+  const stateBuffer = { label: 'g2p-state', destroyed: false, destroy() { this.destroyed = true; } };
+  const mechanicsBuffer = { label: 'g2p-mechanics', destroyed: false, destroy() { this.destroyed = true; } };
   const execution = await runMlsMpmG2pWithOptionalWebGpu({
     ...fixture(),
     preferWebGpu: true,
+    retainOutputParticleBuffers: true,
+    navigatorRef: webGpuNavigator(),
+    async webGpuRunner(args) {
+      assert.equal(args.retainOutputParticleBuffers, true);
+      const result = reconstructMlsMpmG2pCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        stateBuffer,
+        mechanicsBuffer,
+        stateBufferByteLength: result.state.byteLength,
+        mechanicsBufferByteLength: result.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        destroyOutputParticleBuffers() {
+          stateBuffer.destroy();
+          mechanicsBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(execution.backend, 'webgpu');
+  assert.equal(execution.retainedOutputParticleBuffers, true);
+  assert.equal(execution.stateBuffer, stateBuffer);
+  assert.equal(execution.mechanicsBuffer, mechanicsBuffer);
+  assert.equal(execution.stateBufferByteLength, execution.state.byteLength);
+  assert.equal(execution.mechanicsBufferByteLength, execution.mechanics.byteLength);
+  assert.equal(stateBuffer.destroyed, false);
+  assert.equal(mechanicsBuffer.destroyed, false);
+  execution.destroyOutputParticleBuffers();
+  assert.equal(stateBuffer.destroyed, true);
+  assert.equal(mechanicsBuffer.destroyed, true);
+});
+
+test('optional MLS-MPM G2P rejects parity drift and keeps CPU output', async () => {
+  let destroyed = 0;
+  const execution = await runMlsMpmG2pWithOptionalWebGpu({
+    ...fixture(),
+    preferWebGpu: true,
+    retainOutputParticleBuffers: true,
     navigatorRef: webGpuNavigator(),
     async webGpuRunner(args) {
       const result = reconstructMlsMpmG2pCpu(args);
       result.backend = 'webgpu';
       result.state = result.state.slice();
       result.state[0] += 1;
+      result.stateBuffer = { destroy: () => { destroyed += 1; } };
+      result.mechanicsBuffer = { destroy: () => { destroyed += 1; } };
+      result.retainedOutputParticleBuffers = true;
+      result.destroyOutputParticleBuffers = () => {
+        result.stateBuffer.destroy();
+        result.mechanicsBuffer.destroy();
+      };
       return result;
     },
     parityTolerance: 1e-8
@@ -219,6 +268,7 @@ test('optional MLS-MPM G2P rejects parity drift and keeps CPU output', async () 
   assert.equal(execution.webgpuStatus.status, 'webgpu-parity-failed');
   assert.equal(execution.webgpuParity.status, 'fail');
   assert.ok(execution.webgpuParity.maxStateAbs > 0.5);
+  assert.equal(destroyed, 2);
 });
 
 test('MLS-MPM G2P parity report is explicit and non-scientific', () => {

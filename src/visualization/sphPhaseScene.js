@@ -1322,6 +1322,11 @@ export function createSphPhaseScene(container, {
     mlsMpmGridUpdate = null;
     mlsMpmGridUpdateSignature = null;
     scene.userData.mlsMpmGridUpdate = null;
+    if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
+      mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
+    } else {
+      mlsMpmG2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
+    }
     mlsMpmG2pReconstruction = null;
     mlsMpmG2pReconstructionSignature = null;
     scene.userData.mlsMpmG2pReconstruction = null;
@@ -1421,6 +1426,11 @@ export function createSphPhaseScene(container, {
     mlsMpmP2gGridProjection?.destroyGridBuffer?.();
     mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
     mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
+    if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
+      mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
+    } else {
+      mlsMpmG2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
+    }
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }

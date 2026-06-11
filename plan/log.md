@@ -8665,3 +8665,76 @@ Failures / open questions:
 - Thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
   pressure, and rendering fields remain outside the resident GPU hot loop.
 - No push was attempted.
+
+## 2026-06-11 01:12:57 AKDT - Retained G2P output buffers and ping-pong metadata
+
+Prompt:
+
+- Continue along the GPU-resident MLS-MPM path and close the next clean
+  residency gap.
+
+Actions:
+
+- Added `retainOutputParticleBuffers` to the G2P WebGPU path and optional
+  parity wrapper.
+- Exposed retained G2P `stateBuffer` and `mechanicsBuffer` on accepted WebGPU
+  G2P executions.
+- Added ownership flags to uploaded SPH/MLS-MPM buffer descriptors and made
+  destroy helpers skip borrowed buffers.
+- Added resident-step `nextParticleUploads` descriptors backed by retained G2P
+  output buffers.
+- Added `particlePingPong` metadata for source slot, next slot, step, next step,
+  time, and next time.
+- Extended browser e2e checks for retained output buffers and ping-pong fields.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphG2pGpuKernel.js`
+- `src/runtime/sph/sphGpuBuffers.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphG2pGpuKernel.test.mjs`
+- `tests/sphGpuBuffers.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphGpuBuffers.js && node --check src/runtime/sph/sphG2pGpuKernel.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check tests/sphGpuBuffers.test.mjs && node --check tests/sphG2pGpuKernel.test.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/demo.e2e.mjs`
+- `node --test tests/sphGpuBuffers.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphGpuBuffers.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- Browser HTTPS/WebGPU retained-output probe against `https://127.0.0.1:5173/`
+  using Chromium flags `--enable-unsafe-webgpu --enable-features=Vulkan`
+- `npm test`
+- `npm run build`
+
+Validation:
+
+- PASS: focused SPH-buffer/G2P/resident-step tests passed `21/21`.
+- PASS: focused ABI/SPH-buffer/P2G/grid-update/G2P/resident-step tests passed
+  `49/49`.
+- PASS: focused SPH browser e2e passed against the live HTTPS server (`1/1`).
+- PASS: flagged-WebGPU browser probe reported resident step `backend=webgpu`,
+  P2G/grid-update/G2P stage statuses `webgpu-executed`, retained stage buffers
+  `true`, retained G2P output buffers `true`, buffer mode
+  `retained-stage-and-output-buffers`, `nextParticleBufferMode=retained-g2p-output-buffers`,
+  state/mechanics output byte lengths `4864` and `19456`, ping-pong slot
+  `0 -> 1`, `nextTime=0.0005`, `activeGridNodeCount=280`, `massDeltaKg=0`,
+  and P2G/grid-update/G2P parity `pass`.
+- PASS: `npm test` passed `283/283`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+
+Failures / open questions:
+
+- The retained next uploads are not yet swapped into repeated resident GPU
+  steps.
+- Full parity readback is still active; no-readback hot-loop mode and compact
+  GPU diagnostics remain next.
+- CPU particle state remains authoritative for visible motion, thermal state,
+  phase changes, reactions, wall heat, and status.
+- No push was attempted.

@@ -8,6 +8,7 @@ import {
 import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
+  destroyMlsMpmResidentStepBuffers,
   runMlsMpmResidentStepWithOptionalWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import { projectMlsMpmP2gGridCpu } from '../src/runtime/sph/sphGridGpuKernel.js';
@@ -115,8 +116,22 @@ test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not
 test('MLS-MPM resident step shares retained stage buffers across WebGPU stages', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
+  const sourceStateBuffer = tracker.buffer('source-state');
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const sourceMechanicsBuffer = tracker.buffer('source-mechanics');
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: sourceStateBuffer,
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: sourceMechanicsBuffer,
+      slot: 0
+    },
     preferWebGpu: true,
     navigatorRef: webGpuNavigator(),
     boxDimsM: [3, 3, 3],
@@ -147,7 +162,21 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
     },
     g2pRunner(args) {
       assert.equal(args.updatedGridBuffer?.label, 'updated-grid');
-      return { ...reconstructMlsMpmG2pCpu(args), backend: 'webgpu' };
+      assert.equal(args.retainOutputParticleBuffers, true);
+      const result = reconstructMlsMpmG2pCpu(args);
+      return {
+        ...result,
+        backend: 'webgpu',
+        stateBuffer: tracker.buffer('g2p-state'),
+        mechanicsBuffer: tracker.buffer('g2p-mechanics'),
+        stateBufferByteLength: result.state.byteLength,
+        mechanicsBufferByteLength: result.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
     }
   });
 
@@ -157,11 +186,32 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   assert.equal(step.stageStatus.gridUpdate, 'webgpu-executed');
   assert.equal(step.stageStatus.g2p, 'webgpu-executed');
   assert.equal(step.residentBuffersRetained, true);
-  assert.equal(step.residentBufferMode, 'retained-stage-buffers');
+  assert.equal(step.stageBuffersRetained, true);
+  assert.equal(step.g2pOutputBuffersRetained, true);
+  assert.equal(step.residentBufferMode, 'retained-stage-and-output-buffers');
+  assert.equal(step.nextParticleStateBufferByteLength, step.state.byteLength);
+  assert.equal(step.nextParticleMechanicsBufferByteLength, step.mechanics.byteLength);
+  assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
+  assert.deepEqual(step.particlePingPong, {
+    sourceSlot: 0,
+    nextSlot: 1,
+    step: 0,
+    nextStep: 1,
+    time: 0,
+    nextTime: 0.1
+  });
+  assert.equal(step.nextParticleUploads.sphParticleUpload.slot, 1);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.ownsStateBuffer, true);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.ownsThermoBuffer, false);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.slot, 1);
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.ownsMechanicsBuffer, true);
   assert.equal(step.diagnostics.activeGridNodeCount > 0, true);
   assert.equal(step.diagnostics.sourceMomentumKgMPerS[0], 16);
   assert.equal(Number.isFinite(step.diagnostics.maxSpeedMPerS), true);
   assert.equal(tracker.destroyed, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(tracker.destroyed, 4);
 });
 
 test('MLS-MPM resident step falls forward through CPU stages after a WebGPU parity failure', async () => {

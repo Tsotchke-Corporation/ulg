@@ -651,6 +651,31 @@ Still remaining:
   phase updates, reactions, and status.
 - Compact GPU summary buffers need to replace full readbacks in the hot loop.
 
+## 2026-06-11 Checkpoint - Retained G2P Output Buffers
+
+The resident-step chain now keeps the G2P output state and mechanics buffers
+alive after parity passes. Those buffers are exposed as next-step particle upload
+descriptors with explicit ownership flags and ping-pong metadata. This is the
+handoff needed for a repeated GPU stepping loop.
+
+Implemented:
+
+- `retainOutputParticleBuffers` on G2P WebGPU execution.
+- Retained state/mechanics buffer fields and cleanup functions on G2P execution
+  artifacts.
+- Ownership-aware `destroySphGpuParticleBuffers()` and
+  `destroyMlsMpmGpuParticleBuffers()`.
+- Resident-step fields:
+  `g2pOutputBuffersRetained`, `nextParticleUploads`,
+  `nextParticleBufferMode`, `nextParticleStateBufferByteLength`,
+  `nextParticleMechanicsBufferByteLength`, and `particlePingPong`.
+
+Still remaining:
+
+- The hot loop still runs in `full-parity-readback` mode.
+- The retained next uploads are not yet swapped into the next resident step.
+- Compact diagnostics are CPU-computed from readback, not GPU summary buffers.
+
 ## Validation
 
 Required tests and evidence:

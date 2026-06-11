@@ -148,6 +148,28 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
   assert.deepEqual(destroyed, ['ulg-sph-particle-state', 'ulg-sph-particle-thermo']);
 });
 
+test('SPH GPU particle buffer destroy honors ownership flags for borrowed buffers', () => {
+  const destroyed = [];
+  const stateBuffer = { destroy: () => destroyed.push('state') };
+  const thermoBuffer = { destroy: () => destroyed.push('thermo') };
+
+  destroySphGpuParticleBuffers({
+    stateBuffer,
+    thermoBuffer,
+    ownsStateBuffer: true,
+    ownsThermoBuffer: false
+  });
+  assert.deepEqual(destroyed, ['state']);
+
+  destroySphGpuParticleBuffers({
+    stateBuffer,
+    thermoBuffer,
+    ownsStateBuffer: false,
+    ownsThermoBuffer: true
+  });
+  assert.deepEqual(destroyed, ['state', 'thermo']);
+});
+
 test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first step', () => {
   const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
   const packed = buildMlsMpmGpuParticleBuffers(demo.state, {
@@ -232,4 +254,21 @@ test('MLS-MPM GPU mechanics buffer upload writes and destroys storage buffers', 
 
   destroyMlsMpmGpuParticleBuffers(buffers);
   assert.deepEqual(destroyed, ['ulg-mls-mpm-particle-mechanics']);
+});
+
+test('MLS-MPM GPU mechanics destroy honors borrowed-buffer ownership', () => {
+  const destroyed = [];
+  const mechanicsBuffer = { destroy: () => destroyed.push('mechanics') };
+
+  destroyMlsMpmGpuParticleBuffers({
+    mechanicsBuffer,
+    ownsMechanicsBuffer: false
+  });
+  assert.deepEqual(destroyed, []);
+
+  destroyMlsMpmGpuParticleBuffers({
+    mechanicsBuffer,
+    ownsMechanicsBuffer: true
+  });
+  assert.deepEqual(destroyed, ['mechanics']);
 });

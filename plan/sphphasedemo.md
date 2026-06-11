@@ -1163,3 +1163,38 @@ Remaining before GPU-authoritative motion:
   after conservation and repeated-step parity are established.
 - Move thermal, wall heat, phase-equilibrium, reaction, gas pressure, and render
   fields onto resident GPU buffers.
+
+## 2026-06-11 G2P Output Buffer Retention Checkpoint
+
+Completed:
+
+- G2P WebGPU execution can now retain its output particle state and mechanics
+  buffers after parity passes.
+- The resident MLS-MPM step exposes retained G2P output buffers as
+  `nextParticleUploads`, with explicit ownership flags and ping-pong metadata.
+- Particle upload destruction now honors ownership flags, so borrowed thermo
+  buffers are not destroyed when a retained next-state upload is cleaned up.
+- The browser demo exposes `particlePingPong` with source/next slots, step, and
+  time metadata.
+
+Validation evidence:
+
+- Focused SPH-buffer/G2P/resident-step tests passed `21/21`.
+- Broader ABI/SPH-buffer/P2G/grid-update/G2P/resident-step tests passed `49/49`.
+- Browser e2e for the default derived-material SPH demo passed against the live
+  HTTPS server.
+- Flagged WebGPU browser probe reported retained stage buffers `true`, retained
+  G2P output buffers `true`, `nextParticleBufferMode=retained-g2p-output-buffers`,
+  state/mechanics output byte lengths `4864` and `19456`, ping-pong slot
+  `0 -> 1`, next time `0.0005`, and P2G/grid-update/G2P parity `pass`.
+- Full `npm test` passed `283/283`; production build passed with the known
+  large-chunk warning.
+
+Remaining before GPU-authoritative motion:
+
+- Add no-readback resident mode and compact GPU summary buffers; full parity
+  readback is still required for this evidence path.
+- Promote retained next particle uploads into repeated GPU stepping, then add
+  repeated-step conservation checks.
+- Keep CPU thermal, phase, reaction, wall heat, gas pressure, and render fields
+  in sync until those kernels are moved to GPU.

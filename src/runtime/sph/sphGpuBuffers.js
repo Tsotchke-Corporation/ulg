@@ -309,6 +309,8 @@ export function uploadSphGpuParticleBuffers(device, packed) {
     thermoStrideBytes: packed.thermoStrideBytes,
     stateBuffer: writeStorageBuffer(device, 'ulg-sph-particle-state', packed.state),
     thermoBuffer: writeStorageBuffer(device, 'ulg-sph-particle-thermo', packed.thermo),
+    ownsStateBuffer: true,
+    ownsThermoBuffer: true,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -407,6 +409,7 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
     particleCount: packed.particleCount,
     mechanicsStrideBytes: packed.mechanicsStrideBytes,
     mechanicsBuffer: writeStorageBuffer(device, 'ulg-mls-mpm-particle-mechanics', packed.mechanics),
+    ownsMechanicsBuffer: true,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -415,12 +418,14 @@ export function uploadMlsMpmGpuParticleBuffers(device, packed) {
 }
 
 export function destroyMlsMpmGpuParticleBuffers(buffers) {
-  buffers?.mechanicsBuffer?.destroy?.();
+  if (!buffers || buffers.ownsMechanicsBuffer === false) return;
+  buffers.mechanicsBuffer?.destroy?.();
 }
 
 export function destroySphGpuParticleBuffers(buffers) {
-  buffers?.stateBuffer?.destroy?.();
-  buffers?.thermoBuffer?.destroy?.();
+  if (!buffers) return;
+  if (buffers.ownsStateBuffer !== false) buffers.stateBuffer?.destroy?.();
+  if (buffers.ownsThermoBuffer !== false) buffers.thermoBuffer?.destroy?.();
 }
 
 export function decodeSphGpuParticleRows(packed) {

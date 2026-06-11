@@ -1201,3 +1201,38 @@ Not claimed:
 - G2P output buffers are not yet retained as ping-pong inputs for repeated GPU
   stepping.
 - Thermal/phase/reaction/wall heat updates remain CPU-side in the live demo.
+
+## 2026-06-11 Update - Retained G2P Output And Ping-Pong Metadata
+
+Completed:
+
+- Added retained G2P output state/mechanics buffers after parity-passing WebGPU
+  execution.
+- Exposed retained output buffers as resident-step `nextParticleUploads`.
+- Added ownership flags to SPH and MLS-MPM upload descriptors, and made destroy
+  helpers honor borrowed buffers.
+- Added resident-step ping-pong metadata: source slot, next slot, source step,
+  next step, source time, and next time.
+- Extended browser e2e telemetry to assert retained G2P output buffers and
+  ping-pong metadata.
+
+Latest validation:
+
+- PASS: focused SPH-buffer/G2P/resident-step tests passed `21/21`.
+- PASS: focused ABI/SPH-buffer/P2G/grid-update/G2P/resident-step tests passed
+  `49/49`.
+- PASS: focused browser e2e passed against `https://127.0.0.1:5173` (`1/1`).
+- PASS: flagged-WebGPU browser probe reported retained stage buffers `true`,
+  retained G2P output buffers `true`,
+  `nextParticleBufferMode=retained-g2p-output-buffers`,
+  output byte lengths `4864` and `19456`, ping-pong slot `0 -> 1`,
+  `nextTime=0.0005`, and P2G/grid-update/G2P parity `pass`.
+- PASS: `npm test` (`283/283`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+
+Not claimed:
+
+- The retained outputs are not yet swapped into a repeated GPU hot loop.
+- Full parity readback is still active.
+- CPU state remains authoritative for visible motion, thermal state, phase
+  changes, reactions, wall heat, and status.

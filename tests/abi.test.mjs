@@ -600,7 +600,7 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
     ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
     'peercompute.ulg.mls-mpm-gpu-resident-summary-execution.v0'
   );
-  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 20);
+  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 32);
   assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(0, 4), [
     'particleCount:f32',
@@ -612,8 +612,11 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
   assert.equal(mlsMpmResidentSummaryWgsl, mlsMpmResidentSummaryPartialsWgsl);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> source_sph_state/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> next_sph_state/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> next_sph_thermo/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> updated_grid_nodes/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read_write> partial_summaries/);
+  assert.match(mlsMpmResidentSummaryWgsl, /wg_phase_mass_solid/);
+  assert.match(mlsMpmResidentSummaryWgsl, /wg_temperature_mass_sum/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<workgroup> wg_active_grid_nodes/);
   assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(64\)/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read> partial_summaries/);

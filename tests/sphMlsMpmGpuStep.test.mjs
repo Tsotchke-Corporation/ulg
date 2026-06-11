@@ -226,11 +226,16 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
     12, 0, 4, 5,
     6, 7, 8, 9,
     3, 3, 3, 2.5,
-    0.125, 0.9, 1.1, 1
+    0.125, 0.9, 1.1, 1,
+    5, 4, 2, 1,
+    450, 273, 900, 65,
+    0, 65, 12, 1
   ]);
   const device = fakeSummaryDevice(summaryValues);
   const tracker = fakeBufferTracker();
   const sourceStateBuffer = tracker.buffer('source-state');
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const retainedThermoBuffer = tracker.buffer('retained-thermal-thermo');
   const sourceMechanicsBuffer = tracker.buffer('source-mechanics');
   const nextStateBuffer = tracker.buffer('next-state');
   const nextMechanicsBuffer = tracker.buffer('next-mechanics');
@@ -249,7 +254,8 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
     },
     sphParticleUpload: {
       status: 'webgpu-uploaded',
-      stateBuffer: sourceStateBuffer
+      stateBuffer: sourceStateBuffer,
+      thermoBuffer: sourceThermoBuffer
     },
     mlsMpmParticleUpload: {
       status: 'webgpu-uploaded',
@@ -262,29 +268,42 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
     g2pReconstruction: {
       stateBuffer: nextStateBuffer,
       mechanicsBuffer: nextMechanicsBuffer
+    },
+    thermalStep: {
+      result: {
+        thermoBuffer: retainedThermoBuffer
+      }
     }
   });
 
   assert.equal(summary.status, 'compact-summary-ready');
   assert.equal(summary.reductionStrategy, 'two-pass-workgroup-reduction');
   assert.equal(summary.compactPartialSummaryCount, 3);
-  assert.equal(summary.compactPartialSummaryByteLength, 240);
+  assert.equal(summary.compactPartialSummaryByteLength, 384);
   assert.equal(summary.compactReductionWorkgroupSize, 64);
-  assert.equal(summary.compactReadbackByteLength, 80);
-  assert.equal(summary.compactReadbackFloatCount, 20);
+  assert.equal(summary.compactReadbackByteLength, 128);
+  assert.equal(summary.compactReadbackFloatCount, 32);
   assert.equal(summary.sourceStateBufferMode, 'borrowed-webgpu-upload');
+  assert.equal(summary.thermoBufferMode, 'retained-thermal-output');
   assert.equal(summary.sourceMechanicsBufferMode, 'borrowed-webgpu-upload');
   assert.equal(summary.activeGridNodeCount, 17);
   assert.equal(summary.massDeltaKg, 0);
   assert.deepEqual(summary.momentumDeltaKgMPerS, [3, 3, 3]);
+  assert.deepEqual(summary.phaseMassKg, { solid: 5, liquid: 4, gas: 2, plasma: 1 });
+  assert.equal(summary.temperatureMassWeightedMeanK, 450);
+  assert.equal(summary.minTemperatureK, 273);
+  assert.equal(summary.maxTemperatureK, 900);
+  assert.equal(summary.thermalReadyCount, 65);
+  assert.equal(summary.thermalProblemCount, 0);
+  assert.equal(summary.thermalPhaseSummaryAvailable, true);
   assert.deepEqual(device.dispatches.map((entry) => entry.count), [3, 1]);
   assert.equal(device.bindGroups.length, 2);
-  assert.equal(device.bindGroups[0].entries.length, 7);
+  assert.equal(device.bindGroups[0].entries.length, 8);
   assert.equal(device.bindGroups[1].entries.length, 3);
   assert.equal(device.copies.length, 1);
-  assert.equal(device.copies[0].size, 80);
+  assert.equal(device.copies[0].size, 128);
   assert.equal(device.writes[0].byteLength, 16);
-  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, 240);
+  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, 384);
   assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-readback').unmapped, true);
   assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
 });
@@ -671,9 +690,19 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         maxDisplacementM: 0.1875,
         minVolumeRatioJ: 0.98,
         maxVolumeRatioJ: 1.02,
+        phaseMassKg: { solid: 3, liquid: 4, gas: 1, plasma: 0 },
+        temperatureMassWeightedMeanK: 420,
+        minTemperatureK: 273,
+        maxTemperatureK: 1200,
+        thermalReadyCount: 1,
+        thermalProblemCount: 0,
+        finiteTemperatureCount: 1,
+        phaseMassTotalKg: 8,
+        thermalPhaseSummaryAvailable: true,
+        thermalSummaryStatus: 'thermal-phase-summary-ready',
         readbackMode: 'compact-summary-readback',
         compactGpuSummaryAvailable: true,
-        compactReadbackByteLength: 80,
+        compactReadbackByteLength: 128,
         reductionStrategy: 'two-pass-workgroup-reduction',
         scientificValidation: false,
         sphValidation: false,
@@ -691,11 +720,16 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
   assert.equal(step.diagnostics.compactGpuSummaryAvailable, true);
   assert.equal(step.diagnostics.compactGpuSummaryStatus, 'compact-summary-ready');
   assert.equal(step.diagnostics.compactGpuSummaryReadbackMode, 'compact-summary-readback');
-  assert.equal(step.diagnostics.compactReadbackByteLength, 80);
+  assert.equal(step.diagnostics.compactReadbackByteLength, 128);
   assert.equal(step.diagnostics.compactSummaryReductionStrategy, 'two-pass-workgroup-reduction');
   assert.equal(step.diagnostics.activeGridNodeCount, 7);
   assert.equal(step.diagnostics.massDeltaKg, 0);
   assert.equal(step.diagnostics.maxSpeedMPerS, 1.875);
+  assert.deepEqual(step.diagnostics.phaseMassKg, { solid: 3, liquid: 4, gas: 1, plasma: 0 });
+  assert.equal(step.diagnostics.temperatureMassWeightedMeanK, 420);
+  assert.equal(step.diagnostics.thermalReadyCount, 1);
+  assert.equal(step.diagnostics.thermalProblemCount, 0);
+  assert.equal(step.diagnostics.thermalPhaseSummaryAvailable, true);
   assert.deepEqual(step.diagnostics.momentumDeltaKgMPerS, [-1, 0, 0]);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
   destroyMlsMpmResidentStepBuffers(step);

@@ -967,6 +967,11 @@ export function mountSphPhaseDemoOverlay() {
       || compactDiagnostics?.readbackMode
       || 'pending';
     const compactReduction = compactDiagnostics?.compactSummaryReductionStrategy || 'pending';
+    const thermalPhaseMassKg = compactDiagnostics?.phaseMassKg || {};
+    const thermalMeanK = compactDiagnostics?.temperatureMassWeightedMeanK;
+    const thermalMinK = compactDiagnostics?.minTemperatureK;
+    const thermalMaxK = compactDiagnostics?.maxTemperatureK;
+    const thermalProblemCount = compactDiagnostics?.thermalProblemCount;
     const residentThermalStatus = residentStep?.stageStatus?.thermal
       || residentStep?.thermalStep?.status
       || residentStep?.thermalStep?.result?.status
@@ -1012,6 +1017,7 @@ export function mountSphPhaseDemoOverlay() {
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
       `resident source  : ${residentSourceMode} continued=${Boolean(residentContinued)} next=${Boolean(residentContinuationAvailable)}`,
       `compact summary  : status=${compactStatus} mode=${compactMode} reduction=${compactReduction}`,
+      `thermal summary  : mean=${Number.isFinite(thermalMeanK) ? fmt(thermalMeanK) : 'pending'}K min=${Number.isFinite(thermalMinK) ? fmt(thermalMinK) : 'pending'}K max=${Number.isFinite(thermalMaxK) ? fmt(thermalMaxK) : 'pending'}K solid=${fmt(thermalPhaseMassKg.solid ?? 0)}kg liquid=${fmt(thermalPhaseMassKg.liquid ?? 0)}kg gas=${fmt(thermalPhaseMassKg.gas ?? 0)}kg plasma=${fmt(thermalPhaseMassKg.plasma ?? 0)}kg problem=${thermalProblemCount ?? 'pending'}`,
       `thermal graph gpu: status=${thermalResponseGraphUpload?.status || 'pending'} responses=${thermalResponseGraphUpload?.responseCount ?? 0} graphs=${thermalResponseGraphUpload?.graphCount ?? 0} bytes=${thermalResponseGraphUpload?.responseBufferByteLength ?? 0}`,
       `resident thermal : status=${residentThermalStatus} backend=${residentThermalBackend} next=${residentThermalBufferMode}`,
       `resident reaction: status=${residentReactionStatus} backend=${residentReactionBackend} reactions=${reactionTable?.reactionCount ?? 0}`,

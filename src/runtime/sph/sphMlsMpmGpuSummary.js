@@ -12,7 +12,8 @@ import {
 } from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
-  SPH_GPU_PARTICLE_STATE_FLOATS
+  SPH_GPU_PARTICLE_STATE_FLOATS,
+  SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
@@ -78,6 +79,14 @@ function outputBufferFromG2p(g2pReconstruction, key) {
   return g2pReconstruction?.gpuResult?.[key] ?? g2pReconstruction?.[key] ?? null;
 }
 
+function outputBufferFromStage(stage, key) {
+  return stage?.result?.gpuResult?.[key]
+    ?? stage?.result?.[key]
+    ?? stage?.gpuResult?.[key]
+    ?? stage?.[key]
+    ?? null;
+}
+
 function updatedGridBufferFromGridUpdate(gridUpdate) {
   return gridUpdate?.gpuResult?.updatedGridBuffer ?? gridUpdate?.updatedGridBuffer ?? null;
 }
@@ -86,8 +95,18 @@ function optionalSourceStateBuffer(sphParticleUpload) {
   return sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.stateBuffer : null;
 }
 
+function optionalSourceThermoBuffer(sphParticleUpload) {
+  return sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
+}
+
 function optionalSourceMechanicsBuffer(mlsMpmParticleUpload) {
   return mlsMpmParticleUpload?.status === 'webgpu-uploaded' ? mlsMpmParticleUpload.mechanicsBuffer : null;
+}
+
+function sourceThermoArray(sphParticleState) {
+  return sphParticleState.thermo instanceof Float32Array
+    ? sphParticleState.thermo
+    : new Float32Array(sphParticleState.particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
 }
 
 export function decodeMlsMpmResidentSummaryValues(values, {
@@ -102,6 +121,12 @@ export function decodeMlsMpmResidentSummaryValues(values, {
   const sourceMomentumKgMPerS = [values[6], values[7], values[8]];
   const nextMomentumKgMPerS = [values[9], values[10], values[11]];
   const momentumDeltaKgMPerS = [values[12], values[13], values[14]];
+  const phaseMassKg = {
+    solid: values[20],
+    liquid: values[21],
+    gas: values[22],
+    plasma: values[23]
+  };
   return {
     schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
     executionSchema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -122,6 +147,16 @@ export function decodeMlsMpmResidentSummaryValues(values, {
     maxDisplacementM: values[16],
     minVolumeRatioJ: values[17],
     maxVolumeRatioJ: values[18],
+    phaseMassKg,
+    temperatureMassWeightedMeanK: values[24],
+    minTemperatureK: values[25],
+    maxTemperatureK: values[26],
+    thermalReadyCount: values[27],
+    thermalProblemCount: values[28],
+    finiteTemperatureCount: values[29],
+    phaseMassTotalKg: values[30],
+    thermalSummaryStatus: values[31] > 0 ? 'thermal-phase-summary-ready' : 'thermal-phase-summary-empty',
+    thermalPhaseSummaryAvailable: values[31] > 0,
     readbackMode,
     compactGpuSummaryAvailable: true,
     fullParticleReadbackPerformed: false,
@@ -143,7 +178,9 @@ export async function runMlsMpmResidentSummaryWebGpu({
   sphParticleUpload = null,
   mlsMpmParticleUpload = null,
   gridUpdate,
-  g2pReconstruction
+  g2pReconstruction,
+  thermalStep = null,
+  reactionStep = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmResidentSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -154,14 +191,27 @@ export async function runMlsMpmResidentSummaryWebGpu({
   const partialCount = Math.max(1, Math.ceil(Math.max(particleCount, gridNodeCount) / SUMMARY_WORKGROUP_SIZE));
   const nextStateBuffer = outputBufferFromG2p(g2pReconstruction, 'stateBuffer');
   const nextMechanicsBuffer = outputBufferFromG2p(g2pReconstruction, 'mechanicsBuffer');
+  const retainedReactionThermoBuffer = outputBufferFromStage(reactionStep, 'thermoBuffer');
+  const retainedThermalThermoBuffer = outputBufferFromStage(thermalStep, 'thermoBuffer');
   const updatedGridBuffer = updatedGridBufferFromGridUpdate(gridUpdate);
   if (!nextStateBuffer || !nextMechanicsBuffer || !updatedGridBuffer) {
     throw new TypeError('MLS-MPM resident summary requires retained G2P state/mechanics and updated-grid buffers');
   }
   const borrowedSourceStateBuffer = optionalSourceStateBuffer(sphParticleUpload);
+  const borrowedSourceThermoBuffer = optionalSourceThermoBuffer(sphParticleUpload);
   const borrowedSourceMechanicsBuffer = optionalSourceMechanicsBuffer(mlsMpmParticleUpload);
   const sourceStateBuffer = borrowedSourceStateBuffer
     || writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-sph-state', sphParticleState.state);
+  let nextThermoBuffer = retainedReactionThermoBuffer || retainedThermalThermoBuffer || borrowedSourceThermoBuffer || null;
+  let nextThermoBufferMode = retainedReactionThermoBuffer
+    ? 'retained-reaction-output'
+    : (retainedThermalThermoBuffer
+      ? 'retained-thermal-output'
+      : (borrowedSourceThermoBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload'));
+  if (!nextThermoBuffer) {
+    nextThermoBuffer = writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-sph-thermo', sourceThermoArray(sphParticleState));
+    nextThermoBufferMode = 'temporary-source-upload';
+  }
   const sourceMechanicsBuffer = borrowedSourceMechanicsBuffer
     || writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-mechanics', mlsMpmParticleState.mechanics);
   const summaryByteLength = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
@@ -201,7 +251,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
         computeBufferBinding(3, 'read-only-storage'),
         computeBufferBinding(4, 'read-only-storage'),
         computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform')
+        computeBufferBinding(6, 'uniform'),
+        computeBufferBinding(7, 'read-only-storage')
       ]
     });
     const partialsBindGroup = device.createBindGroup({
@@ -213,7 +264,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
         { binding: 3, resource: { buffer: nextMechanicsBuffer } },
         { binding: 4, resource: { buffer: updatedGridBuffer } },
         { binding: 5, resource: { buffer: partialsBuffer } },
-        { binding: 6, resource: { buffer: paramsBuffer } }
+        { binding: 6, resource: { buffer: paramsBuffer } },
+        { binding: 7, resource: { buffer: nextThermoBuffer } }
       ]
     });
     const finalizeModule = device.createShaderModule({ code: mlsMpmResidentSummaryFinalizeWgsl });
@@ -264,12 +316,15 @@ export async function runMlsMpmResidentSummaryWebGpu({
       compactPartialSummaryByteLength: partialsByteLength,
       compactReductionWorkgroupSize: SUMMARY_WORKGROUP_SIZE,
       sourceStateBufferMode: borrowedSourceStateBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
+      thermoBufferMode: nextThermoBufferMode,
       sourceMechanicsBufferMode: borrowedSourceMechanicsBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
       sourceStateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
+      thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
       sourceMechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
     };
   } finally {
     if (!borrowedSourceStateBuffer) sourceStateBuffer.destroy?.();
+    if (nextThermoBufferMode === 'temporary-source-upload') nextThermoBuffer.destroy?.();
     if (!borrowedSourceMechanicsBuffer) sourceMechanicsBuffer.destroy?.();
     partialsBuffer.destroy?.();
     summaryBuffer.destroy?.();

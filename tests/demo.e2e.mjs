@@ -1455,6 +1455,16 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           massDeltaKg: mlsMpmResidentStep?.diagnostics?.massDeltaKg,
           maxSpeedMPerS: mlsMpmResidentStep?.diagnostics?.maxSpeedMPerS,
           maxDisplacementM: mlsMpmResidentStep?.diagnostics?.maxDisplacementM,
+          phaseMassKg: mlsMpmResidentStep?.diagnostics?.phaseMassKg,
+          temperatureMassWeightedMeanK: mlsMpmResidentStep?.diagnostics?.temperatureMassWeightedMeanK,
+          minTemperatureK: mlsMpmResidentStep?.diagnostics?.minTemperatureK,
+          maxTemperatureK: mlsMpmResidentStep?.diagnostics?.maxTemperatureK,
+          thermalReadyCount: mlsMpmResidentStep?.diagnostics?.thermalReadyCount,
+          thermalProblemCount: mlsMpmResidentStep?.diagnostics?.thermalProblemCount,
+          finiteTemperatureCount: mlsMpmResidentStep?.diagnostics?.finiteTemperatureCount,
+          phaseMassTotalKg: mlsMpmResidentStep?.diagnostics?.phaseMassTotalKg,
+          thermalPhaseSummaryAvailable: mlsMpmResidentStep?.diagnostics?.thermalPhaseSummaryAvailable,
+          thermalSummaryStatus: mlsMpmResidentStep?.diagnostics?.thermalSummaryStatus,
           readbackMode: mlsMpmResidentStep?.diagnostics?.readbackMode,
           compactGpuSummaryAvailable: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryAvailable,
           compactGpuSummaryStatus: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryStatus,
@@ -1815,6 +1825,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=no-full-readback');
     expect(derivedSummary.statusText).toContain('resident source  : previous-gpu-resident-output continued=true next=true');
     expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
+    expect(derivedSummary.statusText).toContain('thermal summary  :');
     expect(derivedSummary.statusText).toContain('thermal graph gpu: status=webgpu-uploaded');
     expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
@@ -1840,13 +1851,21 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryAvailable).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryStatus).toBe('compact-summary-ready');
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryReadbackMode).toBe('compact-summary-readback');
-    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactReadbackByteLength).toBe(80);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactReadbackByteLength).toBe(128);
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactSummaryReductionStrategy).toBe(
       'two-pass-workgroup-reduction'
     );
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
     expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
     expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.thermalPhaseSummaryAvailable).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.thermalSummaryStatus).toBe('thermal-phase-summary-ready');
+    expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.temperatureMassWeightedMeanK)).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.minTemperatureK).toBeGreaterThan(0);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.maxTemperatureK).toBeGreaterThanOrEqual(
+      derivedSummary.mlsMpmResidentStep.diagnostics.minTemperatureK
+    );
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.phaseMassTotalKg).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.p2g).toBe('webgpu-executed-no-full-readback');
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.gridUpdate).toBe('webgpu-executed-no-full-readback');
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed-no-full-readback');

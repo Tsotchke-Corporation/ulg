@@ -1911,6 +1911,7 @@ struct ResidentSummaryParams {
 @group(0) @binding(4) var<storage, read> updated_grid_nodes: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> partial_summaries: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: ResidentSummaryParams;
+@group(0) @binding(7) var<storage, read> next_sph_thermo: array<vec4<f32>>;
 
 var<workgroup> wg_active_grid_nodes: array<f32, 64>;
 var<workgroup> wg_source_mass: array<f32, 64>;
@@ -1925,6 +1926,17 @@ var<workgroup> wg_max_speed: array<f32, 64>;
 var<workgroup> wg_max_displacement: array<f32, 64>;
 var<workgroup> wg_min_volume_ratio_j: array<f32, 64>;
 var<workgroup> wg_max_volume_ratio_j: array<f32, 64>;
+var<workgroup> wg_phase_mass_solid: array<f32, 64>;
+var<workgroup> wg_phase_mass_liquid: array<f32, 64>;
+var<workgroup> wg_phase_mass_gas: array<f32, 64>;
+var<workgroup> wg_phase_mass_plasma: array<f32, 64>;
+var<workgroup> wg_temperature_mass_sum: array<f32, 64>;
+var<workgroup> wg_min_temperature_k: array<f32, 64>;
+var<workgroup> wg_max_temperature_k: array<f32, 64>;
+var<workgroup> wg_thermal_ready_count: array<f32, 64>;
+var<workgroup> wg_thermal_problem_count: array<f32, 64>;
+var<workgroup> wg_finite_temperature_count: array<f32, 64>;
+var<workgroup> wg_phase_mass_total: array<f32, 64>;
 
 @compute @workgroup_size(64)
 fn main(
@@ -1951,14 +1963,29 @@ fn main(
   var max_displacement2 = 0.0;
   var min_volume_ratio_j = 3.4028234663852886e38;
   var max_volume_ratio_j = 0.0;
+  var phase_mass_solid = 0.0;
+  var phase_mass_liquid = 0.0;
+  var phase_mass_gas = 0.0;
+  var phase_mass_plasma = 0.0;
+  var temperature_mass_sum = 0.0;
+  var min_temperature_k = 3.4028234663852886e38;
+  var max_temperature_k = 0.0;
+  var thermal_ready_count = 0.0;
+  var thermal_problem_count = 0.0;
+  var finite_temperature_count = 0.0;
+  var phase_mass_total = 0.0;
 
   if (index < params.particle_count) {
     let state_base = index * 2u;
+    let thermo_base = index * 3u;
     let mechanics_base = index * 8u;
     let source_pos_mass = source_sph_state[state_base];
     let source_vel_u = source_sph_state[state_base + 1u];
     let next_pos_mass = next_sph_state[state_base];
     let next_vel_u = next_sph_state[state_base + 1u];
+    let thermo_row0 = next_sph_thermo[thermo_base];
+    let thermo_row1 = next_sph_thermo[thermo_base + 1u];
+    let thermo_row2 = next_sph_thermo[thermo_base + 2u];
 
     source_mass = source_mass + source_pos_mass.w;
     next_mass = next_mass + next_pos_mass.w;
@@ -1971,6 +1998,29 @@ fn main(
     let next_j = next_mls_mechanics[mechanics_base + 4u].z;
     min_volume_ratio_j = min(min_volume_ratio_j, next_j);
     max_volume_ratio_j = max(max_volume_ratio_j, next_j);
+
+    let particle_mass = max(next_pos_mass.w, 0.0);
+    let phase_fractions = max(thermo_row1, vec4<f32>(0.0));
+    phase_mass_solid = phase_mass_solid + particle_mass * phase_fractions.x;
+    phase_mass_liquid = phase_mass_liquid + particle_mass * phase_fractions.y;
+    phase_mass_gas = phase_mass_gas + particle_mass * phase_fractions.z;
+    phase_mass_plasma = phase_mass_plasma + particle_mass * phase_fractions.w;
+    phase_mass_total = phase_mass_total + particle_mass * (
+      phase_fractions.x + phase_fractions.y + phase_fractions.z + phase_fractions.w
+    );
+
+    let temperature_k = thermo_row0.z;
+    if (temperature_k > 0.0) {
+      temperature_mass_sum = temperature_mass_sum + particle_mass * temperature_k;
+      min_temperature_k = min(min_temperature_k, temperature_k);
+      max_temperature_k = max(max_temperature_k, temperature_k);
+      finite_temperature_count = finite_temperature_count + 1.0;
+    }
+    if (thermo_row2.z == 1.0) {
+      thermal_ready_count = thermal_ready_count + 1.0;
+    } else {
+      thermal_problem_count = thermal_problem_count + 1.0;
+    }
   }
 
   wg_active_grid_nodes[lane] = active_grid_nodes;
@@ -1986,6 +2036,17 @@ fn main(
   wg_max_displacement[lane] = sqrt(max_displacement2);
   wg_min_volume_ratio_j[lane] = min_volume_ratio_j;
   wg_max_volume_ratio_j[lane] = max_volume_ratio_j;
+  wg_phase_mass_solid[lane] = phase_mass_solid;
+  wg_phase_mass_liquid[lane] = phase_mass_liquid;
+  wg_phase_mass_gas[lane] = phase_mass_gas;
+  wg_phase_mass_plasma[lane] = phase_mass_plasma;
+  wg_temperature_mass_sum[lane] = temperature_mass_sum;
+  wg_min_temperature_k[lane] = min_temperature_k;
+  wg_max_temperature_k[lane] = max_temperature_k;
+  wg_thermal_ready_count[lane] = thermal_ready_count;
+  wg_thermal_problem_count[lane] = thermal_problem_count;
+  wg_finite_temperature_count[lane] = finite_temperature_count;
+  wg_phase_mass_total[lane] = phase_mass_total;
   workgroupBarrier();
 
   var stride = 32u;
@@ -2005,6 +2066,17 @@ fn main(
       wg_max_displacement[lane] = max(wg_max_displacement[lane], wg_max_displacement[other]);
       wg_min_volume_ratio_j[lane] = min(wg_min_volume_ratio_j[lane], wg_min_volume_ratio_j[other]);
       wg_max_volume_ratio_j[lane] = max(wg_max_volume_ratio_j[lane], wg_max_volume_ratio_j[other]);
+      wg_phase_mass_solid[lane] = wg_phase_mass_solid[lane] + wg_phase_mass_solid[other];
+      wg_phase_mass_liquid[lane] = wg_phase_mass_liquid[lane] + wg_phase_mass_liquid[other];
+      wg_phase_mass_gas[lane] = wg_phase_mass_gas[lane] + wg_phase_mass_gas[other];
+      wg_phase_mass_plasma[lane] = wg_phase_mass_plasma[lane] + wg_phase_mass_plasma[other];
+      wg_temperature_mass_sum[lane] = wg_temperature_mass_sum[lane] + wg_temperature_mass_sum[other];
+      wg_min_temperature_k[lane] = min(wg_min_temperature_k[lane], wg_min_temperature_k[other]);
+      wg_max_temperature_k[lane] = max(wg_max_temperature_k[lane], wg_max_temperature_k[other]);
+      wg_thermal_ready_count[lane] = wg_thermal_ready_count[lane] + wg_thermal_ready_count[other];
+      wg_thermal_problem_count[lane] = wg_thermal_problem_count[lane] + wg_thermal_problem_count[other];
+      wg_finite_temperature_count[lane] = wg_finite_temperature_count[lane] + wg_finite_temperature_count[other];
+      wg_phase_mass_total[lane] = wg_phase_mass_total[lane] + wg_phase_mass_total[other];
     }
     workgroupBarrier();
     if (stride == 1u) {
@@ -2014,7 +2086,7 @@ fn main(
   }
 
   if (lane == 0u) {
-    let partial_base = workgroup_id.x * 5u;
+    let partial_base = workgroup_id.x * 8u;
     let momentum_delta = vec3<f32>(
       wg_next_momentum_x[0u] - wg_source_momentum_x[0u],
       wg_next_momentum_y[0u] - wg_source_momentum_y[0u],
@@ -2050,6 +2122,24 @@ fn main(
       wg_max_volume_ratio_j[0u],
       1.0
     );
+    partial_summaries[partial_base + 5u] = vec4<f32>(
+      wg_phase_mass_solid[0u],
+      wg_phase_mass_liquid[0u],
+      wg_phase_mass_gas[0u],
+      wg_phase_mass_plasma[0u]
+    );
+    partial_summaries[partial_base + 6u] = vec4<f32>(
+      wg_temperature_mass_sum[0u],
+      wg_min_temperature_k[0u],
+      wg_max_temperature_k[0u],
+      wg_thermal_ready_count[0u]
+    );
+    partial_summaries[partial_base + 7u] = vec4<f32>(
+      wg_thermal_problem_count[0u],
+      wg_finite_temperature_count[0u],
+      wg_phase_mass_total[0u],
+      1.0
+    );
   }
 }
 `;
@@ -2081,14 +2171,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var max_displacement = 0.0;
   var min_volume_ratio_j = 3.4028234663852886e38;
   var max_volume_ratio_j = 0.0;
+  var phase_mass_solid = 0.0;
+  var phase_mass_liquid = 0.0;
+  var phase_mass_gas = 0.0;
+  var phase_mass_plasma = 0.0;
+  var temperature_mass_sum = 0.0;
+  var min_temperature_k = 3.4028234663852886e38;
+  var max_temperature_k = 0.0;
+  var thermal_ready_count = 0.0;
+  var thermal_problem_count = 0.0;
+  var finite_temperature_count = 0.0;
+  var phase_mass_total = 0.0;
 
   for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
-    let base = partial_index * 5u;
+    let base = partial_index * 8u;
     let row0 = partial_summaries[base];
     let row1 = partial_summaries[base + 1u];
     let row2 = partial_summaries[base + 2u];
     let row3 = partial_summaries[base + 3u];
     let row4 = partial_summaries[base + 4u];
+    let row5 = partial_summaries[base + 5u];
+    let row6 = partial_summaries[base + 6u];
+    let row7 = partial_summaries[base + 7u];
     active_grid_nodes = active_grid_nodes + row0.z;
     source_mass = source_mass + row0.w;
     next_mass = next_mass + row1.x;
@@ -2098,10 +2202,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     max_displacement = max(max_displacement, row4.x);
     min_volume_ratio_j = min(min_volume_ratio_j, row4.y);
     max_volume_ratio_j = max(max_volume_ratio_j, row4.z);
+    phase_mass_solid = phase_mass_solid + row5.x;
+    phase_mass_liquid = phase_mass_liquid + row5.y;
+    phase_mass_gas = phase_mass_gas + row5.z;
+    phase_mass_plasma = phase_mass_plasma + row5.w;
+    temperature_mass_sum = temperature_mass_sum + row6.x;
+    min_temperature_k = min(min_temperature_k, row6.y);
+    max_temperature_k = max(max_temperature_k, row6.z);
+    thermal_ready_count = thermal_ready_count + row6.w;
+    thermal_problem_count = thermal_problem_count + row7.x;
+    finite_temperature_count = finite_temperature_count + row7.y;
+    phase_mass_total = phase_mass_total + row7.z;
   }
 
   if (params.particle_count == 0u) {
     min_volume_ratio_j = 0.0;
+  }
+  if (finite_temperature_count == 0.0) {
+    min_temperature_k = 0.0;
+    max_temperature_k = 0.0;
+  }
+
+  var temperature_mass_weighted_mean_k = 0.0;
+  if (phase_mass_total > 0.0) {
+    temperature_mass_weighted_mean_k = temperature_mass_sum / phase_mass_total;
   }
 
   let momentum_delta = next_momentum - source_momentum;
@@ -2133,6 +2257,24 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     max_displacement,
     min_volume_ratio_j,
     max_volume_ratio_j,
+    1.0
+  );
+  resident_summary[5u] = vec4<f32>(
+    phase_mass_solid,
+    phase_mass_liquid,
+    phase_mass_gas,
+    phase_mass_plasma
+  );
+  resident_summary[6u] = vec4<f32>(
+    temperature_mass_weighted_mean_k,
+    min_temperature_k,
+    max_temperature_k,
+    thermal_ready_count
+  );
+  resident_summary[7u] = vec4<f32>(
+    thermal_problem_count,
+    finite_temperature_count,
+    phase_mass_total,
     1.0
   );
 }

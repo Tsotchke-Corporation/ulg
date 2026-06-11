@@ -370,7 +370,19 @@ export const MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT = Object.freeze([
   'maxDisplacementM:f32',
   'minVolumeRatioJ:f32',
   'maxVolumeRatioJ:f32',
-  'status:f32'
+  'status:f32',
+  'phaseMassSolidKg:f32',
+  'phaseMassLiquidKg:f32',
+  'phaseMassGasKg:f32',
+  'phaseMassPlasmaKg:f32',
+  'temperatureMassWeightedMeanK:f32',
+  'minTemperatureK:f32',
+  'maxTemperatureK:f32',
+  'thermalReadyCount:f32',
+  'thermalProblemCount:f32',
+  'finiteTemperatureCount:f32',
+  'phaseMassTotalKg:f32',
+  'thermalStatus:f32'
 ]);
 
 export const D_TYPES = Object.freeze({

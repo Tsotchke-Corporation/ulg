@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 11:23 AKDT
+Updated: 2026-06-11 11:37 AKDT
 
 ## Done
 
@@ -102,6 +102,14 @@ Updated: 2026-06-11 11:23 AKDT
   in Chromium with Na + liquid H2O: all five resident stages ran on WebGPU, no
   full readback, and the reaction stage retained output buffers. Scientific/
   material/chemistry/phase/full-physics validation remain false.
+- Extended the resident MLS-MPM compact GPU summary from mechanics-only
+  telemetry to a 128-byte mechanics + thermal/phase summary. The WGSL summary
+  now binds retained thermo rows, prefers reaction/thermal output buffers before
+  the source upload, and reports phase masses, mass-weighted temperature range,
+  ready/problem thermo counts, and compact readback metadata without a full
+  particle/grid readback. The SPH overlay shows a `thermal summary` status row.
+  This is resident diagnostic telemetry only; scientific/SPH/phase/full-physics
+  validation remain false.
 - Spawned sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - Used ICC repo registry/status and architecture summaries for MoonLab and peercompute.
 - Added a vanilla Vite/three.js ULG app.

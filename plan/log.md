@@ -10243,3 +10243,89 @@ Failures / open questions:
   uploads for thermal and reaction stages when WebGPU is available, but compact
   thermal/phase summaries are still the next task.
 - No push was attempted.
+
+## 2026-06-11 11:37 AKDT - Compact resident thermal/phase GPU summary
+
+Prompt:
+
+- Continue after the GitHub Pages build and persistent thermal response graph
+  upload, finishing the five-task queue before auditing transparent z-buffer
+  ordering.
+
+What happened:
+
+- Extended `MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT` from 20 to 32 floats so the
+  compact resident summary now covers mechanics plus thermal/phase diagnostics
+  in a single 128-byte readback.
+- Updated `mlsMpmResidentSummaryPartialsWgsl` to bind retained SPH thermo rows
+  at binding 7 and reduce phase masses, mass-weighted temperature, min/max
+  temperature, ready/problem thermo counts, finite-temperature count, and phase
+  mass total alongside the existing mechanics/grid metrics.
+- Updated `mlsMpmResidentSummaryFinalizeWgsl` to reduce eight vec4 rows per
+  partial and emit the appended thermal/phase fields.
+- Updated `runMlsMpmResidentSummaryWebGpu()` to prefer retained reaction thermo
+  buffers, then retained thermal thermo buffers, then the source upload, falling
+  back to a temporary zero/source thermo upload only for standalone summary
+  calls. The runner reports the selected thermo-buffer mode and still performs
+  no full particle/grid readback.
+- Surfaced the new compact fields through resident step diagnostics and added a
+  live `thermal summary` row to the SPH demo overlay.
+- Regenerated the GitHub Pages artifact in `docs/` after the source changes.
+- Sidecar readback audit completed. The highest-priority next performance target
+  is the renderer bridge: `refreshSphResidentRenderState()` still reads render
+  fields back to CPU to feed Three.js MarchingCubes; task 5 should reduce that
+  CPU readback path before broader profiling.
+
+Files touched:
+
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+- `src/runtime/sph/sphMlsMpmGpuSummary.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/abi.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/demo.e2e.mjs`
+- `docs/index.html`
+- `docs/assets/pages-D-dpXRNK.js`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check tests/abi.test.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/demo.e2e.mjs`
+- `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphThermalGpuKernel.test.mjs tests/sphReactionGpuKernel.test.mjs`
+- `curl -k -I https://127.0.0.1:5173/`
+- `ps -eo pid,cmd | rg 'vite|5173'`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `npm run build:pages`
+- `npm test`
+- `git diff --check`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 11:37:09 AKDT`.
+
+Validation:
+
+- PASS: syntax checks for touched runtime, overlay, and test files.
+- PASS: focused ABI/resident/thermal/reaction coverage passed `40/40`.
+- PASS: HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` passed with the existing Vite large-chunk
+  warning and regenerated `docs/`.
+- PASS: full `npm test` passed `327/327`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The compact summary readback is now richer but still occurs every resident
+  step. The next performance slice should add cadence or remove/reduce the
+  renderer-side render-field readback first.
+- The demo still uses a Three.js/MarchingCubes bridge, so a fully GPU-resident
+  renderer is not complete yet.
+- No push was attempted.

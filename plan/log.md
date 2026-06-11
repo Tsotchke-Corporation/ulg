@@ -8265,3 +8265,85 @@ Failures / open questions:
   reconstruction still need WebGPU kernels.
 - The CPU carrier is still authoritative for the visual simulation state.
 - No push was attempted.
+
+## 2026-06-10 23:38:34 AKDT - WebGPU P2G grid projection
+
+Prompt:
+
+- Continue the GPU-resident MLS-MPM path after the particle-local mechanics
+  prediction kernel.
+
+Actions:
+
+- Added ABI schemas for
+  `peercompute.ulg.mls-mpm-gpu-grid-projection.v0`,
+  `peercompute.ulg.mls-mpm-gpu-grid-projection-execution.v0`, and
+  `peercompute.ulg.mls-mpm-gpu-grid-projection-parity.v0`.
+- Added a f32x4-aligned MLS-MPM grid-node row layout carrying mass, momentum,
+  node position, and status.
+- Added `mlsMpmP2gGridProjectionWgsl`, a gather-form P2G kernel that dispatches
+  one invocation per grid node, loops over resident SPH/MLS-MPM particle rows,
+  applies CPU-compatible quadratic B-spline support, and writes grid
+  mass/momentum without float atomics.
+- Added `src/runtime/sph/sphGridGpuKernel.js` with CPU reference projection,
+  optional WebGPU execution, borrowed resident input-buffer support, CPU/WebGPU
+  parity gating, fallback statuses, and non-validation flags.
+- Wired the SPH phase scene/overlay to expose
+  `getMlsMpmP2gGridProjection()` and schedule the projection after SPH and
+  MLS-MPM rows are uploaded.
+- Extended unit and browser e2e coverage to require the grid projection
+  artifact and verify it never claims stress/grid/G2P/SPH/phase/full-physics
+  validation.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphGridGpuKernel.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphGridGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphGridGpuKernel.js && node --check ulg-gpu-abi/src/index.js && node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check src/runtime/sph/sphGridGpuKernel.js && node --check tests/sphGridGpuKernel.test.mjs && node --check tests/abi.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphGridGpuKernel.test.mjs`
+- `node --check tests/demo.e2e.mjs && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check src/runtime/sph/sphGridGpuKernel.js`
+- `node --test tests/abi.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMechanicsGpuKernel.test.mjs`
+- Browser HTTPS/WebGPU probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/P2G-grid tests passed `16/16`.
+- PASS: focused ABI/P2G-grid/mechanics-prediction tests passed `24/24`.
+- PASS: Browser HTTPS/WebGPU probe reported
+  `grid.schema=peercompute.ulg.mls-mpm-gpu-grid-projection-execution.v0`,
+  `projectionSchema=peercompute.ulg.mls-mpm-gpu-grid-projection.v0`,
+  `backend=webgpu`, `webgpuStatus=webgpu-executed`,
+  `parity=pass`, `maxGridAbs=0.00000762939453125`,
+  `gridNodeCount=13824`, and `particleCount=152`.
+- PASS: focused SPH e2e passed against the live HTTPS server (`1/1`).
+- PASS: `npm test` passed `257/257`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This is a gather-form P2G mass/momentum projection, not the full P2G scatter.
+- Stress projection is not included yet; `stressProjectionValidation` remains
+  false.
+- Grid velocity/update, CFL clamp, wall/contact handling, and G2P reconstruction
+  still need WebGPU kernels.
+- The CPU carrier is still authoritative for the visual simulation state.
+- No push was attempted.

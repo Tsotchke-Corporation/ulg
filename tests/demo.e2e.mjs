@@ -1144,7 +1144,7 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
 });
 
 test('SPH phase demo runs derived material properties by default', async ({ page }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(90_000);
   await page.setViewportSize({ width: 900, height: 680 });
   await page.goto('/');
   await page.locator('#run-sph-phase').click();
@@ -1177,6 +1177,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getMlsMpmGpuParticleState?.()?.schema
       && scene?.getMlsMpmGpuParticleUpload?.()?.schema
       && scene?.getMlsMpmMechanicsPrediction?.()?.schema
+      && scene?.getMlsMpmP2gGridProjection?.()?.schema
     );
   });
   const derivedSummary = await page.evaluate(() => {
@@ -1192,6 +1193,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
     const mlsMpmGpuParticleUpload = scene?.getMlsMpmGpuParticleUpload?.();
     const mlsMpmMechanicsPrediction = scene?.getMlsMpmMechanicsPrediction?.();
+    const mlsMpmP2gGridProjection = scene?.getMlsMpmP2gGridProjection?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1276,6 +1278,26 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         sphValidation: mlsMpmMechanicsPrediction?.sphValidation,
         phaseChangeValidation: mlsMpmMechanicsPrediction?.phaseChangeValidation,
         fullPhysicsValidation: mlsMpmMechanicsPrediction?.fullPhysicsValidation
+      },
+      mlsMpmP2gGridProjection: {
+        schema: mlsMpmP2gGridProjection?.schema,
+        projectionSchema: mlsMpmP2gGridProjection?.projectionSchema,
+        backend: mlsMpmP2gGridProjection?.backend,
+        webgpuStatus: mlsMpmP2gGridProjection?.webgpuStatus?.status,
+        paritySchema: mlsMpmP2gGridProjection?.webgpuParity?.schema,
+        parityStatus: mlsMpmP2gGridProjection?.webgpuParity?.status,
+        parityMaxGridAbs: mlsMpmP2gGridProjection?.webgpuParity?.maxGridAbs ?? null,
+        parityTolerance: mlsMpmP2gGridProjection?.webgpuParity?.tolerance ?? null,
+        particleCount: mlsMpmP2gGridProjection?.particleCount,
+        gridNodeCount: mlsMpmP2gGridProjection?.gridNodeCount,
+        gridNodeStrideFloats: mlsMpmP2gGridProjection?.gridNodeStrideFloats,
+        p2gProjectionValidation: mlsMpmP2gGridProjection?.p2gProjectionValidation,
+        stressProjectionValidation: mlsMpmP2gGridProjection?.stressProjectionValidation,
+        gridValidation: mlsMpmP2gGridProjection?.gridValidation,
+        g2pValidation: mlsMpmP2gGridProjection?.g2pValidation,
+        sphValidation: mlsMpmP2gGridProjection?.sphValidation,
+        phaseChangeValidation: mlsMpmP2gGridProjection?.phaseChangeValidation,
+        fullPhysicsValidation: mlsMpmP2gGridProjection?.fullPhysicsValidation
       },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
@@ -1362,6 +1384,35 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmMechanicsPrediction.sphValidation).toBe(false);
   expect(derivedSummary.mlsMpmMechanicsPrediction.phaseChangeValidation).toBe(false);
   expect(derivedSummary.mlsMpmMechanicsPrediction.fullPhysicsValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.schema).toBe('peercompute.ulg.mls-mpm-gpu-grid-projection-execution.v0');
+  expect(derivedSummary.mlsMpmP2gGridProjection.projectionSchema).toBe('peercompute.ulg.mls-mpm-gpu-grid-projection.v0');
+  expect(derivedSummary.mlsMpmP2gGridProjection.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+  expect(derivedSummary.mlsMpmP2gGridProjection.gridNodeCount).toBeGreaterThan(0);
+  expect(derivedSummary.mlsMpmP2gGridProjection.gridNodeStrideFloats).toBe(8);
+  expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.mlsMpmP2gGridProjection.backend);
+  expect([
+    'blocked-webgpu-unavailable',
+    'not-requested',
+    'webgpu-device-lost-fallback',
+    'webgpu-error-fallback',
+    'webgpu-executed',
+    'webgpu-parity-failed'
+  ]).toContain(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus);
+  if (derivedSummary.mlsMpmP2gGridProjection.backend === 'webgpu') {
+    expect(derivedSummary.mlsMpmP2gGridProjection.webgpuStatus).toBe('webgpu-executed');
+    expect(derivedSummary.mlsMpmP2gGridProjection.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-grid-projection-parity.v0');
+    expect(derivedSummary.mlsMpmP2gGridProjection.parityStatus).toBe('pass');
+    expect(derivedSummary.mlsMpmP2gGridProjection.parityMaxGridAbs).toBeLessThanOrEqual(
+      derivedSummary.mlsMpmP2gGridProjection.parityTolerance
+    );
+  }
+  expect(derivedSummary.mlsMpmP2gGridProjection.p2gProjectionValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.stressProjectionValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.gridValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.g2pValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.sphValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.phaseChangeValidation).toBe(false);
+  expect(derivedSummary.mlsMpmP2gGridProjection.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);

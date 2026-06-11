@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 23:25 AKDT
+Updated: 2026-06-10 23:38 AKDT
 
 ## Done
 
@@ -74,6 +74,16 @@ Updated: 2026-06-10 23:25 AKDT
   path executes it on WebGPU using the already uploaded buffers. It deliberately
   keeps `p2gValidation`, `gridValidation`, `g2pValidation`, `sphValidation`,
   `phaseChangeValidation`, and `fullPhysicsValidation` false.
+- Added the first WebGPU P2G grid projection slice:
+  `peercompute.ulg.mls-mpm-gpu-grid-projection.v0`,
+  `peercompute.ulg.mls-mpm-gpu-grid-projection-execution.v0`, and
+  `peercompute.ulg.mls-mpm-gpu-grid-projection-parity.v0`. The gather-form
+  WGSL kernel launches one invocation per grid node, loops over resident
+  particle rows, applies CPU-compatible quadratic B-spline support, and writes
+  grid mass/momentum rows without float atomics. The live browser path executes
+  it on WebGPU from the uploaded SPH/MLS-MPM buffers and accepts it only after
+  CPU parity. Stress projection, grid velocity/update, contact/walls, G2P, SPH,
+  phase-change, and full-physics validation remain false.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

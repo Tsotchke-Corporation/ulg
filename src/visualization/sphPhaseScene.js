@@ -23,6 +23,7 @@ import {
   uploadSphGpuParticleBuffers
 } from '../runtime/sph/sphGpuBuffers.js';
 import { runMlsMpmMechanicsPredictWithOptionalWebGpu } from '../runtime/sph/sphMechanicsGpuKernel.js';
+import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from '../runtime/sph/sphGridGpuKernel.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -350,6 +351,9 @@ export function createSphPhaseScene(container, {
   let mlsMpmMechanicsPrediction = null;
   let mlsMpmMechanicsPredictionSignature = null;
   let pendingMlsMpmMechanicsPrediction = null;
+  let mlsMpmP2gGridProjection = null;
+  let mlsMpmP2gGridProjectionSignature = null;
+  let pendingMlsMpmP2gGridProjection = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -359,6 +363,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmGpuParticleState = null;
   scene.userData.mlsMpmGpuParticleUpload = null;
   scene.userData.mlsMpmMechanicsPrediction = null;
+  scene.userData.mlsMpmP2gGridProjection = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -524,6 +529,22 @@ export function createSphPhaseScene(container, {
       mlsSignature,
       dt,
       gravityMPerS2.join(','),
+      dims.join(',')
+    ].join('|');
+  }
+
+  function mlsMpmP2gGridProjectionSignatureFor({
+    sphParticleState = sphGpuParticleState,
+    mlsMpmParticleState = mlsMpmGpuParticleState,
+    gridSpacingM = sphGpuParticleState?.smoothingLengthM ?? 0
+  } = {}) {
+    const sphSignature = sphGpuParticleSignature(sphParticleState);
+    const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
+    if (!sphSignature || !mlsSignature) return null;
+    return [
+      sphSignature,
+      mlsSignature,
+      gridSpacingM,
       dims.join(',')
     ].join('|');
   }
@@ -776,6 +797,88 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function refreshMlsMpmP2gGridProjection({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    gridSpacingM = sphGpuParticleState?.smoothingLengthM,
+    parityTolerance = 5e-2,
+    webGpuRunner = undefined
+  } = {}) {
+    if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
+      mlsMpmP2gGridProjection = null;
+      scene.userData.mlsMpmP2gGridProjection = null;
+      return null;
+    }
+    const signature = mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM });
+    if (!force && mlsMpmP2gGridProjectionSignature === signature && mlsMpmP2gGridProjection) {
+      return mlsMpmP2gGridProjection;
+    }
+    if (!force && pendingMlsMpmP2gGridProjection?.signature === signature) {
+      return pendingMlsMpmP2gGridProjection.promise;
+    }
+    const promise = (async () => {
+      const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
+        ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
+        : deviceResult;
+      const resolvedSphUpload = preferWebGpu
+        ? await refreshSphGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : sphGpuParticleUpload;
+      const resolvedMlsUpload = preferWebGpu
+        ? await refreshMlsMpmGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : mlsMpmGpuParticleUpload;
+      const execution = await runMlsMpmP2gGridProjectionWithOptionalWebGpu({
+        sphParticleState: sphGpuParticleState,
+        mlsMpmParticleState: mlsMpmGpuParticleState,
+        sphParticleUpload: resolvedSphUpload,
+        mlsMpmParticleUpload: resolvedMlsUpload,
+        gridSpacingM,
+        boxDimsM: dims,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult: resolvedDeviceResult,
+        parityTolerance,
+        webGpuRunner,
+        onDeviceLost() {
+          opticalGpuDeviceResultPromise = null;
+        }
+      });
+      execution.signature = signature;
+      if (
+        !running
+        || mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM }) !== signature
+      ) {
+        return {
+          ...execution,
+          stale: true
+        };
+      }
+      mlsMpmP2gGridProjection = execution;
+      mlsMpmP2gGridProjectionSignature = signature;
+      scene.userData.mlsMpmP2gGridProjection = execution;
+      return execution;
+    })();
+    pendingMlsMpmP2gGridProjection = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingMlsMpmP2gGridProjection?.promise === promise) pendingMlsMpmP2gGridProjection = null;
+    }
+  }
+
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
     const key = descriptor.surfaceKey;
@@ -857,6 +960,9 @@ export function createSphPhaseScene(container, {
     mlsMpmMechanicsPrediction = null;
     mlsMpmMechanicsPredictionSignature = null;
     scene.userData.mlsMpmMechanicsPrediction = null;
+    mlsMpmP2gGridProjection = null;
+    mlsMpmP2gGridProjectionSignature = null;
+    scene.userData.mlsMpmP2gGridProjection = null;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -984,10 +1090,14 @@ export function createSphPhaseScene(container, {
     getMlsMpmMechanicsPrediction() {
       return mlsMpmMechanicsPrediction;
     },
+    getMlsMpmP2gGridProjection() {
+      return mlsMpmP2gGridProjection;
+    },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,
     refreshMlsMpmMechanicsPrediction,
+    refreshMlsMpmP2gGridProjection,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

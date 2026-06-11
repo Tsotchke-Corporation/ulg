@@ -30,9 +30,11 @@ closure-derived optical lookup rows, SPH particle state/thermo rows, and
 MLS-MPM mechanics rows into WebGPU storage buffers. The mechanics buffer holds
 `F`, `C`, `J`, rest volume, solid flag, and status for each macro-particle.
 It also runs a first WebGPU mechanics prediction kernel from those resident rows
-and accepts the result only after CPU parity. The next required implementation
-step is still to replace the CPU-authoritative MLS-MPM carrier with WebGPU
-P2G/grid/G2P and heat/phase kernels.
+and accepts the result only after CPU parity. A first gather-form WebGPU P2G
+grid projection now also writes grid mass/momentum rows from those resident
+particles with CPU parity. The next required implementation step is still to
+replace the CPU-authoritative MLS-MPM carrier with WebGPU stress projection,
+grid update/contact/wall handling, G2P, and heat/phase kernels.
 
 ## Non-Negotiables
 

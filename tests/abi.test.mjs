@@ -9,6 +9,7 @@ import {
   OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT,
   OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT,
   OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT,
+  MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
@@ -27,6 +28,9 @@ import {
   ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
+  ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA,
+  ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
@@ -35,7 +39,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
-import { mlsMpmMechanicsPredictWgsl, opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import { mlsMpmMechanicsPredictWgsl, mlsMpmP2gGridProjectionWgsl, opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -197,6 +201,32 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read_write> out_mls_mechanics: array<vec4<f32>>/);
   assert.match(mlsMpmMechanicsPredictWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('MLS-MPM GPU P2G grid projection ABI exposes f32x4-aligned grid rows', () => {
+  assert.equal(ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-grid-projection.v0');
+  assert.equal(
+    ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-grid-projection-execution.v0'
+  );
+  assert.equal(
+    ULG_MLS_MPM_GPU_GRID_PROJECTION_PARITY_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-grid-projection-parity.v0'
+  );
+  assert.equal(MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.length, 8);
+  assert.equal(MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT.slice(0, 4), [
+    'massKg:f32',
+    'momentumXKgMPerS:f32',
+    'momentumYKgMPerS:f32',
+    'momentumZKgMPerS:f32'
+  ]);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /struct P2gProjectionParams/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_nodes: array<vec4<f32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn quadratic_weights/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

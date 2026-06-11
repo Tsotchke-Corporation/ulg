@@ -283,3 +283,107 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   out_mls_mechanics[mechanics_base + 5u] = row5;
 }
 `;
+
+export const mlsMpmP2gGridProjectionWgsl = `
+struct P2gProjectionParams {
+  particle_count: u32,
+  grid_node_count: u32,
+  grid_nx: u32,
+  grid_ny: u32,
+  grid_nz: u32,
+  shift: u32,
+  grid_spacing_m: f32,
+  inv_grid_spacing_m: f32,
+};
+
+@group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> grid_nodes: array<vec4<f32>>;
+@group(0) @binding(4) var<uniform> params: P2gProjectionParams;
+
+fn quadratic_weights(fx: f32) -> vec3<f32> {
+  let a = 1.5 - fx;
+  let b = fx - 1.0;
+  let c = fx - 0.5;
+  return vec3<f32>(0.5 * a * a, 0.75 - b * b, 0.5 * c * c);
+}
+
+fn weight_at(weights: vec3<f32>, offset: i32) -> f32 {
+  if (offset == 0) { return weights.x; }
+  if (offset == 1) { return weights.y; }
+  if (offset == 2) { return weights.z; }
+  return 0.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let node_index = global_id.x;
+  if (node_index >= params.grid_node_count) {
+    return;
+  }
+
+  let plane = params.grid_ny * params.grid_nz;
+  let i = node_index / plane;
+  let rem = node_index - i * plane;
+  let j = rem / params.grid_nz;
+  let k = rem - j * params.grid_nz;
+  let node_i = i32(i) - i32(params.shift);
+  let node_j = i32(j) - i32(params.shift);
+  let node_k = i32(k) - i32(params.shift);
+  let node_pos = vec3<f32>(
+    f32(node_i) * params.grid_spacing_m,
+    f32(node_j) * params.grid_spacing_m,
+    f32(node_k) * params.grid_spacing_m
+  );
+
+  var mass = 0.0;
+  var momentum = vec3<f32>(0.0, 0.0, 0.0);
+
+  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+    let state_base = particle_index * 2u;
+    let mechanics_base = particle_index * 6u;
+    let pos_mass = sph_state[state_base];
+    let vel_u = sph_state[state_base + 1u];
+    let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;
+    let p_grid = pos_mass.xyz * params.inv_grid_spacing_m;
+    let base_x = i32(floor(p_grid.x - 0.5));
+    let base_y = i32(floor(p_grid.y - 0.5));
+    let base_z = i32(floor(p_grid.z - 0.5));
+    let ox = node_i - base_x;
+    let oy = node_j - base_y;
+    let oz = node_k - base_z;
+    if (ox < 0 || ox > 2 || oy < 0 || oy > 2 || oz < 0 || oz > 2) {
+      continue;
+    }
+
+    let wx = quadratic_weights(p_grid.x - f32(base_x));
+    let wy = quadratic_weights(p_grid.y - f32(base_y));
+    let wz = quadratic_weights(p_grid.z - f32(base_z));
+    let weight = weight_at(wx, ox) * weight_at(wy, oy) * weight_at(wz, oz);
+    if (weight == 0.0) {
+      continue;
+    }
+
+    let row2 = mls_mechanics[mechanics_base + 2u];
+    let row3 = mls_mechanics[mechanics_base + 3u];
+    let row4 = mls_mechanics[mechanics_base + 4u];
+    let c00 = row2.y; let c01 = row2.z; let c02 = row2.w;
+    let c10 = row3.x; let c11 = row3.y; let c12 = row3.z;
+    let c20 = row3.w; let c21 = row4.x; let c22 = row4.y;
+    let dpos = node_pos - pos_mass.xyz;
+    let apic = vec3<f32>(
+      c00 * dpos.x + c01 * dpos.y + c02 * dpos.z,
+      c10 * dpos.x + c11 * dpos.y + c12 * dpos.z,
+      c20 * dpos.x + c21 * dpos.y + c22 * dpos.z
+    );
+    let particle_momentum = pos_mass.w * (vel_u.xyz + apic);
+    mass = mass + weight * pos_mass.w;
+    momentum = momentum + weight * particle_momentum;
+  }
+
+  let status = select(0.0, 1.0, mass > 0.0);
+  grid_nodes[node_index * 2u] = vec4<f32>(mass, momentum.x, momentum.y, momentum.z);
+  grid_nodes[node_index * 2u + 1u] = vec4<f32>(node_pos.x, node_pos.y, node_pos.z, status);
+}
+`;

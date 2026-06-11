@@ -148,6 +148,16 @@ parity-gated execution artifact. This is useful residency/dispatch proof, not
 the final mechanics loop: no neighbor density, stress scatter, grid momentum
 update, contact, pressure solve, or G2P reconstruction is validated yet.
 
+As of 2026-06-10 23:38 AKDT, the first WebGPU P2G grid projection kernel also
+executes in the live demo. `mlsMpmP2gGridProjectionWgsl` is a deterministic
+gather kernel: one invocation per grid node loops over resident particle rows
+and accumulates quadratic-B-spline mass and APIC momentum into f32x4 grid rows.
+This avoids float atomics and is parity-friendly, but it is O(grid nodes *
+particles) and does not yet include stress scatter, grid velocity/update,
+contact/wall conditions, or G2P reconstruction. A later performance pass should
+replace it with tiled/scatter-friendly kernels once browser WebGPU supports the
+needed reduction strategy cleanly.
+
 ## Hot-Loop Kernel Chain
 
 A first GPU-resident SPH phase demo should target this dispatch chain:

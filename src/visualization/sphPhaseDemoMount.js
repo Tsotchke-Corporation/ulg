@@ -495,11 +495,13 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
   overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
   overlay.__mlsMpmMechanicsPrediction = scene.getMlsMpmMechanicsPrediction?.() || null;
+  overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || null;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
   let pendingMlsMpmGpuParticleUploadSignature = null;
   let pendingMlsMpmMechanicsPredictionSignature = null;
+  let pendingMlsMpmP2gGridProjectionSignature = null;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -577,6 +579,27 @@ export function mountSphPhaseDemoOverlay() {
     });
   }
 
+  function mlsMpmP2gGridProjectionSignature() {
+    const sph = scene.getSphGpuParticleState?.();
+    const mls = scene.getMlsMpmGpuParticleState?.();
+    const sphSignature = sphGpuParticleSignature(sph);
+    const mlsSignature = mlsMpmGpuParticleSignature(mls);
+    return sphSignature && mlsSignature ? `${sphSignature}|${mlsSignature}|${sph?.smoothingLengthM ?? 0}` : null;
+  }
+
+  function scheduleMlsMpmP2gGridProjection() {
+    const signature = mlsMpmP2gGridProjectionSignature();
+    if (!signature || pendingMlsMpmP2gGridProjectionSignature === signature) return;
+    pendingMlsMpmP2gGridProjectionSignature = signature;
+    scene.refreshMlsMpmP2gGridProjection?.({ preferWebGpu: true }).then((execution) => {
+      overlay.__mlsMpmP2gGridProjection = execution;
+    }).catch((error) => {
+      overlay.__mlsMpmP2gGridProjectionError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (pendingMlsMpmP2gGridProjectionSignature === signature) pendingMlsMpmP2gGridProjectionSignature = null;
+    });
+  }
+
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
 
@@ -596,10 +619,12 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
     overlay.__mlsMpmMechanicsPrediction = scene.getMlsMpmMechanicsPrediction?.() || null;
+    overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || null;
     pendingOpticalLookupSignature = null;
     pendingSphGpuParticleUploadSignature = null;
     pendingMlsMpmGpuParticleUploadSignature = null;
     pendingMlsMpmMechanicsPredictionSignature = null;
+    pendingMlsMpmP2gGridProjectionSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -670,6 +695,7 @@ export function mountSphPhaseDemoOverlay() {
     scheduleSphGpuParticleUpload();
     scheduleMlsMpmGpuParticleUpload();
     scheduleMlsMpmMechanicsPrediction();
+    scheduleMlsMpmP2gGridProjection();
   }
 
   function stepDemoForVisualTest(steps = 1) {

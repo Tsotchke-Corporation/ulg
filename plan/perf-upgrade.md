@@ -140,6 +140,14 @@ builds that mechanics snapshot every particle sync and uploads it to a cached
 browser WebGPU device beside the SPH state/thermo snapshot. This prepares
 P2G/G2P mechanics residency without claiming a GPU mechanics solver.
 
+As of 2026-06-10 23:25 AKDT, ULG also has the first GPU-executed mechanics
+prediction kernel. `mlsMpmMechanicsPredictWgsl` consumes the resident SPH state,
+SPH thermo, and MLS-MPM mechanics buffers, predicts particle-local velocity,
+position, deformation gradient `F`, and volume ratio `J`, and exposes a
+parity-gated execution artifact. This is useful residency/dispatch proof, not
+the final mechanics loop: no neighbor density, stress scatter, grid momentum
+update, contact, pressure solve, or G2P reconstruction is validated yet.
+
 ## Hot-Loop Kernel Chain
 
 A first GPU-resident SPH phase demo should target this dispatch chain:

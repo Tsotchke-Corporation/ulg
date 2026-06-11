@@ -1176,6 +1176,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getSphGpuParticleUpload?.()?.schema
       && scene?.getMlsMpmGpuParticleState?.()?.schema
       && scene?.getMlsMpmGpuParticleUpload?.()?.schema
+      && scene?.getMlsMpmMechanicsPrediction?.()?.schema
     );
   });
   const derivedSummary = await page.evaluate(() => {
@@ -1190,6 +1191,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
     const mlsMpmGpuParticleUpload = scene?.getMlsMpmGpuParticleUpload?.();
+    const mlsMpmMechanicsPrediction = scene?.getMlsMpmMechanicsPrediction?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1255,6 +1257,26 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         sourceSchema: mlsMpmGpuParticleUpload?.sourceSchema,
         particleCount: mlsMpmGpuParticleUpload?.particleCount
       },
+      mlsMpmMechanicsPrediction: {
+        schema: mlsMpmMechanicsPrediction?.schema,
+        predictionSchema: mlsMpmMechanicsPrediction?.predictionSchema,
+        backend: mlsMpmMechanicsPrediction?.backend,
+        webgpuStatus: mlsMpmMechanicsPrediction?.webgpuStatus?.status,
+        paritySchema: mlsMpmMechanicsPrediction?.webgpuParity?.schema,
+        parityStatus: mlsMpmMechanicsPrediction?.webgpuParity?.status,
+        parityMaxStateAbs: mlsMpmMechanicsPrediction?.webgpuParity?.maxStateAbs ?? null,
+        parityMaxMechanicsAbs: mlsMpmMechanicsPrediction?.webgpuParity?.maxMechanicsAbs ?? null,
+        parityTolerance: mlsMpmMechanicsPrediction?.webgpuParity?.tolerance ?? null,
+        particleCount: mlsMpmMechanicsPrediction?.particleCount,
+        stateStrideFloats: mlsMpmMechanicsPrediction?.stateStrideFloats,
+        mechanicsStrideFloats: mlsMpmMechanicsPrediction?.mechanicsStrideFloats,
+        p2gValidation: mlsMpmMechanicsPrediction?.p2gValidation,
+        gridValidation: mlsMpmMechanicsPrediction?.gridValidation,
+        g2pValidation: mlsMpmMechanicsPrediction?.g2pValidation,
+        sphValidation: mlsMpmMechanicsPrediction?.sphValidation,
+        phaseChangeValidation: mlsMpmMechanicsPrediction?.phaseChangeValidation,
+        fullPhysicsValidation: mlsMpmMechanicsPrediction?.fullPhysicsValidation
+      },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
@@ -1309,6 +1331,37 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(['webgpu-uploaded', 'blocked-webgpu-unavailable', 'webgpu-error-fallback']).toContain(
     derivedSummary.mlsMpmGpuParticleUpload.status
   );
+  expect(derivedSummary.mlsMpmMechanicsPrediction.schema).toBe('peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0');
+  expect(derivedSummary.mlsMpmMechanicsPrediction.predictionSchema).toBe('peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0');
+  expect(derivedSummary.mlsMpmMechanicsPrediction.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.stateStrideFloats).toBe(8);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.mechanicsStrideFloats).toBe(24);
+  expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.mlsMpmMechanicsPrediction.backend);
+  expect([
+    'blocked-webgpu-unavailable',
+    'not-requested',
+    'webgpu-device-lost-fallback',
+    'webgpu-error-fallback',
+    'webgpu-executed',
+    'webgpu-parity-failed'
+  ]).toContain(derivedSummary.mlsMpmMechanicsPrediction.webgpuStatus);
+  if (derivedSummary.mlsMpmMechanicsPrediction.backend === 'webgpu') {
+    expect(derivedSummary.mlsMpmMechanicsPrediction.webgpuStatus).toBe('webgpu-executed');
+    expect(derivedSummary.mlsMpmMechanicsPrediction.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0');
+    expect(derivedSummary.mlsMpmMechanicsPrediction.parityStatus).toBe('pass');
+    expect(derivedSummary.mlsMpmMechanicsPrediction.parityMaxStateAbs).toBeLessThanOrEqual(
+      derivedSummary.mlsMpmMechanicsPrediction.parityTolerance
+    );
+    expect(derivedSummary.mlsMpmMechanicsPrediction.parityMaxMechanicsAbs).toBeLessThanOrEqual(
+      derivedSummary.mlsMpmMechanicsPrediction.parityTolerance
+    );
+  }
+  expect(derivedSummary.mlsMpmMechanicsPrediction.p2gValidation).toBe(false);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.gridValidation).toBe(false);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.g2pValidation).toBe(false);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.sphValidation).toBe(false);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.phaseChangeValidation).toBe(false);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);

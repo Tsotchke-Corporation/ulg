@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 23:10 AKDT
+Updated: 2026-06-10 23:25 AKDT
 
 ## Done
 
@@ -64,6 +64,16 @@ Updated: 2026-06-10 23:10 AKDT
   it to the cached browser WebGPU device beside the SPH thermodynamic/state
   snapshot. This makes the current CPU mechanics state resident in WebGPU
   storage buffers but does not execute P2G/grid/G2P on WebGPU yet.
+- Added the first GPU-executed MLS-MPM mechanics slice:
+  `peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0`,
+  `peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0`, and
+  `peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0`. The WGSL kernel consumes
+  the resident SPH state/thermo rows and MLS-MPM mechanics rows, applies a
+  particle-local ballistic/APIC deformation prediction, emits predicted state
+  and mechanics rows, and is accepted only after CPU parity. The live browser
+  path executes it on WebGPU using the already uploaded buffers. It deliberately
+  keeps `p2gValidation`, `gridValidation`, `g2pValidation`, `sphValidation`,
+  `phaseChangeValidation`, and `fullPhysicsValidation` false.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

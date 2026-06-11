@@ -494,10 +494,12 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
   overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
   overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
+  overlay.__mlsMpmMechanicsPrediction = scene.getMlsMpmMechanicsPrediction?.() || null;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
   let pendingMlsMpmGpuParticleUploadSignature = null;
+  let pendingMlsMpmMechanicsPredictionSignature = null;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -554,6 +556,27 @@ export function mountSphPhaseDemoOverlay() {
     });
   }
 
+  function mlsMpmMechanicsPredictionSignature() {
+    const sph = scene.getSphGpuParticleState?.();
+    const mls = scene.getMlsMpmGpuParticleState?.();
+    const sphSignature = sphGpuParticleSignature(sph);
+    const mlsSignature = mlsMpmGpuParticleSignature(mls);
+    return sphSignature && mlsSignature ? `${sphSignature}|${mlsSignature}` : null;
+  }
+
+  function scheduleMlsMpmMechanicsPrediction() {
+    const signature = mlsMpmMechanicsPredictionSignature();
+    if (!signature || pendingMlsMpmMechanicsPredictionSignature === signature) return;
+    pendingMlsMpmMechanicsPredictionSignature = signature;
+    scene.refreshMlsMpmMechanicsPrediction?.({ preferWebGpu: true }).then((execution) => {
+      overlay.__mlsMpmMechanicsPrediction = execution;
+    }).catch((error) => {
+      overlay.__mlsMpmMechanicsPredictionError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (pendingMlsMpmMechanicsPredictionSignature === signature) pendingMlsMpmMechanicsPredictionSignature = null;
+    });
+  }
+
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
 
@@ -572,9 +595,11 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
+    overlay.__mlsMpmMechanicsPrediction = scene.getMlsMpmMechanicsPrediction?.() || null;
     pendingOpticalLookupSignature = null;
     pendingSphGpuParticleUploadSignature = null;
     pendingMlsMpmGpuParticleUploadSignature = null;
+    pendingMlsMpmMechanicsPredictionSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -644,6 +669,7 @@ export function mountSphPhaseDemoOverlay() {
     scheduleOpticalGpuLookupRefresh();
     scheduleSphGpuParticleUpload();
     scheduleMlsMpmGpuParticleUpload();
+    scheduleMlsMpmMechanicsPrediction();
   }
 
   function stepDemoForVisualTest(steps = 1) {

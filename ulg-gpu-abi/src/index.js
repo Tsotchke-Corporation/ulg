@@ -16,6 +16,9 @@ export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-parti
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0';
+export const ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0';
+export const ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0';
+export const ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',

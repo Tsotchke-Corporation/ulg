@@ -27,12 +27,15 @@ import {
   ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
+  ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
+  ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
-import { opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import { mlsMpmMechanicsPredictWgsl, opticalLookupWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
 
@@ -164,6 +167,18 @@ test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
 test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {
   assert.equal(ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0');
   assert.equal(ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0');
+  assert.equal(
+    ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0'
+  );
+  assert.equal(
+    ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0'
+  );
+  assert.equal(
+    ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0'
+  );
   assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length, 24);
   assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(0, 4), [
@@ -178,6 +193,10 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
     'solidFlag:f32',
     'status:f32'
   ]);
+  assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
+  assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
+  assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read_write> out_mls_mechanics: array<vec4<f32>>/);
+  assert.match(mlsMpmMechanicsPredictWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

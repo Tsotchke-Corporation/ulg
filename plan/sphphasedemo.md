@@ -29,9 +29,10 @@ Implementation checkpoint, 2026-06-10 AKDT: the live browser demo now uploads
 closure-derived optical lookup rows, SPH particle state/thermo rows, and
 MLS-MPM mechanics rows into WebGPU storage buffers. The mechanics buffer holds
 `F`, `C`, `J`, rest volume, solid flag, and status for each macro-particle.
-The next required implementation step is to consume those resident buffers from
-WebGPU P2G/grid/G2P and heat/phase kernels instead of treating CPU carrier state
-as authoritative.
+It also runs a first WebGPU mechanics prediction kernel from those resident rows
+and accepts the result only after CPU parity. The next required implementation
+step is still to replace the CPU-authoritative MLS-MPM carrier with WebGPU
+P2G/grid/G2P and heat/phase kernels.
 
 ## Non-Negotiables
 

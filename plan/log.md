@@ -8188,3 +8188,80 @@ Failures / open questions:
   P2G, grid update, or G2P kernels.
 - The CPU carrier is still authoritative for particle mechanics.
 - No push was attempted.
+
+## 2026-06-10 23:25:17 AKDT - First WebGPU mechanics prediction kernel
+
+Prompt:
+
+- Keep moving toward an honest GPU-resident SPH/MLS-MPM runtime and accept demo
+  breakage if larger refactors require it.
+
+Actions:
+
+- Added ABI schemas for
+  `peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0`,
+  `peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0`, and
+  `peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0`.
+- Added `mlsMpmMechanicsPredictWgsl`, a particle-local mechanics prediction
+  kernel that reads vec4-packed SPH state, SPH thermo, and MLS-MPM mechanics
+  rows, applies gravity/position prediction plus `F <- (I + dt*C)F`, computes
+  `J`, preserves mass/internal energy/rest volume/status, and writes predicted
+  state/mechanics rows.
+- Added `src/runtime/sph/sphMechanicsGpuKernel.js` with CPU reference,
+  optional WebGPU execution, borrowed resident input-buffer support, CPU/WebGPU
+  parity gating, fallback statuses, and non-validation flags.
+- Wired the SPH phase scene and overlay to run the prediction through the cached
+  browser WebGPU device after SPH and MLS-MPM rows are uploaded.
+- Extended unit and browser e2e coverage to require the mechanics execution
+  artifact and verify it never claims P2G/grid/G2P/SPH/phase/full-physics
+  validation.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphMechanicsGpuKernel.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphMechanicsGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMechanicsGpuKernel.js && node --check ulg-gpu-abi/src/wgsl.js && node --check ulg-gpu-abi/src/index.js`
+- `node --test tests/abi.test.mjs tests/sphMechanicsGpuKernel.test.mjs`
+- `node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs && node --check src/runtime/sph/sphMechanicsGpuKernel.js`
+- `node --test tests/abi.test.mjs tests/sphMechanicsGpuKernel.test.mjs tests/sphGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- Browser HTTPS/WebGPU probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/mechanics-kernel tests passed `15/15`.
+- PASS: focused ABI/mechanics/SPH-buffer/renderer tests passed `27/27`.
+- PASS: Browser HTTPS/WebGPU probe reported
+  `mechanics.schema=peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0`,
+  `predictionSchema=peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0`,
+  `backend=webgpu`, `webgpuStatus=webgpu-executed`,
+  `parityStatus=pass`, `maxStateAbs=0`, `maxMechanicsAbs=0`, and
+  `particleCount=152`.
+- PASS: focused SPH e2e passed against the live HTTPS server (`1/1`).
+- PASS: `npm test` passed `248/248`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The kernel is a particle-local prediction proof, not the full MLS-MPM solver.
+- P2G scatter, grid momentum/stress update, wall/contact solve, and G2P
+  reconstruction still need WebGPU kernels.
+- The CPU carrier is still authoritative for the visual simulation state.
+- No push was attempted.

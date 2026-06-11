@@ -7,10 +7,48 @@ export const ULG_CLOSURE_INVALIDATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure
 export const ULG_CLOSURE_REDERIVATION_ARTIFACT_SCHEMA = 'peercompute.ulg.closure-rederivation-artifact.v0';
 export const ULG_THERMODYNAMIC_PREFLIGHT_ARTIFACT_SCHEMA = 'peercompute.ulg.thermodynamic-preflight.v0';
 export const ULG_CLOSURE_TABLE_WGSL_DESCRIPTOR_SCHEMA = 'peercompute.ulg.closure-table-wgsl-descriptor.v0';
+export const ULG_OPTICAL_GPU_TABLE_SCHEMA = 'peercompute.ulg.optical-gpu-table.v0';
+export const ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA = 'peercompute.ulg.optical-gpu-buffer-set.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',
   'derivative:f32',
+  'pad0:f32'
+]);
+export const OPTICAL_GPU_RECORD_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'phaseId:f32',
+  'spectralOffset:f32',
+  'spectralCount:f32',
+  'baseColorLinearR:f32',
+  'baseColorLinearG:f32',
+  'baseColorLinearB:f32',
+  'metalness:f32',
+  'roughness:f32',
+  'transmission:f32',
+  'opacity:f32',
+  'ior:f32',
+  'attenuationLinearR:f32',
+  'attenuationLinearG:f32',
+  'attenuationLinearB:f32',
+  'attenuationDistanceM:f32',
+  'absorptionCoefficientPerM:f32',
+  'scatteringCoefficientPerM:f32',
+  'renderModelId:f32',
+  'vertexColorPolicyId:f32',
+  'opticalDepth:f32',
+  'blocked:f32',
+  'status:f32',
+  'pad0:f32'
+]);
+export const OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT = Object.freeze([
+  'wavelengthNm:f32',
+  'reflectance:f32',
+  'transmittance:f32',
+  'absorptionCoefficientPerM:f32',
+  'scatteringCoefficientPerM:f32',
+  'n:f32',
+  'k:f32',
   'pad0:f32'
 ]);
 

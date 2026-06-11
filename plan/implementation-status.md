@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 21:50 AKDT
+Updated: 2026-06-10 22:00 AKDT
 
 ## Done
 
@@ -28,6 +28,14 @@ Updated: 2026-06-10 21:50 AKDT
   key for URL/simulation compatibility. The picker is vanilla DOM, shares the
   same material option source as the dropdown, filters unavailable noble-gas
   closures, and preserves the strict derived-closure material path.
+- Added the first GPU-resident optical/PBR bridge. `ulg-gpu-abi` now declares
+  stable `peercompute.ulg.optical-gpu-table.v0` and
+  `peercompute.ulg.optical-gpu-buffer-set.v0` row layouts for packed material
+  records and spectral samples. `opticalGpuBuffers.js` packs cached
+  `opticalRenderParams()` results into typed arrays/uploadable WebGPU storage
+  buffers, and the SPH renderer now exposes the packed table for each visible
+  material/phase batch while still using Three.js `MeshPhysicalMaterial` as the
+  interim display layer.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

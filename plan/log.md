@@ -7479,6 +7479,8 @@ Commands run:
 - `git diff --check`
 - `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
 - `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
 
 Validation:
 
@@ -7507,4 +7509,104 @@ Failures / open questions:
 - The picker is a UI/control improvement only. It does not complete GPU
   residency, first-principles material validation, or condensed noble-gas
   closure support.
+- No push was attempted.
+
+## 2026-06-10 22:00:53 AKDT - Optical/PBR GPU buffer ABI and SPH scene bridge
+
+Prompt:
+
+- User clarified that the full system does not need to be done tonight and that
+  the priority is staying honest and fast on the core technology path, even if
+  larger refactors temporarily break the demo.
+
+Actions:
+
+- Spawned a read-only explorer subagent for the WebGPU/material-closure path.
+  Its result confirmed that the existing WebGPU runtime is the toy carrier
+  parity path (`src/runtime/webgpuCarrierKernel.js`) and recommended the
+  smallest coherent next slice: a packed optical/PBR GPU ABI and buffer packer
+  before attempting full GPU-resident SPH mechanics or DFT.
+- Added stable optical/PBR GPU row-layout constants to
+  `ulg-gpu-abi/src/index.js`:
+  `peercompute.ulg.optical-gpu-table.v0`,
+  `peercompute.ulg.optical-gpu-buffer-set.v0`,
+  24-float `OpticalMaterialRecord` rows, and 8-float
+  `OpticalSpectralSample` rows.
+- Added `src/runtime/material/opticalGpuBuffers.js`, which converts cached
+  `opticalRenderParams()` output into typed arrays for WebGPU storage buffers,
+  including material/phase ids, spectral offsets/counts, linear RGB PBR
+  parameters, opacity/transmission/IOR, attenuation, absorption/scattering,
+  render-model ids, vertex-color-policy ids, and blocked/status flags.
+- Added `uploadOpticalGpuTable(device, table)`, a WebGPU-like storage-buffer
+  upload helper for the packed optical record and spectral-sample arrays.
+- Updated `src/visualization/sphPhaseScene.js` so active material/phase surface
+  batches generate a packed `peercompute.ulg.optical-gpu-table.v0`; the scene
+  exposes it through `getOpticalGpuTable()` and annotates each surface with the
+  corresponding packed optical GPU record.
+- Updated browser e2e coverage to assert that the SPH scene exposes a packed
+  optical GPU table while the demo remains visually rendered by Three.js for
+  now.
+- Updated `plan/perf-upgrade.md`, `plan/sphphasedemo.md`, and
+  `plan/implementation-status.md` to record the implemented GPU-buffer bridge
+  and explicitly preserve the remaining blocker: GPU kernels/renderers do not
+  yet consume the table directly in the hot loop.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `rg -n "WebGPU|webgpu|GPUBuffer|navigator\\.gpu|create.*Kernel|wgsl|storage|bindGroup|compute" src tests plan/perf-upgrade.md plan/sphphasedemo.md`
+- `sed -n '1,380p' src/runtime/webgpuCarrierKernel.js`
+- `sed -n '740,900p' src/runtime/material/opticalClosure.js`
+- `sed -n '330,420p' plan/perf-upgrade.md`
+- `sed -n '250,290p' plan/sphphasedemo.md`
+- `sed -n '1,220p' ulg-gpu-abi/src/wgsl.js`
+- `sed -n '1,220p' ulg-gpu-abi/src/index.js`
+- `node --check src/runtime/material/opticalGpuBuffers.js tests/opticalGpuBuffers.test.mjs`
+- `node --test tests/opticalGpuBuffers.test.mjs`
+- `node --check ulg-gpu-abi/src/index.js src/runtime/material/opticalGpuBuffers.js src/visualization/sphPhaseScene.js tests/abi.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- `node --test tests/abi.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- Browser probe via Playwright against `https://127.0.0.1:5173/` with
+  `ignoreHTTPSErrors`, opening SPH Phase and waiting for
+  `overlay.__sphScene.getOpticalGpuTable().recordCount > 0`.
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/optical/renderer tests passed `12/12`.
+- PASS: HTTPS browser probe reported schema
+  `peercompute.ulg.optical-gpu-table.v0`, `recordCount=2`,
+  `spectralSampleCount=18`, and `recordsLength=48`.
+- PASS: `npm test` passed `219/219`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+- PASS: ICC ULG index refreshed after edits; status reports stale=false at
+  git head `af80fb9794223d9dcb761bb573e5fe89f7121ada`.
+
+Failures / open questions:
+
+- The first optical GPU buffer test initially expected the heavy Au
+  Drude-Lorentz render model while using a lightweight conductor fixture with
+  no interband oscillators. The implementation and test were corrected to
+  include a separate `conductor-drude-free-electron` enum and keep the heavier
+  relativistic path covered by `tests/opticalClosure.test.mjs`.
+- This is not full GPU residency yet. Optical derivation still happens on the
+  CPU/control plane; Three.js still builds `MeshPhysicalMaterial`; the packed
+  table is ready for WebGPU kernels but not yet sampled by the frame-loop
+  renderer/simulation.
 - No push was attempted.

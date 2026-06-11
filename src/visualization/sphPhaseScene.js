@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { buildOpticalGpuTable } from '../runtime/material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -218,6 +219,15 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
   }));
 }
 
+export function createOpticalGpuTableForSurfaceBatches(batches, { materialProperties = null } = {}) {
+  return buildOpticalGpuTable(batches.map((batch) => ({
+    material: batch.material,
+    phase: batch.phase ?? opticalQueryForDescriptor(batch.descriptor).phase,
+    renderKey: batch.renderKey,
+    properties: materialPropertiesForSurfaceDescriptor(batch.descriptor, materialProperties)
+  })), { materialProperties: materialProperties || {} });
+}
+
 export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null, surfaceRadiusM = null, surfaceRadiusScale = 1 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
@@ -279,6 +289,8 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
   scene.add(grid);
 
   const surfaces = new Map();
+  let opticalGpuTable = buildOpticalGpuTable([]);
+  scene.userData.opticalGpuTable = opticalGpuTable;
 
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
@@ -329,6 +341,12 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
   function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null, materialProperties = null }) {
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
+    opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
+    scene.userData.opticalGpuTable = opticalGpuTable;
+    const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
+      `${record.material}|${record.phase}`,
+      record
+    ]));
     for (const batch of batches) {
       const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, materialProperties);
       const surface = ensureSurface(batch.descriptor, properties);
@@ -337,6 +355,7 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
       mesh.userData.materialKey = batch.material;
       mesh.userData.renderKey = batch.renderKey;
       mesh.userData.phase = batch.phase;
+      mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(`${batch.material}|${batch.phase}`) || null;
       // Incandescent surfaces (hot iron) glow: the radiation closure supplies the emissive colour,
       // which is added on top of the BRDF, so a fully-metallic surface still lights up instead of
       // rendering dark. A null/absent entry means the surface is below the glow threshold.
@@ -419,5 +438,14 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     if (Number.isFinite(scale) && scale > 0) radiusScale = scale;
   }
 
-  return { setParticles, setSurfaceRadiusScale, dispose, scene, camera };
+  return {
+    setParticles,
+    setSurfaceRadiusScale,
+    dispose,
+    scene,
+    camera,
+    getOpticalGpuTable() {
+      return opticalGpuTable;
+    }
+  };
 }

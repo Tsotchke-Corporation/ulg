@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SPH_PHASE_RENDER_MODE,
-  createContinuousSurfaceBatches
+  createContinuousSurfaceBatches,
+  createOpticalGpuTableForSurfaceBatches
 } from '../src/visualization/sphPhaseScene.js';
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
@@ -94,4 +95,45 @@ test('SPH phase renderer does not collapse arbitrary selected elements to the la
   const summary = Object.fromEntries(batches.map((batch) => [batch.material, batch.count]));
   assert.deepEqual(summary, { Na: 2, Au: 2 });
   assert.deepEqual(batches.map((batch) => batch.surfaceKey).sort(), ['Au|Au|liquid', 'Na|Na|solid']);
+});
+
+test('SPH phase renderer derives a packed optical GPU table from surface batches', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 0.4, 2.6,
+      2.4, 2.8, 2.4,
+      2.6, 2.8, 2.6
+    ]),
+    colorsRgb: new Float32Array([
+      0.9, 0.9, 0.9,
+      0.9, 0.9, 0.9,
+      1.0, 0.8, 0.4,
+      1.0, 0.8, 0.4
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'solid', renderKey: 'ice' },
+      { material: 'h2o', phase: 'gas', renderKey: 'steam' },
+      { material: 'Au', phase: 'solid', renderKey: 'Au' },
+      { material: 'Au', phase: 'solid', renderKey: 'Au' }
+    ]
+  });
+  const table = createOpticalGpuTableForSurfaceBatches(batches, {
+    materialProperties: {
+      Au: {
+        conductionElectronDensityPerM3: 5.9e28,
+        opticalInterbandOscillators: []
+      }
+    }
+  });
+
+  assert.equal(table.schema, 'peercompute.ulg.optical-gpu-table.v0');
+  assert.equal(table.recordCount, 3);
+  assert.ok(table.spectralSampleCount > 0);
+  assert.deepEqual(
+    table.recordMetadata.map((record) => `${record.material}|${record.phase}`).sort(),
+    ['Au|solid', 'h2o|gas', 'h2o|solid']
+  );
+  assert.match(table.wgslStructs, /OpticalMaterialRecord/);
 });

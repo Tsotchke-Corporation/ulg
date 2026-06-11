@@ -1170,6 +1170,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
     const scene = overlay.__sphScene;
+    const opticalGpuTable = scene?.getOpticalGpuTable?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1183,12 +1184,20 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       driverReady: Boolean(overlay.__sphDriver),
+      opticalGpuTable: {
+        schema: opticalGpuTable?.schema,
+        recordCount: opticalGpuTable?.recordCount,
+        spectralSampleCount: opticalGpuTable?.spectralSampleCount
+      },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
   expect(derivedSummary.canvasWidth).toBeGreaterThan(100);
   expect(derivedSummary.canvasHeight).toBeGreaterThan(100);
   expect(derivedSummary.driverReady).toBe(true);
+  expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
+  expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
+  expect(derivedSummary.opticalGpuTable.spectralSampleCount).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
 });
 

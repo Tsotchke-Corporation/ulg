@@ -387,6 +387,25 @@ Three.js/WebGPU rendering. Three.js can use a CPU-created `MeshPhysicalMaterial`
 as an interim display layer, but its parameters must come from the same
 spectral closure record that the future WebGPU renderer samples directly.
 
+Implemented status (2026-06-10):
+
+- `ulg-gpu-abi/src/index.js` declares the stable optical row layouts and schema
+  ids:
+  - `peercompute.ulg.optical-gpu-table.v0`,
+  - `peercompute.ulg.optical-gpu-buffer-set.v0`,
+  - 24-float `OpticalMaterialRecord` rows,
+  - 8-float `OpticalSpectralSample` rows.
+- `src/runtime/material/opticalGpuBuffers.js` packs CPU-derived
+  `opticalRenderParams()` output into typed arrays and can upload those arrays
+  to WebGPU storage buffers.
+- `src/visualization/sphPhaseScene.js` now derives one packed optical GPU table
+  from each active material/phase surface batch and exposes it via
+  `getOpticalGpuTable()`.
+- This is a residency bridge, not the final GPU solver. Derivation still occurs
+  on the CPU/control plane; the current renderer remains Three.js WebGL
+  `MeshPhysicalMaterial`; future kernels must consume these storage buffers
+  directly and avoid per-frame CPU material resolution.
+
 ### Persistent Kernel Model
 
 The final runtime should keep these systems alive in parallel:

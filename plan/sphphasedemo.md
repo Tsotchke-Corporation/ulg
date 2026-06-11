@@ -270,6 +270,18 @@ GPU-resident requirement:
   CPU control plane, then swapped into resident GPU bind groups at safe frame
   boundaries.
 
+Current implementation checkpoint (2026-06-10):
+
+- The first optical/PBR GPU buffer ABI is implemented:
+  `peercompute.ulg.optical-gpu-table.v0` and
+  `peercompute.ulg.optical-gpu-buffer-set.v0`.
+- The SPH renderer now builds a packed optical table for active material/phase
+  surface batches and exposes it through `getOpticalGpuTable()`.
+- Each packed table contains closure-derived PBR material records plus spectral
+  sample rows suitable for WebGPU storage-buffer upload.
+- The demo still renders through Three.js `MeshPhysicalMaterial`; WebGPU
+  kernels/renderers do not yet consume the table directly in the frame loop.
+
 Validation remains false until quantitative optical-response evidence exists.
 The current scalar-relativistic atomic Drude-Lorentz path is useful reference
 evidence for elements but is not the final periodic band solver. The current

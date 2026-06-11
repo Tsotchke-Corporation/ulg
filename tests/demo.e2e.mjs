@@ -1243,10 +1243,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           lookupBackend: node.userData.opticalGpuExecutionBackend ?? null,
           renderAlpha: node.userData.opticalGpuLookupOutput?.renderAlpha ?? null,
           materialOpacity: node.material?.opacity ?? null,
-          materialTransmission: node.material?.transmission ?? null
+          materialTransmission: node.material?.transmission ?? null,
+          renderLayer: node.userData.renderLayer ?? null,
+          renderOrder: node.renderOrder ?? null,
+          materialDepthWrite: node.material?.depthWrite ?? null
         });
       }
     });
+    const containerWire = scene?.scene?.children?.find((node) => node.userData?.renderLayer === 'container-wire');
     return {
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
@@ -1543,6 +1547,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       },
       sphResidentPerf: overlay.__sphResidentPerf,
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
+        .map((surface) => ({ ...surface })),
+      containerWire: containerWire ? {
+        renderLayer: containerWire.userData.renderLayer,
+        renderOrder: containerWire.renderOrder,
+        materialDepthWrite: containerWire.material?.depthWrite ?? null
+      } : null
     };
   });
   expect(derivedSummary.canvasWidth).toBeGreaterThan(100);
@@ -1559,6 +1569,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.statusText).toContain('standalone mech  : standalone-mechanics-prediction-disabled backend=disabled');
   expect(derivedSummary.statusText).toContain('render authoritative:');
   expect(derivedSummary.statusText).toContain('gpu authoritative: false');
+  expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
+  expect(derivedSummary.containerWire.renderLayer).toBe('container-wire');
+  expect(derivedSummary.containerWire.materialDepthWrite).toBe(false);
+  expect(derivedSummary.containerWire.renderOrder).toBeGreaterThan(
+    Math.max(...derivedSummary.visibleSurfaces.map((surface) => surface.renderOrder))
+  );
+  expect(derivedSummary.visibleSurfaces.every((surface) => Number.isFinite(surface.renderOrder))).toBe(true);
+  expect(derivedSummary.visibleSurfaces.every((surface) => typeof surface.renderLayer === 'string')).toBe(true);
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
   expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
   expect(derivedSummary.opticalGpuTable.spectralSampleCount).toBeGreaterThan(0);
@@ -1921,6 +1939,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentPerf.renderReadbackCadence).toBeGreaterThan(1);
     expect(Number.isFinite(derivedSummary.sphResidentPerf.lastResidentMs)).toBe(true);
     expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
+    expect(derivedSummary.visibleSurfaces
+      .filter((surface) => (surface.materialTransmission ?? 0) > 0.01 || (surface.materialOpacity ?? 1) < 0.999)
+      .every((surface) => surface.materialDepthWrite === false)).toBe(true);
     expect(derivedSummary.sphResidentRenderState.scientificValidation).toBe(false);
     expect(derivedSummary.sphResidentRenderState.sphValidation).toBe(false);
     expect(derivedSummary.sphResidentRenderState.phaseChangeValidation).toBe(false);

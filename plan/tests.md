@@ -4,7 +4,14 @@
 
 Command: `npm test`
 
-Current result: pass, 327/327 tests on 2026-06-11 after adding resident render
+Current result: pass, 328/328 tests on 2026-06-11 after adding explicit
+transparent-surface render-order/depth-write policy for the SPH phase renderer.
+Focused renderer coverage passed 7/7, focused HTTPS Chromium e2e for the SPH
+phase demo passed 1/1 against `https://127.0.0.1:5173/`, `npm run build`
+passed with the existing Vite large-chunk warning, and `npm run build:pages`
+regenerated the GitHub Pages artifact in `docs/`.
+
+Prior milestone: pass, 327/327 tests on 2026-06-11 after adding resident render
 readback cadence/profiling telemetry and disabling the standalone MLS-MPM
 mechanics prediction parity readback in the default SPH demo hot loop. Focused
 HTTPS Chromium e2e for the SPH phase demo passed 1/1 against

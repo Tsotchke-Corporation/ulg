@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 11:47 AKDT
+Updated: 2026-06-11 11:56 AKDT
 
 ## Done
 
@@ -118,6 +118,13 @@ Updated: 2026-06-11 11:47 AKDT
   `render cadence`, `resident profile`, and `standalone mech` rows for timing
   and skipped-readback evidence. The renderer still uses a Three.js/
   MarchingCubes CPU bridge, so a fully GPU-resident renderer remains open.
+- Fixed transparent-surface render ordering for the SPH phase renderer. The
+  renderer now exports deterministic render-order layers for opaque,
+  transmissive, vapor, alpha, and container-wire objects; transparent/
+  transmissive surfaces no longer write depth; GPU optical lookup reuses the
+  original material/phase descriptor for phase-aware alpha/order decisions; and
+  the sealed container wireframe renders last without depth writes. Browser e2e
+  now checks live mesh render order/depth-write state.
 - Spawned sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - Used ICC repo registry/status and architecture summaries for MoonLab and peercompute.
 - Added a vanilla Vite/three.js ULG app.

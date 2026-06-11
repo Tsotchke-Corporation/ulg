@@ -51,6 +51,13 @@ import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
 export const SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT = 'no-full-readback';
+export const SPH_PHASE_RENDER_ORDER = Object.freeze({
+  opaqueSurface: 100,
+  transmissiveSurface: 200,
+  vaporSurface: 300,
+  alphaSurface: 320,
+  containerWire: 500
+});
 
 const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
 const RESIDENT_NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -173,7 +180,28 @@ export function renderDepthWriteFromOpticalResponse(optics = {}, descriptorOrRow
   const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
   const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
   const transparent = transmission > 0.01 || alpha < 0.999;
-  return !transparent || (alpha > 0.5 && transmission <= 0.01);
+  return !transparent;
+}
+
+export function renderLayerFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
+  const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
+  const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
+  const phase = opticalPhaseOf(optics, descriptorOrRow);
+  const material = descriptorOrRow.material ?? optics.material ?? null;
+  const renderKey = descriptorOrRow.renderKey ?? descriptorOrRow.renderMaterialKey ?? null;
+  const isVapor = phase === 'gas' || material === 'steam' || renderKey === 'steam';
+  if (isVapor) return 'vapor-surface';
+  if (transmission > 0.01) return 'transmissive-surface';
+  if (alpha < 0.999) return 'alpha-surface';
+  return 'opaque-surface';
+}
+
+export function renderOrderFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
+  const layer = renderLayerFromOpticalResponse(optics, descriptorOrRow);
+  if (layer === 'vapor-surface') return SPH_PHASE_RENDER_ORDER.vaporSurface;
+  if (layer === 'transmissive-surface') return SPH_PHASE_RENDER_ORDER.transmissiveSurface;
+  if (layer === 'alpha-surface') return SPH_PHASE_RENDER_ORDER.alphaSurface;
+  return SPH_PHASE_RENDER_ORDER.opaqueSurface;
 }
 
 function makeSurfaceMaterial(descriptorOrKey, properties = null) {
@@ -201,6 +229,8 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null) {
     depthWrite: renderDepthWriteFromOpticalResponse(optics, descriptor),
     opacity: renderAlpha
   });
+  material.userData.renderLayer = renderLayerFromOpticalResponse(optics, descriptor);
+  material.userData.renderOrder = renderOrderFromOpticalResponse(optics, descriptor);
   if (optics.attenuationColor) {
     material.attenuationColor = new THREE.Color().setRGB(
       optics.attenuationColor[0],
@@ -214,6 +244,19 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null) {
   material.userData.opticalRenderAlpha = renderAlpha;
   material.userData.renderDescriptor = descriptor;
   return material;
+}
+
+function applySurfaceRenderOrdering(mesh, optics = {}, descriptorOrRow = {}) {
+  const layer = renderLayerFromOpticalResponse(optics, descriptorOrRow);
+  const order = renderOrderFromOpticalResponse(optics, descriptorOrRow);
+  mesh.renderOrder = order;
+  mesh.userData.renderLayer = layer;
+  if (mesh.material) {
+    mesh.material.depthWrite = renderDepthWriteFromOpticalResponse(optics, descriptorOrRow);
+    mesh.material.userData.renderLayer = layer;
+    mesh.material.userData.renderOrder = order;
+  }
+  return { layer, order };
 }
 
 function emptyBounds() {
@@ -386,9 +429,16 @@ export function createSphPhaseScene(container, {
   const boxGeom = new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
   const box = new THREE.LineSegments(
     new THREE.EdgesGeometry(boxGeom),
-    new THREE.LineBasicMaterial({ color: 0x36d6a4, transparent: true, opacity: 0.6 })
+    new THREE.LineBasicMaterial({
+      color: 0x36d6a4,
+      transparent: true,
+      opacity: 0.6,
+      depthWrite: false
+    })
   );
   box.position.set(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+  box.renderOrder = SPH_PHASE_RENDER_ORDER.containerWire;
+  box.userData.renderLayer = 'container-wire';
   scene.add(box);
   const gridFootprint = Math.max(dims[0], dims[2]);
   const grid = new THREE.GridHelper(gridFootprint, 20, 0x1d8b6d, 0x0d332b);
@@ -467,25 +517,27 @@ export function createSphPhaseScene(container, {
       if (!surface || row.status === 255 || row.recordIndex < 0) continue;
       const { mesh } = surface;
       const material = mesh.material;
+      const descriptor = surface.descriptor || row;
       material.color.setRGB(
         clamp(row.baseColorLinear[0], 0, 1),
         clamp(row.baseColorLinear[1], 0, 1),
         clamp(row.baseColorLinear[2], 0, 1),
         THREE.LinearSRGBColorSpace
       );
-      const renderAlpha = renderAlphaFromOpticalResponse(row, row);
+      const renderAlpha = renderAlphaFromOpticalResponse(row, descriptor);
       material.opacity = renderAlpha;
       material.transparent = row.transmission > 0.01 || renderAlpha < 0.999;
-      material.depthWrite = renderDepthWriteFromOpticalResponse(row, row);
+      material.depthWrite = renderDepthWriteFromOpticalResponse(row, descriptor);
       material.metalness = clamp(row.metalness, 0, 1);
       material.roughness = clamp(row.roughness, 0, 1);
       material.transmission = clamp(row.transmission, 0, 1);
       material.ior = Math.max(1, row.ior || 1);
       material.vertexColors = row.vertexColorPolicyId === 2;
+      const ordering = applySurfaceRenderOrdering(mesh, row, descriptor);
       material.needsUpdate = true;
       mesh.userData.opticalGpuLookupOutput = { ...row, renderAlpha };
       mesh.userData.opticalGpuExecutionBackend = execution.backend;
-      applied.push({ surfaceKey, row });
+      applied.push({ surfaceKey, row, ordering });
     }
     scene.userData.opticalGpuLookupDrawState = {
       schema: 'peercompute.ulg.optical-gpu-draw-state.v0',
@@ -1746,6 +1798,7 @@ export function createSphPhaseScene(container, {
     mesh.userData.renderKey = descriptor.renderKey;
     mesh.userData.phase = descriptor.phase;
     mesh.userData.optical = mesh.material.userData.optical;
+    applySurfaceRenderOrdering(mesh, mesh.material.userData.optical, descriptor);
     scene.add(mesh);
     surface = { mesh, config, properties, descriptor };
     surfaces.set(key, surface);

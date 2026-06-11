@@ -10404,3 +10404,75 @@ Failures / open questions:
   slice should add summary cadence or batch summary/fence handling.
 - Next task is the transparent z-buffer/render-order audit/fix.
 - No push was attempted.
+
+## 2026-06-11 11:56 AKDT - Transparent z-buffer/render-order fix
+
+Prompt:
+
+- After the five-task queue, audit and fix the suspected z-buffer/render-order
+  issue for transparent materials and objects inside transparent containers.
+
+What happened:
+
+- Added explicit SPH phase render-order layers for opaque surfaces,
+  transmissive condensed surfaces, vapor surfaces, generic alpha surfaces, and
+  the sealed container wireframe.
+- Simplified transparent depth-write policy: if a surface is transparent by
+  transmission or alpha, it no longer writes depth. Opaque surfaces still write
+  depth.
+- Applied render layer/order metadata during material creation and MarchingCubes
+  surface creation.
+- Updated WebGPU optical lookup application to reuse the original
+  material/phase descriptor while applying GPU-derived optical values, so steam
+  and other phase-sensitive transparent surfaces keep the right alpha/order
+  classification after lookup rows arrive.
+- Set the sealed container wireframe to `depthWrite=false` and render it after
+  all material surfaces.
+- Added renderer unit coverage for opaque/transmissive/vapor/alpha ordering and
+  transparent depth-write behavior.
+- Extended the browser e2e summary to inspect live mesh render order,
+  render-layer, material depth-write, and container wireframe ordering.
+- Regenerated the GitHub Pages artifact in `docs/` after the source changes.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `tests/sphPhaseRenderer.test.mjs`
+- `tests/demo.e2e.mjs`
+- `docs/index.html`
+- `docs/assets/pages-CLSJKAp-.js`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check tests/sphPhaseRenderer.test.mjs && node --check tests/demo.e2e.mjs`
+- `node --test tests/sphPhaseRenderer.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `npm run build:pages`
+- `npm test`
+- `git diff --check`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 11:56:03 AKDT`.
+
+Validation:
+
+- PASS: syntax checks for touched renderer and e2e files.
+- PASS: focused SPH renderer tests passed `7/7`.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` passed with the existing Vite large-chunk
+  warning and regenerated `docs/`.
+- PASS: full `npm test` passed `328/328`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This fixes Three.js render ordering/depth-write policy, not the larger
+  GPU-resident renderer gap. MarchingCubes still receives CPU-side field arrays
+  after render-field readbacks.
+- No push was attempted.

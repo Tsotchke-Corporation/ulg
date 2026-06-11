@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SPH_PHASE_RENDER_MODE,
+  SPH_PHASE_RENDER_ORDER,
   createContinuousSurfaceBatches,
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
   renderAlphaFromOpticalResponse,
-  renderDepthWriteFromOpticalResponse
+  renderDepthWriteFromOpticalResponse,
+  renderLayerFromOpticalResponse,
+  renderOrderFromOpticalResponse
 } from '../src/visualization/sphPhaseScene.js';
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
@@ -194,4 +197,51 @@ test('SPH renderer keeps condensed transmissive H2O geometrically visible', () =
   assert.equal(renderAlphaFromOpticalResponse(waterOptics, waterOptics), 1);
   assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), false);
   assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), vaporOptics.opacity);
+});
+
+test('SPH renderer orders transparent surfaces and disables their depth writes', () => {
+  const opaqueMetal = {
+    material: 'fe',
+    phase: 'solid',
+    opacity: 1,
+    transmission: 0,
+    metalness: 1
+  };
+  const condensedWater = {
+    material: 'h2o',
+    phase: 'liquid',
+    opacity: 0.0028,
+    transmission: 0.977,
+    metalness: 0
+  };
+  const vapor = {
+    material: 'h2o',
+    phase: 'gas',
+    opacity: 0.04,
+    transmission: 0.9,
+    metalness: 0
+  };
+  const alphaSurface = {
+    material: 'generic',
+    phase: 'liquid',
+    opacity: 0.5,
+    transmission: 0,
+    metalness: 0
+  };
+
+  assert.equal(renderDepthWriteFromOpticalResponse(opaqueMetal, opaqueMetal), true);
+  assert.equal(renderLayerFromOpticalResponse(opaqueMetal, opaqueMetal), 'opaque-surface');
+  assert.equal(renderOrderFromOpticalResponse(opaqueMetal, opaqueMetal), SPH_PHASE_RENDER_ORDER.opaqueSurface);
+
+  assert.equal(renderDepthWriteFromOpticalResponse(condensedWater, condensedWater), false);
+  assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'transmissive-surface');
+  assert.equal(renderOrderFromOpticalResponse(condensedWater, condensedWater), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
+
+  assert.equal(renderDepthWriteFromOpticalResponse(vapor, vapor), false);
+  assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'vapor-surface');
+  assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.vaporSurface);
+
+  assert.equal(renderDepthWriteFromOpticalResponse(alphaSurface, alphaSurface), false);
+  assert.equal(renderLayerFromOpticalResponse(alphaSurface, alphaSurface), 'alpha-surface');
+  assert.equal(renderOrderFromOpticalResponse(alphaSurface, alphaSurface), SPH_PHASE_RENDER_ORDER.alphaSurface);
 });

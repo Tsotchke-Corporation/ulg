@@ -28,6 +28,8 @@ const STEP_SCOPE = 'mls-mpm-resident-step-p2g-grid-update-g2p';
 const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const DEFAULT_GRAVITY_M_PER_S2 = Object.freeze([0, -9.80665, 0]);
 const DEFAULT_CFL_FACTOR = 0.6;
+const FULL_READBACK_MODE = 'full-parity-readback';
+const NO_FULL_READBACK_MODE = 'no-full-readback';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -119,9 +121,33 @@ export function compactMlsMpmResidentStepDiagnostics({
   mlsMpmParticleState,
   p2gGridProjection,
   gridUpdate,
-  g2pReconstruction
+  g2pReconstruction,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
+  if (readbackMode === NO_FULL_READBACK_MODE) {
+    return {
+      particleCount: sphParticleState.particleCount,
+      gridNodeCount: gridUpdate?.gridNodeCount ?? p2gGridProjection?.gridNodeCount ?? 0,
+      activeGridNodeCount: null,
+      sourceMassKg: null,
+      nextMassKg: null,
+      massDeltaKg: null,
+      sourceMomentumKgMPerS: null,
+      nextMomentumKgMPerS: null,
+      momentumDeltaKgMPerS: null,
+      maxSpeedMPerS: null,
+      maxDisplacementM: null,
+      minVolumeRatioJ: null,
+      maxVolumeRatioJ: null,
+      readbackMode,
+      compactGpuSummaryAvailable: false,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
   const particleSummary = summarizeParticles({
     sourceState: sphParticleState.state,
     sourceMechanics: mlsMpmParticleState.mechanics,
@@ -134,6 +160,8 @@ export function compactMlsMpmResidentStepDiagnostics({
     gridNodeCount: gridUpdate?.gridNodeCount ?? p2gGridProjection?.gridNodeCount ?? 0,
     activeGridNodeCount: summarizeActiveGridNodes(gridUpdate),
     ...particleSummary,
+    readbackMode,
+    compactGpuSummaryAvailable: false,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -245,6 +273,9 @@ function residentStepEnvelope({
   const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
   const g2pOutputBuffersRetained = Boolean(g2pOutput.stateBuffer && g2pOutput.mechanicsBuffer);
   const residentBuffersRetained = stageBuffersRetained && g2pOutputBuffersRetained;
+  const noFullReadback = residentBuffersRetained
+    && stages.every((stage) => stage?.backend === 'webgpu' && stage?.readbackMode === NO_FULL_READBACK_MODE);
+  const readbackMode = noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
   const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
   const particlePingPong = {
@@ -269,7 +300,8 @@ function residentStepEnvelope({
     mlsMpmParticleUpload,
     p2gGridProjection,
     gridUpdate,
-    g2pReconstruction
+    g2pReconstruction,
+    readbackMode
   });
 
   return {
@@ -311,8 +343,9 @@ function residentStepEnvelope({
     nextParticleBufferMode: nextParticleUploads ? 'retained-g2p-output-buffers' : 'not-available',
     nextParticleStateBufferByteLength: g2pOutput.stateBufferByteLength,
     nextParticleMechanicsBufferByteLength: g2pOutput.mechanicsBufferByteLength,
-    readbackMode: 'full-parity-readback',
-    normalHotLoopReadbackFree: false,
+    readbackMode,
+    normalHotLoopReadbackFree: noFullReadback,
+    renderStateReadbackAvailable: !noFullReadback,
     gpuAuthoritativeState: false,
     diagnostics,
     p2gProjectionValidation: false,
@@ -346,12 +379,14 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   p2gRunner = undefined,
   gridUpdateRunner = undefined,
   g2pRunner = undefined,
-  sourceSlot = sphParticleUpload?.slot ?? 0
+  sourceSlot = sphParticleUpload?.slot ?? 0,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dtSeconds = finiteNumber(dt, 0);
+  const requestedReadbackMode = readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   let lostInfo = null;
   const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
     ? await requestOpticalGpuDevice(navigatorRef, {
@@ -380,6 +415,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     deviceResult: sharedDeviceResult,
     parityTolerance: parityTolerances.p2g ?? 5e-2,
     retainGridBuffer: true,
+    readbackMode: requestedReadbackMode,
     webGpuRunner: p2gRunner,
     onDeviceLost(info) {
       lostInfo = info;
@@ -400,6 +436,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     deviceResult: sharedDeviceResult,
     parityTolerance: parityTolerances.gridUpdate ?? 1e-5,
     retainUpdatedGridBuffer: true,
+    readbackMode: requestedReadbackMode,
     webGpuRunner: gridUpdateRunner,
     onDeviceLost(info) {
       lostInfo = info;
@@ -422,6 +459,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     deviceResult: sharedDeviceResult,
     parityTolerance: parityTolerances.g2p ?? 5e-2,
     retainOutputParticleBuffers: true,
+    readbackMode: requestedReadbackMode,
     webGpuRunner: g2pRunner,
     onDeviceLost(info) {
       lostInfo = info;
@@ -462,23 +500,27 @@ export function destroyMlsMpmResidentStepBuffers(step) {
 }
 
 function cloneSphParticleStateForNext(source, step) {
+  const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
   return {
     ...source,
-    status: 'gpu-resident-readback-ready',
+    status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
-    state: step.state,
+    state: noFullReadback ? source.state : step.state,
+    cpuStateStale: noFullReadback,
     thermo: source.thermo
   };
 }
 
 function cloneMlsMpmParticleStateForNext(source, step) {
+  const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
   return {
     ...source,
-    status: 'gpu-resident-readback-ready',
+    status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
-    mechanics: step.mechanics
+    mechanics: noFullReadback ? source.mechanics : step.mechanics,
+    cpuStateStale: noFullReadback
   };
 }
 
@@ -503,6 +545,8 @@ function summarizeResidentStepForSequence(step, index) {
       maxDisplacementM: step.diagnostics?.maxDisplacementM ?? 0
     },
     readbackMode: step.readbackMode,
+    normalHotLoopReadbackFree: step.normalHotLoopReadbackFree,
+    renderStateReadbackAvailable: step.renderStateReadbackAvailable,
     gpuAuthoritativeState: step.gpuAuthoritativeState,
     fullPhysicsValidation: false
   };
@@ -558,8 +602,9 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
     retainedSteps,
     finalStep,
     stepSummaries,
-    readbackMode: finalStep?.readbackMode ?? 'full-parity-readback',
-    normalHotLoopReadbackFree: false,
+    readbackMode: finalStep?.readbackMode ?? FULL_READBACK_MODE,
+    normalHotLoopReadbackFree: Boolean(finalStep?.normalHotLoopReadbackFree),
+    renderStateReadbackAvailable: finalStep?.renderStateReadbackAvailable ?? true,
     gpuAuthoritativeState: false,
     scientificValidation: false,
     sphValidation: false,

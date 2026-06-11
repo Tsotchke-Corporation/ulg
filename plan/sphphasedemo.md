@@ -1259,3 +1259,32 @@ Remaining before demo-visible GPU motion:
   repeated-step conservation checks.
 - Move thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
   pressure, and optical/render fields onto resident GPU buffers.
+
+## 2026-06-11 No-Full-Readback Resident Foundation
+
+Completed:
+
+- Added an opt-in no-full-readback mode to the MLS-MPM resident mechanics
+  chain below the live scene.
+- P2G, grid update, and G2P can now retain GPU buffers without mapping full
+  grid/state/mechanics arrays back to CPU.
+- Repeated resident steps can ping-pong unread retained G2P buffers into the
+  next step.
+- The runtime reports metadata-only diagnostics rather than fake conservation
+  values when full arrays are absent.
+
+Validation evidence:
+
+- Focused resident-step tests passed `6/6`.
+- Broader ABI/P2G/grid-update/G2P/resident-step tests passed `43/43`.
+- `git diff --check` passed.
+
+Remaining before demo-visible GPU motion:
+
+- Add compact GPU summary-buffer diagnostics.
+- Route the live scene/default scheduler through no-full-readback mode after
+  summary buffers exist.
+- Promote repeated GPU output to visual/mechanical authority only after
+  repeated-step conservation checks.
+- Move thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
+  pressure, and optical/render fields onto resident GPU buffers.

@@ -37,6 +37,8 @@ const GPU_MAP_MODE = {
 
 const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const G2P_SCOPE = 'mls-mpm-g2p-velocity-affine-deformation-reconstruction';
+const FULL_READBACK_MODE = 'full-parity-readback';
+const NO_FULL_READBACK_MODE = 'no-full-readback';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -52,7 +54,7 @@ function finiteVector3(value, fallback) {
   ];
 }
 
-function assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate }) {
+function assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate, requireUpdatedGridNodes = true }) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('MLS-MPM G2P requires a packed SPH GPU particle buffer');
   }
@@ -69,7 +71,7 @@ function assertInputs({ sphParticleState, mlsMpmParticleState, gridUpdate }) {
   ) {
     throw new TypeError('MLS-MPM G2P requires a grid update artifact');
   }
-  if (!(gridUpdate.updatedGridNodes instanceof Float32Array)) {
+  if (requireUpdatedGridNodes && !(gridUpdate.updatedGridNodes instanceof Float32Array)) {
     throw new TypeError('MLS-MPM G2P requires Float32Array updatedGridNodes');
   }
 }
@@ -123,7 +125,18 @@ function inRange(gridUpdate, i, j, k) {
     && k + gridUpdate.gridShift >= 0 && k + gridUpdate.gridShift < gnz;
 }
 
-function outputEnvelope({ backend, sphParticleState, mlsMpmParticleState, gridUpdate, state, mechanics, dt, boxDimsM }) {
+function outputEnvelope({
+  backend,
+  sphParticleState,
+  mlsMpmParticleState,
+  gridUpdate,
+  state,
+  mechanics,
+  dt,
+  boxDimsM,
+  readbackMode = FULL_READBACK_MODE
+}) {
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   return {
     schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
     backend,
@@ -146,6 +159,9 @@ function outputEnvelope({ backend, sphParticleState, mlsMpmParticleState, gridUp
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
     state,
     mechanics,
+    readbackMode,
+    fullReadbackPerformed: !noFullReadback,
+    normalHotLoopReadbackFree: noFullReadback,
     p2gProjectionValidation: false,
     stressProjectionValidation: false,
     gridUpdateValidation: false,
@@ -299,7 +315,8 @@ export async function runMlsMpmG2pWebGpu({
   updatedGridBuffer = null,
   dt = gridUpdate?.dt ?? mlsMpmParticleState?.mechanicsDtS ?? 0,
   boxDimsM = DEFAULT_BOX_DIMS_M,
-  retainOutputParticleBuffers = false
+  retainOutputParticleBuffers = false,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmG2pWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -313,6 +330,12 @@ export async function runMlsMpmG2pWebGpu({
   const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded' ? mlsMpmParticleUpload.mechanicsBuffer : null;
   const borrowedGridBuffer = updatedGridBuffer || gridUpdate.gpuResult?.updatedGridBuffer || gridUpdate.updatedGridBuffer || null;
+  assertInputs({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridUpdate,
+    requireUpdatedGridNodes: !borrowedGridBuffer
+  });
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-state-in', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-sph-thermo-in', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-g2p-mechanics-in', mlsMpmParticleState.mechanics);
@@ -320,8 +343,13 @@ export async function runMlsMpmG2pWebGpu({
   const outStateBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-out', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const outMechanicsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-out', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC });
   const paramsBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-params', size: 64, usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST });
-  const stateReadBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-readback', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
-  const mechanicsReadBuffer = device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const stateReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({ label: 'ulg-mls-mpm-g2p-state-readback', size: Math.max(4, stateByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
+  const mechanicsReadBuffer = noFullReadback
+    ? null
+    : device.createBuffer({ label: 'ulg-mls-mpm-g2p-mechanics-readback', size: Math.max(4, mechanicsByteLength), usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST });
   let returnedRetainedOutputBuffers = false;
 
   try {
@@ -346,15 +374,23 @@ export async function runMlsMpmG2pWebGpu({
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
     pass.end();
-    encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
-    encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(outStateBuffer, 0, stateReadBuffer, 0, Math.max(4, stateByteLength));
+      encoder.copyBufferToBuffer(outMechanicsBuffer, 0, mechanicsReadBuffer, 0, Math.max(4, mechanicsByteLength));
+    }
     device.queue.submit([encoder.finish()]);
-    await stateReadBuffer.mapAsync(GPU_MAP_MODE.READ);
-    await mechanicsReadBuffer.mapAsync(GPU_MAP_MODE.READ);
-    const state = new Float32Array(stateReadBuffer.getMappedRange()).slice(0, sphParticleState.state.length);
-    const mechanics = new Float32Array(mechanicsReadBuffer.getMappedRange()).slice(0, mlsMpmParticleState.mechanics.length);
-    stateReadBuffer.unmap();
-    mechanicsReadBuffer.unmap();
+    let state = new Float32Array();
+    let mechanics = new Float32Array();
+    if (!noFullReadback) {
+      await stateReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      await mechanicsReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      state = new Float32Array(stateReadBuffer.getMappedRange()).slice(0, sphParticleState.state.length);
+      mechanics = new Float32Array(mechanicsReadBuffer.getMappedRange()).slice(0, mlsMpmParticleState.mechanics.length);
+      stateReadBuffer.unmap();
+      mechanicsReadBuffer.unmap();
+    } else if (device.queue?.onSubmittedWorkDone) {
+      await device.queue.onSubmittedWorkDone();
+    }
     const reconstruction = outputEnvelope({
       backend: 'webgpu',
       sphParticleState,
@@ -363,7 +399,8 @@ export async function runMlsMpmG2pWebGpu({
       state,
       mechanics,
       dt: dtSeconds,
-      boxDimsM: dims
+      boxDimsM: dims,
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     if (retainOutputParticleBuffers) {
       reconstruction.stateBuffer = outStateBuffer;
@@ -388,9 +425,25 @@ export async function runMlsMpmG2pWebGpu({
       outMechanicsBuffer.destroy?.();
     }
     paramsBuffer.destroy?.();
-    stateReadBuffer.destroy?.();
-    mechanicsReadBuffer.destroy?.();
+    stateReadBuffer?.destroy?.();
+    mechanicsReadBuffer?.destroy?.();
   }
+}
+
+function createNoFullReadbackParityReport(tolerance = 5e-2) {
+  return {
+    schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
+    status: 'not-run-no-full-readback',
+    tolerance,
+    maxStateAbs: null,
+    maxMechanicsAbs: null,
+    lengthMismatch: null,
+    reason: 'Full G2P particle readback and CPU parity were skipped for resident WebGPU execution',
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export function createMlsMpmG2pParityReport({ cpuReference, gpuResult, tolerance = 5e-2 } = {}) {
@@ -441,6 +494,9 @@ function executionFromReconstruction(reconstruction, { cpuReference = null, gpuR
     mechanicsBufferByteLength: reconstruction?.mechanicsBufferByteLength ?? 0,
     retainedOutputParticleBuffers: Boolean(reconstruction?.retainedOutputParticleBuffers),
     destroyOutputParticleBuffers: reconstruction?.destroyOutputParticleBuffers ?? null,
+    readbackMode: reconstruction?.readbackMode ?? FULL_READBACK_MODE,
+    fullReadbackPerformed: reconstruction?.fullReadbackPerformed ?? true,
+    normalHotLoopReadbackFree: reconstruction?.normalHotLoopReadbackFree ?? false,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -482,11 +538,20 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
   parityTolerance = 5e-2,
   retainOutputParticleBuffers = false,
   onDeviceLost = null,
-  webGpuRunner = runMlsMpmG2pWebGpu
+  webGpuRunner = runMlsMpmG2pWebGpu,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
-  const cpuReference = reconstructMlsMpmG2pCpu({ sphParticleState, mlsMpmParticleState, gridUpdate, dt, boxDimsM });
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  let cpuReference = null;
+  const getCpuReference = () => {
+    if (!cpuReference) {
+      cpuReference = reconstructMlsMpmG2pCpu({ sphParticleState, mlsMpmParticleState, gridUpdate, dt, boxDimsM });
+    }
+    return cpuReference;
+  };
   if (!preferWebGpu) {
-    return executionFromReconstruction(cpuReference, { cpuReference, webgpuStatus: { status: 'not-requested', reason: 'WebGPU MLS-MPM G2P path not requested' } });
+    const reference = getCpuReference();
+    return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'not-requested', reason: 'WebGPU MLS-MPM G2P path not requested' } });
   }
   try {
     let lostInfo = null;
@@ -505,11 +570,13 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       });
     }
     if (!resolvedDeviceResult.device) {
-      return executionFromReconstruction(cpuReference, { cpuReference, webgpuStatus: { status: resolvedDeviceResult.status, reason: resolvedDeviceResult.reason, fallback: 'cpu-reference' } });
+      const reference = getCpuReference();
+      return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: resolvedDeviceResult.status, reason: resolvedDeviceResult.reason, fallback: 'cpu-reference' } });
     }
     await Promise.resolve();
     if (lostInfo) {
-      return executionFromReconstruction(cpuReference, { cpuReference, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
+      const reference = getCpuReference();
+      return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
     }
     const gpuResult = await webGpuRunner({
       device: resolvedDeviceResult.device,
@@ -521,20 +588,35 @@ export async function runMlsMpmG2pWithOptionalWebGpu({
       updatedGridBuffer,
       dt,
       boxDimsM,
-      retainOutputParticleBuffers
+      retainOutputParticleBuffers,
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     await Promise.resolve();
     if (lostInfo) {
       gpuResult.destroyOutputParticleBuffers?.();
-      return executionFromReconstruction(cpuReference, { cpuReference, gpuResult, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
+      const reference = getCpuReference();
+      return executionFromReconstruction(reference, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-device-lost-fallback', reason: describeDeviceLost(lostInfo), fallback: 'cpu-reference' } });
     }
-    const webgpuParity = createMlsMpmG2pParityReport({ cpuReference, gpuResult, tolerance: parityTolerance });
+    if (noFullReadback) {
+      return executionFromReconstruction(gpuResult, {
+        cpuReference: null,
+        gpuResult,
+        webgpuStatus: {
+          status: 'webgpu-executed-no-full-readback',
+          reason: 'WebGPU MLS-MPM G2P executed without full particle readback'
+        },
+        webgpuParity: createNoFullReadbackParityReport(parityTolerance)
+      });
+    }
+    const reference = getCpuReference();
+    const webgpuParity = createMlsMpmG2pParityReport({ cpuReference: reference, gpuResult, tolerance: parityTolerance });
     if (webgpuParity.status !== 'pass') {
       gpuResult.destroyOutputParticleBuffers?.();
-      return executionFromReconstruction(cpuReference, { cpuReference, gpuResult, webgpuStatus: { status: 'webgpu-parity-failed', reason: 'CPU/WebGPU MLS-MPM G2P parity exceeded tolerance', fallback: 'cpu-reference' }, webgpuParity });
+      return executionFromReconstruction(reference, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-parity-failed', reason: 'CPU/WebGPU MLS-MPM G2P parity exceeded tolerance', fallback: 'cpu-reference' }, webgpuParity });
     }
-    return executionFromReconstruction(gpuResult, { cpuReference, gpuResult, webgpuStatus: { status: 'webgpu-executed', reason: 'CPU/WebGPU MLS-MPM G2P parity passed' }, webgpuParity });
+    return executionFromReconstruction(gpuResult, { cpuReference: reference, gpuResult, webgpuStatus: { status: 'webgpu-executed', reason: 'CPU/WebGPU MLS-MPM G2P parity passed' }, webgpuParity });
   } catch (error) {
-    return executionFromReconstruction(cpuReference, { cpuReference, webgpuStatus: { status: 'webgpu-error-fallback', reason: error instanceof Error ? error.message : String(error), fallback: 'cpu-reference' } });
+    const reference = getCpuReference();
+    return executionFromReconstruction(reference, { cpuReference: reference, webgpuStatus: { status: 'webgpu-error-fallback', reason: error instanceof Error ? error.message : String(error), fallback: 'cpu-reference' } });
   }
 }

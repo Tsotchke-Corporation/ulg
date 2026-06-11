@@ -695,8 +695,33 @@ Implemented:
 
 Still remaining:
 
-- No-readback hot-loop mode.
 - Compact GPU summary buffers for normal-frame diagnostics.
+- GPU-authoritative visible particle state.
+- Thermal, wall heat, phase, reaction, gas pressure, and render-field kernels.
+
+## 2026-06-11 Checkpoint - No-Full-Readback Resident Foundation
+
+The MLS-MPM mechanics chain now has an opt-in no-full-readback mode below the
+scene layer. This mode retains GPU buffers and skips full array readback for
+P2G, grid update, and G2P. It does not run CPU parity on success and does not
+invent diagnostics from unread buffers.
+
+Implemented:
+
+- `readbackMode: 'no-full-readback'` on P2G, grid update, G2P, single resident
+  step, and repeated resident steps.
+- Lazy CPU reference/parity generation so no-full-readback success avoids CPU
+  reference work.
+- Explicit parity status `not-run-no-full-readback`.
+- Metadata-only diagnostics when full arrays are absent.
+- Tests for single-step and repeated-step retained-buffer ping-pong without
+  full arrays.
+
+Still remaining:
+
+- Compact GPU summary buffers for mass, active nodes, speed, displacement,
+  pressure, and conservation diagnostics.
+- Scene/default hot-loop selection for no-full-readback mode.
 - GPU-authoritative visible particle state.
 - Thermal, wall heat, phase, reaction, gas pressure, and render-field kernels.
 

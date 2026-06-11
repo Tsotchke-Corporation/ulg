@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 01:32 AKDT
+Updated: 2026-06-11 01:47 AKDT
 
 ## Done
 
@@ -1308,3 +1308,34 @@ Not claimed:
   `normalHotLoopReadbackFree=false`, and `gpuAuthoritativeState=false`.
 - CPU state remains authoritative for visible motion, thermal state, phase
   changes, reactions, wall heat, gas pressure, and status.
+
+## 2026-06-11 Update - No-Full-Readback Resident Step Foundation
+
+Completed:
+
+- Added opt-in `readbackMode: 'no-full-readback'` to the P2G, grid-update,
+  G2P, single resident-step, and repeated resident-step runtime path.
+- P2G/grid-update/G2P WebGPU runners can now skip full output-buffer readback
+  while retaining the GPU storage buffers needed by the next stage.
+- Optional wrappers avoid CPU-reference/parity work on no-full-readback success
+  and mark parity reports as `not-run-no-full-readback`.
+- Resident diagnostics switch to metadata-only values when full arrays are not
+  read back; no mass/speed/active-node values are faked.
+- Repeated no-readback steps preserve stale CPU arrays only for metadata and
+  buffer sizing, mark the packed state as unread/stale, and feed retained G2P
+  buffers into the next step.
+
+Latest validation:
+
+- PASS: syntax checks for P2G, grid update, G2P, resident-step, and tests.
+- PASS: focused resident-step tests passed `6/6`.
+- PASS: broader ABI/P2G/grid-update/G2P/resident-step tests passed `43/43`.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- This is not yet the default live scene mode.
+- There are no compact GPU summary buffers yet, so diagnostics are
+  metadata-only in no-full-readback mode.
+- `gpuAuthoritativeState` remains false and render state is not GPU
+  authoritative.

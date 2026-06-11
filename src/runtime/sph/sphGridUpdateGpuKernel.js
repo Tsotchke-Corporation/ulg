@@ -36,6 +36,8 @@ const DEFAULT_GRAVITY_M_PER_S2 = Object.freeze([0, -9.80665, 0]);
 const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const DEFAULT_CFL_FACTOR = 0.6;
 const GRID_UPDATE_SCOPE = 'mls-mpm-grid-velocity-update-gravity-cfl-walls';
+const FULL_READBACK_MODE = 'full-parity-readback';
+const NO_FULL_READBACK_MODE = 'no-full-readback';
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -51,7 +53,7 @@ function finiteVector3(value, fallback) {
   ];
 }
 
-function assertP2gGridProjection(p2gGridProjection) {
+function assertP2gGridProjection(p2gGridProjection, { requireGridNodes = true } = {}) {
   const projectionSchema = p2gGridProjection?.projectionSchema || p2gGridProjection?.schema;
   if (
     p2gGridProjection?.schema !== ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA
@@ -60,7 +62,7 @@ function assertP2gGridProjection(p2gGridProjection) {
   ) {
     throw new TypeError('MLS-MPM grid update requires a P2G grid projection artifact');
   }
-  if (!(p2gGridProjection.gridNodes instanceof Float32Array)) {
+  if (requireGridNodes && !(p2gGridProjection.gridNodes instanceof Float32Array)) {
     throw new TypeError('MLS-MPM grid update requires Float32Array gridNodes');
   }
   if (p2gGridProjection.gridNodeStrideFloats !== MLS_MPM_GPU_GRID_NODE_FLOATS) {
@@ -75,8 +77,10 @@ function outputEnvelope({
   dt,
   gravityMPerS2,
   boxDimsM,
-  cflFactor
+  cflFactor,
+  readbackMode = FULL_READBACK_MODE
 }) {
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   return {
     schema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
     backend,
@@ -99,6 +103,9 @@ function outputEnvelope({
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
     gridNodeStrideBytes: MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     updatedGridNodes,
+    readbackMode,
+    fullReadbackPerformed: !noFullReadback,
+    normalHotLoopReadbackFree: noFullReadback,
     p2gProjectionValidation: false,
     stressProjectionValidation: false,
     gridUpdateValidation: false,
@@ -118,7 +125,6 @@ export function updateMlsMpmGridCpu({
   boxDimsM = DEFAULT_BOX_DIMS_M,
   cflFactor = DEFAULT_CFL_FACTOR
 } = {}) {
-  assertP2gGridProjection(p2gGridProjection);
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -214,7 +220,8 @@ export async function runMlsMpmGridUpdateWebGpu({
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   cflFactor = DEFAULT_CFL_FACTOR,
-  retainUpdatedGridBuffer = false
+  retainUpdatedGridBuffer = false,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmGridUpdateWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -226,6 +233,7 @@ export async function runMlsMpmGridUpdateWebGpu({
   const cfl = finiteNumber(cflFactor, DEFAULT_CFL_FACTOR);
   const outputByteLength = p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const borrowedGridBuffer = p2gGridBuffer || p2gGridProjection.gridBuffer || p2gGridProjection.gpuResult?.gridBuffer || null;
+  assertP2gGridProjection(p2gGridProjection, { requireGridNodes: !borrowedGridBuffer });
   const sourceGridBuffer = borrowedGridBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-grid-update-p2g-in', p2gGridProjection.gridNodes);
   const updatedGridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-grid-update-out',
@@ -237,11 +245,14 @@ export async function runMlsMpmGridUpdateWebGpu({
     size: 80,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  const readBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-grid-update-readback',
-    size: Math.max(4, outputByteLength),
-    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const readBuffer = noFullReadback
+    ? null
+    : device.createBuffer({
+      label: 'ulg-mls-mpm-grid-update-readback',
+      size: Math.max(4, outputByteLength),
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    });
   let returnedRetainedUpdatedGridBuffer = false;
 
   try {
@@ -271,11 +282,18 @@ export async function runMlsMpmGridUpdateWebGpu({
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(p2gGridProjection.gridNodeCount / 64)));
     pass.end();
-    encoder.copyBufferToBuffer(updatedGridBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
+    if (!noFullReadback) {
+      encoder.copyBufferToBuffer(updatedGridBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
+    }
     device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPU_MAP_MODE.READ);
-    const updatedGridNodes = new Float32Array(readBuffer.getMappedRange()).slice(0, p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS);
-    readBuffer.unmap();
+    let updatedGridNodes = new Float32Array();
+    if (!noFullReadback) {
+      await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+      updatedGridNodes = new Float32Array(readBuffer.getMappedRange()).slice(0, p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS);
+      readBuffer.unmap();
+    } else if (device.queue?.onSubmittedWorkDone) {
+      await device.queue.onSubmittedWorkDone();
+    }
     const update = outputEnvelope({
       backend: 'webgpu',
       p2gGridProjection,
@@ -283,7 +301,8 @@ export async function runMlsMpmGridUpdateWebGpu({
       dt: dtSeconds,
       gravityMPerS2: gravity,
       boxDimsM: dims,
-      cflFactor: cfl
+      cflFactor: cfl,
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     if (retainUpdatedGridBuffer) {
       update.updatedGridBuffer = updatedGridBuffer;
@@ -296,8 +315,23 @@ export async function runMlsMpmGridUpdateWebGpu({
     if (!borrowedGridBuffer) sourceGridBuffer.destroy?.();
     if (!retainUpdatedGridBuffer || !returnedRetainedUpdatedGridBuffer) updatedGridBuffer.destroy?.();
     paramsBuffer.destroy?.();
-    readBuffer.destroy?.();
+    readBuffer?.destroy?.();
   }
+}
+
+function createNoFullReadbackParityReport(tolerance = 1e-5) {
+  return {
+    schema: ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
+    status: 'not-run-no-full-readback',
+    tolerance,
+    maxGridAbs: null,
+    lengthMismatch: null,
+    reason: 'Full grid-update readback and CPU parity were skipped for resident WebGPU execution',
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export function createMlsMpmGridUpdateParityReport({ cpuReference, gpuResult, tolerance = 1e-5 } = {}) {
@@ -361,6 +395,9 @@ function executionFromUpdate(update, {
     boxDimsM: update?.boxDimsM ?? [],
     cflFactor: update?.cflFactor ?? 0,
     updatedGridNodes: update?.updatedGridNodes ?? new Float32Array(),
+    readbackMode: update?.readbackMode ?? FULL_READBACK_MODE,
+    fullReadbackPerformed: update?.fullReadbackPerformed ?? true,
+    normalHotLoopReadbackFree: update?.normalHotLoopReadbackFree ?? false,
     cpuReference,
     gpuResult,
     webgpuStatus,
@@ -400,18 +437,27 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   parityTolerance = 1e-5,
   retainUpdatedGridBuffer = false,
   onDeviceLost = null,
-  webGpuRunner = runMlsMpmGridUpdateWebGpu
+  webGpuRunner = runMlsMpmGridUpdateWebGpu,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
-  const cpuReference = updateMlsMpmGridCpu({
-    p2gGridProjection,
-    dt,
-    gravityMPerS2,
-    boxDimsM,
-    cflFactor
-  });
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  let cpuReference = null;
+  const getCpuReference = () => {
+    if (!cpuReference) {
+      cpuReference = updateMlsMpmGridCpu({
+        p2gGridProjection,
+        dt,
+        gravityMPerS2,
+        boxDimsM,
+        cflFactor
+      });
+    }
+    return cpuReference;
+  };
   if (!preferWebGpu) {
-    return executionFromUpdate(cpuReference, {
-      cpuReference,
+    const reference = getCpuReference();
+    return executionFromUpdate(reference, {
+      cpuReference: reference,
       webgpuStatus: {
         status: 'not-requested',
         reason: 'WebGPU MLS-MPM grid update path not requested'
@@ -435,8 +481,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       });
     }
     if (!resolvedDeviceResult.device) {
-      return executionFromUpdate(cpuReference, {
-        cpuReference,
+      const reference = getCpuReference();
+      return executionFromUpdate(reference, {
+        cpuReference: reference,
         webgpuStatus: {
           status: resolvedDeviceResult.status,
           reason: resolvedDeviceResult.reason,
@@ -446,8 +493,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
     }
     await Promise.resolve();
     if (lostInfo) {
-      return executionFromUpdate(cpuReference, {
-        cpuReference,
+      const reference = getCpuReference();
+      return executionFromUpdate(reference, {
+        cpuReference: reference,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
           reason: describeDeviceLost(lostInfo),
@@ -463,13 +511,15 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       gravityMPerS2,
       boxDimsM,
       cflFactor,
-      retainUpdatedGridBuffer
+      retainUpdatedGridBuffer,
+      readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     await Promise.resolve();
     if (lostInfo) {
       gpuResult.destroyUpdatedGridBuffer?.();
-      return executionFromUpdate(cpuReference, {
-        cpuReference,
+      const reference = getCpuReference();
+      return executionFromUpdate(reference, {
+        cpuReference: reference,
         gpuResult,
         webgpuStatus: {
           status: 'webgpu-device-lost-fallback',
@@ -478,15 +528,27 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         }
       });
     }
+    if (noFullReadback) {
+      return executionFromUpdate(gpuResult, {
+        cpuReference: null,
+        gpuResult,
+        webgpuStatus: {
+          status: 'webgpu-executed-no-full-readback',
+          reason: 'WebGPU MLS-MPM grid update executed without full grid readback'
+        },
+        webgpuParity: createNoFullReadbackParityReport(parityTolerance)
+      });
+    }
+    const reference = getCpuReference();
     const webgpuParity = createMlsMpmGridUpdateParityReport({
-      cpuReference,
+      cpuReference: reference,
       gpuResult,
       tolerance: parityTolerance
     });
     if (webgpuParity.status !== 'pass') {
       gpuResult.destroyUpdatedGridBuffer?.();
-      return executionFromUpdate(cpuReference, {
-        cpuReference,
+      return executionFromUpdate(reference, {
+        cpuReference: reference,
         gpuResult,
         webgpuStatus: {
           status: 'webgpu-parity-failed',
@@ -497,7 +559,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       });
     }
     return executionFromUpdate(gpuResult, {
-      cpuReference,
+      cpuReference: reference,
       gpuResult,
       webgpuStatus: {
         status: 'webgpu-executed',
@@ -506,8 +568,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       webgpuParity
     });
   } catch (error) {
-    return executionFromUpdate(cpuReference, {
-      cpuReference,
+    const reference = getCpuReference();
+    return executionFromUpdate(reference, {
+      cpuReference: reference,
       webgpuStatus: {
         status: 'webgpu-error-fallback',
         reason: error instanceof Error ? error.message : String(error),

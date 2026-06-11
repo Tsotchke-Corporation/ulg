@@ -8864,3 +8864,59 @@ Failures / open questions:
 - GPU output is not yet authoritative for visible motion or CPU particle state.
 - Thermal, phase, reaction, wall heat, gas pressure, and status remain CPU-side.
 - No push was attempted.
+
+## 2026-06-11 01:47:25 AKDT - No-full-readback resident step foundation
+
+Prompt:
+
+- Continue the core GPU-resident architecture after scene-level two-step
+  scheduling.
+
+Actions:
+
+- Added opt-in `readbackMode: 'no-full-readback'` through P2G, grid update,
+  G2P, single resident-step, and repeated resident-step runtime paths.
+- Made the P2G, grid-update, and G2P WebGPU runners skip full
+  `copyBufferToBuffer`/`mapAsync` output readback when no-full-readback mode is
+  requested.
+- Kept retained GPU buffers alive for stage chaining and ping-pong.
+- Added explicit `not-run-no-full-readback` parity reports instead of claiming
+  CPU/WebGPU parity when full arrays were not read.
+- Switched resident diagnostics to metadata-only fields in no-full-readback
+  mode.
+- Preserved stale CPU arrays only for metadata and buffer sizing between unread
+  repeated steps, marking packed state as unread/stale.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphG2pGpuKernel.js`
+- `src/runtime/sph/sphGridGpuKernel.js`
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphGridGpuKernel.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphG2pGpuKernel.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check tests/sphMlsMpmGpuStep.test.mjs && node --test tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks completed.
+- PASS: focused resident-step tests passed `6/6`.
+- PASS: broader ABI/P2G/grid-update/G2P/resident-step tests passed `43/43`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- No-full-readback mode is not yet the default live scene path.
+- Compact GPU summary buffers are still missing, so no-full-readback
+  diagnostics are metadata-only.
+- GPU state is still not render-authoritative or physics-authoritative.
+- No push was attempted.

@@ -1732,6 +1732,7 @@ export function createSphPhaseScene(container, {
       mesh.userData.renderRowsBackend = renderRowsExecution?.backend || null;
       mesh.userData.renderFieldExecutionSchema = renderFieldExecution?.schema || null;
       mesh.userData.renderFieldBackend = renderFieldExecution?.backend || null;
+      mesh.userData.renderFieldInputSource = renderFieldExecution?.renderFieldInputSource || null;
       mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(`${descriptor.material}|${descriptor.phase}`) || null;
       const emissive = emissiveByMaterial?.[descriptor.material] ?? emissiveByMaterial?.[descriptor.renderKey] ?? null;
       if (emissive) {
@@ -1879,13 +1880,15 @@ export function createSphPhaseScene(container, {
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       return sphResidentRenderState;
     }
+    let renderRowsExecution = null;
     try {
-      const renderRowsExecution = await extractSphRenderRowsWebGpu({
+      renderRowsExecution = await extractSphRenderRowsWebGpu({
         device: resolvedDeviceResult.device,
         sphParticleState: nextSphParticleState,
         sphParticleUpload: nextSphUpload,
         sourceStateBuffer: nextSphUpload.stateBuffer,
-        sourceThermoBuffer: nextSphUpload.thermoBuffer
+        sourceThermoBuffer: nextSphUpload.thermoBuffer,
+        retainRenderRowsBuffer: true
       });
       const decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
         materialProperties: materialProperties || {},
@@ -1906,6 +1909,7 @@ export function createSphPhaseScene(container, {
         renderFieldExecution = await buildSphRenderFieldWebGpu({
           device: resolvedDeviceResult.device,
           renderRows: renderRowsExecution.renderRows,
+          renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
           surfaceTable,
           particleCount: renderRowsExecution.particleCount,
           fieldPadding: FIELD_PADDING,
@@ -1934,6 +1938,7 @@ export function createSphPhaseScene(container, {
           reason: fieldError instanceof Error ? fieldError.message : String(fieldError),
           surfaceCount: surfaceTable.surfaceCount,
           totalFieldCells: surfaceTable.totalFieldCells,
+          renderFieldInputSource: null,
           renderFieldReadback: false,
           scientificValidation: false,
           sphValidation: false,
@@ -1968,8 +1973,11 @@ export function createSphPhaseScene(container, {
         renderFieldReadback: Boolean(renderFieldExecution?.renderFieldReadback),
         renderFieldStatus: renderFieldExecution?.status ?? null,
         renderFieldBackend: renderFieldExecution?.backend ?? null,
+        renderFieldInputSource: renderFieldExecution?.renderFieldInputSource ?? null,
         renderFieldSurfaceCount: renderFieldExecution?.surfaceCount ?? surfaceTable.surfaceCount,
         renderFieldTotalCells: renderFieldExecution?.totalFieldCells ?? surfaceTable.totalFieldCells,
+        renderRowsBufferRetained: Boolean(renderRowsExecution.renderRowsBufferRetained),
+        renderRowsBufferByteLength: renderRowsExecution.renderRowsBufferByteLength ?? 0,
         compactRenderReadback: true,
         materialKeys: [...new Set(decoded.materials.map((descriptor) => descriptor.material))],
         phaseKeys: [...new Set(decoded.materials.map((descriptor) => descriptor.phase))],
@@ -1997,6 +2005,8 @@ export function createSphPhaseScene(container, {
       };
       scene.userData.sphResidentRenderState = sphResidentRenderState;
       return sphResidentRenderState;
+    } finally {
+      renderRowsExecution?.destroyRenderRowsBuffer?.();
     }
   }
 

@@ -1630,3 +1630,37 @@ carrier-runtime slice.
   `node --test tests/sphPhaseRenderer.test.mjs` (`6/6`), focused HTTPS
   Chromium e2e (`1/1`), manual Fe/H2O and Na/H2O browser probes, and
   `git diff --check`.
+
+## 2026-06-11 Resident Render Buffer And Closure-Graph Perf Gates
+
+Immediate render-buffer gate:
+
+- `tests/sphRenderGpuKernel.test.mjs` should prove the optional WebGPU
+  render-field path forwards a retained render-row GPU buffer to the injected
+  runner and reports `renderFieldInputSource =
+  resident-render-rows-buffer`.
+- `tests/demo.e2e.mjs` should prove a successful WebGPU resident SPH branch
+  reports retained render-row buffer telemetry and visible surfaces sourced from
+  `resident-render-rows-buffer`.
+
+Validation status:
+
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` (`7/7`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` (`1/1`).
+- PASS: full `npm test` (`313/313`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+
+Flat closure-law graph gates for the next major performance slice:
+
+- CPU compiler tests should build a deterministic flat node/edge/table buffer
+  set from a representative closure graph and validate units, domains,
+  provenance hashes, and dependency ordering.
+- CPU reference and WebGPU evaluator tests should run the same EOS/phase,
+  mechanics, optical, radiation, reaction, and nuclear fixture rows through the
+  flat closure buffers and compare outputs within declared tolerances.
+- Browser e2e should confirm normal runtime samples the flat closure graph from
+  WebGPU buffers and only reads compact status/diagnostic summaries unless a
+  domain exit or validation failure is reported.
+- Regression tests should reject material-specific branches for individual demo
+  substances when the same behavior can be expressed through derived closure
+  rows.

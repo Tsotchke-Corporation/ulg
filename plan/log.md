@@ -1196,6 +1196,93 @@ Open / blockers:
   `closure-refresh-request` and closure-table WGSL descriptor fields.
 - No push was attempted.
 
+## 2026-06-11 09:43:13 AKDT - Retained render rows and flat closure graph perf target
+
+Prompt handled:
+
+- User clarified the `/btw` performance target: move the closure-law graph to a
+  flat WebGPU structure that is initially built and validated by CPU, then
+  consumed by GPU at runtime. User asked where that fits with the current task
+  and to proceed with whichever target is right.
+
+Actions:
+
+- Finished the current clean render-path slice before pivoting: retained the
+  compact SPH render-row GPU buffer after extraction and passed it directly into
+  the resident render-field kernel.
+- Kept the existing compact metadata readback for the interim Three.js bridge,
+  but removed the redundant render-row reupload on the successful WebGPU
+  render-field path.
+- Added retained-buffer ownership/cleanup on the render-row execution artifact
+  and destroyed it from the scene in a `finally` block.
+- Added live telemetry:
+  `renderFieldInputSource = resident-render-rows-buffer`,
+  `renderRowsBufferRetained`, and `renderRowsBufferByteLength`.
+- Updated the focused browser e2e to assert visible resident render-field
+  surfaces use the retained GPU buffer path.
+- Updated `plan/perf-upgrade.md` with the flat closure-law graph WebGPU target:
+  CPU compiles/validates node, edge, coefficient/table, runtime slot, and status
+  buffers; GPU evaluates the graph from flat rows in the hot loop.
+- Updated `plan/tests.md` and `plan/implementation-status.md` with the render
+  buffer gate, closure graph gates, and current validation results.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/sph/sphRenderGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphRenderGpuKernel.test.mjs`
+
+Commands run:
+
+- `git status --short --branch`
+- `find .. -name AGENTS.md -print`
+- `sed -n '1,220p' Agents.md`
+- `sed -n '1,220p' ../AGENTS.md`
+- `rg -n "SPH_PHASE_RENDER_MODE|refreshSphResidentRenderState|buildSphRenderFieldWebGpu|extractSphRenderRowsWebGpu|applySurfaceFields|renderField" src/visualization/sphPhaseScene.js src/runtime/sph/sphRenderGpuKernel.js tests plan -g '*.js' -g '*.mjs' -g '*.md'`
+- `rg -n "closure law|law graph|closure.*graph|flat.*WebGPU|perf|GPU resident|WebGPU resident" plan docs src -g '*.md' -g '*.js'`
+- `node -v`
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/sphRenderGpuKernel.test.mjs`
+- `curl -k -I --max-time 5 https://127.0.0.1:5173/`
+- `ps -p 242294 -o pid,cmd`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs --project=chromium -g "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+- `git diff --stat`
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+
+Validation:
+
+- PASS: Node is `v24.16.0`.
+- PASS: syntax checks for touched runtime/scene/e2e files.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` passed `7/7`.
+- PASS: HTTPS Vite server is still up on `0.0.0.0:5173`; local probe returned
+  `HTTP/2 200`.
+- PASS: focused HTTPS Chromium e2e passed `1/1` in about `1.0m`.
+- PASS: `npm test` passed `313/313`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- I did not see the original `/btw` output in the thread, only the user's
+  summary. The summary is now captured in `plan/perf-upgrade.md`.
+- The renderer is still an interim bridge: render rows and field cells still
+  cross to CPU for Three.js MarchingCubes. This patch only removes a redundant
+  render-row reupload and records the resident-buffer handoff.
+- The flat closure-law graph evaluator is planned but not implemented yet. It
+  should be the next major GPU-residency target before deeper SPH/MLS-MPM
+  runtime optimization.
+- No push was attempted.
+
 ## 2026-06-10 20:31:18 AKDT - Scalar-relativistic interband optical response
 
 Prompt:

@@ -1593,3 +1593,36 @@ Not claimed:
   field back to CPU and still uses Three.js MarchingCubes polygonization.
 - Per-cell temperature-varying optical/radiation color and gas
   condensation/scattering remain future GPU closure-sampling work.
+
+## 2026-06-11 Update - Current Performance Slice
+
+Completed:
+
+- Retaining the WebGPU compact SPH render-row buffer after extraction and
+  borrowing it directly in the resident render-field kernel. This keeps the
+  current metadata readback for the Three.js bridge, but removes the redundant
+  render-row reupload on the successful WebGPU render-field path.
+- Recording `renderFieldInputSource = resident-render-rows-buffer`,
+  `renderRowsBufferRetained`, and retained-buffer byte length in the live demo
+  telemetry and browser e2e expectations.
+- Added the flat closure-law graph WebGPU target to `plan/perf-upgrade.md`.
+  The intended architecture is CPU compile/validation of the law graph followed
+  by WebGPU evaluation from flat closure node/edge/table buffers. This belongs
+  before the full 60 Hz SPH/MLS-MPM/nuclear hot loop because it removes
+  per-frame JS closure traversal without weakening first-principles provenance.
+
+Latest validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphRenderGpuKernel.js`,
+  `src/visualization/sphPhaseScene.js`, and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` (`7/7`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` (`1/1`).
+- PASS: `npm test` (`313/313`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- The render path is still not direct WebGPU volume rendering.
+- The closure-law graph flat-buffer evaluator is planned but not implemented in
+  this slice.

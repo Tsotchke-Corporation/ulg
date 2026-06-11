@@ -195,6 +195,70 @@ A first GPU-resident SPH phase demo should target this dispatch chain:
 CPU readback should happen after step 12 and only for the small summary buffers,
 ideally every N frames rather than every frame.
 
+## Flat Closure-Law Graph WebGPU Target
+
+The `/btw` performance target fits between the current resident kernel chain and
+the full direct renderer: the closure-law graph should become a flat
+WebGPU-resident data structure. CPU code is still responsible for building and
+validating the graph, but the runtime hot loop should evaluate it from storage
+buffers rather than traversing JS objects or per-material contracts.
+
+Required layout:
+
+- Closure node rows:
+  - operation/law id,
+  - material id and phase/domain selectors,
+  - input edge offset/count,
+  - output slot id,
+  - coefficient/table offset/count,
+  - interpolation/range mode,
+  - validation/domain flag ids,
+  - provenance/hash row ids.
+- Closure edge rows:
+  - source slot id,
+  - destination node id,
+  - unit/dimension id,
+  - derivative/sensitivity tag where needed.
+- Coefficient/table rows:
+  - EOS, phase, optics, radiation, reaction, nuclear, and mechanics lookup
+    tables,
+  - sampled ranges and interpolation metadata,
+  - material constants derived from lower-level quantum/MD/reference solvers.
+- Runtime slot buffers:
+  - particle/local state inputs such as density, temperature, composition,
+    phase fractions, strain, pressure, radiation field, and isotope inventory,
+  - closure outputs such as pressure, sound speed, viscosity, moduli, thermal
+    conductivity, opacity, emissive color, reaction rates, decay/fission/fusion
+    source terms, and wall/transport coefficients.
+- Status buffers:
+  - out-of-domain node ids,
+  - NaN/overflow flags,
+  - validation/parity failure bits,
+  - compact diagnostic counters.
+
+CPU responsibilities:
+
+- Compile high-level material closures into the flat tables.
+- Validate units, dimensions, domains, graph acyclicity or fixed-point groups,
+  provenance hashes, and CPU reference parity fixtures.
+- Upload validated table buffers and build bind groups.
+- Handle slow-path invalidation only when a GPU status buffer reports a domain
+  exit, stale cache key, or validation blocker.
+
+GPU responsibilities:
+
+- Evaluate closure nodes from flat rows during the SPH/MLS-MPM/nuclear hot
+  loop.
+- Keep intermediate closure slots WebGPU-resident across kernels.
+- Feed pressure, phase, mechanics, thermal, optics, radiation, reaction, and
+  nuclear closures without CPU-side graph traversal.
+- Emit only compact status/diagnostic readbacks during normal runtime.
+
+This is a general solution target. It should support all elements and compounds
+whose closures have been derived and validated, with cache reuse keyed by the
+closure graph/provenance hash. It should not add one-off material branches for
+H2O, Fe, Au, Na, or any other specific demo material.
+
 ## 2026-06-11 Checkpoint - Resident Render Rows And Layout-Limit Fixes
 
 Implemented:
@@ -265,6 +329,35 @@ Remaining performance target:
   polygonization. The next slice should replace the Three.js MarchingCubes
   bridge with direct WebGPU draw/volume buffers and move color/emission sampling
   to GPU-resident optical/radiation closure buffers.
+
+## 2026-06-11 Checkpoint - Retained Render-Row Buffer Handoff
+
+Implemented:
+
+- The resident SPH render-row extraction kernel can now retain its compact
+  render-row GPU buffer after the required interim metadata readback.
+- The resident render-field kernel borrows that retained buffer directly on the
+  successful WebGPU path, removing one CPU-side render-row reupload before field
+  splatting.
+- Live scene telemetry exposes `renderFieldInputSource =
+  resident-render-rows-buffer`, `renderRowsBufferRetained`, and retained buffer
+  byte length so browser probes can verify the path.
+- The retained buffer is owned by the render-row execution artifact and is
+  destroyed in a `finally` block after the field/fallback branch completes.
+
+Evidence:
+
+- `node --test tests/sphRenderGpuKernel.test.mjs` passed `7/7`.
+- Focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` passed `1/1`.
+- `npm test` passed `313/313`.
+- `npm run build` passed with the existing Vite large-chunk warning.
+- `git diff --check` passed.
+
+Remaining performance target:
+
+- This is not the final renderer. Compact render-row metadata and field cells
+  still cross back to CPU for the Three.js bridge. The next larger runtime
+  target is the flat closure-law graph plus direct GPU draw/volume buffers.
 
 ## GPU-Resident Nuclear And Ionizing-Radiation Target
 
@@ -899,10 +992,12 @@ The next implementation slice should not start with the full SPH phase demo. It
 should create the GPU-resident runtime foundation:
 
 1. Define packed GPU buffer layouts for particle state, closure tables, wall
-   controls, gas state, diagnostics, and render fields.
-2. Add a WebGPU-resident particle update path that does not read back full
+   controls, gas state, diagnostics, render fields, and the flat closure-law
+   graph.
+2. Compile and validate the closure-law graph on CPU, upload it as flat WebGPU
+   tables, and evaluate a small EOS/phase/optics fixture on GPU with parity.
+3. Add a WebGPU-resident particle update path that does not read back full
    buffers.
-3. Move closure sampling for a small fixture fully onto GPU.
 4. Add compact summary-buffer readback for pressure/energy/phase diagnostics.
 5. Add tests proving contracts are load-time/control-plane only for the hot
    loop.

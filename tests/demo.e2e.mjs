@@ -1232,6 +1232,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           renderSource: node.userData.renderSource ?? null,
           renderRowsBackend: node.userData.renderRowsBackend ?? null,
           renderFieldBackend: node.userData.renderFieldBackend ?? null,
+          renderFieldInputSource: node.userData.renderFieldInputSource ?? null,
           lookupOutputRecordIndex: node.userData.opticalGpuLookupOutput?.recordIndex ?? null,
           lookupBackend: node.userData.opticalGpuExecutionBackend ?? null,
           renderAlpha: node.userData.opticalGpuLookupOutput?.renderAlpha ?? null,
@@ -1834,10 +1835,15 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentRenderState.renderFieldReadback).toBe(true);
     expect(derivedSummary.sphResidentRenderState.renderFieldStatus).toBe('render-field-built');
     expect(derivedSummary.sphResidentRenderState.renderFieldBackend).toBe('webgpu');
+    expect(derivedSummary.sphResidentRenderState.renderFieldInputSource).toBe('resident-render-rows-buffer');
     expect(derivedSummary.sphResidentRenderState.renderFieldSurfaceCount).toBe(
       derivedSummary.sphResidentRenderState.surfaceCount
     );
     expect(derivedSummary.sphResidentRenderState.renderFieldTotalCells).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentRenderState.renderRowsBufferRetained).toBe(true);
+    expect(derivedSummary.sphResidentRenderState.renderRowsBufferByteLength).toBe(
+      derivedSummary.sphResidentRenderState.renderRowByteLength
+    );
     expect(derivedSummary.sphResidentRenderState.compactRenderReadback).toBe(true);
     expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
     expect(derivedSummary.sphResidentRenderState.scientificValidation).toBe(false);
@@ -1848,6 +1854,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       surface.renderSource === 'resident-gpu-render-field'
       && surface.renderRowsBackend === 'webgpu'
       && surface.renderFieldBackend === 'webgpu'
+      && surface.renderFieldInputSource === 'resident-render-rows-buffer'
     ))).toBe(true);
   } else {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=full-parity-readback');

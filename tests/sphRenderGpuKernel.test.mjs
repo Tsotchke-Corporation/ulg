@@ -287,6 +287,7 @@ test('SPH render field CPU splats only matching material-phase rows', () => {
 test('SPH render field optional WebGPU accepts an injected field runner', async () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const retainedRenderRowsBuffer = { label: 'test-retained-render-rows-buffer' };
   const surfaceTable = buildSphRenderFieldSurfaceTable([
     {
       surfaceKey: 'Au|Au|solid',
@@ -302,14 +303,18 @@ test('SPH render field optional WebGPU accepts an injected field runner', async 
   ]);
   const execution = await buildSphRenderFieldWithOptionalWebGpu({
     renderRows: extracted.renderRows,
+    renderRowsBuffer: retainedRenderRowsBuffer,
     surfaceTable,
     particleCount: packed.particleCount,
     preferWebGpu: true,
     device: {},
     webGpuRunner(args) {
+      assert.equal(args.renderRowsBuffer, retainedRenderRowsBuffer);
+      assert.equal(args.particleCount, packed.particleCount);
       return {
         ...buildSphRenderFieldCpu(args),
         backend: 'webgpu',
+        renderFieldInputSource: args.renderRowsBuffer ? 'resident-render-rows-buffer' : 'uploaded-render-rows',
         renderFieldReadback: true
       };
     }
@@ -320,6 +325,7 @@ test('SPH render field optional WebGPU accepts an injected field runner', async 
   assert.equal(execution.status, 'webgpu-accepted');
   assert.equal(execution.webgpuStatus.status, 'webgpu-executed');
   assert.equal(execution.result.backend, 'webgpu');
+  assert.equal(execution.result.renderFieldInputSource, 'resident-render-rows-buffer');
   assert.equal(execution.result.fieldRows.length, surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS);
   assert.equal(execution.renderFieldReadback, true);
 });

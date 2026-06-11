@@ -513,6 +513,9 @@ export async function buildSphRenderFieldWebGpu({
   assertRenderFieldSurfaceTable(surfaceTable);
   const resolvedParticleCount = particleCount ?? (renderRows?.length ? renderRows.length / SPH_GPU_RENDER_ROW_FLOATS : 0);
   const borrowedRenderRowsBuffer = renderRowsBuffer || null;
+  const renderFieldInputSource = borrowedRenderRowsBuffer
+    ? 'resident-render-rows-buffer'
+    : 'uploaded-render-rows';
   const sourceRowsBuffer = borrowedRenderRowsBuffer || writeStorageBuffer(
     device,
     'ulg-sph-render-field-source-rows',
@@ -600,6 +603,7 @@ export async function buildSphRenderFieldWebGpu({
     fieldRowByteLength: fieldRows.byteLength,
     fieldPadding,
     refEdgeM,
+    renderFieldInputSource,
     renderFieldReadback: true,
     scientificValidation: false,
     sphValidation: false,
@@ -688,7 +692,8 @@ export async function extractSphRenderRowsWebGpu({
   sphParticleState,
   sphParticleUpload = null,
   sourceStateBuffer = null,
-  sourceThermoBuffer = null
+  sourceThermoBuffer = null,
+  retainRenderRowsBuffer = false
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -741,13 +746,19 @@ export async function extractSphRenderRowsWebGpu({
   device.queue.submit([encoder.finish()]);
   const bytes = await readBuffer(device, renderRowsBuffer, sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT);
   const renderRows = new Float32Array(bytes);
+  let retainedRowsBufferDestroyed = false;
+  const destroyRetainedRenderRowsBuffer = () => {
+    if (retainedRowsBufferDestroyed) return;
+    retainedRowsBufferDestroyed = true;
+    renderRowsBuffer.destroy?.();
+  };
 
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-  renderRowsBuffer.destroy?.();
+  if (!retainRenderRowsBuffer) destroyRetainedRenderRowsBuffer();
   paramsBuffer.destroy?.();
 
-  return {
+  const result = {
     schema: ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
     backend: 'webgpu',
     status: 'render-rows-extracted',
@@ -757,12 +768,20 @@ export async function extractSphRenderRowsWebGpu({
     rowStrideFloats: SPH_GPU_RENDER_ROW_FLOATS,
     renderRows,
     renderRowByteLength: renderRows.byteLength,
+    renderRowsBufferRetained: Boolean(retainRenderRowsBuffer),
+    renderRowsBufferByteLength: sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     compactRenderReadback: true,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+  if (retainRenderRowsBuffer) {
+    result.renderRowsBuffer = renderRowsBuffer;
+    result.renderRowsBufferOwned = true;
+    result.destroyRenderRowsBuffer = destroyRetainedRenderRowsBuffer;
+  }
+  return result;
 }
 
 export async function extractSphRenderRowsWithOptionalWebGpu({

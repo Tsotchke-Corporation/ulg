@@ -9765,3 +9765,95 @@ Failures / open questions:
   optical/radiation closure sampling pass.
 - Gas/steam visibility still needs a general condensation/scattering closure.
 - No push was attempted.
+
+## 2026-06-11 10:15 AKDT - SPH thermal closure graph artifact bridge
+
+Prompt:
+
+- "didn't mean to interrupt continue"
+
+What happened:
+
+- Continued from the flat carrier closure graph bridge toward SPH-side closure
+  graph integration.
+- Incorporated Plato's read-only audit. Recommendation was to generate
+  CPU-side SPH thermal graph buffers from the same `orderedSegments()` source
+  and attach those artifacts beside the existing thermal material table, without
+  replacing the thermal WGSL segment table yet.
+- Confirmed the current SPH thermal path already uses a flat
+  material/phase-segment table, but not the new closure-law graph ABI.
+- Added
+  `peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0`.
+- Added `buildSphThermalClosureGraphBuffers()`, which emits one flat
+  closure-law graph per derived thermal segment for
+  `specificInternalEnergyJPerKg -> temperatureK`.
+- The graph artifact preserves material id, phase ids, source segment index,
+  source segment type, derivative, and provenance-like metadata. It reports
+  non-positive energy domains as skipped segments instead of inventing fake
+  graph domains.
+- Exposed the graph set in the live SPH scene via
+  `getSphThermalClosureGraphBuffers()`.
+- Added node and browser tests proving the graph artifact exists and evaluates
+  to the same temperature as the existing thermal table resolver.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphThermalGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `git status --short --branch` reported `## main...origin/main [ahead 32]`.
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 10:08:58 AKDT`.
+- `rg -n "closureLawGraph|buildSphThermal|resolveThermalStateFromTable|sphThermal" src tests plan -g '*.js' -g '*.mjs' -g '*.md'`.
+- `sed` inspections of `src/runtime/sph/sphThermalGpuKernel.js`,
+  `src/runtime/closureLawGraph.js`, `ulg-gpu-abi/src/index.js`,
+  `tests/sphThermalGpuKernel.test.mjs`, `tests/demo.e2e.mjs`, and
+  `src/visualization/sphPhaseScene.js`.
+- `node --check src/runtime/sph/sphThermalGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --test tests/sphThermalGpuKernel.test.mjs`
+- `node --check src/runtime/sph/sphThermalGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check tests/sphThermalGpuKernel.test.mjs`
+- `node --test tests/sphThermalGpuKernel.test.mjs tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `git diff -- src/runtime/sph/sphThermalGpuKernel.js src/visualization/sphPhaseScene.js tests/sphThermalGpuKernel.test.mjs tests/demo.e2e.mjs ulg-gpu-abi/src/index.js`
+- `git status --short`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 10:15:33 AKDT`.
+
+Validation:
+
+- Initial `node --test tests/sphThermalGpuKernel.test.mjs` failed because the
+  graph-vs-table assertion used a `0.002 K` absolute tolerance against Float32
+  graph buffers and a very hot segment around `500905 K`; the observed drift was
+  about `0.012 K`. The assertion was changed to a Float32-appropriate relative
+  tolerance.
+- PASS: syntax checks for the touched SPH thermal runtime, scene, and thermal
+  test files.
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs` passed `6/6`.
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs
+  tests/closureLawGraph.test.mjs tests/abi.test.mjs` passed `30/30`.
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` passed
+  `1/1` in about one minute.
+- PASS: `npm test` passed `323/323`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The SPH thermal WebGPU kernel still consumes the existing material/phase
+  segment table. The new graph set is generated and validated, but not yet a
+  hot-loop input.
+- Phase ids, phase fractions, density selection, and plateau mixture state are
+  still table-driven. Encoding them as plain scalar graph outputs would hide
+  branch/selector semantics, so the graph ABI needs explicit selector or
+  categorical outputs before that migration is honest.
+- No push was attempted.

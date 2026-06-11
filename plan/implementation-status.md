@@ -1683,3 +1683,43 @@ Not claimed:
 
 - This is a compatibility bridge for the toy carrier runtime. It does not yet
   move SPH/MLS-MPM material closure sampling onto the flat graph.
+
+## 2026-06-11 Update - SPH Thermal Closure Graph Artifact
+
+Completed:
+
+- Added `peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0` as the SPH
+  thermal graph artifact schema.
+- Added `buildSphThermalClosureGraphBuffers()`, which emits one flat
+  closure-law graph per derived thermal segment for
+  `specificInternalEnergyJPerKg -> temperatureK`.
+- The graph builder consumes the same closure-derived SPH thermal material
+  table that drives the CPU/WebGPU thermal path, preserves material id, phase
+  id, source segment index, and temperature derivative metadata, and rejects
+  non-positive energy domains by reporting skipped segments rather than
+  fabricating a fake domain.
+- Exposed the graph set from the browser SPH phase scene as
+  `getSphThermalClosureGraphBuffers()`.
+
+Latest validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphThermalGpuKernel.js`,
+  `src/visualization/sphPhaseScene.js`, and
+  `tests/sphThermalGpuKernel.test.mjs`.
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs` (`6/6`).
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs
+  tests/closureLawGraph.test.mjs tests/abi.test.mjs` (`30/30`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/`
+  confirmed the demo scene exposes the thermal closure graph set (`1/1`).
+- PASS: full `npm test` (`323/323`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- The thermal WebGPU kernel still consumes the existing material/phase segment
+  table. This slice exports graph buffers and proves parity; it does not yet
+  replace phase selection in the hot loop.
+- Phase ids, phase fractions, density selection, and plateau mixture state are
+  not encoded as scalar graph outputs. They remain table-driven until the flat
+  graph ABI has explicit selector/categorical outputs.

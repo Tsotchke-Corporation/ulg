@@ -17,6 +17,7 @@ export const ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA = 'peercompute.ulg.optical-gpu
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
 export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-material-table.v0';
+export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-execution.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-parity.v0';

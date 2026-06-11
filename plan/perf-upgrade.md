@@ -1063,3 +1063,25 @@ should create the GPU-resident runtime foundation:
 4. Add compact summary-buffer readback for pressure/energy/phase diagnostics.
 5. Add tests proving contracts are load-time/control-plane only for the hot
    loop.
+
+## 2026-06-11 Checkpoint - SPH Thermal Graph Artifacts
+
+Implemented:
+
+- SPH thermal now emits a flat closure-law graph artifact set from the existing
+  closure-derived thermal material table.
+- Each graph represents one derived segment as
+  `specificInternalEnergyJPerKg -> temperatureK`, with derivative and source
+  material/phase/segment metadata preserved in GPU-ready buffers.
+- The live SPH scene exposes the graph set beside the material table, so the
+  browser runtime can inspect and eventually upload the same flat graph ABI
+  used by the carrier bridge.
+
+Still remaining:
+
+- Add selector/categorical graph operations before phase id, phase fractions,
+  and density are moved out of the SPH thermal segment table.
+- Teach the WebGPU thermal kernel to bind graph node/sample/slot/status buffers
+  and evaluate thermal closures resident on GPU.
+- Replace full graph/debug readbacks with compact status summaries once graph
+  execution is in the hot loop.

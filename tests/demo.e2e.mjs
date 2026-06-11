@@ -1212,6 +1212,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const opticalGpuExecution = opticalGpuLookup?.execution;
     const opticalGpuDrawState = scene?.getOpticalGpuDrawState?.();
     const sphThermalMaterialTable = scene?.getSphThermalMaterialTable?.();
+    const sphThermalClosureGraphBuffers = scene?.getSphThermalClosureGraphBuffers?.();
     const sphGpuParticleState = scene?.getSphGpuParticleState?.();
     const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
@@ -1257,6 +1258,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         materialCount: sphThermalMaterialTable?.materialCount,
         segmentCount: sphThermalMaterialTable?.segmentCount,
         status: sphThermalMaterialTable?.status
+      },
+      sphThermalClosureGraphBuffers: {
+        schema: sphThermalClosureGraphBuffers?.schema,
+        graphSchema: sphThermalClosureGraphBuffers?.graphSchema,
+        graphCount: sphThermalClosureGraphBuffers?.graphCount,
+        segmentCount: sphThermalClosureGraphBuffers?.segmentCount,
+        skippedSegmentCount: sphThermalClosureGraphBuffers?.skippedSegmentCount,
+        status: sphThermalClosureGraphBuffers?.status
       },
       opticalGpuLookup: {
         schema: opticalGpuLookup?.lookup?.schema,
@@ -1515,6 +1524,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.sphThermalMaterialTable.schema).toBe('peercompute.ulg.sph-gpu-thermal-material-table.v0');
   expect(derivedSummary.sphThermalMaterialTable.materialCount).toBeGreaterThan(0);
   expect(derivedSummary.sphThermalMaterialTable.segmentCount).toBeGreaterThan(0);
+  expect(derivedSummary.sphThermalClosureGraphBuffers.schema).toBe('peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0');
+  expect(derivedSummary.sphThermalClosureGraphBuffers.graphSchema).toBe('peercompute.ulg.closure-law-graph.v0');
+  expect(derivedSummary.sphThermalClosureGraphBuffers.graphCount).toBe(derivedSummary.sphThermalMaterialTable.segmentCount);
+  expect(derivedSummary.sphThermalClosureGraphBuffers.skippedSegmentCount).toBe(0);
   expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
   expect(derivedSummary.opticalGpuLookup.queryCount).toBe(derivedSummary.opticalGpuTable.recordCount);
   expect(derivedSummary.opticalGpuLookup.outputCount).toBe(derivedSummary.opticalGpuLookup.queryCount * 12);

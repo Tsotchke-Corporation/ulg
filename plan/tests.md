@@ -1702,3 +1702,26 @@ Validation status:
   `webgpuStatus.status = webgpu-executed`, carrier parity `pass`,
   `closureLawGraph.backend = webgpu-resident-flat-graph`, and invariant status
   `pass`.
+
+SPH thermal closure graph artifact gates:
+
+- `tests/sphThermalGpuKernel.test.mjs` now verifies
+  `buildSphThermalClosureGraphBuffers()` emits
+  `peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0` from the derived
+  thermal material table, preserves H2O/Fe/air material metadata, preserves
+  source phase ids, and evaluates each emitted segment graph through the
+  generic closure-law graph CPU evaluator to match
+  `resolveThermalStateFromTable()`.
+- `tests/demo.e2e.mjs` now verifies the browser SPH phase scene exposes the
+  graph set beside the material table.
+
+Validation status:
+
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs` (`6/6`).
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs
+  tests/closureLawGraph.test.mjs tests/abi.test.mjs` (`30/30`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/`
+  (`1/1`).
+- PASS: full `npm test` (`323/323`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.

@@ -3,11 +3,14 @@ import {
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
+  ULG_CLOSURE_LAW_GRAPH_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
-  ULG_SPH_GPU_THERMAL_STEP_SCHEMA
+  ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+  createClosureLawGraphBuffers
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
@@ -19,6 +22,7 @@ import {
 } from './sphGpuBuffers.js';
 
 export {
+  ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
@@ -65,6 +69,12 @@ function finiteVector3(value, fallback) {
 function assertPackedSphParticleState(sphParticleState) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('SPH thermal GPU step requires a packed SPH GPU particle buffer');
+  }
+}
+
+function assertPackedSphThermalMaterialTable(table) {
+  if (table?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
+    throw new TypeError('Expected a packed SPH thermal material table');
   }
 }
 
@@ -154,6 +164,145 @@ export function buildSphThermalMaterialTable(materialProperties = {}) {
   };
 }
 
+function materialMetadataById(table) {
+  const metadata = new Map();
+  for (const entry of table.metadata || []) {
+    metadata.set(entry.materialId, entry);
+    metadata.set(new Float32Array([entry.materialId])[0], entry);
+  }
+  return metadata;
+}
+
+function segmentTypeName(segmentType) {
+  return Math.round(segmentType) === THERMAL_SEGMENT_TYPES.plateau ? 'plateau' : 'phase';
+}
+
+function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMetadata }) {
+  const energyStart = finiteNumber(segment.energyStartJPerKg);
+  const energyEnd = finiteNumber(segment.energyEndJPerKg);
+  if (!(energyEnd > energyStart)) {
+    return null;
+  }
+  const temperatureStart = finiteNumber(segment.temperatureStartK);
+  const temperatureEnd = finiteNumber(segment.temperatureEndK);
+  const slope = (temperatureEnd - temperatureStart) / (energyEnd - energyStart);
+  const materialName = materialMetadata?.material || `material-${Math.round(segment.materialId)}`;
+  const graph = createClosureLawGraphBuffers({
+    graphId: `sph-thermal:${materialName}:${Math.round(segment.materialId)}:segment-${segmentIndex}:temperature-vs-energy`,
+    nodes: [{
+      op: 'tableLinear',
+      inputSlot: 0,
+      outputSlot: 1,
+      derivativeSlot: 2,
+      sampleOffset: 0,
+      sampleCount: 2,
+      domainMin: energyStart,
+      domainMax: energyEnd,
+      interpolation: 'linear',
+      statusFlagId: 0,
+      provenanceIndex: segmentIndex,
+      materialId: segment.materialId,
+      phaseId: segment.phaseFromId
+    }],
+    edges: [],
+    samples: [
+      { axis: energyStart, value: temperatureStart, derivative: slope },
+      { axis: energyEnd, value: temperatureEnd, derivative: slope }
+    ],
+    slotCount: 3,
+    initialSlots: { 0: energyStart },
+    statusCount: 1,
+    strategy: 'sph-thermal-segment-flat-closure-law-graph'
+  });
+  return {
+    ...graph,
+    sourceSchema: ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
+    sourceSegmentIndex: segmentIndex,
+    sourceSegmentType: segmentTypeName(segment.segmentType),
+    sourceMaterial: materialName,
+    sourceMaterialId: segment.materialId,
+    sourcePhaseFromId: segment.phaseFromId,
+    sourcePhaseToId: segment.phaseToId,
+    axisName: 'specificInternalEnergyJPerKg',
+    outputName: 'temperatureK',
+    derivativeName: 'dTemperatureKdSpecificInternalEnergyJPerKg',
+    compilerBackend: 'cpu-reference',
+    compilerStatus: 'cpu-validated-sph-thermal-segment-closure-law-graph',
+    materialValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false
+  };
+}
+
+export function buildSphThermalClosureGraphBuffers(materialPropertiesOrTable = {}) {
+  const table = materialPropertiesOrTable?.schema === ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA
+    ? materialPropertiesOrTable
+    : buildSphThermalMaterialTable(materialPropertiesOrTable);
+  assertPackedSphThermalMaterialTable(table);
+  const materialMetadata = materialMetadataById(table);
+  const graphs = [];
+  const metadata = [];
+  const skippedSegments = [];
+  for (let segmentIndex = 0; segmentIndex < table.segmentCount; segmentIndex += 1) {
+    const segment = segmentRows(table, segmentIndex);
+    const material = materialMetadata.get(segment.materialId) || null;
+    const graph = buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMetadata: material });
+    if (!graph) {
+      skippedSegments.push({
+        segmentIndex,
+        material: material?.material || null,
+        materialId: segment.materialId,
+        segmentType: segmentTypeName(segment.segmentType),
+        reason: 'non-positive-energy-domain'
+      });
+      continue;
+    }
+    const graphIndex = graphs.length;
+    graphs.push(graph);
+    metadata.push({
+      graphIndex,
+      graphId: graph.graphId,
+      material: material?.material || null,
+      materialId: segment.materialId,
+      segmentIndex,
+      segmentType: segmentTypeName(segment.segmentType),
+      phaseFromId: segment.phaseFromId,
+      phaseToId: segment.phaseToId,
+      energyStartJPerKg: segment.energyStartJPerKg,
+      energyEndJPerKg: segment.energyEndJPerKg,
+      temperatureStartK: segment.temperatureStartK,
+      temperatureEndK: segment.temperatureEndK,
+      derivativeKdPerJPerKg: (segment.temperatureEndK - segment.temperatureStartK)
+        / (segment.energyEndJPerKg - segment.energyStartJPerKg),
+      graphSchema: graph.schema,
+      graphStatus: graph.status
+    });
+  }
+  return {
+    schema: ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
+    status: skippedSegments.length
+      ? 'thermal-segment-closure-law-graphs-ready-with-skipped-segments'
+      : 'thermal-segment-closure-law-graphs-ready',
+    sourceSchema: table.schema,
+    graphSchema: ULG_CLOSURE_LAW_GRAPH_SCHEMA,
+    axisName: 'specificInternalEnergyJPerKg',
+    outputName: 'temperatureK',
+    derivativeName: 'dTemperatureKdSpecificInternalEnergyJPerKg',
+    materialCount: table.materialCount,
+    segmentCount: table.segmentCount,
+    graphCount: graphs.length,
+    skippedSegmentCount: skippedSegments.length,
+    graphs,
+    metadata,
+    skippedSegments,
+    scientificValidation: false,
+    materialValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 function segmentRows(table, segmentIndex) {
   const offset = segmentIndex * SPH_THERMAL_PHASE_SEGMENT_FLOATS;
   return {
@@ -190,9 +339,7 @@ function addFractions(left, right) {
 }
 
 export function resolveThermalStateFromTable(table, materialId, specificInternalEnergyJPerKg) {
-  if (table?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
-    throw new TypeError('resolveThermalStateFromTable requires a packed thermal material table');
-  }
+  assertPackedSphThermalMaterialTable(table);
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
     const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
     if (table.records[recordOffset] !== materialId) continue;

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ULG_CLOSURE_LAW_GRAPH_SCHEMA } from '../ulg-gpu-abi/src/index.js';
+import { evaluateClosureLawGraphCpu } from '../src/runtime/closureLawGraph.js';
 import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { stableOpticalMaterialId, GPU_PHASE_IDS } from '../src/runtime/material/opticalGpuBuffers.js';
 import { equilibriumFromSpecificEnergy } from '../src/runtime/material/phaseEquilibrium.js';
@@ -11,9 +13,11 @@ import {
   buildSphGpuParticleBuffers
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
+  ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+  buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
   compareSphThermalStepParity,
   resolveThermalStateFromTable,
@@ -96,6 +100,46 @@ test('SPH thermal material table packs closure-derived energy/phase segments', (
     equilibriumFromSpecificEnergy(materialProperties.h2o, liquidEnergy).temperatureK,
     1e-3
   );
+});
+
+test('SPH thermal graph buffer set exports flat energy-temperature segment closures', () => {
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const materials = new Set(graphSet.metadata.map((entry) => entry.material));
+
+  assert.equal(graphSet.schema, ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA);
+  assert.equal(graphSet.status, 'thermal-segment-closure-law-graphs-ready');
+  assert.equal(graphSet.sourceSchema, ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA);
+  assert.equal(graphSet.graphSchema, ULG_CLOSURE_LAW_GRAPH_SCHEMA);
+  assert.equal(graphSet.segmentCount, table.segmentCount);
+  assert.equal(graphSet.graphCount, table.segmentCount);
+  assert.equal(graphSet.skippedSegmentCount, 0);
+  assert.equal(graphSet.scientificValidation, false);
+  assert.equal(graphSet.phaseChangeValidation, false);
+  assert.ok(materials.has('h2o'));
+  assert.ok(materials.has('fe'));
+  assert.ok(materials.has('air'));
+
+  for (const metadata of graphSet.metadata) {
+    const graph = graphSet.graphs[metadata.graphIndex];
+    const midpointEnergy = new Float32Array([
+      metadata.energyStartJPerKg + 0.5 * (metadata.energyEndJPerKg - metadata.energyStartJPerKg)
+    ])[0];
+    const execution = evaluateClosureLawGraphCpu(graph, { inputs: { 0: midpointEnergy } });
+    const resolved = resolveThermalStateFromTable(table, metadata.materialId, midpointEnergy);
+
+    assert.equal(graph.schema, ULG_CLOSURE_LAW_GRAPH_SCHEMA);
+    assert.equal(graph.sourceSegmentIndex, metadata.segmentIndex);
+    assert.equal(graph.sourcePhaseFromId, metadata.phaseFromId);
+    assert.equal(graph.nodeRows[13], metadata.materialId);
+    assert.equal(graph.nodeRows[14], metadata.phaseFromId);
+    assert.equal(execution.status, 'closure-law-graph-evaluated');
+    nearlyEqual(
+      execution.slots[1].value,
+      resolved.temperatureK,
+      Math.max(5e-2, Math.abs(resolved.temperatureK) * 1e-7)
+    );
+  }
 });
 
 test('SPH thermal CPU table step conserves pair conduction energy and refreshes thermo rows', () => {

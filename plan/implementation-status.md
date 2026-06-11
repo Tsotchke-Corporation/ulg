@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 11:04 AKDT
+Updated: 2026-06-11 11:23 AKDT
 
 ## Done
 
@@ -1837,3 +1837,39 @@ Not claimed:
   thermal and reaction steps.
 - The renderer still needs the queued transparent z-buffer/render-order fix
   after the five current GPU-runtime tasks are complete.
+
+## 2026-06-11 Update - Persistent SPH Thermal Response/Graph Upload
+
+Completed:
+
+- Added `peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0` for the
+  persistent runtime WebGPU upload that contains thermal phase-response records,
+  phase-response rows, thermal graph node rows, and thermal graph sample rows.
+- Added `uploadSphThermalResponseGraphBuffers()` and
+  `destroySphThermalResponseGraphBuffers()` in `sphThermalGpuKernel.js`.
+- Updated `runSphThermalStepWebGpu()` and `runSphReactionStepWebGpu()` to
+  borrow `thermalResponseGraphUpload` when supplied, otherwise create and
+  destroy a temporary upload for standalone calls.
+- Added scene-level caching that reuses the upload across particle syncs while
+  the derived thermal response/graph signature is unchanged, invalidates it on
+  material/graph changes, and destroys it on scene disposal.
+- The resident SPH/MLS-MPM path now passes the same cached upload into both
+  thermal and reaction stages. The live status panel reports
+  `thermal graph gpu: status=... responses=... graphs=... bytes=...`.
+
+Latest validation:
+
+- PASS: syntax checks for touched runtime, scene, mount, and test files.
+- PASS: `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs
+  tests/sphReactionGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  (`40/40`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` (`1/1`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`327/327`).
+
+Not claimed:
+
+- Compact thermal/phase GPU summaries are still pending.
+- The transparent z-buffer/render-order fix remains queued until the five
+  current GPU-runtime tasks are complete.

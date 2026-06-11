@@ -8,6 +8,7 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -705,6 +706,12 @@ test('MLS-MPM resident step can refresh SPH state and thermo through a retained 
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseCount: 3,
+    graphCount: 3
+  };
   let thermalCalls = 0;
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
@@ -724,6 +731,9 @@ test('MLS-MPM resident step can refresh SPH state and thermo through a retained 
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    thermalStepOptions: {
+      thermalResponseGraphUpload
+    },
     p2gRunner() {
       return {
         schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
@@ -804,6 +814,7 @@ test('MLS-MPM resident step can refresh SPH state and thermo through a retained 
       assert.equal(args.sourceThermoBuffer, sourceThermoBuffer);
       assert.equal(args.readbackMode, 'no-full-readback');
       assert.equal(args.retainOutputParticleBuffers, true);
+      assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
       return {
         schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
         backend: 'webgpu',
@@ -848,6 +859,12 @@ test('MLS-MPM resident step can convert materials through a retained reaction GP
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
   const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseCount: 3,
+    graphCount: 3
+  };
   let reactionCalls = 0;
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
@@ -868,6 +885,12 @@ test('MLS-MPM resident step can convert materials through a retained reaction GP
     readbackMode: 'no-full-readback',
     thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
     reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
+    thermalStepOptions: {
+      thermalResponseGraphUpload
+    },
+    reactionStepOptions: {
+      thermalResponseGraphUpload
+    },
     p2gRunner() {
       return {
         schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
@@ -943,6 +966,7 @@ test('MLS-MPM resident step can convert materials through a retained reaction GP
       };
     },
     thermalStepRunner(args) {
+      assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
       return {
         schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
         backend: 'webgpu',
@@ -970,6 +994,7 @@ test('MLS-MPM resident step can convert materials through a retained reaction GP
       assert.equal(args.sourceMechanicsBuffer.label, 'g2p-mechanics-before-reaction');
       assert.equal(args.readbackMode, 'no-full-readback');
       assert.equal(args.retainOutputParticleBuffers, true);
+      assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
       return {
         schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
         backend: 'webgpu',

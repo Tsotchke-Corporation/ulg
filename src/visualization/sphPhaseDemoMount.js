@@ -975,6 +975,9 @@ export function mountSphPhaseDemoOverlay() {
       || residentStep?.thermalStep?.backend
       || residentStep?.thermalStep?.result?.backend
       || 'pending';
+    const thermalResponseGraphUpload = scene.getSphThermalResponseGraphUpload?.()
+      || scene.scene?.userData?.sphThermalResponseGraphUpload
+      || null;
     const reactionTable = scene.getSphReactionTable?.() || overlay.__sphReactionTable || null;
     const residentReactionStatus = residentStep?.stageStatus?.reaction
       || residentStep?.reactionStep?.status
@@ -1009,6 +1012,7 @@ export function mountSphPhaseDemoOverlay() {
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
       `resident source  : ${residentSourceMode} continued=${Boolean(residentContinued)} next=${Boolean(residentContinuationAvailable)}`,
       `compact summary  : status=${compactStatus} mode=${compactMode} reduction=${compactReduction}`,
+      `thermal graph gpu: status=${thermalResponseGraphUpload?.status || 'pending'} responses=${thermalResponseGraphUpload?.responseCount ?? 0} graphs=${thermalResponseGraphUpload?.graphCount ?? 0} bytes=${thermalResponseGraphUpload?.responseBufferByteLength ?? 0}`,
       `resident thermal : status=${residentThermalStatus} backend=${residentThermalBackend} next=${residentThermalBufferMode}`,
       `resident reaction: status=${residentReactionStatus} backend=${residentReactionBackend} reactions=${reactionTable?.reactionCount ?? 0}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,

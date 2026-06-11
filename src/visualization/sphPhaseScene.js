@@ -32,9 +32,12 @@ import {
   runMlsMpmResidentStepsWithOptionalWebGpu
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
-  buildSphThermalPhaseResponseTable
+  buildSphThermalPhaseResponseTable,
+  destroySphThermalResponseGraphBuffers,
+  uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import {
@@ -427,6 +430,9 @@ export function createSphPhaseScene(container, {
   let sphThermalMaterialTable = null;
   let sphThermalClosureGraphBuffers = null;
   let sphThermalPhaseResponseTable = null;
+  let sphThermalResponseGraphUpload = null;
+  let sphThermalResponseGraphUploadSignature = null;
+  let pendingSphThermalResponseGraphUpload = null;
   let sphReactionTable = null;
   let sphResidentRenderState = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
@@ -447,6 +453,7 @@ export function createSphPhaseScene(container, {
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphThermalClosureGraphBuffers = null;
   scene.userData.sphThermalPhaseResponseTable = null;
+  scene.userData.sphThermalResponseGraphUpload = null;
   scene.userData.sphReactionTable = null;
   scene.userData.sphResidentRenderState = null;
 
@@ -611,6 +618,28 @@ export function createSphPhaseScene(container, {
       table.productPhaseCount ?? 0,
       Array.from(table.records || []).join(','),
       Array.from(table.productPhaseRecords || []).join(',')
+    ].join('|');
+  }
+
+  function sphThermalResponseGraphSignature({
+    thermalMaterialTable = sphThermalMaterialTable,
+    thermalClosureGraphBuffers = sphThermalClosureGraphBuffers,
+    thermalPhaseResponseTable = sphThermalPhaseResponseTable
+  } = {}) {
+    const graphBank = thermalClosureGraphBuffers?.graphBank;
+    if (!thermalMaterialTable || !graphBank || !thermalPhaseResponseTable) return null;
+    return [
+      thermalMaterialTable.materialCount ?? 0,
+      thermalMaterialTable.segmentCount ?? 0,
+      thermalPhaseResponseTable.materialCount ?? 0,
+      thermalPhaseResponseTable.responseCount ?? 0,
+      graphBank.graphCount ?? 0,
+      graphBank.nodeCount ?? 0,
+      graphBank.sampleCount ?? 0,
+      Array.from(thermalPhaseResponseTable.records || []).join(','),
+      Array.from(thermalPhaseResponseTable.responses || []).join(','),
+      Array.from(graphBank.nodeRows || []).join(','),
+      Array.from(graphBank.sampleRows || []).join(',')
     ].join('|');
   }
 
@@ -948,6 +977,101 @@ export function createSphPhaseScene(container, {
       return await promise;
     } finally {
       if (pendingMlsMpmGpuParticleUpload?.promise === promise) pendingMlsMpmGpuParticleUpload = null;
+    }
+  }
+
+  async function refreshSphThermalResponseGraphBuffers({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null
+  } = {}) {
+    const signature = sphThermalResponseGraphSignature();
+    if (!signature) {
+      if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
+        destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
+      }
+      sphThermalResponseGraphUpload = null;
+      sphThermalResponseGraphUploadSignature = null;
+      scene.userData.sphThermalResponseGraphUpload = null;
+      return null;
+    }
+    if (!force && sphThermalResponseGraphUploadSignature === signature && sphThermalResponseGraphUpload) {
+      return sphThermalResponseGraphUpload;
+    }
+    if (!force && pendingSphThermalResponseGraphUpload?.signature === signature) {
+      return pendingSphThermalResponseGraphUpload.promise;
+    }
+    const promise = (async () => {
+      if (!preferWebGpu) {
+        const upload = {
+          schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+          status: 'not-requested',
+          sourceMaterialTableSchema: sphThermalMaterialTable?.schema ?? null,
+          materialCount: sphThermalPhaseResponseTable?.materialCount ?? 0,
+          responseCount: sphThermalPhaseResponseTable?.responseCount ?? 0,
+          graphCount: sphThermalClosureGraphBuffers?.graphBank?.graphCount ?? 0,
+          reason: 'WebGPU SPH thermal response/graph upload not requested',
+          scientificValidation: false,
+          materialValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+        sphThermalResponseGraphUpload = upload;
+        sphThermalResponseGraphUploadSignature = signature;
+        scene.userData.sphThermalResponseGraphUpload = upload;
+        return upload;
+      }
+      const resolvedDeviceResult = device
+        ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+        : (deviceResult || await requestCachedOpticalGpuDevice(overrideNavigatorRef));
+      if (!resolvedDeviceResult.device) {
+        const upload = {
+          schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+          status: resolvedDeviceResult.status,
+          sourceMaterialTableSchema: sphThermalMaterialTable?.schema ?? null,
+          materialCount: sphThermalPhaseResponseTable?.materialCount ?? 0,
+          responseCount: sphThermalPhaseResponseTable?.responseCount ?? 0,
+          graphCount: sphThermalClosureGraphBuffers?.graphBank?.graphCount ?? 0,
+          reason: resolvedDeviceResult.reason,
+          fallback: 'cpu-packed-response-graph',
+          scientificValidation: false,
+          materialValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+        sphThermalResponseGraphUpload = upload;
+        sphThermalResponseGraphUploadSignature = signature;
+        scene.userData.sphThermalResponseGraphUpload = upload;
+        return upload;
+      }
+      const upload = uploadSphThermalResponseGraphBuffers(resolvedDeviceResult.device, {
+        thermalMaterialTable: sphThermalMaterialTable,
+        thermalClosureGraphSet: sphThermalClosureGraphBuffers,
+        thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
+        thermalPhaseResponseTable: sphThermalPhaseResponseTable
+      });
+      upload.signature = signature;
+      if (!running || sphThermalResponseGraphSignature() !== signature) {
+        destroySphThermalResponseGraphBuffers(upload);
+        return { ...upload, status: 'stale-upload-discarded' };
+      }
+      if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
+        destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
+      }
+      sphThermalResponseGraphUpload = upload;
+      sphThermalResponseGraphUploadSignature = signature;
+      scene.userData.sphThermalResponseGraphUpload = upload;
+      return upload;
+    })();
+    pendingSphThermalResponseGraphUpload = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingSphThermalResponseGraphUpload?.promise === promise) pendingSphThermalResponseGraphUpload = null;
     }
   }
 
@@ -1330,6 +1454,14 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : mlsMpmGpuParticleUpload;
+      const resolvedThermalResponseGraphUpload = preferWebGpu
+        ? await refreshSphThermalResponseGraphBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : sphThermalResponseGraphUpload;
       const execution = await runMlsMpmResidentStepWithOptionalWebGpu({
         sphParticleState: sphGpuParticleState,
         mlsMpmParticleState: mlsMpmGpuParticleState,
@@ -1349,13 +1481,15 @@ export function createSphPhaseScene(container, {
         thermalStepOptions: {
           thermalClosureGraphSet: sphThermalClosureGraphBuffers,
           thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
-          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable,
+          thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
         },
         reactionTable: sphReactionTable,
         reactionStepOptions: {
           thermalClosureGraphSet: sphThermalClosureGraphBuffers,
           thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
-          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable,
+          thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
         },
         parityTolerances,
         p2gRunner,
@@ -1480,6 +1614,14 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : mlsMpmGpuParticleUpload;
+      const resolvedThermalResponseGraphUpload = preferWebGpu
+        ? await refreshSphThermalResponseGraphBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : sphThermalResponseGraphUpload;
       const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
         sphParticleState: sourceSphParticleState,
         mlsMpmParticleState: sourceMlsMpmParticleState,
@@ -1499,13 +1641,15 @@ export function createSphPhaseScene(container, {
         thermalStepOptions: {
           thermalClosureGraphSet: sphThermalClosureGraphBuffers,
           thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
-          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable,
+          thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
         },
         reactionTable: sphReactionTable,
         reactionStepOptions: {
           thermalClosureGraphSet: sphThermalClosureGraphBuffers,
           thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
-          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable,
+          thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
         },
         parityTolerances,
         p2gRunner,
@@ -1820,6 +1964,18 @@ export function createSphPhaseScene(container, {
     sphThermalPhaseResponseTable = sphThermalMaterialTable && sphThermalClosureGraphBuffers
       ? buildSphThermalPhaseResponseTable(sphThermalMaterialTable, sphThermalClosureGraphBuffers)
       : null;
+    const nextThermalResponseGraphSignature = sphThermalResponseGraphSignature();
+    if (
+      sphThermalResponseGraphUpload
+      && sphThermalResponseGraphUploadSignature !== nextThermalResponseGraphSignature
+    ) {
+      if (sphThermalResponseGraphUpload.status === 'webgpu-uploaded') {
+        destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
+      }
+      sphThermalResponseGraphUpload = null;
+      sphThermalResponseGraphUploadSignature = null;
+      scene.userData.sphThermalResponseGraphUpload = null;
+    }
     sphReactionTable = materialProperties
       ? buildSphReactionTable(reactions || [], {
         materialProperties,
@@ -1830,6 +1986,7 @@ export function createSphPhaseScene(container, {
     scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
     scene.userData.sphThermalClosureGraphBuffers = sphThermalClosureGraphBuffers;
     scene.userData.sphThermalPhaseResponseTable = sphThermalPhaseResponseTable;
+    scene.userData.sphThermalResponseGraphUpload = sphThermalResponseGraphUpload;
     scene.userData.sphReactionTable = sphReactionTable;
     sphResidentRenderState = null;
     scene.userData.sphResidentRenderState = null;
@@ -2076,6 +2233,9 @@ export function createSphPhaseScene(container, {
     pmrem.dispose();
     if (sphGpuParticleUpload?.status === 'webgpu-uploaded') destroySphGpuParticleBuffers(sphGpuParticleUpload);
     if (mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded') destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
+    if (sphThermalResponseGraphUpload?.status === 'webgpu-uploaded') {
+      destroySphThermalResponseGraphBuffers(sphThermalResponseGraphUpload);
+    }
     clearMlsMpmResidentExecutionArtifacts();
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
@@ -2105,6 +2265,9 @@ export function createSphPhaseScene(container, {
     },
     getSphThermalPhaseResponseTable() {
       return sphThermalPhaseResponseTable;
+    },
+    getSphThermalResponseGraphUpload() {
+      return sphThermalResponseGraphUpload;
     },
     getSphReactionTable() {
       return sphReactionTable;

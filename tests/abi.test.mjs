@@ -80,6 +80,7 @@ import {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA
@@ -289,6 +290,10 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
   assert.equal(ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0');
+  assert.equal(
+    ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    'peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0'
+  );
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-execution.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-parity.v0');

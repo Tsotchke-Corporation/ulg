@@ -23,9 +23,12 @@ import {
   buildSphThermalClosureGraphBank,
   buildSphThermalClosureGraphBuffers,
   buildSphThermalPhaseResponseTable,
+  destroySphThermalResponseGraphBuffers,
   resolveThermalStateFromGraphPhaseResponseCpu,
+  uploadSphThermalResponseGraphBuffers,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
-  ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA
+  ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA
 } from './sphThermalGpuKernel.js';
 
 export {
@@ -99,6 +102,12 @@ function assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionT
 function assertOptionalThermalPhaseResponseTable(table) {
   if (table && table.schema !== ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA) {
     throw new TypeError('SPH reaction step requires a packed thermal phase-response table');
+  }
+}
+
+function assertOptionalThermalResponseGraphUpload(upload) {
+  if (upload && upload.schema !== ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA) {
+    throw new TypeError('SPH reaction step requires a packed thermal response/graph WebGPU buffer set');
   }
 }
 
@@ -461,6 +470,7 @@ function outputEnvelope({
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
+  thermalResponseGraphUpload = null,
   state,
   thermo,
   mechanics,
@@ -489,6 +499,10 @@ function outputEnvelope({
     thermalClosureGraphSetSchema: thermalClosureGraphSet?.schema ?? null,
     thermalClosureGraphBankSchema: thermalClosureGraphBank?.schema ?? null,
     thermalPhaseResponseTableSchema: thermalPhaseResponseTable?.schema ?? null,
+    thermalResponseGraphBufferSetSchema: thermalResponseGraphUpload?.schema ?? null,
+    thermalResponseGraphBufferMode: thermalResponseGraphUpload
+      ? (thermalResponseGraphUpload.borrowed ? 'borrowed-webgpu-upload' : 'temporary-webgpu-upload')
+      : null,
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
     productPhaseCount: reactionTable.productPhaseCount,
@@ -496,6 +510,8 @@ function outputEnvelope({
     segmentCount: thermalMaterialTable.segmentCount,
     responseCount: thermalPhaseResponseTable?.responseCount ?? null,
     thermalGraphCount: thermalClosureGraphBank?.graphCount ?? thermalClosureGraphSet?.graphCount ?? null,
+    thermalResponseGraphBufferResponseByteLength: thermalResponseGraphUpload?.responseBufferByteLength ?? null,
+    thermalResponseGraphBufferSampleByteLength: thermalResponseGraphUpload?.graphSampleBufferByteLength ?? null,
     sourceStep: sphParticleState.step ?? 0,
     step: (sphParticleState.step ?? 0) + 1,
     sourceTime: sphParticleState.time ?? 0,
@@ -671,12 +687,14 @@ export async function runSphReactionStepWebGpu({
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
+  thermalResponseGraphUpload = null,
   retainOutputParticleBuffers = false,
   resetMechanics = true,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
+  assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionStepWebGpu requires a WebGPU-like device');
   }
@@ -690,15 +708,27 @@ export async function runSphReactionStepWebGpu({
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
+  const borrowedResponseGraphUpload = thermalResponseGraphUpload?.status === 'webgpu-uploaded'
+    ? { ...thermalResponseGraphUpload, borrowed: true }
+    : null;
+  const localResponseGraphUpload = borrowedResponseGraphUpload
+    ? null
+    : uploadSphThermalResponseGraphBuffers(device, {
+      thermalMaterialTable,
+      thermalClosureGraphSet: resolvedGraphSet,
+      thermalClosureGraphBank: resolvedGraphBank,
+      thermalPhaseResponseTable: resolvedPhaseResponseTable
+    });
+  const responseGraphUpload = borrowedResponseGraphUpload || localResponseGraphUpload;
   const reactionRecordBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-records-and-product-phases',
     reactionTable.combinedRecords || new Float32Array([...reactionTable.records, ...reactionTable.productPhaseRecords])
   );
-  const phaseResponseRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-phase-response-records', resolvedPhaseResponseTable.records);
-  const phaseResponseBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-phase-responses', resolvedPhaseResponseTable.responses);
-  const graphNodeBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-graph-nodes', resolvedGraphBank.nodeRows);
-  const graphSampleBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-thermal-graph-samples', resolvedGraphBank.sampleRows);
+  const phaseResponseRecordBuffer = responseGraphUpload.responseRecordBuffer;
+  const phaseResponseBuffer = responseGraphUpload.responseBuffer;
+  const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
+  const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
   const proposalBuffer = writeStorageBuffer(
     device,
     'ulg-sph-reaction-proposals',
@@ -822,15 +852,12 @@ export async function runSphReactionStepWebGpu({
   if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
   for (const buffer of [
     reactionRecordBuffer,
-    phaseResponseRecordBuffer,
-    phaseResponseBuffer,
-    graphNodeBuffer,
-    graphSampleBuffer,
     proposalBuffer,
     paramsBuffer
   ]) {
     buffer.destroy?.();
   }
+  if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
   if (!retainOutputParticleBuffers) {
     outStateBuffer.destroy?.();
     outThermoBuffer.destroy?.();
@@ -846,6 +873,7 @@ export async function runSphReactionStepWebGpu({
     thermalClosureGraphSet: resolvedGraphSet,
     thermalClosureGraphBank: resolvedGraphBank,
     thermalPhaseResponseTable: resolvedPhaseResponseTable,
+    thermalResponseGraphUpload: responseGraphUpload,
     state,
     thermo,
     mechanics,

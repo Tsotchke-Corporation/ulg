@@ -11,6 +11,7 @@ import {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
@@ -31,6 +32,7 @@ export {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
@@ -740,6 +742,7 @@ function outputEnvelope({
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
+  thermalResponseGraphUpload = null,
   state,
   thermo,
   wallHeatJ,
@@ -766,11 +769,17 @@ function outputEnvelope({
     thermalClosureGraphSetSchema: thermalClosureGraphSet?.schema ?? null,
     thermalClosureGraphBankSchema: thermalClosureGraphBank?.schema ?? null,
     thermalPhaseResponseTableSchema: thermalPhaseResponseTable?.schema ?? null,
+    thermalResponseGraphBufferSetSchema: thermalResponseGraphUpload?.schema ?? null,
+    thermalResponseGraphBufferMode: thermalResponseGraphUpload
+      ? (thermalResponseGraphUpload.borrowed ? 'borrowed-webgpu-upload' : 'temporary-webgpu-upload')
+      : null,
     particleCount: sphParticleState.particleCount,
     materialCount: thermalMaterialTable.materialCount,
     segmentCount: thermalMaterialTable.segmentCount,
     responseCount: thermalPhaseResponseTable?.responseCount ?? null,
     thermalGraphCount: thermalClosureGraphBank?.graphCount ?? thermalClosureGraphSet?.graphCount ?? null,
+    thermalResponseGraphBufferResponseByteLength: thermalResponseGraphUpload?.responseBufferByteLength ?? null,
+    thermalResponseGraphBufferSampleByteLength: thermalResponseGraphUpload?.graphSampleBufferByteLength ?? null,
     sourceStep: sphParticleState.step ?? 0,
     step: (sphParticleState.step ?? 0) + 1,
     sourceTime: sphParticleState.time ?? 0,
@@ -899,6 +908,116 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function resolveThermalResponseGraphArtifacts({
+  thermalMaterialTable,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null
+} = {}) {
+  if (thermalMaterialTable?.schema !== ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA) {
+    throw new TypeError('Expected a packed SPH thermal material table');
+  }
+  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
+  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
+  if (resolvedGraphSet?.schema !== ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA) {
+    throw new TypeError('Expected an SPH thermal closure graph set');
+  }
+  if (resolvedGraphBank?.schema !== ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA) {
+    throw new TypeError('Expected an SPH thermal closure graph bank');
+  }
+  assertPackedSphThermalPhaseResponseTable(resolvedPhaseResponseTable);
+  return {
+    thermalClosureGraphSet: resolvedGraphSet,
+    thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable
+  };
+}
+
+function assertOptionalThermalResponseGraphUpload(upload) {
+  if (upload && upload.schema !== ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA) {
+    throw new TypeError('Expected an SPH thermal response/graph WebGPU buffer set');
+  }
+}
+
+export function uploadSphThermalResponseGraphBuffers(device, {
+  thermalMaterialTable,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('uploadSphThermalResponseGraphBuffers requires a WebGPU-like device with queue.writeBuffer');
+  }
+  const resolved = resolveThermalResponseGraphArtifacts({
+    thermalMaterialTable,
+    thermalClosureGraphSet,
+    thermalClosureGraphBank,
+    thermalPhaseResponseTable
+  });
+  const responseRecordBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-thermal-phase-response-records',
+    resolved.thermalPhaseResponseTable.records
+  );
+  const responseBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-thermal-phase-responses',
+    resolved.thermalPhaseResponseTable.responses
+  );
+  const graphNodeBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-thermal-graph-nodes',
+    resolved.thermalClosureGraphBank.nodeRows
+  );
+  const graphSampleBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-thermal-graph-samples',
+    resolved.thermalClosureGraphBank.sampleRows
+  );
+  return {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    sourceMaterialTableSchema: thermalMaterialTable.schema,
+    thermalClosureGraphSetSchema: resolved.thermalClosureGraphSet.schema,
+    thermalClosureGraphBankSchema: resolved.thermalClosureGraphBank.schema,
+    thermalPhaseResponseTableSchema: resolved.thermalPhaseResponseTable.schema,
+    materialCount: resolved.thermalPhaseResponseTable.materialCount,
+    responseCount: resolved.thermalPhaseResponseTable.responseCount,
+    graphCount: resolved.thermalClosureGraphBank.graphCount,
+    nodeCount: resolved.thermalClosureGraphBank.nodeCount,
+    sampleCount: resolved.thermalClosureGraphBank.sampleCount,
+    responseRecordBuffer,
+    responseBuffer,
+    graphNodeBuffer,
+    graphSampleBuffer,
+    responseRecordBufferByteLength: resolved.thermalPhaseResponseTable.records.byteLength,
+    responseBufferByteLength: resolved.thermalPhaseResponseTable.responses.byteLength,
+    graphNodeBufferByteLength: resolved.thermalClosureGraphBank.nodeRows.byteLength,
+    graphSampleBufferByteLength: resolved.thermalClosureGraphBank.sampleRows.byteLength,
+    ownsResponseRecordBuffer: true,
+    ownsResponseBuffer: true,
+    ownsGraphNodeBuffer: true,
+    ownsGraphSampleBuffer: true,
+    thermalClosureGraphSet: resolved.thermalClosureGraphSet,
+    thermalClosureGraphBank: resolved.thermalClosureGraphBank,
+    thermalPhaseResponseTable: resolved.thermalPhaseResponseTable,
+    scientificValidation: false,
+    materialValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function destroySphThermalResponseGraphBuffers(buffers) {
+  if (!buffers) return;
+  if (buffers.ownsResponseRecordBuffer !== false) buffers.responseRecordBuffer?.destroy?.();
+  if (buffers.ownsResponseBuffer !== false) buffers.responseBuffer?.destroy?.();
+  if (buffers.ownsGraphNodeBuffer !== false) buffers.graphNodeBuffer?.destroy?.();
+  if (buffers.ownsGraphSampleBuffer !== false) buffers.graphSampleBuffer?.destroy?.();
+}
+
 function createParamsArray({
   particleCount,
   materialCount,
@@ -959,6 +1078,7 @@ export async function runSphThermalStepWebGpu({
   thermalClosureGraphSet = null,
   thermalClosureGraphBank = null,
   thermalPhaseResponseTable = null,
+  thermalResponseGraphUpload = null,
   sphParticleUpload = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
@@ -972,6 +1092,7 @@ export async function runSphThermalStepWebGpu({
   readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
+  assertOptionalThermalResponseGraphUpload(thermalResponseGraphUpload);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphThermalStepWebGpu requires a WebGPU-like device');
   }
@@ -985,10 +1106,22 @@ export async function runSphThermalStepWebGpu({
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
-  const responseRecordBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-phase-response-records', resolvedPhaseResponseTable.records);
-  const responseBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-phase-responses', resolvedPhaseResponseTable.responses);
-  const graphNodeBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-graph-nodes', resolvedGraphBank.nodeRows);
-  const graphSampleBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-graph-samples', resolvedGraphBank.sampleRows);
+  const borrowedResponseGraphUpload = thermalResponseGraphUpload?.status === 'webgpu-uploaded'
+    ? { ...thermalResponseGraphUpload, borrowed: true }
+    : null;
+  const localResponseGraphUpload = borrowedResponseGraphUpload
+    ? null
+    : uploadSphThermalResponseGraphBuffers(device, {
+      thermalMaterialTable,
+      thermalClosureGraphSet: resolvedGraphSet,
+      thermalClosureGraphBank: resolvedGraphBank,
+      thermalPhaseResponseTable: resolvedPhaseResponseTable
+    });
+  const responseGraphUpload = borrowedResponseGraphUpload || localResponseGraphUpload;
+  const responseRecordBuffer = responseGraphUpload.responseRecordBuffer;
+  const responseBuffer = responseGraphUpload.responseBuffer;
+  const graphNodeBuffer = responseGraphUpload.graphNodeBuffer;
+  const graphSampleBuffer = responseGraphUpload.graphSampleBuffer;
   const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-output-state', new Float32Array(sphParticleState.state.length), GPU_BUFFER_USAGE.COPY_SRC);
   const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-output-thermo', new Float32Array(sphParticleState.thermo.length), GPU_BUFFER_USAGE.COPY_SRC);
   const paramsBuffer = device.createBuffer({
@@ -1062,9 +1195,8 @@ export async function runSphThermalStepWebGpu({
   }
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-  for (const buffer of [responseRecordBuffer, responseBuffer, graphNodeBuffer, graphSampleBuffer, paramsBuffer]) {
-    buffer.destroy?.();
-  }
+  if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
+  paramsBuffer.destroy?.();
   if (!retainOutputParticleBuffers) {
     outStateBuffer.destroy?.();
     outThermoBuffer.destroy?.();
@@ -1076,6 +1208,7 @@ export async function runSphThermalStepWebGpu({
     thermalClosureGraphSet: resolvedGraphSet,
     thermalClosureGraphBank: resolvedGraphBank,
     thermalPhaseResponseTable: resolvedPhaseResponseTable,
+    thermalResponseGraphUpload: responseGraphUpload,
     state,
     thermo,
     wallHeatJ: Object.fromEntries(FACE_IDS.map((faceId) => [faceId, null])),

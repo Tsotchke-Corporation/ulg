@@ -18,17 +18,20 @@ import {
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   buildSphThermalPhaseResponseTable,
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
   compareSphThermalStepParity,
+  destroySphThermalResponseGraphBuffers,
   resolveThermalPhaseResponseFromTable,
   resolveThermalStateFromGraphPhaseResponseCpu,
   resolveThermalStateFromTable,
   runSphThermalStepCpu,
-  runSphThermalStepWithOptionalWebGpu
+  runSphThermalStepWithOptionalWebGpu,
+  uploadSphThermalResponseGraphBuffers
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
 
 const closures = createReferenceMaterialClosures();
@@ -228,6 +231,67 @@ test('SPH thermal phase response table preserves plateau, edge, and clamp semant
   assert.equal(plateau.phaseId, GPU_PHASE_IDS.liquid);
   nearlyEqual(plateau.phaseFractions.solid, 0.5, 1e-5);
   nearlyEqual(plateau.phaseFractions.liquid, 0.5, 1e-5);
+});
+
+test('SPH thermal response graph upload persists phase-response and graph buffers', () => {
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const writes = [];
+  const destroyed = [];
+  const device = {
+    createBuffer({ label, size, usage }) {
+      return {
+        label,
+        size,
+        usage,
+        destroy() {
+          destroyed.push(label);
+        }
+      };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength, usage: buffer.usage });
+      }
+    }
+  };
+
+  const upload = uploadSphThermalResponseGraphBuffers(device, {
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable
+  });
+
+  assert.equal(upload.schema, ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA);
+  assert.equal(upload.status, 'webgpu-uploaded');
+  assert.equal(upload.responseCount, responseTable.responseCount);
+  assert.equal(upload.graphCount, graphSet.graphBank.graphCount);
+  assert.equal(upload.responseRecordBufferByteLength, responseTable.records.byteLength);
+  assert.equal(upload.responseBufferByteLength, responseTable.responses.byteLength);
+  assert.equal(upload.graphNodeBufferByteLength, graphSet.graphBank.nodeRows.byteLength);
+  assert.equal(upload.graphSampleBufferByteLength, graphSet.graphBank.sampleRows.byteLength);
+  assert.deepEqual(writes.map((write) => write.label), [
+    'ulg-sph-thermal-phase-response-records',
+    'ulg-sph-thermal-phase-responses',
+    'ulg-sph-thermal-graph-nodes',
+    'ulg-sph-thermal-graph-samples'
+  ]);
+  assert.deepEqual(writes.map((write) => write.byteLength), [
+    responseTable.records.byteLength,
+    responseTable.responses.byteLength,
+    graphSet.graphBank.nodeRows.byteLength,
+    graphSet.graphBank.sampleRows.byteLength
+  ]);
+
+  destroySphThermalResponseGraphBuffers(upload);
+  assert.deepEqual(destroyed, [
+    'ulg-sph-thermal-phase-response-records',
+    'ulg-sph-thermal-phase-responses',
+    'ulg-sph-thermal-graph-nodes',
+    'ulg-sph-thermal-graph-samples'
+  ]);
 });
 
 test('SPH thermal CPU table step conserves pair conduction energy and refreshes thermo rows', () => {

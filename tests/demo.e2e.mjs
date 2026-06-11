@@ -1214,6 +1214,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const sphThermalMaterialTable = scene?.getSphThermalMaterialTable?.();
     const sphThermalClosureGraphBuffers = scene?.getSphThermalClosureGraphBuffers?.();
     const sphThermalPhaseResponseTable = scene?.getSphThermalPhaseResponseTable?.();
+    const sphThermalResponseGraphUpload = scene?.getSphThermalResponseGraphUpload?.();
     const sphGpuParticleState = scene?.getSphGpuParticleState?.();
     const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
@@ -1275,6 +1276,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         responseCount: sphThermalPhaseResponseTable?.responseCount,
         materialCount: sphThermalPhaseResponseTable?.materialCount,
         status: sphThermalPhaseResponseTable?.status
+      },
+      sphThermalResponseGraphUpload: {
+        schema: sphThermalResponseGraphUpload?.schema,
+        status: sphThermalResponseGraphUpload?.status,
+        responseCount: sphThermalResponseGraphUpload?.responseCount,
+        graphCount: sphThermalResponseGraphUpload?.graphCount,
+        responseBufferByteLength: sphThermalResponseGraphUpload?.responseBufferByteLength,
+        graphSampleBufferByteLength: sphThermalResponseGraphUpload?.graphSampleBufferByteLength
       },
       opticalGpuLookup: {
         schema: opticalGpuLookup?.lookup?.schema,
@@ -1524,6 +1533,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback');
   expect(derivedSummary.statusText).toContain('resident source  :');
   expect(derivedSummary.statusText).toContain('compact summary  :');
+  expect(derivedSummary.statusText).toContain('thermal graph gpu: status=');
   expect(derivedSummary.statusText).toContain('render source    :');
   expect(derivedSummary.statusText).toContain('render authoritative:');
   expect(derivedSummary.statusText).toContain('gpu authoritative: false');
@@ -1541,6 +1551,16 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.sphThermalPhaseResponseTable.schema).toBe('peercompute.ulg.sph-gpu-thermal-phase-response-table.v0');
   expect(derivedSummary.sphThermalPhaseResponseTable.graphBankSchema).toBe('peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0');
   expect(derivedSummary.sphThermalPhaseResponseTable.responseCount).toBe(derivedSummary.sphThermalMaterialTable.segmentCount);
+  expect(derivedSummary.sphThermalResponseGraphUpload.schema).toBe('peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0');
+  expect([
+    'blocked-webgpu-unavailable',
+    'not-requested',
+    'webgpu-device-lost-fallback',
+    'webgpu-error-fallback',
+    'webgpu-uploaded'
+  ]).toContain(derivedSummary.sphThermalResponseGraphUpload.status);
+  expect(derivedSummary.sphThermalResponseGraphUpload.responseCount).toBe(derivedSummary.sphThermalPhaseResponseTable.responseCount);
+  expect(derivedSummary.sphThermalResponseGraphUpload.graphCount).toBe(derivedSummary.sphThermalClosureGraphBuffers.graphCount);
   expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
   expect(derivedSummary.opticalGpuLookup.queryCount).toBe(derivedSummary.opticalGpuTable.recordCount);
   expect(derivedSummary.opticalGpuLookup.outputCount).toBe(derivedSummary.opticalGpuLookup.queryCount * 12);
@@ -1795,6 +1815,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=no-full-readback');
     expect(derivedSummary.statusText).toContain('resident source  : previous-gpu-resident-output continued=true next=true');
     expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
+    expect(derivedSummary.statusText).toContain('thermal graph gpu: status=webgpu-uploaded');
     expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
     expect(derivedSummary.statusText).toContain('render source    : resident-gpu-render-field');
@@ -1831,6 +1852,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed-no-full-readback');
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.thermal).toBe('thermal-step-executed');
     expect(derivedSummary.mlsMpmResidentStep.stageBackends.thermal).toBe('webgpu');
+    expect(derivedSummary.sphThermalResponseGraphUpload.status).toBe('webgpu-uploaded');
+    expect(derivedSummary.sphThermalResponseGraphUpload.responseBufferByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.sphThermalResponseGraphUpload.graphSampleBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.residentBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.stageBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.g2pOutputBuffersRetained).toBe(true);

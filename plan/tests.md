@@ -4,17 +4,19 @@
 
 Command: `npm test`
 
-Current result: pass, 326/326 tests on 2026-06-11 after migrating the SPH
-reaction product phase reset to the shared thermal phase-response table and
-thermal graph bank. Focused ABI/reaction/thermal coverage passed 29/29, focused
-HTTPS Chromium e2e for the SPH phase demo passed 1/1 against
-`https://127.0.0.1:5173/`, and `npm run build` passed with the existing Vite
-large-chunk warning.
+Current result: pass, 327/327 tests on 2026-06-11 after adding the persistent
+SPH thermal response/graph WebGPU upload set and wiring it into resident
+thermal plus reaction stages. Focused ABI/thermal/reaction/resident coverage
+passed 40/40, focused HTTPS Chromium e2e for the SPH phase demo passed 1/1
+against `https://127.0.0.1:5173/`, and `npm run build` passed with the existing
+Vite large-chunk warning.
 
-Prior milestone: pass, 134/134 tests on 2026-06-09 after taking Kohn–Sham DFT
-all the way to the iron atom (multi-shell Aufbau + tridiagonal eigensolver).
-Earlier milestone: 132/132 after the minimal radial KS-LDA solver validated on
-helium.
+Prior milestone: pass, 326/326 tests on 2026-06-11 after migrating the SPH
+reaction product phase reset to the shared thermal phase-response table and
+thermal graph bank. Earlier milestone: pass, 134/134 tests on 2026-06-09 after
+taking Kohn–Sham DFT all the way to the iron atom (multi-shell Aufbau +
+tridiagonal eigensolver). Earlier still: 132/132 after the minimal radial KS-LDA
+solver validated on helium.
 
 - Kohn–Sham DFT coverage on 2026-06-09: `node --test tests/radialKohnSham.test.mjs`
   passed `3/3` — the radial KS-LDA solver reproduces helium's total energy

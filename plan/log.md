@@ -10168,3 +10168,78 @@ Failures / open questions:
   response/graph buffers are still uploaded per invocation. Persisting those GPU
   buffers across resident steps is the next task.
 - No push was attempted.
+
+## 2026-06-11 11:23 AKDT - Persistent thermal response/graph GPU upload
+
+Prompt:
+
+- Continue the five-task queue after migrating reaction product phase reset to
+  thermal response graphs.
+
+What happened:
+
+- Added `peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0` as the
+  runtime upload schema for persistent thermal phase-response and graph-bank
+  buffers.
+- Added `uploadSphThermalResponseGraphBuffers()` and
+  `destroySphThermalResponseGraphBuffers()` in the SPH thermal runtime.
+- Updated thermal and reaction WebGPU steps to borrow a shared
+  `thermalResponseGraphUpload` when available, falling back to temporary
+  per-call uploads only for standalone execution.
+- Added scene-level caching via `refreshSphThermalResponseGraphBuffers()`.
+  The scene reuses the upload across particle syncs while the derived
+  response/graph signature is unchanged, invalidates it when materials or graph
+  contents change, and destroys it on scene disposal.
+- Passed the same cached upload into both resident thermal and reaction stages.
+- Added a visible SPH status row:
+  `thermal graph gpu: status=... responses=... graphs=... bytes=...`.
+
+Files touched:
+
+- `ulg-gpu-abi/src/index.js`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/abi.test.mjs`
+- `tests/sphThermalGpuKernel.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphThermalGpuKernel.js`
+- `node --check src/runtime/sph/sphReactionGpuKernel.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check tests/abi.test.mjs && node --check tests/sphThermalGpuKernel.test.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/demo.e2e.mjs`
+- `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `git diff --check`
+- `npm test`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 11:23:34 AKDT`.
+
+Validation:
+
+- PASS: syntax checks for touched runtime, scene, mount, and test files.
+- PASS: focused ABI/thermal/reaction/resident tests passed `40/40`.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`. In that run WebGPU was unavailable, and the new
+  status row correctly reported `blocked-webgpu-unavailable` with derived
+  response/graph counts; the e2e asserts full upload byte lengths when the
+  resident backend is WebGPU.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` passed `327/327`.
+
+Failures / open questions:
+
+- The persistent response/graph upload removes repeated static response/graph
+  uploads for thermal and reaction stages when WebGPU is available, but compact
+  thermal/phase summaries are still the next task.
+- No push was attempted.

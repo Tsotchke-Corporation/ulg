@@ -20,6 +20,7 @@ export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gp
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0';
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0';
 export const ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0';
+export const ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-response-graph-buffer-set.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-execution.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-parity.v0';

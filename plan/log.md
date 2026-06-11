@@ -7331,3 +7331,180 @@ Failures / open questions:
   `plan/claude-audit.md` / `plan/ulg-runtime-plan.md` remain pre-existing
   user/worktree state and were not staged by this checkpoint.
 - No push was attempted.
+
+## 2026-06-10 21:30:08 AKDT - GPU PBR closure slice, nuclear plan, renderer material fix
+
+Prompt:
+
+- User asked to build the all-elements/all-molecules PBR material path, cache
+  derived values, plan the GPU-resident closure chain, add fission/fusion/
+  radioactive-decay/radiation handling, keep ICC updated, and fix the SPH
+  renderer bug where only the last selected material appeared.
+
+Actions:
+
+- Refreshed Infinite Context Coder for ULG:
+  `index --repo ulg`, `build-memory --repo ulg`, and
+  `status --repo ulg --check-staleness`.
+- Used ICC `read-lines`/status context for the SPH scene and mount path, then
+  continued with direct source inspection for exact edits.
+- Updated `plan/perf-upgrade.md` with the GPU-resident optical/PBR target and
+  GPU-resident isotope/decay/fission/fusion/ionizing-radiation target.
+- Updated `plan/sphphasedemo.md` with generalized spectral optical/PBR closure
+  requirements and a separate nuclear closure family for isotope inventory,
+  radioactive decay, fission, fusion, and ionizing-radiation transport.
+- Extended `src/runtime/material/opticalClosure.js` so `opticalRenderParams()`
+  returns cached, caller-safe PBR records with base color, render model, vertex
+  color policy, spectral samples, and provenance.
+- Added `particleRenderDescriptors()` in `src/runtime/sphPhaseDemo.js` so the
+  renderer receives simulation material plus closure phase and render key.
+- Updated `src/visualization/sphPhaseDemoMount.js` to pass descriptors instead
+  of material strings.
+- Updated `src/visualization/sphPhaseScene.js` to batch by
+  `renderKey|material|phase`, query optical closures using the preserved
+  material and phase, use closure-derived PBR material colors, disable vertex
+  colors unless explicitly requested, add PMREM environment lighting, ACES tone
+  mapping, sRGB output, and sRGB color-space conversion for base color,
+  attenuation, and emissive channels.
+- Added regression coverage for cached optical render params, phase-preserving
+  renderer descriptors, and arbitrary selected element batches not collapsing
+  to the last selected material.
+
+Files touched:
+
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `src/runtime/material/opticalClosure.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/opticalClosure.test.mjs`
+- `tests/sphPhaseDemo.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+
+Validation:
+
+- PASS: ICC ULG status current at
+  `5ebf3d10d64b705d4178e23ad72b08fb24de6cbf`.
+- PASS: `node --check src/runtime/material/opticalClosure.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check src/runtime/sphPhaseDemo.js`
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS: `node --test tests/opticalClosure.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphPhaseDemo.test.mjs`
+  passed `17/17`.
+- PASS: Browser visual probe against the live HTTPS Vite server at
+  `https://127.0.0.1:5173/` with `drop=Au&base=Na` reported both visible
+  surfaces: `Na` count `125` and `Au` count `27`.
+- PASS: Visual screenshot saved at `/tmp/ulg-au-na-sph.png`.
+
+Failures / open questions:
+
+- PeerCompute ICC status is stale relative to its current branch, but this ULG
+  renderer/PBR task did not require refreshing peercompute artifacts.
+- This does not complete the full WebGPU-resident closure chain. It establishes
+  the generalized optical/PBR record and renderer consumption path.
+- Nuclear, fission, fusion, radioactive-decay, and ionizing-radiation handling
+  are now explicitly planned closure families but are not implemented solvers.
+- No push was attempted.
+
+## 2026-06-10 21:50:27 AKDT - SPH material names and MoonLab-style element picker
+
+Prompt:
+
+- User asked to add element names to the SPH material dropdown or reuse the
+  cool MoonLab element picker from `projects/moonlab`, then clarified that the
+  work does not need to finish tonight and that breaking the demo is acceptable
+  when needed for honest progress.
+
+Actions:
+
+- Re-read `/home/cos/projects/ulg/Agents.md`, `/home/cos/projects/AGENTS.md`,
+  `plan/plan.md`, and recent `plan/log.md` state before editing.
+- Used Infinite Context Coder for ULG status/read-lines and MoonLab
+  `find-file --query ElementPicker`; ULG ICC was current at
+  `5ebf3d10d64b705d4178e23ad72b08fb24de6cbf`.
+- Closed the MoonLab picker inspection subagent after receiving its read-only
+  result. It identified the source picker/data in MoonLab git history at
+  `oroboro:bindings/javascript/demo/src/orbitals/{ElementPicker.tsx,elements.ts}`.
+- Added `src/visualization/sphMaterialOptions.js`, a vanilla JS material option
+  source generated mechanically from MoonLab's local `elements.ts` git object
+  and normalized to ULG runtime keys. Fe remains key `fe`; other elements use
+  their symbols such as `Au` and `Na`. Noble gases remain excluded from
+  selectable element material closures because the current closure resolver
+  does not expose condensed noble-gas closures.
+- Updated `src/visualization/sphPhaseDemoMount.js` so the material dropdown
+  labels include element names (`Gold (Au, Z=79) - derived element`) and each
+  material row has a `PT` button that opens a MoonLab-style periodic-table
+  modal. The picker is DOM-only, shares `ELEMENT_MATERIAL_OPTIONS` with the
+  dropdown, supports search by name/symbol/Z, closes on Escape/background/
+  close button, and dispatches the same `change` event as the select when a
+  material is chosen.
+- Added `tests/sphMaterialOptions.test.mjs` for element names, Fe key
+  compatibility, Au/U grid metadata, and noble-gas exclusion.
+- Updated `tests/demo.e2e.mjs` so the SPH browser smoke checks named dropdown
+  options and verifies the Gold picker cell renders without selecting a heavy
+  material during the default test path.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `src/visualization/sphMaterialOptions.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphMaterialOptions.test.mjs`
+
+Commands run:
+
+- `rg -n "peercompute|Multiscale|ulg|sphPhase|infinite_context|MoonLab|moonlab" /home/cos/.codex/memories/MEMORY.md`
+- `rg --files -g 'AGENTS.md' -g 'Agents.md' -g 'agents.md' .. /home/cos/projects`
+- `sed -n '1,220p' /home/cos/projects/ulg/Agents.md`
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `sed -n '1,260p' plan/plan.md`
+- `tail -n 120 plan/log.md`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py read-lines --repo ulg --path src/visualization/sphPhaseDemoMount.js --start 1 --end 330`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py find-file --repo moonlab --query ElementPicker`
+- `git -C /home/cos/projects/moonlab show oroboro:bindings/javascript/demo/src/orbitals/elements.ts`
+- `git -C /home/cos/projects/moonlab show oroboro:bindings/javascript/demo/src/orbitals/Orbitals.css`
+- `node --check src/visualization/sphMaterialOptions.js src/visualization/sphPhaseDemoMount.js`
+- `node --test tests/sphMaterialOptions.test.mjs`
+- Browser probe via Playwright against `https://127.0.0.1:5173/` with
+  `ignoreHTTPSErrors`, opening SPH Phase, verifying dropdown labels, opening
+  the picker, and confirming Gold is grid column `11`, grid row `6`.
+- `npm test`
+- `npm run build`
+- `git diff --check`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphMaterialOptions.js src/visualization/sphPhaseDemoMount.js`
+- PASS: `node --test tests/sphMaterialOptions.test.mjs` passed `4/4`.
+- PASS: Browser probe against the live HTTPS Vite server on
+  `0.0.0.0:5173` reported `110` selectable element cells, Gold at group `11`
+  / row `6`, and default selected label `Iron (Fe, Z=26) - derived element`.
+- PASS: Visual screenshot saved at `/tmp/ulg-element-picker.png`.
+- PASS: `npm test` passed `214/214`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+- PASS: ICC ULG index refreshed after edits; status reports stale=false at
+  git head `5ebf3d10d64b705d4178e23ad72b08fb24de6cbf`.
+
+Failures / open questions:
+
+- Several initial `apply_patch` attempts to paste the full periodic-table name
+  data failed as no-op invalid patches; no source files changed from those
+  failed attempts. The final metadata file was generated mechanically from the
+  local MoonLab git object and then inspected/tested.
+- `npm run test:e2e` was not run because the repo Playwright config is HTTP on
+  port `5173`, while the live user-facing server is the requested HTTPS Vite
+  process already bound on `0.0.0.0:5173`. A targeted HTTPS Playwright probe was
+  run instead.
+- The picker is a UI/control improvement only. It does not complete GPU
+  residency, first-principles material validation, or condensed noble-gas
+  closure support.
+- No push was attempted.

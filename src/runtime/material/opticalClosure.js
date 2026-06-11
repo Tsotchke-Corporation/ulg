@@ -28,6 +28,8 @@ const INTERBAND_DAMPING_FRACTION = 0.35;
 const INTERBAND_ELECTRON_GAS_BROADENING_SCALE = 0.06;
 const INTERBAND_MAX_RAW_EV = 12;
 const INTERBAND_MAX_OSCILLATORS = 6;
+const OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM = Object.freeze([380, 430, 480, 530, 580, 630, 680, 730, 780]);
+const opticalRenderParamCache = new Map();
 const uhfEnergy = (atoms, multiplicity) => _uhf(atoms, { multiplicity }).totalEnergyHa;
 const interbandTransitionCache = new Map();
 
@@ -83,6 +85,92 @@ function visibleLuminousMean(responseFn) {
   return norm > 0 ? sum / norm : 0;
 }
 
+function clamp01(value) {
+  return Math.min(1, Math.max(0, Number.isFinite(value) ? value : 0));
+}
+
+function srgbTuple(color) {
+  if (Array.isArray(color)) return [clamp01(color[0]), clamp01(color[1]), clamp01(color[2])];
+  return [clamp01(color?.r), clamp01(color?.g), clamp01(color?.b)];
+}
+
+function stableNumber(value) {
+  return Number.isFinite(value) ? Number(value).toPrecision(10) : String(value ?? 'null');
+}
+
+function oscillatorCacheKey(oscillators) {
+  if (!Array.isArray(oscillators) || oscillators.length === 0) return 'none';
+  return oscillators
+    .map((osc) => [
+      osc.from ?? '?',
+      osc.to ?? '?',
+      stableNumber(osc.energyEv),
+      stableNumber(osc.dampingEv),
+      stableNumber(osc.strengthWeight)
+    ].join(':'))
+    .join('|');
+}
+
+function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, properties, conductionElectronDensityPerM3 } = {}) {
+  return [
+    material ?? 'unknown',
+    phase ?? 'unknown',
+    stableNumber(pathLengthM),
+    stableNumber(conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3),
+    stableNumber(properties?.electronicGapEv),
+    oscillatorCacheKey(properties?.opticalInterbandOscillators),
+    Array.isArray(properties?.intrinsicColorSrgb) ? properties.intrinsicColorSrgb.map(stableNumber).join(',') : 'no-intrinsic'
+  ].join('::');
+}
+
+function cloneOpticalRenderParams(params) {
+  return {
+    ...params,
+    baseColorSrgb: params.baseColorSrgb ? [...params.baseColorSrgb] : params.baseColorSrgb,
+    attenuationColor: params.attenuationColor ? [...params.attenuationColor] : params.attenuationColor,
+    interbandOscillators: Array.isArray(params.interbandOscillators)
+      ? params.interbandOscillators.map((osc) => ({ ...osc }))
+      : params.interbandOscillators,
+    spectralSamples: Array.isArray(params.spectralSamples)
+      ? params.spectralSamples.map((sample) => ({ ...sample }))
+      : params.spectralSamples,
+    pbr: params.pbr
+      ? {
+          ...params.pbr,
+          baseColorSrgb: params.pbr.baseColorSrgb ? [...params.pbr.baseColorSrgb] : params.pbr.baseColorSrgb
+        }
+      : params.pbr,
+    provenance: params.provenance
+      ? { ...params.provenance, inputs: params.provenance.inputs ? { ...params.provenance.inputs } : params.provenance.inputs }
+      : params.provenance
+  };
+}
+
+function withPbrMetadata(params, { baseColorSrgb, renderModel, vertexColorPolicy = 'material-pbr', spectralSamples = [] }) {
+  const color = srgbTuple(baseColorSrgb);
+  return {
+    ...params,
+    baseColorSrgb: color,
+    renderModel,
+    vertexColorPolicy,
+    spectralSamples,
+    pbr: {
+      baseColorSrgb: color,
+      metalness: params.metalness,
+      roughness: params.roughness,
+      opacity: params.opacity,
+      transmission: params.transmission,
+      ior: params.ior ?? null,
+      renderModel,
+      vertexColorPolicy
+    }
+  };
+}
+
+export function clearOpticalRenderParamsCache() {
+  opticalRenderParamCache.clear();
+}
+
 function opticalDepthToOpacity(opticalDepth) {
   if (!(opticalDepth > 0)) return 0;
   return 1 - Math.exp(-Math.min(80, opticalDepth));
@@ -108,6 +196,33 @@ function reflectanceFromDielectric(epsilon) {
 function absorptionCoefficientFromDielectricPerM(nm, epsilon) {
   const [, kIm] = complexSqrt(epsilon);
   return (4 * Math.PI * Math.max(0, kIm)) / (nm * 1e-9);
+}
+
+function dielectricSpectralSample(nm, epsilon, pathLengthM) {
+  const [nRe, kIm] = complexSqrt(epsilon);
+  const absorptionCoefficientPerM = absorptionCoefficientFromDielectricPerM(nm, epsilon);
+  return {
+    wavelengthNm: nm,
+    reflectance: clamp01(reflectanceFromDielectric(epsilon)),
+    transmittance: Math.exp(-Math.min(80, absorptionCoefficientPerM * Math.max(0, pathLengthM))),
+    absorptionCoefficientPerM,
+    scatteringCoefficientPerM: 0,
+    n: nRe,
+    k: kIm
+  };
+}
+
+function absorptionSpectralSample(nm, { absorptionCoefficientPerM, pathLengthM, reflectance = 0, scatteringCoefficientPerM = 0, n = null, k = null }) {
+  const absorption = Math.max(0, absorptionCoefficientPerM ?? 0);
+  return {
+    wavelengthNm: nm,
+    reflectance: clamp01(reflectance),
+    transmittance: Math.exp(-Math.min(80, absorption * Math.max(0, pathLengthM))),
+    absorptionCoefficientPerM: absorption,
+    scatteringCoefficientPerM: Math.max(0, scatteringCoefficientPerM),
+    n,
+    k
+  };
 }
 
 function canonicalElementZ(material) {
@@ -352,12 +467,16 @@ function metalOpticalRenderParams(conductionElectronDensityPerM3, { pathLengthM 
     ? relativisticInterbandOscillators({ atomicNumberZ, conductionElectronDensityPerM3, options: interbandOptions })
     : [];
   const epsilonAt = (nm) => dielectricDrudeLorentzEv(1239.841984 / nm, { plasmaEnergyEv, dampingEv, oscillators });
+  const reflectanceAt = (nm) => reflectanceFromDielectric(epsilonAt(nm));
   const absorptionCoefficientPerM = visibleLuminousMean((nm) => absorptionCoefficientFromDielectricPerM(nm, epsilonAt(nm)));
-  const reflectance = visibleLuminousMean((nm) => reflectanceFromDielectric(epsilonAt(nm)));
+  const reflectance = visibleLuminousMean(reflectanceAt);
   const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
   const opacity = opticalDepthToOpacity(opticalDepth);
   const transmission = Math.exp(-Math.min(80, opticalDepth));
-  return {
+  const baseColor = spectralResponseToSrgb(reflectanceAt);
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM
+    .map((nm) => dielectricSpectralSample(nm, epsilonAt(nm), pathLengthM));
+  return withPbrMetadata({
     metalness: opacity > 0.5 ? 1 : opacity,
     roughness: 0.32,
     transmission,
@@ -382,7 +501,11 @@ function metalOpticalRenderParams(conductionElectronDensityPerM3, { pathLengthM 
       inputs: { atomicNumberZ, conductionElectronDensityPerM3, pathLengthM, damping: 'omega_p/30', oscillatorCount: oscillators.length },
       validation: false
     }
-  };
+  }, {
+    baseColorSrgb: [baseColor.r, baseColor.g, baseColor.b],
+    renderModel: oscillators.length ? 'conductor-drude-lorentz-relativistic-interband' : 'conductor-drude-free-electron',
+    spectralSamples
+  });
 }
 
 // Water's visible colour is DERIVED from O–H vibrational overtones, not a tabulated spectrum.
@@ -517,10 +640,20 @@ function bandGapAbsorptionCoefficientPerM(nm, { properties, phase = 'solid' }) {
 function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.3 }) {
   const sample = bandGapAbsorptionCoefficientPerM(500, { properties, phase });
   if (sample == null) return null;
-  const absorptionCoefficientPerM = visibleLuminousMean((nm) => bandGapAbsorptionCoefficientPerM(nm, { properties, phase }) ?? 0);
+  const absorptionAt = (nm) => bandGapAbsorptionCoefficientPerM(nm, { properties, phase }) ?? 0;
+  const absorptionCoefficientPerM = visibleLuminousMean(absorptionAt);
   const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
   const opacity = opticalDepthToOpacity(opticalDepth);
-  return {
+  const responseColor = spectralResponseToSrgb((nm) => Math.exp(-absorptionAt(nm) * Math.max(0, pathLengthM)));
+  const baseColor = properties?.intrinsicColorSrgb ?? [responseColor.r, responseColor.g, responseColor.b];
+  const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
+    absorptionCoefficientPerM: absorptionAt(nm),
+    pathLengthM,
+    reflectance: 0.04,
+    n: 1.4,
+    k: 0
+  }));
+  return withPbrMetadata({
     metalness: 0,
     roughness: 0.4,
     transmission: Math.exp(-Math.min(80, opticalDepth)),
@@ -539,7 +672,11 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
       inputs: { electronicGapEv: properties?.electronicGapEv, pathLengthM, phase },
       validation: false
     }
-  };
+  }, {
+    baseColorSrgb: baseColor,
+    renderModel: 'molecular-gap-pbr',
+    spectralSamples
+  });
 }
 
 /**
@@ -553,7 +690,7 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
  *    faked here.
  * closureBacked: true; opticalValidation stays false.
  */
-export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3, properties = null, conductionElectronDensityPerM3 = null } = {}) {
+function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3, properties = null, conductionElectronDensityPerM3 = null } = {}) {
   const conductionDensity = conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3 ?? null;
   if (conductionDensity > 0) {
     return metalOpticalRenderParams(conductionDensity, {
@@ -577,7 +714,16 @@ export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 
     const transmission = Math.min(1, Math.max(0, (1 - fresnelR0) * ballisticTransmission));
     const opacity = opticalDepthToOpacity(opticalDepth);
     const roughness = isVapor ? 0.9 : (isSolid ? 0.5 : 0.08);
-    return {
+    const waterPhase = isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid');
+    const baseColor = isVapor ? [1, 1, 1] : attenuationColor;
+    const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
+      absorptionCoefficientPerM: isVapor ? waterAbsorption(nm) / 50 : waterAbsorption(nm),
+      pathLengthM,
+      reflectance: fresnelR0,
+      n,
+      k: 0
+    }));
+    return withPbrMetadata({
       metalness: 0,
       roughness,
       transmission,
@@ -593,14 +739,18 @@ export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 
         status: 'derived',
         source: 'beer-lambert-oh-overtone-optical-depth',
         method: 'O-H overtone absorption -> luminous attenuation distance -> Beer-Lambert opacity/transmission',
-        inputs: { pathLengthM, phase: isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid') },
+        inputs: { pathLengthM, phase: waterPhase },
         validation: false
       }
-    };
+    }, {
+      baseColorSrgb: baseColor,
+      renderModel: isVapor ? 'molecular-vapor-transparent-spectrum' : 'molecular-transparent-beer-lambert-pbr',
+      spectralSamples
+    });
   }
   const compound = compoundGapRenderParams({ properties, phase, pathLengthM });
   if (compound) return compound;
-  return {
+  return withPbrMetadata({
     metalness: 0,
     roughness: 0.4,
     transmission: 0,
@@ -620,7 +770,21 @@ export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 
       inputs: { material, phase },
       validation: false
     }
-  };
+  }, {
+    baseColorSrgb: [0, 0, 0],
+    renderModel: 'blocked-missing-optical-closure',
+    vertexColorPolicy: 'blocked',
+    spectralSamples: []
+  });
+}
+
+export function opticalRenderParams(options = {}) {
+  const key = opticalRenderCacheKey(options);
+  const cached = opticalRenderParamCache.get(key);
+  if (cached) return cloneOpticalRenderParams(cached);
+  const derived = deriveOpticalRenderParams(options);
+  opticalRenderParamCache.set(key, cloneOpticalRenderParams(derived));
+  return cloneOpticalRenderParams(derived);
 }
 
 /**
@@ -641,6 +805,7 @@ export function createOpticalClosure() {
       water: { model: 'beer-lambert-OH-overtone-absorption' },
       opacity: { model: 'optical-depth-to-opacity', conductorOpacity: 'Drude skin depth', transparentMediaOpacity: 'Beer-Lambert attenuation' },
       air: { model: 'rayleigh-1-over-lambda4' },
+      pbr: { model: 'spectral-response-to-pbr', cache: 'material-phase-path-hash', vertexColorPolicy: 'closure-owned' },
       colorPipeline: 'spectral-response -> CIE-1931 -> equal-energy sRGB'
     },
     provenance: {

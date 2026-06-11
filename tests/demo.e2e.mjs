@@ -1149,6 +1149,16 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   await page.locator('#run-sph-phase').click();
   await expect(page.locator('#sph-phase-overlay')).toBeVisible();
   await expect(page.getByText('SPH PHASE — two materials interacting')).toBeVisible();
+  const materialLabels = await page.locator('#sph-elements select').first().locator('option').evaluateAll(
+    (options) => options.map((option) => option.textContent)
+  );
+  expect(materialLabels).toContain('Iron (Fe, Z=26) - derived element');
+  expect(materialLabels).toContain('Gold (Au, Z=79) - derived element');
+  await page.locator('#sph-elements .sph-picker-button').first().click();
+  await expect(page.locator('.sph-element-picker-overlay')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Gold (Au, Z=79) - derived element' })).toBeVisible();
+  await page.locator('.sph-element-picker').getByRole('button', { name: 'close' }).click();
+  await expect(page.locator('.sph-element-picker-overlay')).toHaveCount(0);
   await expect(page.locator('#sph-status')).toContainText('preflight        : preflight-feasible-derived-closures');
   await expect(page.locator('#sph-status')).not.toContainText('first-principles material properties are required');
   await page.waitForFunction(() => {

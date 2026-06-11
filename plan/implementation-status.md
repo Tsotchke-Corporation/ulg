@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 20:31 AKDT
+Updated: 2026-06-10 21:50 AKDT
 
 ## Done
 
@@ -22,6 +22,12 @@ Updated: 2026-06-10 20:31 AKDT
   opacity uses the same Drude-Lorentz complex dielectric response and can reuse
   precomputed closure oscillators. `opticalInterbandOscillators` is tracked in
   the material-property provenance ledger.
+- Added human-readable element names and a MoonLab-style periodic-table picker
+  to the SPH phase demo material controls. The dropdown now lists labels such as
+  `Gold (Au, Z=79) - derived element`, while Fe keeps the existing `fe` runtime
+  key for URL/simulation compatibility. The picker is vanilla DOM, shares the
+  same material option source as the dropdown, filters unavailable noble-gas
+  closures, and preserves the strict derived-closure material path.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures
@@ -953,3 +959,43 @@ Updated: 2026-06-10 20:31 AKDT
   are green.
 - Wire real ULG/Eshkol/MoonLab worker services into the PeerCompute supervisor
   and then run the full peercompute relay-backed local stack.
+
+## 2026-06-10 Update - GPU PBR Closure Slice And Renderer Fix
+
+Completed:
+
+- Refreshed Infinite Context Coder for ULG. ICC status is current at git head
+  `5ebf3d10d64b705d4178e23ad72b08fb24de6cbf`; memory now covers 190 files and
+  627 chunks.
+- Updated `plan/sphphasedemo.md` and `plan/perf-upgrade.md` with the honest
+  GPU-resident optical/PBR target and added nuclear/isotope closure requirements
+  for radioactive decay, fission, fusion, activation, and ionizing-radiation
+  transport.
+- Extended `opticalRenderParams()` with cached closure-owned render records:
+  `baseColorSrgb`, `renderModel`, `vertexColorPolicy`, spectral samples, and a
+  PBR subrecord derived from the optical spectrum.
+- Changed the SPH renderer path to pass per-particle material/phase/render-key
+  descriptors instead of renderer-side phase guesses.
+- Changed Three.js surface materials to use closure-derived PBR colors, disable
+  vertex colors unless the optical closure explicitly permits diagnostic vertex
+  color, add PMREM environment lighting, ACES tone mapping, sRGB output, and
+  correct sRGB-to-linear handoff for base color, attenuation, and emissive glow.
+- Fixed and regression-tested the material-selector rendering issue where mixed
+  selected elements could collapse visually/structurally to one material.
+
+Latest validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/opticalClosure.test.mjs tests/sphPhaseDemo.test.mjs` (`17/17`)
+- PASS: browser visual probe against `https://127.0.0.1:5173/` with
+  `drop=Au&base=Na`; both `Na` and `Au` surfaces were visible with particle
+  counts `125` and `27`.
+- Screenshot evidence: `/tmp/ulg-au-na-sph.png`.
+
+Not claimed:
+
+- Full WebGPU-resident optical closure derivation is not complete yet. This
+  slice builds the generalized closure/PBR record and renderer consumption path.
+- Full periodic band/BZ optical response, general molecular excited-state
+  optical response, and nuclear fission/fusion/decay solvers remain planned
+  closure families, not completed runtime kernels.

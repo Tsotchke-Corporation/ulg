@@ -100,6 +100,13 @@ All frame-loop simulation layers should communicate through WebGPU buffers:
   - emissive intensity,
   - phase classification,
   - particle/volume draw buffers.
+- Optional nuclear/radiation data:
+  - isotope inventory records,
+  - decay constants and branching tables,
+  - fission/fusion channel tables,
+  - neutron/gamma/charged-particle transport bins,
+  - radiation energy and dose/deposition fields,
+  - activation and daughter-product ledgers.
 
 The CPU should bind these resources and dispatch kernels. It should not inspect
 or transform them per particle each frame.
@@ -130,10 +137,54 @@ A first GPU-resident SPH phase demo should target this dispatch chain:
 11. Update gas/steam pressure and condensation/evaporation state.
 12. Accumulate conservation and diagnostic summaries into small GPU buffers.
 13. Generate color/opacity/glow from optical/radiation closures.
-14. Render directly from GPU state.
+14. If nuclear physics is enabled:
+   - update isotope inventories from decay/reaction tables,
+   - sample fission/fusion source terms within validated domains,
+   - propagate neutron/gamma/charged-particle radiation bins,
+   - deposit ionizing-radiation energy back into material/gas fields,
+   - accumulate isotope and radiation conservation ledgers.
+15. Render directly from GPU state.
 
 CPU readback should happen after step 12 and only for the small summary buffers,
 ideally every N frames rather than every frame.
+
+## GPU-Resident Nuclear And Ionizing-Radiation Target
+
+Nuclear physics is a separate closure family from chemical/electronic material
+properties. Element material ids are not enough; the runtime needs isotope
+inventories `(Z,A,state)` and reaction products when radioactive decay,
+fission, fusion, activation, or ionizing radiation are enabled.
+
+The control plane should validate and upload:
+
+- isotope mass / binding-energy tables,
+- decay constants, branches, daughter products, and emitted spectra,
+- fission cross sections, barriers, yields, prompt/delayed neutron spectra, and
+  gamma spectra,
+- fusion cross sections or reactivity tables as functions of species,
+  temperature, density, and screening domain,
+- radiation transport opacities, stopping powers, scattering kernels, and
+  energy-deposition coefficients.
+
+The hot loop should keep the expensive state resident on the GPU:
+
+- particle/material isotope inventory buffers,
+- radiation-group buffers for neutrons, gammas, charged particles, and deposited
+  heat,
+- compact reaction event accumulators,
+- daughter isotope production buffers,
+- dose/energy-deposition reductions,
+- domain-exit/status buffers.
+
+The CPU may read back only summaries: total activity, emitted/deposited energy,
+neutron balance, isotope conservation residuals, validation blockers, and dose
+or heat ledgers. It must not run per-particle decay chains or cross-section
+sampling in JavaScript during normal simulation.
+
+This is not a near-term shortcut. Reliable fission/fusion/decay closures require
+nuclear-structure references, cross-section evidence, transport benchmarks, and
+strict conservation tests. Until those exist, scenarios that need them should
+produce blocked or degraded artifacts rather than invented reaction rates.
 
 ## Contract And Closure Rules
 
@@ -237,6 +288,122 @@ The performance upgrade needs reusable GPU primitives:
   browser WebGPU,
 - compact summary-buffer readbacks,
 - device-loss recovery and CPU fallback boundaries.
+
+## GPU-Resident Optical And PBR Target
+
+Optical behavior must be a generalized closure family, not material-specific
+rendering code. Gold, water, sodium hydroxide, iron oxide, air species, and
+arbitrary user-entered formulas must all flow through the same contract shape:
+
+1. Resolve material identity once from formula/element/mixture input.
+2. Derive or load lower-level electronic, vibrational, phonon, and scattering
+   evidence.
+3. Convert that evidence into spectral optical response tables.
+4. Cache the resolved tables by material identity, phase, validity domain, and
+   input artifact hash.
+5. Upload compact optical/PBR tables to WebGPU buffers.
+6. Keep those buffers resident and sample them in compute/render kernels.
+7. Read back only compact status, blocker, and provenance summaries.
+
+The hot loop must not call expensive JavaScript material resolution,
+Hartree-Fock, Kohn-Sham, molecular geometry generation, oscillator discovery,
+or CIE integration. Those are control-plane or async derivation tasks. Once a
+material has a validated optical closure buffer, GPU kernels consume it by
+material id and phase id.
+
+### Required Optical Closure Outputs
+
+Every element/formula optical closure should produce a common record:
+
+- spectral sample wavelengths,
+- spectral reflectance for opaque/conductive surfaces,
+- spectral transmittance/attenuation for transparent media,
+- complex dielectric or `n,k` samples when available,
+- absorption coefficient samples,
+- scattering coefficient samples,
+- IOR or polarizability-derived real-index samples,
+- PBR display parameters derived from the spectrum:
+  - base color,
+  - metalness,
+  - roughness provenance,
+  - transmission,
+  - thickness / attenuation distance,
+  - opacity,
+  - emissive coupling to the radiation closure,
+  - vertex-color policy,
+- validity domains for phase, temperature, density, pressure, and composition,
+- provenance links to the underlying electronic/vibrational derivation.
+
+For elements:
+
+- metals add a Drude intraband term from derived conduction-electron density,
+- localized d/f and periodic-band transitions add interband oscillator terms,
+- full target is periodic band / Brillouin-zone integration for solids,
+- current scalar-relativistic atomic interband closure is an evidence-level CPU
+  reference and must not be described as the final periodic solver.
+
+For molecules/compounds:
+
+- electronic transitions come from excited-state or orbital-gap/transition-
+  dipole evidence,
+- vibrational and overtone transitions come from normal modes and anharmonic
+  rules,
+- condensed-phase broadening/local-field corrections come from MD/statistical
+  sampling or lower-level reference artifacts,
+- water is not special except that its O-H overtone evidence is one instance of
+  the generic molecular vibrational path.
+
+### GPU Optical Buffer Layout
+
+The first WebGPU buffer layout should be intentionally simple and stable:
+
+- `OpticalMaterialRecord`
+  - material id,
+  - phase id,
+  - spectral sample offset/count,
+  - PBR parameter offset,
+  - validity-domain offset,
+  - provenance/status offset.
+- `OpticalSpectralSample`
+  - wavelength nm,
+  - reflectance,
+  - transmittance,
+  - absorption coefficient,
+  - scattering coefficient.
+- `OpticalPbrParams`
+  - baseColor linear RGB,
+  - attenuationColor linear RGB,
+  - metalness,
+  - roughness,
+  - transmission,
+  - opacity,
+  - IOR,
+  - attenuation distance,
+  - render-model enum,
+  - vertex-color-policy enum.
+
+This layout is the bridge between the lower-level closure chain and
+Three.js/WebGPU rendering. Three.js can use a CPU-created `MeshPhysicalMaterial`
+as an interim display layer, but its parameters must come from the same
+spectral closure record that the future WebGPU renderer samples directly.
+
+### Persistent Kernel Model
+
+The final runtime should keep these systems alive in parallel:
+
+- simulation kernels advancing particle/phase/gas/wall state,
+- closure-domain kernels checking whether state leaves validity envelopes,
+- optical/radiation kernels producing render buffers from resident closure
+  tables,
+- async derivation/refinement kernels or remote workers generating candidate
+  closures,
+- CPU control-plane code validating candidate artifacts and swapping bind
+  groups only at safe frame boundaries.
+
+This is a large architectural upgrade. The near-term implementation should
+build the common optical/PBR record and GPU buffer descriptor first, then move
+sampling into WebGPU. It should not pretend that full Schrodinger/DFT for all
+materials is already a 60 Hz browser hot loop.
 
 ## 60 Hz Budget
 

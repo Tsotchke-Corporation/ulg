@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -58,30 +59,58 @@ function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
 }
 
-function materialPropertiesForSurfaceKey(key, materialProperties) {
+function renderDescriptorOf(value) {
+  if (value && typeof value === 'object') {
+    const renderKey = materialKeyOf(value.renderKey ?? value.key ?? value.material);
+    const material = materialKeyOf(value.material ?? ((renderKey === 'steam' || renderKey === 'ice') ? 'h2o' : renderKey));
+    const phase = value.phase ?? (renderKey === 'steam' ? 'gas' : (renderKey === 'ice' ? 'solid' : null));
+    return {
+      renderKey,
+      material,
+      phase,
+      surfaceKey: `${renderKey}|${material}|${phase ?? 'phase-unspecified'}`
+    };
+  }
+  const renderKey = materialKeyOf(value);
+  return {
+    renderKey,
+    material: (renderKey === 'steam' || renderKey === 'ice') ? 'h2o' : renderKey,
+    phase: renderKey === 'steam' ? 'gas' : (renderKey === 'ice' ? 'solid' : null),
+    surfaceKey: `${renderKey}|${(renderKey === 'steam' || renderKey === 'ice') ? 'h2o' : renderKey}|${renderKey === 'steam' ? 'gas' : (renderKey === 'ice' ? 'solid' : 'phase-unspecified')}`
+  };
+}
+
+function materialPropertiesForSurfaceDescriptor(descriptor, materialProperties) {
   if (!materialProperties) return null;
-  if (key === 'steam' || key === 'ice') return materialProperties.h2o ?? materialProperties[key] ?? null;
-  return materialProperties[key] ?? materialProperties[key.toLowerCase?.()] ?? null;
+  const materialKey = descriptor.material;
+  const renderKey = descriptor.renderKey;
+  return materialProperties[materialKey]
+    ?? materialProperties[materialKey?.toLowerCase?.()]
+    ?? materialProperties[renderKey]
+    ?? materialProperties[renderKey?.toLowerCase?.()]
+    ?? null;
 }
 
-// Map a render surface key to the optical-closure query (material + phase) that derives its
-// appearance. 'steam' is gas-phase water; 'h2o' is the liquid/solid bulk.
-function opticalQueryForKey(key, properties = null) {
-  if (key === 'steam') return { material: 'steam', phase: 'gas', properties };
-  if (key === 'ice') return { material: 'ice', phase: 'solid', properties };
-  if (key === 'h2o') return { material: 'h2o', phase: 'liquid', properties };
-  return { material: key, phase: 'liquid', properties };
+function opticalQueryForDescriptor(descriptor, properties = null) {
+  return {
+    material: descriptor.material,
+    phase: descriptor.phase ?? (descriptor.renderKey === 'steam' ? 'gas' : (descriptor.renderKey === 'ice' ? 'solid' : 'liquid')),
+    properties
+  };
 }
 
-function makeSurfaceMaterial(key, properties = null) {
+function makeSurfaceMaterial(descriptorOrKey, properties = null) {
+  const descriptor = renderDescriptorOf(descriptorOrKey);
   // Transmission / IOR / attenuation come from the optical closure (refractive index + Beer–Lambert
   // extinction): clear media transmit according to optical depth; conductors become opaque from
   // Drude skin depth; missing optical closures block rather than falling back to fake opacity.
-  const optics = opticalRenderParams(opticalQueryForKey(key, properties));
+  const optics = opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
   const usesTransmission = optics.transmission > 0.01;
   const transparent = usesTransmission || optics.opacity < 0.999;
+  const baseColor = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
   const material = new THREE.MeshPhysicalMaterial({
-    vertexColors: true,
+    color: new THREE.Color().setRGB(baseColor[0], baseColor[1], baseColor[2], THREE.SRGBColorSpace),
+    vertexColors: optics.vertexColorPolicy === 'particle-diagnostic',
     side: THREE.DoubleSide,
     clearcoat: optics.metalness > 0.5 ? 0.18 : 0.05,
     metalness: optics.metalness,
@@ -89,15 +118,22 @@ function makeSurfaceMaterial(key, properties = null) {
     ior: optics.ior ?? 1.5,
     transmission: optics.transmission,
     thickness: usesTransmission ? 0.6 : 0,
+    envMapIntensity: optics.metalness > 0.5 ? 1.3 : 0.85,
     transparent,
     depthWrite: !transparent || optics.opacity > 0.5,
     opacity: clamp(optics.opacity, 0, 1)
   });
   if (optics.attenuationColor) {
-    material.attenuationColor = new THREE.Color(...optics.attenuationColor);
+    material.attenuationColor = new THREE.Color().setRGB(
+      optics.attenuationColor[0],
+      optics.attenuationColor[1],
+      optics.attenuationColor[2],
+      THREE.SRGBColorSpace
+    );
     material.attenuationDistance = Math.max(0.05, optics.attenuationDistanceM);
   }
   material.userData.optical = optics;
+  material.userData.renderDescriptor = descriptor;
   return material;
 }
 
@@ -137,18 +173,22 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
   const batches = new Map();
   const particleCount = positionsM.length / 3;
   for (let i = 0; i < particleCount; i += 1) {
-    const key = materialKeyOf(materials?.[i]);
-    let batch = batches.get(key);
+    const descriptor = renderDescriptorOf(materials?.[i]);
+    let batch = batches.get(descriptor.surfaceKey);
     if (!batch) {
       batch = {
-        material: key,
+        surfaceKey: descriptor.surfaceKey,
+        renderKey: descriptor.renderKey,
+        material: descriptor.material,
+        phase: descriptor.phase,
+        descriptor,
         positionsM: [],
         normalizedPositions: [],
         colorsRgb: [],
         bounds: emptyBounds(),
         count: 0
       };
-      batches.set(key, batch);
+      batches.set(descriptor.surfaceKey, batch);
     }
     const x = positionsM[i * 3];
     const y = positionsM[i * 3 + 1];
@@ -200,7 +240,14 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(width, height);
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.08;
   container.appendChild(renderer.domElement);
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const environment = pmrem.fromScene(new RoomEnvironment(), 0.04);
+  scene.environment = environment.texture;
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -233,21 +280,23 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
 
   const surfaces = new Map();
 
-  function ensureSurface(materialKey, properties = null) {
-    const key = materialKeyOf(materialKey);
+  function ensureSurface(descriptorOrKey, properties = null) {
+    const descriptor = renderDescriptorOf(descriptorOrKey);
+    const key = descriptor.surfaceKey;
     let surface = surfaces.get(key);
     if (surface) {
       if (surface.properties !== properties) {
         surface.mesh.material.dispose();
-        surface.mesh.material = makeSurfaceMaterial(key, properties);
+        surface.mesh.material = makeSurfaceMaterial(descriptor, properties);
         surface.properties = properties;
+        surface.descriptor = descriptor;
       }
       return surface;
     }
-    const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
+    const config = SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
     const mesh = new MarchingCubes(
       config.resolution,
-      makeSurfaceMaterial(key, properties),
+      makeSurfaceMaterial(descriptor, properties),
       false,
       true,
       config.maxPolyCount
@@ -261,10 +310,12 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     mesh.position.set(refEdgeM / 2, refEdgeM / 2, refEdgeM / 2);
     mesh.frustumCulled = false;
     mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;
-    mesh.userData.materialKey = key;
+    mesh.userData.materialKey = descriptor.material;
+    mesh.userData.renderKey = descriptor.renderKey;
+    mesh.userData.phase = descriptor.phase;
     mesh.userData.optical = mesh.material.userData.optical;
     scene.add(mesh);
-    surface = { mesh, config, properties };
+    surface = { mesh, config, properties, descriptor };
     surfaces.set(key, surface);
     return surface;
   }
@@ -279,16 +330,19 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     for (const batch of batches) {
-      const properties = materialPropertiesForSurfaceKey(batch.material, materialProperties);
-      const surface = ensureSurface(batch.material, properties);
+      const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, materialProperties);
+      const surface = ensureSurface(batch.descriptor, properties);
       const { mesh, config } = surface;
       mesh.userData.optical = mesh.material.userData.optical;
+      mesh.userData.materialKey = batch.material;
+      mesh.userData.renderKey = batch.renderKey;
+      mesh.userData.phase = batch.phase;
       // Incandescent surfaces (hot iron) glow: the radiation closure supplies the emissive colour,
       // which is added on top of the BRDF, so a fully-metallic surface still lights up instead of
       // rendering dark. A null/absent entry means the surface is below the glow threshold.
-      const emissive = emissiveByMaterial?.[batch.material] ?? null;
+      const emissive = emissiveByMaterial?.[batch.material] ?? emissiveByMaterial?.[batch.renderKey] ?? null;
       if (emissive) {
-        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2]);
+        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
         mesh.material.emissiveIntensity = 1.8;
       } else {
         mesh.material.emissive.setRGB(0, 0, 0);
@@ -318,7 +372,7 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
       mesh.visible = batch.count > 0;
       mesh.userData.particleCount = batch.count;
       mesh.userData.surfaceRadiusM = radiusM;
-      activeKeys.add(batch.material);
+      activeKeys.add(batch.surfaceKey);
     }
     for (const [key, surface] of surfaces) {
       if (!activeKeys.has(key)) {
@@ -355,6 +409,8 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
       mesh.geometry.dispose();
       mesh.material.dispose();
     }
+    environment.dispose();
+    pmrem.dispose();
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }

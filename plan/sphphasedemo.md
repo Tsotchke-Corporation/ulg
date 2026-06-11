@@ -200,6 +200,166 @@ Required closure groups:
   - temperature-to-spectral-radiance mapping,
   - RGB display transform provenance.
 
+### 2A. Generalized Spectral Optical / PBR Closure
+
+The optical/rendering closure must apply to every element, molecule, compound,
+and mixture through one generalized pipeline. Water and gold are not allowed to
+remain renderer special cases. They can have distinctive behavior only because
+their derived spectra are distinctive.
+
+Required derivation chain:
+
+1. Resolve formula, element, phase, density, temperature, and composition.
+2. Derive or load lower-level electronic and vibrational evidence:
+   - element Drude/intraband response from derived conduction-electron density,
+   - element interband response from localized atomic transitions now and
+     periodic band / Brillouin-zone transitions in the full solver,
+   - molecular electronic absorption from excited-state or transition-dipole
+     evidence,
+   - molecular vibrational/overtone absorption from normal modes and
+     anharmonicity,
+   - scattering and condensed-phase broadening from MD/statistical evidence.
+3. Build a spectral optical response table:
+   - wavelengths,
+   - reflectance,
+   - transmittance,
+   - absorption coefficient,
+   - scattering coefficient,
+   - complex dielectric or `n,k` samples when available,
+   - validity domains and provenance refs.
+4. Derive display/PBR parameters from the same spectral table:
+   - base color,
+   - metalness,
+   - roughness source/provenance,
+   - opacity,
+   - transmission,
+   - IOR,
+   - attenuation color/distance,
+   - emissive coupling to the radiation closure,
+   - vertex-color policy.
+5. Cache the derived table by material identity, phase, validity domain, and
+   input artifact hash.
+6. Upload the compact spectral/PBR table to GPU buffers and sample it by
+   material id + phase id during rendering.
+
+Renderer rules:
+
+- Three.js `MeshPhysicalMaterial` is allowed as an interim PBR display layer,
+  but its parameters must come from the optical closure record.
+- Surface particle colors may visualize diagnostics only when the optical
+  closure explicitly marks `vertexColorPolicy = particle-diagnostic`.
+- Conductive materials must use conductor PBR parameters (`metalness = 1`,
+  opaque skin-depth transmission, spectral base color / complex Fresnel
+  approximation).
+- Transparent molecular phases must use transmission/refraction plus
+  Beer-Lambert attenuation from the generic molecular spectrum, not a fixed
+  blue water color.
+- Steam/cloud visibility requires a scattering/condensation closure. Pure
+  water vapor may remain nearly invisible if the spectrum and phase state say
+  so.
+- Missing optical evidence must block or visibly degrade with provenance; it
+  must not fall back to arbitrary color/opacity.
+
+GPU-resident requirement:
+
+- Material/phase optical records are resolved and cached before the hot loop.
+- The hot loop samples WebGPU buffers/textures, not JavaScript material
+  resolvers.
+- Closure-domain exits are detected into compact GPU status buffers.
+- Candidate optical closures may be derived asynchronously, validated on the
+  CPU control plane, then swapped into resident GPU bind groups at safe frame
+  boundaries.
+
+Validation remains false until quantitative optical-response evidence exists.
+The current scalar-relativistic atomic Drude-Lorentz path is useful reference
+evidence for elements but is not the final periodic band solver. The current
+O-H overtone path is useful reference evidence for water but must be folded
+into the generic molecular vibrational pipeline rather than kept as a renderer
+exception.
+
+### 2B. Nuclear, Decay, Fission, Fusion, And Ionizing-Radiation Closures
+
+The material pipeline must distinguish chemical/electronic material identity
+from isotope and nuclear state. Element symbols alone are insufficient once
+radioactive decay, neutron activation, fission, fusion, or ionizing radiation
+are in scope. A particle may represent many atoms or molecules, and therefore
+must carry isotope inventories when nuclear physics is enabled.
+
+Required nuclear derivation chain:
+
+1. Resolve isotope composition for each material:
+   - nuclide id `(Z,A,metastable state)`,
+   - abundance / particle inventory,
+   - nuclear mass and binding energy,
+   - spin/parity and energy levels when needed by reaction channels,
+   - provenance and validity of each nuclear datum.
+2. Derive radioactive decay closure:
+   - allowed decay modes from mass-energy differences and selection rules,
+   - half-life / decay constant from nuclear matrix elements or validated
+     reference evidence,
+   - branching ratios,
+   - emitted alpha, beta, gamma, neutrino, neutron, or daughter recoil spectra,
+   - daughter isotope production and heat deposition.
+3. Derive fission closure:
+   - fissionability and barrier evidence,
+   - spontaneous and neutron-induced fission rates / cross sections,
+   - neutron-energy-dependent channels,
+   - fragment yield distributions,
+   - prompt and delayed neutron spectra,
+   - prompt and delayed gamma spectra,
+   - fission energy partition into fragments, neutrons, photons, beta decays,
+     neutrinos, and local heat.
+4. Derive fusion closure:
+   - reaction channels from isotope pairs,
+   - Coulomb barrier / tunneling probability,
+   - plasma-screening and temperature/density dependence when applicable,
+   - cross sections or reactivities with provenance,
+   - product isotope and radiation spectra,
+   - deposited versus escaping energy accounting.
+5. Derive ionizing-radiation transport closure:
+   - alpha/beta charged-particle stopping power,
+   - gamma opacity / Compton / photoelectric / pair-production terms,
+   - neutron scattering, absorption, moderation, and activation terms,
+   - secondary radiation production,
+   - energy deposition and dose/heat source terms.
+
+Runtime handling requirements:
+
+- Nuclear state is optional for ordinary SPH material demos, but when enabled
+  it must be conserved and evolved from isotope inventories, not inferred from
+  display material names.
+- Decay/reaction events update isotope inventories, emitted-radiation fields,
+  internal energy, gas/species products if applicable, and provenance ledgers.
+- Ionizing radiation is not the same as thermal glow. Thermal incandescence
+  remains the optical/radiation closure; nuclear photons and particles require
+  radiation-transport source terms and deposition kernels.
+- Fission/fusion must be blocked outside their validated temperature, density,
+  neutron spectrum, and isotope domains. A demo may show a blocker/status
+  artifact, but it must not invent reaction rates.
+- CPU control-plane code may validate nuclear artifacts and compile/upload
+  tables. Per-step isotope updates, reaction-rate sampling, transport, and heat
+  deposition should be WebGPU-resident once the GPU runtime path exists.
+
+Required additional artifact families:
+
+- `moonlab.ulg.nuclear-structure-reference.v0`
+- `moonlab.ulg.nuclear-cross-section-reference.v0`
+- `moonlab.ulg.decay-chain-reference.v0`
+- `moonlab.ulg.fission-reference.v0`
+- `moonlab.ulg.fusion-reference.v0`
+- `moonlab.ulg.ionizing-radiation-transport-reference.v0`
+- `eshkol.ulg.isotope-inventory-closure.v0`
+- `eshkol.ulg.radioactive-decay-closure.v0`
+- `eshkol.ulg.fission-closure.v0`
+- `eshkol.ulg.fusion-closure.v0`
+- `eshkol.ulg.ionizing-radiation-closure.v0`
+
+For the ice/iron SPH phase demo these nuclear closures are normally inactive.
+They become required when a scenario introduces radioactive isotopes, neutron
+fields, plasma fusion conditions, fissile materials, activation, or ionizing
+radiation heat sources. Validation remains false until quantitative nuclear
+benchmarks and conservation ledgers exist.
+
 Required artifact families:
 
 - `eshkol.ulg.material-closure.v0`
@@ -209,6 +369,11 @@ Required artifact families:
 - `eshkol.ulg.mechanical-closure.v0`
 - `eshkol.ulg.optical-closure.v0`
 - `eshkol.ulg.radiation-closure.v0`
+- `eshkol.ulg.isotope-inventory-closure.v0`
+- `eshkol.ulg.radioactive-decay-closure.v0`
+- `eshkol.ulg.fission-closure.v0`
+- `eshkol.ulg.fusion-closure.v0`
+- `eshkol.ulg.ionizing-radiation-closure.v0`
 - `eshkol.ulg.wall-boundary-closure.v0`
 
 Each closure must include:

@@ -250,13 +250,24 @@ export function particleColors(demo) {
  * rather than merging it into the bulk-water blob — that is what makes the rising steam visible.
  */
 export function particleRenderMaterials(demo) {
+  return particleRenderDescriptors(demo).map((descriptor) => descriptor.renderKey);
+}
+
+/**
+ * Per-particle render descriptor. The simulation material remains the real material identity; the
+ * render key is only a surface-batching hint. Phase is carried explicitly so non-H2O materials do
+ * not get forced through a renderer-side liquid default.
+ */
+export function particleRenderDescriptors(demo) {
   return demo.state.particles.map((p) => {
+    const props = demo.materialProperties[p.material];
+    const phase = equilibriumFromSpecificEnergy(props, p.specificInternalEnergyJPerKg).stablePhase;
+    let renderKey = p.material;
     if (p.material === 'h2o') {
-      const phase = equilibriumFromSpecificEnergy(demo.materialProperties.h2o, p.specificInternalEnergyJPerKg).stablePhase;
-      if (phase === 'gas') return 'steam'; // optically-thin vapour → condensation cloud
-      if (phase === 'solid') return 'ice'; // translucent white (grain scattering), distinct from clear water
+      if (phase === 'gas') renderKey = 'steam'; // optically-thin vapour -> condensation cloud
+      if (phase === 'solid') renderKey = 'ice'; // translucent solid phase, distinct from clear water
     }
-    return p.material;
+    return { material: p.material, phase, renderKey };
   });
 }
 

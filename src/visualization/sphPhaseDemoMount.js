@@ -3,10 +3,10 @@
 // status rows. Also exposes a headless API on window.__ulgDemo for e2e/status checks.
 
 import { createSphPhaseScene } from './sphPhaseScene.js';
-import { createSphPhaseDemo, particleColors, particleRenderMaterials, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
+import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
+import { createSphPhaseDemo, particleColors, particleRenderDescriptors, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
 import { createSphPhaseScenario } from '../runtime/thermoPreflight.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
-import { metallicElementSymbols } from '../runtime/material/elementClosures.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const ICE_TEMP_K = 233.15;
@@ -30,18 +30,6 @@ const BASE_PARTICLE_EDGE_DEFAULT = 5;
 // Default isosurface blob-size multiplier (1 = the auto estimate from particle spacing). Decoupled
 // from container size so resizing the box doesn't change how big the rendered blobs look.
 const BLOB_SCALE_DEFAULT = 1;
-// Selectable block materials. The production path resolves these through the generic
-// first-principles material derivation pipeline; unsupported reaction energetics are reported
-// separately by reaction discovery.
-const MATERIAL_OPTIONS = [
-  { key: 'fe', label: 'Iron (Fe) — derived element' },
-  { key: 'h2o', label: 'Water (H₂O) — derived compound' },
-  { key: 'h2', label: 'Hydrogen (H₂) — first-principles gas' },
-  { key: 'o2', label: 'Oxygen (O₂) — first-principles gas' },
-  ...metallicElementSymbols()
-    .filter((e) => e.Z !== 26) // Fe is offered explicitly above
-    .map((e) => ({ key: e.symbol, label: `${e.symbol} (Z=${e.Z}) — derived element` }))
-];
 // Default initial temperatures (K): hot drop block (molten iron above its 1811 K liquidus) and cold
 // base block (ice at −40 °F). Editable in the panel.
 const DROP_TEMP_DEFAULT_K = 1850;
@@ -115,10 +103,38 @@ function buildOverlayShell() {
     <style>
       #sph-phase-overlay button { background:#14342c;color:#bfe9d8;border:1px solid #1d8b6d;border-radius:6px;padding:8px 12px;margin:0 4px 4px 0;font:600 13px ui-monospace,monospace;cursor:pointer;min-height:40px;touch-action:manipulation; }
       #sph-phase-overlay button:active { background:#1d8b6d;color:#04070a; }
-      #sph-phase-overlay input { min-height:36px;font-size:16px;box-sizing:border-box; }
+      #sph-phase-overlay input, #sph-phase-overlay select { min-height:36px;font-size:16px;box-sizing:border-box; }
+      #sph-phase-overlay select { width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c; }
+      .sph-material-row { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px;align-items:center; }
+      .sph-picker-button { width:42px;padding:8px 0!important;margin:0!important; }
+      .sph-element-picker-overlay { position:fixed;inset:0;z-index:90;background:rgba(2,6,8,.78);display:flex;align-items:center;justify-content:center;padding:14px; }
+      .sph-element-picker { width:min(1080px,96vw);max-height:min(760px,92vh);box-sizing:border-box;border:1px solid #1d8b6d;background:#071114;color:#bfe9d8;padding:12px;box-shadow:0 18px 60px rgba(0,0,0,.58);display:flex;flex-direction:column;gap:10px; }
+      .sph-picker-head { display:flex;justify-content:space-between;gap:10px;align-items:start; }
+      .sph-picker-title { color:#75f7b4;font-weight:700;line-height:1.3; }
+      .sph-picker-subtitle { color:#75c7f7;font-size:11px;opacity:.8;margin-top:3px; }
+      .sph-picker-search { width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;padding:8px; }
+      .sph-element-grid-scroll { overflow:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px; }
+      .sph-element-grid { display:grid;grid-template-columns:repeat(18,48px);grid-auto-rows:48px;gap:4px;width:max-content;min-width:100%; }
+      #sph-phase-overlay .sph-element-cell { position:relative;margin:0!important;padding:3px!important;min-height:48px;border-radius:4px;background:#0b181d;border-color:#245447;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px; }
+      #sph-phase-overlay .sph-element-cell:hover { border-color:#75f7b4;background:#102823; }
+      #sph-phase-overlay .sph-element-cell.selected { border-color:#fff2a8;box-shadow:0 0 0 2px rgba(255,242,168,.25); }
+      .sph-element-number { font-size:9px;color:#75c7f7;line-height:1; }
+      .sph-element-symbol { font-size:15px;font-weight:800;line-height:1; }
+      .sph-element-name { font-size:8px;line-height:1;max-width:42px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.86; }
+      .sph-cat-alkali { background:#182412!important; }
+      .sph-cat-alkaline { background:#202512!important; }
+      .sph-cat-transition { background:#112127!important; }
+      .sph-cat-post-transition { background:#211c25!important; }
+      .sph-cat-metalloid { background:#1e2418!important; }
+      .sph-cat-nonmetal { background:#162225!important; }
+      .sph-cat-halogen { background:#241b17!important; }
+      .sph-cat-lanthanide { background:#1d1d2a!important; }
+      .sph-cat-actinide { background:#251b22!important; }
+      .sph-picker-legend { display:flex;flex-wrap:wrap;gap:5px;font-size:10px;color:#75c7f7; }
+      .sph-legend-chip { border:1px solid #245447;padding:3px 6px;background:#0a1418; }
       #sph-panel { transition:transform .25s ease; }
       #sph-panel.collapsed { transform:translateX(110%); }
-      @media (max-width:700px) { #sph-panel { width:min(340px,92vw); } #sph-status { font-size:13px; } }
+      @media (max-width:700px) { #sph-panel { width:min(340px,92vw); } #sph-status { font-size:13px; } .sph-element-grid { grid-template-columns:repeat(18,42px);grid-auto-rows:42px; } #sph-phase-overlay .sph-element-cell { min-height:42px; } .sph-element-name { display:none; } }
     </style>
     <div id="sph-scene" style="position:absolute;inset:0;"></div>
     <button id="sph-toggle" type="button" aria-label="Toggle controls" style="position:absolute;top:12px;left:12px;z-index:60;">☰ menu</button>
@@ -153,6 +169,119 @@ function buildOverlayShell() {
     </aside>
   `;
   return overlay;
+}
+
+function categoryLabel(category) {
+  return String(category || 'element').replace(/-/g, ' ');
+}
+
+function createPickerSpan(className, text) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
+function openElementPicker({ overlay, select, roleLabel }) {
+  overlay.querySelector('.sph-element-picker-overlay')?.remove();
+
+  const pickerOverlay = document.createElement('div');
+  pickerOverlay.className = 'sph-element-picker-overlay';
+
+  const picker = document.createElement('section');
+  picker.className = 'sph-element-picker';
+  picker.setAttribute('role', 'dialog');
+  picker.setAttribute('aria-modal', 'true');
+  picker.setAttribute('aria-label', `Choose element for ${roleLabel}`);
+
+  const head = document.createElement('div');
+  head.className = 'sph-picker-head';
+  const titleWrap = document.createElement('div');
+  const title = document.createElement('div');
+  title.className = 'sph-picker-title';
+  title.textContent = `periodic table - ${roleLabel}`;
+  const subtitle = document.createElement('div');
+  subtitle.className = 'sph-picker-subtitle';
+  subtitle.textContent = 'Selectable cells resolve through the derived element material closure.';
+  titleWrap.append(title, subtitle);
+  const closeButton = document.createElement('button');
+  closeButton.type = 'button';
+  closeButton.textContent = 'close';
+  head.append(titleWrap, closeButton);
+
+  const search = document.createElement('input');
+  search.className = 'sph-picker-search';
+  search.type = 'search';
+  search.placeholder = 'filter by name, symbol, or Z';
+
+  const scroll = document.createElement('div');
+  scroll.className = 'sph-element-grid-scroll';
+  const grid = document.createElement('div');
+  grid.className = 'sph-element-grid';
+  scroll.appendChild(grid);
+
+  const legend = document.createElement('div');
+  legend.className = 'sph-picker-legend';
+  const categories = [...new Set(ELEMENT_MATERIAL_OPTIONS.map((option) => option.category))];
+  for (const category of categories) {
+    const chip = document.createElement('span');
+    chip.className = `sph-legend-chip sph-cat-${category}`;
+    chip.textContent = categoryLabel(category);
+    legend.appendChild(chip);
+  }
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    window.removeEventListener('keydown', onKeyDown);
+    pickerOverlay.remove();
+    select.focus();
+  };
+  function onKeyDown(event) {
+    if (event.key === 'Escape') close();
+  }
+
+  function renderGrid() {
+    const query = search.value.trim().toLowerCase();
+    grid.replaceChildren();
+    for (const option of ELEMENT_MATERIAL_OPTIONS) {
+      const haystack = `${option.name} ${option.symbol} ${option.Z}`.toLowerCase();
+      if (query && !haystack.includes(query)) continue;
+      const cell = document.createElement('button');
+      cell.type = 'button';
+      cell.className = `sph-element-cell sph-cat-${option.category}`;
+      if (option.key === select.value) cell.classList.add('selected');
+      cell.style.gridColumn = String(option.group);
+      cell.style.gridRow = String(option.period);
+      cell.title = option.label;
+      cell.setAttribute('aria-label', option.label);
+      cell.append(
+        createPickerSpan('sph-element-number', String(option.Z)),
+        createPickerSpan('sph-element-symbol', option.symbol),
+        createPickerSpan('sph-element-name', option.name)
+      );
+      cell.addEventListener('click', () => {
+        select.value = option.key;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        close();
+      });
+      grid.appendChild(cell);
+    }
+  }
+
+  closeButton.addEventListener('click', close);
+  pickerOverlay.addEventListener('click', (event) => {
+    if (event.target === pickerOverlay) close();
+  });
+  search.addEventListener('input', renderGrid);
+  window.addEventListener('keydown', onKeyDown);
+
+  picker.append(head, search, scroll, legend);
+  pickerOverlay.appendChild(picker);
+  overlay.appendChild(pickerOverlay);
+  renderGrid();
+  search.focus();
 }
 
 /**
@@ -243,8 +372,10 @@ export function mountSphPhaseDemoOverlay() {
     const wrap = document.createElement('label');
     wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
     wrap.textContent = label;
+    const row = document.createElement('div');
+    row.className = 'sph-material-row';
     const select = document.createElement('select');
-    select.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+    select.className = 'sph-material-select';
     for (const opt of MATERIAL_OPTIONS) {
       const o = document.createElement('option');
       o.value = opt.key;
@@ -252,7 +383,15 @@ export function mountSphPhaseDemoOverlay() {
       if (opt.key === def) o.selected = true;
       select.appendChild(o);
     }
-    wrap.appendChild(select);
+    const pickerButton = document.createElement('button');
+    pickerButton.type = 'button';
+    pickerButton.className = 'sph-picker-button';
+    pickerButton.textContent = 'PT';
+    pickerButton.title = `Open periodic table for ${label}`;
+    pickerButton.setAttribute('aria-label', `Open periodic table for ${label}`);
+    pickerButton.addEventListener('click', () => openElementPicker({ overlay, select, roleLabel: label }));
+    row.append(select, pickerButton);
+    wrap.appendChild(row);
     elementsEl.appendChild(wrap);
     elementSelects[role] = select;
   }
@@ -398,7 +537,7 @@ export function mountSphPhaseDemoOverlay() {
       return;
     }
     const colors = particleColors(driver.demo);
-    const renderMaterials = particleRenderMaterials(driver.demo);
+    const renderDescriptors = particleRenderDescriptors(driver.demo);
     const n = driver.demo.state.particles.length;
     const positionsM = new Float32Array(n * 3);
     const colorsRgb = new Float32Array(n * 3);
@@ -410,7 +549,7 @@ export function mountSphPhaseDemoOverlay() {
       colorsRgb[i * 3] = colors[i].rgb[0];
       colorsRgb[i * 3 + 1] = colors[i].rgb[1];
       colorsRgb[i * 3 + 2] = colors[i].rgb[2];
-      materials[i] = renderMaterials[i];
+      materials[i] = renderDescriptors[i];
     });
     scene.setParticles({
       positionsM,

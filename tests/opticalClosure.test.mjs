@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  clearOpticalRenderParamsCache,
   createOpticalClosure,
   drudeAbsorptionCoefficientPerM,
   drudeReflectance,
@@ -65,17 +66,26 @@ test('optical closure artifact is physically derived but not optically validated
 });
 
 test('render params are derived from the optics: iron opaque metal, water refracts, vapour barely', () => {
+  clearOpticalRenderParamsCache();
   const fe = deriveElementProperties(26, fastHeavyOptics);
   const iron = opticalRenderParams({ material: 'fe', properties: { conductionElectronDensityPerM3: fe.conductionElectronDensityPerM3 } });
   assert.equal(iron.metalness, 1);
   assert.ok(iron.transmission < 1e-6); // opaque from Drude skin depth
   assert.ok(iron.opacity > 0.999);
+  assert.equal(iron.vertexColorPolicy, 'material-pbr');
+  assert.equal(iron.renderModel, 'conductor-drude-lorentz-relativistic-interband');
+  assert.ok(Array.isArray(iron.baseColorSrgb));
+  assert.ok(iron.baseColorSrgb.every((v) => v >= 0 && v <= 1));
+  assert.ok(iron.spectralSamples.length > 0);
+  assert.ok(iron.spectralSamples.every((sample) => sample.wavelengthNm >= 380 && sample.wavelengthNm <= 780));
   assert.equal(iron.provenance.source, 'scalar-relativistic-kohn-sham-drude-lorentz-skin-depth');
 
   const water = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
   assert.ok(Math.abs(water.ior - 1.333) < 1e-6); // refractive index sets IOR
   assert.ok(water.transmission > 0.8); // clear water mostly transmits
   assert.ok(water.opacity >= 0 && water.opacity < 0.2);
+  assert.equal(water.vertexColorPolicy, 'material-pbr');
+  assert.equal(water.renderModel, 'molecular-transparent-beer-lambert-pbr');
   assert.ok(Array.isArray(water.attenuationColor)); // Beer-Lambert tint
   // Blue tint: less attenuation in the blue than the red over the path.
   assert.ok(water.attenuationColor[2] >= water.attenuationColor[0]);
@@ -93,10 +103,23 @@ test('gold opacity is derived from conductor skin depth, not a generic transluce
   assert.equal(render.metalness, 1);
   assert.ok(render.opacity > 0.999);
   assert.ok(render.transmission < 1e-6);
+  assert.ok(render.baseColorSrgb[0] > render.baseColorSrgb[1] && render.baseColorSrgb[1] > render.baseColorSrgb[2]);
+  assert.equal(render.vertexColorPolicy, 'material-pbr');
   assert.equal(render.provenance.source, 'scalar-relativistic-kohn-sham-drude-lorentz-skin-depth');
   const blocked = opticalRenderParams({ material: 'unknownium' });
   assert.equal(blocked.blocked, true);
   assert.equal(blocked.opacity, 0);
+  assert.equal(blocked.vertexColorPolicy, 'blocked');
+});
+
+test('optical render params are cached but returned as caller-safe clones', () => {
+  clearOpticalRenderParamsCache();
+  const first = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
+  first.baseColorSrgb[0] = 0;
+  first.spectralSamples[0].reflectance = 99;
+  const second = opticalRenderParams({ material: 'h2o', phase: 'liquid' });
+  assert.notEqual(second.spectralSamples[0].reflectance, 99);
+  assert.ok(second.baseColorSrgb[0] > 0);
 });
 
 test('gold colour comes from scalar-relativistic interband oscillators, not a per-element colour patch', () => {

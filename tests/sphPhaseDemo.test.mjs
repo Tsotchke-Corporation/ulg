@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   buildSphPhaseDemoState,
   createSphPhaseDemo,
+  particleRenderDescriptors,
   particleThermalState,
   phaseMassSummary
 } from '../src/runtime/sphPhaseDemo.js';
@@ -47,6 +48,17 @@ test('particle phase + temperature come from the closure energy', () => {
   const summary = phaseMassSummary(demo);
   assert.equal(summary.ironSolidFraction, 0);
   assert.ok(summary.byMaterialPhase.h2o.solid > 0);
+});
+
+test('particle render descriptors preserve simulation material and closure phase', () => {
+  const demo = buildSphPhaseDemoState();
+  const descriptors = particleRenderDescriptors(demo);
+  const ice = descriptors.find((d) => d.material === 'h2o');
+  const iron = descriptors.find((d) => d.material === 'fe');
+  assert.equal(ice.phase, 'solid');
+  assert.equal(ice.renderKey, 'ice');
+  assert.equal(iron.phase, 'liquid');
+  assert.equal(iron.renderKey, 'fe');
 });
 
 test('demo driver: preflight feasible, stepping stays bounded and finite', () => {

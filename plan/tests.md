@@ -1725,3 +1725,27 @@ Validation status:
 - PASS: full `npm test` (`323/323`).
 - PASS: `npm run build` with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
+
+SPH thermal phase-response gates:
+
+- `tests/abi.test.mjs` now locks the
+  `peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0` and
+  `peercompute.ulg.sph-gpu-thermal-phase-response-table.v0` schemas plus the
+  f32x4-aligned response record/row layouts.
+- `tests/closureLawGraph.test.mjs` now covers the generic `tableStep` graph op
+  for explicit selector/categorical outputs.
+- `tests/sphThermalGpuKernel.test.mjs` now verifies the packed thermal graph
+  bank, builds the phase-response table, and proves graph temperature plus
+  response-table phase/density/fraction outputs match the legacy thermal
+  resolver for generated H2O/Fe/air segments, plateau midpoint behavior, and
+  low/high clamp behavior.
+
+Validation status:
+
+- PASS: `node --test tests/abi.test.mjs tests/closureLawGraph.test.mjs
+  tests/sphThermalGpuKernel.test.mjs` (`32/32`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/`
+  (`1/1`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`325/325`).

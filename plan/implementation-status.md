@@ -1723,3 +1723,42 @@ Not claimed:
 - Phase ids, phase fractions, density selection, and plateau mixture state are
   not encoded as scalar graph outputs. They remain table-driven until the flat
   graph ABI has explicit selector/categorical outputs.
+
+## 2026-06-11 Update - SPH Thermal Phase-Response ABI
+
+Completed:
+
+- Added `peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0` as the packed
+  thermal temperature-graph bank artifact. The bank concatenates graph
+  node/sample/slot/status rows so the next WebGPU thermal kernel slice can bind
+  one graph-bank buffer set instead of arrays of JS graph objects.
+- Added `peercompute.ulg.sph-gpu-thermal-phase-response-table.v0` with
+  material response records and explicit phase-response rows. These rows encode
+  segment type, temperature graph index, energy domain, phase endpoints, density
+  endpoints, density/stable-phase policy ids, and plateau fraction coefficients.
+- Added `buildSphThermalPhaseResponseTable()`,
+  `resolveThermalPhaseResponseFromTable()`, and
+  `resolveThermalStateFromGraphPhaseResponseCpu()`.
+- Added generic `tableStep` support to the flat closure-law graph CPU/WebGPU
+  evaluator for future explicit selector nodes. SPH thermal does not use graph
+  scalar slots for phase ids or density in this slice.
+
+Latest validation:
+
+- PASS: syntax checks for the touched SPH thermal runtime, graph runtime, ABI,
+  WGSL, and tests.
+- PASS: `node --test tests/abi.test.mjs tests/closureLawGraph.test.mjs
+  tests/sphThermalGpuKernel.test.mjs` (`32/32`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` (`1/1`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`325/325`).
+
+Not claimed:
+
+- The WebGPU thermal kernel still binds the legacy thermal segment table. The
+  new response table and graph bank are CPU-validated artifacts ready for the
+  next kernel-binding slice.
+- The current density policy intentionally preserves the legacy
+  dominant-at-half plateau behavior. It is explicit policy metadata, not a
+  claim of physically validated mixture density.

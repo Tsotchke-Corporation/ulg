@@ -13,13 +13,19 @@ import {
   buildSphGpuParticleBuffers
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
+  SPH_THERMAL_CLOSURE_GRAPH_SLOTS,
+  ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+  buildSphThermalPhaseResponseTable,
   buildSphThermalClosureGraphBuffers,
   buildSphThermalMaterialTable,
   compareSphThermalStepParity,
+  resolveThermalPhaseResponseFromTable,
+  resolveThermalStateFromGraphPhaseResponseCpu,
   resolveThermalStateFromTable,
   runSphThermalStepCpu,
   runSphThermalStepWithOptionalWebGpu
@@ -105,12 +111,17 @@ test('SPH thermal material table packs closure-derived energy/phase segments', (
 test('SPH thermal graph buffer set exports flat energy-temperature segment closures', () => {
   const table = buildSphThermalMaterialTable(materialProperties);
   const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
   const materials = new Set(graphSet.metadata.map((entry) => entry.material));
 
   assert.equal(graphSet.schema, ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA);
   assert.equal(graphSet.status, 'thermal-segment-closure-law-graphs-ready');
   assert.equal(graphSet.sourceSchema, ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA);
   assert.equal(graphSet.graphSchema, ULG_CLOSURE_LAW_GRAPH_SCHEMA);
+  assert.equal(graphSet.graphBank.schema, ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA);
+  assert.equal(graphSet.graphBank.graphCount, graphSet.graphCount);
+  assert.equal(graphSet.graphBank.nodeCount, graphSet.graphCount);
+  assert.equal(graphSet.graphBank.sampleCount, graphSet.graphCount * 2);
   assert.equal(graphSet.segmentCount, table.segmentCount);
   assert.equal(graphSet.graphCount, table.segmentCount);
   assert.equal(graphSet.skippedSegmentCount, 0);
@@ -119,11 +130,16 @@ test('SPH thermal graph buffer set exports flat energy-temperature segment closu
   assert.ok(materials.has('h2o'));
   assert.ok(materials.has('fe'));
   assert.ok(materials.has('air'));
+  assert.equal(responseTable.schema, ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA);
+  assert.equal(responseTable.status, 'closure-derived-phase-response-table-ready');
+  assert.equal(responseTable.responseCount, table.segmentCount);
+  assert.equal(responseTable.graphBankSchema, ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA);
 
   for (const metadata of graphSet.metadata) {
     const graph = graphSet.graphs[metadata.graphIndex];
+    const segmentSampleFraction = metadata.segmentType === 'plateau' ? 0.75 : 0.5;
     const midpointEnergy = new Float32Array([
-      metadata.energyStartJPerKg + 0.5 * (metadata.energyEndJPerKg - metadata.energyStartJPerKg)
+      metadata.energyStartJPerKg + segmentSampleFraction * (metadata.energyEndJPerKg - metadata.energyStartJPerKg)
     ])[0];
     const execution = evaluateClosureLawGraphCpu(graph, { inputs: { 0: midpointEnergy } });
     const resolved = resolveThermalStateFromTable(table, metadata.materialId, midpointEnergy);
@@ -134,12 +150,84 @@ test('SPH thermal graph buffer set exports flat energy-temperature segment closu
     assert.equal(graph.nodeRows[13], metadata.materialId);
     assert.equal(graph.nodeRows[14], metadata.phaseFromId);
     assert.equal(execution.status, 'closure-law-graph-evaluated');
+    assert.equal(graph.outputName, 'temperatureK');
+    assert.equal(graph.outputSlots.temperatureK, SPH_THERMAL_CLOSURE_GRAPH_SLOTS.temperatureK);
+    assert.equal(graph.slotCount, Object.keys(SPH_THERMAL_CLOSURE_GRAPH_SLOTS).length);
     nearlyEqual(
-      execution.slots[1].value,
+      execution.slots[SPH_THERMAL_CLOSURE_GRAPH_SLOTS.temperatureK].value,
       resolved.temperatureK,
       Math.max(5e-2, Math.abs(resolved.temperatureK) * 1e-7)
     );
+
+    const response = resolveThermalPhaseResponseFromTable(responseTable, metadata.materialId, midpointEnergy);
+    const graphResponse = resolveThermalStateFromGraphPhaseResponseCpu({
+      graphSet,
+      responseTable,
+      materialId: metadata.materialId,
+      specificInternalEnergyJPerKg: midpointEnergy
+    });
+    assert.equal(response.temperatureGraphIndex, metadata.graphIndex);
+    assert.equal(response.phaseId, resolved.phaseId);
+    assert.equal(graphResponse.phaseId, resolved.phaseId);
+    nearlyEqual(graphResponse.temperatureK, resolved.temperatureK, Math.max(5e-2, Math.abs(resolved.temperatureK) * 1e-7));
+    nearlyEqual(graphResponse.restDensityKgPerM3, resolved.restDensityKgPerM3, Math.max(1e-4, Math.abs(resolved.restDensityKgPerM3) * 1e-6));
+    nearlyEqual(graphResponse.phaseFractions.solid, resolved.phaseFractions.solid, 1e-6);
+    nearlyEqual(graphResponse.phaseFractions.liquid, resolved.phaseFractions.liquid, 1e-6);
+    nearlyEqual(graphResponse.phaseFractions.gas, resolved.phaseFractions.gas, 1e-6);
+    nearlyEqual(graphResponse.phaseFractions.plasma, resolved.phaseFractions.plasma, 1e-6);
   }
+});
+
+test('SPH thermal phase response table preserves plateau, edge, and clamp semantics', () => {
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const waterId = stableOpticalMaterialId('h2o');
+  const waterRecordOffset = Array.from(table.records).findIndex((value, index) => index % 4 === 0 && value === waterId);
+  const segmentOffset = table.records[waterRecordOffset + 1];
+  const segmentCount = table.records[waterRecordOffset + 2];
+  const firstSegmentOffset = segmentOffset * 12;
+  const lastSegmentOffset = (segmentOffset + segmentCount - 1) * 12;
+  const lowClampEnergy = table.segments[firstSegmentOffset + 4] - 1;
+  const highClampEnergy = table.segments[lastSegmentOffset + 5] + Math.max(1, Math.abs(table.segments[lastSegmentOffset + 5]) * 1e-3);
+  let meltPlateauMid = null;
+
+  for (let local = 0; local < segmentCount; local += 1) {
+    const offset = (segmentOffset + local) * 12;
+    const response = resolveThermalPhaseResponseFromTable(responseTable, waterId, table.segments[offset + 4]);
+    assert.equal(response.status, 1);
+    assert.notEqual(response.temperatureGraphIndex, -1);
+    if (table.segments[offset + 1] === 2 && meltPlateauMid == null) {
+      meltPlateauMid = table.segments[offset + 4] + 0.5 * (table.segments[offset + 5] - table.segments[offset + 4]);
+    }
+  }
+
+  const belowIce = resolveThermalStateFromGraphPhaseResponseCpu({
+    graphSet,
+    responseTable,
+    materialId: waterId,
+    specificInternalEnergyJPerKg: lowClampEnergy
+  });
+  const highSteam = resolveThermalStateFromGraphPhaseResponseCpu({
+    graphSet,
+    responseTable,
+    materialId: waterId,
+    specificInternalEnergyJPerKg: highClampEnergy
+  });
+  const plateau = resolveThermalStateFromGraphPhaseResponseCpu({
+    graphSet,
+    responseTable,
+    materialId: waterId,
+    specificInternalEnergyJPerKg: meltPlateauMid
+  });
+
+  assert.equal(belowIce.response.domainStatus, 'clamped-low');
+  assert.equal(belowIce.phaseId, GPU_PHASE_IDS.solid);
+  assert.equal(highSteam.response.domainStatus, 'clamped-high');
+  assert.equal(highSteam.phaseId, GPU_PHASE_IDS.gas);
+  assert.equal(plateau.phaseId, GPU_PHASE_IDS.liquid);
+  nearlyEqual(plateau.phaseFractions.solid, 0.5, 1e-5);
+  nearlyEqual(plateau.phaseFractions.liquid, 0.5, 1e-5);
 });
 
 test('SPH thermal CPU table step conserves pair conduction energy and refreshes thermo rows', () => {

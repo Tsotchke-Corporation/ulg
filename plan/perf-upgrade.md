@@ -1085,3 +1085,24 @@ Still remaining:
   and evaluate thermal closures resident on GPU.
 - Replace full graph/debug readbacks with compact status summaries once graph
   execution is in the hot loop.
+
+## 2026-06-11 Checkpoint - Thermal Response Tables For GPU Binding
+
+Implemented:
+
+- Added a packed thermal closure graph bank so temperature graphs can move
+  toward WebGPU binding without per-segment JS graph objects.
+- Added an explicit SPH thermal phase-response table. Categorical phase
+  selection, plateau fractions, and density policy are represented as response
+  rows rather than hidden as ordinary interpolated scalar graph outputs.
+- Added CPU parity that combines graph-derived temperature with response-table
+  phase/density/fraction selection and compares against the legacy resolver.
+
+Next performance slice:
+
+- Bind graph-bank node/sample rows plus phase-response records/rows in
+  `sphThermalStepWgsl`.
+- Avoid shared global graph slots in the SPH hot loop; each particle needs
+  local scratch or direct per-particle graph sampling to prevent races.
+- Keep full particle readback disabled in normal resident runs and read back
+  compact status/summary rows only.

@@ -219,6 +219,24 @@ function tableLinear(sampleRows, sampleOffset, sampleCount, x) {
   };
 }
 
+function tableStep(sampleRows, sampleOffset, sampleCount, x) {
+  let selectedIndex = sampleOffset;
+  for (let index = sampleOffset; index < sampleOffset + sampleCount; index += 1) {
+    const axis = sampleRows[index * SAMPLE_FLOATS];
+    if (x >= axis) {
+      selectedIndex = index;
+    } else {
+      break;
+    }
+  }
+  const selectedOffset = selectedIndex * SAMPLE_FLOATS;
+  return {
+    value: sampleRows[selectedOffset + 1],
+    derivative: 0,
+    sampleStart: sampleOffset * SAMPLE_FLOATS
+  };
+}
+
 function decodeSlots(slotRows) {
   const slots = [];
   for (let slot = 0; slot < slotRows.length / SLOT_FLOATS; slot += 1) {
@@ -263,8 +281,16 @@ export function evaluateClosureLawGraphCpu(graph, { inputs = {}, slotRows = null
     const domainMin = graph.nodeRows[nodeOffset + 6];
     const domainMax = graph.nodeRows[nodeOffset + 7];
     const inputValue = slots[inputSlot * SLOT_FLOATS];
-    if (opId !== CLOSURE_LAW_GRAPH_OP_IDS.tableLinear) {
+    if (opId !== CLOSURE_LAW_GRAPH_OP_IDS.tableLinear && opId !== CLOSURE_LAW_GRAPH_OP_IDS.tableStep) {
       setStatus(statuses, nodeIndex, CLOSURE_LAW_GRAPH_STATUS_IDS.unsupportedOperation, opId, 0);
+      continue;
+    }
+    if (opId === CLOSURE_LAW_GRAPH_OP_IDS.tableLinear && sampleCount < 2) {
+      setStatus(statuses, nodeIndex, CLOSURE_LAW_GRAPH_STATUS_IDS.unsupportedOperation, sampleCount, 2);
+      continue;
+    }
+    if (opId === CLOSURE_LAW_GRAPH_OP_IDS.tableStep && sampleCount < 1) {
+      setStatus(statuses, nodeIndex, CLOSURE_LAW_GRAPH_STATUS_IDS.unsupportedOperation, sampleCount, 1);
       continue;
     }
     if (inputValue < domainMin) {
@@ -279,7 +305,9 @@ export function evaluateClosureLawGraphCpu(graph, { inputs = {}, slotRows = null
       slots[derivativeSlot * SLOT_FLOATS + 2] = CLOSURE_LAW_GRAPH_STATUS_IDS.outOfDomainHigh;
       continue;
     }
-    const sampled = tableLinear(graph.sampleRows, sampleOffset, sampleCount, inputValue);
+    const sampled = opId === CLOSURE_LAW_GRAPH_OP_IDS.tableStep
+      ? tableStep(graph.sampleRows, sampleOffset, sampleCount, inputValue)
+      : tableLinear(graph.sampleRows, sampleOffset, sampleCount, inputValue);
     const outputOffset = outputSlot * SLOT_FLOATS;
     const derivativeOffset = derivativeSlot * SLOT_FLOATS;
     slots[outputOffset] = sampled.value;

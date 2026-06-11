@@ -9857,3 +9857,111 @@ Failures / open questions:
   branch/selector semantics, so the graph ABI needs explicit selector or
   categorical outputs before that migration is honest.
 - No push was attempted.
+
+## 2026-06-11 10:35 AKDT - Thermal phase-response table and graph bank
+
+Prompts:
+
+- "is the vite dev server running so it will catch your changes live?"
+- "is this still an mlsmpm sim or purely sph?"
+- "didn't mean to interrupt pick up where you left off you're doing great. I
+  think performance improved a bit. what's left on our todo?"
+
+What happened:
+
+- Verified the live HTTPS Vite server was still running on `0.0.0.0:5173` and
+  responding with `HTTP/2 200`. The active HTTPS process was still
+  `pid 242294` using `/tmp/ulg-vite-https/vite.https.config.mjs`.
+- Answered that the demo remains a hybrid: MLS-MPM handles the main mechanics
+  and resident grid-transfer path, while SPH-style particle state handles
+  thermal, phase, reaction, render rows, and material ids.
+- Continued the in-flight SPH thermal graph integration.
+- Incorporated Dirac's read-only audit recommendation: do not encode phase ids,
+  phase fractions, or density as ordinary interpolated graph scalar outputs.
+  Instead, add an explicit SPH thermal phase-response ABI and keep temperature
+  as the numeric graph output.
+- Added generic `tableStep` support to the flat closure-law graph evaluator and
+  WGSL for future explicit selector/categorical graph nodes.
+- Added `peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0`, a packed bank
+  of concatenated thermal temperature graph node/sample/slot/status rows.
+- Added `peercompute.ulg.sph-gpu-thermal-phase-response-table.v0`, with
+  response records and response rows encoding segment type, temperature graph
+  index, energy bounds, phase endpoints, density endpoints, policy ids, and
+  plateau fraction coefficients.
+- Added `buildSphThermalClosureGraphBank()`,
+  `buildSphThermalPhaseResponseTable()`,
+  `resolveThermalPhaseResponseFromTable()`, and
+  `resolveThermalStateFromGraphPhaseResponseCpu()`.
+- Added tests proving graph-derived temperature plus response-table
+  phase/density/fraction selection matches the legacy SPH thermal segment
+  resolver.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/closureLawGraph.js`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `tests/abi.test.mjs`
+- `tests/closureLawGraph.test.mjs`
+- `tests/sphThermalGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `pgrep -af "vite|npm run dev"` showed HTTPS Vite process `242294` and an
+  additional plain dev process.
+- `curl -k -I --max-time 5 https://127.0.0.1:5173/` returned `HTTP/2 200`.
+- `ss -ltnp '( sport = :5173 )'` showed `0.0.0.0:5173` owned by `pid=242294`.
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 10:31:25 AKDT`.
+- `git status --short --branch` reported `## main...origin/main [ahead 33]`
+  with the in-flight phase-response files modified.
+- `python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+  reported `is_stale=false` at clean commit `eb5a82a`.
+- `node --check src/runtime/sph/sphThermalGpuKernel.js && node --check tests/sphThermalGpuKernel.test.mjs && node --check tests/abi.test.mjs && node --check tests/closureLawGraph.test.mjs`
+- `node --test tests/sphThermalGpuKernel.test.mjs`
+- `node --test tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+- `node --input-type=module` inspection of generated H2O thermal segment rows.
+- `node --test tests/abi.test.mjs tests/closureLawGraph.test.mjs tests/sphThermalGpuKernel.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `git diff --check`
+- `npm test`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 10:35:47 AKDT`.
+
+Validation:
+
+- Initial richer graph-slot attempt failed a thermal test because categorical
+  phase id switched on a Float32 midpoint boundary. Dirac's audit made clear
+  that phase/density/fractions should not be encoded as ordinary graph scalar
+  slots, so the SPH implementation was redirected to explicit response rows.
+- Initial response clamp test failed because the hard-coded "below ice" energy
+  was still inside the generated H2O solid segment. The test now derives low
+  and high clamp samples from the generated segment boundaries.
+- PASS: syntax checks for the touched thermal runtime and tests.
+- PASS: `node --test tests/sphThermalGpuKernel.test.mjs` passed `7/7`.
+- PASS: `node --test tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+  passed `25/25`.
+- PASS: `node --test tests/abi.test.mjs tests/closureLawGraph.test.mjs
+  tests/sphThermalGpuKernel.test.mjs` passed `32/32`.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` passed `325/325`.
+
+Failures / open questions:
+
+- The WebGPU thermal kernel still binds the legacy material/phase segment
+  table. The next slice is to bind the packed graph bank and phase-response
+  table in `sphThermalStepWgsl`.
+- The response table intentionally preserves current dominant-at-half density
+  behavior for plateau mixtures. This is explicit policy metadata, not a
+  validated mixture-density model.
+- Direct GPU rendering and compact diagnostics remain open performance work.
+- No push was attempted.

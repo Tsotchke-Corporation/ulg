@@ -46,6 +46,7 @@ test('closure-law graph WGSL exposes flat graph buffers and status outputs', () 
   assert.match(closureLawGraphEvalWgsl, /var<storage, read_write> graph_slots/);
   assert.match(closureLawGraphEvalWgsl, /var<storage, read_write> graph_status/);
   assert.match(closureLawGraphEvalWgsl, /fn sample_table_linear/);
+  assert.match(closureLawGraphEvalWgsl, /fn sample_table_step/);
 });
 
 test('CPU compiler packs a table closure into a flat closure-law graph', () => {
@@ -100,6 +101,31 @@ test('CPU evaluator reports closure refresh on domain exit', () => {
   assert.equal(execution.statusRows[1], 3);
   assert.equal(execution.statusRows[2], 2);
   assert.equal(execution.statusRows[3], 1.5);
+});
+
+test('CPU evaluator samples table-step nodes for selector/categorical outputs', () => {
+  const graph = compileClosureLawGraphFromTableClosure(createOscillatorClosure(), {
+    initialInputs: { 0: 1.25 }
+  });
+  const stepGraph = {
+    ...graph,
+    graphId: 'toy-step-selector-graph',
+    nodeRows: new Float32Array(graph.nodeRows),
+    sampleRows: new Float32Array([
+      0.5, 1, 0, 0,
+      1.0, 2, 0, 0,
+      1.5, 3, 0, 0
+    ])
+  };
+  stepGraph.nodeRows[0] = 2;
+  stepGraph.nodeRows[5] = 3;
+  const execution = evaluateClosureLawGraphCpu(stepGraph, { inputs: { 0: 1.25 } });
+
+  assert.equal(execution.status, 'closure-law-graph-evaluated');
+  assert.equal(execution.slots[1].value, 2);
+  assert.equal(execution.slots[1].derivative, 0);
+  assert.equal(execution.slots[2].value, 0);
+  assert.equal(execution.statusRows[1], 1);
 });
 
 test('optional WebGPU closure-law graph path accepts a parity-passing injected runner', async () => {

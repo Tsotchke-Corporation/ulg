@@ -18,6 +18,8 @@ export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-parti
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
 export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-material-table.v0';
 export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0';
+export const ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0';
+export const ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-execution.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-parity.v0';
@@ -91,7 +93,8 @@ export const CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT = Object.freeze([
   'limit:f32'
 ]);
 export const CLOSURE_LAW_GRAPH_OP_IDS = Object.freeze({
-  tableLinear: 1
+  tableLinear: 1,
+  tableStep: 2
 });
 export const CLOSURE_LAW_GRAPH_INTERPOLATION_IDS = Object.freeze({
   linear: 1
@@ -201,6 +204,30 @@ export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
   'densityToKgPerM3:f32',
   'status:f32',
   'pad0:f32'
+]);
+export const SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'responseOffset:f32',
+  'responseCount:f32',
+  'status:f32'
+]);
+export const SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'segmentType:f32',
+  'temperatureGraphIndex:f32',
+  'status:f32',
+  'energyStartJPerKg:f32',
+  'energyEndJPerKg:f32',
+  'phaseFromId:f32',
+  'phaseToId:f32',
+  'densityFromKgPerM3:f32',
+  'densityToKgPerM3:f32',
+  'densityPolicyId:f32',
+  'stablePhasePolicyId:f32',
+  'fractionFromSlope:f32',
+  'fractionFromIntercept:f32',
+  'fractionToSlope:f32',
+  'fractionToIntercept:f32'
 ]);
 export const SPH_GPU_REACTION_RECORD_ROW_LAYOUT = Object.freeze([
   'reactantAMaterialId:f32',

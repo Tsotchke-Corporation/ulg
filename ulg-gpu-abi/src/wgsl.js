@@ -197,6 +197,22 @@ fn sample_table_linear(node: ClosureLawGraphNode, x: f32) -> vec2<f32> {
   );
 }
 
+fn sample_table_step(node: ClosureLawGraphNode, x: f32) -> vec2<f32> {
+  let offset = graph_u32(node.sample_offset);
+  let count = graph_u32(node.sample_count);
+  var selected_index = offset;
+  for (var index = offset; index < offset + count; index = index + 1u) {
+    let axis = graph_samples[index].axis;
+    if (x >= axis) {
+      selected_index = index;
+    } else {
+      break;
+    }
+  }
+  let selected = graph_samples[selected_index];
+  return vec2<f32>(selected.value, 0.0);
+}
+
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   if (global_id.x > 0u) {
@@ -208,7 +224,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let output_slot = graph_u32(node.output_slot);
     let derivative_slot = graph_u32(node.derivative_slot);
     let sample_count = graph_u32(node.sample_count);
-    if (node.op_id != 1.0 || sample_count < 2u) {
+    let is_table_linear = node.op_id == 1.0;
+    let is_table_step = node.op_id == 2.0;
+    if ((!is_table_linear && !is_table_step) || (is_table_linear && sample_count < 2u) || (is_table_step && sample_count < 1u)) {
       write_node_status(node_index, 4.0, node.op_id, 0.0);
       continue;
     }
@@ -229,7 +247,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       write_node_status(node_index, 3.0, x, node.domain_max);
       continue;
     }
-    let sampled = sample_table_linear(node, x);
+    var sampled = vec2<f32>(0.0, 0.0);
+    if (is_table_step) {
+      sampled = sample_table_step(node, x);
+    } else {
+      sampled = sample_table_linear(node, x);
+    }
     graph_slots[output_slot].value = sampled.x;
     graph_slots[output_slot].derivative = sampled.y;
     graph_slots[output_slot].status = 1.0;

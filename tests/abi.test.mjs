@@ -7,6 +7,7 @@ import {
   CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT,
   CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT,
   CLOSURE_LAW_GRAPH_NODE_ROW_LAYOUT,
+  CLOSURE_LAW_GRAPH_OP_IDS,
   CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT,
   CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT,
   OPTICAL_GPU_RECORD_ROW_LAYOUT,
@@ -22,6 +23,8 @@ import {
   SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
   SPH_GPU_RENDER_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
+  SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT,
+  SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
@@ -73,7 +76,10 @@ import {
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
+  ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
+  ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA
@@ -189,6 +195,9 @@ test('closure-law graph ABI exposes flat WebGPU row layouts', () => {
   assert.equal(CLOSURE_LAW_GRAPH_EDGE_ROW_LAYOUT.length % 4, 0);
   assert.equal(CLOSURE_LAW_GRAPH_SLOT_ROW_LAYOUT.length % 4, 0);
   assert.equal(CLOSURE_LAW_GRAPH_STATUS_ROW_LAYOUT.length % 4, 0);
+  assert.equal(CLOSURE_LAW_GRAPH_OP_IDS.tableLinear, 1);
+  assert.equal(CLOSURE_LAW_GRAPH_OP_IDS.tableStep, 2);
+  assert.equal(descriptor.opIds.tableStep, 2);
   assert.equal(descriptor.fullPhysicsValidation, false);
 
   const graph = createClosureLawGraphBuffers({
@@ -277,13 +286,20 @@ test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
 
 test('SPH GPU thermal material table ABI exposes closure-derived row layouts', () => {
   assert.equal(ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-material-table.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-closure-graph-set.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-closure-graph-bank.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-phase-response-table.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-execution.v0');
   assert.equal(ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-parity.v0');
   assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length, 4);
   assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT.length, 4);
+  assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.length, 16);
   assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length % 4, 0);
   assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT, [
     'materialId:f32',
     'segmentOffset:f32',
@@ -299,6 +315,32 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
     'energyEndJPerKg:f32',
     'temperatureStartK:f32',
     'temperatureEndK:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT, [
+    'materialId:f32',
+    'responseOffset:f32',
+    'responseCount:f32',
+    'status:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.slice(0, 8), [
+    'materialId:f32',
+    'segmentType:f32',
+    'temperatureGraphIndex:f32',
+    'status:f32',
+    'energyStartJPerKg:f32',
+    'energyEndJPerKg:f32',
+    'phaseFromId:f32',
+    'phaseToId:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT.slice(8), [
+    'densityFromKgPerM3:f32',
+    'densityToKgPerM3:f32',
+    'densityPolicyId:f32',
+    'stablePhasePolicyId:f32',
+    'fractionFromSlope:f32',
+    'fractionFromIntercept:f32',
+    'fractionToSlope:f32',
+    'fractionToIntercept:f32'
   ]);
   assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(2\) var<storage, read> material_records/);
   assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> out_sph_thermo/);

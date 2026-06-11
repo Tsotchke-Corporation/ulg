@@ -1658,3 +1658,28 @@ Not claimed:
 
 - Only table-linear closure nodes are implemented so far.
 - SPH/MLS-MPM kernels do not yet consume closure-law graph slot buffers.
+
+## 2026-06-11 Update - Carrier Closure Graph Bridge
+
+Completed:
+
+- Added `carrierGraphStepWgsl`, which drives the existing toy carrier WebGPU
+  step from flat closure-law graph buffers.
+- Updated the real WebGPU carrier runner to compile the closure artifact into a
+  flat graph and bind graph node/sample/slot/status buffers instead of the old
+  direct sample buffer.
+- Carrier WebGPU results now report a `closureLawGraph` metadata block with
+  `backend = webgpu-resident-flat-graph`.
+
+Latest validation:
+
+- PASS: focused carrier/closure/ABI tests passed `32/32`.
+- PASS: manual Chromium/WebGPU probe against `https://127.0.0.1:5173/` with
+  WebGPU flags reported `backend = webgpu`, carrier parity `pass`, max position
+  drift about `5.7e-9`, max velocity drift about `1.6e-9`, and invariant status
+  `pass`.
+
+Not claimed:
+
+- This is a compatibility bridge for the toy carrier runtime. It does not yet
+  move SPH/MLS-MPM material closure sampling onto the flat graph.

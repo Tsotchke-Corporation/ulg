@@ -1,7 +1,6 @@
-import { createClosureTableSampleBuffer } from '../../ulg-gpu-abi/src/index.js';
-import { carrierStepWgsl } from '../../ulg-gpu-abi/src/wgsl.js';
+import { carrierGraphStepWgsl } from '../../ulg-gpu-abi/src/wgsl.js';
 import { createCarrierRuntime, observeCarrierTopology } from './carrierRuntime.js';
-import { normalizeClosureTableSamples } from './closureHandle.js';
+import { compileClosureLawGraphFromTableClosure } from './closureLawGraph.js';
 import { computeInvariants, invariantDriftReport } from './invariants.js';
 
 export const ULG_CARRIER_WEBGPU_PARITY_SCHEMA = 'peercompute.ulg.carrier-webgpu-parity.v0';
@@ -59,35 +58,17 @@ function stateFromBodyArray(template, bodyArray, { step, dt }) {
   return state;
 }
 
-function derivativeAtSample(samples, index) {
-  if (samples[index].derivative != null) {
-    return samples[index].derivative;
-  }
-  const left = samples[Math.max(0, index - 1)];
-  const right = samples[Math.min(samples.length - 1, index + 1)];
-  if (right.axis === left.axis) {
-    return 0;
-  }
-  return (right.value - left.value) / (right.axis - left.axis);
-}
-
-function normalizeTableSamples(closureArtifact) {
-  const table = closureArtifact?.execution?.table || closureArtifact?.table || {};
-  const { samples } = normalizeClosureTableSamples(table);
-  return samples.map((sample, index) => ({
-    axis: finiteNumber(sample.axis),
-    value: finiteNumber(sample.value),
-    derivative: finiteNumber(derivativeAtSample(samples, index))
-  }));
-}
-
-function createParamsArray({ dt, sampleCount, step }) {
-  const buffer = new ArrayBuffer(16);
+function createCarrierGraphParamsArray({ dt, nodeCount, slotCount, statusCount, step }) {
+  const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
   view.setFloat32(0, dt, true);
-  view.setUint32(4, sampleCount, true);
-  view.setUint32(8, step, true);
-  view.setUint32(12, 0, true);
+  view.setUint32(4, nodeCount, true);
+  view.setUint32(8, slotCount, true);
+  view.setUint32(12, statusCount, true);
+  view.setUint32(16, step, true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
   return buffer;
 }
 
@@ -167,19 +148,32 @@ async function runWebGpuCarrierSteps({
   dt,
   toleranceProfile
 }) {
-  const samples = normalizeTableSamples(closureArtifact);
+  const closureGraph = compileClosureLawGraphFromTableClosure(closureArtifact, {
+    graphId: `${closureArtifact.closureId || 'carrier-closure'}:carrier-runtime`
+  });
   const bodyByteLength = 8 * Float32Array.BYTES_PER_ELEMENT;
-  const sampleArray = createClosureTableSampleBuffer(samples);
   const bodyBuffer = device.createBuffer({
     size: bodyByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
+  const nodeBuffer = device.createBuffer({
+    size: closureGraph.nodeRows.byteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
   const sampleBuffer = device.createBuffer({
-    size: sampleArray.byteLength,
+    size: closureGraph.sampleRows.byteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const slotBuffer = device.createBuffer({
+    size: closureGraph.slotRows.byteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const statusBuffer = device.createBuffer({
+    size: closureGraph.statusRows.byteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
   const paramsBuffer = device.createBuffer({
-    size: 16,
+    size: 32,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const readBuffer = device.createBuffer({
@@ -187,8 +181,11 @@ async function runWebGpuCarrierSteps({
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(bodyBuffer, 0, createBodyArray(initialState));
-  device.queue.writeBuffer(sampleBuffer, 0, sampleArray);
-  const module = device.createShaderModule({ code: carrierStepWgsl });
+  device.queue.writeBuffer(nodeBuffer, 0, closureGraph.nodeRows);
+  device.queue.writeBuffer(sampleBuffer, 0, closureGraph.sampleRows);
+  device.queue.writeBuffer(slotBuffer, 0, closureGraph.slotRows);
+  device.queue.writeBuffer(statusBuffer, 0, closureGraph.statusRows);
+  const module = device.createShaderModule({ code: carrierGraphStepWgsl });
   const pipeline = device.createComputePipeline({
     layout: 'auto',
     compute: { module, entryPoint: 'main' }
@@ -197,8 +194,11 @@ async function runWebGpuCarrierSteps({
     layout: pipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: bodyBuffer } },
-      { binding: 1, resource: { buffer: sampleBuffer } },
-      { binding: 2, resource: { buffer: paramsBuffer } }
+      { binding: 1, resource: { buffer: nodeBuffer } },
+      { binding: 2, resource: { buffer: sampleBuffer } },
+      { binding: 3, resource: { buffer: slotBuffer } },
+      { binding: 4, resource: { buffer: statusBuffer } },
+      { binding: 5, resource: { buffer: paramsBuffer } }
     ]
   });
   let before = cloneState(initialState);
@@ -206,7 +206,13 @@ async function runWebGpuCarrierSteps({
   const invariantSeries = [computeInvariants(before, closureHandle)];
   try {
     for (let step = 1; step <= steps; step += 1) {
-      device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({ dt, sampleCount: samples.length, step }));
+      device.queue.writeBuffer(paramsBuffer, 0, createCarrierGraphParamsArray({
+        dt,
+        nodeCount: closureGraph.nodeCount,
+        slotCount: closureGraph.slotCount,
+        statusCount: closureGraph.statusCount,
+        step
+      }));
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
@@ -225,7 +231,10 @@ async function runWebGpuCarrierSteps({
     }
   } finally {
     bodyBuffer.destroy?.();
+    nodeBuffer.destroy?.();
     sampleBuffer.destroy?.();
+    slotBuffer.destroy?.();
+    statusBuffer.destroy?.();
     paramsBuffer.destroy?.();
     readBuffer.destroy?.();
   }
@@ -236,6 +245,17 @@ async function runWebGpuCarrierSteps({
     steps,
     finalState: before,
     deltas,
+    closureLawGraph: {
+      schema: closureGraph.schema,
+      graphId: closureGraph.graphId,
+      nodeCount: closureGraph.nodeCount,
+      sampleCount: closureGraph.sampleCount,
+      slotCount: closureGraph.slotCount,
+      runtime: 'carrier-graph-step-wgsl',
+      backend: 'webgpu-resident-flat-graph',
+      scientificValidation: false,
+      fullPhysicsValidation: false
+    },
     invariantSeries,
     invariants: invariantDriftReport(invariantSeries, toleranceProfile)
   };

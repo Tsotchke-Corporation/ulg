@@ -1686,3 +1686,19 @@ Validation status:
 - PASS: manual Chromium/WebGPU probe reported `backend = webgpu`,
   `webgpuStatus.status = webgpu-executed`, parity `pass`, `maxSlotAbs = 0`,
   and `maxStatusAbs = 0`.
+
+Carrier graph bridge gates:
+
+- `tests/webgpuCarrierKernel.test.mjs` now checks `carrierGraphStepWgsl`
+  declares and consumes flat closure-law graph node/sample/slot/status buffers.
+- Manual Chromium/WebGPU probe ran the existing optional carrier runtime through
+  the graph-backed WebGPU kernel and passed CPU/WebGPU carrier parity.
+
+Validation status:
+
+- PASS: `node --test tests/webgpuCarrierKernel.test.mjs
+  tests/closureLawGraph.test.mjs tests/abi.test.mjs` (`32/32`).
+- PASS: manual Chromium/WebGPU carrier probe reported `backend = webgpu`,
+  `webgpuStatus.status = webgpu-executed`, carrier parity `pass`,
+  `closureLawGraph.backend = webgpu-resident-flat-graph`, and invariant status
+  `pass`.

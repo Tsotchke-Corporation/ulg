@@ -1379,6 +1379,67 @@ Failures / open questions:
   null.
 - No push was attempted.
 
+## 2026-06-11 10:03:11 AKDT - Carrier runtime closure graph bridge
+
+Prompt handled:
+
+- Continued the flat closure-law graph performance track after committing
+  `c2cec66`. Goal was to make an existing runtime path consume the flat graph
+  buffers rather than leaving the graph evaluator isolated.
+
+Actions:
+
+- Added `carrierGraphStepWgsl`, a graph-backed variant of the existing toy
+  carrier WebGPU step.
+- Updated `runWebGpuCarrierSteps()` to compile the table-interpolation closure
+  artifact into a flat closure-law graph and upload graph node/sample/slot/status
+  buffers.
+- The carrier kernel now samples derivatives through graph slots and status
+  rows instead of binding the raw closure sample table directly.
+- Added carrier test coverage to ensure `carrierGraphStepWgsl` declares the
+  flat graph buffers.
+- Ran a real Chromium/WebGPU probe against the live HTTPS Vite server to execute
+  the graph-backed carrier path.
+- Updated perf/status/tests plans with the bridge checkpoint and evidence.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/webgpuCarrierKernel.js`
+- `tests/webgpuCarrierKernel.test.mjs`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/webgpuCarrierKernel.js`
+- `node --check tests/webgpuCarrierKernel.test.mjs`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --test tests/webgpuCarrierKernel.test.mjs tests/closureLawGraph.test.mjs tests/abi.test.mjs`
+- Manual Chromium/WebGPU probe with `--enable-unsafe-webgpu`,
+  `--ignore-gpu-blocklist`, `--enable-features=Vulkan,UseSkiaRenderer`, and
+  `--use-vulkan=native` against `https://127.0.0.1:5173/`.
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+
+Validation:
+
+- PASS: syntax checks for carrier runtime, carrier test, and WGSL.
+- PASS: focused ABI/closure graph/carrier tests passed `32/32`.
+- PASS: manual browser WebGPU carrier probe reported `backend = webgpu`,
+  `webgpuStatus.status = webgpu-executed`, carrier parity `pass`, max position
+  drift `5.655303558782521e-9`, max velocity drift
+  `1.5903938469993828e-9`, `closureLawGraph.backend =
+  webgpu-resident-flat-graph`, and invariant status `pass`.
+
+Failures / open questions:
+
+- This bridge covers the toy carrier runtime only. SPH thermal/phase/mechanics,
+  optical, reaction, and nuclear/radiation kernels still need graph-backed
+  closure slots.
+- No push was attempted.
+
 ## 2026-06-10 20:31:18 AKDT - Scalar-relativistic interband optical response
 
 Prompt:

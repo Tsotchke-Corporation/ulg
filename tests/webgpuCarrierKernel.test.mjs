@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { carrierStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+import { carrierGraphStepWgsl, carrierStepWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import { createClosureHandle } from '../src/runtime/closureHandle.js';
 import { createCarrierRuntime, createDefaultCarrierState } from '../src/runtime/carrierRuntime.js';
 import {
@@ -53,6 +53,16 @@ test('carrier-step WGSL exposes storage buffers, table sampling, and compute ent
   assert.match(carrierStepWgsl, /var<storage, read> samples: array<ClosureTableSample>/);
   assert.match(carrierStepWgsl, /fn sample_derivative/);
   assert.match(carrierStepWgsl, /@compute @workgroup_size\(1\)/);
+});
+
+test('carrier graph-step WGSL consumes flat closure-law graph buffers', () => {
+  assert.match(carrierGraphStepWgsl, /struct ClosureLawGraphNode/);
+  assert.match(carrierGraphStepWgsl, /var<storage, read> graph_nodes/);
+  assert.match(carrierGraphStepWgsl, /var<storage, read> graph_samples/);
+  assert.match(carrierGraphStepWgsl, /var<storage, read_write> graph_slots/);
+  assert.match(carrierGraphStepWgsl, /var<storage, read_write> graph_status/);
+  assert.match(carrierGraphStepWgsl, /fn evaluate_derivative_from_graph/);
+  assert.match(carrierGraphStepWgsl, /@compute @workgroup_size\(1\)/);
 });
 
 test('optional WebGPU carrier path returns CPU reference when WebGPU is not requested', async () => {

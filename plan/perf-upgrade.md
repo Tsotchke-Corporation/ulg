@@ -294,6 +294,33 @@ Remaining performance target:
   into the same graph rows and consume slot buffers from SPH/MLS-MPM kernels
   without per-frame CPU graph traversal.
 
+## 2026-06-11 Checkpoint - Carrier Runtime Uses Flat Closure Graph Buffers
+
+Implemented:
+
+- Added `carrierGraphStepWgsl`, a compatibility carrier kernel that evaluates
+  the toy two-body closure through flat closure-law graph node/sample/slot/status
+  buffers instead of binding raw closure samples directly.
+- Updated the real WebGPU carrier runner to CPU-compile the closure artifact
+  into a flat graph before upload.
+- The carrier WebGPU result now reports `closureLawGraph.backend =
+  webgpu-resident-flat-graph` so probes can distinguish graph-backed execution
+  from the older direct-sample kernel.
+
+Evidence:
+
+- Focused ABI/closure graph/carrier tests passed `32/32`.
+- Manual Chromium/WebGPU probe against the live HTTPS Vite server passed with
+  `backend = webgpu`, `webgpuStatus.status = webgpu-executed`, carrier parity
+  `pass`, max position drift about `5.7e-9`, max velocity drift about `1.6e-9`,
+  and invariant status `pass`.
+
+Remaining performance target:
+
+- This bridge covers the toy carrier runtime only. SPH thermal, phase,
+  mechanics, optical, reaction, and nuclear/radiation kernels still need to
+  consume the flat closure graph/slot buffers.
+
 ## 2026-06-11 Checkpoint - Resident Render Rows And Layout-Limit Fixes
 
 Implemented:

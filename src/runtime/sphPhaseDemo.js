@@ -353,7 +353,12 @@ export function createSphPhaseDemo(options = {}) {
     demo.materialProperties[key] = closure.properties;
   }
   demo.reactionNote = discovery.note;
-  const reactionContactRadiusM = gridSpacingM * 1.2;
+  // Contact radius for "the two materials are touching". In MLS-MPM two materials transfer momentum
+  // through shared grid nodes, so distinct condensed bodies come to rest ~1 grid cell apart (they
+  // never interpenetrate to particle-spacing range). The reaction must use that mechanical contact
+  // scale — a couple of grid cells — or two blocks resting against each other would sit just outside
+  // a tight radius and never react (the bug this fixes). ~2.5 cells spans the contact gap.
+  const reactionContactRadiusM = gridSpacingM * 2.5;
   const reactionTemperatureOf = (p) => equilibriumFromSpecificEnergy(demo.materialProperties[p.material], p.specificInternalEnergyJPerKg).temperatureK;
 
   return {

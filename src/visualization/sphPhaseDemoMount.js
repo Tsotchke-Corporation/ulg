@@ -540,7 +540,15 @@ export function mountSphPhaseDemoOverlay() {
 
   function mlsMpmGpuParticleSignature(packed) {
     return packed
-      ? [packed.particleCount, packed.step, packed.time, packed.mechanics?.byteLength ?? 0].join('|')
+      ? [
+        packed.particleCount,
+        packed.step,
+        packed.time,
+        packed.mechanics?.byteLength ?? 0,
+        packed.mechanicsDtS ?? 0,
+        packed.soundSpeedScale ?? 0,
+        packed.minGasSoundSpeedMPerS ?? 0
+      ].join('|')
       : null;
   }
 

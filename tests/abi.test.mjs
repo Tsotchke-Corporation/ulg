@@ -183,7 +183,7 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
     ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
     'peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0'
   );
-  assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length, 24);
+  assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length, 32);
   assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(0, 4), [
     'deformationF00:f32',
@@ -196,6 +196,14 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
     'restVolumeM3:f32',
     'solidFlag:f32',
     'status:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(22, 28), [
+    'effectiveBulkModulusPa:f32',
+    'shearModulusPa:f32',
+    'lameLambdaPa:f32',
+    'soundSpeedMPerS:f32',
+    'eosModelId:f32',
+    'constitutiveStatus:f32'
   ]);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
@@ -226,6 +234,8 @@ test('MLS-MPM GPU P2G grid projection ABI exposes f32x4-aligned grid rows', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_nodes: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn quadratic_weights/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
 });
 

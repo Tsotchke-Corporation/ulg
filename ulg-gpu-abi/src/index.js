@@ -131,8 +131,16 @@ export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
   'restVolumeM3:f32',
   'solidFlag:f32',
   'status:f32',
+  'effectiveBulkModulusPa:f32',
+  'shearModulusPa:f32',
+  'lameLambdaPa:f32',
+  'soundSpeedMPerS:f32',
+  'eosModelId:f32',
+  'constitutiveStatus:f32',
   'pad0:f32',
-  'pad1:f32'
+  'pad1:f32',
+  'pad2:f32',
+  'pad3:f32'
 ]);
 export const MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT = Object.freeze([
   'massKg:f32',

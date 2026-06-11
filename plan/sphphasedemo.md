@@ -1023,3 +1023,42 @@ layer, not particles:
    export/import per side.
 8. Add mechanical/optical closure schemas with overclaim guards.
 9. Only after this passes, wire the conservative SPH phase carrier.
+
+## 2026-06-10 GPU MLS-MPM Stress P2G Checkpoint
+
+Completed since the prior GPU P2G checkpoint:
+
+- The mechanics particle buffer now stores closure-derived mechanical constants
+  per macro-particle: effective bulk modulus, shear modulus, Lame lambda,
+  sound speed, EOS model id, and constitutive status.
+- The live demo propagates its CFL-derived sound-speed/modulus scale into GPU
+  particle packing, so the GPU projection uses the same reduced but
+  first-principles-derived material stiffness as the current interactive
+  carrier.
+- The WebGPU P2G projection now includes stress momentum:
+  `aff = m*C + (-dt*V*4/dx^2)*sigma`.
+- Fluid stress uses pressure derived from packed rest density, current
+  density, EOS model, and sound speed.
+- Solid stress uses the fixed-corotated elastic model with packed shear modulus
+  and Lame lambda.
+
+Validation evidence:
+
+- Focused ABI/SPH-buffer/P2G/mechanics tests passed `32/32`.
+- Browser e2e for the default derived-material SPH demo passed against the
+  live HTTPS server.
+- Live WebGPU probe reported P2G `webgpu-executed`, parity `pass`,
+  `maxGridAbs=0.00006866455078125`, `dt=0.0005`, and mechanics stride `32`.
+- Full `npm test` passed `258/258`; production build passed with the known
+  large-chunk warning.
+
+Remaining before this satisfies the demo's physical acceptance criteria:
+
+- Implement WebGPU grid velocity update with gravity, CFL clamp, sealed-box
+  wall/contact constraints, and pressure/steam diagnostics.
+- Implement WebGPU G2P reconstruction for velocity, affine `C`, deformation
+  gradient `F`, and volume ratio `J`.
+- Move thermal conduction, six wall heat exchange, phase equilibrium,
+  vapor/condensation pressure, and reaction updates onto GPU-resident buffers.
+- Keep all material properties and optical behavior closure-derived; no
+  per-material visual or mechanical patches.

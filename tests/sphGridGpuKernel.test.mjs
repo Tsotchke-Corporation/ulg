@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mlsMpmP2gGridProjectionWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -28,20 +29,37 @@ function manualBuffers({
   velocity = [2, 3, 4],
   massKg = 8,
   affineC = [0, 0, 0, 0, 0, 0, 0, 0, 0],
-  smoothingLengthM = 1
+  smoothingLengthM = 1,
+  restDensityKgPerM3 = 8,
+  volumeRatioJ = 1,
+  restVolumeM3 = massKg / restDensityKgPerM3,
+  solidFlag = 1,
+  effectiveBulkModulusPa = 0,
+  shearModulusPa = 0,
+  lameLambdaPa = 0,
+  soundSpeedMPerS = 0,
+  eosModelId = 0,
+  mechanicsDtS = 0
 } = {}) {
   const state = new Float32Array([
     position[0], position[1], position[2], massKg,
     velocity[0], velocity[1], velocity[2], 123
   ]);
   const thermo = new Float32Array(12);
-  const mechanics = new Float32Array(24);
+  thermo[3] = restDensityKgPerM3;
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
   mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], 0);
   mechanics.set(affineC, 9);
-  mechanics[18] = 1;
-  mechanics[19] = 1;
-  mechanics[20] = 1;
+  mechanics[18] = volumeRatioJ;
+  mechanics[19] = restVolumeM3;
+  mechanics[20] = solidFlag;
   mechanics[21] = 1;
+  mechanics[22] = effectiveBulkModulusPa;
+  mechanics[23] = shearModulusPa;
+  mechanics[24] = lameLambdaPa;
+  mechanics[25] = soundSpeedMPerS;
+  mechanics[26] = eosModelId;
+  mechanics[27] = 1;
   return {
     sphParticleState: {
       schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -57,6 +75,7 @@ function manualBuffers({
       particleCount: 1,
       step: 0,
       time: 0,
+      mechanicsDtS,
       mechanics
     }
   };
@@ -102,6 +121,8 @@ test('MLS-MPM P2G grid projection WGSL declares gather-form grid bindings', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_thermo/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> mls_mechanics/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_nodes/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /for \(var particle_index/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
 });
@@ -121,7 +142,7 @@ test('CPU MLS-MPM P2G grid projection conserves mass and linear momentum without
 
   assert.equal(projection.schema, ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA);
   assert.equal(projection.backend, 'cpu-reference');
-  assert.equal(projection.kernelScope, 'gather-form-p2g-mass-momentum-projection');
+  assert.equal(projection.kernelScope, 'gather-form-p2g-stress-momentum-projection');
   assert.equal(projection.gridNodeStrideFloats, 8);
   nearlyEqual(summary.mass, 8, 1e-5);
   nearlyEqual(summary.momentum[0], 16, 1e-5);
@@ -157,6 +178,37 @@ test('CPU MLS-MPM P2G grid projection includes APIC affine velocity contribution
   nearlyEqual(projection.gridNodes[centerOffset + 1], 8 * centerWeight * (2 + nodeMinusParticleX), 1e-5);
   nearlyEqual(projection.gridNodes[centerOffset + 2], 8 * centerWeight * 3, 1e-5);
   nearlyEqual(projection.gridNodes[centerOffset + 3], 8 * centerWeight * 4, 1e-5);
+});
+
+test('CPU MLS-MPM P2G grid projection includes derived pressure stress contribution per node', () => {
+  const { sphParticleState, mlsMpmParticleState } = manualBuffers({
+    velocity: [0, 0, 0],
+    massKg: 8,
+    restDensityKgPerM3: 4,
+    restVolumeM3: 1,
+    volumeRatioJ: 1,
+    solidFlag: 0,
+    soundSpeedMPerS: 10,
+    eosModelId: 2,
+    mechanicsDtS: 0.1
+  });
+  const projection = projectMlsMpmP2gGridCpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridSpacingM: 1,
+    boxDimsM: [2, 2, 2]
+  });
+  const gridSpec = createMlsMpmGridSpec({ gridSpacingM: 1, boxDimsM: [2, 2, 2] });
+  const centerOffset = nodeOffset(gridSpec, 1, 1, 1);
+  const centerWeight = 0.6875 ** 3;
+  const expectedPressurePa = 400;
+  const expectedStressScale = -0.1 * 1 * 4;
+  const expectedAffineDiagonal = expectedStressScale * -expectedPressurePa;
+  const expectedNodeMomentum = centerWeight * expectedAffineDiagonal * -0.25;
+
+  nearlyEqual(projection.gridNodes[centerOffset + 1], expectedNodeMomentum, 1e-5);
+  nearlyEqual(projection.gridNodes[centerOffset + 2], expectedNodeMomentum, 1e-5);
+  nearlyEqual(projection.gridNodes[centerOffset + 3], expectedNodeMomentum, 1e-5);
 });
 
 test('optional MLS-MPM P2G grid projection returns CPU reference when WebGPU is not requested', async () => {

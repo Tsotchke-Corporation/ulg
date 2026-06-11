@@ -8347,3 +8347,90 @@ Failures / open questions:
   still need WebGPU kernels.
 - The CPU carrier is still authoritative for the visual simulation state.
 - No push was attempted.
+
+## 2026-06-10 23:59:25 AKDT - WebGPU stress-aware MLS-MPM P2G
+
+Prompt:
+
+- Continue the GPU-resident core technology path. Breaking the demo temporarily
+  was acceptable if it sped up the core refactor.
+
+Actions:
+
+- Extended the MLS-MPM particle mechanics ABI from 24 to 32 f32 values while
+  preserving vec4 row alignment.
+- Added packed per-particle constitutive constants derived from material
+  closures: effective bulk modulus, shear modulus, Lame lambda, sound speed,
+  EOS model id, and constitutive status.
+- Stored the live demo's CFL-derived sound-speed/modulus scale on
+  `state.gpuMechanics`, then used that metadata when packing GPU mechanics rows.
+- Added `dt` to the P2G WebGPU parameter block.
+- Ported fluid pressure and fixed-corotated solid stress into
+  `mlsMpmP2gGridProjectionWgsl`.
+- Updated CPU and WebGPU P2G projection to transfer
+  `m*v + (m*C + stressTerm)*dpos`, matching the CPU carrier's MLS-MPM stress
+  formula for this projection stage.
+- Updated scene and overlay GPU signatures so mechanics buffers are refreshed
+  when timestep/stiffness metadata changes.
+- Updated ABI, SPH-buffer, P2G, mechanics, and browser e2e expectations for the
+  32-float mechanics row and stress-aware projection scope.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphGpuBuffers.js`
+- `src/runtime/sph/sphGridGpuKernel.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphGpuBuffers.test.mjs`
+- `tests/sphGridGpuKernel.test.mjs`
+- `tests/sphMechanicsGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphGpuBuffers.js`
+- `node --check src/runtime/sph/sphGridGpuKernel.js`
+- `node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check tests/sphGridGpuKernel.test.mjs && node --test tests/abi.test.mjs tests/sphGpuBuffers.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMechanicsGpuKernel.test.mjs`
+- `node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/abi.test.mjs tests/sphGpuBuffers.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMechanicsGpuKernel.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- Browser HTTPS/WebGPU probe against `https://127.0.0.1:5173/`
+- `npm test`
+- `npm run build`
+
+Validation:
+
+- PASS: focused ABI/SPH-buffer/P2G/mechanics tests passed `32/32`.
+- PASS: focused SPH browser e2e passed against the live HTTPS server (`1/1`).
+- PASS: Browser HTTPS/WebGPU probe reported mechanics stride `32`,
+  first-particle derived constants
+  `bulk=2336433.25`, `shear=817751.625`, `lambda=1791265.5`,
+  `soundSpeed=48.24279022216797`, mechanics `backend=webgpu`,
+  mechanics `webgpuStatus=webgpu-executed`, mechanics parity `pass`, P2G
+  `backend=webgpu`, P2G `webgpuStatus=webgpu-executed`, P2G parity `pass`,
+  `maxGridAbs=0.00006866455078125`, `tolerance=0.05`,
+  `kernelScope=gather-form-p2g-stress-momentum-projection`, `dt=0.0005`,
+  `gridNodeCount=13824`, and `particleCount=152`.
+- PASS: `npm test` passed `258/258`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+
+Failures / open questions:
+
+- This still does not make the visual simulation GPU-authoritative.
+- Grid velocity update, gravity, CFL clamp, wall/contact constraints, and G2P
+  reconstruction remain the next MLS-MPM GPU kernels.
+- Thermal conduction, six wall heat ledgers, phase equilibrium, reactions, and
+  compact diagnostics are still CPU-side for the live demo.
+- `stressProjectionValidation`, `gridValidation`, `g2pValidation`,
+  `sphValidation`, `phaseChangeValidation`, and `fullPhysicsValidation` remain
+  false.
+- No push was attempted.

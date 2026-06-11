@@ -1344,7 +1344,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   );
   expect(derivedSummary.mlsMpmGpuParticleState.schema).toBe('peercompute.ulg.mls-mpm-gpu-particle-buffer.v0');
   expect(derivedSummary.mlsMpmGpuParticleState.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
-  expect(derivedSummary.mlsMpmGpuParticleState.mechanicsStrideFloats).toBe(24);
+  expect(derivedSummary.mlsMpmGpuParticleState.mechanicsStrideFloats).toBe(32);
   expect(derivedSummary.mlsMpmGpuParticleState.firstSolidFlag).toBe(1);
   expect(derivedSummary.mlsMpmGpuParticleState.firstStatus).toBe(1);
   expect(derivedSummary.mlsMpmGpuParticleUpload.schema).toBe('peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0');
@@ -1357,7 +1357,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmMechanicsPrediction.predictionSchema).toBe('peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0');
   expect(derivedSummary.mlsMpmMechanicsPrediction.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
   expect(derivedSummary.mlsMpmMechanicsPrediction.stateStrideFloats).toBe(8);
-  expect(derivedSummary.mlsMpmMechanicsPrediction.mechanicsStrideFloats).toBe(24);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.mechanicsStrideFloats).toBe(32);
   expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.mlsMpmMechanicsPrediction.backend);
   expect([
     'blocked-webgpu-unavailable',

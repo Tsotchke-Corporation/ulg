@@ -65,6 +65,7 @@ test('MLS-MPM mechanics prediction WGSL declares vec4 storage buffers and comput
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> mls_mechanics/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read_write> out_mls_mechanics/);
+  assert.match(mlsMpmMechanicsPredictWgsl, /particle_index \* 8u/);
   assert.match(mlsMpmMechanicsPredictWgsl, /fn det3/);
   assert.match(mlsMpmMechanicsPredictWgsl, /@compute @workgroup_size\(64\)/);
 });
@@ -99,6 +100,11 @@ test('CPU MLS-MPM mechanics prediction updates position, velocity, F, and J only
   nearlyEqual(result.mechanics[18], result.mechanics[0] * result.mechanics[4] * result.mechanics[8], 2e-4);
   assert.equal(result.mechanics[19], beforeMechanics[19], 'rest volume is copied');
   assert.equal(result.mechanics[20], beforeMechanics[20], 'solid flag is copied');
+  assert.equal(result.mechanics[22], beforeMechanics[22], 'effective bulk modulus is copied');
+  assert.equal(result.mechanics[23], beforeMechanics[23], 'shear modulus is copied');
+  assert.equal(result.mechanics[24], beforeMechanics[24], 'Lame lambda is copied');
+  assert.equal(result.mechanics[25], beforeMechanics[25], 'sound speed is copied');
+  assert.equal(result.mechanics[26], beforeMechanics[26], 'EOS model id is copied');
   assert.equal(result.p2gValidation, false);
   assert.equal(result.gridValidation, false);
   assert.equal(result.g2pValidation, false);

@@ -192,7 +192,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   }
 
   let state_base = particle_index * 2u;
-  let mechanics_base = particle_index * 6u;
+  let mechanics_base = particle_index * 8u;
   let pos_mass = sph_state[state_base];
   let vel_u = sph_state[state_base + 1u];
   let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;
@@ -233,6 +233,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row3 = mls_mechanics[mechanics_base + 3u];
   let row4 = mls_mechanics[mechanics_base + 4u];
   let row5 = mls_mechanics[mechanics_base + 5u];
+  let row6 = mls_mechanics[mechanics_base + 6u];
+  let row7 = mls_mechanics[mechanics_base + 7u];
 
   let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
   let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
@@ -281,6 +283,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   out_mls_mechanics[mechanics_base + 3u] = vec4<f32>(c10, c11, c12, c20);
   out_mls_mechanics[mechanics_base + 4u] = vec4<f32>(c21, c22, next_j, row4.w);
   out_mls_mechanics[mechanics_base + 5u] = row5;
+  out_mls_mechanics[mechanics_base + 6u] = row6;
+  out_mls_mechanics[mechanics_base + 7u] = row7;
 }
 `;
 
@@ -294,6 +298,16 @@ struct P2gProjectionParams {
   shift: u32,
   grid_spacing_m: f32,
   inv_grid_spacing_m: f32,
+  dt: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+struct StressRows {
+  x: vec3<f32>,
+  y: vec3<f32>,
+  z: vec3<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -314,6 +328,81 @@ fn weight_at(weights: vec3<f32>, offset: i32) -> f32 {
   if (offset == 1) { return weights.y; }
   if (offset == 2) { return weights.z; }
   return 0.0;
+}
+
+fn det3(
+  f00: f32, f01: f32, f02: f32,
+  f10: f32, f11: f32, f12: f32,
+  f20: f32, f21: f32, f22: f32
+) -> f32 {
+  return f00 * (f11 * f22 - f12 * f21)
+    - f01 * (f10 * f22 - f12 * f20)
+    + f02 * (f10 * f21 - f11 * f20);
+}
+
+fn packed_pressure(density_kg_per_m3: f32, rest_density_kg_per_m3: f32, sound_speed_m_per_s: f32, eos_model_id: f32) -> f32 {
+  if (density_kg_per_m3 <= 0.0 || rest_density_kg_per_m3 <= 0.0 || sound_speed_m_per_s <= 0.0) {
+    return 0.0;
+  }
+  if (eos_model_id > 1.5 && eos_model_id < 2.5) {
+    return max(0.0, sound_speed_m_per_s * sound_speed_m_per_s * (density_kg_per_m3 - rest_density_kg_per_m3));
+  }
+  if (eos_model_id > 0.5 && eos_model_id < 1.5) {
+    let ratio = density_kg_per_m3 / max(rest_density_kg_per_m3, 1.0e-9);
+    return (rest_density_kg_per_m3 * sound_speed_m_per_s * sound_speed_m_per_s / 7.0)
+      * (pow(ratio, 7.0) - 1.0);
+  }
+  return 0.0;
+}
+
+fn corotated_stress(
+  f00: f32, f01: f32, f02: f32,
+  f10: f32, f11: f32, f12: f32,
+  f20: f32, f21: f32, f22: f32,
+  mu: f32,
+  lambda: f32
+) -> StressRows {
+  var r0 = f00; var r1 = f01; var r2 = f02;
+  var r3 = f10; var r4 = f11; var r5 = f12;
+  var r6 = f20; var r7 = f21; var r8 = f22;
+  for (var it = 0u; it < 12u; it = it + 1u) {
+    let rd = det3(r0, r1, r2, r3, r4, r5, r6, r7, r8);
+    if (abs(rd) < 1.0e-12) {
+      break;
+    }
+    let id = 1.0 / rd;
+    let t0 = (r4 * r8 - r5 * r7) * id; let t3 = (r2 * r7 - r1 * r8) * id; let t6 = (r1 * r5 - r2 * r4) * id;
+    let t1 = (r5 * r6 - r3 * r8) * id; let t4 = (r0 * r8 - r2 * r6) * id; let t7 = (r2 * r3 - r0 * r5) * id;
+    let t2 = (r3 * r7 - r4 * r6) * id; let t5 = (r1 * r6 - r0 * r7) * id; let t8 = (r0 * r4 - r1 * r3) * id;
+    let n0 = 0.5 * (r0 + t0); let n1 = 0.5 * (r1 + t1); let n2 = 0.5 * (r2 + t2);
+    let n3 = 0.5 * (r3 + t3); let n4 = 0.5 * (r4 + t4); let n5 = 0.5 * (r5 + t5);
+    let n6 = 0.5 * (r6 + t6); let n7 = 0.5 * (r7 + t7); let n8 = 0.5 * (r8 + t8);
+    let diff = abs(n0 - r0) + abs(n4 - r4) + abs(n8 - r8);
+    r0 = n0; r1 = n1; r2 = n2;
+    r3 = n3; r4 = n4; r5 = n5;
+    r6 = n6; r7 = n7; r8 = n8;
+    if (diff < 1.0e-10) {
+      break;
+    }
+  }
+
+  let j = det3(f00, f01, f02, f10, f11, f12, f20, f21, f22);
+  if (abs(j) < 1.0e-12) {
+    return StressRows(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  }
+  let jid = 1.0 / j;
+  let ft0 = (f11 * f22 - f12 * f21) * jid; let ft3 = (f02 * f21 - f01 * f22) * jid; let ft6 = (f01 * f12 - f02 * f11) * jid;
+  let ft1 = (f12 * f20 - f10 * f22) * jid; let ft4 = (f00 * f22 - f02 * f20) * jid; let ft7 = (f02 * f10 - f00 * f12) * jid;
+  let ft2 = (f10 * f21 - f11 * f20) * jid; let ft5 = (f01 * f20 - f00 * f21) * jid; let ft8 = (f00 * f11 - f01 * f10) * jid;
+  let c = lambda * (j - 1.0) * j;
+  let p0 = 2.0 * mu * (f00 - r0) + c * ft0; let p1 = 2.0 * mu * (f01 - r1) + c * ft1; let p2 = 2.0 * mu * (f02 - r2) + c * ft2;
+  let p3 = 2.0 * mu * (f10 - r3) + c * ft3; let p4 = 2.0 * mu * (f11 - r4) + c * ft4; let p5 = 2.0 * mu * (f12 - r5) + c * ft5;
+  let p6 = 2.0 * mu * (f20 - r6) + c * ft6; let p7 = 2.0 * mu * (f21 - r7) + c * ft7; let p8 = 2.0 * mu * (f22 - r8) + c * ft8;
+  return StressRows(
+    vec3<f32>((p0 * f00 + p1 * f01 + p2 * f02) * jid, (p0 * f10 + p1 * f11 + p2 * f12) * jid, (p0 * f20 + p1 * f21 + p2 * f22) * jid),
+    vec3<f32>((p3 * f00 + p4 * f01 + p5 * f02) * jid, (p3 * f10 + p4 * f11 + p5 * f12) * jid, (p3 * f20 + p4 * f21 + p5 * f22) * jid),
+    vec3<f32>((p6 * f00 + p7 * f01 + p8 * f02) * jid, (p6 * f10 + p7 * f11 + p8 * f12) * jid, (p6 * f20 + p7 * f21 + p8 * f22) * jid)
+  );
 }
 
 @compute @workgroup_size(64)
@@ -342,10 +431,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
     let state_base = particle_index * 2u;
-    let mechanics_base = particle_index * 6u;
+    let thermo_base = particle_index * 3u;
+    let mechanics_base = particle_index * 8u;
     let pos_mass = sph_state[state_base];
     let vel_u = sph_state[state_base + 1u];
-    let _thermo_status = sph_thermo[particle_index * 3u + 2u].z;
+    let thermo0 = sph_thermo[thermo_base];
+    let _thermo_status = sph_thermo[thermo_base + 2u].z;
     let p_grid = pos_mass.xyz * params.inv_grid_spacing_m;
     let base_x = i32(floor(p_grid.x - 0.5));
     let base_y = i32(floor(p_grid.y - 0.5));
@@ -365,19 +456,63 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       continue;
     }
 
+    let row0 = mls_mechanics[mechanics_base];
+    let row1 = mls_mechanics[mechanics_base + 1u];
     let row2 = mls_mechanics[mechanics_base + 2u];
     let row3 = mls_mechanics[mechanics_base + 3u];
     let row4 = mls_mechanics[mechanics_base + 4u];
+    let row5 = mls_mechanics[mechanics_base + 5u];
+    let row6 = mls_mechanics[mechanics_base + 6u];
+    let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
+    let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
+    let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
     let c00 = row2.y; let c01 = row2.z; let c02 = row2.w;
     let c10 = row3.x; let c11 = row3.y; let c12 = row3.z;
     let c20 = row3.w; let c21 = row4.x; let c22 = row4.y;
     let dpos = node_pos - pos_mass.xyz;
-    let apic = vec3<f32>(
-      c00 * dpos.x + c01 * dpos.y + c02 * dpos.z,
-      c10 * dpos.x + c11 * dpos.y + c12 * dpos.z,
-      c20 * dpos.x + c21 * dpos.y + c22 * dpos.z
+    let volume = max(row4.w * max(row4.z, 1.0e-9), 0.0);
+    var sigma = StressRows(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    if (params.dt != 0.0 && volume > 0.0) {
+      if (row5.x > 0.5 && row5.w > 0.0) {
+        sigma = corotated_stress(
+          f00, f01, f02,
+          f10, f11, f12,
+          f20, f21, f22,
+          row5.w,
+          row6.x
+        );
+      } else {
+        let density = pos_mass.w / max(volume, 1.0e-30);
+        let pressure = packed_pressure(density, thermo0.w, row6.y, row6.z);
+        sigma = StressRows(
+          vec3<f32>(-pressure, 0.0, 0.0),
+          vec3<f32>(0.0, -pressure, 0.0),
+          vec3<f32>(0.0, 0.0, -pressure)
+        );
+      }
+    }
+    let stress_scale = -params.dt * volume * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
+    let aff_x = vec3<f32>(
+      pos_mass.w * c00 + stress_scale * sigma.x.x,
+      pos_mass.w * c01 + stress_scale * sigma.x.y,
+      pos_mass.w * c02 + stress_scale * sigma.x.z
     );
-    let particle_momentum = pos_mass.w * (vel_u.xyz + apic);
+    let aff_y = vec3<f32>(
+      pos_mass.w * c10 + stress_scale * sigma.y.x,
+      pos_mass.w * c11 + stress_scale * sigma.y.y,
+      pos_mass.w * c12 + stress_scale * sigma.y.z
+    );
+    let aff_z = vec3<f32>(
+      pos_mass.w * c20 + stress_scale * sigma.z.x,
+      pos_mass.w * c21 + stress_scale * sigma.z.y,
+      pos_mass.w * c22 + stress_scale * sigma.z.z
+    );
+    let affine_momentum = vec3<f32>(
+      dot(aff_x, dpos),
+      dot(aff_y, dpos),
+      dot(aff_z, dpos)
+    );
+    let particle_momentum = pos_mass.w * vel_u.xyz + affine_momentum;
     mass = mass + weight * pos_mass.w;
     momentum = momentum + weight * particle_momentum;
   }

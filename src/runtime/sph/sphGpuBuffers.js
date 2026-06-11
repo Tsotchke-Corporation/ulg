@@ -31,7 +31,15 @@ export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
 });
 
 const AVOGADRO = 6.02214076e23;
+const R_GAS = 8.314462618;
+const DEFAULT_SOUND_SPEED_SCALE = 1;
+const DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S = 40;
 const PHASE_FRACTION_ORDER = ['solid', 'liquid', 'gas', 'plasma'];
+const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
+  disabled: 0,
+  taitCondensed: 1,
+  gasLinearized: 2
+});
 
 const GPU_BUFFER_USAGE = {
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
@@ -80,7 +88,8 @@ function finiteMatrix9(value, fallback) {
   return source.map((entry) => finiteNumber(entry, 0));
 }
 
-function solidFlagFor(particle, eq) {
+function solidFlagFor(particle, eq, constitutive = null) {
+  if (constitutive) return constitutive.solid ? 1 : 0;
   if (particle.mpmSolid === true) return 1;
   if (particle.mpmSolid === false) return 0;
   return eq?.stablePhase === 'solid' ? 1 : 0;
@@ -107,6 +116,91 @@ function equilibriumForParticle(particle, properties) {
     };
   }
   return equilibriumFromSpecificEnergy(properties, finiteNumber(particle.specificInternalEnergyJPerKg, 0));
+}
+
+function phasePropertiesFor(properties, phase) {
+  if (!properties?.phases?.length) return null;
+  return properties.phases.find((candidate) => candidate.name === phase) || properties.phases[0];
+}
+
+function mechanicsScaleOptions(state, {
+  soundSpeedScale,
+  minGasSoundSpeedMPerS
+} = {}) {
+  const stateParams = state?.gpuMechanics || {};
+  return {
+    soundSpeedScale: finiteNumber(
+      soundSpeedScale ?? stateParams.soundSpeedScale,
+      DEFAULT_SOUND_SPEED_SCALE
+    ),
+    minGasSoundSpeedMPerS: finiteNumber(
+      minGasSoundSpeedMPerS ?? stateParams.minGasSoundSpeedMPerS,
+      DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
+    )
+  };
+}
+
+function gasSoundSpeedMPerS(properties, phaseProperties, temperatureK, soundSpeedScale, minGasSoundSpeedMPerS) {
+  const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
+  const cp = finiteNumber(phaseProperties?.cpJPerKgK, 0);
+  if (!(molarMassKgPerMol > 0)) return 0;
+  const specificGasConstant = R_GAS / molarMassKgPerMol;
+  const gamma = cp > specificGasConstant ? cp / (cp - specificGasConstant) : 1.33;
+  const realSoundSpeed = Math.sqrt(Math.max(gamma * specificGasConstant * temperatureK, 0));
+  return Math.max(realSoundSpeed * soundSpeedScale, minGasSoundSpeedMPerS);
+}
+
+function constitutivePropertiesFor(particle, properties, eq, options) {
+  if (!properties) {
+    return {
+      solid: false,
+      effectiveBulkModulusPa: 0,
+      shearModulusPa: 0,
+      lameLambdaPa: 0,
+      soundSpeedMPerS: 0,
+      eosModelId: MLS_MPM_EOS_MODEL_IDS.disabled,
+      constitutiveStatus: SPH_GPU_PARTICLE_STATUS.missingMaterialProperties
+    };
+  }
+  const phase = eq?.stablePhase || 'liquid';
+  const ph = phasePropertiesFor(properties, phase);
+  const soundSpeedScale = finiteNumber(options.soundSpeedScale, DEFAULT_SOUND_SPEED_SCALE);
+  const modulusScale = soundSpeedScale * soundSpeedScale;
+  const restDensity = finiteNumber(ph?.densityKgPerM3 ?? particle.restDensityKgPerM3, 0);
+  const bulkRaw = finiteNumber(ph?.bulkModulusPa, 0);
+  const shearRaw = phase === 'solid' ? finiteNumber(ph?.shearModulusPa, 0) : 0;
+  if (phase === 'gas') {
+    return {
+      solid: false,
+      effectiveBulkModulusPa: 0,
+      shearModulusPa: 0,
+      lameLambdaPa: 0,
+      soundSpeedMPerS: gasSoundSpeedMPerS(
+        properties,
+        ph,
+        finiteNumber(eq?.temperatureK, 0),
+        soundSpeedScale,
+        finiteNumber(options.minGasSoundSpeedMPerS, DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S)
+      ),
+      eosModelId: MLS_MPM_EOS_MODEL_IDS.gasLinearized,
+      constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready
+    };
+  }
+  const effectiveBulkModulusPa = bulkRaw * modulusScale;
+  const shearModulusPa = shearRaw * modulusScale;
+  return {
+    solid: phase === 'solid' && shearModulusPa > 0,
+    effectiveBulkModulusPa,
+    shearModulusPa,
+    lameLambdaPa: phase === 'solid' ? Math.max((bulkRaw - (2 / 3) * shearRaw) * modulusScale, 0) : 0,
+    soundSpeedMPerS: restDensity > 0 && effectiveBulkModulusPa > 0
+      ? Math.sqrt(effectiveBulkModulusPa / restDensity)
+      : 0,
+    eosModelId: effectiveBulkModulusPa > 0
+      ? MLS_MPM_EOS_MODEL_IDS.taitCondensed
+      : MLS_MPM_EOS_MODEL_IDS.disabled,
+    constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready
+  };
 }
 
 export function buildSphGpuParticleBuffers(state, { materialProperties = {} } = {}) {
@@ -222,10 +316,12 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   };
 }
 
-export function buildMlsMpmGpuParticleBuffers(state, { materialProperties = {} } = {}) {
+export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
+  const { materialProperties = {} } = options;
   if (!state?.particles || !Array.isArray(state.particles)) {
     throw new TypeError('buildMlsMpmGpuParticleBuffers requires a SPH state with particles');
   }
+  const scaleOptions = mechanicsScaleOptions(state, options);
   const particleCount = state.particles.length;
   const mechanics = new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
   const metadata = [];
@@ -234,6 +330,7 @@ export function buildMlsMpmGpuParticleBuffers(state, { materialProperties = {} }
     const material = particle.material || 'unknown';
     const properties = materialPropertiesFor(material, materialProperties);
     const eq = equilibriumForParticle(particle, properties);
+    const constitutive = constitutivePropertiesFor(particle, properties, eq, scaleOptions);
     const F = finiteMatrix9(particle.mpmF, identityF());
     const C = finiteMatrix9(particle.mpmC, zeros9());
     const restDensity = restDensityFor(properties, eq.stablePhase, particle);
@@ -247,14 +344,28 @@ export function buildMlsMpmGpuParticleBuffers(state, { materialProperties = {} }
       F[8], C[0], C[1], C[2],
       C[3], C[4], C[5], C[6],
       C[7], C[8], J, volume0,
-      solidFlagFor(particle, eq), status, 0, 0
+      solidFlagFor(particle, eq, constitutive),
+      status,
+      constitutive.effectiveBulkModulusPa,
+      constitutive.shearModulusPa,
+      constitutive.lameLambdaPa,
+      constitutive.soundSpeedMPerS,
+      constitutive.eosModelId,
+      constitutive.constitutiveStatus,
+      0,
+      0
     ], offset);
     metadata.push({
       id: particle.id ?? `p${index}`,
       material,
       phase: eq.stablePhase,
-      solid: solidFlagFor(particle, eq) === 1,
-      status
+      solid: constitutive.solid,
+      status,
+      effectiveBulkModulusPa: constitutive.effectiveBulkModulusPa,
+      shearModulusPa: constitutive.shearModulusPa,
+      lameLambdaPa: constitutive.lameLambdaPa,
+      soundSpeedMPerS: constitutive.soundSpeedMPerS,
+      eosModelId: constitutive.eosModelId
     });
   }
   return {
@@ -266,6 +377,9 @@ export function buildMlsMpmGpuParticleBuffers(state, { materialProperties = {} }
     mechanicsLayout: [...MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT],
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
     mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    soundSpeedScale: scaleOptions.soundSpeedScale,
+    minGasSoundSpeedMPerS: scaleOptions.minGasSoundSpeedMPerS,
+    mechanicsDtS: finiteNumber(state.gpuMechanics?.dt, 0),
     mechanics,
     metadata,
     scientificValidation: false,
@@ -381,7 +495,13 @@ export function decodeMlsMpmGpuParticleRows(packed) {
       volumeRatioJ: packed.mechanics[offset + 18],
       restVolumeM3: packed.mechanics[offset + 19],
       solidFlag: packed.mechanics[offset + 20],
-      status: packed.mechanics[offset + 21]
+      status: packed.mechanics[offset + 21],
+      effectiveBulkModulusPa: packed.mechanics[offset + 22],
+      shearModulusPa: packed.mechanics[offset + 23],
+      lameLambdaPa: packed.mechanics[offset + 24],
+      soundSpeedMPerS: packed.mechanics[offset + 25],
+      eosModelId: packed.mechanics[offset + 26],
+      constitutiveStatus: packed.mechanics[offset + 27]
     });
   }
   return rows;

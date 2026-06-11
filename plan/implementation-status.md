@@ -1055,3 +1055,40 @@ Not claimed:
 - Full periodic band/BZ optical response, general molecular excited-state
   optical response, and nuclear fission/fusion/decay solvers remain planned
   closure families, not completed runtime kernels.
+
+## 2026-06-10 Update - WebGPU MLS-MPM Stress P2G Slice
+
+Completed:
+
+- Extended the MLS-MPM mechanics GPU particle ABI from 24 to 32 f32 values so
+  each particle carries closure-derived constitutive constants on GPU:
+  effective bulk modulus, shear modulus, Lame lambda, sound speed, EOS model,
+  and constitutive status.
+- Stored the demo's CFL-derived global stiffness scale on `state.gpuMechanics`
+  so the live WebGPU rows use the same reduced-but-derived moduli as the
+  interactive CPU carrier.
+- Ported the P2G grid projection from mass/APIC momentum only to stress-aware
+  momentum transfer:
+  `aff = m*C + (-dt*V*4/dx^2)*sigma`, with fluid pressure from packed EOS
+  constants and solid stress from fixed-corotated elasticity.
+- Kept the projection gather-form and parity-gated. The visual simulation is
+  still CPU-authoritative, and validation flags for stress/grid/G2P/SPH/phase
+  physics remain false until the full grid update and G2P loop are resident.
+
+Latest validation:
+
+- PASS: focused ABI/SPH-buffer/P2G/mechanics tests passed `32/32`.
+- PASS: focused browser e2e passed against `https://127.0.0.1:5173` (`1/1`).
+- PASS: live browser WebGPU probe reported mechanics and P2G both
+  `webgpu-executed`, parity `pass`, mechanics stride `32`, P2G kernel scope
+  `gather-form-p2g-stress-momentum-projection`, `p2gDt=0.0005`,
+  `gridNodeCount=13824`, and `maxGridAbs=0.00006866455078125`.
+- PASS: `npm test` (`258/258`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+
+Not claimed:
+
+- The GPU path now computes stress contribution during P2G, but does not yet
+  update grid velocities, apply wall/contact constraints, CFL-clamp grid nodes,
+  or perform G2P reconstruction.
+- CPU carrier state still drives the visible particles.

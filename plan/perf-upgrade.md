@@ -551,6 +551,34 @@ limit. It should not silently reduce physics fidelity without a visible status.
 - Swap validated closure buffers into the running simulation at safe frame
   boundaries.
 
+## 2026-06-10 Checkpoint - Stress-Aware MLS-MPM P2G
+
+The MLS-MPM GPU particle row is now 32 f32 values and carries closure-derived
+mechanical constants beside `F`, `C`, `J`, and rest volume. This lets the P2G
+kernel compute material stress on GPU instead of asking the CPU for pressure or
+modulus lookups during the projection.
+
+Implemented GPU-resident pieces:
+
+- Packed effective bulk modulus, shear modulus, Lame lambda, sound speed, EOS
+  model id, and constitutive status into the mechanics buffer.
+- Propagated the demo's CFL-derived sound-speed/modulus scale into
+  `state.gpuMechanics` so GPU and CPU use the same interactive approximation.
+- Added `dt` to the P2G parameter block.
+- Ported fluid pressure and fixed-corotated solid stress into WGSL.
+- Updated P2G momentum transfer to
+  `m*v + (m*C + stressTerm) * dpos`.
+- Verified live WebGPU parity for the stress-aware gather-form projection.
+
+Remaining hot-loop work before the demo can run GPU-authoritatively:
+
+- Grid velocity update, gravity, CFL clamp, and wall/contact constraints.
+- G2P velocity/C/F/J reconstruction.
+- Thermal conduction, wall heat ledgers, phase equilibrium, and reaction
+  updates resident on GPU.
+- Compact diagnostics instead of full grid/particle readbacks during normal
+  stepping.
+
 ## Validation
 
 Required tests and evidence:

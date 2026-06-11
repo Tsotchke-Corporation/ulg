@@ -497,7 +497,20 @@ export function createSphPhaseDemo(options = {}) {
   const cflMaxSoundSpeedMPerS = (cflSafety * mechLengthM) / carrierDt;
   const soundSpeedScale = Math.min(1, maxRealSoundSpeed > 0 ? cflMaxSoundSpeedMPerS / maxRealSoundSpeed : 1);
   const modulusScale = soundSpeedScale * soundSpeedScale; // moduli scale as c^2
-  const eos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS: 40 });
+  const minGasSoundSpeedMPerS = options.minGasSoundSpeedMPerS ?? 40;
+  const gpuMechanics = {
+    integrator: mechanics,
+    gridSpacingM,
+    dt: carrierDt,
+    mechanicalSubsteps,
+    soundSpeedScale,
+    modulusScale,
+    minGasSoundSpeedMPerS,
+    cflSafety
+  };
+  demo.gpuMechanics = gpuMechanics;
+  demo.state.gpuMechanics = gpuMechanics;
+  const eos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS });
 
   let carrier;
   if (mechanics === 'mlsmpm') {
@@ -579,6 +592,7 @@ export function createSphPhaseDemo(options = {}) {
       for (let s = 0; s < mechanicalSubsteps; s += 1) {
         const result = carrier.step(demo.state);
         demo.state = result.state;
+        demo.state.gpuMechanics = gpuMechanics;
       }
 
       // P5: evolve energy by conduction + six-wall heat flux over the SAME sim-time as the mechanics.
@@ -621,6 +635,7 @@ export function createSphPhaseDemo(options = {}) {
           p.v[0] *= s; p.v[1] *= s; p.v[2] *= s;
         }
       }
+      demo.state.gpuMechanics = gpuMechanics;
       return demo.state;
     },
     totals() {

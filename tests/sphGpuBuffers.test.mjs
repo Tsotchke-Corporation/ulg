@@ -165,7 +165,17 @@ test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first ste
   assert.equal(h2o.volumeRatioJ, 1);
   assert.ok(h2o.restVolumeM3 > 0);
   assert.equal(h2o.solidFlag, 1);
+  assert.ok(h2o.effectiveBulkModulusPa > 0);
+  assert.ok(h2o.shearModulusPa > 0);
+  assert.ok(h2o.lameLambdaPa > 0);
+  assert.ok(h2o.soundSpeedMPerS > 0);
+  assert.equal(h2o.eosModelId, 1);
   assert.equal(fe.solidFlag, 0);
+  assert.ok(fe.effectiveBulkModulusPa > 0);
+  assert.equal(fe.shearModulusPa, 0);
+  assert.equal(fe.lameLambdaPa, 0);
+  assert.ok(fe.soundSpeedMPerS > 0);
+  assert.equal(fe.eosModelId, 1);
 });
 
 test('MLS-MPM GPU mechanics buffer preserves carrier-updated F, C, J, and V0', () => {
@@ -185,6 +195,8 @@ test('MLS-MPM GPU mechanics buffer preserves carrier-updated F, C, J, and V0', (
   nearlyEqual(row.volumeRatioJ, particle.mpmJ, 1e-5);
   nearlyEqual(row.restVolumeM3, particle.mpmVolume0, 1e-7);
   assert.equal(row.status, SPH_GPU_PARTICLE_STATUS.ready);
+  assert.equal(row.constitutiveStatus, SPH_GPU_PARTICLE_STATUS.ready);
+  assert.ok(row.soundSpeedMPerS > 0);
 });
 
 test('MLS-MPM GPU mechanics buffer upload writes and destroys storage buffers', () => {

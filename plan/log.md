@@ -8124,3 +8124,67 @@ Failures / open questions:
   by the overlay.
 - P2G, grid update, and G2P are still CPU-executed.
 - No push was attempted.
+
+## 2026-06-10 23:10:40 AKDT - Live MLS-MPM mechanics WebGPU upload
+
+Prompt:
+
+- Continue after the MLS-MPM mechanics buffer ABI and accept demo breakage if it
+  helps the larger GPU-resident refactor.
+
+Actions:
+
+- Wired `buildMlsMpmGpuParticleBuffers()` into the SPH phase overlay particle
+  sync path beside the existing SPH state/thermo buffer packer.
+- Extended the scene bridge with MLS-MPM mechanics state exposure, upload
+  signature gating, cached WebGPU device reuse, stale-generation rejection, and
+  destruction of old uploaded buffers.
+- Added focused e2e assertions for
+  `peercompute.ulg.mls-mpm-gpu-particle-buffer.v0` and
+  `peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0`, including particle
+  count parity with the SPH snapshot and the 24-float mechanics row stride.
+- Updated the implementation/performance/SPH demo plans to record that mechanics
+  snapshots are now WebGPU-resident but the solver is not yet GPU-executed.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs`
+- `node --test tests/sphGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- `curl -skI https://127.0.0.1:5173/`
+- `curl -skI https://100.86.83.35:5173/`
+- Browser HTTPS/WebGPU probe against `https://127.0.0.1:5173/`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused SPH GPU buffer / renderer tests passed `12/12`.
+- PASS: HTTPS Vite returned `HTTP/2 200` on localhost and VPN address.
+- PASS: Browser HTTPS/WebGPU probe reported
+  `mls.schema=peercompute.ulg.mls-mpm-gpu-particle-buffer.v0`,
+  `particleCount=152`, `mechanicsStrideFloats=24`,
+  `uploadSchema=peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0`, and
+  `uploadStatus=webgpu-uploaded`.
+- PASS: focused SPH e2e passed against the live HTTPS server (`1/1`).
+- PASS: `npm test` passed `240/240`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The mechanics buffers are resident/uploaded but not yet consumed by WebGPU
+  P2G, grid update, or G2P kernels.
+- The CPU carrier is still authoritative for particle mechanics.
+- No push was attempted.

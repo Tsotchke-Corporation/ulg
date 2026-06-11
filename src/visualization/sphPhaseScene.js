@@ -15,8 +15,11 @@ import {
   sampleOpticalGpuTableCpu
 } from '../runtime/material/opticalGpuBuffers.js';
 import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
+  uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from '../runtime/sph/sphGpuBuffers.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
@@ -339,12 +342,18 @@ export function createSphPhaseScene(container, {
   let sphGpuParticleUpload = null;
   let sphGpuParticleUploadSignature = null;
   let pendingSphGpuParticleUpload = null;
+  let mlsMpmGpuParticleState = null;
+  let mlsMpmGpuParticleUpload = null;
+  let mlsMpmGpuParticleUploadSignature = null;
+  let pendingMlsMpmGpuParticleUpload = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
   scene.userData.opticalGpuLookupDrawState = null;
   scene.userData.sphGpuParticleState = null;
   scene.userData.sphGpuParticleUpload = null;
+  scene.userData.mlsMpmGpuParticleState = null;
+  scene.userData.mlsMpmGpuParticleUpload = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -486,6 +495,16 @@ export function createSphPhaseScene(container, {
     ].join('|');
   }
 
+  function mlsMpmGpuParticleSignature(packed) {
+    if (!packed) return null;
+    return [
+      packed.particleCount,
+      packed.step,
+      packed.time,
+      packed.mechanics?.byteLength ?? 0
+    ].join('|');
+  }
+
   async function refreshSphGpuParticleBuffers({
     preferWebGpu = true,
     force = false,
@@ -568,6 +587,88 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function refreshMlsMpmGpuParticleBuffers({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null
+  } = {}) {
+    if (!mlsMpmGpuParticleState) {
+      mlsMpmGpuParticleUpload = null;
+      scene.userData.mlsMpmGpuParticleUpload = null;
+      return null;
+    }
+    const signature = mlsMpmGpuParticleSignature(mlsMpmGpuParticleState);
+    if (!force && mlsMpmGpuParticleUploadSignature === signature && mlsMpmGpuParticleUpload) {
+      return mlsMpmGpuParticleUpload;
+    }
+    if (!force && pendingMlsMpmGpuParticleUpload?.signature === signature) {
+      return pendingMlsMpmGpuParticleUpload.promise;
+    }
+    const promise = (async () => {
+      if (!preferWebGpu) {
+        const upload = {
+          schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+          status: 'not-requested',
+          sourceSchema: mlsMpmGpuParticleState.schema,
+          particleCount: mlsMpmGpuParticleState.particleCount,
+          reason: 'WebGPU MLS-MPM particle upload not requested',
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+        mlsMpmGpuParticleUpload = upload;
+        mlsMpmGpuParticleUploadSignature = signature;
+        scene.userData.mlsMpmGpuParticleUpload = upload;
+        return upload;
+      }
+      const resolvedDeviceResult = device
+        ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+        : (deviceResult || await requestCachedOpticalGpuDevice(overrideNavigatorRef));
+      if (!resolvedDeviceResult.device) {
+        const upload = {
+          schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+          status: resolvedDeviceResult.status,
+          sourceSchema: mlsMpmGpuParticleState.schema,
+          particleCount: mlsMpmGpuParticleState.particleCount,
+          reason: resolvedDeviceResult.reason,
+          fallback: 'cpu-packed-buffer',
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+        mlsMpmGpuParticleUpload = upload;
+        mlsMpmGpuParticleUploadSignature = signature;
+        scene.userData.mlsMpmGpuParticleUpload = upload;
+        return upload;
+      }
+      const upload = uploadMlsMpmGpuParticleBuffers(resolvedDeviceResult.device, mlsMpmGpuParticleState);
+      upload.signature = signature;
+      upload.step = mlsMpmGpuParticleState.step;
+      upload.time = mlsMpmGpuParticleState.time;
+      if (!running || mlsMpmGpuParticleSignature(mlsMpmGpuParticleState) !== signature) {
+        destroyMlsMpmGpuParticleBuffers(upload);
+        return { ...upload, status: 'stale-upload-discarded' };
+      }
+      if (mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded') {
+        destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
+      }
+      mlsMpmGpuParticleUpload = upload;
+      mlsMpmGpuParticleUploadSignature = signature;
+      scene.userData.mlsMpmGpuParticleUpload = upload;
+      return upload;
+    })();
+    pendingMlsMpmGpuParticleUpload = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingMlsMpmGpuParticleUpload?.promise === promise) pendingMlsMpmGpuParticleUpload = null;
+    }
+  }
+
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
     const key = descriptor.surfaceKey;
@@ -614,7 +715,7 @@ export function createSphPhaseScene(container, {
   // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
   // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
   // continuous density surface from particles, but it does not invent material colour.
-  function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null, materialProperties = null, sphGpuParticleState: nextSphGpuParticleState = null }) {
+  function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null, materialProperties = null, sphGpuParticleState: nextSphGpuParticleState = null, mlsMpmGpuParticleState: nextMlsMpmGpuParticleState = null }) {
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
@@ -635,6 +736,17 @@ export function createSphPhaseScene(container, {
     sphGpuParticleUpload = null;
     sphGpuParticleUploadSignature = null;
     scene.userData.sphGpuParticleUpload = null;
+    if (
+      mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded'
+      && mlsMpmGpuParticleUploadSignature !== mlsMpmGpuParticleSignature(nextMlsMpmGpuParticleState)
+    ) {
+      destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
+    }
+    mlsMpmGpuParticleState = nextMlsMpmGpuParticleState;
+    scene.userData.mlsMpmGpuParticleState = mlsMpmGpuParticleState;
+    mlsMpmGpuParticleUpload = null;
+    mlsMpmGpuParticleUploadSignature = null;
+    scene.userData.mlsMpmGpuParticleUpload = null;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -723,6 +835,7 @@ export function createSphPhaseScene(container, {
     environment.dispose();
     pmrem.dispose();
     if (sphGpuParticleUpload?.status === 'webgpu-uploaded') destroySphGpuParticleBuffers(sphGpuParticleUpload);
+    if (mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded') destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
@@ -752,8 +865,15 @@ export function createSphPhaseScene(container, {
     getSphGpuParticleUpload() {
       return sphGpuParticleUpload;
     },
+    getMlsMpmGpuParticleState() {
+      return mlsMpmGpuParticleState;
+    },
+    getMlsMpmGpuParticleUpload() {
+      return mlsMpmGpuParticleUpload;
+    },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
+    refreshMlsMpmGpuParticleBuffers,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

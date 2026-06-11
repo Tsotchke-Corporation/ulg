@@ -135,8 +135,10 @@ cached browser WebGPU device. It is not yet consumed by a GPU mechanics kernel.
 The MLS-MPM mechanics-state buffer ABI/runtime slice also exists as
 `peercompute.ulg.mls-mpm-gpu-particle-buffer.v0`. It packs deformation gradient,
 affine APIC velocity field, volume ratio, rest volume, and solid flag into
-f32x4-aligned WebGPU rows. This prepares P2G/G2P mechanics residency without
-claiming a GPU mechanics solver.
+f32x4-aligned WebGPU rows. As of 2026-06-10 23:10 AKDT, the live SPH overlay
+builds that mechanics snapshot every particle sync and uploads it to a cached
+browser WebGPU device beside the SPH state/thermo snapshot. This prepares
+P2G/G2P mechanics residency without claiming a GPU mechanics solver.
 
 ## Hot-Loop Kernel Chain
 

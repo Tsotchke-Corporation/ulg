@@ -7,7 +7,7 @@ import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions
 import { createSphPhaseDemo, particleColors, particleRenderDescriptors, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
 import { createSphPhaseScenario } from '../runtime/thermoPreflight.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
-import { buildSphGpuParticleBuffers } from '../runtime/sph/sphGpuBuffers.js';
+import { buildMlsMpmGpuParticleBuffers, buildSphGpuParticleBuffers } from '../runtime/sph/sphGpuBuffers.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const ICE_TEMP_K = 233.15;
@@ -492,9 +492,12 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
   overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
   overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
+  overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
+  overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
+  let pendingMlsMpmGpuParticleUploadSignature = null;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -531,6 +534,26 @@ export function mountSphPhaseDemoOverlay() {
     });
   }
 
+  function mlsMpmGpuParticleSignature(packed) {
+    return packed
+      ? [packed.particleCount, packed.step, packed.time, packed.mechanics?.byteLength ?? 0].join('|')
+      : null;
+  }
+
+  function scheduleMlsMpmGpuParticleUpload() {
+    const packed = scene.getMlsMpmGpuParticleState?.();
+    const signature = mlsMpmGpuParticleSignature(packed);
+    if (!signature || pendingMlsMpmGpuParticleUploadSignature === signature) return;
+    pendingMlsMpmGpuParticleUploadSignature = signature;
+    scene.refreshMlsMpmGpuParticleBuffers?.({ preferWebGpu: true }).then((upload) => {
+      overlay.__mlsMpmGpuParticleUpload = upload;
+    }).catch((error) => {
+      overlay.__mlsMpmGpuParticleUploadError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (pendingMlsMpmGpuParticleUploadSignature === signature) pendingMlsMpmGpuParticleUploadSignature = null;
+    });
+  }
+
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
 
@@ -547,8 +570,11 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
+    overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
+    overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
     pendingOpticalLookupSignature = null;
     pendingSphGpuParticleUploadSignature = null;
+    pendingMlsMpmGpuParticleUploadSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -587,6 +613,9 @@ export function mountSphPhaseDemoOverlay() {
     const sphGpuParticleState = buildSphGpuParticleBuffers(driver.demo.state, {
       materialProperties: driver.demo.materialProperties
     });
+    const mlsMpmGpuParticleState = buildMlsMpmGpuParticleBuffers(driver.demo.state, {
+      materialProperties: driver.demo.materialProperties
+    });
     const n = driver.demo.state.particles.length;
     const positionsM = new Float32Array(n * 3);
     const colorsRgb = new Float32Array(n * 3);
@@ -606,12 +635,15 @@ export function mountSphPhaseDemoOverlay() {
       materials,
       emissiveByMaterial: surfaceEmissive(driver.demo),
       materialProperties: driver.demo.materialProperties,
-      sphGpuParticleState
+      sphGpuParticleState,
+      mlsMpmGpuParticleState
     });
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
+    overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     scheduleOpticalGpuLookupRefresh();
     scheduleSphGpuParticleUpload();
+    scheduleMlsMpmGpuParticleUpload();
   }
 
   function stepDemoForVisualTest(steps = 1) {

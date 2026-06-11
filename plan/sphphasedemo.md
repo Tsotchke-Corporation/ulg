@@ -1,7 +1,7 @@
 # SPH Phase Demo Plan - Ice On Molten Iron In A Sealed Box
 
 Date: 2026-06-08 AKDT
-Updated: 2026-06-08 AKDT
+Updated: 2026-06-10 AKDT
 
 ## Purpose
 
@@ -24,6 +24,14 @@ The demo must not fake the outcome with scripted phase toggles, arbitrary color
 ramps, arbitrary material constants, or hard-coded pressure curves. Every
 visible behavior and every material property must come from the closure, field,
 carrier, thermodynamic, radiation, mechanical, and validation chain.
+
+Implementation checkpoint, 2026-06-10 AKDT: the live browser demo now uploads
+closure-derived optical lookup rows, SPH particle state/thermo rows, and
+MLS-MPM mechanics rows into WebGPU storage buffers. The mechanics buffer holds
+`F`, `C`, `J`, rest volume, solid flag, and status for each macro-particle.
+The next required implementation step is to consume those resident buffers from
+WebGPU P2G/grid/G2P and heat/phase kernels instead of treating CPU carrier state
+as authoritative.
 
 ## Non-Negotiables
 

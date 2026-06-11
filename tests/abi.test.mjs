@@ -57,6 +57,8 @@ import {
   mlsMpmGridUpdateWgsl,
   mlsMpmMechanicsPredictWgsl,
   mlsMpmP2gGridProjectionWgsl,
+  mlsMpmResidentSummaryFinalizeWgsl,
+  mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl,
   opticalLookupWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
@@ -327,11 +329,16 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
     'sourceMassKg:f32'
   ]);
   assert.match(mlsMpmResidentSummaryWgsl, /struct ResidentSummaryParams/);
+  assert.equal(mlsMpmResidentSummaryWgsl, mlsMpmResidentSummaryPartialsWgsl);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> source_sph_state/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> next_sph_state/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read> updated_grid_nodes/);
-  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read_write> resident_summary/);
-  assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(1\)/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<storage, read_write> partial_summaries/);
+  assert.match(mlsMpmResidentSummaryWgsl, /var<workgroup> wg_active_grid_nodes/);
+  assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(64\)/);
+  assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read> partial_summaries/);
+  assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read_write> resident_summary/);
+  assert.match(mlsMpmResidentSummaryFinalizeWgsl, /@compute @workgroup_size\(1\)/);
 });
 
 test('schema sketches validate representative artifacts', () => {

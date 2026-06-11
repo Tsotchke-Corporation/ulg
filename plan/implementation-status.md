@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 02:03 AKDT
+Updated: 2026-06-11 02:13 AKDT
 
 ## Done
 
@@ -1349,6 +1349,9 @@ Completed:
 - Added a browser WebGPU compact summary pass for resident MLS-MPM steps. It
   reads retained source/output particle buffers plus the updated grid buffer
   and returns only the compact diagnostic row, not full particle/grid arrays.
+- Upgraded that compact summary from a single-invocation GPU loop to a two-pass
+  workgroup reduction: 64-lane partial summaries followed by a small final
+  reduction into the same 80-byte diagnostic record.
 - Resident diagnostics now use compact GPU summary values in
   no-full-readback mode when available: active grid nodes, source/next mass,
   momentum delta, max speed, max displacement, and min/max volume ratio.
@@ -1367,17 +1370,18 @@ Completed:
 
 Latest validation:
 
-- PASS: `npm test` passed `288/288`.
+- PASS: `npm test` passed `289/289`.
 - PASS: `npm run build` passed with the existing Vite large-chunk warning.
 - PASS: `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
-  passed `19/19`.
+  passed `20/20`.
 - PASS: `node --check src/visualization/sphPhaseScene.js &&
   node --check src/visualization/sphPhaseDemoMount.js &&
   node --check tests/demo.e2e.mjs`.
 - PASS: focused HTTPS browser e2e passed against the live server:
   `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1
   npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo
-  runs derived material properties by default"` (`1/1`).
+  runs derived material properties by default"` (`1/1`) with the two-pass
+  summary WGSL.
 - PASS: Vite HTTPS server remains bound to `0.0.0.0:5173`; local
   `https://127.0.0.1:5173/` and VPN `https://100.86.83.35:5173/` returned
   `200`.
@@ -1387,7 +1391,7 @@ Not claimed:
 
 - `gpuAuthoritativeState` remains false; no render-authoritative physics is
   claimed.
-- The compact summary pass is a first GPU-resident diagnostic bridge. Its
-  current reduction strategy is a single-invocation GPU loop, not the final
-  high-throughput tiled/parallel reduction for large particle counts.
+- The compact summary still has a serial final pass over partial rows. That is
+  much smaller than scanning every particle/grid node, but future very large
+  runs should replace it with recursive partial reductions.
 - Full particle/grid arrays are still not read back in normal no-full mode.

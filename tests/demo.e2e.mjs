@@ -1403,6 +1403,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           compactGpuSummaryStatus: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryStatus,
           compactGpuSummaryReadbackMode: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryReadbackMode,
           compactReadbackByteLength: mlsMpmResidentStep?.diagnostics?.compactReadbackByteLength,
+          compactSummaryReductionStrategy: mlsMpmResidentStep?.diagnostics?.compactSummaryReductionStrategy,
           fullPhysicsValidation: mlsMpmResidentStep?.diagnostics?.fullPhysicsValidation
         },
         p2gProjectionValidation: mlsMpmResidentStep?.p2gProjectionValidation,
@@ -1717,6 +1718,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryStatus).toBe('compact-summary-ready');
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactGpuSummaryReadbackMode).toBe('compact-summary-readback');
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactReadbackByteLength).toBe(80);
+    expect(derivedSummary.mlsMpmResidentStep.diagnostics.compactSummaryReductionStrategy).toBe(
+      'two-pass-workgroup-reduction'
+    );
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
     expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
     expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);

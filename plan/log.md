@@ -8999,3 +8999,56 @@ Failures / open questions:
 - Thermal, phase, reaction, wall heat, gas pressure, and material closure state
   are not yet driven by this resident MLS-MPM path.
 - No push was attempted.
+
+## 2026-06-11 02:13 AKDT - Two-pass compact summary reduction
+
+Prompt:
+
+- Continue the GPU-resident refactor and speed up the demo path even if larger
+  refactors break intermediate behavior.
+
+Actions:
+
+- Split the resident compact summary WGSL into a partial-summary pass and a
+  finalize pass.
+- The partial pass dispatches one 64-lane workgroup per chunk across
+  `max(particleCount, gridNodeCount)`, reducing source/next mass, momentum,
+  active grid nodes, max speed/displacement, and min/max volume ratio into
+  f32x4-aligned partial records.
+- The finalize pass reduces partial records into the existing 80-byte compact
+  diagnostic row, preserving the no-full-readback CPU contract.
+- Updated the summary runner to allocate a partial-summary storage buffer,
+  dispatch both passes, and surface `two-pass-workgroup-reduction` metadata.
+- Added deterministic fake-device coverage for dispatch counts, bind-group
+  shapes, partial buffer sizing, compact readback byte length, and borrowed
+  source buffer modes.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `src/runtime/sph/sphMlsMpmGpuSummary.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check ulg-gpu-abi/src/wgsl.js && node --check
+  src/runtime/sph/sphMlsMpmGpuSummary.js`
+- `node --check tests/abi.test.mjs && node --check
+  tests/sphMlsMpmGpuStep.test.mjs && node --check tests/demo.e2e.mjs &&
+  node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+
+Validation:
+
+- PASS: focused ABI/resident-step tests passed `20/20`.
+
+Failures / open questions:
+
+- The final summary pass still loops over partial records serially. This is a
+  bounded compact-summary pass, not the full particle/grid readback; recursive
+  partial reductions are still needed for extreme particle counts.
+- `gpuAuthoritativeState` remains false.
+- No push was attempted.

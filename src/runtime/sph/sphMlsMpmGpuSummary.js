@@ -5,7 +5,11 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
-import { mlsMpmResidentSummaryWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import {
+  mlsMpmResidentSummaryFinalizeWgsl,
+  mlsMpmResidentSummaryPartialsWgsl,
+  mlsMpmResidentSummaryWgsl
+} from '../../../ulg-gpu-abi/src/wgsl.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS
@@ -14,6 +18,8 @@ import {
 export {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
+  mlsMpmResidentSummaryFinalizeWgsl,
+  mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl
 };
 
@@ -33,6 +39,7 @@ const GPU_MAP_MODE = {
 };
 
 const SUMMARY_SCOPE = 'mls-mpm-resident-compact-gpu-summary';
+const SUMMARY_WORKGROUP_SIZE = 64;
 
 function assertPackedInputs({ sphParticleState, mlsMpmParticleState }) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
@@ -57,11 +64,12 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function createSummaryParamsArray({ particleCount, gridNodeCount }) {
+function createSummaryParamsArray({ particleCount, gridNodeCount, partialCount }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, gridNodeCount, true);
+  view.setUint32(8, partialCount, true);
   return buffer;
 }
 
@@ -84,7 +92,8 @@ function optionalSourceMechanicsBuffer(mlsMpmParticleUpload) {
 export function decodeMlsMpmResidentSummaryValues(values, {
   particleCount = values?.[0] ?? 0,
   gridNodeCount = values?.[1] ?? 0,
-  readbackMode = 'compact-summary-readback'
+  readbackMode = 'compact-summary-readback',
+  reductionStrategy = 'two-pass-workgroup-reduction'
 } = {}) {
   if (!(values instanceof Float32Array) || values.length < MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS) {
     throw new TypeError('decodeMlsMpmResidentSummaryValues requires a compact resident summary Float32Array');
@@ -98,7 +107,7 @@ export function decodeMlsMpmResidentSummaryValues(values, {
     backend: 'webgpu',
     status: values[19] > 0 ? 'compact-summary-ready' : 'compact-summary-empty',
     kernelScope: SUMMARY_SCOPE,
-    reductionStrategy: 'single-invocation-gpu-loop',
+    reductionStrategy,
     particleCount,
     gridNodeCount,
     activeGridNodeCount: values[2],
@@ -141,6 +150,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const particleCount = sphParticleState.particleCount;
   const gridNodeCount = gridUpdate?.gridNodeCount ?? g2pReconstruction?.gridNodeCount ?? 0;
+  const partialCount = Math.max(1, Math.ceil(Math.max(particleCount, gridNodeCount) / SUMMARY_WORKGROUP_SIZE));
   const nextStateBuffer = outputBufferFromG2p(g2pReconstruction, 'stateBuffer');
   const nextMechanicsBuffer = outputBufferFromG2p(g2pReconstruction, 'mechanicsBuffer');
   const updatedGridBuffer = updatedGridBufferFromGridUpdate(gridUpdate);
@@ -154,6 +164,12 @@ export async function runMlsMpmResidentSummaryWebGpu({
   const sourceMechanicsBuffer = borrowedSourceMechanicsBuffer
     || writeStorageBuffer(device, 'ulg-mls-mpm-summary-source-mechanics', mlsMpmParticleState.mechanics);
   const summaryByteLength = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const partialsByteLength = partialCount * summaryByteLength;
+  const partialsBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-resident-summary-partials',
+    size: Math.max(4, partialsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE
+  });
   const summaryBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-resident-summary-out',
     size: summaryByteLength,
@@ -171,30 +187,48 @@ export async function runMlsMpmResidentSummaryWebGpu({
   });
 
   try {
-    device.queue.writeBuffer(paramsBuffer, 0, createSummaryParamsArray({ particleCount, gridNodeCount }));
-    const module = device.createShaderModule({ code: mlsMpmResidentSummaryWgsl });
-    const pipeline = device.createComputePipeline({
+    device.queue.writeBuffer(paramsBuffer, 0, createSummaryParamsArray({ particleCount, gridNodeCount, partialCount }));
+    const partialsModule = device.createShaderModule({ code: mlsMpmResidentSummaryPartialsWgsl });
+    const partialsPipeline = device.createComputePipeline({
       layout: 'auto',
-      compute: { module, entryPoint: 'main' }
+      compute: { module: partialsModule, entryPoint: 'main' }
     });
-    const bindGroup = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+    const partialsBindGroup = device.createBindGroup({
+      layout: partialsPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: sourceStateBuffer } },
         { binding: 1, resource: { buffer: nextStateBuffer } },
         { binding: 2, resource: { buffer: sourceMechanicsBuffer } },
         { binding: 3, resource: { buffer: nextMechanicsBuffer } },
         { binding: 4, resource: { buffer: updatedGridBuffer } },
-        { binding: 5, resource: { buffer: summaryBuffer } },
+        { binding: 5, resource: { buffer: partialsBuffer } },
         { binding: 6, resource: { buffer: paramsBuffer } }
       ]
     });
+    const finalizeModule = device.createShaderModule({ code: mlsMpmResidentSummaryFinalizeWgsl });
+    const finalizePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: finalizeModule, entryPoint: 'main' }
+    });
+    const finalizeBindGroup = device.createBindGroup({
+      layout: finalizePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: partialsBuffer } },
+        { binding: 1, resource: { buffer: summaryBuffer } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
     const encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(1);
-    pass.end();
+    const partialsPass = encoder.beginComputePass();
+    partialsPass.setPipeline(partialsPipeline);
+    partialsPass.setBindGroup(0, partialsBindGroup);
+    partialsPass.dispatchWorkgroups(partialCount);
+    partialsPass.end();
+    const finalizePass = encoder.beginComputePass();
+    finalizePass.setPipeline(finalizePipeline);
+    finalizePass.setBindGroup(0, finalizeBindGroup);
+    finalizePass.dispatchWorkgroups(1);
+    finalizePass.end();
     encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
     device.queue.submit([encoder.finish()]);
     await readBuffer.mapAsync(GPU_MAP_MODE.READ);
@@ -204,10 +238,14 @@ export async function runMlsMpmResidentSummaryWebGpu({
       ...decodeMlsMpmResidentSummaryValues(values, {
         particleCount,
         gridNodeCount,
-        readbackMode: 'compact-summary-readback'
+        readbackMode: 'compact-summary-readback',
+        reductionStrategy: 'two-pass-workgroup-reduction'
       }),
       compactReadbackFloatCount: MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
       compactReadbackByteLength: summaryByteLength,
+      compactPartialSummaryCount: partialCount,
+      compactPartialSummaryByteLength: partialsByteLength,
+      compactReductionWorkgroupSize: SUMMARY_WORKGROUP_SIZE,
       sourceStateBufferMode: borrowedSourceStateBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
       sourceMechanicsBufferMode: borrowedSourceMechanicsBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
       sourceStateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -216,6 +254,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
   } finally {
     if (!borrowedSourceStateBuffer) sourceStateBuffer.destroy?.();
     if (!borrowedSourceMechanicsBuffer) sourceMechanicsBuffer.destroy?.();
+    partialsBuffer.destroy?.();
     summaryBuffer.destroy?.();
     readBuffer.destroy?.();
     paramsBuffer.destroy?.();

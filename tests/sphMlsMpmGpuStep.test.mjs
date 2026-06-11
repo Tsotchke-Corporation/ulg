@@ -21,6 +21,7 @@ import {
 import { projectMlsMpmP2gGridCpu } from '../src/runtime/sph/sphGridGpuKernel.js';
 import { updateMlsMpmGridCpu } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
 import { reconstructMlsMpmG2pCpu } from '../src/runtime/sph/sphG2pGpuKernel.js';
+import { runMlsMpmResidentSummaryWebGpu } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
 
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
@@ -93,6 +94,100 @@ function fakeBufferTracker() {
   };
 }
 
+function fakeSummaryDevice(summaryValues) {
+  const createdBuffers = [];
+  const bindGroups = [];
+  const dispatches = [];
+  const shaderModules = [];
+  const copies = [];
+  const submissions = [];
+  const writes = [];
+  return {
+    createdBuffers,
+    bindGroups,
+    dispatches,
+    shaderModules,
+    copies,
+    submissions,
+    writes,
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
+      },
+      submit(commands) {
+        submissions.push(commands);
+      }
+    },
+    createBuffer({ label, size, usage }) {
+      const buffer = {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        },
+        async mapAsync() {},
+        getMappedRange() {
+          return summaryValues.buffer.slice(
+            summaryValues.byteOffset,
+            summaryValues.byteOffset + summaryValues.byteLength
+          );
+        },
+        unmap() {
+          this.unmapped = true;
+        }
+      };
+      createdBuffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule({ code }) {
+      const module = { code };
+      shaderModules.push(module);
+      return module;
+    },
+    createComputePipeline({ compute }) {
+      return {
+        compute,
+        getBindGroupLayout(index) {
+          return { index, entryPoint: compute.entryPoint };
+        }
+      };
+    },
+    createBindGroup({ layout, entries }) {
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline(pipeline) {
+              this.pipeline = pipeline;
+            },
+            setBindGroup(index, bindGroup) {
+              this.bindGroup = { index, bindGroup };
+            },
+            dispatchWorkgroups(count) {
+              dispatches.push({ count, pipeline: this.pipeline, bindGroup: this.bindGroup?.bindGroup });
+            },
+            end() {
+              this.ended = true;
+            }
+          };
+        },
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+          copies.push({ source, sourceOffset, destination, destinationOffset, size });
+        },
+        finish() {
+          return { dispatches: [...dispatches], copies: [...copies] };
+        }
+      };
+    }
+  };
+}
+
 test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not requested', async () => {
   const buffers = manualBuffers();
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
@@ -118,6 +213,77 @@ test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not
   assert.ok(step.state instanceof Float32Array);
   assert.ok(step.mechanics instanceof Float32Array);
   assert.equal(step.fullPhysicsValidation, false);
+});
+
+test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', async () => {
+  const particleCount = 65;
+  const gridNodeCount = 130;
+  const summaryValues = new Float32Array([
+    particleCount, gridNodeCount, 17, 12,
+    12, 0, 4, 5,
+    6, 7, 8, 9,
+    3, 3, 3, 2.5,
+    0.125, 0.9, 1.1, 1
+  ]);
+  const device = fakeSummaryDevice(summaryValues);
+  const tracker = fakeBufferTracker();
+  const sourceStateBuffer = tracker.buffer('source-state');
+  const sourceMechanicsBuffer = tracker.buffer('source-mechanics');
+  const nextStateBuffer = tracker.buffer('next-state');
+  const nextMechanicsBuffer = tracker.buffer('next-mechanics');
+  const updatedGridBuffer = tracker.buffer('updated-grid');
+  const summary = await runMlsMpmResidentSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      state: new Float32Array(particleCount * 8)
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      mechanics: new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length)
+    },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: sourceStateBuffer
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: sourceMechanicsBuffer
+    },
+    gridUpdate: {
+      gridNodeCount,
+      gpuResult: { updatedGridBuffer }
+    },
+    g2pReconstruction: {
+      stateBuffer: nextStateBuffer,
+      mechanicsBuffer: nextMechanicsBuffer
+    }
+  });
+
+  assert.equal(summary.status, 'compact-summary-ready');
+  assert.equal(summary.reductionStrategy, 'two-pass-workgroup-reduction');
+  assert.equal(summary.compactPartialSummaryCount, 3);
+  assert.equal(summary.compactPartialSummaryByteLength, 240);
+  assert.equal(summary.compactReductionWorkgroupSize, 64);
+  assert.equal(summary.compactReadbackByteLength, 80);
+  assert.equal(summary.compactReadbackFloatCount, 20);
+  assert.equal(summary.sourceStateBufferMode, 'borrowed-webgpu-upload');
+  assert.equal(summary.sourceMechanicsBufferMode, 'borrowed-webgpu-upload');
+  assert.equal(summary.activeGridNodeCount, 17);
+  assert.equal(summary.massDeltaKg, 0);
+  assert.deepEqual(summary.momentumDeltaKgMPerS, [3, 3, 3]);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [3, 1]);
+  assert.equal(device.bindGroups.length, 2);
+  assert.equal(device.bindGroups[0].entries.length, 7);
+  assert.equal(device.bindGroups[1].entries.length, 3);
+  assert.equal(device.copies.length, 1);
+  assert.equal(device.copies[0].size, 80);
+  assert.equal(device.writes[0].byteLength, 16);
+  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, 240);
+  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-readback').unmapped, true);
+  assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
 });
 
 test('MLS-MPM resident step shares retained stage buffers across WebGPU stages', async () => {
@@ -484,6 +650,7 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
       assert.equal(args.mlsMpmParticleUpload.mechanicsBuffer.label, 'source-mechanics');
       assert.equal(args.gridUpdate.gpuResult.updatedGridBuffer.label, 'updated-grid-summary');
       assert.equal(args.g2pReconstruction.stateBuffer.label, 'g2p-state-summary');
+      assert.equal(args.g2pReconstruction.mechanicsBuffer.label, 'g2p-mechanics-summary');
       return {
         schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
         backend: 'webgpu',
@@ -504,7 +671,7 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         readbackMode: 'compact-summary-readback',
         compactGpuSummaryAvailable: true,
         compactReadbackByteLength: 80,
-        reductionStrategy: 'single-invocation-gpu-loop',
+        reductionStrategy: 'two-pass-workgroup-reduction',
         scientificValidation: false,
         sphValidation: false,
         phaseChangeValidation: false,
@@ -522,6 +689,7 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
   assert.equal(step.diagnostics.compactGpuSummaryStatus, 'compact-summary-ready');
   assert.equal(step.diagnostics.compactGpuSummaryReadbackMode, 'compact-summary-readback');
   assert.equal(step.diagnostics.compactReadbackByteLength, 80);
+  assert.equal(step.diagnostics.compactSummaryReductionStrategy, 'two-pass-workgroup-reduction');
   assert.equal(step.diagnostics.activeGridNodeCount, 7);
   assert.equal(step.diagnostics.massDeltaKg, 0);
   assert.equal(step.diagnostics.maxSpeedMPerS, 1.875);

@@ -779,11 +779,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-export const mlsMpmResidentSummaryWgsl = `
+export const mlsMpmResidentSummaryPartialsWgsl = `
 struct ResidentSummaryParams {
   particle_count: u32,
   grid_node_count: u32,
-  pad_u0: u32,
+  partial_count: u32,
   pad_u1: u32,
 };
 
@@ -792,20 +792,37 @@ struct ResidentSummaryParams {
 @group(0) @binding(2) var<storage, read> source_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> next_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> updated_grid_nodes: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read_write> resident_summary: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> partial_summaries: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: ResidentSummaryParams;
 
-@compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  if (global_id.x > 0u) {
-    return;
-  }
+var<workgroup> wg_active_grid_nodes: array<f32, 64>;
+var<workgroup> wg_source_mass: array<f32, 64>;
+var<workgroup> wg_next_mass: array<f32, 64>;
+var<workgroup> wg_source_momentum_x: array<f32, 64>;
+var<workgroup> wg_source_momentum_y: array<f32, 64>;
+var<workgroup> wg_source_momentum_z: array<f32, 64>;
+var<workgroup> wg_next_momentum_x: array<f32, 64>;
+var<workgroup> wg_next_momentum_y: array<f32, 64>;
+var<workgroup> wg_next_momentum_z: array<f32, 64>;
+var<workgroup> wg_max_speed: array<f32, 64>;
+var<workgroup> wg_max_displacement: array<f32, 64>;
+var<workgroup> wg_min_volume_ratio_j: array<f32, 64>;
+var<workgroup> wg_max_volume_ratio_j: array<f32, 64>;
+
+@compute @workgroup_size(64)
+fn main(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let index = global_id.x;
+  let lane = local_id.x;
 
   var active_grid_nodes = 0.0;
-  for (var node_index = 0u; node_index < params.grid_node_count; node_index = node_index + 1u) {
-    let row0 = updated_grid_nodes[node_index * 2u];
+  if (index < params.grid_node_count) {
+    let row0 = updated_grid_nodes[index * 2u];
     if (row0.x > 0.0) {
-      active_grid_nodes = active_grid_nodes + 1.0;
+      active_grid_nodes = 1.0;
     }
   }
 
@@ -818,9 +835,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var min_volume_ratio_j = 3.4028234663852886e38;
   var max_volume_ratio_j = 0.0;
 
-  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
-    let state_base = particle_index * 2u;
-    let mechanics_base = particle_index * 8u;
+  if (index < params.particle_count) {
+    let state_base = index * 2u;
+    let mechanics_base = index * 8u;
     let source_pos_mass = source_sph_state[state_base];
     let source_vel_u = source_sph_state[state_base + 1u];
     let next_pos_mass = next_sph_state[state_base];
@@ -837,6 +854,133 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let next_j = next_mls_mechanics[mechanics_base + 4u].z;
     min_volume_ratio_j = min(min_volume_ratio_j, next_j);
     max_volume_ratio_j = max(max_volume_ratio_j, next_j);
+  }
+
+  wg_active_grid_nodes[lane] = active_grid_nodes;
+  wg_source_mass[lane] = source_mass;
+  wg_next_mass[lane] = next_mass;
+  wg_source_momentum_x[lane] = source_momentum.x;
+  wg_source_momentum_y[lane] = source_momentum.y;
+  wg_source_momentum_z[lane] = source_momentum.z;
+  wg_next_momentum_x[lane] = next_momentum.x;
+  wg_next_momentum_y[lane] = next_momentum.y;
+  wg_next_momentum_z[lane] = next_momentum.z;
+  wg_max_speed[lane] = sqrt(max_speed2);
+  wg_max_displacement[lane] = sqrt(max_displacement2);
+  wg_min_volume_ratio_j[lane] = min_volume_ratio_j;
+  wg_max_volume_ratio_j[lane] = max_volume_ratio_j;
+  workgroupBarrier();
+
+  var stride = 32u;
+  loop {
+    if (lane < stride) {
+      let other = lane + stride;
+      wg_active_grid_nodes[lane] = wg_active_grid_nodes[lane] + wg_active_grid_nodes[other];
+      wg_source_mass[lane] = wg_source_mass[lane] + wg_source_mass[other];
+      wg_next_mass[lane] = wg_next_mass[lane] + wg_next_mass[other];
+      wg_source_momentum_x[lane] = wg_source_momentum_x[lane] + wg_source_momentum_x[other];
+      wg_source_momentum_y[lane] = wg_source_momentum_y[lane] + wg_source_momentum_y[other];
+      wg_source_momentum_z[lane] = wg_source_momentum_z[lane] + wg_source_momentum_z[other];
+      wg_next_momentum_x[lane] = wg_next_momentum_x[lane] + wg_next_momentum_x[other];
+      wg_next_momentum_y[lane] = wg_next_momentum_y[lane] + wg_next_momentum_y[other];
+      wg_next_momentum_z[lane] = wg_next_momentum_z[lane] + wg_next_momentum_z[other];
+      wg_max_speed[lane] = max(wg_max_speed[lane], wg_max_speed[other]);
+      wg_max_displacement[lane] = max(wg_max_displacement[lane], wg_max_displacement[other]);
+      wg_min_volume_ratio_j[lane] = min(wg_min_volume_ratio_j[lane], wg_min_volume_ratio_j[other]);
+      wg_max_volume_ratio_j[lane] = max(wg_max_volume_ratio_j[lane], wg_max_volume_ratio_j[other]);
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  if (lane == 0u) {
+    let partial_base = workgroup_id.x * 5u;
+    let momentum_delta = vec3<f32>(
+      wg_next_momentum_x[0u] - wg_source_momentum_x[0u],
+      wg_next_momentum_y[0u] - wg_source_momentum_y[0u],
+      wg_next_momentum_z[0u] - wg_source_momentum_z[0u]
+    );
+    partial_summaries[partial_base] = vec4<f32>(
+      0.0,
+      0.0,
+      wg_active_grid_nodes[0u],
+      wg_source_mass[0u]
+    );
+    partial_summaries[partial_base + 1u] = vec4<f32>(
+      wg_next_mass[0u],
+      wg_next_mass[0u] - wg_source_mass[0u],
+      wg_source_momentum_x[0u],
+      wg_source_momentum_y[0u]
+    );
+    partial_summaries[partial_base + 2u] = vec4<f32>(
+      wg_source_momentum_z[0u],
+      wg_next_momentum_x[0u],
+      wg_next_momentum_y[0u],
+      wg_next_momentum_z[0u]
+    );
+    partial_summaries[partial_base + 3u] = vec4<f32>(
+      momentum_delta.x,
+      momentum_delta.y,
+      momentum_delta.z,
+      wg_max_speed[0u]
+    );
+    partial_summaries[partial_base + 4u] = vec4<f32>(
+      wg_max_displacement[0u],
+      wg_min_volume_ratio_j[0u],
+      wg_max_volume_ratio_j[0u],
+      1.0
+    );
+  }
+}
+`;
+
+export const mlsMpmResidentSummaryFinalizeWgsl = `
+struct ResidentSummaryParams {
+  particle_count: u32,
+  grid_node_count: u32,
+  partial_count: u32,
+  pad_u1: u32,
+};
+
+@group(0) @binding(0) var<storage, read> partial_summaries: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> resident_summary: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> params: ResidentSummaryParams;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+
+  var active_grid_nodes = 0.0;
+  var source_mass = 0.0;
+  var next_mass = 0.0;
+  var source_momentum = vec3<f32>(0.0);
+  var next_momentum = vec3<f32>(0.0);
+  var max_speed = 0.0;
+  var max_displacement = 0.0;
+  var min_volume_ratio_j = 3.4028234663852886e38;
+  var max_volume_ratio_j = 0.0;
+
+  for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
+    let base = partial_index * 5u;
+    let row0 = partial_summaries[base];
+    let row1 = partial_summaries[base + 1u];
+    let row2 = partial_summaries[base + 2u];
+    let row3 = partial_summaries[base + 3u];
+    let row4 = partial_summaries[base + 4u];
+    active_grid_nodes = active_grid_nodes + row0.z;
+    source_mass = source_mass + row0.w;
+    next_mass = next_mass + row1.x;
+    source_momentum = source_momentum + vec3<f32>(row1.z, row1.w, row2.x);
+    next_momentum = next_momentum + vec3<f32>(row2.y, row2.z, row2.w);
+    max_speed = max(max_speed, row3.w);
+    max_displacement = max(max_displacement, row4.x);
+    min_volume_ratio_j = min(min_volume_ratio_j, row4.y);
+    max_volume_ratio_j = max(max_volume_ratio_j, row4.z);
   }
 
   if (params.particle_count == 0u) {
@@ -866,13 +1010,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     momentum_delta.x,
     momentum_delta.y,
     momentum_delta.z,
-    sqrt(max_speed2)
+    max_speed
   );
   resident_summary[4u] = vec4<f32>(
-    sqrt(max_displacement2),
+    max_displacement,
     min_volume_ratio_j,
     max_volume_ratio_j,
     1.0
   );
 }
 `;
+
+export const mlsMpmResidentSummaryWgsl = mlsMpmResidentSummaryPartialsWgsl;

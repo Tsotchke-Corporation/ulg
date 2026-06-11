@@ -1762,3 +1762,39 @@ Not claimed:
 - The current density policy intentionally preserves the legacy
   dominant-at-half plateau behavior. It is explicit policy metadata, not a
   claim of physically validated mixture density.
+
+## 2026-06-11 Update - SPH Thermal Response/Graph WebGPU Binding
+
+Completed:
+
+- Updated `sphThermalStepWgsl` to bind phase-response records, phase-response
+  rows, thermal graph node rows, and thermal graph sample rows.
+- The shader now selects the response row by material id and internal energy,
+  evaluates temperature from the packed graph-bank sample rows using
+  per-invocation local values, and projects the explicit phase-response row into
+  the existing particle thermo layout.
+- Updated `runSphThermalStepWebGpu()` to build or accept prebuilt thermal graph
+  sets, graph banks, and phase-response tables, then upload/bind those buffers
+  instead of legacy thermal segment rows.
+- Updated the SPH scene to build the graph set and phase-response table once
+  when particles/materials are set, then pass those cached artifacts into
+  resident thermal steps.
+- Browser e2e now confirms the demo scene exposes both the graph bank and the
+  phase-response table.
+
+Latest validation:
+
+- PASS: syntax checks for touched shader/runtime/scene/test files.
+- PASS: `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs
+  tests/closureLawGraph.test.mjs` (`32/32`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/` (`1/1`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`325/325`).
+
+Not claimed:
+
+- Reaction WebGPU still uses the legacy thermal segment table for product phase
+  reset. That is the next thermal-response consumer to migrate.
+- The thermal kernel still uploads response/graph buffers on each WebGPU
+  invocation unless callers pass cached artifacts, which the scene now does.

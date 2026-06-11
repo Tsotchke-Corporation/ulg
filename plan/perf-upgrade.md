@@ -1106,3 +1106,22 @@ Next performance slice:
   local scratch or direct per-particle graph sampling to prevent races.
 - Keep full particle readback disabled in normal resident runs and read back
   compact status/summary rows only.
+
+## 2026-06-11 Checkpoint - Thermal Kernel Uses Response/Graph Buffers
+
+Implemented:
+
+- `sphThermalStepWgsl` now consumes response records/rows plus thermal graph
+  node/sample rows. It no longer resolves thermal state from the legacy segment
+  rows in the WebGPU thermal step.
+- The shader samples temperature from graph-bank samples using local
+  per-particle values, avoiding shared global graph slots in the hot loop.
+- The scene precomputes and passes thermal graph/response artifacts into the
+  resident chain, reducing per-frame CPU artifact construction.
+
+Still remaining:
+
+- Persist uploaded response/graph buffers across resident steps instead of
+  uploading them on each thermal kernel call.
+- Move reaction product phase reset onto the same response table.
+- Add compact thermal status/phase summary buffers for normal no-readback runs.

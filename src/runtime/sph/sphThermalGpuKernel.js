@@ -737,6 +737,9 @@ function outputEnvelope({
   backend,
   sphParticleState,
   thermalMaterialTable,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null,
   state,
   thermo,
   wallHeatJ,
@@ -760,9 +763,14 @@ function outputEnvelope({
     kernelScope: THERMAL_SCOPE,
     sourceSchema: sphParticleState.schema,
     materialTableSchema: thermalMaterialTable.schema,
+    thermalClosureGraphSetSchema: thermalClosureGraphSet?.schema ?? null,
+    thermalClosureGraphBankSchema: thermalClosureGraphBank?.schema ?? null,
+    thermalPhaseResponseTableSchema: thermalPhaseResponseTable?.schema ?? null,
     particleCount: sphParticleState.particleCount,
     materialCount: thermalMaterialTable.materialCount,
     segmentCount: thermalMaterialTable.segmentCount,
+    responseCount: thermalPhaseResponseTable?.responseCount ?? null,
+    thermalGraphCount: thermalClosureGraphBank?.graphCount ?? thermalClosureGraphSet?.graphCount ?? null,
     sourceStep: sphParticleState.step ?? 0,
     step: (sphParticleState.step ?? 0) + 1,
     sourceTime: sphParticleState.time ?? 0,
@@ -948,6 +956,9 @@ export async function runSphThermalStepWebGpu({
   device,
   sphParticleState,
   thermalMaterialTable,
+  thermalClosureGraphSet = null,
+  thermalClosureGraphBank = null,
+  thermalPhaseResponseTable = null,
   sphParticleUpload = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
@@ -971,8 +982,13 @@ export async function runSphThermalStepWebGpu({
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-thermal-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-thermal-source-thermo', sphParticleState.thermo);
-  const recordBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-material-records', thermalMaterialTable.records);
-  const segmentBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-segments', thermalMaterialTable.segments);
+  const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
+  const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
+  const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
+  const responseRecordBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-phase-response-records', resolvedPhaseResponseTable.records);
+  const responseBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-phase-responses', resolvedPhaseResponseTable.responses);
+  const graphNodeBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-graph-nodes', resolvedGraphBank.nodeRows);
+  const graphSampleBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-graph-samples', resolvedGraphBank.sampleRows);
   const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-output-state', new Float32Array(sphParticleState.state.length), GPU_BUFFER_USAGE.COPY_SRC);
   const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-thermal-output-thermo', new Float32Array(sphParticleState.thermo.length), GPU_BUFFER_USAGE.COPY_SRC);
   const paramsBuffer = device.createBuffer({
@@ -982,8 +998,8 @@ export async function runSphThermalStepWebGpu({
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
-    materialCount: thermalMaterialTable.materialCount,
-    segmentCount: thermalMaterialTable.segmentCount,
+    materialCount: resolvedPhaseResponseTable.materialCount,
+    segmentCount: resolvedPhaseResponseTable.responseCount,
     dtS: finiteNumber(dtS, 0),
     smoothingLengthM: finiteNumber(sphParticleState.smoothingLengthM, 0),
     conductionRate,
@@ -1003,9 +1019,11 @@ export async function runSphThermalStepWebGpu({
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'read-only-storage'),
       computeBufferBinding(3, 'read-only-storage'),
-      computeBufferBinding(4, 'storage'),
-      computeBufferBinding(5, 'storage'),
-      computeBufferBinding(6, 'uniform')
+      computeBufferBinding(4, 'read-only-storage'),
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(6, 'storage'),
+      computeBufferBinding(7, 'storage'),
+      computeBufferBinding(8, 'uniform')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1013,11 +1031,13 @@ export async function runSphThermalStepWebGpu({
     entries: [
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: thermoBuffer } },
-      { binding: 2, resource: { buffer: recordBuffer } },
-      { binding: 3, resource: { buffer: segmentBuffer } },
-      { binding: 4, resource: { buffer: outStateBuffer } },
-      { binding: 5, resource: { buffer: outThermoBuffer } },
-      { binding: 6, resource: { buffer: paramsBuffer } }
+      { binding: 2, resource: { buffer: responseRecordBuffer } },
+      { binding: 3, resource: { buffer: responseBuffer } },
+      { binding: 4, resource: { buffer: graphNodeBuffer } },
+      { binding: 5, resource: { buffer: graphSampleBuffer } },
+      { binding: 6, resource: { buffer: outStateBuffer } },
+      { binding: 7, resource: { buffer: outThermoBuffer } },
+      { binding: 8, resource: { buffer: paramsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1042,7 +1062,7 @@ export async function runSphThermalStepWebGpu({
   }
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-  for (const buffer of [recordBuffer, segmentBuffer, paramsBuffer]) {
+  for (const buffer of [responseRecordBuffer, responseBuffer, graphNodeBuffer, graphSampleBuffer, paramsBuffer]) {
     buffer.destroy?.();
   }
   if (!retainOutputParticleBuffers) {
@@ -1053,6 +1073,9 @@ export async function runSphThermalStepWebGpu({
     backend: 'webgpu',
     sphParticleState,
     thermalMaterialTable,
+    thermalClosureGraphSet: resolvedGraphSet,
+    thermalClosureGraphBank: resolvedGraphBank,
+    thermalPhaseResponseTable: resolvedPhaseResponseTable,
     state,
     thermo,
     wallHeatJ: Object.fromEntries(FACE_IDS.map((faceId) => [faceId, null])),

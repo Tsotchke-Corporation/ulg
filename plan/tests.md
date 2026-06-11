@@ -1749,3 +1749,22 @@ Validation status:
 - PASS: `npm run build` with the existing Vite large-chunk warning.
 - PASS: `git diff --check`.
 - PASS: full `npm test` (`325/325`).
+
+SPH thermal WebGPU response/graph binding gates:
+
+- `tests/abi.test.mjs` now checks `sphThermalStepWgsl` binds
+  `phase_response_records`, `phase_responses`, `thermal_graph_nodes`, and
+  `thermal_graph_samples`, with output thermo at the shifted storage binding.
+- `tests/demo.e2e.mjs` now confirms the live scene exposes the packed graph
+  bank schema and the phase-response table schema/count.
+
+Validation status:
+
+- PASS: syntax checks for touched WGSL/runtime/scene/e2e files.
+- PASS: `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs
+  tests/closureLawGraph.test.mjs` (`32/32`).
+- PASS: focused HTTPS Chromium e2e against `https://127.0.0.1:5173/`
+  (`1/1`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`325/325`).

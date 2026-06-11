@@ -33,7 +33,8 @@ import {
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import {
   buildSphThermalClosureGraphBuffers,
-  buildSphThermalMaterialTable
+  buildSphThermalMaterialTable,
+  buildSphThermalPhaseResponseTable
 } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import {
@@ -425,6 +426,7 @@ export function createSphPhaseScene(container, {
   let pendingMlsMpmResidentSteps = null;
   let sphThermalMaterialTable = null;
   let sphThermalClosureGraphBuffers = null;
+  let sphThermalPhaseResponseTable = null;
   let sphReactionTable = null;
   let sphResidentRenderState = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
@@ -444,6 +446,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
   scene.userData.sphThermalClosureGraphBuffers = null;
+  scene.userData.sphThermalPhaseResponseTable = null;
   scene.userData.sphReactionTable = null;
   scene.userData.sphResidentRenderState = null;
 
@@ -1343,6 +1346,11 @@ export function createSphPhaseScene(container, {
         deviceResult: resolvedDeviceResult,
         readbackMode: requestedReadbackMode,
         thermalMaterialTable: sphThermalMaterialTable,
+        thermalStepOptions: {
+          thermalClosureGraphSet: sphThermalClosureGraphBuffers,
+          thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+        },
         reactionTable: sphReactionTable,
         parityTolerances,
         p2gRunner,
@@ -1483,6 +1491,11 @@ export function createSphPhaseScene(container, {
         deviceResult: resolvedDeviceResult,
         readbackMode: requestedReadbackMode,
         thermalMaterialTable: sphThermalMaterialTable,
+        thermalStepOptions: {
+          thermalClosureGraphSet: sphThermalClosureGraphBuffers,
+          thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
+          thermalPhaseResponseTable: sphThermalPhaseResponseTable
+        },
         reactionTable: sphReactionTable,
         parityTolerances,
         p2gRunner,
@@ -1794,6 +1807,9 @@ export function createSphPhaseScene(container, {
     sphThermalClosureGraphBuffers = sphThermalMaterialTable
       ? buildSphThermalClosureGraphBuffers(sphThermalMaterialTable)
       : null;
+    sphThermalPhaseResponseTable = sphThermalMaterialTable && sphThermalClosureGraphBuffers
+      ? buildSphThermalPhaseResponseTable(sphThermalMaterialTable, sphThermalClosureGraphBuffers)
+      : null;
     sphReactionTable = materialProperties
       ? buildSphReactionTable(reactions || [], {
         materialProperties,
@@ -1803,6 +1819,7 @@ export function createSphPhaseScene(container, {
     rebuildOpticalStateForSurfaceBatches(batches, { materialProperties });
     scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
     scene.userData.sphThermalClosureGraphBuffers = sphThermalClosureGraphBuffers;
+    scene.userData.sphThermalPhaseResponseTable = sphThermalPhaseResponseTable;
     scene.userData.sphReactionTable = sphReactionTable;
     sphResidentRenderState = null;
     scene.userData.sphResidentRenderState = null;
@@ -2075,6 +2092,9 @@ export function createSphPhaseScene(container, {
     },
     getSphThermalClosureGraphBuffers() {
       return sphThermalClosureGraphBuffers;
+    },
+    getSphThermalPhaseResponseTable() {
+      return sphThermalPhaseResponseTable;
     },
     getSphReactionTable() {
       return sphReactionTable;

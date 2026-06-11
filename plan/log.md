@@ -9965,3 +9965,91 @@ Failures / open questions:
   validated mixture-density model.
 - Direct GPU rendering and compact diagnostics remain open performance work.
 - No push was attempted.
+
+## 2026-06-11 10:45 AKDT - Thermal WebGPU kernel binds response table and graph bank
+
+Prompt:
+
+- Continued from the prior prompt after completing the phase-response ABI
+  checkpoint.
+
+What happened:
+
+- Started the next hot-loop binding slice: move `sphThermalStepWgsl` from
+  legacy thermal segment rows to phase-response rows plus the packed thermal
+  temperature graph bank.
+- Updated `sphThermalStepWgsl` bindings:
+  - `binding(2)` phase-response records.
+  - `binding(3)` phase-response rows.
+  - `binding(4)` thermal graph node rows.
+  - `binding(5)` thermal graph sample rows.
+  - `binding(6)` output SPH state.
+  - `binding(7)` output SPH thermo.
+  - `binding(8)` thermal params.
+- The shader now samples temperature from the graph-bank samples with local
+  per-particle values and projects explicit phase-response data into the
+  compatibility thermo row.
+- Updated `runSphThermalStepWebGpu()` to build or accept thermal graph sets,
+  graph banks, and phase-response tables, upload those buffers, and report
+  their schemas/counts in the thermal step envelope.
+- Updated `sphPhaseScene` to precompute the thermal graph set and
+  phase-response table when material properties are set, then pass cached
+  artifacts through `thermalStepOptions` into resident thermal steps.
+- Updated browser e2e to confirm the scene exposes the graph bank and
+  phase-response table.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `sed`/`rg` inspections of `ulg-gpu-abi/src/wgsl.js`,
+  `src/runtime/sph/sphThermalGpuKernel.js`,
+  `src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `src/visualization/sphPhaseScene.js`, `tests/abi.test.mjs`, and
+  `tests/sphThermalGpuKernel.test.mjs`.
+- `node --check ulg-gpu-abi/src/wgsl.js && node --check src/runtime/sph/sphThermalGpuKernel.js && node --check tests/abi.test.mjs && node --check tests/sphThermalGpuKernel.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs`
+- `node --check src/visualization/sphPhaseScene.js && node --check tests/demo.e2e.mjs && node --check src/runtime/sph/sphThermalGpuKernel.js && node --check ulg-gpu-abi/src/wgsl.js`
+- `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs tests/closureLawGraph.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `git diff --check`
+- `npm test`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 10:45:13 AKDT`.
+- `git status --short --branch` reported `## main...origin/main [ahead 34]`
+  with the thermal binding files modified.
+- `git diff --stat`
+
+Validation:
+
+- PASS: syntax checks for touched WGSL/runtime/scene/e2e files.
+- PASS: `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs`
+  passed `24/24`.
+- PASS: `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs
+  tests/closureLawGraph.test.mjs` passed `32/32`.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` passed `325/325`.
+
+Failures / open questions:
+
+- Reaction WebGPU still uses legacy thermal segment rows for product phase
+  reset. That should migrate to response rows next so reaction and thermal use
+  the same phase semantics.
+- Thermal response/graph buffers are now cached at the scene artifact level, but
+  uploaded to GPU per thermal invocation. Persisting those buffers across
+  resident steps is still open.
+- No push was attempted.

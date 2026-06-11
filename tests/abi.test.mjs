@@ -342,8 +342,11 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
     'fractionToSlope:f32',
     'fractionToIntercept:f32'
   ]);
-  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(2\) var<storage, read> material_records/);
-  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> out_sph_thermo/);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(2\) var<storage, read> phase_response_records/);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(3\) var<storage, read> phase_responses/);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(4\) var<storage, read> thermal_graph_nodes/);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(5\) var<storage, read> thermal_graph_samples/);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(7\) var<storage, read_write> out_sph_thermo/);
   assert.match(sphThermalStepWgsl, /@compute @workgroup_size\(64\)/);
 });
 

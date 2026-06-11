@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 02:27 AKDT
+Updated: 2026-06-11 02:48 AKDT
 
 ## Done
 
@@ -1438,3 +1438,48 @@ Not claimed:
   updates remain CPU-side.
 - `gpuAuthoritativeState` remains false, and Three.js rendering is still fed
   from CPU-side visual particles rather than a WebGPU render buffer.
+
+## 2026-06-11 Update - Resident Thermal/Thermo GPU Stage
+
+Completed:
+
+- Added `peercompute.ulg.sph-gpu-thermal-material-table.v0` plus stable
+  f32x4-aligned material-record and phase-segment row layouts.
+- Added `peercompute.ulg.sph-gpu-thermal-step.v0` and a WGSL thermal kernel
+  that consumes resident SPH state/thermo buffers plus a closure-derived
+  material phase table, applies pairwise compact-support conduction and six
+  explicit wall reservoirs, and writes refreshed state/internal-energy and
+  thermo rows.
+- The thermal material table is generated from material closure energy/phase
+  segments, keyed by stable material id, so elements and compounds use the same
+  path rather than one-off Fe/H2O patches.
+- Resident MLS-MPM steps can now run the thermal stage after G2P and before the
+  next P2G, retaining thermal output `stateBuffer`/`thermoBuffer` while keeping
+  G2P mechanics buffers resident.
+- The live SPH scene builds a thermal material table from the active derived
+  material closures and passes it into resident MLS-MPM chains. Overlay status
+  and browser e2e now surface the resident thermal stage.
+
+Latest validation:
+
+- PASS: syntax checks for ABI, WGSL, thermal kernel, resident-step, scene,
+  mount, and browser e2e files.
+- PASS: focused ABI/thermal/resident-step tests passed `27/27`.
+- PASS: `npm test` passed `296/296`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: focused HTTPS Chromium/WebGPU e2e passed against the live server:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1
+  npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs
+  -g "SPH phase demo runs derived material properties by default"` (`1/1`,
+  about 59 seconds), requiring `thermal-step-executed` on WebGPU and
+  `retained-thermal-output-and-g2p-mechanics-buffers`.
+
+Not claimed:
+
+- This is a resident thermal/thermo refresh stage, not full GPU-authoritative
+  chemistry. Reactions/material conversion, product-closure changes, gas
+  pressure summaries, and render-authoritative positions still need GPU paths.
+- The thermal phase table is a closure-derived lookup representation; it is
+  evidence-level and keeps scientific/material/phase validation flags false.
+- `gpuAuthoritativeState` remains false because the visible Three.js renderer
+  still consumes CPU-side visual particles.

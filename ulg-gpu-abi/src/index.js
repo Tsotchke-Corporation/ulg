@@ -14,6 +14,10 @@ export const ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA = 'peercompute.ulg.optical-
 export const ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-parity.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
+export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-material-table.v0';
+export const ULG_SPH_GPU_THERMAL_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step.v0';
+export const ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-execution.v0';
+export const ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-parity.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0';
 export const ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0';
@@ -116,6 +120,26 @@ export const SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT = Object.freeze([
   'phaseFractionPlasma:f32',
   'smoothingLengthM:f32',
   'representedEntityCount:f32',
+  'status:f32',
+  'pad0:f32'
+]);
+export const SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'segmentOffset:f32',
+  'segmentCount:f32',
+  'status:f32'
+]);
+export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'segmentType:f32',
+  'phaseFromId:f32',
+  'phaseToId:f32',
+  'energyStartJPerKg:f32',
+  'energyEndJPerKg:f32',
+  'temperatureStartK:f32',
+  'temperatureEndK:f32',
+  'densityFromKgPerM3:f32',
+  'densityToKgPerM3:f32',
   'status:f32',
   'pad0:f32'
 ]);

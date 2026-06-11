@@ -492,6 +492,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__sphScene = scene;
   overlay.__sphDriver = driver;
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+  overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
   overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
   overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
   overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -766,6 +767,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphScene = scene;
     overlay.__sphDriver = driver;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+    overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -850,6 +852,7 @@ export function mountSphPhaseDemoOverlay() {
       mlsMpmGpuParticleState
     });
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
+    overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
@@ -940,6 +943,15 @@ export function mountSphPhaseDemoOverlay() {
       || compactDiagnostics?.readbackMode
       || 'pending';
     const compactReduction = compactDiagnostics?.compactSummaryReductionStrategy || 'pending';
+    const residentThermalStatus = residentStep?.stageStatus?.thermal
+      || residentStep?.thermalStep?.status
+      || residentStep?.thermalStep?.result?.status
+      || 'pending';
+    const residentThermalBackend = residentStep?.stageBackends?.thermal
+      || residentStep?.thermalStep?.backend
+      || residentStep?.thermalStep?.result?.backend
+      || 'pending';
+    const residentThermalBufferMode = residentStep?.nextParticleBufferMode || 'pending';
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
@@ -957,6 +969,7 @@ export function mountSphPhaseDemoOverlay() {
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
       `resident source  : ${residentSourceMode} continued=${Boolean(residentContinued)} next=${Boolean(residentContinuationAvailable)}`,
       `compact summary  : status=${compactStatus} mode=${compactMode} reduction=${compactReduction}`,
+      `resident thermal : status=${residentThermalStatus} backend=${residentThermalBackend} next=${residentThermalBufferMode}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,

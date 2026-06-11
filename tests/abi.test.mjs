@@ -15,6 +15,8 @@ import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
+  SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
   createClosureTableDescriptor,
   createClosureTableSampleBuffer,
   createClosureTableWgslDescriptor,
@@ -50,7 +52,11 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
-  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
+  ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
+  ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
+  ULG_SPH_GPU_THERMAL_STEP_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   mlsMpmG2pReconstructWgsl,
@@ -60,7 +66,8 @@ import {
   mlsMpmResidentSummaryFinalizeWgsl,
   mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl,
-  opticalLookupWgsl
+  opticalLookupWgsl,
+  sphThermalStepWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
 
 const ajv = new Ajv2020({ strict: false });
@@ -188,6 +195,36 @@ test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
     'temperatureK:f32',
     'restDensityKgPerM3:f32'
   ]);
+});
+
+test('SPH GPU thermal material table ABI exposes closure-derived row layouts', () => {
+  assert.equal(ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-material-table.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-execution.v0');
+  assert.equal(ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-thermal-step-parity.v0');
+  assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length, 4);
+  assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT, [
+    'materialId:f32',
+    'segmentOffset:f32',
+    'segmentCount:f32',
+    'status:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT.slice(0, 8), [
+    'materialId:f32',
+    'segmentType:f32',
+    'phaseFromId:f32',
+    'phaseToId:f32',
+    'energyStartJPerKg:f32',
+    'energyEndJPerKg:f32',
+    'temperatureStartK:f32',
+    'temperatureEndK:f32'
+  ]);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(2\) var<storage, read> material_records/);
+  assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> out_sph_thermo/);
+  assert.match(sphThermalStepWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {

@@ -31,6 +31,7 @@ import {
   runMlsMpmResidentStepWithOptionalWebGpu,
   runMlsMpmResidentStepsWithOptionalWebGpu
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
+import { buildSphThermalMaterialTable } from '../runtime/sph/sphThermalGpuKernel.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -381,6 +382,7 @@ export function createSphPhaseScene(container, {
   let mlsMpmResidentSteps = null;
   let mlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentSteps = null;
+  let sphThermalMaterialTable = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -396,6 +398,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentStep = null;
   scene.userData.mlsMpmResidentSteps = null;
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+  scene.userData.sphThermalMaterialTable = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -1280,6 +1283,7 @@ export function createSphPhaseScene(container, {
         device,
         deviceResult: resolvedDeviceResult,
         readbackMode: requestedReadbackMode,
+        thermalMaterialTable: sphThermalMaterialTable,
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1418,6 +1422,7 @@ export function createSphPhaseScene(container, {
         device,
         deviceResult: resolvedDeviceResult,
         readbackMode: requestedReadbackMode,
+        thermalMaterialTable: sphThermalMaterialTable,
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1522,9 +1527,13 @@ export function createSphPhaseScene(container, {
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
+    sphThermalMaterialTable = materialProperties
+      ? buildSphThermalMaterialTable(materialProperties)
+      : null;
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     opticalGpuLookupGeneration += 1;
     scene.userData.opticalGpuTable = opticalGpuTable;
+    scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
     scene.userData.opticalGpuLookup = opticalGpuLookup;
     scene.userData.opticalGpuLookupExecution = null;
     scene.userData.opticalGpuLookupDrawState = null;
@@ -1663,6 +1672,9 @@ export function createSphPhaseScene(container, {
     },
     getOpticalGpuLookup() {
       return opticalGpuLookup;
+    },
+    getSphThermalMaterialTable() {
+      return sphThermalMaterialTable;
     },
     getOpticalGpuDrawState() {
       return scene.userData.opticalGpuLookupDrawState;

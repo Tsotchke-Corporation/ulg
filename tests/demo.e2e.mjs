@@ -1205,6 +1205,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const opticalGpuLookup = scene?.getOpticalGpuLookup?.();
     const opticalGpuExecution = opticalGpuLookup?.execution;
     const opticalGpuDrawState = scene?.getOpticalGpuDrawState?.();
+    const sphThermalMaterialTable = scene?.getSphThermalMaterialTable?.();
     const sphGpuParticleState = scene?.getSphGpuParticleState?.();
     const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
@@ -1236,6 +1237,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         schema: opticalGpuTable?.schema,
         recordCount: opticalGpuTable?.recordCount,
         spectralSampleCount: opticalGpuTable?.spectralSampleCount
+      },
+      sphThermalMaterialTable: {
+        schema: sphThermalMaterialTable?.schema,
+        materialCount: sphThermalMaterialTable?.materialCount,
+        segmentCount: sphThermalMaterialTable?.segmentCount,
+        status: sphThermalMaterialTable?.status
       },
       opticalGpuLookup: {
         schema: opticalGpuLookup?.lookup?.schema,
@@ -1388,6 +1395,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         residentBufferMode: mlsMpmResidentStep?.residentBufferMode,
         nextParticleBufferMode: mlsMpmResidentStep?.nextParticleBufferMode,
         nextParticleStateBufferByteLength: mlsMpmResidentStep?.nextParticleStateBufferByteLength,
+        nextParticleThermoBufferByteLength: mlsMpmResidentStep?.nextParticleThermoBufferByteLength,
         nextParticleMechanicsBufferByteLength: mlsMpmResidentStep?.nextParticleMechanicsBufferByteLength,
         particlePingPong: mlsMpmResidentStep?.particlePingPong,
         requestedReadbackMode: mlsMpmResidentStep?.requestedReadbackMode,
@@ -1462,6 +1470,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
   expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
   expect(derivedSummary.opticalGpuTable.spectralSampleCount).toBeGreaterThan(0);
+  expect(derivedSummary.sphThermalMaterialTable.schema).toBe('peercompute.ulg.sph-gpu-thermal-material-table.v0');
+  expect(derivedSummary.sphThermalMaterialTable.materialCount).toBeGreaterThan(0);
+  expect(derivedSummary.sphThermalMaterialTable.segmentCount).toBeGreaterThan(0);
   expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
   expect(derivedSummary.opticalGpuLookup.queryCount).toBe(derivedSummary.opticalGpuTable.recordCount);
   expect(derivedSummary.opticalGpuLookup.outputCount).toBe(derivedSummary.opticalGpuLookup.queryCount * 12);
@@ -1716,12 +1727,13 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=no-full-readback');
     expect(derivedSummary.statusText).toContain('resident source  : previous-gpu-resident-output continued=true next=true');
     expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
+    expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
     expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('previous-gpu-resident-output');
     expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(true);
     expect(derivedSummary.mlsMpmResidentSteps.continuationAvailable).toBe(true);
-    expect(derivedSummary.mlsMpmResidentSteps.nextParticleBufferMode).toBe('retained-g2p-output-buffers');
+    expect(derivedSummary.mlsMpmResidentSteps.nextParticleBufferMode).toBe('retained-thermal-output-and-g2p-mechanics-buffers');
     expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(true);
     expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.stepSummaries.every((summary) => (
@@ -1747,12 +1759,15 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.p2g).toBe('webgpu-executed-no-full-readback');
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.gridUpdate).toBe('webgpu-executed-no-full-readback');
     expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed-no-full-readback');
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.thermal).toBe('thermal-step-executed');
+    expect(derivedSummary.mlsMpmResidentStep.stageBackends.thermal).toBe('webgpu');
     expect(derivedSummary.mlsMpmResidentStep.residentBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.stageBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.g2pOutputBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.residentBufferMode).toBe('retained-stage-and-output-buffers');
-    expect(derivedSummary.mlsMpmResidentStep.nextParticleBufferMode).toBe('retained-g2p-output-buffers');
+    expect(derivedSummary.mlsMpmResidentStep.nextParticleBufferMode).toBe('retained-thermal-output-and-g2p-mechanics-buffers');
     expect(derivedSummary.mlsMpmResidentStep.nextParticleStateBufferByteLength).toBeGreaterThan(0);
+    expect(derivedSummary.mlsMpmResidentStep.nextParticleThermoBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.nextParticleMechanicsBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.particlePingPong.sourceSlot).toBe(1);
     expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextSlot).toBe(0);

@@ -8973,6 +8973,9 @@ Commands run:
   -g "SPH phase demo runs derived material properties by default"`
 - `npm test`
 - `npm run build`
+- `git diff --check`
+- `npm test`
+- `npm run build`
 - `curl -k -s -o /dev/null -w '%{http_code} %{url_effective}\n'
   https://127.0.0.1:5173/`
 - `curl -k --max-time 10 -s -o /dev/null -w '%{http_code}
@@ -9116,4 +9119,83 @@ Failures / open questions:
   closure updates, and render-authoritative positions still need GPU-resident
   paths.
 - `gpuAuthoritativeState` remains false.
+- No push was attempted.
+
+## 2026-06-11 02:48 AKDT - Resident thermal/thermo GPU stage
+
+Prompt:
+
+- Continue the GPU-first refactor and move the thermal/phase part toward
+  WebGPU residency instead of leaving stale thermo buffers in the resident
+  MLS-MPM chain.
+
+Actions:
+
+- Added ABI schemas and row layouts for a closure-derived SPH thermal material
+  table and thermal step execution/parity records.
+- Added `sphThermalStepWgsl`, which reads resident SPH state/thermo buffers,
+  material phase-segment tables, six wall temperatures, and thermal rates, then
+  writes refreshed internal energy plus thermo rows.
+- Added `sphThermalGpuKernel.js` with:
+  - closure-derived material-table packing from `orderedSegments()`,
+  - CPU reference table inversion and thermal stepping,
+  - optional WebGPU execution/parity,
+  - retained output `stateBuffer`/`thermoBuffer` support for no-full-readback
+    resident chains.
+- Wired resident MLS-MPM steps to optionally run the thermal stage after G2P,
+  replace the next SPH state/thermo upload with the thermal output buffers, and
+  preserve G2P mechanics buffers for the next P2G.
+- The SPH phase scene now builds the thermal material table from active derived
+  material closures, passes it into resident MLS-MPM chains, and surfaces the
+  table/stage through the overlay and e2e summary.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/sph/sphThermalGpuKernel.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/sphThermalGpuKernel.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphThermalGpuKernel.js && node --check
+  ulg-gpu-abi/src/index.js && node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/abi.test.mjs && node --check
+  tests/sphThermalGpuKernel.test.mjs && node --test tests/abi.test.mjs
+  tests/sphThermalGpuKernel.test.mjs`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check
+  tests/sphMlsMpmGpuStep.test.mjs && node --test
+  tests/sphMlsMpmGpuStep.test.mjs tests/sphThermalGpuKernel.test.mjs`
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check
+  src/visualization/sphPhaseScene.js && node --check tests/demo.e2e.mjs`
+- `node --test tests/abi.test.mjs tests/sphThermalGpuKernel.test.mjs
+  tests/sphMlsMpmGpuStep.test.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173
+  npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs
+  -g "SPH phase demo runs derived material properties by default"`
+
+Validation:
+
+- PASS: focused ABI/thermal/resident-step tests passed `27/27`.
+- PASS: focused HTTPS Chromium/WebGPU e2e passed (`1/1`, about 59 seconds),
+  requiring resident `thermal-step-executed` on WebGPU.
+- PASS: full Node test suite passed `296/296`.
+- PASS: production build passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This is still not GPU-authoritative chemistry. Reactions/material conversion,
+  product closure changes, gas pressure summaries, and render-authoritative
+  positions remain future GPU slices.
+- The thermal material table is closure-derived but evidence-level; validation
+  flags remain false.
 - No push was attempted.

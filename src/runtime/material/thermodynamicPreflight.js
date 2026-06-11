@@ -30,7 +30,7 @@ function solveAdiabaticEquilibriumK(parts) {
   return 0.5 * (lo + hi);
 }
 
-export async function computeClosureBackedPreflight(scenario = createSphPhaseScenario(), { materialRegistry } = {}) {
+export async function computeClosureBackedPreflight(scenario = createSphPhaseScenario(), { materialRegistry, allowFixtureBaseline = false } = {}) {
   if (!materialRegistry) throw new Error('computeClosureBackedPreflight requires a materialRegistry');
   const reference = computeThermodynamicPreflight(scenario);
 
@@ -125,6 +125,8 @@ export async function computeClosureBackedPreflight(scenario = createSphPhaseSce
       adiabaticEquilibriumDeltaK,
       heatCapacityModel: { fe: 'debye-solid', air: 'equipartition' }
     },
-    blockers: [...reference.blockers, 'closure-backed-by-reference-fixtures-not-validated']
+    blockers: allowFixtureBaseline
+      ? [...reference.blockers, 'closure-backed-by-reference-fixtures-not-validated']
+      : ['derived-material-models-unvalidated']
   };
 }

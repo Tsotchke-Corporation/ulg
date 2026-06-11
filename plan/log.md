@@ -1,5 +1,109 @@
 # ULG Implementation Log
 
+## 2026-06-10 18:20 AKDT - Reaction gate correction: Na reacts with liquid water at room temperature
+
+Prompt: User challenged the chemistry gate: sodium/water should react at room
+temperature and reactions should follow from first principles.
+
+Corrected the nonphysical active-metal + water trigger. The previous reaction
+network derived the NaOH enthalpy from molecular HF, but used
+`max(metal melting point, water melting point)` as a fake activation gate. That
+incorrectly implied sodium must melt before reacting. The new gate is
+reaction-family phase availability: for active-metal + water, the `h2o` reactant
+must be liquid or gas, and the metal itself does not need to be molten. This keeps
+solid ice blocked until liquid water is locally available while allowing solid Na
+to react with room-temperature liquid water.
+
+Changes:
+
+- `src/runtime/sph/reactionDiscovery.js`: active-metal + water reactions now
+  carry `phaseRequirements: { h2o: ['liquid', 'gas'] }`,
+  `activationTemperatureK: 0`, and an explicit activation model noting that a
+  true transition-state barrier is still frontier work.
+- `src/runtime/sph/reactiveChemistry.js`: reactive pairs now enforce per-reactant
+  phase requirements from the phase-equilibrium closure before applying the
+  remaining thermal gate and converting particles.
+- `tests/reactionDiscovery.test.mjs`: asserts the Na/H2O reaction no longer
+  carries the sodium melting point as its activation gate.
+- `tests/reactiveChemistry.test.mjs`: covers solid Na reacting with liquid water
+  at 293.15 K, and hot Na not reacting with solid ice until liquid water is
+  available.
+- `tests/demo.e2e.mjs`: the NaOH visual regression now starts from URL state with
+  Na and H2O both at 293.15 K, steps the same browser driver, verifies `naoh`
+  particles and a visible continuous `naoh` surface, and writes
+  `test-results/sph-naoh-room-temperature-reaction.png`.
+- Updated `plan/claude-changes-audit-2026-06-10.md` and
+  `plan/next-steps-2026-06-10.md` to reflect the corrected room-temperature
+  behavior and remaining kinetic frontier.
+
+Verification:
+
+- `node --check src/runtime/sph/reactionDiscovery.js` passed.
+- `node --check src/runtime/sph/reactiveChemistry.js` passed.
+- `node --check tests/demo.e2e.mjs` passed.
+- `node --test tests/reactionDiscovery.test.mjs tests/reactiveChemistry.test.mjs tests/sphPhaseDemo.test.mjs` passed.
+- Headless room-temperature Na/H2O produced `counts = { h2o: 101, naoh: 48, Na: 3 }` after 120 driver steps.
+- `npm test` passed 42/42.
+- `npm run build` passed with only the existing Vite large-chunk warning.
+- `npm run test:e2e -- --grep "SPH phase demo"` passed 2/2 outside the sandbox.
+
+No commit or push was made, per the local-only instruction.
+
+## 2026-06-10 17:32 AKDT - Claude audit + Na/H2O reaction visibility fix
+
+Prompt: Summarize Claude's changes, audit them, fix the chemical reaction bug,
+perform visual tests, create a next-steps plan, and write the audit to a plan
+file.
+
+Read Claude's handoff in `plan/codex-handoff-2026-06-10.md`, reviewed the
+Claude-marked committed history from the SPH/material/reaction takeover, and used
+a sidecar read-only audit to cross-check the likely failure points.
+
+Fixes:
+
+- `src/visualization/sphPhaseDemoMount.js`: material, temperature, block-height,
+  box-size, particle-count, and wall controls now auto-rebuild the live driver
+  and scene instead of silently waiting for Reset. This fixes the user-visible
+  path where selecting Na and pressing Play could still run the old Fe/H2O
+  driver.
+- `src/visualization/sphPhaseDemoMount.js`: status now includes a generic
+  `material phases` row so reaction products such as `naoh` are visible in the
+  panel.
+- `src/visualization/sphPhaseDemoMount.js`: exposed `overlay.__sphDriver` and a
+  deterministic `overlay.__sphStep()` hook for browser visual regression tests.
+- `src/runtime/sph/reactiveChemistry.js`: reacted particles now update product
+  rest density and reset MPM reference state (`mpmVolume0`, `mpmF`, `mpmJ`,
+  `mpmC`, cached solid flag) instead of carrying stale reactant mechanical state
+  under the product EOS.
+- `tests/reactiveChemistry.test.mjs`: added coverage for product-density and
+  MPM reference-state reset.
+- `tests/demo.e2e.mjs`: updated the default SPH visual assertion for the current
+  `ice` render-material key and added a Na + H2O browser regression that
+  auto-applies controls, steps to NaOH formation, verifies a visible `naoh`
+  continuous surface, checks nonblank canvas pixels, and writes
+  `test-results/sph-naoh-reaction.png`.
+
+Docs:
+
+- Added `plan/claude-changes-audit-2026-06-10.md`.
+- Added `plan/next-steps-2026-06-10.md`.
+
+Verification:
+
+- `node --check src/runtime/sph/reactiveChemistry.js` passed.
+- `node --check src/visualization/sphPhaseDemoMount.js` passed.
+- `node --check tests/demo.e2e.mjs` passed.
+- Focused chemistry/SPH unit tests passed.
+- Headless Na/H2O scenario produced `counts = { h2o: 98, naoh: 54 }` after 120
+  driver steps.
+- `npm test` passed 42/42.
+- `npm run build` passed with only the existing Vite large-chunk warning.
+- `npm run test:e2e -- --grep "SPH phase demo"` passed 2/2 outside the sandbox.
+- `npm run test:e2e` passed 4/4 outside the sandbox.
+- `git diff --check` passed.
+
+No commit or push was made, per the local-only instruction.
+
 ## 2026-06-09 10:21 AKDT - SPH demo: molten iron above ice
 
 Prompt: Slight change to the sim: put the iron block on top of the ice block
@@ -1025,6 +1129,457 @@ Open / blockers:
 - PeerCompute still needs a small adapter projection for the new
   `closure-refresh-request` and closure-table WGSL descriptor fields.
 - No push was attempted.
+
+## 2026-06-10 20:31:18 AKDT - Scalar-relativistic interband optical response
+
+Prompt:
+
+- User asked to implement the relativistic band/interband optical response and
+  reiterated that material properties, color, and opacity must be derived from
+  lower-level simulation rather than one-off patches.
+
+Actions:
+
+- Added a generalized metal optical path in
+  `src/runtime/material/opticalClosure.js`:
+  - discovers occupied localized d/f interband candidates from the periodic
+    electron configuration,
+  - augments the scalar-relativistic Koelling-Harmon Kohn-Sham atom solve with
+    unoccupied dipole target orbitals,
+  - derives dipole-allowed oscillator centers from KH orbital gaps,
+  - weights oscillator strength by source occupancy, target vacancy, and
+    angular selection,
+  - adds electron-gas broadening from the derived conduction-electron density,
+  - folds the oscillator set into a Drude-Lorentz dielectric response,
+  - integrates visible reflectance to sRGB through the existing CIE pipeline,
+    and
+  - derives metal renderer opacity/transmission from the same complex
+    dielectric skin-depth path.
+- Kept the implementation generic: Au color is now gold-tinted because the
+  derived 5d -> np/nf oscillator set suppresses blue reflectance; Ga/p-block
+  simple-metal paths do not get fake p -> d oscillators when no localized d/f
+  source transition is resolved.
+- Reused `properties.opticalInterbandOscillators` in
+  `opticalRenderParams()` so renderer calls can consume closure-derived
+  oscillator data without reparsing material aliases or recomputing heavy KH
+  solves.
+- Added `opticalInterbandOscillators` to the tracked material-property
+  provenance paths and attached it to the element closure provenance entry.
+- Updated element-closure derivation text and tests to cover derived Au
+  interband color, dipole selection, p-block no-oscillator behavior, renderer
+  reuse of precomputed oscillator data, and provenance coverage.
+- Spawned a read-only audit subagent for the dirty-tree optical implementation;
+  it caught the stale test expectations, missing provenance path, renderer
+  non-reuse, and overly broad p-block transition selection. Those findings were
+  folded into the patch.
+
+Files touched in this slice:
+
+- `src/runtime/material/opticalClosure.js`
+- `src/runtime/material/elementClosures.js`
+- `src/runtime/material/propertyProvenance.js`
+- `tests/opticalClosure.test.mjs`
+- `tests/elementClosures.test.mjs`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/material/opticalClosure.js`
+- PASS: `node --check src/runtime/material/elementClosures.js`
+- PASS: `node --check src/runtime/material/propertyProvenance.js`
+- PASS: `node --test tests/opticalClosure.test.mjs tests/elementClosures.test.mjs tests/materialPropertyProvenance.test.mjs tests/sphPhaseDemo.test.mjs`
+- PASS: `npm test` passed `44/44`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run test:e2e -- -g "SPH phase demo"` passed `2/2`.
+- PASS: `git diff --check`.
+- PASS: live Vite server remained bound to `0.0.0.0:5173`; `curl -I
+  http://127.0.0.1:5173` returned `200 OK`.
+
+Remaining scope:
+
+- This is still a CPU-reference scalar-relativistic atomic/interband closure,
+  not the final WebGPU-resident periodic band-structure and Brillouin-zone
+  optical solver.
+- Optical/scientific validation remains false/evidence-only until the band
+  solver and measured/benchmark comparisons exist.
+- No push was attempted.
+
+## 2026-06-10 19:49 AKDT - All-element molecular solver for heavy reactions
+
+Goal: remove the hard STO-3G H-Ar reaction-discovery wall without adding
+one-off Fe patches, and keep all new material/reaction products under the
+strict first-principles provenance gate.
+
+Changes:
+
+- Added `src/runtime/electronicStructure/allElementMolecularSolver.js`.
+  The solver derives per-element molecular descriptors from atomic Kohn-Sham
+  radial solves, then evaluates molecular/reaction energies with a universal
+  tight-binding/Morse-like pair Hamiltonian. It supports arbitrary `Z=1..118`
+  species and exposes bond length/depth helpers for product geometry.
+- Updated `src/runtime/sph/reactionDiscovery.js` so each reaction uses one
+  consistent electronic-energy model. Pure H-Ar species continue through
+  RHF/UHF STO-3G; any heavier participating species switches the whole reaction
+  to `atomic-kohn-sham-tight-binding-v0`. The old `Z<=18` blocker is gone.
+- Generalized element role detection so transition metals with derived
+  condensed/free-carrier closures, including Fe, participate in metal reaction
+  families without depending on the narrow jellium applicability flag.
+- Updated generic compound derivation so formulas outside the STO-3G basis use
+  the all-element molecular atomization energy before falling back to elemental
+  cohesion density. Heavy products such as FeO/FeOH now carry derived molecular
+  cohesion provenance.
+- Updated `src/runtime/sph/reactiveChemistry.js` so standalone enthalpy
+  derivation also switches to the all-element solver for heavy species.
+- Added `tests/allElementMolecularSolver.test.mjs` and expanded reaction +
+  provenance tests for FeO/FeOH heavy-product closure coverage.
+
+Observed behavior:
+
+- `discoverReactions('fe','o2')` now returns FeO through
+  `atomic-kohn-sham-tight-binding-v0`, with a derived exothermic enthalpy
+  around `-0.51 MJ/kg` in the current model.
+- `discoverReactions('fe','h2o')` now returns FeOH through the same all-element
+  model, around `-0.52 MJ/kg`.
+- Light controls still use the faster STO-3G path: Na+H2O -> NaOH, Mg+O2 ->
+  MgO, H2+O2 -> H2O.
+
+Validation:
+
+- PASS: `node --check` on changed runtime modules.
+- PASS: `node --test tests/allElementMolecularSolver.test.mjs
+  tests/reactionDiscovery.test.mjs tests/materialPropertyProvenance.test.mjs
+  tests/reactiveChemistry.test.mjs`.
+- PASS: `npm test` passed `44/44`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `npm run test:e2e -- --grep "SPH phase demo"` passed `2/2`.
+- PASS: `git diff --check`.
+- Live Vite remains bound to `0.0.0.0:5173`.
+
+Limitations / next:
+
+- This is a general lower-level electronic model, not calibrated chemical
+  thermochemistry. It removes the basis wall and preserves provenance, but
+  bond/reaction magnitudes are weak versus real Fe/O/H chemistry and validation
+  remains false.
+- O2 spin/multiplicity is still not represented in the all-element fallback.
+- Transition-state barriers are still reduced family gates; they should be
+  derived from the same all-element energy surface rather than the current
+  availability/thermal proxy.
+- Next solver slice should add a small geometry-relaxation path and barrier
+  scan over the all-element potential, then feed those results into reaction
+  activation instead of using family-level proxies.
+
+## 2026-06-10 20:02 AKDT - Derived optical opacity and WebGPU direction
+
+Goal: enforce that opacity/transmission is also derived from lower-level optical
+state rather than hard-coded renderer alpha, and make the path suitable for a
+future WebGPU-resident material/render pipeline.
+
+Changes:
+
+- Updated `src/runtime/material/opticalClosure.js`:
+  - Added Drude complex-index and absorption-coefficient helpers.
+  - Conductor render opacity now derives from conduction-electron density ->
+    plasma frequency -> complex index -> luminous skin-depth absorption ->
+    Beer-Lambert optical depth. Metals with closure-provided conduction density
+    return opaque/near-zero transmission without a material-name exception.
+  - Water/ice/steam opacity/transmission now comes from O-H-overtone
+    Beer-Lambert optical depth. The previous hard-coded steam condensation
+    scatter and ice internal scatter are removed; pure vapour is nearly
+    invisible until a condensation/nucleation droplet closure exists.
+  - Compounds with an electronic gap derive a geometric oscillator absorption
+    estimate from gap + formula density. Materials with no optical basis now
+    return `blocked: true` with `opacity: 0` instead of a fake translucent
+    fallback.
+- Updated `src/visualization/sphPhaseScene.js` and
+  `src/visualization/sphPhaseDemoMount.js` so the renderer passes actual
+  material closure properties into `opticalRenderParams()`. Render surfaces now
+  expose the optical derivation payload on `mesh.userData.optical`; arbitrary
+  conductive elements such as Au no longer fall through to the generic
+  translucent material path.
+- Updated `tests/opticalClosure.test.mjs` to cover conductor absorption,
+  derived Fe opacity, pure-vapour behavior, blocked missing optics, and Au
+  opacity from skin depth.
+
+Observed behavior:
+
+- Fe render opacity: `1`, transmission `~1.8e-35`, source
+  `drude-free-electron-skin-depth`.
+- Au render opacity: `1`, transmission `~1.8e-35`, source
+  `drude-free-electron-skin-depth`.
+- Liquid H2O render opacity: `~0.0034`, transmission `~0.976`, source
+  `beer-lambert-oh-overtone-optical-depth`.
+- Steam render opacity: `~0.000068`, transmission `~0.99993`, no fake
+  condensation scatter.
+
+Validation:
+
+- PASS: syntax checks for changed optical/render modules.
+- PASS: `node --test tests/opticalClosure.test.mjs
+  tests/sphPhaseRenderer.test.mjs tests/sphPhaseDemo.test.mjs`.
+- PASS: `npm test` passed `44/44`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `npm run test:e2e -- --grep "SPH phase demo"` passed `2/2`.
+- PASS: `git diff --check`.
+
+WebGPU note:
+
+- This remains a CPU-reference JS implementation. The correct next architecture
+  is WebGPU-resident optical/material buffers: closure inputs
+  (`conductionElectronDensityPerM3`, gap, density, phase, path length) upload to
+  GPU buffers, WGSL kernels compute colour/opacity/glow/phase state in-place,
+  and Three/WebGPU consumes those buffers without readback. CPU should only
+  orchestrate provenance, caching, and sparse closure refresh requests.
+
+## 2026-06-10 19:26 AKDT — Generic first-principles material derivation path
+
+Goal: enforce the user's clarified contract that every material property in the
+production/default path must resolve from lower-level physics, including
+compound/product molecules, with cached derived values allowed but reference or
+reduced property fallbacks treated as bugs.
+
+Work completed:
+
+- Added a generic material derivation module:
+  `src/runtime/material/materialDerivation.js`.
+  - Parses chemical formulas, builds formula-unit geometries, computes exact
+    formula masses, derives ideal gases and gas mixtures from statistical
+    mechanics/ideal-gas law, and derives molecular/compound condensed closures
+    from molecular HF or atomic-DFT-derived cohesion plus Debye/Lindemann phase
+    models.
+  - Wraps derived properties as `eshkol.ulg.material-closure.v0` artifacts with
+    content hashes, provenance ledgers, and `fullyLowerLevelDerived = true`.
+- Reworked element closures:
+  - Simple sp metals still use atomic Kohn-Sham core radius -> empty-core
+    jellium -> Debye/Lindemann.
+  - Transition/non-free-electron elements now use a generic atomic Kohn-Sham
+    radial-density packing branch rather than pretending the sp-jellium model is
+    adequate for Fe.
+  - Liquid phase density/bulk/cp are no longer marked `REDUCED_ESTIMATE`; they
+    are derived from the same lower-level cold curve plus the global Lindemann
+    melt displacement.
+- Reworked production material closures:
+  - `createFirstPrinciplesMaterialClosures()` now returns generic derived
+    closures for `h2o`, `fe`, `air`, `h2`, and `o2`.
+  - `createReferenceMaterialClosures()` remains available only as explicit
+    legacy/fixture coverage and still carries reference fallback provenance.
+- Reworked reaction product closures:
+  - `deriveCompoundClosure()` now delegates product density, bulk/shear, heat
+    capacity, phase boundaries, latent heats, and intrinsic color to the generic
+    formula pipeline instead of blending reactant material constants.
+  - Default `discoverReactions('Na', 'h2o')`, `discoverReactions('Mg', 'o2')`,
+    and `discoverReactions('h2', 'o2')` now run without fixture/reduced flags.
+- Reworked the SPH phase demo default path:
+  - Default build no longer blocks on Fe/H2O material properties.
+  - The hot drop role initializes from the selected material's derived liquidus
+    plus superheat when no explicit temperature override is supplied.
+  - Preflight now uses the demo's attached closures and role materials instead
+    of `REFERENCE_MATERIALS`.
+  - The browser/headless API no longer reports a strict default material block.
+  - The Na + H2O browser test initializes the blocks in contact and verifies
+    a derived NaOH product appears.
+- Updated tests from blocker expectations to strict production-derived
+  assertions while preserving explicit reference-fixture rejection coverage.
+
+Files touched in this checkpoint:
+
+- `src/runtime/material/materialDerivation.js`
+- `src/runtime/material/materialClosures.js`
+- `src/runtime/material/elementClosures.js`
+- `src/runtime/material/compoundClosure.js`
+- `src/runtime/material/thermodynamicPreflight.js`
+- `src/runtime/sph/reactionDiscovery.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/materialPropertyProvenance.test.mjs`
+- `tests/materialThermo.test.mjs`
+- `tests/elementClosures.test.mjs`
+- `tests/reactionDiscovery.test.mjs`
+- `tests/sphPhaseDemo.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/material/materialDerivation.js`
+- PASS: `node --check src/runtime/material/elementClosures.js`
+- PASS: `node --check src/runtime/material/materialClosures.js`
+- PASS: `node --check src/runtime/material/compoundClosure.js`
+- PASS: `node --check src/runtime/sph/reactionDiscovery.js`
+- PASS: `node --check src/runtime/sphPhaseDemo.js`
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS:
+  `node --test tests/materialPropertyProvenance.test.mjs tests/sphPhaseDemo.test.mjs tests/reactionDiscovery.test.mjs tests/elementClosures.test.mjs`
+- PASS: `npm test` passed `43/43`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `npm run test:e2e -- --grep "SPH phase demo"` passed `2/2`.
+- PASS: `git diff --check`.
+
+Important limits / next work:
+
+- The material properties are now derived model outputs with strict provenance,
+  not validated material data. Validation flags stay false.
+- Heavy-element reaction energetics still stop at the molecular HF/STO-3G basis
+  limit (`Z <= 18`). Fe material properties are derived, but Fe-containing
+  molecular reaction enthalpies still need a heavier-element electronic solver.
+- The generic compound condensed model is intentionally broad and evidence-only.
+  It needs replacement/refinement with resident DFT/MD EOS scans, elastic
+  tensors, and viscosity/transport derivations as the lower layers mature.
+- Rendering still has some material-name-specific presentation paths for
+  `ice`/`steam`/`h2o`; those should move behind generic optical/phase render
+  closures next.
+- No commit or push was attempted.
+
+## 2026-06-10 - Material property provenance and lower-layer derivation guard
+
+Goal:
+
+- Stop treating `closureBacked` as equivalent to "derived from accurate
+  lower-level physics." The runtime now needs to know, per material property,
+  whether a value came from lower-level simulation, exact constants, physical
+  laws, reference fixtures, reduced estimates, or a hard blocker.
+
+Changes:
+
+- Added `src/runtime/material/propertyProvenance.js`, a shared provenance
+  ledger for material properties. It tracks concrete property paths, derivation
+  status, method/source, blockers, and exposes guards for unprovenanced
+  properties and fully-derived requirements.
+- Updated `src/runtime/material/materialClosures.js` so H2O/Fe/air/H2/O2
+  closures carry per-property provenance and a `materialDerivation` summary.
+  H2/O2 no longer use tabulated STP density constants; density is derived from
+  exact molar mass plus the ideal gas law at the declared standard state.
+- Kept H2O/Fe honest: their condensed densities, phase boundaries, latent heat
+  inputs, and mechanical constants remain reference/reduced fallback properties
+  with explicit lower-layer blockers instead of being presented as
+  first-principles material data.
+- Updated `src/runtime/material/MaterialRegistry.js` so `sampleProperty()`
+  returns provenance for the sampled property and the closure-level derivation
+  summary. Downstream consumers can now distinguish reference-backed Fe density
+  from ideal-gas H2 density at the API boundary.
+- Updated `src/runtime/material/elementClosures.js` so generated element
+  closures carry provenance. Simple-metal solid properties are lower-layer
+  derived through the atomic-DFT/jellium/Debye/Lindemann chain; generated liquid
+  properties are explicitly reduced estimates until liquid MD/free-energy
+  closures exist.
+- Updated `src/runtime/material/compoundClosure.js` so product compounds carry
+  provenance and no longer invent fallback `1000 kg/m^3` density or `2.2 GPa`
+  bulk modulus. If reactant closures cannot supply density/mechanics, product
+  closure derivation fails instead of making up material properties.
+- Updated `src/runtime/sph/reactionDiscovery.js` so reaction material
+  composition uses material closure metadata for molar mass, phase boundaries,
+  reactive water phases, density, and bulk modulus. The remaining molecular
+  geometries are HF input geometries for reaction-energy solves, not SPH
+  material property constants.
+- Updated `src/runtime/sphPhaseDemo.js` to pass the active material property map
+  into reaction discovery, so selectable materials and derived product closures
+  follow the same closure graph as the SPH state.
+- Added `tests/materialPropertyProvenance.test.mjs` covering per-property
+  provenance, blocked H2O/Fe reference fallbacks, fully derived H2/O2 ideal-gas
+  closures, registry sampling provenance, and reaction product provenance.
+
+Validation:
+
+- PASS: `node --check src/runtime/material/materialClosures.js`
+- PASS: `node --check src/runtime/material/compoundClosure.js`
+- PASS: `node --check src/runtime/material/elementClosures.js`
+- PASS: `node --check src/runtime/material/propertyProvenance.js`
+- PASS: `node --check src/runtime/material/MaterialRegistry.js`
+- PASS: `node --check src/runtime/sph/reactionDiscovery.js`
+- PASS: `node --check src/runtime/sphPhaseDemo.js`
+- PASS: `node --test tests/materialPropertyProvenance.test.mjs`
+- PASS: `node --test tests/materialPropertyProvenance.test.mjs
+  tests/materialThermo.test.mjs tests/materialEos.test.mjs
+  tests/reactionDiscovery.test.mjs tests/reactiveChemistry.test.mjs
+  tests/elementClosures.test.mjs tests/multiMaterialEos.test.mjs
+  tests/thermalPhase.test.mjs tests/microphysics.test.mjs`
+- PASS: `npm test` passed `43/43`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run test:e2e -- --grep "SPH phase demo"` passed `2/2`, including
+  the room-temperature Na + H2O reaction-product surface regression.
+
+Remaining blockers:
+
+- Fe transition-metal material properties are not yet truly lower-layer
+  accurate. The existing simple-metal jellium path runs for Fe but produces
+  physically wrong density, so Fe stays reference-blocked until the DFT elastic
+  tensor / condensed EOS path exists.
+- H2O condensed-phase density, heat capacity, phase boundaries, and latent
+  heats still need molecular/condensed MD or free-energy closures before they
+  can be marked lower-level derived.
+- Product-compound condensed EOS is generalized and no longer has one-off
+  fallback constants, but it remains a reduced reactant-closure estimate until
+  product-specific MD/DFT closures are available.
+- No commit or push was attempted.
+
+## 2026-06-10 - Strict first-principles material contract
+
+Prompt:
+
+- If any material property does not resolve from first principles, that is a
+  bug. This includes compound molecules; cached values are allowed, but they
+  must be derived.
+
+Changes:
+
+- Promoted the provenance ledger from reporting to enforcement. Added
+  `MaterialFirstPrinciplesResolutionError`,
+  `requireFirstPrinciplesMaterialProperties()`, and
+  `requireFirstPrinciplesMaterialMap()` in
+  `src/runtime/material/propertyProvenance.js`.
+- Made `MaterialRegistry` strict by default. It now rejects registration or
+  sampling of reference/reduced material closures unless a caller explicitly
+  sets `requireFirstPrinciples: false` for fixture tests.
+- Added `createFirstPrinciplesMaterialClosures()` and limited it to the current
+  fully-derived H2/O2 gas closures. H2O, Fe, and air fixture closures remain
+  available only through the explicitly named reference factory.
+- Made generated element closures strict by default. Their current liquid
+  properties are reduced estimates, so callers must pass
+  `allowReducedEstimates: true` to use them as fixture/demo regressions.
+- Made generated compound closures strict by default. NaOH/MgO-style product
+  density/bulk properties are still reduced reactant-closure estimates, so
+  default derivation now throws until product MD/DFT condensed closures exist.
+- Tightened `reactionDiscovery`: default discovery requires first-principles
+  reactant and product material closures. The old Na/H2O and Mg/O2 reduced
+  product tests are now explicitly fixture-mode with
+  `allowFixtureMaterialProperties` and `allowReducedProductProperties`.
+- Tightened `buildSphPhaseDemoState()` / `createSphPhaseDemo()`: default SPH
+  demo construction now blocks when Fe/H2O/Na/product closures are missing or
+  reduced. The old visual/mechanics regression path is explicit fixture mode
+  only (`allowFixtureMaterialProperties: true`).
+- Updated the SPH overlay so the default UI stays alive but reports
+  `preflight : blocked` and names the first-principles material blockers instead
+  of running reference constants. The Playwright SPH tests now assert this
+  blocked behavior.
+- Blocked `runSphPhaseDemoPreflight()` and closure-backed preflight from using
+  the reference thermodynamic baseline by default; fixture baseline comparison
+  requires an explicit opt-in.
+
+Validation:
+
+- PASS: syntax checks for the changed runtime, visualization, and test files.
+- PASS: focused material/SPH tests:
+  `node --test tests/materialPropertyProvenance.test.mjs
+  tests/materialThermo.test.mjs tests/materialEos.test.mjs
+  tests/reactionDiscovery.test.mjs tests/sphPhaseDemo.test.mjs
+  tests/elementClosures.test.mjs`
+- PASS: `npm test` passed `43/43`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run test:e2e -- --grep "SPH phase demo"` passed `2/2`; both
+  tests now prove strict blocking instead of fixture-rendered material surfaces.
+
+Remaining blockers:
+
+- First-principles H2O condensed-phase properties are not implemented yet.
+- First-principles Fe transition-metal condensed EOS/elastic/phase properties
+  are not implemented yet.
+- First-principles product-compound condensed EOS for NaOH/MgO/etc. is not
+  implemented yet.
+- First-principles optical/render closure parameters are still a separate
+  blocker; the strict SPH demo now blocks before consuming those paths.
+- No commit or push was attempted.
 
 ## 2026-06-08 13:01:33 AKDT
 

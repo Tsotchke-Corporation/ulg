@@ -4,7 +4,7 @@
 
 import { createSphPhaseScene } from './sphPhaseScene.js';
 import { createSphPhaseDemo, particleColors, particleRenderMaterials, phaseMassSummary, surfaceEmissive } from '../runtime/sphPhaseDemo.js';
-import { computeThermodynamicPreflight, createSphPhaseScenario } from '../runtime/thermoPreflight.js';
+import { createSphPhaseScenario } from '../runtime/thermoPreflight.js';
 import { sphTotals } from '../runtime/sph/sphConservation.js';
 import { metallicElementSymbols } from '../runtime/material/elementClosures.js';
 
@@ -30,17 +30,17 @@ const BASE_PARTICLE_EDGE_DEFAULT = 5;
 // Default isosurface blob-size multiplier (1 = the auto estimate from particle spacing). Decoupled
 // from container size so resizing the box doesn't change how big the rendered blobs look.
 const BLOB_SCALE_DEFAULT = 1;
-// Selectable block materials: the two reference compounds (Fe and H₂O — full referenced closures)
-// plus the FULL set of metallic elements, whose closures are DERIVED on demand from the simulation
-// (jellium + atomic DFT + universal rules) — no per-material tables.
+// Selectable block materials. The production path resolves these through the generic
+// first-principles material derivation pipeline; unsupported reaction energetics are reported
+// separately by reaction discovery.
 const MATERIAL_OPTIONS = [
-  { key: 'fe', label: 'Iron (Fe) — ref' },
-  { key: 'h2o', label: 'Water (H₂O) — ref' },
-  { key: 'h2', label: 'Hydrogen (H₂) — reacts' },
-  { key: 'o2', label: 'Oxygen (O₂) — reacts' },
+  { key: 'fe', label: 'Iron (Fe) — derived element' },
+  { key: 'h2o', label: 'Water (H₂O) — derived compound' },
+  { key: 'h2', label: 'Hydrogen (H₂) — first-principles gas' },
+  { key: 'o2', label: 'Oxygen (O₂) — first-principles gas' },
   ...metallicElementSymbols()
-    .filter((e) => e.Z !== 26) // Fe is offered via the reference closure above
-    .map((e) => ({ key: e.symbol, label: `${e.symbol} (Z=${e.Z}) — derived` }))
+    .filter((e) => e.Z !== 26) // Fe is offered explicitly above
+    .map((e) => ({ key: e.symbol, label: `${e.symbol} (Z=${e.Z}) — derived element` }))
 ];
 // Default initial temperatures (K): hot drop block (molten iron above its 1811 K liquidus) and cold
 // base block (ice at −40 °F). Editable in the panel.
@@ -55,6 +55,17 @@ function fmt(n, digits = 2) {
   return n.toFixed(digits);
 }
 
+function formatMaterialPhaseMasses(byMaterialPhase = {}) {
+  return Object.entries(byMaterialPhase)
+    .map(([material, phases]) => {
+      const phaseText = Object.entries(phases)
+        .map(([phase, massKg]) => `${phase} ${fmt(massKg)}kg`)
+        .join('/');
+      return `${material}:${phaseText}`;
+    })
+    .join('  ');
+}
+
 /**
  * Headless demo API attached to window.__ulgDemo (no rendering).
  */
@@ -66,7 +77,7 @@ export function createSphPhaseDemoApi() {
   };
   return {
     runSphPhaseDemoPreflight(options = {}) {
-      return computeThermodynamicPreflight(createSphPhaseScenario(options));
+      return createSphPhaseDemo(options).preflight();
     },
     runSphPhaseDemoStep(options = {}) {
       const d = ensure(options);
@@ -116,7 +127,7 @@ function buildOverlayShell() {
         <strong style="color:#75f7b4;">SPH PHASE — two materials interacting</strong>
         <button id="sph-close" type="button">close</button>
       </div>
-      <p style="opacity:.6;font-size:11px;line-height:1.4;">CPU reference, reduced resolution. Colour is closure-backed, not demo-tuned: incandescent glow from the Planck radiation closure (first-principles from temperature); intrinsic colour from the optical closure (Drude reflectance for iron, Beer–Lambert O–H absorption for water/ice, Rayleigh for air). Heat capacity is first-principles too (equipartition air, Debye iron). Closures are derived, not yet validated against measured optics/EOS. Multi-material EOS / wall heat flux / conduction are P5.</p>
+      <p style="opacity:.6;font-size:11px;line-height:1.4;">Strict first-principles mode. The demo will not run reference or reduced material constants as physics; missing condensed, liquid, optical, or product closures are reported as blockers.</p>
       <div style="margin:8px 0;display:flex;flex-wrap:wrap;">
         <button id="sph-preflight" type="button">Preflight</button>
         <button id="sph-play" type="button">Play</button>
@@ -125,15 +136,15 @@ function buildOverlayShell() {
       </div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">materials — apply with Reset</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">materials — auto-applies</div>
       <div id="sph-elements" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial temperature (K) — apply with Reset</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial temperature (K) — auto-applies</div>
       <div id="sph-temps" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — apply with Reset</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">initial block height (m, bottom face) — auto-applies</div>
       <div id="sph-heights" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">container box size (m, X·Y·Z) — apply with Reset</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">container box size (m, X·Y·Z) — auto-applies</div>
       <div id="sph-box" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:4px 0;"></div>
-      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">particles per block edge (N → N³ particles) — apply with Reset</div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">particles per block edge (N → N³ particles) — auto-applies</div>
       <div id="sph-counts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">isosurface blob size (× — independent of box) — live</div>
       <div id="sph-blob" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
@@ -287,7 +298,6 @@ export function mountSphPhaseDemoOverlay() {
     for (const [key, el] of Object.entries(urlControls)) q.set(key, el.value);
     window.history.replaceState(null, '', `#${q.toString()}`);
   }
-  for (const el of Object.values(urlControls)) el.addEventListener('change', syncUrlFromControls);
   applyUrlToControls(); // restore from the URL before the first build
   syncUrlFromControls(); // and reflect the full current state in the URL
 
@@ -323,14 +333,70 @@ export function mountSphPhaseDemoOverlay() {
   }
 
   const blobScaleOf = () => { const v = Number(blobInput.value); return Number.isFinite(v) && v > 0 ? v : BLOB_SCALE_DEFAULT; };
-  let driver = createSphPhaseDemo(driverOptionsFromControls());
-  let scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM, surfaceRadiusScale: blobScaleOf() });
+  let blockedError = null;
+  let driver = null;
+  function createDriverFromControls() {
+    try {
+      const next = createSphPhaseDemo(driverOptionsFromControls());
+      blockedError = null;
+      return next;
+    } catch (error) {
+      blockedError = error;
+      return null;
+    }
+  }
+  driver = createDriverFromControls();
+  let scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(), surfaceRadiusScale: blobScaleOf() });
   overlay.__sphScene = scene;
+  overlay.__sphDriver = driver;
+  let rebuildTimer = null;
 
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
 
+  function rebuildDemoFromControls() {
+    playing = false;
+    overlay.querySelector('#sph-play').textContent = 'Play';
+    driver = createDriverFromControls();
+    // The box dimensions may have changed, so rebuild the scene (its field/wireframe/camera are
+    // sized to the box at creation) against the new driver's box.
+    scene.dispose();
+    scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver?.demo.box.dimensionsM ?? boxDimensionsFromControls(), surfaceRadiusScale: blobScaleOf() });
+    overlay.__sphScene = scene;
+    overlay.__sphDriver = driver;
+    syncParticles();
+    renderStatus();
+  }
+
+  function scheduleDemoRebuild() {
+    syncUrlFromControls();
+    if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
+    playing = false;
+    overlay.querySelector('#sph-play').textContent = 'Play';
+    statusEl.textContent = 'rebuilding material state and derived chemistry...';
+    rebuildTimer = window.setTimeout(() => {
+      rebuildTimer = null;
+      rebuildDemoFromControls();
+    }, 0);
+  }
+
+  for (const [key, el] of Object.entries(urlControls)) {
+    if (key === 'blob') {
+      el.addEventListener('change', syncUrlFromControls);
+    } else {
+      el.addEventListener('change', scheduleDemoRebuild);
+    }
+  }
+
   function syncParticles() {
+    if (!driver) {
+      scene.setParticles({
+        positionsM: new Float32Array(0),
+        colorsRgb: new Float32Array(0),
+        materials: []
+      });
+      return;
+    }
     const colors = particleColors(driver.demo);
     const renderMaterials = particleRenderMaterials(driver.demo);
     const n = driver.demo.state.particles.length;
@@ -346,16 +412,57 @@ export function mountSphPhaseDemoOverlay() {
       colorsRgb[i * 3 + 2] = colors[i].rgb[2];
       materials[i] = renderMaterials[i];
     });
-    scene.setParticles({ positionsM, colorsRgb, materials, emissiveByMaterial: surfaceEmissive(driver.demo) });
+    scene.setParticles({
+      positionsM,
+      colorsRgb,
+      materials,
+      emissiveByMaterial: surfaceEmissive(driver.demo),
+      materialProperties: driver.demo.materialProperties
+    });
   }
 
+  function stepDemoForVisualTest(steps = 1) {
+    if (!driver) {
+      return {
+        blocked: true,
+        reason: blockedError?.message || 'first-principles material resolution blocked',
+        blockers: blockedError?.blockers || []
+      };
+    }
+    const count = Math.max(1, Math.round(Number(steps) || 1));
+    for (let i = 0; i < count; i += 1) driver.step();
+    syncParticles();
+    renderStatus();
+    return {
+      step: driver.demo.state.step ?? 0,
+      time: driver.demo.state.time ?? 0,
+      particlesByMaterial: driver.demo.state.particles.reduce((acc, particle) => {
+        acc[particle.material] = (acc[particle.material] || 0) + 1;
+        return acc;
+      }, {})
+    };
+  }
+  overlay.__sphStep = stepDemoForVisualTest;
+
   function renderStatus() {
+    if (!driver) {
+      statusEl.textContent = [
+        'preflight        : blocked',
+        'reason           : first-principles material properties are required',
+        `error            : ${blockedError?.message || 'material closure missing'}`,
+        `blockers         : ${(blockedError?.blockers || []).join(', ') || 'first-principles-material-closure-not-produced'}`,
+        '',
+        'validation       : no fixture/reduced material properties consumed'
+      ].join('\n');
+      return;
+    }
     const pre = driver.preflight();
     const totals = sphTotals(driver.demo.state);
     const phase = phaseMassSummary(driver.demo);
     const waterPhases = phase.byMaterialPhase.h2o || {};
     const ledger = pre.energyBudget.wallLedger.map((w) => `  ${w.faceId} ${w.role} ${fmt(w.heatJ)}J`).join('\n');
     const water = Object.entries(waterPhases).map(([ph, m]) => `${ph} ${fmt(m)}kg`).join('  ');
+    const materialPhases = formatMaterialPhaseMasses(phase.byMaterialPhase);
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
@@ -363,6 +470,7 @@ export function mountSphPhaseDemoOverlay() {
       `masses (kg)      : Fe ${fmt(pre.masses.ironMassKg)}  ice ${fmt(pre.masses.iceMassKg)}  air ${fmt(pre.masses.airMassKg)}`,
       `particles        : ${driver.demo.dropMaterial} ${driver.demo.counts.drop}  ${driver.demo.baseMaterial} ${driver.demo.counts.base}  total ${driver.demo.counts.total}`,
       `reaction         : ${driver.demo.reactionNote || '—'}`,
+      `material phases  : ${materialPhases || '—'}`,
       `molecules/macro  : H2O ${fmt(pre.particleResolution.h2o.entitiesPerMacroParticle)}  Fe ${fmt(pre.particleResolution.fe.entitiesPerMacroParticle)}`,
       `water by phase   : ${water || '—'}`,
       `iron solid frac  : ${fmt(phase.ironSolidFraction, 3)}`,
@@ -376,7 +484,7 @@ export function mountSphPhaseDemoOverlay() {
 
   let playing = false;
   function tick() {
-    if (!playing) return;
+    if (!playing || !driver) return;
     driver.step();
     syncParticles();
     renderStatus();
@@ -384,23 +492,19 @@ export function mountSphPhaseDemoOverlay() {
   }
 
   overlay.querySelector('#sph-preflight').addEventListener('click', renderStatus);
-  overlay.querySelector('#sph-step').addEventListener('click', () => { driver.step(); syncParticles(); renderStatus(); });
+  overlay.querySelector('#sph-step').addEventListener('click', () => {
+    if (!driver) { renderStatus(); return; }
+    driver.step(); syncParticles(); renderStatus();
+  });
   overlay.querySelector('#sph-play').addEventListener('click', (e) => {
+    if (!driver) { playing = false; e.target.textContent = 'Play'; renderStatus(); return; }
     playing = !playing;
     e.target.textContent = playing ? 'Pause' : 'Play';
     if (playing) tick();
   });
   overlay.querySelector('#sph-reset').addEventListener('click', () => {
-    playing = false;
-    overlay.querySelector('#sph-play').textContent = 'Play';
-    driver = createSphPhaseDemo(driverOptionsFromControls());
-    // The box dimensions may have changed, so rebuild the scene (its field/wireframe/camera are
-    // sized to the box at creation) against the new driver's box.
-    scene.dispose();
-    scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM, surfaceRadiusScale: blobScaleOf() });
-    overlay.__sphScene = scene;
-    syncParticles();
-    renderStatus();
+    syncUrlFromControls();
+    rebuildDemoFromControls();
   });
 
   // Collapsible control drawer. Start collapsed on small/portrait screens so the scene is the
@@ -418,6 +522,7 @@ export function mountSphPhaseDemoOverlay() {
 
   function close() {
     playing = false;
+    if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     scene.dispose();
     overlay.remove();
   }

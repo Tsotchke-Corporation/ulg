@@ -57,7 +57,10 @@ test('Clausius–Clapeyron lowers the boiling point at reduced pressure', () => 
 });
 
 test('iron solid closure now reports a temperature-dependent (thermal-expansion) density', async () => {
-  const registry = new MaterialRegistry({ closureRegistry: new ClosureRegistry({ artifactCache: new ArtifactCache() }) });
+  const registry = new MaterialRegistry({
+    closureRegistry: new ClosureRegistry({ artifactCache: new ArtifactCache() }),
+    requireFirstPrinciples: false
+  });
   await registry.registerAll(createReferenceMaterialClosures());
   const cold = await registry.sampleProperty({ material: 'fe', property: 'density', temperatureK: 300 });
   const hot = await registry.sampleProperty({ material: 'fe', property: 'density', temperatureK: 1500 });

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deriveElementProperties, elementMaterialClosure } from '../src/runtime/material/elementClosures.js';
+import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
 
 // Fast, coarse-grid derivation for the test (light elements only).
 const fast = { gridPointsN: 600, rMaxBohr: 30 };
@@ -53,5 +54,26 @@ test('elementMaterialClosure derives a solid+liquid closure for any metal; none 
   assert.ok(na.properties.phases[0].shearModulusPa > 0); // solid resists shear
   assert.equal(na.properties.phases[1].shearModulusPa, 0); // liquid flows
   assert.ok(na.properties.transitions[0].latentHeatJPerKg > 0); // Richards' rule fusion
+  assert.ok(Array.isArray(na.properties.opticalInterbandOscillators));
+  const summary = materialDerivationSummary(na.properties);
+  assert.equal(summary.fullyLowerLevelDerived, true);
+  assert.equal(summary.hasReducedEstimates, false);
+  assert.equal(summary.unprovenanced.includes('opticalInterbandOscillators'), false);
   assert.equal(elementMaterialClosure(18, fast), null); // Argon: not a metal
+});
+
+test('heavy element closures expose derived relativistic optical response with provenance', () => {
+  const au = elementMaterialClosure(79, {
+    gridPointsN: 420,
+    rMaxBohr: 42,
+    maxScf: 100,
+    opticalInterbandOptions: { gridPointsN: 420, rMaxBohr: 42, maxScf: 100 }
+  });
+  assert.equal(au.symbol, 'Au');
+  assert.ok(au.properties.intrinsicColorSrgb[0] > au.properties.intrinsicColorSrgb[1]);
+  assert.ok(au.properties.intrinsicColorSrgb[1] > au.properties.intrinsicColorSrgb[2]);
+  assert.ok(au.properties.opticalInterbandOscillators.length > 0);
+  const summary = materialDerivationSummary(au.properties);
+  assert.equal(summary.fullyLowerLevelDerived, true);
+  assert.equal(summary.unprovenanced.includes('opticalInterbandOscillators'), false);
 });

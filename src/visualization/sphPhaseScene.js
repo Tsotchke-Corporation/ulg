@@ -14,29 +14,13 @@ const SURFACE_CONFIG = {
     resolution: 48,
     subtract: 24,
     isolation: 80,
-    maxPolyCount: 120000,
-    opacity: 0.82,
-    materialOptions: {
-      roughness: 0.18,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.82,
-      depthWrite: true
-    }
+    maxPolyCount: 120000
   },
   fe: {
     resolution: 46,
     subtract: 26,
     isolation: 82,
-    maxPolyCount: 120000,
-    opacity: 1,
-    materialOptions: {
-      roughness: 0.36,
-      metalness: 0.48,
-      transparent: false,
-      opacity: 1,
-      depthWrite: true
-    }
+    maxPolyCount: 120000
   },
   // Vaporized water: a faint, diffuse cloud rather than a tight blob. Lower isolation + larger
   // ball influence makes the metaballs bleed together into a whispy volume; high transparency and
@@ -45,29 +29,13 @@ const SURFACE_CONFIG = {
     resolution: 36,
     subtract: 10,
     isolation: 24,
-    maxPolyCount: 120000,
-    opacity: 0.5,
-    materialOptions: {
-      roughness: 0.95,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.5,
-      depthWrite: false
-    }
+    maxPolyCount: 120000
   },
   default: {
     resolution: 46,
     subtract: 24,
     isolation: 80,
-    maxPolyCount: 120000,
-    opacity: 0.9,
-    materialOptions: {
-      roughness: 0.24,
-      metalness: 0,
-      transparent: true,
-      opacity: 0.9,
-      depthWrite: true
-    }
+    maxPolyCount: 120000
   }
 };
 
@@ -90,45 +58,46 @@ function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
 }
 
-// Map a render surface key to the optical-closure query (material + phase) that derives its
-// appearance. 'steam' is gas-phase water; 'h2o' is the liquid/solid bulk.
-function opticalQueryForKey(key) {
-  if (key === 'fe') return { material: 'fe', phase: 'liquid' };
-  if (key === 'steam') return { material: 'steam', phase: 'gas' };
-  if (key === 'ice') return { material: 'ice', phase: 'solid' };
-  if (key === 'h2o') return { material: 'h2o', phase: 'liquid' };
-  return { material: 'default', phase: 'liquid' };
+function materialPropertiesForSurfaceKey(key, materialProperties) {
+  if (!materialProperties) return null;
+  if (key === 'steam' || key === 'ice') return materialProperties.h2o ?? materialProperties[key] ?? null;
+  return materialProperties[key] ?? materialProperties[key.toLowerCase?.()] ?? null;
 }
 
-function makeSurfaceMaterial(key) {
-  const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
+// Map a render surface key to the optical-closure query (material + phase) that derives its
+// appearance. 'steam' is gas-phase water; 'h2o' is the liquid/solid bulk.
+function opticalQueryForKey(key, properties = null) {
+  if (key === 'steam') return { material: 'steam', phase: 'gas', properties };
+  if (key === 'ice') return { material: 'ice', phase: 'solid', properties };
+  if (key === 'h2o') return { material: 'h2o', phase: 'liquid', properties };
+  return { material: key, phase: 'liquid', properties };
+}
+
+function makeSurfaceMaterial(key, properties = null) {
   // Transmission / IOR / attenuation come from the optical closure (refractive index + Beer–Lambert
-  // extinction + scattering): liquid water refracts clear (IOR 1.33), ice is translucent white from
-  // grain scattering, iron is opaque metal, steam barely refracts and only shows via condensation.
-  const optics = opticalRenderParams(opticalQueryForKey(key));
+  // extinction): clear media transmit according to optical depth; conductors become opaque from
+  // Drude skin depth; missing optical closures block rather than falling back to fake opacity.
+  const optics = opticalRenderParams(opticalQueryForKey(key, properties));
   const usesTransmission = optics.transmission > 0.01;
-  // CRITICAL: only flag the material `transparent` when it actually needs blending. Opaque iron
-  // must stay non-transparent so it renders into the opaque pass — three.js builds the transmission
-  // sample target from opaque objects only, so a transparent iron would be invisible *through* the
-  // ice/water. Steam (suppressed transmission) and any low-opacity surface stay transparent.
-  const transparent = usesTransmission || optics.opacity < 1 || key === 'steam';
+  const transparent = usesTransmission || optics.opacity < 0.999;
   const material = new THREE.MeshPhysicalMaterial({
     vertexColors: true,
     side: THREE.DoubleSide,
-    clearcoat: key === 'fe' ? 0.18 : 0.05,
+    clearcoat: optics.metalness > 0.5 ? 0.18 : 0.05,
     metalness: optics.metalness,
     roughness: optics.roughness,
-    ior: optics.ior,
+    ior: optics.ior ?? 1.5,
     transmission: optics.transmission,
     thickness: usesTransmission ? 0.6 : 0,
     transparent,
-    depthWrite: transparent ? config.materialOptions.depthWrite : true,
-    opacity: usesTransmission ? 1 : (key === 'steam' ? config.opacity : optics.opacity)
+    depthWrite: !transparent || optics.opacity > 0.5,
+    opacity: clamp(optics.opacity, 0, 1)
   });
   if (optics.attenuationColor) {
     material.attenuationColor = new THREE.Color(...optics.attenuationColor);
     material.attenuationDistance = Math.max(0.05, optics.attenuationDistanceM);
   }
+  material.userData.optical = optics;
   return material;
 }
 
@@ -264,14 +233,21 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
 
   const surfaces = new Map();
 
-  function ensureSurface(materialKey) {
+  function ensureSurface(materialKey, properties = null) {
     const key = materialKeyOf(materialKey);
     let surface = surfaces.get(key);
-    if (surface) return surface;
+    if (surface) {
+      if (surface.properties !== properties) {
+        surface.mesh.material.dispose();
+        surface.mesh.material = makeSurfaceMaterial(key, properties);
+        surface.properties = properties;
+      }
+      return surface;
+    }
     const config = SURFACE_CONFIG[key] || SURFACE_CONFIG.default;
     const mesh = new MarchingCubes(
       config.resolution,
-      makeSurfaceMaterial(key),
+      makeSurfaceMaterial(key, properties),
       false,
       true,
       config.maxPolyCount
@@ -286,8 +262,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     mesh.frustumCulled = false;
     mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;
     mesh.userData.materialKey = key;
+    mesh.userData.optical = mesh.material.userData.optical;
     scene.add(mesh);
-    surface = { mesh, config };
+    surface = { mesh, config, properties };
     surfaces.set(key, surface);
     return surface;
   }
@@ -298,12 +275,14 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
   // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
   // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
   // continuous density surface from particles, but it does not invent material colour.
-  function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null }) {
+  function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null, materialProperties = null }) {
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     for (const batch of batches) {
-      const surface = ensureSurface(batch.material);
+      const properties = materialPropertiesForSurfaceKey(batch.material, materialProperties);
+      const surface = ensureSurface(batch.material, properties);
       const { mesh, config } = surface;
+      mesh.userData.optical = mesh.material.userData.optical;
       // Incandescent surfaces (hot iron) glow: the radiation closure supplies the emissive colour,
       // which is added on top of the BRDF, so a fully-metallic surface still lights up instead of
       // rendering dark. A null/absent entry means the surface is below the glow threshold.

@@ -12,6 +12,14 @@
 
 import { atomicMassKg } from '../electronicStructure/periodicTable.js';
 import { rhf } from '../electronicStructure/molecularHartreeFock.js';
+import { deriveFormulaMaterialProperties } from './materialDerivation.js';
+import {
+  PROPERTY_DERIVATION_STATUS as DS,
+  materialDerivationSummary,
+  propertyProvenanceEntry,
+  requireFirstPrinciplesMaterialProperties,
+  withPropertyProvenance
+} from './propertyProvenance.js';
 
 const AVOGADRO = 6.02214076e23;
 const R = 8.314462618;
@@ -55,52 +63,28 @@ export function compoundColorFromGapEv(gapEv) {
  * @param reactants   [{ densityKgPerM3, bulkModulusPa, molarMassKgPerMol }] the source materials, for
  *                    the density/stiffness estimates.
  */
-export function deriveCompoundClosure({ key, label, atomCounts, geometry, reactants = [] }) {
-  let molarMassKgPerMol = 0;
-  let nAtoms = 0;
-  for (const [Z, count] of Object.entries(atomCounts)) {
-    molarMassKgPerMol += count * atomicMassKg(Number(Z)) * AVOGADRO;
-    nAtoms += count;
-  }
-  // Condensed density: volume-additive blend of the reactant densities (1/ρ = Σ wᵢ/ρᵢ by mass).
-  const dens = reactants.filter((r) => r.densityKgPerM3 > 0);
-  const densityKgPerM3 = dens.length
-    ? dens.length / dens.reduce((a, r) => a + 1 / r.densityKgPerM3, 0)
-    : 1000;
-  // Bulk modulus: mean of the reactant bulk moduli (positive → finite sound speed for the EOS).
-  const bulks = reactants.map((r) => r.bulkModulusPa).filter((b) => b > 0);
-  const bulkModulusPa = bulks.length ? bulks.reduce((a, b) => a + b, 0) / bulks.length : 2.2e9;
-  // Heat capacity: Dulong–Petit (equipartition, 3R per atom) over the molar mass.
-  const cpJPerKgK = (3 * R * nAtoms) / molarMassKgPerMol;
-
-  // Optical colour from the HOMO–LUMO gap (robust: any failure → colourless default).
-  let intrinsicColorSrgb = [0.9, 0.92, 0.94];
-  try {
-    const res = rhf(geometry);
-    const eps = res.orbitalEnergies;
-    const nOcc = res.nOcc;
-    if (eps && nOcc > 0 && nOcc < eps.length) {
-      const gapEv = (eps[nOcc] - eps[nOcc - 1]) * HARTREE_EV;
-      intrinsicColorSrgb = compoundColorFromGapEv(gapEv);
-    }
-  } catch { /* keep the colourless default */ }
-
-  return {
-    key,
-    properties: {
-      molarMassKgPerMol,
-      label,
-      compound: true,
-      derivation: 'product-compound: exact molar mass; volume-additive density + mean bulk modulus from reactants; Dulong–Petit cp; HOMO–LUMO-gap colour',
-      // Carried on the closure so the renderer uses the derived body colour directly (the optical
-      // closure's metal/water paths don't apply to an arbitrary product compound).
-      intrinsicColorSrgb,
-      phases: [
-        { name: 'liquid', cpJPerKgK, densityKgPerM3, temperatureRange: [0, OPEN_TOP_K], bulkModulusPa, shearModulusPa: 0 }
-      ],
-      transitions: [],
-      closureBacked: true,
-      validation: { eosValidation: false, thermalValidation: false, opticalValidation: false, scientificValidation: false }
-    }
+export function deriveCompoundClosure({ key, label, atomCounts, geometry, reactants = [], allowReducedEstimates = false }) {
+  const properties = {
+    ...deriveFormulaMaterialProperties({
+      key,
+      atomCounts,
+      geometry,
+      phaseModel: 'molecular-condensed'
+    }),
+    label,
+    compound: true
   };
+
+  const closure = {
+    key,
+    properties,
+    materialDerivation: materialDerivationSummary(properties)
+  };
+  if (!allowReducedEstimates) {
+    requireFirstPrinciplesMaterialProperties(properties, {
+      material: key,
+      context: 'deriveCompoundClosure'
+    });
+  }
+  return closure;
 }

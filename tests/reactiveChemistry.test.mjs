@@ -32,6 +32,104 @@ test('reactive step converts reactants in contact above activation, conserves ma
   assert.ok(parts.reduce((a, p) => a + p.specificInternalEnergyJPerKg * p.massKg, 0) > energy0); // heat released
 });
 
+test('reactive step resets MPM reference state to the product density', () => {
+  const parts = [
+    {
+      x: [0, 0, 0],
+      v: [0, 0, 0],
+      massKg: 2,
+      material: 'a',
+      specificInternalEnergyJPerKg: 0,
+      restDensityKgPerM3: 100,
+      mpmVolume0: 0.02,
+      mpmF: new Float64Array([2, 0, 0, 0, 2, 0, 0, 0, 2]),
+      mpmJ: 8,
+      mpmC: new Float64Array(9).fill(3),
+      mpmSolid: true
+    },
+    {
+      x: [0.01, 0, 0],
+      v: [0, 0, 0],
+      massKg: 4,
+      material: 'b',
+      specificInternalEnergyJPerKg: 0,
+      restDensityKgPerM3: 200,
+      mpmVolume0: 0.02,
+      mpmF: new Float64Array([0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5]),
+      mpmJ: 0.125,
+      mpmC: new Float64Array(9).fill(2),
+      mpmSolid: true
+    }
+  ];
+  const productDensity = 500;
+  const events = reactiveStep({ particles: parts }, {
+    reactions: [{ a: 'a', b: 'b', product: 'ab', activationTemperatureK: 300, specificEnthalpyJPerKg: -1000 }],
+    materialProperties: {
+      ab: {
+        molarMassKgPerMol: 0.01,
+        phases: [{ name: 'liquid', cpJPerKgK: 1000, densityKgPerM3: productDensity, temperatureRange: [0, 10000] }],
+        transitions: []
+      }
+    },
+    contactRadiusM: 0.05,
+    temperatureOf: () => 400
+  });
+  assert.equal(events, 1);
+  for (const particle of parts) {
+    assert.equal(particle.material, 'ab');
+    assert.equal(particle.restDensityKgPerM3, productDensity);
+    assert.equal(particle.mpmVolume0, particle.massKg / productDensity);
+    assert.equal(particle.mpmJ, 1);
+    assert.deepEqual(Array.from(particle.mpmF), [1, 0, 0, 0, 1, 0, 0, 0, 1]);
+    assert.deepEqual(Array.from(particle.mpmC), new Array(9).fill(0));
+    assert.equal(particle.mpmSolid, false);
+  }
+});
+
+test('active metal reacts with liquid water at room temperature without requiring molten metal', () => {
+  const parts = [
+    { x: [0, 0, 0], v: [0, 0, 0], massKg: 1, material: 'Na', specificInternalEnergyJPerKg: 0 },
+    { x: [0.01, 0, 0], v: [0, 0, 0], massKg: 1, material: 'h2o', specificInternalEnergyJPerKg: 0 }
+  ];
+  const events = reactiveStep({ particles: parts }, {
+    reactions: [{
+      a: 'Na',
+      b: 'h2o',
+      product: 'naoh',
+      activationTemperatureK: 0,
+      phaseRequirements: { h2o: ['liquid', 'gas'] },
+      specificEnthalpyJPerKg: -8.5e6
+    }],
+    contactRadiusM: 0.05,
+    temperatureOf: () => 293.15,
+    phaseOf: (particle) => (particle.material === 'h2o' ? 'liquid' : 'solid')
+  });
+  assert.equal(events, 1);
+  assert.equal(parts.filter((p) => p.material === 'naoh').length, 2);
+});
+
+test('active metal does not react with solid ice just because the metal is hot', () => {
+  const parts = [
+    { x: [0, 0, 0], v: [0, 0, 0], massKg: 1, material: 'Na', specificInternalEnergyJPerKg: 0 },
+    { x: [0.01, 0, 0], v: [0, 0, 0], massKg: 1, material: 'h2o', specificInternalEnergyJPerKg: 0 }
+  ];
+  const events = reactiveStep({ particles: parts }, {
+    reactions: [{
+      a: 'Na',
+      b: 'h2o',
+      product: 'naoh',
+      activationTemperatureK: 0,
+      phaseRequirements: { h2o: ['liquid', 'gas'] },
+      specificEnthalpyJPerKg: -8.5e6
+    }],
+    contactRadiusM: 0.05,
+    temperatureOf: (particle) => (particle.material === 'Na' ? 600 : 233.15),
+    phaseOf: (particle) => (particle.material === 'h2o' ? 'solid' : 'solid')
+  });
+  assert.equal(events, 0);
+  assert.ok(parts.every((p) => p.material !== 'naoh'));
+});
+
 test('no reaction below the activation temperature', () => {
   const parts = [
     { x: [0, 0, 0], v: [0, 0, 0], massKg: 1, material: 'h2', specificInternalEnergyJPerKg: 0 },

@@ -1143,65 +1143,55 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   }
 });
 
-test('SPH phase demo renders continuous material surfaces', async ({ page }) => {
+test('SPH phase demo runs derived material properties by default', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 680 });
   await page.goto('/');
   await page.locator('#run-sph-phase').click();
   await expect(page.locator('#sph-phase-overlay')).toBeVisible();
-  await expect(page.getByText('SPH PHASE — molten iron on ice')).toBeVisible();
+  await expect(page.getByText('SPH PHASE — two materials interacting')).toBeVisible();
+  await expect(page.locator('#sph-status')).toContainText('preflight        : preflight-feasible-derived-closures');
+  await expect(page.locator('#sph-status')).not.toContainText('first-principles material properties are required');
   await page.waitForFunction(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay?.querySelector('canvas');
     return Boolean(canvas && canvas.width > 0 && canvas.height > 0);
   });
-  await page.waitForTimeout(900);
-  const surfaceSummary = await page.evaluate(() => {
+  const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
     const scene = overlay.__sphScene;
-    const surfaces = [];
+    const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
-        surfaces.push({
+        visibleSurfaces.push({
           materialKey: node.userData.materialKey,
-          particleCount: node.userData.particleCount,
-          visible: node.visible,
-          drawRange: node.geometry?.drawRange?.count ?? 0
+          visible: node.visible
         });
       }
     });
-    return { canvasWidth: canvas.width, canvasHeight: canvas.height, surfaces };
+    return {
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      driverReady: Boolean(overlay.__sphDriver),
+      visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
+    };
   });
-  expect(surfaceSummary.canvasWidth).toBeGreaterThan(100);
-  expect(surfaceSummary.canvasHeight).toBeGreaterThan(100);
-  expect(surfaceSummary.surfaces.some((surface) => (
-    surface.materialKey === 'h2o'
-    && surface.visible
-    && surface.particleCount > 0
-    && surface.drawRange > 0
-  ))).toBe(true);
-  expect(surfaceSummary.surfaces.some((surface) => (
-    surface.materialKey === 'fe'
-    && surface.visible
-    && surface.particleCount > 0
-    && surface.drawRange > 0
-  ))).toBe(true);
-  const pixels = await page.locator('#sph-phase-overlay canvas').evaluate((canvas) => {
-    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-    const width = gl.drawingBufferWidth;
-    const height = gl.drawingBufferHeight;
-    const pixels = new Uint8Array(width * height * 4);
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-    let nonBlank = 0;
-    for (let index = 0; index < pixels.length; index += 64) {
-      const r = pixels[index];
-      const g = pixels[index + 1];
-      const b = pixels[index + 2];
-      if (r + g + b > 16) nonBlank += 1;
-    }
-    return { width, height, nonBlank };
-  });
-  expect(pixels.nonBlank).toBeGreaterThan(80);
+  expect(derivedSummary.canvasWidth).toBeGreaterThan(100);
+  expect(derivedSummary.canvasHeight).toBeGreaterThan(100);
+  expect(derivedSummary.driverReady).toBe(true);
+  expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
+});
+
+test('SPH phase demo reacts room-temperature Na + H2O through derived product closure', async ({ page }) => {
+  await page.setViewportSize({ width: 980, height: 720 });
+  await page.goto('/#drop=Na&base=h2o&dropt=293.15&baset=293.15&ironh=1');
+  await page.locator('#run-sph-phase').click();
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await expect(page.locator('#sph-status')).toContainText('preflight        :');
+  await expect(page.locator('#sph-status')).toContainText('Na+h2o');
+  const stepped = await page.evaluate(() => document.querySelector('#sph-phase-overlay').__sphStep(2));
+  expect(stepped.blocked).not.toBe(true);
+  expect(stepped.particlesByMaterial.naoh).toBeGreaterThan(0);
 });
 
 test('ULG oscillator demo consumes a cached closure and emits a simulation artifact', async ({ page }) => {

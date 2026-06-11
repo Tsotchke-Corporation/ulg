@@ -7,7 +7,8 @@
 // and conduction are demo plan P5 — so the stepping is labelled a reference, not validated
 // phase physics. Evidence-only throughout.
 
-import { createReferenceMaterialClosures } from './material/materialClosures.js';
+import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from './material/materialClosures.js';
+import { createDerivedMaterialClosure } from './material/materialDerivation.js';
 import { specificInternalEnergyJPerKg } from './material/thermoState.js';
 import { equilibriumFromSpecificEnergy } from './material/phaseEquilibrium.js';
 import { incandescentColor } from './material/radiationClosure.js';
@@ -22,7 +23,13 @@ import { elementMaterialClosure } from './material/elementClosures.js';
 import { zForSymbol } from './electronicStructure/periodicTable.js';
 import { reactiveStep } from './sph/reactiveChemistry.js';
 import { discoverReactions } from './sph/reactionDiscovery.js';
-import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
+import { createSphPhaseScenario } from './thermoPreflight.js';
+import { PHYSICAL_CONSTANTS, idealGasDensityKgPerM3 } from './materials/referenceMaterials.js';
+import {
+  MaterialFirstPrinciplesResolutionError,
+  requireFirstPrinciplesMaterialMap,
+  requireFirstPrinciplesMaterialProperties
+} from './material/propertyProvenance.js';
 
 function fillCube({ material, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
   const particles = [];
@@ -59,6 +66,13 @@ function fillCube({ material, min, size, spacing, particlesPerEdge, temperatureK
 // each block starts at the correct packing for whatever material/phase it is (molten metal, ice,
 // liquid water, ...).
 function densityAtTemperatureKgPerM3(props, temperatureK) {
+  if (props.idealGas) {
+    return idealGasDensityKgPerM3({
+      pressurePa: PHYSICAL_CONSTANTS.standardAtmospherePa,
+      temperatureK,
+      molarMassKgPerMol: props.molarMassKgPerMol
+    });
+  }
   const u = specificInternalEnergyJPerKg(props, temperatureK);
   const phase = equilibriumFromSpecificEnergy(props, u).stablePhase;
   const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
@@ -74,7 +88,8 @@ function densityAtTemperatureKgPerM3(props, temperatureK) {
  */
 export function buildSphPhaseDemoState({
   scenario = createSphPhaseScenario(),
-  closures = createReferenceMaterialClosures(),
+  closures = null,
+  allowFixtureMaterialProperties = false,
   dropMaterial = 'fe',
   baseMaterial = 'h2o',
   dropTemperatureK,
@@ -84,6 +99,11 @@ export function buildSphPhaseDemoState({
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
+  const baseClosures = closures ?? (
+    allowFixtureMaterialProperties
+      ? createReferenceMaterialClosures()
+      : createFirstPrinciplesMaterialClosures()
+  );
   // Box is a rectangular cuboid [Lx, Ly, Lz] (configurable per axis); a scalar edge stays cubic.
   const boxDims = scenario.box.dimensionsM ?? [scenario.box.edgeM, scenario.box.edgeM, scenario.box.edgeM];
   const ironEdge = scenario.iron.edgeM;
@@ -101,18 +121,47 @@ export function buildSphPhaseDemoState({
   // Resolve each block's material to a closure: the reference closures (fe/h2o/air) or, for any
   // other element symbol, a closure DERIVED on the fly from the simulation (elementMaterialClosure:
   // jellium + atomic DFT + universal rules). No per-material reference tables.
-  const resolved = { ...closures };
+  const resolved = { ...baseClosures };
   for (const key of [dropMaterial, baseMaterial]) {
     if (resolved[key]) continue;
     const Z = zForSymbol(key);
-    const ec = Z != null ? elementMaterialClosure(Z) : null;
-    if (!ec) throw new Error(`No closure for material '${key}' (not a reference material or metallic element)`);
-    resolved[key] = ec;
+    const ec = Z != null ? elementMaterialClosure(Z, { allowReducedEstimates: allowFixtureMaterialProperties }) : null;
+    if (ec) {
+      resolved[key] = ec;
+      continue;
+    }
+    try {
+      resolved[key] = createDerivedMaterialClosure(key);
+      continue;
+    } catch {
+      throw new MaterialFirstPrinciplesResolutionError(
+        `No first-principles material closure for '${key}'`,
+        {
+          material: key,
+          context: 'buildSphPhaseDemoState',
+          blockers: ['first-principles-material-closure-not-produced']
+        }
+      );
+    }
+  }
+  if (!allowFixtureMaterialProperties) {
+    for (const [key, closure] of Object.entries(resolved)) {
+      requireFirstPrinciplesMaterialProperties(closure.properties, {
+        material: key,
+        context: 'buildSphPhaseDemoState'
+      });
+    }
   }
   const dropProps = resolved[dropMaterial].properties;
   const baseProps = resolved[baseMaterial].properties;
-  // Initial temperatures: explicit overrides, else the scenario's hot drop / cold base roles.
-  const dropTempK = dropTemperatureK ?? scenario.iron.initialTemperatureK;
+  // Initial temperatures: explicit overrides, else the scenario's hot drop / cold base roles. A
+  // molten-drop role resolves against the material's own derived liquidus, not a reference Fe
+  // constant, so any selected material starts in its closure-derived liquid phase by default.
+  const liquidus = dropProps.transitions?.find((t) => t.from === 'solid' && t.to === 'liquid')?.temperatureK ?? null;
+  const requestedDropTempK = dropTemperatureK ?? scenario.iron.initialTemperatureK;
+  const dropTempK = dropTemperatureK == null && liquidus != null
+    ? Math.max(requestedDropTempK, liquidus + 39)
+    : requestedDropTempK;
   const baseTempK = baseTemperatureK ?? scenario.ice.initialTemperatureK;
 
   const dropParticles = fillCube({
@@ -145,11 +194,13 @@ export function buildSphPhaseDemoState({
   });
   return {
     scenario,
-    closures,
+    closures: baseClosures,
+    allowFixtureMaterialProperties,
     state,
     box: { dimensionsM: boxDims, edgeM: Math.max(...boxDims) },
     dropMaterial,
     baseMaterial,
+    initialTemperaturesK: { drop: dropTempK, base: baseTempK, gas: scenario.gas.initialTemperatureK },
     counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };
@@ -181,10 +232,10 @@ export function particleColors(demo) {
     if (inc.visible) {
       return { rgb: [...inc.srgb], closureBacked: true, source: 'radiation-closure' };
     }
-    // Reaction-product compounds carry a colour derived from their HOMO–LUMO gap (absorption edge);
-    // use it directly since the metal/water optical paths don't apply to an arbitrary compound.
+    // Material closures can carry an intrinsic optical colour directly: elements use the
+    // scalar-relativistic Drude-Lorentz optical response, compounds use the molecular gap path.
     if (props.intrinsicColorSrgb) {
-      return { rgb: [...props.intrinsicColorSrgb], closureBacked: true, source: 'compound-closure' };
+      return { rgb: [...props.intrinsicColorSrgb], closureBacked: true, source: 'material-closure' };
     }
     // Metals: colour derived from the conduction-electron density (Drude plasma frequency). Water/
     // air: Beer–Lambert / Rayleigh. The electron density comes from the material closure.
@@ -257,11 +308,146 @@ export function phaseMassSummary(demo) {
   return { byMaterialPhase, ironSolidFraction: feTotalMass > 0 ? feSolidMass / feTotalMass : null };
 }
 
+function materialEntities(material, massKg, properties, macroParticleCount) {
+  const totalEntities = properties.molarMassKgPerMol > 0
+    ? (massKg / properties.molarMassKgPerMol) * 6.02214076e23
+    : null;
+  return {
+    material,
+    macroParticleCount,
+    totalEntities,
+    entitiesPerMacroParticle: macroParticleCount > 0 && totalEntities != null ? totalEntities / macroParticleCount : null
+  };
+}
+
+function solveClosureEquilibriumK(parts) {
+  const total = (t) => parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, t), 0);
+  const target = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, p.initialTemperatureK), 0);
+  let lo = Math.min(...parts.map((p) => p.initialTemperatureK));
+  let hi = Math.max(...parts.map((p) => p.initialTemperatureK));
+  for (let i = 0; i < 200; i += 1) {
+    const mid = 0.5 * (lo + hi);
+    if (total(mid) < target) lo = mid;
+    else hi = mid;
+  }
+  return 0.5 * (lo + hi);
+}
+
+function computeDerivedDemoPreflight(demo) {
+  const scenario = demo.scenario;
+  const dropProps = demo.materialProperties[demo.dropMaterial];
+  const baseProps = demo.materialProperties[demo.baseMaterial];
+  const airProps = demo.materialProperties.air;
+  const dropTemp = demo.initialTemperaturesK?.drop ?? scenario.iron.initialTemperatureK;
+  const baseTemp = demo.initialTemperaturesK?.base ?? scenario.ice.initialTemperatureK;
+  const airTemp = demo.initialTemperaturesK?.gas ?? scenario.gas.initialTemperatureK;
+  const wallTemps = Object.values(scenario.walls.faces);
+  const maxWallTempK = Math.max(...wallTemps);
+  const meanWallTempK = wallTemps.reduce((sum, t) => sum + t, 0) / wallTemps.length;
+  const adiabatic = scenario.walls.model === 'adiabatic';
+
+  const dropDensity = densityAtTemperatureKgPerM3(dropProps, dropTemp);
+  const baseDensity = densityAtTemperatureKgPerM3(baseProps, baseTemp);
+  const airVolumeM3 = scenario.box.volumeM3 - scenario.iron.volumeM3 - scenario.ice.volumeM3;
+  const airDensity = airProps
+    ? idealGasDensityKgPerM3({
+      pressurePa: scenario.gas.pressurePa,
+      temperatureK: airTemp,
+      molarMassKgPerMol: airProps.molarMassKgPerMol
+    })
+    : 0;
+  const dropMassKg = scenario.iron.volumeM3 * dropDensity;
+  const baseMassKg = scenario.ice.volumeM3 * baseDensity;
+  const airMassKg = airVolumeM3 * airDensity;
+  const parts = [
+    { massKg: dropMassKg, properties: dropProps, initialTemperatureK: dropTemp },
+    { massKg: baseMassKg, properties: baseProps, initialTemperatureK: baseTemp }
+  ];
+  if (airProps) parts.push({ massKg: airMassKg, properties: airProps, initialTemperatureK: airTemp });
+  const adiabaticEquilibriumK = solveClosureEquilibriumK(parts);
+  const asymptoticInteriorTempK = adiabatic ? adiabaticEquilibriumK : meanWallTempK;
+  const bindingInteriorTempK = adiabatic ? adiabaticEquilibriumK : maxWallTempK;
+  const initialEnergyJ = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, p.initialTemperatureK), 0);
+  const finalEnergyJ = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, asymptoticInteriorTempK), 0);
+  const heatExportedToWallsJ = adiabatic ? 0 : initialEnergyJ - finalEnergyJ;
+  const finalBasePhase = equilibriumFromSpecificEnergy(baseProps, specificInternalEnergyJPerKg(baseProps, bindingInteriorTempK)).stablePhase;
+  const finalDropPhase = equilibriumFromSpecificEnergy(dropProps, specificInternalEnergyJPerKg(dropProps, bindingInteriorTempK)).stablePhase;
+  const feasible = finalBasePhase === 'solid' && finalDropPhase === 'solid';
+  const sinkFaceCount = heatExportedToWallsJ > 0 ? wallTemps.length : 0;
+  const wallLedger = Object.entries(scenario.walls.faces).map(([faceId, temperatureK]) => ({
+    faceId,
+    temperatureK,
+    role: heatExportedToWallsJ > 0 ? 'sink' : 'balanced',
+    areaM2: scenario.box.edgeM * scenario.box.edgeM,
+    areaFraction: 1 / 6,
+    heatJ: sinkFaceCount > 0 ? heatExportedToWallsJ / sinkFaceCount : 0
+  }));
+  const particleResolution = {
+    [demo.baseMaterial]: materialEntities(demo.baseMaterial, baseMassKg, baseProps, scenario.particleResolution.h2o),
+    [demo.dropMaterial]: materialEntities(demo.dropMaterial, dropMassKg, dropProps, scenario.particleResolution.fe),
+    gas: airProps ? materialEntities('air', airMassKg, airProps, scenario.particleResolution.gas) : null
+  };
+  return {
+    scenarioId: scenario.scenarioId,
+    status: feasible ? 'preflight-feasible-derived-closures' : 'preflight-infeasible-derived-closures',
+    masses: {
+      ironMassKg: dropMassKg,
+      iceMassKg: baseMassKg,
+      airMassKg,
+      airDensityKgPerM3: airDensity,
+      dropMassKg,
+      baseMassKg
+    },
+    energyBudget: {
+      initialInternalEnergyJ: initialEnergyJ,
+      finalInternalEnergyJ: finalEnergyJ,
+      heatExportedToWallsJ,
+      wallLedger
+    },
+    boundary: {
+      model: scenario.walls.model,
+      wallTemperaturesK: { ...scenario.walls.faces },
+      maxWallTempK,
+      meanWallTempK,
+      asymptoticInteriorTempK,
+      adiabaticEquilibriumK
+    },
+    feasibility: {
+      feasible,
+      bindingInteriorTempK,
+      finalH2oPhase: demo.baseMaterial === 'h2o' ? finalBasePhase : null,
+      finalFePhase: demo.dropMaterial === 'fe' ? finalDropPhase : null,
+      finalBasePhase,
+      finalDropPhase,
+      reason: feasible
+        ? 'closure-derived wall equilibrium leaves both demo materials in their solid phase'
+        : 'closure-derived wall equilibrium does not leave both demo materials solid'
+    },
+    particleResolution: {
+      h2o: particleResolution.h2o || particleResolution[demo.baseMaterial],
+      fe: particleResolution.fe || particleResolution[demo.dropMaterial],
+      gas: particleResolution.gas,
+      ...particleResolution
+    },
+    closureBacked: true,
+    scientificValidation: false,
+    fullPhysicsValidation: false,
+    materialValidation: false,
+    eosValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    blockers: ['derived-material-models-unvalidated']
+  };
+}
+
 /**
  * Create the demo driver: preflight + a reduced-resolution CPU reference carrier stepper.
  */
 export function createSphPhaseDemo(options = {}) {
   const demo = buildSphPhaseDemoState(options);
+  if (!demo.allowFixtureMaterialProperties) {
+    requireFirstPrinciplesMaterialMap(demo.materialProperties, { context: 'createSphPhaseDemo.initial-materials' });
+  }
   // Per-face cumulative heat ledger (J exchanged with each fixed-temperature wall reservoir).
   demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
   const gasDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'gas').densityKgPerM3;
@@ -347,9 +533,19 @@ export function createSphPhaseDemo(options = {}) {
   // the activation temperature the reactant particles become the product and release the derived heat
   // (→ temperature → phase change / steam → expansion). Any derived product-compound closure is
   // registered into materialProperties so the product renders and carries thermodynamics.
-  const discovery = discoverReactions(demo.dropMaterial, demo.baseMaterial);
+  const discovery = discoverReactions(demo.dropMaterial, demo.baseMaterial, {
+    materialProperties: demo.materialProperties,
+    allowFixtureMaterialProperties: demo.allowFixtureMaterialProperties,
+    allowReducedProductProperties: demo.allowFixtureMaterialProperties
+  });
   const reactions = discovery.reactions;
   for (const [key, closure] of Object.entries(discovery.productClosures)) {
+    if (!demo.allowFixtureMaterialProperties) {
+      requireFirstPrinciplesMaterialProperties(closure.properties, {
+        material: key,
+        context: 'createSphPhaseDemo.product-material'
+      });
+    }
     demo.materialProperties[key] = closure.properties;
   }
   demo.reactionNote = discovery.note;
@@ -364,7 +560,7 @@ export function createSphPhaseDemo(options = {}) {
   return {
     demo,
     preflight() {
-      return computeThermodynamicPreflight(demo.scenario);
+      return computeDerivedDemoPreflight(demo);
     },
     step() {
       // Advance the mechanics by several CFL-limited carrier substeps so it covers the same

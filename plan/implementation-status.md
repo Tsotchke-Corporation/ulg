@@ -1,10 +1,32 @@
 # Implementation Status
 
-Updated: 2026-06-09 09:13 AKDT
+Updated: 2026-06-10 20:31 AKDT
 
 ## Done
 
 - Read `agents.md`, `/home/cos/projects/AGENTS.md`, and the ULG v0.5 PDF.
+- Added the strict first-principles material-property provenance gate and then
+  replaced the production/default Fe, H2O, air, H2, O2, element, and product
+  closure paths with a generic derivation pipeline. The production path now
+  parses formulas, derives element closures from atomic DFT/jellium or
+  atomic-density packing, derives compound closures from formula geometry,
+  molecular HF/atomic DFT/statistical mechanics, and rejects reference or
+  reduced material-property provenance by default.
+- Implemented a generalized scalar-relativistic interband optical response for
+  element closures. Metals now combine the derived Drude free-electron plasma
+  response with Koelling-Harmon Kohn-Sham dipole-allowed localized d/f
+  transitions, target-vacancy oscillator weights, electron-gas broadening, and
+  CIE/sRGB integration. Gold now emerges gold-tinted from oscillator data
+  rather than a per-element color patch; p-block simple metals stay on the
+  Drude path when no localized d/f oscillator is resolved. Renderer metal
+  opacity uses the same Drude-Lorentz complex dielectric response and can reuse
+  precomputed closure oscillators. `opticalInterbandOscillators` is tracked in
+  the material-property provenance ledger.
+- Restored the SPH phase demo to running by default under strict provenance:
+  the ice block starts solid at -40 F, the drop block starts molten from its
+  own derived liquidus plus superheat, the preflight uses attached closures
+  instead of reference fixtures, and room-temperature Na + H2O can react into
+  a derived NaOH product closure when initialized in contact.
 - Spawned sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - Used ICC repo registry/status and architecture summaries for MoonLab and peercompute.
 - Added a vanilla Vite/three.js ULG app.
@@ -196,6 +218,48 @@ Updated: 2026-06-09 09:13 AKDT
   (flagged): latent heats, melting/boiling points, liquid + ice heat capacities,
   condensed densities. Verified `npm test` (`107/107`), `npm run build`, headless
   render (ice blue, iron orange glow).
+- Added enforceable material-property provenance. Each H2O/Fe/air/H2/O2 closure
+  now carries a per-property ledger and `materialDerivation` summary; registry
+  samples return provenance for the sampled property. H2/O2 gas density is now
+  ideal-gas-law derived instead of tabulated. H2O/Fe condensed properties remain
+  explicitly reference-blocked, not falsely marked first-principles. Element and
+  product-compound closures also carry provenance; product closures no longer
+  invent fallback density/bulk constants. Reaction discovery now consumes
+  material closure metadata for molar mass, phase gates, density, and stiffness.
+  Verified `npm test` (`43/43`), `npm run build`, and focused SPH Playwright
+  (`2/2`), including `tests/materialPropertyProvenance.test.mjs`.
+- Added the first all-element molecular/reaction solver rung beyond the
+  STO-3G H-Ar basis wall. Heavy-element reactions now switch the whole reaction
+  energy baseline to `atomic-kohn-sham-tight-binding-v0`, derived from atomic
+  Kohn-Sham radial densities, orbital binding scales, containment radii, and a
+  universal pair Hamiltonian. `discoverReactions('fe','o2')` now derives FeO,
+  `discoverReactions('fe','h2o')` derives FeOH, and both product closures pass
+  the strict no-reference/no-reduced provenance gate. Generic compound material
+  derivation also uses the all-element molecular atomization path when RHF/STO-3G
+  cannot cover the formula. This is evidence-level, not calibrated
+  thermochemistry; validation flags remain false. Verified `npm test` (`44/44`),
+  `npm run build`, `npm run test:e2e -- --grep "SPH phase demo"` (`2/2`), and
+  `git diff --check`.
+- Replaced hard-coded render opacity/transmission defaults with derived optical
+  depth. Conductors now derive opacity/transmission from Drude complex index and
+  skin-depth absorption using the material closure's conduction-electron
+  density, so selectable metals such as Au no longer fall through to the generic
+  translucent renderer. Water/ice/steam opacity now comes from Beer-Lambert
+  O-H-overtone optical depth; pure steam is nearly invisible unless a future
+  condensation/nucleation droplet closure derives scattering. Missing optical
+  inputs return a blocked render contract instead of fake opacity. This is still
+  CPU-reference JS; the same closure-input/optical-output contract needs to be
+  moved into WebGPU/WGSL buffers next. Verified `npm test` (`44/44`),
+  `npm run build`, focused SPH Playwright (`2/2`), and `git diff --check`.
+- Promoted the material provenance contract to strict runtime enforcement.
+  `MaterialRegistry`, reaction discovery, generated element/product closures,
+  SPH demo construction, and SPH preflight now reject reference or reduced
+  material properties by default. Fixture behavior is still available only via
+  explicit test/demo opt-ins (`requireFirstPrinciples: false`,
+  `allowFixtureMaterialProperties`, `allowReducedProductProperties`). The live
+  SPH overlay now reports missing first-principles Fe/H2O/Na/product closures as
+  blockers instead of rendering a fake reference-material sim. Verified
+  `npm test` (`43/43`), `npm run build`, and focused SPH Playwright (`2/2`).
 - Added unit tests and Playwright smoke coverage.
 - Verified `npm test`, `npm run build`, and `npm run test:e2e`.
 - Verified the carrier-runtime slice with syntax checks, focused
@@ -835,6 +899,25 @@ Updated: 2026-06-09 09:13 AKDT
   compact artifact summaries expose the factory status, production-host
   candidate requirements, runtime scope, implementation status, and required
   non-stub import count without invoking the production handler.
+
+## Latest Validation
+
+- PASS: `node --check src/runtime/material/opticalClosure.js`
+- PASS: `node --check src/runtime/material/elementClosures.js`
+- PASS: `node --check src/runtime/material/propertyProvenance.js`
+- PASS: `node --test tests/opticalClosure.test.mjs tests/elementClosures.test.mjs tests/materialPropertyProvenance.test.mjs tests/sphPhaseDemo.test.mjs`
+- PASS: `npm test` (`44/44`)
+- PASS: `npm run build` (Vite large-chunk warning only)
+- PASS: `npm run test:e2e -- -g "SPH phase demo"` (`2/2`)
+- PASS: `git diff --check`
+- PASS: live Vite listener confirmed on `0.0.0.0:5173`; `curl -I http://127.0.0.1:5173` returned `200 OK`.
+
+## Not Yet Claimed
+
+- This is a CPU-reference scalar-relativistic atomic interband closure, not yet
+  a WebGPU-resident periodic band-structure/BZ integration solver.
+- Optical validation remains evidence-only; no measured optical constants or
+  calibrated scientific validation are claimed.
 
 ## In Progress
 

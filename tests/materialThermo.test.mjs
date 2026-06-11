@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { ArtifactCache } from '../src/runtime/ArtifactCache.js';
 import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
-import { createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
+import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { heatCapacityJPerKgK, specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
 import { equilibriumFromSpecificEnergy, stablePhaseAt } from '../src/runtime/material/phaseEquilibrium.js';
 import { computeClosureBackedPreflight } from '../src/runtime/material/thermodynamicPreflight.js';
@@ -13,8 +13,19 @@ import { specificEnergyJPerKg } from '../src/runtime/materials/referenceMaterial
 const STD_ATM = 101325;
 
 async function freshRegistry() {
-  const registry = new MaterialRegistry({ closureRegistry: new ClosureRegistry({ artifactCache: new ArtifactCache() }) });
+  const registry = new MaterialRegistry({
+    closureRegistry: new ClosureRegistry({ artifactCache: new ArtifactCache() }),
+    requireFirstPrinciples: false
+  });
   await registry.registerAll(createReferenceMaterialClosures());
+  return registry;
+}
+
+async function derivedRegistry() {
+  const registry = new MaterialRegistry({
+    closureRegistry: new ClosureRegistry({ artifactCache: new ArtifactCache() })
+  });
+  await registry.registerAll(createFirstPrinciplesMaterialClosures());
   return registry;
 }
 
@@ -91,7 +102,7 @@ test('MaterialRegistry sampling outside the closure domain emits a refresh reque
 test('closure-backed preflight reproduces the reference-constant preflight', async () => {
   const registry = await freshRegistry();
   const scenario = createSphPhaseScenario();
-  const preflight = await computeClosureBackedPreflight(scenario, { materialRegistry: registry });
+  const preflight = await computeClosureBackedPreflight(scenario, { materialRegistry: registry, allowFixtureBaseline: true });
   assert.equal(preflight.closureBacked, true);
   // Masses + feasibility are invariant to the heat-capacity model, so they still match.
   assert.equal(preflight.closureSampling.consistentWithReference, true);
@@ -105,16 +116,25 @@ test('closure-backed preflight reproduces the reference-constant preflight', asy
   assert.equal(preflight.scientificValidation, false);
   assert.ok(preflight.blockers.includes('closure-backed-by-reference-fixtures-not-validated'));
 
-  const adiabatic = await computeClosureBackedPreflight(createSphPhaseScenario({ wallModel: 'adiabatic' }), { materialRegistry: registry });
+  const adiabatic = await computeClosureBackedPreflight(createSphPhaseScenario({ wallModel: 'adiabatic' }), { materialRegistry: registry, allowFixtureBaseline: true });
   assert.equal(adiabatic.closureSampling.feasible, false);
   assert.equal(adiabatic.closureSampling.consistentWithReference, true);
+});
+
+test('closure-backed preflight runs strict derived closures without fixture baseline', async () => {
+  const registry = await derivedRegistry();
+  const preflight = await computeClosureBackedPreflight(createSphPhaseScenario(), { materialRegistry: registry });
+  assert.equal(preflight.closureBacked, true);
+  assert.equal(preflight.status, 'preflight-feasible');
+  assert.equal(preflight.closureSampling.feasible, true);
+  assert.deepEqual(preflight.blockers, ['derived-material-models-unvalidated']);
 });
 
 test('closure-backed preflight blocks (with a refresh request) when a material starts out of domain', async () => {
   const registry = await freshRegistry();
   // Iron initial temperature above the Fe closure validity domain (200..4000 K).
   const scenario = createSphPhaseScenario({ ironInitialTemperatureK: 5000 });
-  const preflight = await computeClosureBackedPreflight(scenario, { materialRegistry: registry });
+  const preflight = await computeClosureBackedPreflight(scenario, { materialRegistry: registry, allowFixtureBaseline: true });
   assert.equal(preflight.status, 'preflight-blocked-closure-domain');
   const blockedFe = preflight.blockedMaterials.find((m) => m.material === 'fe');
   assert.ok(blockedFe);

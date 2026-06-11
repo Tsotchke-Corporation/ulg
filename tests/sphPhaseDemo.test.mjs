@@ -6,6 +6,18 @@ import {
   particleThermalState,
   phaseMassSummary
 } from '../src/runtime/sphPhaseDemo.js';
+import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
+
+test('demo default builds with fully derived material closures', () => {
+  const demo = buildSphPhaseDemoState();
+  assert.ok(demo.counts.total > 0);
+  for (const key of ['fe', 'h2o', 'air']) {
+    const summary = materialDerivationSummary(demo.materialProperties[key]);
+    assert.equal(summary.fullyLowerLevelDerived, true);
+    assert.equal(summary.hasReferenceFallbacks, false);
+    assert.equal(summary.hasReducedEstimates, false);
+  }
+});
 
 test('demo initial state: hot molten-iron block on a cold ice block', () => {
   const demo = buildSphPhaseDemoState();
@@ -15,7 +27,8 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
   assert.equal(demo.baseMaterial, 'h2o');
   const fe = demo.state.particles.filter((p) => p.material === 'fe');
   const ice = demo.state.particles.filter((p) => p.material === 'h2o');
-  assert.ok(fe.every((p) => p.temperatureK === 1850));
+  const feLiquidus = demo.materialProperties.fe.transitions[0].temperatureK;
+  assert.ok(fe.every((p) => p.temperatureK > feLiquidus));
   assert.ok(ice.every((p) => p.temperatureK === 233.15));
   // Iron sits above the ice (higher y).
   const minIronY = Math.min(...fe.map((p) => p.x[1]));
@@ -28,7 +41,7 @@ test('particle phase + temperature come from the closure energy', () => {
   const thermal = particleThermalState(demo);
   const ironStates = thermal.filter((t) => t.material === 'fe');
   const iceStates = thermal.filter((t) => t.material === 'h2o');
-  // Iron starts molten (1850 K > 1811 K melting), ice solid.
+  // Iron starts molten from its derived liquidus, ice starts solid from its derived H2O closure.
   assert.ok(ironStates.every((t) => t.phase === 'liquid'));
   assert.ok(iceStates.every((t) => t.phase === 'solid'));
   const summary = phaseMassSummary(demo);
@@ -40,6 +53,7 @@ test('demo driver: preflight feasible, stepping stays bounded and finite', () =>
   const driver = createSphPhaseDemo();
   const pre = driver.preflight();
   assert.equal(pre.feasibility.feasible, true);
+  assert.equal(pre.closureBacked, true);
   for (let i = 0; i < 5; i += 1) driver.step();
   const totals = driver.totals();
   assert.ok(Number.isFinite(totals.totalEnergyJ));

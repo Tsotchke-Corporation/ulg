@@ -2,7 +2,8 @@
 //
 // This is the counterpart to the radiation closure (which gives incandescent EMISSION colour).
 // Here the colour a material shows under illumination is derived from physics, not tuned:
-//  - metals (iron): complex reflectance from the Drude free-electron dielectric function.
+//  - metals: complex reflectance from a Drude free-electron dielectric function plus
+//    scalar-relativistic Kohn-Sham interband oscillators for occupied localized d/f shells.
 //  - transparent media (water/ice): transmitted colour from Beer–Lambert absorption, whose
 //    rise toward the red comes from O–H vibrational overtone bands -> water looks blue.
 //  - gases (air): Rayleigh scattering (∝ 1/λ^4) -> a faint blue, essentially transparent.
@@ -14,9 +15,21 @@
 
 import { createMaterialClosureArtifact } from '../../../ulg-gpu-abi/src/index.js';
 import { _uhf } from '../electronicStructure/molecularHartreeFock.js';
+import { solveAtom } from '../electronicStructure/radialKohnSham.js';
+import { electronConfiguration, zForSymbol } from '../electronicStructure/periodicTable.js';
 
 const C = 2.99792458e8;
+const BOHR_M = 5.29177210903e-11;
+const HARTREE_EV = 27.211386245988;
+const HBAR_EV_S = 6.582119569e-16;
+const INTERBAND_STRENGTH_SCALE = 0.025;
+const INTERBAND_MIN_DAMPING_EV = 0.22;
+const INTERBAND_DAMPING_FRACTION = 0.35;
+const INTERBAND_ELECTRON_GAS_BROADENING_SCALE = 0.06;
+const INTERBAND_MAX_RAW_EV = 12;
+const INTERBAND_MAX_OSCILLATORS = 6;
 const uhfEnergy = (atoms, multiplicity) => _uhf(atoms, { multiplicity }).totalEnergyHa;
+const interbandTransitionCache = new Map();
 
 function gauss(x, mu, s1, s2) {
   const t = (x - mu) * (x < mu ? 1 / s1 : 1 / s2);
@@ -59,11 +72,175 @@ export function spectralResponseToSrgb(responseFn) {
   return { r: srgbEncode(Math.max(0, r)), g: srgbEncode(Math.max(0, g)), b: srgbEncode(Math.max(0, b)) };
 }
 
+function visibleLuminousMean(responseFn) {
+  let sum = 0;
+  let norm = 0;
+  for (let nm = 380; nm <= 780; nm += 5) {
+    const w = cieY(nm);
+    sum += responseFn(nm) * w;
+    norm += w;
+  }
+  return norm > 0 ? sum / norm : 0;
+}
+
+function opticalDepthToOpacity(opticalDepth) {
+  if (!(opticalDepth > 0)) return 0;
+  return 1 - Math.exp(-Math.min(80, opticalDepth));
+}
+
+function complexAdd(a, b) { return [a[0] + b[0], a[1] + b[1]]; }
+function complexSub(a, b) { return [a[0] - b[0], a[1] - b[1]]; }
+function complexDiv(a, b) {
+  const d = b[0] * b[0] + b[1] * b[1];
+  return [(a[0] * b[0] + a[1] * b[1]) / d, (a[1] * b[0] - a[0] * b[1]) / d];
+}
+function complexSqrt(z) {
+  const [x, y] = z;
+  const r = Math.hypot(x, y);
+  return [Math.sqrt(Math.max(0, (r + x) / 2)), Math.sign(y || 1) * Math.sqrt(Math.max(0, (r - x) / 2))];
+}
+
+function reflectanceFromDielectric(epsilon) {
+  const [nRe, kIm] = complexSqrt(epsilon);
+  return ((nRe - 1) ** 2 + kIm ** 2) / ((nRe + 1) ** 2 + kIm ** 2);
+}
+
+function absorptionCoefficientFromDielectricPerM(nm, epsilon) {
+  const [, kIm] = complexSqrt(epsilon);
+  return (4 * Math.PI * Math.max(0, kIm)) / (nm * 1e-9);
+}
+
+function canonicalElementZ(material) {
+  if (typeof material !== 'string' || material.length === 0) return null;
+  const symbol = material[0].toUpperCase() + material.slice(1).toLowerCase();
+  return zForSymbol(symbol) ?? null;
+}
+
+function subshellCapacity(l) {
+  return 2 * (2 * l + 1);
+}
+
+function orbitalLabel(orbital) {
+  return `${orbital.n}${'spdfg'[orbital.l] ?? `l${orbital.l}`}`;
+}
+
+export function hasRelativisticInterbandCandidate(atomicNumberZ) {
+  return electronConfiguration(atomicNumberZ).some((sub) => sub.l >= 2 && sub.occupancy > 0);
+}
+
+function augmentedInterbandConfiguration(atomicNumberZ) {
+  const cfg = electronConfiguration(atomicNumberZ).map((sub) => ({ ...sub }));
+  const add = (n, l) => {
+    let targetN = Math.max(n, l + 1);
+    while (cfg.some((sub) => sub.n === targetN && sub.l === l)) targetN += 1;
+    cfg.push({ n: targetN, l, occupancy: 0 });
+  };
+  for (const sub of [...cfg]) {
+    if (sub.occupancy <= 0 || sub.l < 2) continue;
+    for (const lt of [sub.l - 1, sub.l + 1]) {
+      if (lt < 0 || lt > 4) continue;
+      add(sub.n + 1, lt);
+    }
+  }
+  return cfg.sort((a, b) => (a.n + a.l) - (b.n + b.l) || a.n - b.n || a.l - b.l);
+}
+
+function rawRelativisticInterbandTransitions(atomicNumberZ, options = {}) {
+  if (!hasRelativisticInterbandCandidate(atomicNumberZ)) return [];
+  const gridPointsN = options.gridPointsN ?? 900;
+  const rMaxBohr = options.rMaxBohr ?? 42;
+  const maxScf = options.maxScf ?? 160;
+  const key = `${atomicNumberZ}:${gridPointsN}:${rMaxBohr}:${maxScf}`;
+  if (interbandTransitionCache.has(key)) return interbandTransitionCache.get(key);
+  const atom = solveAtom(atomicNumberZ, {
+    scalarRelativistic: true,
+    configuration: augmentedInterbandConfiguration(atomicNumberZ),
+    gridPointsN,
+    rMaxBohr,
+    maxScf
+  });
+  const occupied = atom.orbitals.filter((orbital) => orbital.occupancy > 0);
+  const targets = atom.orbitals.filter((orbital) => orbital.occupancy < subshellCapacity(orbital.l));
+  const transitions = [];
+  for (const from of occupied) {
+    if (from.l < 2) continue;
+    for (const to of targets) {
+      if (to.n === from.n && to.l === from.l) continue;
+      if (Math.abs(to.l - from.l) !== 1 || to.energyHa <= from.energyHa) continue;
+      const rawEnergyEv = (to.energyHa - from.energyHa) * HARTREE_EV;
+      if (!(rawEnergyEv > 0) || rawEnergyEv > INTERBAND_MAX_RAW_EV) continue;
+      const angular = to.l > from.l
+        ? (from.l + 1) / (2 * from.l + 1)
+        : from.l / (2 * from.l + 1);
+      const filled = Math.min(1, Math.max(0, from.occupancy / subshellCapacity(from.l)));
+      const vacancy = Math.min(1, Math.max(0, 1 - to.occupancy / subshellCapacity(to.l)));
+      const localizedWeight = from.l >= 2 ? 1 : 0.35;
+      const strengthWeight = filled * vacancy * angular * localizedWeight;
+      if (!(strengthWeight > 0)) continue;
+      transitions.push({
+        from: orbitalLabel(from),
+        to: orbitalLabel(to),
+        fromL: from.l,
+        toL: to.l,
+        occupancy: from.occupancy,
+        targetOccupancy: to.occupancy,
+        rawEnergyEv,
+        strengthWeight
+      });
+    }
+  }
+  const compact = transitions
+    .sort((a, b) => a.rawEnergyEv - b.rawEnergyEv || b.strengthWeight - a.strengthWeight)
+    .slice(0, INTERBAND_MAX_OSCILLATORS);
+  interbandTransitionCache.set(key, compact);
+  return compact;
+}
+
+function thomasFermiWavevectorBohr(conductionElectronDensityPerM3) {
+  const nBohr = Math.max(0, conductionElectronDensityPerM3) * BOHR_M ** 3;
+  if (!(nBohr > 0)) return 0;
+  const kF = (3 * Math.PI * Math.PI * nBohr) ** (1 / 3);
+  return Math.sqrt((4 * kF) / Math.PI);
+}
+
+export function relativisticInterbandOscillators({ atomicNumberZ, conductionElectronDensityPerM3, options = {} } = {}) {
+  if (!(atomicNumberZ > 0) || !(conductionElectronDensityPerM3 > 0)) return [];
+  const kTf = thomasFermiWavevectorBohr(conductionElectronDensityPerM3);
+  const electronGasEnergyEv = 0.5 * HARTREE_EV * kTf * kTf;
+  return rawRelativisticInterbandTransitions(atomicNumberZ, options)
+    .map((transition) => {
+      const rawHa = transition.rawEnergyEv / HARTREE_EV;
+      const transitionWavevectorBohr = Math.sqrt(Math.max(rawHa, 1e-6));
+      const thomasFermiScreeningRatio = Math.sqrt(1 + (kTf / transitionWavevectorBohr) ** 2);
+      const bandBroadeningEv = INTERBAND_ELECTRON_GAS_BROADENING_SCALE
+        * electronGasEnergyEv
+        * Math.sqrt(Math.max(transition.strengthWeight, 0));
+      const energyEv = transition.rawEnergyEv;
+      return {
+        ...transition,
+        energyEv,
+        thomasFermiScreeningRatio,
+        electronGasEnergyEv,
+        bandBroadeningEv,
+        thomasFermiWavevectorBohr: kTf,
+        dampingEv: Math.max(INTERBAND_MIN_DAMPING_EV, INTERBAND_DAMPING_FRACTION * energyEv + bandBroadeningEv)
+      };
+    })
+    .filter((osc) => osc.energyEv > 0.15 && osc.energyEv < 8)
+    .sort((a, b) => a.energyEv - b.energyEv || b.strengthWeight - a.strengthWeight)
+    .slice(0, INTERBAND_MAX_OSCILLATORS);
+}
+
 /**
  * Drude normal-incidence reflectance of a metal at wavelength nm, from the free-electron
  * dielectric function ε(ω) = 1 − ω_p² / (ω² + i ω γ).
  */
 export function drudeReflectance(nm, { plasmaRadPerS, dampingRadPerS }) {
+  const { nRe, kIm } = drudeOpticalConstants(nm, { plasmaRadPerS, dampingRadPerS });
+  return ((nRe - 1) ** 2 + kIm ** 2) / ((nRe + 1) ** 2 + kIm ** 2);
+}
+
+export function drudeOpticalConstants(nm, { plasmaRadPerS, dampingRadPerS }) {
   const omega = (2 * Math.PI * C) / (nm * 1e-9);
   const wp2 = plasmaRadPerS * plasmaRadPerS;
   const denomRe = omega * omega;
@@ -74,7 +251,12 @@ export function drudeReflectance(nm, { plasmaRadPerS, dampingRadPerS }) {
   const mag = Math.hypot(epsRe, epsIm);
   const nRe = Math.sqrt((mag + epsRe) / 2);
   const kIm = Math.sqrt((mag - epsRe) / 2);
-  return ((nRe - 1) ** 2 + kIm ** 2) / ((nRe + 1) ** 2 + kIm ** 2);
+  return { nRe, kIm, epsRe, epsIm };
+}
+
+export function drudeAbsorptionCoefficientPerM(nm, { plasmaRadPerS, dampingRadPerS }) {
+  const { kIm } = drudeOpticalConstants(nm, { plasmaRadPerS, dampingRadPerS });
+  return (4 * Math.PI * kIm) / (nm * 1e-9);
 }
 
 const ELECTRON_CHARGE = 1.602176634e-19;
@@ -102,6 +284,105 @@ export function metalDrudeColorSrgb(conductionElectronDensityPerM3) {
   const damping = wp / 30;
   const c = spectralResponseToSrgb((nm) => drudeReflectance(nm, { plasmaRadPerS: wp, dampingRadPerS: damping }));
   return { r: c.r, g: c.g, b: c.b, plasmaRadPerS: wp };
+}
+
+function dielectricDrudeLorentzEv(photonEv, { plasmaEnergyEv, dampingEv, oscillators }) {
+  let epsilon = [1, 0];
+  epsilon = complexSub(epsilon, complexDiv(
+    [plasmaEnergyEv * plasmaEnergyEv, 0],
+    [photonEv * photonEv, photonEv * dampingEv]
+  ));
+  for (const oscillator of oscillators || []) {
+    const strengthEv2 = INTERBAND_STRENGTH_SCALE
+      * plasmaEnergyEv * plasmaEnergyEv
+      * oscillator.strengthWeight;
+    epsilon = complexAdd(epsilon, complexDiv(
+      [strengthEv2, 0],
+      [
+        oscillator.energyEv * oscillator.energyEv - photonEv * photonEv,
+        -oscillator.dampingEv * photonEv
+      ]
+    ));
+  }
+  return epsilon;
+}
+
+export function metalRelativisticReflectance(nm, { atomicNumberZ = null, conductionElectronDensityPerM3, interbandOptions = {}, interbandOscillators = null } = {}) {
+  const wp = plasmaFrequencyRadPerS(conductionElectronDensityPerM3);
+  const plasmaEnergyEv = HBAR_EV_S * wp;
+  const dampingEv = plasmaEnergyEv / 30;
+  const oscillators = Array.isArray(interbandOscillators)
+    ? interbandOscillators
+    : atomicNumberZ
+    ? relativisticInterbandOscillators({ atomicNumberZ, conductionElectronDensityPerM3, options: interbandOptions })
+    : [];
+  const photonEv = 1239.841984 / nm;
+  return reflectanceFromDielectric(dielectricDrudeLorentzEv(photonEv, { plasmaEnergyEv, dampingEv, oscillators }));
+}
+
+export function metalRelativisticColorSrgb({ atomicNumberZ = null, conductionElectronDensityPerM3, interbandOptions = {}, interbandOscillators = null } = {}) {
+  if (!(conductionElectronDensityPerM3 > 0)) return { r: 0.7, g: 0.7, b: 0.7, interbandOscillators: [] };
+  const oscillators = Array.isArray(interbandOscillators)
+    ? interbandOscillators
+    : atomicNumberZ
+      ? relativisticInterbandOscillators({ atomicNumberZ, conductionElectronDensityPerM3, options: interbandOptions })
+      : [];
+  const c = spectralResponseToSrgb((nm) => metalRelativisticReflectance(nm, {
+    atomicNumberZ,
+    conductionElectronDensityPerM3,
+    interbandOptions,
+    interbandOscillators: oscillators
+  }));
+  return {
+    r: c.r,
+    g: c.g,
+    b: c.b,
+    plasmaRadPerS: plasmaFrequencyRadPerS(conductionElectronDensityPerM3),
+    interbandOscillators: oscillators
+  };
+}
+
+function metalOpticalRenderParams(conductionElectronDensityPerM3, { pathLengthM = 0.3, atomicNumberZ = null, interbandOptions = {}, interbandOscillators = null } = {}) {
+  const wp = plasmaFrequencyRadPerS(conductionElectronDensityPerM3);
+  const plasmaEnergyEv = HBAR_EV_S * wp;
+  const dampingEv = plasmaEnergyEv / 30;
+  const oscillators = Array.isArray(interbandOscillators)
+    ? interbandOscillators
+    : atomicNumberZ
+    ? relativisticInterbandOscillators({ atomicNumberZ, conductionElectronDensityPerM3, options: interbandOptions })
+    : [];
+  const epsilonAt = (nm) => dielectricDrudeLorentzEv(1239.841984 / nm, { plasmaEnergyEv, dampingEv, oscillators });
+  const absorptionCoefficientPerM = visibleLuminousMean((nm) => absorptionCoefficientFromDielectricPerM(nm, epsilonAt(nm)));
+  const reflectance = visibleLuminousMean((nm) => reflectanceFromDielectric(epsilonAt(nm)));
+  const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+  const opacity = opticalDepthToOpacity(opticalDepth);
+  const transmission = Math.exp(-Math.min(80, opticalDepth));
+  return {
+    metalness: opacity > 0.5 ? 1 : opacity,
+    roughness: 0.32,
+    transmission,
+    ior: null,
+    opacity,
+    attenuationColor: null,
+    attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
+    condensationScatter: 0,
+    internalScatter: 0,
+    opticalDepth,
+    absorptionCoefficientPerM,
+    reflectance,
+    interbandOscillators: oscillators,
+    provenance: {
+      status: 'derived',
+      source: oscillators.length
+        ? 'scalar-relativistic-kohn-sham-drude-lorentz-skin-depth'
+        : 'drude-free-electron-skin-depth',
+      method: oscillators.length
+        ? 'conduction electron density + scalar-relativistic Kohn-Sham dipole-allowed interband transitions -> Drude-Lorentz complex index -> luminous skin-depth opacity'
+        : 'conduction electron density -> plasma frequency -> complex index -> luminous absorption coefficient -> Beer-Lambert opacity',
+      inputs: { atomicNumberZ, conductionElectronDensityPerM3, pathLengthM, damping: 'omega_p/30', oscillatorCount: oscillators.length },
+      validation: false
+    }
+  };
 }
 
 // Water's visible colour is DERIVED from O–H vibrational overtones, not a tabulated spectrum.
@@ -157,7 +438,10 @@ export function intrinsicColorSrgb({ material, phase = 'solid', pathLengthM = 3,
   // Metals: derive the colour from the conduction-electron density (Drude). The caller passes the
   // density (from the material closure); a metal without one falls through to the grey default.
   if (conductionElectronDensityPerM3 > 0) {
-    const c = metalDrudeColorSrgb(conductionElectronDensityPerM3);
+    const c = metalRelativisticColorSrgb({
+      atomicNumberZ: canonicalElementZ(material),
+      conductionElectronDensityPerM3
+    });
     return { r: c.r, g: c.g, b: c.b };
   }
   if (material === 'h2o') {
@@ -208,21 +492,75 @@ function waterBeerLambertAttenuation() {
   return { attenuationColor: [c.r, c.g, c.b], attenuationDistanceM };
 }
 
+function phaseDensityKgPerM3(properties, phase) {
+  const phases = properties?.phases || [];
+  const exact = phases.find((candidate) => candidate.name === phase);
+  const fallback = phases.find((candidate) => candidate.densityKgPerM3 > 0);
+  return exact?.densityKgPerM3 ?? fallback?.densityKgPerM3 ?? null;
+}
+
+function bandGapAbsorptionCoefficientPerM(nm, { properties, phase = 'solid' }) {
+  const gapEv = properties?.electronicGapEv;
+  if (!(gapEv >= 0)) return null;
+  const photonEv = 1239.841984 / nm;
+  if (photonEv <= gapEv) return 0;
+  const density = phaseDensityKgPerM3(properties, phase);
+  const molarMass = properties?.molarMassKgPerMol;
+  if (!(density > 0) || !(molarMass > 0)) return null;
+  const numberDensity = (density / molarMass) * 6.02214076e23;
+  const volumePerFormulaM3 = 1 / numberDensity;
+  const geometricCrossSectionM2 = volumePerFormulaM3 ** (2 / 3);
+  const oscillatorFraction = Math.min(1, Math.max(0, (photonEv - gapEv) / Math.max(1, photonEv)));
+  return numberDensity * geometricCrossSectionM2 * oscillatorFraction;
+}
+
+function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.3 }) {
+  const sample = bandGapAbsorptionCoefficientPerM(500, { properties, phase });
+  if (sample == null) return null;
+  const absorptionCoefficientPerM = visibleLuminousMean((nm) => bandGapAbsorptionCoefficientPerM(nm, { properties, phase }) ?? 0);
+  const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+  const opacity = opticalDepthToOpacity(opticalDepth);
+  return {
+    metalness: 0,
+    roughness: 0.4,
+    transmission: Math.exp(-Math.min(80, opticalDepth)),
+    ior: 1.4,
+    opacity,
+    attenuationColor: properties?.intrinsicColorSrgb ?? null,
+    attenuationDistanceM: absorptionCoefficientPerM > 0 ? 1 / absorptionCoefficientPerM : Infinity,
+    condensationScatter: 0,
+    internalScatter: 0,
+    opticalDepth,
+    absorptionCoefficientPerM,
+    provenance: {
+      status: 'derived',
+      source: 'molecular-gap-geometric-absorption',
+      method: 'electronic gap + formula density -> geometric oscillator absorption -> Beer-Lambert opacity',
+      inputs: { electronicGapEv: properties?.electronicGapEv, pathLengthM, phase },
+      validation: false
+    }
+  };
+}
+
 /**
  * Physically-derived render parameters for a material surface — what the renderer should use
  * instead of hand-picked opacities. Everything here comes from the optics, not from tuning:
  *  - metals (iron): opaque (transmission 0, metalness 1); colour is the Drude reflectance.
  *  - water/ice: transmission + IOR from the refractive index (Fresnel sets the visible surface
  *    reflection), with a Beer–Lambert attenuation colour/distance for the bulk blue tint.
- *  - vapour (steam): IOR ≈ 1 so it barely refracts (pure vapour is nearly invisible); the only
- *    thing that makes steam visible is Mie scattering off *condensed* micro-droplets, modelled
- *    here as a single labelled `condensationScatter` term — the one value not yet derived from a
- *    closure (it needs the condensation/nucleation microphysics), so it is called out explicitly.
+ *  - vapour (steam): IOR ≈ 1 and a long O-H attenuation length, so pure vapour is nearly invisible.
+ *    Visible white steam requires a separate condensation/nucleation droplet closure; it is not
+ *    faked here.
  * closureBacked: true; opticalValidation stays false.
  */
-export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3 } = {}) {
-  if (material === 'fe') {
-    return { metalness: 1, roughness: 0.32, transmission: 0, ior: 2.9, opacity: 1, attenuationColor: null, attenuationDistanceM: 0, condensationScatter: 0 };
+export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3, properties = null, conductionElectronDensityPerM3 = null } = {}) {
+  const conductionDensity = conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3 ?? null;
+  if (conductionDensity > 0) {
+    return metalOpticalRenderParams(conductionDensity, {
+      pathLengthM,
+      atomicNumberZ: canonicalElementZ(material),
+      interbandOscillators: properties?.opticalInterbandOscillators
+    });
   }
   if (material === 'h2o' || material === 'steam' || material === 'ice') {
     const isVapor = material === 'steam' || phase === 'gas';
@@ -233,19 +571,56 @@ export function opticalRenderParams({ material, phase = 'liquid', pathLengthM = 
     // Vapour is optically thin: push the attenuation distance far out so it carries almost no tint.
     const attenuationColor = isVapor ? [1, 1, 1] : atten.attenuationColor;
     const attenuationDistanceM = isVapor ? atten.attenuationDistanceM * 50 : atten.attenuationDistanceM;
-    // Multiple-scattering fractions that reduce ballistic transmission (the part of light that
-    // doesn't pass straight through). Both are microstructure terms — not derived from the
-    // molecular optics — so they are called out explicitly:
-    //   - vapour: Mie scattering off condensed micro-droplets (the visible part of steam).
-    //   - ice: multiple scattering off grain boundaries / trapped bubbles, which is why bulk ice
-    //     is translucent white rather than clear like liquid water.
-    const condensationScatter = isVapor ? 0.45 : 0;
-    const internalScatter = isSolid ? 0.55 : 0;
-    const transmission = Math.min(1, Math.max(0, 1 - fresnelR0 - condensationScatter - internalScatter));
+    const absorptionCoefficientPerM = 1 / attenuationDistanceM;
+    const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+    const ballisticTransmission = Math.exp(-Math.min(80, opticalDepth));
+    const transmission = Math.min(1, Math.max(0, (1 - fresnelR0) * ballisticTransmission));
+    const opacity = opticalDepthToOpacity(opticalDepth);
     const roughness = isVapor ? 0.9 : (isSolid ? 0.5 : 0.08);
-    return { metalness: 0, roughness, transmission, ior: n, opacity: 1, attenuationColor, attenuationDistanceM, condensationScatter, internalScatter };
+    return {
+      metalness: 0,
+      roughness,
+      transmission,
+      ior: n,
+      opacity,
+      attenuationColor,
+      attenuationDistanceM,
+      condensationScatter: 0,
+      internalScatter: 0,
+      opticalDepth,
+      absorptionCoefficientPerM,
+      provenance: {
+        status: 'derived',
+        source: 'beer-lambert-oh-overtone-optical-depth',
+        method: 'O-H overtone absorption -> luminous attenuation distance -> Beer-Lambert opacity/transmission',
+        inputs: { pathLengthM, phase: isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid') },
+        validation: false
+      }
+    };
   }
-  return { metalness: 0, roughness: 0.4, transmission: 0, ior: 1.4, opacity: 0.9, attenuationColor: null, attenuationDistanceM: 0, condensationScatter: 0 };
+  const compound = compoundGapRenderParams({ properties, phase, pathLengthM });
+  if (compound) return compound;
+  return {
+    metalness: 0,
+    roughness: 0.4,
+    transmission: 0,
+    ior: 1.4,
+    opacity: 0,
+    attenuationColor: null,
+    attenuationDistanceM: Infinity,
+    condensationScatter: 0,
+    internalScatter: 0,
+    opticalDepth: null,
+    absorptionCoefficientPerM: null,
+    blocked: true,
+    provenance: {
+      status: 'blocked',
+      source: 'missing-optical-closure',
+      method: 'no conduction density, water absorption model, or electronic-gap opacity available',
+      inputs: { material, phase },
+      validation: false
+    }
+  };
 }
 
 /**
@@ -262,7 +637,9 @@ export function createOpticalClosure() {
     units: { color: 'sRGB-0-1', absorption: '1/m' },
     properties: {
       metals: { model: 'drude-free-electron', plasmaFrequency: 'derived from conduction-electron density', damping: 'universal omega_p/30 estimate' },
+      interbandMetals: { model: 'scalar-relativistic-kohn-sham-drude-lorentz', transitions: 'KH orbital gaps with electron-gas band broadening', oscillatorStrengths: 'dipole selection rules and subshell occupancy' },
       water: { model: 'beer-lambert-OH-overtone-absorption' },
+      opacity: { model: 'optical-depth-to-opacity', conductorOpacity: 'Drude skin depth', transparentMediaOpacity: 'Beer-Lambert attenuation' },
       air: { model: 'rayleigh-1-over-lambda4' },
       colorPipeline: 'spectral-response -> CIE-1931 -> equal-energy sRGB'
     },

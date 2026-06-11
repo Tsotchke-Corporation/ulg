@@ -3,14 +3,20 @@
 // All material sampling goes through ClosureRegistry, so a sample whose (temperature, pressure)
 // leaves a closure's validity domain produces the existing closure-refresh/invalidation
 // evidence rather than a silent extrapolation. Property values come from the material closure's
-// data via the P3 thermodynamic core. Nothing here is validated physics: closures are
-// reference-fixture-backed until MoonLab/Eshkol microphysics references exist.
+// data via the P3 thermodynamic core. Nothing here is validated physics: strict registries require
+// first-principles provenance, while explicit fixture registries may still load reference closures
+// for regression baselines.
 
 import { createClosureDomainExitRefreshRequest } from '../fieldClosureSamples.js';
 import { idealGasDensityKgPerM3 } from '../materials/referenceMaterials.js';
 import { heatCapacityJPerKgK, specificInternalEnergyJPerKg } from './thermoState.js';
 import { stablePhaseAt } from './phaseEquilibrium.js';
 import { densityAtTemperature } from './gruneisenEos.js';
+import {
+  materialDerivationSummary,
+  provenanceEntriesForPath,
+  requireFirstPrinciplesMaterialProperties
+} from './propertyProvenance.js';
 
 function phaseRecordAt(properties, temperatureK) {
   const t = Number(temperatureK);
@@ -21,6 +27,59 @@ function phaseRecordAt(properties, temperatureK) {
     if (t <= tHi) return phases[i];
   }
   return phases[phases.length - 1] || null;
+}
+
+function evaluatedPropertyPath(closure, property, temperatureK) {
+  const properties = closure.properties || {};
+  const phase = phaseRecordAt(properties, temperatureK);
+  switch (property) {
+    case 'specificInternalEnergy':
+      return 'specificInternalEnergy';
+    case 'heatCapacity':
+      return phase?.debyeTemperatureK ? `phases.${phase.name}.debyeTemperatureK` : `phases.${phase?.name}.cpJPerKgK`;
+    case 'phase':
+      return 'phase';
+    case 'molarMass':
+      return 'molarMassKgPerMol';
+    case 'density':
+      if (properties.idealGas) return 'idealGas';
+      if (phase?.eos) return `phases.${phase.name}.eos.referenceDensityKgPerM3`;
+      return `phases.${phase?.name}.densityKgPerM3`;
+    default:
+      return null;
+  }
+}
+
+function sampleProvenance(closure, property, temperatureK) {
+  const properties = closure.properties || {};
+  const directPath = evaluatedPropertyPath(closure, property, temperatureK);
+  const direct = directPath ? provenanceEntriesForPath(properties, directPath) : [];
+  const supportPaths = [];
+  if (property === 'specificInternalEnergy') {
+    const phase = phaseRecordAt(properties, temperatureK);
+    if (phase) {
+      supportPaths.push(
+        phase.debyeTemperatureK ? `phases.${phase.name}.debyeTemperatureK` : `phases.${phase.name}.cpJPerKgK`,
+        `phases.${phase.name}.temperatureRange`
+      );
+    }
+    for (const transition of properties.transitions || []) {
+      if (temperatureK > transition.temperatureK) {
+        supportPaths.push(`transitions.${transition.from}->${transition.to}.temperatureK`);
+        supportPaths.push(`transitions.${transition.from}->${transition.to}.latentHeatJPerKg`);
+      }
+    }
+  } else if (property === 'phase') {
+    for (const phase of properties.phases || []) supportPaths.push(`phases.${phase.name}.temperatureRange`);
+    for (const transition of properties.transitions || []) supportPaths.push(`transitions.${transition.from}->${transition.to}.temperatureK`);
+  }
+  const supporting = supportPaths.flatMap((path) => provenanceEntriesForPath(properties, path));
+  const entries = [...direct, ...supporting].filter((entry, index, all) => all.indexOf(entry) === index);
+  return {
+    path: directPath,
+    entries,
+    derivationSummary: closure.materialDerivation || materialDerivationSummary(properties)
+  };
 }
 
 function evaluateProperty(closure, property, temperatureK, pressurePa) {
@@ -62,9 +121,10 @@ function evaluateProperty(closure, property, temperatureK, pressurePa) {
 }
 
 export class MaterialRegistry {
-  constructor({ closureRegistry } = {}) {
+  constructor({ closureRegistry, requireFirstPrinciples = true } = {}) {
     if (!closureRegistry) throw new Error('MaterialRegistry requires a closureRegistry');
     this.closureRegistry = closureRegistry;
+    this.requireFirstPrinciples = requireFirstPrinciples;
     this.entries = new Map();
   }
 
@@ -75,6 +135,12 @@ export class MaterialRegistry {
   async register(closure) {
     if (!closure?.material || !closure?.closureFamily) {
       throw new Error('material closure must carry material and closureFamily');
+    }
+    if (this.requireFirstPrinciples) {
+      requireFirstPrinciplesMaterialProperties(closure.properties || {}, {
+        material: closure.material,
+        context: 'MaterialRegistry.register'
+      });
     }
     const ref = await this.closureRegistry.store(closure);
     this.entries.set(this.#key(closure.material, closure.closureFamily), { ref, closure });
@@ -98,12 +164,18 @@ export class MaterialRegistry {
    * domain returns `status: 'out-of-domain'` with a closure-refresh request (the same contract
    * the carrier domain-exit path emits) instead of an extrapolated value.
    */
-  async sampleProperty({ material, closureFamily = 'material', property, temperatureK, pressurePa = null }) {
+  async sampleProperty({ material, closureFamily = 'material', property, temperatureK, pressurePa = null, requireFirstPrinciples = this.requireFirstPrinciples }) {
     const entry = this.entries.get(this.#key(material, closureFamily));
     if (!entry) {
       return { status: 'miss', reason: 'material-closure-not-registered', material, property, value: null };
     }
     const closure = entry.closure;
+    if (requireFirstPrinciples) {
+      requireFirstPrinciplesMaterialProperties(closure.properties || {}, {
+        material: closure.material,
+        context: `MaterialRegistry.sampleProperty:${property}`
+      });
+    }
     const point = { temperatureK };
     if (pressurePa != null) point.pressurePa = pressurePa;
     const resolved = await this.closureRegistry.resolve({
@@ -139,6 +211,7 @@ export class MaterialRegistry {
       units: closure.units?.[property] || null,
       closureRef: entry.ref,
       validity: 'in-range',
+      provenance: sampleProvenance(closure, property, temperatureK),
       scientificValidation: false,
       materialValidation: false
     };

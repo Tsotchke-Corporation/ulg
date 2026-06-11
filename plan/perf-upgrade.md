@@ -404,6 +404,8 @@ Implemented status (2026-06-10):
   provides a CPU reference sampler for parity, and exposes
   `runOpticalGpuLookup()` for WebGPU dispatch/readback of compact render
   parameter rows.
+- Optical material ids are stable across rebuilds: element ids are their
+  atomic number, and compounds use deterministic f32-exact hashed ids.
 - `src/visualization/sphPhaseScene.js` now derives one packed optical GPU table
   from each active material/phase surface batch and exposes it via
   `getOpticalGpuTable()`.

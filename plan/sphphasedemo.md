@@ -284,6 +284,8 @@ Current implementation checkpoint (2026-06-10):
   sample rows suitable for WebGPU storage-buffer upload.
 - The runtime can sample packed records by material/phase id through a CPU
   parity path or a WebGPU dispatch helper.
+- Material ids are stable for GPU residency: elements use atomic number, while
+  compounds use deterministic f32-exact hashed ids.
 - The demo still renders through Three.js `MeshPhysicalMaterial`; WebGPU
   kernels/renderers do not yet consume the table directly in the frame loop.
 

@@ -14,6 +14,7 @@ import {
   buildOpticalGpuLookupQueries,
   opticalLookupWgsl,
   sampleOpticalGpuTableCpu,
+  stableOpticalMaterialId,
   uploadOpticalGpuTable
 } from '../src/runtime/material/opticalGpuBuffers.js';
 
@@ -59,7 +60,7 @@ test('optical GPU table deduplicates material-phase records and preserves stable
   ]);
 
   assert.equal(table.recordCount, 2);
-  assert.deepEqual(table.materialMap, [{ material: 'h2o', materialId: 1 }]);
+  assert.deepEqual(table.materialMap, [{ material: 'h2o', materialId: stableOpticalMaterialId('h2o') }]);
   assert.deepEqual(
     table.recordMetadata.map((record) => ({ phase: record.phase, phaseId: record.phaseId })),
     [
@@ -67,6 +68,14 @@ test('optical GPU table deduplicates material-phase records and preserves stable
       { phase: 'gas', phaseId: 3 }
     ]
   );
+});
+
+test('stable optical material ids use atomic numbers for elements and deterministic ids for compounds', () => {
+  assert.equal(stableOpticalMaterialId('Au'), 79);
+  assert.equal(stableOpticalMaterialId('au'), 79);
+  assert.equal(stableOpticalMaterialId('fe'), 26);
+  assert.equal(stableOpticalMaterialId('h2o'), stableOpticalMaterialId('H2O'));
+  assert.ok(stableOpticalMaterialId('h2o') > 1000);
 });
 
 test('optical GPU table upload writes records and spectral samples to storage buffers', () => {

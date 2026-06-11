@@ -7477,6 +7477,8 @@ Commands run:
 - `npm test`
 - `npm run build`
 - `git diff --check`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+- `EMSDK_QUIET=1 /home/cos/projects/infinite_context_coder/.venv/bin/python /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
 - Browser WebGPU probe via Playwright against `https://127.0.0.1:5173/`,
   importing `/src/runtime/material/opticalGpuBuffers.js`, requesting
   `navigator.gpu`, running `runOpticalGpuLookup()` for liquid H2O, and
@@ -7687,4 +7689,56 @@ Failures / open questions:
   WGSL/source contract checks.
 - The frame-loop renderer still reads the packed table only as scene metadata.
   Direct WebGPU renderer/simulation consumption is the next core slice.
+- No push was attempted.
+
+## 2026-06-10 22:13:58 AKDT - Stable optical GPU material ids
+
+Prompt:
+
+- Continuing the core GPU-residency cleanup after adding the optical GPU lookup
+  kernel.
+
+Actions:
+
+- Replaced order-dependent optical material ids with stable ids in
+  `src/runtime/material/opticalGpuBuffers.js`.
+- Elements now use atomic number as their GPU material id (`Au`/`au` -> 79,
+  `fe` -> 26). Non-element materials/compounds use deterministic f32-exact
+  hashed ids well above the atomic-number range.
+- Updated optical GPU tests to assert stable element/compound ids and to keep
+  lookup queries aligned with those ids.
+- Updated `plan/implementation-status.md`, `plan/perf-upgrade.md`, and
+  `plan/sphphasedemo.md` with the stable-id rule.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `tests/opticalGpuBuffers.test.mjs`
+
+Commands run:
+
+- `node --check src/runtime/material/opticalGpuBuffers.js tests/opticalGpuBuffers.test.mjs`
+- `node --test tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused stable-id/renderer tests passed `10/10`.
+- PASS: `npm test` passed `222/222`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+- PASS: ICC ULG index refreshed after edits; status reports stale=false at
+  git head `5cec6c72861fadeeb0ed2f6761d856edc1f4c13e`.
+
+Failures / open questions:
+
+- Compound ids are deterministic hashes, not a finalized cross-repo material
+  ontology. They are stable and f32-exact for ULG GPU tables, but PeerCompute
+  placement and future material catalogs may need a shared registry.
 - No push was attempted.

@@ -8,6 +8,7 @@ import {
   ULG_OPTICAL_GPU_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { opticalLookupWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
+import { zForSymbol } from '../electronicStructure/periodicTable.js';
 import { opticalRenderParams } from './opticalClosure.js';
 
 export { ULG_OPTICAL_GPU_BUFFER_SET_SCHEMA, ULG_OPTICAL_GPU_LOOKUP_SCHEMA, ULG_OPTICAL_GPU_TABLE_SCHEMA };
@@ -127,6 +128,28 @@ function materialKey(descriptor) {
   return descriptor?.material || descriptor?.renderKey || null;
 }
 
+function normalizeElementSymbol(candidate) {
+  if (typeof candidate !== 'string' || candidate.length === 0) return null;
+  return `${candidate[0].toUpperCase()}${candidate.slice(1).toLowerCase()}`;
+}
+
+function stableHashId(text) {
+  let hash = 0x811c9dc5;
+  for (const ch of String(text)) {
+    hash ^= ch.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  // Keep the id exactly representable in f32 and well away from atomic numbers.
+  return 1000 + (hash % 8_000_000);
+}
+
+export function stableOpticalMaterialId(material) {
+  const symbol = normalizeElementSymbol(material);
+  const Z = symbol ? zForSymbol(symbol) : null;
+  if (Z != null) return Z;
+  return stableHashId(String(material || 'unknown').toLowerCase());
+}
+
 function descriptorPhase(descriptor) {
   if (typeof descriptor === 'string') return 'unknown';
   return descriptor?.phase || 'unknown';
@@ -166,7 +189,7 @@ export function buildOpticalGpuTable(descriptors, {
   const seen = new Set();
 
   const materialIdFor = (material) => {
-    if (!materialIds.has(material)) materialIds.set(material, materialIds.size + 1);
+    if (!materialIds.has(material)) materialIds.set(material, stableOpticalMaterialId(material));
     return materialIds.get(material);
   };
 

@@ -10329,3 +10329,78 @@ Failures / open questions:
 - The demo still uses a Three.js/MarchingCubes bridge, so a fully GPU-resident
   renderer is not complete yet.
 - No push was attempted.
+
+## 2026-06-11 11:47 AKDT - Resident readback cadence and profiling telemetry
+
+Prompt:
+
+- Finish the fifth task after compact thermal/phase summaries: reduce
+  render/diagnostic CPU readbacks and profile before moving on to the transparent
+  z-buffer/render-order issue.
+
+What happened:
+
+- Used the sidecar readback audit to target the default SPH demo hot loop.
+  Highest readback pressure remains the Three.js/MarchingCubes render bridge:
+  resident render rows/render fields are still read back to CPU to build visible
+  surfaces.
+- Added `peercompute.ulg.sph-demo-render-readback-cadence.v0` metadata in the
+  SPH demo mount layer. Resident WebGPU continuations now refresh expensive
+  render-field readbacks only when cadence is due, while skipped continuations
+  keep the last resident render state.
+- Added `peercompute.ulg.sph-demo-resident-perf.v0` overlay telemetry with
+  resident submission count, last resident-step timing, render readback timing,
+  render readback count, and skipped-readback count.
+- Disabled the standalone MLS-MPM mechanics prediction parity path by default in
+  the demo hot loop. The active mechanics path remains the resident
+  P2G -> grid update -> G2P chain; the old standalone prediction can still be
+  enabled explicitly through `overlay.__sphStandaloneMechanicsPredictionEnabled`
+  for validation/profiling.
+- Added status rows for `render cadence`, `resident profile`, and
+  `standalone mech`.
+- Updated the SPH Playwright e2e to assert the disabled standalone mechanics
+  telemetry, render cadence metadata, and resident perf telemetry.
+- Regenerated the GitHub Pages artifact in `docs/` after the source changes.
+
+Files touched:
+
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/demo.e2e.mjs`
+- `docs/index.html`
+- `docs/assets/pages-tv38NuM7.js`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check tests/demo.e2e.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `npm run build:pages`
+- `npm test`
+- `git diff --check`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 11:47:27 AKDT`.
+
+Validation:
+
+- PASS: syntax checks for the touched mount and e2e files.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` passed with the existing Vite large-chunk
+  warning and regenerated `docs/`.
+- PASS: full `npm test` passed `327/327`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- Render readback is reduced on resident continuations but not eliminated; the
+  visible renderer still bridges through CPU arrays and Three.js
+  MarchingCubes.
+- The compact resident summary readback still runs every resident step. A later
+  slice should add summary cadence or batch summary/fence handling.
+- Next task is the transparent z-buffer/render-order audit/fix.
+- No push was attempted.

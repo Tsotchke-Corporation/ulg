@@ -37,6 +37,8 @@ const DROP_TEMP_DEFAULT_K = 1850;
 const BASE_TEMP_DEFAULT_K = 233.15;
 const RESIDENT_STEPS_PER_SCHEDULE = 2;
 const RESIDENT_CONTINUATION_CHAIN_BUDGET = 2;
+const RESIDENT_RENDER_READBACK_CADENCE = 3;
+const STANDALONE_MECHANICS_PREDICTION_DEFAULT = false;
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -506,6 +508,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
   overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
   overlay.__mlsMpmResidentRequestedReadbackMode = scene.getMlsMpmResidentRequestedReadbackMode?.() || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+  overlay.__sphStandaloneMechanicsPredictionEnabled = STANDALONE_MECHANICS_PREDICTION_DEFAULT;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
@@ -516,6 +519,100 @@ export function mountSphPhaseDemoOverlay() {
   let pendingMlsMpmG2pReconstructionSignature = null;
   let pendingMlsMpmResidentStepsSignature = null;
   let particleSyncGeneration = 0;
+  let residentRenderReadbackSequence = 0;
+  let residentRenderReadbackCount = 0;
+  let residentRenderReadbackSkippedCount = 0;
+  let residentPerf = {
+    schema: 'peercompute.ulg.sph-demo-resident-perf.v0',
+    residentSubmissions: 0,
+    renderReadbackCadence: RESIDENT_RENDER_READBACK_CADENCE,
+    renderReadbacks: 0,
+    skippedRenderReadbacks: 0,
+    lastResidentMs: null,
+    lastRenderReadbackMs: null,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+  overlay.__sphResidentPerf = residentPerf;
+
+  function updateResidentPerf(patch = {}) {
+    residentPerf = {
+      ...residentPerf,
+      ...patch,
+      updatedAtMs: performance.now()
+    };
+    overlay.__sphResidentPerf = residentPerf;
+    return residentPerf;
+  }
+
+  function resetResidentPerf(reason) {
+    residentRenderReadbackSequence = 0;
+    residentRenderReadbackCount = 0;
+    residentRenderReadbackSkippedCount = 0;
+    updateResidentPerf({
+      resetReason: reason,
+      residentSubmissions: 0,
+      renderReadbacks: 0,
+      skippedRenderReadbacks: 0,
+      lastResidentMs: null,
+      lastRenderReadbackMs: null,
+      lastRenderReadbackSkipped: false
+    });
+  }
+
+  function residentRenderReadbackDecision({ continueFromResidentState = false } = {}) {
+    residentRenderReadbackSequence += 1;
+    const hasRenderedState = Boolean(scene.getSphResidentRenderState?.()?.schema);
+    const due = !continueFromResidentState
+      || !hasRenderedState
+      || ((residentRenderReadbackSequence - 1) % RESIDENT_RENDER_READBACK_CADENCE === 0);
+    return {
+      schema: 'peercompute.ulg.sph-demo-render-readback-cadence.v0',
+      cadence: RESIDENT_RENDER_READBACK_CADENCE,
+      sequence: residentRenderReadbackSequence,
+      due,
+      skipped: !due,
+      skippedCount: residentRenderReadbackSkippedCount,
+      renderReadbackCount: residentRenderReadbackCount,
+      reason: due ? 'cadence-due' : 'cadence-skip',
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+
+  function annotateResidentRenderStateCadence(state, cadence) {
+    overlay.__sphResidentRenderReadbackCadence = cadence;
+    if (state && typeof state === 'object') {
+      state.renderReadbackCadence = { ...cadence };
+      scene.scene.userData.sphResidentRenderState = state;
+    }
+    return state;
+  }
+
+  function disabledStandaloneMechanicsPrediction(sphGpuParticleState, mlsMpmGpuParticleState) {
+    return {
+      schema: 'peercompute.ulg.mls-mpm-gpu-mechanics-execution.v0',
+      predictionSchema: 'peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0',
+      backend: 'disabled',
+      status: 'standalone-mechanics-prediction-disabled',
+      reason: 'default demo hot loop uses the resident MLS-MPM chain instead',
+      defaultEnabled: STANDALONE_MECHANICS_PREDICTION_DEFAULT,
+      particleCount: sphGpuParticleState?.particleCount ?? mlsMpmGpuParticleState?.particleCount ?? 0,
+      stateStrideFloats: sphGpuParticleState?.stateStrideFloats ?? 8,
+      mechanicsStrideFloats: mlsMpmGpuParticleState?.mechanicsStrideFloats ?? 32,
+      normalHotLoopReadbackFree: true,
+      p2gValidation: false,
+      gridValidation: false,
+      g2pValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -712,12 +809,20 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmResidentRequestedReadbackMode = readbackMode;
     pendingMlsMpmResidentStepsSignature = signature;
     let scheduleContinuation = false;
+    const residentStartMs = performance.now();
     scene.refreshMlsMpmResidentSteps?.({
       preferWebGpu: true,
       stepCount: normalizedStepCount,
       readbackMode,
       continueFromResidentState
     }).then(async (execution) => {
+      const residentMs = performance.now() - residentStartMs;
+      updateResidentPerf({
+        residentSubmissions: residentPerf.residentSubmissions + 1,
+        lastResidentMs: residentMs,
+        lastResidentBackend: execution?.backend || 'missing',
+        lastResidentReadbackMode: execution?.readbackMode || 'missing'
+      });
       overlay.__mlsMpmResidentSteps = execution;
       overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
       overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.finalStep?.p2gGridProjection || null;
@@ -735,12 +840,45 @@ export function mountSphPhaseDemoOverlay() {
         && generation === particleSyncGeneration
       );
       if (execution?.backend === 'webgpu' && generation === particleSyncGeneration) {
+        const cadence = residentRenderReadbackDecision({ continueFromResidentState });
         try {
-          overlay.__sphResidentRenderState = await scene.refreshSphResidentRenderState?.({
-            preferWebGpu: true,
-            residentSteps: execution,
-            materialProperties: driver?.demo?.materialProperties || {}
-          });
+          if (cadence.due) {
+            const renderStartMs = performance.now();
+            overlay.__sphResidentRenderState = await scene.refreshSphResidentRenderState?.({
+              preferWebGpu: true,
+              residentSteps: execution,
+              materialProperties: driver?.demo?.materialProperties || {}
+            });
+            residentRenderReadbackCount += 1;
+            annotateResidentRenderStateCadence(overlay.__sphResidentRenderState, {
+              ...cadence,
+              skipped: false,
+              renderReadbackCount: residentRenderReadbackCount,
+              skippedCount: residentRenderReadbackSkippedCount
+            });
+            updateResidentPerf({
+              renderReadbacks: residentRenderReadbackCount,
+              skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+              lastRenderReadbackMs: performance.now() - renderStartMs,
+              lastRenderReadbackSkipped: false
+            });
+          } else {
+            residentRenderReadbackSkippedCount += 1;
+            overlay.__sphResidentRenderState = annotateResidentRenderStateCadence(
+              scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null,
+              {
+                ...cadence,
+                skipped: true,
+                renderReadbackCount: residentRenderReadbackCount,
+                skippedCount: residentRenderReadbackSkippedCount
+              }
+            );
+            updateResidentPerf({
+              renderReadbacks: residentRenderReadbackCount,
+              skippedRenderReadbacks: residentRenderReadbackSkippedCount,
+              lastRenderReadbackSkipped: true
+            });
+          }
         } catch (error) {
           overlay.__sphResidentRenderStateError = error instanceof Error ? error.message : String(error);
         }
@@ -804,6 +942,7 @@ export function mountSphPhaseDemoOverlay() {
     pendingMlsMpmGridUpdateSignature = null;
     pendingMlsMpmG2pReconstructionSignature = null;
     pendingMlsMpmResidentStepsSignature = null;
+    resetResidentPerf('demo-rebuild');
     syncParticles();
     renderStatus();
   }
@@ -888,7 +1027,14 @@ export function mountSphPhaseDemoOverlay() {
     scheduleOpticalGpuLookupRefresh();
     scheduleSphGpuParticleUpload();
     scheduleMlsMpmGpuParticleUpload();
-    scheduleMlsMpmMechanicsPrediction();
+    if (overlay.__sphStandaloneMechanicsPredictionEnabled) {
+      scheduleMlsMpmMechanicsPrediction();
+    } else {
+      overlay.__mlsMpmMechanicsPrediction = disabledStandaloneMechanicsPrediction(
+        sphGpuParticleState,
+        mlsMpmGpuParticleState
+      );
+    }
     scheduleMlsMpmResidentSteps();
   }
 
@@ -999,7 +1145,12 @@ export function mountSphPhaseDemoOverlay() {
     const renderRowsCount = residentRenderState?.particleCount ?? 0;
     const renderFieldCells = residentRenderState?.renderFieldTotalCells ?? 0;
     const renderFieldReadback = residentRenderState?.renderFieldReadback ?? false;
+    const renderCadence = residentRenderState?.renderReadbackCadence
+      || overlay.__sphResidentRenderReadbackCadence
+      || null;
     const renderAuthoritative = Boolean(residentRenderState?.gpuAuthoritativeState);
+    const residentPerfSummary = overlay.__sphResidentPerf || residentPerf;
+    const standaloneMechanics = overlay.__mlsMpmMechanicsPrediction || null;
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
@@ -1023,6 +1174,9 @@ export function mountSphPhaseDemoOverlay() {
       `resident reaction: status=${residentReactionStatus} backend=${residentReactionBackend} reactions=${reactionTable?.reactionCount ?? 0}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
       `render source    : ${renderSource} status=${renderRowsStatus} backend=${renderRowsBackend} rows=${renderRowsCount} field-cells=${renderFieldCells} field-readback=${Boolean(renderFieldReadback)}`,
+      `render cadence   : every=${renderCadence?.cadence ?? RESIDENT_RENDER_READBACK_CADENCE} sequence=${renderCadence?.sequence ?? 0} skipped=${renderCadence?.skippedCount ?? 0} last-skipped=${Boolean(renderCadence?.skipped)}`,
+      `resident profile : submissions=${residentPerfSummary?.residentSubmissions ?? 0} step-ms=${fmt(residentPerfSummary?.lastResidentMs, 1)} render-ms=${fmt(residentPerfSummary?.lastRenderReadbackMs, 1)}`,
+      `standalone mech  : ${standaloneMechanics?.status || 'pending'} backend=${standaloneMechanics?.backend || 'pending'}`,
       `render authoritative: ${renderAuthoritative}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,

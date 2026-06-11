@@ -1176,7 +1176,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getSphGpuParticleUpload?.()?.schema
       && scene?.getMlsMpmGpuParticleState?.()?.schema
       && scene?.getMlsMpmGpuParticleUpload?.()?.schema
-      && scene?.getMlsMpmMechanicsPrediction?.()?.schema
+      && (scene?.getMlsMpmMechanicsPrediction?.()?.schema
+        || overlay?.__mlsMpmMechanicsPrediction?.status === 'standalone-mechanics-prediction-disabled')
       && scene?.getMlsMpmP2gGridProjection?.()?.schema
       && scene?.getMlsMpmGridUpdate?.()?.schema
       && scene?.getMlsMpmG2pReconstruction?.()?.schema
@@ -1219,7 +1220,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const sphGpuParticleUpload = scene?.getSphGpuParticleUpload?.();
     const mlsMpmGpuParticleState = scene?.getMlsMpmGpuParticleState?.();
     const mlsMpmGpuParticleUpload = scene?.getMlsMpmGpuParticleUpload?.();
-    const mlsMpmMechanicsPrediction = scene?.getMlsMpmMechanicsPrediction?.();
+    const mlsMpmMechanicsPrediction = scene?.getMlsMpmMechanicsPrediction?.()
+      || overlay.__mlsMpmMechanicsPrediction
+      || null;
     const mlsMpmP2gGridProjection = scene?.getMlsMpmP2gGridProjection?.();
     const mlsMpmGridUpdate = scene?.getMlsMpmGridUpdate?.();
     const mlsMpmG2pReconstruction = scene?.getMlsMpmG2pReconstruction?.();
@@ -1334,6 +1337,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         schema: mlsMpmMechanicsPrediction?.schema,
         predictionSchema: mlsMpmMechanicsPrediction?.predictionSchema,
         backend: mlsMpmMechanicsPrediction?.backend,
+        status: mlsMpmMechanicsPrediction?.status,
+        reason: mlsMpmMechanicsPrediction?.reason,
+        defaultEnabled: mlsMpmMechanicsPrediction?.defaultEnabled,
+        normalHotLoopReadbackFree: mlsMpmMechanicsPrediction?.normalHotLoopReadbackFree,
         webgpuStatus: mlsMpmMechanicsPrediction?.webgpuStatus?.status,
         paritySchema: mlsMpmMechanicsPrediction?.webgpuParity?.schema,
         parityStatus: mlsMpmMechanicsPrediction?.webgpuParity?.status,
@@ -1525,6 +1532,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         renderFieldSurfaceCount: sphResidentRenderState?.renderFieldSurfaceCount,
         renderFieldTotalCells: sphResidentRenderState?.renderFieldTotalCells,
         compactRenderReadback: sphResidentRenderState?.compactRenderReadback,
+        renderReadbackCadence: sphResidentRenderState?.renderReadbackCadence,
         gpuAuthoritativeState: sphResidentRenderState?.gpuAuthoritativeState,
         materialKeys: sphResidentRenderState?.materialKeys,
         phaseKeys: sphResidentRenderState?.phaseKeys,
@@ -1533,6 +1541,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         phaseChangeValidation: sphResidentRenderState?.phaseChangeValidation,
         fullPhysicsValidation: sphResidentRenderState?.fullPhysicsValidation
       },
+      sphResidentPerf: overlay.__sphResidentPerf,
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
@@ -1545,6 +1554,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.statusText).toContain('compact summary  :');
   expect(derivedSummary.statusText).toContain('thermal graph gpu: status=');
   expect(derivedSummary.statusText).toContain('render source    :');
+  expect(derivedSummary.statusText).toContain('render cadence   :');
+  expect(derivedSummary.statusText).toContain('resident profile :');
+  expect(derivedSummary.statusText).toContain('standalone mech  : standalone-mechanics-prediction-disabled backend=disabled');
   expect(derivedSummary.statusText).toContain('render authoritative:');
   expect(derivedSummary.statusText).toContain('gpu authoritative: false');
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
@@ -1621,26 +1633,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmMechanicsPrediction.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
   expect(derivedSummary.mlsMpmMechanicsPrediction.stateStrideFloats).toBe(8);
   expect(derivedSummary.mlsMpmMechanicsPrediction.mechanicsStrideFloats).toBe(32);
-  expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.mlsMpmMechanicsPrediction.backend);
-  expect([
-    'blocked-webgpu-unavailable',
-    'not-requested',
-    'webgpu-device-lost-fallback',
-    'webgpu-error-fallback',
-    'webgpu-executed',
-    'webgpu-parity-failed'
-  ]).toContain(derivedSummary.mlsMpmMechanicsPrediction.webgpuStatus);
-  if (derivedSummary.mlsMpmMechanicsPrediction.backend === 'webgpu') {
-    expect(derivedSummary.mlsMpmMechanicsPrediction.webgpuStatus).toBe('webgpu-executed');
-    expect(derivedSummary.mlsMpmMechanicsPrediction.paritySchema).toBe('peercompute.ulg.mls-mpm-gpu-mechanics-parity.v0');
-    expect(derivedSummary.mlsMpmMechanicsPrediction.parityStatus).toBe('pass');
-    expect(derivedSummary.mlsMpmMechanicsPrediction.parityMaxStateAbs).toBeLessThanOrEqual(
-      derivedSummary.mlsMpmMechanicsPrediction.parityTolerance
-    );
-    expect(derivedSummary.mlsMpmMechanicsPrediction.parityMaxMechanicsAbs).toBeLessThanOrEqual(
-      derivedSummary.mlsMpmMechanicsPrediction.parityTolerance
-    );
-  }
+  expect(derivedSummary.mlsMpmMechanicsPrediction.backend).toBe('disabled');
+  expect(derivedSummary.mlsMpmMechanicsPrediction.status).toBe('standalone-mechanics-prediction-disabled');
+  expect(derivedSummary.mlsMpmMechanicsPrediction.defaultEnabled).toBe(false);
+  expect(derivedSummary.mlsMpmMechanicsPrediction.normalHotLoopReadbackFree).toBe(true);
   expect(derivedSummary.mlsMpmMechanicsPrediction.p2gValidation).toBe(false);
   expect(derivedSummary.mlsMpmMechanicsPrediction.gridValidation).toBe(false);
   expect(derivedSummary.mlsMpmMechanicsPrediction.g2pValidation).toBe(false);
@@ -1830,6 +1826,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
     expect(derivedSummary.statusText).toContain('render source    : resident-gpu-render-field');
+    expect(derivedSummary.statusText).toContain('render cadence   :');
+    expect(derivedSummary.statusText).toContain('resident profile :');
     expect(derivedSummary.statusText).toContain('render authoritative: true');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
     expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('previous-gpu-resident-output');
@@ -1914,6 +1912,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       derivedSummary.sphResidentRenderState.renderRowByteLength
     );
     expect(derivedSummary.sphResidentRenderState.compactRenderReadback).toBe(true);
+    expect(derivedSummary.sphResidentRenderState.renderReadbackCadence.schema).toBe(
+      'peercompute.ulg.sph-demo-render-readback-cadence.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.renderReadbackCadence.cadence).toBeGreaterThan(1);
+    expect(derivedSummary.sphResidentPerf.schema).toBe('peercompute.ulg.sph-demo-resident-perf.v0');
+    expect(derivedSummary.sphResidentPerf.residentSubmissions).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentPerf.renderReadbackCadence).toBeGreaterThan(1);
+    expect(Number.isFinite(derivedSummary.sphResidentPerf.lastResidentMs)).toBe(true);
     expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
     expect(derivedSummary.sphResidentRenderState.scientificValidation).toBe(false);
     expect(derivedSummary.sphResidentRenderState.sphValidation).toBe(false);

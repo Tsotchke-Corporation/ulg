@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 11:37 AKDT
+Updated: 2026-06-11 11:47 AKDT
 
 ## Done
 
@@ -110,6 +110,14 @@ Updated: 2026-06-11 11:37 AKDT
   particle/grid readback. The SPH overlay shows a `thermal summary` status row.
   This is resident diagnostic telemetry only; scientific/SPH/phase/full-physics
   validation remain false.
+- Reduced default SPH demo readbacks in the resident hot loop. The standalone
+  MLS-MPM mechanics prediction parity path is now disabled by default because
+  the resident P2G -> grid -> G2P chain is the active mechanics path, and the
+  resident render bridge now refreshes expensive render-field readbacks on a
+  cadence instead of every continuation frame. The overlay exposes
+  `render cadence`, `resident profile`, and `standalone mech` rows for timing
+  and skipped-readback evidence. The renderer still uses a Three.js/
+  MarchingCubes CPU bridge, so a fully GPU-resident renderer remains open.
 - Spawned sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - Used ICC repo registry/status and architecture summaries for MoonLab and peercompute.
 - Added a vanilla Vite/three.js ULG app.

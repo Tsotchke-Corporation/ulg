@@ -4,7 +4,15 @@
 
 Command: `npm test`
 
-Current result: pass, 327/327 tests on 2026-06-11 after extending the resident
+Current result: pass, 327/327 tests on 2026-06-11 after adding resident render
+readback cadence/profiling telemetry and disabling the standalone MLS-MPM
+mechanics prediction parity readback in the default SPH demo hot loop. Focused
+HTTPS Chromium e2e for the SPH phase demo passed 1/1 against
+`https://127.0.0.1:5173/`, `npm run build` passed with the existing Vite
+large-chunk warning, and `npm run build:pages` regenerated the GitHub Pages
+artifact in `docs/`.
+
+Prior milestone: pass, 327/327 tests on 2026-06-11 after extending the resident
 MLS-MPM compact GPU summary to include retained thermo-buffer phase masses and
 temperature diagnostics. Focused ABI/thermal/reaction/resident coverage passed
 40/40, focused HTTPS Chromium e2e for the SPH phase demo passed 1/1 against

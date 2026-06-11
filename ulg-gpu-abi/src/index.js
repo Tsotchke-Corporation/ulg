@@ -14,6 +14,8 @@ export const ULG_OPTICAL_GPU_LOOKUP_EXECUTION_SCHEMA = 'peercompute.ulg.optical-
 export const ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA = 'peercompute.ulg.optical-gpu-lookup-parity.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer.v0';
 export const ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.sph-gpu-particle-buffer-set.v0';
+export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0';
+export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0';
 export const CLOSURE_TABLE_WGSL_SAMPLE_ROW_LAYOUT = Object.freeze([
   'axis:f32',
   'value:f32',
@@ -99,6 +101,32 @@ export const SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT = Object.freeze([
   'representedEntityCount:f32',
   'status:f32',
   'pad0:f32'
+]);
+export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
+  'deformationF00:f32',
+  'deformationF01:f32',
+  'deformationF02:f32',
+  'deformationF10:f32',
+  'deformationF11:f32',
+  'deformationF12:f32',
+  'deformationF20:f32',
+  'deformationF21:f32',
+  'deformationF22:f32',
+  'affineC00:f32',
+  'affineC01:f32',
+  'affineC02:f32',
+  'affineC10:f32',
+  'affineC11:f32',
+  'affineC12:f32',
+  'affineC20:f32',
+  'affineC21:f32',
+  'affineC22:f32',
+  'volumeRatioJ:f32',
+  'restVolumeM3:f32',
+  'solidFlag:f32',
+  'status:f32',
+  'pad0:f32',
+  'pad1:f32'
 ]);
 
 export const D_TYPES = Object.freeze({

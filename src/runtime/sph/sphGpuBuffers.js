@@ -1,6 +1,9 @@
 import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
@@ -8,14 +11,18 @@ import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/
 import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 
 export {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 };
 
 export const SPH_GPU_PARTICLE_STATE_FLOATS = SPH_GPU_PARTICLE_STATE_ROW_LAYOUT.length;
 export const SPH_GPU_PARTICLE_THERMO_FLOATS = SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length;
+export const MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS = MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length;
 export const SPH_GPU_PARTICLE_STATUS = Object.freeze({
   ready: 1,
   energyClampedLow: 2,
@@ -58,6 +65,25 @@ function representedEntityCount(particle, properties) {
   return massKg > 0 && molarMassKgPerMol > 0
     ? (massKg / molarMassKgPerMol) * AVOGADRO
     : 0;
+}
+
+function identityF() {
+  return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+}
+
+function zeros9() {
+  return [0, 0, 0, 0, 0, 0, 0, 0, 0];
+}
+
+function finiteMatrix9(value, fallback) {
+  const source = value && value.length === 9 ? Array.from(value) : fallback;
+  return source.map((entry) => finiteNumber(entry, 0));
+}
+
+function solidFlagFor(particle, eq) {
+  if (particle.mpmSolid === true) return 1;
+  if (particle.mpmSolid === false) return 0;
+  return eq?.stablePhase === 'solid' ? 1 : 0;
 }
 
 function statusForEquilibrium(eq, properties) {
@@ -196,6 +222,84 @@ export function uploadSphGpuParticleBuffers(device, packed) {
   };
 }
 
+export function buildMlsMpmGpuParticleBuffers(state, { materialProperties = {} } = {}) {
+  if (!state?.particles || !Array.isArray(state.particles)) {
+    throw new TypeError('buildMlsMpmGpuParticleBuffers requires a SPH state with particles');
+  }
+  const particleCount = state.particles.length;
+  const mechanics = new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
+  const metadata = [];
+  for (let index = 0; index < particleCount; index += 1) {
+    const particle = state.particles[index];
+    const material = particle.material || 'unknown';
+    const properties = materialPropertiesFor(material, materialProperties);
+    const eq = equilibriumForParticle(particle, properties);
+    const F = finiteMatrix9(particle.mpmF, identityF());
+    const C = finiteMatrix9(particle.mpmC, zeros9());
+    const restDensity = restDensityFor(properties, eq.stablePhase, particle);
+    const volume0 = finiteNumber(particle.mpmVolume0, restDensity > 0 ? finiteNumber(particle.massKg) / restDensity : 0);
+    const J = finiteNumber(particle.mpmJ, 1);
+    const status = statusForEquilibrium(eq, properties);
+    const offset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    mechanics.set([
+      F[0], F[1], F[2], F[3],
+      F[4], F[5], F[6], F[7],
+      F[8], C[0], C[1], C[2],
+      C[3], C[4], C[5], C[6],
+      C[7], C[8], J, volume0,
+      solidFlagFor(particle, eq), status, 0, 0
+    ], offset);
+    metadata.push({
+      id: particle.id ?? `p${index}`,
+      material,
+      phase: eq.stablePhase,
+      solid: solidFlagFor(particle, eq) === 1,
+      status
+    });
+  }
+  return {
+    schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+    status: 'cpu-derived-gpu-buffer-ready',
+    particleCount,
+    step: state.step ?? 0,
+    time: state.time ?? 0,
+    mechanicsLayout: [...MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT],
+    mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+    mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    mechanics,
+    metadata,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function uploadMlsMpmGpuParticleBuffers(device, packed) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('uploadMlsMpmGpuParticleBuffers requires a WebGPU-like device with queue.writeBuffer');
+  }
+  if (packed?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError('uploadMlsMpmGpuParticleBuffers requires a packed MLS-MPM GPU particle buffer');
+  }
+  return {
+    schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    sourceSchema: packed.schema,
+    particleCount: packed.particleCount,
+    mechanicsStrideBytes: packed.mechanicsStrideBytes,
+    mechanicsBuffer: writeStorageBuffer(device, 'ulg-mls-mpm-particle-mechanics', packed.mechanics),
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function destroyMlsMpmGpuParticleBuffers(buffers) {
+  buffers?.mechanicsBuffer?.destroy?.();
+}
+
 export function destroySphGpuParticleBuffers(buffers) {
   buffers?.stateBuffer?.destroy?.();
   buffers?.thermoBuffer?.destroy?.();
@@ -237,6 +341,47 @@ export function decodeSphGpuParticleRows(packed) {
       smoothingLengthM: packed.thermo[thermoOffset + 8],
       representedEntityCount: packed.thermo[thermoOffset + 9],
       status: packed.thermo[thermoOffset + 10]
+    });
+  }
+  return rows;
+}
+
+export function decodeMlsMpmGpuParticleRows(packed) {
+  if (packed?.schema !== ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA) {
+    throw new TypeError('decodeMlsMpmGpuParticleRows requires a packed MLS-MPM GPU particle buffer');
+  }
+  const rows = [];
+  for (let index = 0; index < packed.particleCount; index += 1) {
+    const offset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    rows.push({
+      index,
+      metadata: packed.metadata[index],
+      deformationF: [
+        packed.mechanics[offset],
+        packed.mechanics[offset + 1],
+        packed.mechanics[offset + 2],
+        packed.mechanics[offset + 3],
+        packed.mechanics[offset + 4],
+        packed.mechanics[offset + 5],
+        packed.mechanics[offset + 6],
+        packed.mechanics[offset + 7],
+        packed.mechanics[offset + 8]
+      ],
+      affineC: [
+        packed.mechanics[offset + 9],
+        packed.mechanics[offset + 10],
+        packed.mechanics[offset + 11],
+        packed.mechanics[offset + 12],
+        packed.mechanics[offset + 13],
+        packed.mechanics[offset + 14],
+        packed.mechanics[offset + 15],
+        packed.mechanics[offset + 16],
+        packed.mechanics[offset + 17]
+      ],
+      volumeRatioJ: packed.mechanics[offset + 18],
+      restVolumeM3: packed.mechanics[offset + 19],
+      solidFlag: packed.mechanics[offset + 20],
+      status: packed.mechanics[offset + 21]
     });
   }
   return rows;

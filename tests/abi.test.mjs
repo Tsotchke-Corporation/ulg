@@ -9,6 +9,7 @@ import {
   OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT,
   OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT,
   OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT,
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   createClosureTableDescriptor,
@@ -26,6 +27,8 @@ import {
   ULG_OPTICAL_GPU_LOOKUP_PARITY_SCHEMA,
   ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
   ULG_OPTICAL_GPU_TABLE_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -155,6 +158,25 @@ test('SPH GPU particle buffer ABI exposes f32x4-aligned row layouts', () => {
     'phaseId:f32',
     'temperatureK:f32',
     'restDensityKgPerM3:f32'
+  ]);
+});
+
+test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {
+  assert.equal(ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0');
+  assert.equal(ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0');
+  assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length, 24);
+  assert.equal(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(0, 4), [
+    'deformationF00:f32',
+    'deformationF01:f32',
+    'deformationF02:f32',
+    'deformationF10:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(18, 22), [
+    'volumeRatioJ:f32',
+    'restVolumeM3:f32',
+    'solidFlag:f32',
+    'status:f32'
   ]);
 });
 

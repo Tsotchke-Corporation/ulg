@@ -8069,3 +8069,58 @@ Failures / open questions:
 - MLS-MPM deformation state is still not packed; this is the macro-particle
   thermodynamic/state snapshot only.
 - No push was attempted.
+
+## 2026-06-10 23:00:30 AKDT - MLS-MPM mechanics GPU buffer ABI
+
+Prompt:
+
+- Continue toward GPU-resident SPH/MLS-MPM mechanics after the live SPH particle
+  snapshot upload.
+
+Actions:
+
+- Added ABI constants and a f32x4-aligned row layout for
+  `peercompute.ulg.mls-mpm-gpu-particle-buffer.v0` and
+  `peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0`.
+- Extended `src/runtime/sph/sphGpuBuffers.js` with
+  `buildMlsMpmGpuParticleBuffers()`, `uploadMlsMpmGpuParticleBuffers()`,
+  `destroyMlsMpmGpuParticleBuffers()`, and `decodeMlsMpmGpuParticleRows()`.
+- The mechanics row packs deformation gradient `F`, affine velocity field `C`,
+  volume ratio `J`, rest particle volume, solid flag, and status. If the carrier
+  has not stepped yet, the packer emits the identity/zero initialized MLS-MPM
+  state derived from current material phase and rest density.
+- Added ABI and focused tests covering row alignment, initial identity mechanics,
+  carrier-updated `F/C/J/V0`, upload byte lengths, and destruction.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphGpuBuffers.js`
+- `tests/abi.test.mjs`
+- `tests/sphGpuBuffers.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `node --check ulg-gpu-abi/src/index.js src/runtime/sph/sphGpuBuffers.js tests/abi.test.mjs tests/sphGpuBuffers.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphGpuBuffers.test.mjs`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/SPH-GPU-buffer tests passed `14/14`.
+- PASS: `npm test` passed `240/240`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The MLS-MPM mechanics buffers are not yet bound to the live scene or uploaded
+  by the overlay.
+- P2G, grid update, and G2P are still CPU-executed.
+- No push was attempted.

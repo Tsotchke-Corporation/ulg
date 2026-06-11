@@ -2,17 +2,24 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
 import { equilibriumFromSpecificEnergy } from '../src/runtime/material/phaseEquilibrium.js';
-import { buildSphPhaseDemoState } from '../src/runtime/sphPhaseDemo.js';
+import { buildSphPhaseDemoState, createSphPhaseDemo } from '../src/runtime/sphPhaseDemo.js';
 import { createSphState } from '../src/runtime/sph/sphState.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_STATUS,
   SPH_GPU_PARTICLE_THERMO_FLOATS,
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  buildMlsMpmGpuParticleBuffers,
   buildSphGpuParticleBuffers,
+  decodeMlsMpmGpuParticleRows,
   decodeSphGpuParticleRows,
+  destroyMlsMpmGpuParticleBuffers,
   destroySphGpuParticleBuffers,
+  uploadMlsMpmGpuParticleBuffers,
   uploadSphGpuParticleBuffers
 } from '../src/runtime/sph/sphGpuBuffers.js';
 
@@ -139,4 +146,78 @@ test('SPH GPU particle buffer upload writes state and thermo storage buffers', (
 
   destroySphGpuParticleBuffers(buffers);
   assert.deepEqual(destroyed, ['ulg-sph-particle-state', 'ulg-sph-particle-thermo']);
+});
+
+test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first step', () => {
+  const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
+  const packed = buildMlsMpmGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  });
+  const rows = decodeMlsMpmGpuParticleRows(packed);
+  const h2o = rows.find((row) => row.metadata.material === 'h2o');
+  const fe = rows.find((row) => row.metadata.material === 'fe');
+
+  assert.equal(packed.schema, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA);
+  assert.equal(packed.particleCount, demo.state.particles.length);
+  assert.equal(packed.mechanics.length, packed.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
+  assert.deepEqual(h2o.deformationF, [1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  assert.deepEqual(h2o.affineC, [0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  assert.equal(h2o.volumeRatioJ, 1);
+  assert.ok(h2o.restVolumeM3 > 0);
+  assert.equal(h2o.solidFlag, 1);
+  assert.equal(fe.solidFlag, 0);
+});
+
+test('MLS-MPM GPU mechanics buffer preserves carrier-updated F, C, J, and V0', () => {
+  // Use the public demo driver for one real MLS-MPM mechanics step so the fields come from the
+  // carrier, not a hand-written fixture.
+  const demoDriver = createSphPhaseDemo({ dropParticleEdge: 1, baseParticleEdge: 1 });
+  demoDriver.step();
+  const particle = demoDriver.demo.state.particles.find((candidate) => candidate.mpmF !== undefined);
+  const packed = buildMlsMpmGpuParticleBuffers(demoDriver.demo.state, {
+    materialProperties: demoDriver.demo.materialProperties
+  });
+  const row = decodeMlsMpmGpuParticleRows(packed).find((candidate) => candidate.metadata.id === particle.id);
+
+  assert.ok(demoDriver.demo.state.particles.length > 0);
+  assert.deepEqual(row.deformationF.map((value) => Number.isFinite(value)), new Array(9).fill(true));
+  assert.deepEqual(row.affineC.map((value) => Number.isFinite(value)), new Array(9).fill(true));
+  nearlyEqual(row.volumeRatioJ, particle.mpmJ, 1e-5);
+  nearlyEqual(row.restVolumeM3, particle.mpmVolume0, 1e-7);
+  assert.equal(row.status, SPH_GPU_PARTICLE_STATUS.ready);
+});
+
+test('MLS-MPM GPU mechanics buffer upload writes and destroys storage buffers', () => {
+  const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
+  const packed = buildMlsMpmGpuParticleBuffers(demo.state, {
+    materialProperties: demo.materialProperties
+  });
+  const writes = [];
+  const destroyed = [];
+  const device = {
+    createBuffer(descriptor) {
+      return {
+        ...descriptor,
+        destroy() {
+          destroyed.push(descriptor.label);
+        }
+      };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength, usage: buffer.usage });
+      }
+    }
+  };
+
+  const buffers = uploadMlsMpmGpuParticleBuffers(device, packed);
+  assert.equal(buffers.schema, ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA);
+  assert.equal(buffers.status, 'webgpu-uploaded');
+  assert.deepEqual(writes.map((write) => write.label), ['ulg-mls-mpm-particle-mechanics']);
+  assert.equal(writes[0].byteLength, packed.mechanics.byteLength);
+  assert.equal((writes[0].usage & 128) !== 0, true);
+  assert.equal((writes[0].usage & 8) !== 0, true);
+
+  destroyMlsMpmGpuParticleBuffers(buffers);
+  assert.deepEqual(destroyed, ['ulg-mls-mpm-particle-mechanics']);
 });

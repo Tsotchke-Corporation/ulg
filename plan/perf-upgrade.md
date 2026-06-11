@@ -132,6 +132,12 @@ material/phase ids and closure-derived temperature/phase fractions. The live
 SPH overlay now builds and optionally uploads this packed particle snapshot to a
 cached browser WebGPU device. It is not yet consumed by a GPU mechanics kernel.
 
+The MLS-MPM mechanics-state buffer ABI/runtime slice also exists as
+`peercompute.ulg.mls-mpm-gpu-particle-buffer.v0`. It packs deformation gradient,
+affine APIC velocity field, volume ratio, rest volume, and solid flag into
+f32x4-aligned WebGPU rows. This prepares P2G/G2P mechanics residency without
+claiming a GPU mechanics solver.
+
 ## Hot-Loop Kernel Chain
 
 A first GPU-resident SPH phase demo should target this dispatch chain:

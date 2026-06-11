@@ -300,6 +300,10 @@ Current implementation checkpoint (2026-06-10):
 - The live SPH overlay now builds that particle snapshot during particle sync,
   exposes it through `getSphGpuParticleState()`, and optionally uploads it to
   WebGPU storage buffers through `getSphGpuParticleUpload()`.
+- The first MLS-MPM mechanics-state GPU buffer ABI/runtime packer is implemented
+  for deformation gradient, affine velocity field, volume ratio, rest volume,
+  solid flag, and status:
+  `peercompute.ulg.mls-mpm-gpu-particle-buffer.v0`.
 - Each packed table contains closure-derived PBR material records plus spectral
   sample rows suitable for WebGPU storage-buffer upload.
 - The runtime can sample packed records by material/phase id through a CPU
@@ -309,7 +313,8 @@ Current implementation checkpoint (2026-06-10):
 - The demo still renders through Three.js `MeshPhysicalMaterial`; the draw state
   can now come from accepted lookup output, but a WebGPU renderer does not yet
   consume those buffers directly. The particle GPU buffers are uploaded as a
-  scene snapshot but not yet consumed by a GPU mechanics loop.
+  scene snapshot but not yet consumed by a GPU mechanics loop. MLS-MPM mechanics
+  state is pack/upload ready but not yet wired into the live scene.
 
 Validation remains false until quantitative optical-response evidence exists.
 The current scalar-relativistic atomic Drude-Lorentz path is useful reference

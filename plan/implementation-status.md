@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-10 22:55 AKDT
+Updated: 2026-06-10 23:00 AKDT
 
 ## Done
 
@@ -55,6 +55,12 @@ Updated: 2026-06-10 22:55 AKDT
   the packed snapshot after every particle sync, exposes it through the scene,
   and optionally uploads it to a cached browser WebGPU device. This is residency
   plumbing, not a GPU SPH mechanics solver.
+- Added the first MLS-MPM mechanics-state GPU buffer ABI/runtime packer:
+  `peercompute.ulg.mls-mpm-gpu-particle-buffer.v0` and buffer-set schema. It
+  packs deformation gradient `F`, affine velocity field `C`, volume ratio `J`,
+  rest particle volume, solid flag, and status into f32x4-aligned rows, with
+  upload/destroy helpers. This makes the current CPU mechanics state
+  resident-ready but does not execute P2G/grid/G2P on WebGPU yet.
 - Restored the SPH phase demo to running by default under strict provenance:
   the ice block starts solid at -40 F, the drop block starts molten from its
   own derived liquidus plus superheat, the preflight uses attached closures

@@ -657,6 +657,7 @@ export function createSphPhaseScene(container, {
   function mlsMpmResidentStepsSignatureFor({
     stepCount = 1,
     retainIntermediateSteps = false,
+    residentSourceMode = 'cpu-packed-state',
     ...args
   } = {}) {
     const stepSignature = mlsMpmResidentStepSignatureFor(args);
@@ -664,7 +665,8 @@ export function createSphPhaseScene(container, {
     return [
       stepSignature,
       normalizeResidentStepCount(stepCount),
-      Boolean(retainIntermediateSteps)
+      Boolean(retainIntermediateSteps),
+      residentSourceMode
     ].join('|');
   }
 
@@ -1331,7 +1333,8 @@ export function createSphPhaseScene(container, {
     gridUpdateRunner = undefined,
     g2pRunner = undefined,
     stepCount = 1,
-    retainIntermediateSteps = false
+    retainIntermediateSteps = false,
+    continueFromResidentState = false
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -1340,14 +1343,35 @@ export function createSphPhaseScene(container, {
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
     const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
+    const continuationUploads = mlsMpmResidentSteps?.nextParticleUploads ?? null;
+    const continuationAvailable = Boolean(
+      continueFromResidentState
+      && requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+      && mlsMpmResidentSteps?.nextSphParticleState
+      && mlsMpmResidentSteps?.nextMlsMpmParticleState
+      && continuationUploads?.sphParticleUpload?.status === 'webgpu-uploaded'
+      && continuationUploads?.mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+    );
+    const sourceSphParticleState = continuationAvailable
+      ? mlsMpmResidentSteps.nextSphParticleState
+      : sphGpuParticleState;
+    const sourceMlsMpmParticleState = continuationAvailable
+      ? mlsMpmResidentSteps.nextMlsMpmParticleState
+      : mlsMpmGpuParticleState;
+    const residentSourceMode = continuationAvailable
+      ? 'previous-gpu-resident-output'
+      : 'cpu-packed-state';
     const signature = mlsMpmResidentStepsSignatureFor({
+      sphParticleState: sourceSphParticleState,
+      mlsMpmParticleState: sourceMlsMpmParticleState,
       gridSpacingM,
       dt,
       gravityMPerS2,
       cflFactor,
       readbackMode: requestedReadbackMode,
       stepCount: normalizedStepCount,
-      retainIntermediateSteps
+      retainIntermediateSteps,
+      residentSourceMode
     });
     if (!force && mlsMpmResidentStepsSignature === signature && mlsMpmResidentSteps) {
       return mlsMpmResidentSteps;
@@ -1359,7 +1383,9 @@ export function createSphPhaseScene(container, {
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
         : deviceResult;
-      const resolvedSphUpload = preferWebGpu
+      const resolvedSphUpload = continuationAvailable
+        ? continuationUploads.sphParticleUpload
+        : preferWebGpu
         ? await refreshSphGpuParticleBuffers({
           preferWebGpu,
           navigatorRef: overrideNavigatorRef,
@@ -1367,7 +1393,9 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : sphGpuParticleUpload;
-      const resolvedMlsUpload = preferWebGpu
+      const resolvedMlsUpload = continuationAvailable
+        ? continuationUploads.mlsMpmParticleUpload
+        : preferWebGpu
         ? await refreshMlsMpmGpuParticleBuffers({
           preferWebGpu,
           navigatorRef: overrideNavigatorRef,
@@ -1376,8 +1404,8 @@ export function createSphPhaseScene(container, {
         })
         : mlsMpmGpuParticleUpload;
       const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
-        sphParticleState: sphGpuParticleState,
-        mlsMpmParticleState: mlsMpmGpuParticleState,
+        sphParticleState: sourceSphParticleState,
+        mlsMpmParticleState: sourceMlsMpmParticleState,
         sphParticleUpload: resolvedSphUpload,
         mlsMpmParticleUpload: resolvedMlsUpload,
         gridSpacingM,
@@ -1401,6 +1429,9 @@ export function createSphPhaseScene(container, {
         }
       });
       execution.requestedReadbackMode = requestedReadbackMode;
+      execution.residentSourceMode = residentSourceMode;
+      execution.continuedFromResidentState = continuationAvailable;
+      execution.continuationAvailable = Boolean(execution.nextParticleUploads);
       if (execution.finalStep) execution.finalStep.requestedReadbackMode = requestedReadbackMode;
       for (const summary of execution.stepSummaries ?? []) {
         summary.requestedReadbackMode = requestedReadbackMode;
@@ -1409,13 +1440,16 @@ export function createSphPhaseScene(container, {
       if (
         !running
         || mlsMpmResidentStepsSignatureFor({
+          sphParticleState: sourceSphParticleState,
+          mlsMpmParticleState: sourceMlsMpmParticleState,
           gridSpacingM,
           dt,
           gravityMPerS2,
           cflFactor,
           readbackMode: requestedReadbackMode,
           stepCount: normalizedStepCount,
-          retainIntermediateSteps
+          retainIntermediateSteps,
+          residentSourceMode
         }) !== signature
       ) {
         return {

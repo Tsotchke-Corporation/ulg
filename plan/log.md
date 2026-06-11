@@ -9052,3 +9052,68 @@ Failures / open questions:
   partial reductions are still needed for extreme particle counts.
 - `gpuAuthoritativeState` remains false.
 - No push was attempted.
+
+## 2026-06-11 02:27 AKDT - Resident MLS-MPM continuation from retained GPU output
+
+Prompt:
+
+- Continue the GPU-first refactor, accepting that the demo can break during
+  larger refactors if that speeds up the core architecture.
+
+Actions:
+
+- Extended the resident multi-step runtime to return the next packed SPH state,
+  next packed MLS-MPM mechanics state, retained next particle uploads, and the
+  next particle buffer mode.
+- Taught `sphPhaseScene.refreshMlsMpmResidentSteps()` to optionally continue
+  from the previous resident execution's retained G2P output buffers in
+  no-full-readback mode, with cache signatures that include the resident source
+  mode.
+- Updated the SPH demo scheduler to run a bounded continuation chain after the
+  first CPU-packed upload, guarded by particle-sync generation so old GPU work
+  cannot attach to a newer visual state.
+- Added overlay status rows for resident source/continuation and compact
+  summary status/mode/reduction strategy.
+- Strengthened the focused browser e2e so real WebGPU no-full-readback runs
+  must reach `previous-gpu-resident-output` continuation, while fallback runs
+  continue to report CPU-packed/full-readback status honestly.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check
+  src/visualization/sphPhaseScene.js && node --check tests/demo.e2e.mjs`
+- `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173
+  npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs
+  -g "SPH phase demo runs derived material properties by default"`
+- `npm test`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: focused ABI/resident-step tests passed `20/20`.
+- PASS: focused HTTPS Chromium/WebGPU e2e passed (`1/1`, about 1.0 minutes)
+  and observed continued resident source mode.
+- PASS: full Node test suite passed `289/289`.
+- PASS: production build passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This only keeps the resident MLS-MPM state/mechanics chain moving on GPU.
+  Thermal state, phase changes, reactions, wall heat, gas pressure, material
+  closure updates, and render-authoritative positions still need GPU-resident
+  paths.
+- `gpuAuthoritativeState` remains false.
+- No push was attempted.

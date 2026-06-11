@@ -36,6 +36,7 @@ const BLOB_SCALE_DEFAULT = 1;
 const DROP_TEMP_DEFAULT_K = 1850;
 const BASE_TEMP_DEFAULT_K = 233.15;
 const RESIDENT_STEPS_PER_SCHEDULE = 2;
+const RESIDENT_CONTINUATION_CHAIN_BUDGET = 2;
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -511,6 +512,7 @@ export function mountSphPhaseDemoOverlay() {
   let pendingMlsMpmGridUpdateSignature = null;
   let pendingMlsMpmG2pReconstructionSignature = null;
   let pendingMlsMpmResidentStepsSignature = null;
+  let particleSyncGeneration = 0;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -690,20 +692,28 @@ export function mountSphPhaseDemoOverlay() {
 
   function scheduleMlsMpmResidentSteps({
     stepCount = RESIDENT_STEPS_PER_SCHEDULE,
-    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+    continueFromResidentState = false,
+    continuationBudget = RESIDENT_CONTINUATION_CHAIN_BUDGET,
+    generation = particleSyncGeneration
   } = {}) {
     const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
-    const signature = mlsMpmResidentStepsSignature({
+    const baseSignature = mlsMpmResidentStepsSignature({
       stepCount: normalizedStepCount,
       readbackMode
     });
+    const signature = baseSignature
+      ? `${baseSignature}|sync=${generation}|continue=${Boolean(continueFromResidentState)}`
+      : null;
     if (!signature || pendingMlsMpmResidentStepsSignature === signature) return;
     overlay.__mlsMpmResidentRequestedReadbackMode = readbackMode;
     pendingMlsMpmResidentStepsSignature = signature;
+    let scheduleContinuation = false;
     scene.refreshMlsMpmResidentSteps?.({
       preferWebGpu: true,
       stepCount: normalizedStepCount,
-      readbackMode
+      readbackMode,
+      continueFromResidentState
     }).then((execution) => {
       overlay.__mlsMpmResidentSteps = execution;
       overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
@@ -711,12 +721,34 @@ export function mountSphPhaseDemoOverlay() {
       overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || execution?.finalStep?.gridUpdate || null;
       overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || execution?.finalStep?.g2pReconstruction || null;
       overlay.__mlsMpmResidentRequestedReadbackMode = execution?.requestedReadbackMode || readbackMode;
+      overlay.__mlsMpmResidentSourceMode = execution?.residentSourceMode || 'cpu-packed-state';
+      overlay.__mlsMpmResidentContinuedFromResidentState = Boolean(execution?.continuedFromResidentState);
+      overlay.__mlsMpmResidentContinuationAvailable = Boolean(execution?.continuationAvailable);
+      scheduleContinuation = Boolean(
+        execution?.continuationAvailable
+        && execution?.readbackMode === 'no-full-readback'
+        && execution?.backend === 'webgpu'
+        && continuationBudget > 0
+        && generation === particleSyncGeneration
+      );
       renderStatus();
     }).catch((error) => {
       overlay.__mlsMpmResidentStepsError = error instanceof Error ? error.message : String(error);
       renderStatus();
     }).finally(() => {
       if (pendingMlsMpmResidentStepsSignature === signature) pendingMlsMpmResidentStepsSignature = null;
+      if (scheduleContinuation && overlay.isConnected && generation === particleSyncGeneration) {
+        window.requestAnimationFrame(() => {
+          if (!overlay.isConnected || generation !== particleSyncGeneration) return;
+          scheduleMlsMpmResidentSteps({
+            stepCount: normalizedStepCount,
+            readbackMode,
+            continueFromResidentState: true,
+            continuationBudget: continuationBudget - 1,
+            generation
+          });
+        });
+      }
     });
   }
 
@@ -778,6 +810,7 @@ export function mountSphPhaseDemoOverlay() {
   }
 
   function syncParticles() {
+    particleSyncGeneration += 1;
     if (!driver) {
       scene.setParticles({
         positionsM: new Float32Array(0),
@@ -823,6 +856,9 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
     overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
     overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
+    overlay.__mlsMpmResidentSourceMode = 'cpu-packed-state';
+    overlay.__mlsMpmResidentContinuedFromResidentState = false;
+    overlay.__mlsMpmResidentContinuationAvailable = false;
     scheduleOpticalGpuLookupRefresh();
     scheduleSphGpuParticleUpload();
     scheduleMlsMpmGpuParticleUpload();
@@ -889,6 +925,21 @@ export function mountSphPhaseDemoOverlay() {
     const gpuAuthoritativeState = residentSteps?.gpuAuthoritativeState
       ?? residentStep?.gpuAuthoritativeState
       ?? false;
+    const residentSourceMode = residentSteps?.residentSourceMode
+      || overlay.__mlsMpmResidentSourceMode
+      || 'cpu-packed-state';
+    const residentContinued = residentSteps?.continuedFromResidentState
+      ?? overlay.__mlsMpmResidentContinuedFromResidentState
+      ?? false;
+    const residentContinuationAvailable = residentSteps?.continuationAvailable
+      ?? overlay.__mlsMpmResidentContinuationAvailable
+      ?? false;
+    const compactDiagnostics = residentStep?.diagnostics || null;
+    const compactStatus = compactDiagnostics?.compactGpuSummaryStatus || 'pending';
+    const compactMode = compactDiagnostics?.compactGpuSummaryReadbackMode
+      || compactDiagnostics?.readbackMode
+      || 'pending';
+    const compactReduction = compactDiagnostics?.compactSummaryReductionStrategy || 'pending';
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
       `final phase      : H2O ${pre.feasibility.finalH2oPhase} / Fe ${pre.feasibility.finalFePhase}`,
@@ -904,6 +955,8 @@ export function mountSphPhaseDemoOverlay() {
       `momentum |p|     : ${fmt(totals.momentumMagnitudeKgMPerS)} kg·m/s`,
       `resident backend : ${residentBackend}`,
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
+      `resident source  : ${residentSourceMode} continued=${Boolean(residentContinued)} next=${Boolean(residentContinuationAvailable)}`,
+      `compact summary  : status=${compactStatus} mode=${compactMode} reduction=${compactReduction}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,

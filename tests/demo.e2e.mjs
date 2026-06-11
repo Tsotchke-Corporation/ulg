@@ -1189,6 +1189,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     return text.includes('resident readback: requested=no-full-readback actual=')
       && !text.includes('actual=pending');
   });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const steps = overlay?.__sphScene?.getMlsMpmResidentSteps?.();
+    if (!steps?.schema) return false;
+    if (steps.backend !== 'webgpu' || steps.readbackMode !== 'no-full-readback') return true;
+    return steps.continuedFromResidentState === true
+      && steps.residentSourceMode === 'previous-gpu-resident-output';
+  });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
@@ -1428,6 +1436,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         stepSummaries: mlsMpmResidentSteps?.stepSummaries,
         requestedReadbackMode: mlsMpmResidentSteps?.requestedReadbackMode,
         readbackMode: mlsMpmResidentSteps?.readbackMode,
+        residentSourceMode: mlsMpmResidentSteps?.residentSourceMode,
+        continuedFromResidentState: mlsMpmResidentSteps?.continuedFromResidentState,
+        continuationAvailable: mlsMpmResidentSteps?.continuationAvailable,
+        nextParticleBufferMode: mlsMpmResidentSteps?.nextParticleBufferMode,
         normalHotLoopReadbackFree: mlsMpmResidentSteps?.normalHotLoopReadbackFree,
         renderStateReadbackAvailable: mlsMpmResidentSteps?.renderStateReadbackAvailable,
         gpuAuthoritativeState: mlsMpmResidentSteps?.gpuAuthoritativeState,
@@ -1444,6 +1456,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.driverReady).toBe(true);
   expect(derivedSummary.overlayResidentRequestedReadbackMode).toBe('no-full-readback');
   expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback');
+  expect(derivedSummary.statusText).toContain('resident source  :');
+  expect(derivedSummary.statusText).toContain('compact summary  :');
   expect(derivedSummary.statusText).toContain('gpu authoritative: false');
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');
   expect(derivedSummary.opticalGpuTable.recordCount).toBeGreaterThan(0);
@@ -1700,8 +1714,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmResidentStep.gpuAuthoritativeState).toBe(false);
   if (derivedSummary.mlsMpmResidentStep.backend === 'webgpu') {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=no-full-readback');
+    expect(derivedSummary.statusText).toContain('resident source  : previous-gpu-resident-output continued=true next=true');
+    expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
     expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
+    expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('previous-gpu-resident-output');
+    expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(true);
+    expect(derivedSummary.mlsMpmResidentSteps.continuationAvailable).toBe(true);
+    expect(derivedSummary.mlsMpmResidentSteps.nextParticleBufferMode).toBe('retained-g2p-output-buffers');
     expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(true);
     expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.stepSummaries.every((summary) => (
@@ -1744,8 +1764,11 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     );
   } else {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=full-parity-readback');
+    expect(derivedSummary.statusText).toContain('resident source  : cpu-packed-state continued=false');
     expect(derivedSummary.statusText).toContain('render readback  : available=true hot-loop-no-full=false');
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('full-parity-readback');
+    expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('cpu-packed-state');
+    expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.readbackMode).toBe('full-parity-readback');

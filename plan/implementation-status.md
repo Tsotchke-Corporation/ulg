@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 02:13 AKDT
+Updated: 2026-06-11 02:27 AKDT
 
 ## Done
 
@@ -1395,3 +1395,46 @@ Not claimed:
   much smaller than scanning every particle/grid node, but future very large
   runs should replace it with recursive partial reductions.
 - Full particle/grid arrays are still not read back in normal no-full mode.
+
+## 2026-06-11 Update - Resident MLS-MPM Continuation
+
+Completed:
+
+- Extended repeated resident-step executions to return the next packed SPH
+  state, next packed MLS-MPM mechanics state, retained next particle uploads,
+  and next particle buffer mode.
+- `sphPhaseScene.refreshMlsMpmResidentSteps()` can now continue from the
+  previous resident execution's retained G2P output buffers when the requested
+  mode is `no-full-readback`.
+- The SPH phase demo scheduler now starts from the CPU-packed upload, then
+  schedules bounded follow-up resident chains from
+  `previous-gpu-resident-output` while the same particle-sync generation is
+  current.
+- Overlay status reports resident source mode, whether the execution continued
+  from resident GPU state, whether a next continuation is available, and compact
+  summary status/mode/reduction strategy.
+- Browser e2e now waits for and asserts a real WebGPU continuation path when
+  the browser supports no-full-readback resident execution; CPU/mixed fallback
+  still reports `cpu-packed-state` and full-readback honestly.
+
+Latest validation:
+
+- PASS: syntax checks for scene, mount, and browser e2e files.
+- PASS: `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  passed `20/20`.
+- PASS: `npm test` passed `289/289`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: focused HTTPS Chromium/WebGPU e2e passed against the live server:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1
+  npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs
+  -g "SPH phase demo runs derived material properties by default"` (`1/1`,
+  about 1.0 minutes).
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- This only chains resident MLS-MPM state/mechanics buffers. Thermal state,
+  phase changes, reactions, wall heat, gas pressure, and material closure
+  updates remain CPU-side.
+- `gpuAuthoritativeState` remains false, and Three.js rendering is still fed
+  from CPU-side visual particles rather than a WebGPU render buffer.

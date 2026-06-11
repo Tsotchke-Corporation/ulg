@@ -9360,3 +9360,75 @@ Failures / open questions:
   ionizing-radiation handling remain planned closure families, not implemented
   solvers.
 - No push was attempted.
+
+## 2026-06-11 08:45 AKDT - H2O transmissive surface visibility fix
+
+Prompt:
+
+- "hmm h2o still isnt rendering in the demo."
+
+What happened:
+
+- Reproduced the live HTTPS demo on the existing Vite server bound to
+  `0.0.0.0:5173`.
+- Browser probes showed H2O was present in the resident render rows and
+  MarchingCubes geometry, but the Three.js material was nearly invisible
+  because Beer-Lambert optical absorption opacity was being reused as mesh
+  alpha coverage.
+- Fixed the renderer so condensed transmissive H2O/ice keeps geometric alpha
+  at `1` while the derived closure still supplies transmission, IOR,
+  attenuation, metalness, roughness, and spectral color. Vapor/gas rows keep
+  the closure opacity rather than forcing a solid alpha surface.
+- Added focused unit coverage for condensed water alpha/depth behavior and
+  extended the SPH demo e2e telemetry assertion so H2O must render with
+  `renderAlpha = 1`, `material.opacity = 1`, and high transmission.
+- Confirmed with screenshots that default Fe-over-H2O and Na-over-H2O demos now
+  show continuous blue transmissive H2O volumes.
+- Answered the access question: `https://0.0.0.0:5173` is the listen address;
+  use `https://127.0.0.1:5173/` locally or `https://100.86.83.35:5173/` over
+  the VPN.
+
+Files touched:
+
+- `plan/log.md`
+- `plan/tests.md`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check tests/sphPhaseRenderer.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/sphPhaseRenderer.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs --project=chromium -g "SPH phase demo runs derived material properties by default"`
+- Manual Playwright probes for default Fe/H2O and Na/H2O URLs; screenshots:
+  `/tmp/ulg-default-sph-h2o-alpha-fixed.png` and
+  `/tmp/ulg-na-h2o-alpha-fixed.png`
+- `git diff --check`
+- `npm run build`
+- `npm test`
+
+Validation:
+
+- PASS: syntax checks for the touched renderer and tests.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` passed `6/6`.
+- PASS: focused HTTPS Chromium e2e passed `1/1`.
+- PASS: manual Playwright probe showed H2O visible surfaces with nonzero draw
+  counts, `renderAlpha = 1`, `materialOpacity = 1`, and
+  `materialTransmission > 0.9`.
+- PASS: screenshot review showed continuous H2O volume in both default and
+  Na/H2O demos.
+- PASS: `git diff --check`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: full `npm test` passed `309/309`.
+
+Failures / open questions:
+
+- Gas/vapor optical density is still only as good as the current optical
+  closure; a visible steam plume needs the planned condensation/scattering
+  closure rather than a renderer alpha patch.
+- Direct GPU-driven rendering is still pending; compact resident render rows are
+  still read back for Three.js surface reconstruction.
+- No push was attempted.

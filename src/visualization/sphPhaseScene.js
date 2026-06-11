@@ -138,6 +138,33 @@ function opticalQueryForDescriptor(descriptor, properties = null) {
   };
 }
 
+function opticalPhaseOf(optics = {}, descriptorOrRow = {}) {
+  return descriptorOrRow.phase
+    ?? optics.phase
+    ?? (descriptorOrRow.renderKey === 'steam' ? 'gas' : null);
+}
+
+export function renderAlphaFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
+  const opacity = clamp(Number.isFinite(optics.opacity) ? optics.opacity : 1, 0, 1);
+  const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
+  const metalness = clamp(Number.isFinite(optics.metalness) ? optics.metalness : 0, 0, 1);
+  const phase = opticalPhaseOf(optics, descriptorOrRow);
+  const material = descriptorOrRow.material ?? optics.material ?? null;
+  const renderKey = descriptorOrRow.renderKey ?? descriptorOrRow.renderMaterialKey ?? null;
+  const isVapor = phase === 'gas' || material === 'steam' || renderKey === 'steam';
+  if (transmission > 0.01 && metalness < 0.1 && !isVapor) {
+    return 1;
+  }
+  return opacity;
+}
+
+export function renderDepthWriteFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
+  const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
+  const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
+  const transparent = transmission > 0.01 || alpha < 0.999;
+  return !transparent || (alpha > 0.5 && transmission <= 0.01);
+}
+
 function makeSurfaceMaterial(descriptorOrKey, properties = null) {
   const descriptor = renderDescriptorOf(descriptorOrKey);
   // Transmission / IOR / attenuation come from the optical closure (refractive index + Beer–Lambert
@@ -145,7 +172,8 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null) {
   // Drude skin depth; missing optical closures block rather than falling back to fake opacity.
   const optics = opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
   const usesTransmission = optics.transmission > 0.01;
-  const transparent = usesTransmission || optics.opacity < 0.999;
+  const renderAlpha = renderAlphaFromOpticalResponse(optics, descriptor);
+  const transparent = usesTransmission || renderAlpha < 0.999;
   const baseColor = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
   const material = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color().setRGB(baseColor[0], baseColor[1], baseColor[2], THREE.SRGBColorSpace),
@@ -159,8 +187,8 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null) {
     thickness: usesTransmission ? 0.6 : 0,
     envMapIntensity: optics.metalness > 0.5 ? 1.3 : 0.85,
     transparent,
-    depthWrite: !transparent || optics.opacity > 0.5,
-    opacity: clamp(optics.opacity, 0, 1)
+    depthWrite: renderDepthWriteFromOpticalResponse(optics, descriptor),
+    opacity: renderAlpha
   });
   if (optics.attenuationColor) {
     material.attenuationColor = new THREE.Color().setRGB(
@@ -172,6 +200,7 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null) {
     material.attenuationDistance = Math.max(0.05, optics.attenuationDistanceM);
   }
   material.userData.optical = optics;
+  material.userData.opticalRenderAlpha = renderAlpha;
   material.userData.renderDescriptor = descriptor;
   return material;
 }
@@ -425,16 +454,17 @@ export function createSphPhaseScene(container, {
         clamp(row.baseColorLinear[2], 0, 1),
         THREE.LinearSRGBColorSpace
       );
-      material.opacity = clamp(row.opacity, 0, 1);
-      material.transparent = row.transmission > 0.01 || material.opacity < 0.999;
-      material.depthWrite = !material.transparent || material.opacity > 0.5;
+      const renderAlpha = renderAlphaFromOpticalResponse(row, row);
+      material.opacity = renderAlpha;
+      material.transparent = row.transmission > 0.01 || renderAlpha < 0.999;
+      material.depthWrite = renderDepthWriteFromOpticalResponse(row, row);
       material.metalness = clamp(row.metalness, 0, 1);
       material.roughness = clamp(row.roughness, 0, 1);
       material.transmission = clamp(row.transmission, 0, 1);
       material.ior = Math.max(1, row.ior || 1);
       material.vertexColors = row.vertexColorPolicyId === 2;
       material.needsUpdate = true;
-      mesh.userData.opticalGpuLookupOutput = row;
+      mesh.userData.opticalGpuLookupOutput = { ...row, renderAlpha };
       mesh.userData.opticalGpuExecutionBackend = execution.backend;
       applied.push({ surfaceKey, row });
     }

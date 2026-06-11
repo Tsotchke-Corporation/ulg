@@ -1232,7 +1232,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           renderSource: node.userData.renderSource ?? null,
           renderRowsBackend: node.userData.renderRowsBackend ?? null,
           lookupOutputRecordIndex: node.userData.opticalGpuLookupOutput?.recordIndex ?? null,
-          lookupBackend: node.userData.opticalGpuExecutionBackend ?? null
+          lookupBackend: node.userData.opticalGpuExecutionBackend ?? null,
+          renderAlpha: node.userData.opticalGpuLookupOutput?.renderAlpha ?? null,
+          materialOpacity: node.material?.opacity ?? null,
+          materialTransmission: node.material?.transmission ?? null
         });
       }
     });
@@ -1858,6 +1861,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);
+  expect(derivedSummary.visibleSurfaces.some((surface) => (
+    surface.materialKey === 'h2o'
+    && surface.renderAlpha === 1
+    && surface.materialOpacity === 1
+    && surface.materialTransmission > 0.9
+  ))).toBe(true);
 });
 
 test('SPH phase demo reacts room-temperature Na + H2O through derived product closure', async ({ page }) => {

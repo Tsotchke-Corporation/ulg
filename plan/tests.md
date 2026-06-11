@@ -1597,3 +1597,19 @@ carrier-runtime slice.
   passed with relay peers connected, `dispatchAdapterStatus =
   dispatch-adapters-ready`, `acceptedDispatchCount = 2`, ack `handoff-ready`,
   and `simulationStatus = scientific-ready`.
+
+## 2026-06-11 H2O Transmissive Surface Visibility Regression
+
+- Added `tests/sphPhaseRenderer.test.mjs` coverage that condensed transmissive
+  H2O keeps mesh alpha coverage at `1` and disables depth write while vapor
+  continues to use closure opacity.
+- Extended `tests/demo.e2e.mjs` so the default SPH phase demo must expose a
+  visible H2O surface with `renderAlpha = 1`, `material.opacity = 1`, and
+  `material.transmission > 0.9` after the optical GPU lookup is applied.
+- Manual Playwright probes against `https://127.0.0.1:5173/` verified default
+  Fe/H2O and Na/H2O scenarios render continuous H2O volumes. Screenshots were
+  saved to `/tmp/ulg-default-sph-h2o-alpha-fixed.png` and
+  `/tmp/ulg-na-h2o-alpha-fixed.png`.
+- Validation passed: syntax checks for touched files, `node --test
+  tests/sphPhaseRenderer.test.mjs` (`6/6`), focused HTTPS Chromium e2e (`1/1`),
+  `git diff --check`, `npm run build`, and full `npm test` (`309/309`).

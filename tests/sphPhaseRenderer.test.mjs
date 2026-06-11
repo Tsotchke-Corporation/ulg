@@ -4,7 +4,9 @@ import {
   SPH_PHASE_RENDER_MODE,
   createContinuousSurfaceBatches,
   createOpticalGpuLookupForSurfaceBatches,
-  createOpticalGpuTableForSurfaceBatches
+  createOpticalGpuTableForSurfaceBatches,
+  renderAlphaFromOpticalResponse,
+  renderDepthWriteFromOpticalResponse
 } from '../src/visualization/sphPhaseScene.js';
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
@@ -171,4 +173,25 @@ test('SPH phase renderer derives optical GPU lookup rows for active surface batc
   assert.equal(lookup.cpuReference.outputs.length, 24);
   assert.equal(lookup.cpuReference.outputs[11], 0);
   assert.equal(lookup.cpuReference.outputs[23], 1);
+});
+
+test('SPH renderer keeps condensed transmissive H2O geometrically visible', () => {
+  const waterOptics = {
+    material: 'h2o',
+    phase: 'liquid',
+    opacity: 0.0028,
+    transmission: 0.977,
+    metalness: 0
+  };
+  const vaporOptics = {
+    material: 'h2o',
+    phase: 'gas',
+    opacity: 0.0028,
+    transmission: 0.999,
+    metalness: 0
+  };
+
+  assert.equal(renderAlphaFromOpticalResponse(waterOptics, waterOptics), 1);
+  assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), false);
+  assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), vaporOptics.opacity);
 });

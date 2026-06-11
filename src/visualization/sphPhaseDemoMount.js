@@ -493,6 +493,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__sphDriver = driver;
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
   overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
+  overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
   overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
   overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
   overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -768,6 +769,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__sphDriver = driver;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
+    overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -817,7 +819,8 @@ export function mountSphPhaseDemoOverlay() {
       scene.setParticles({
         positionsM: new Float32Array(0),
         colorsRgb: new Float32Array(0),
-        materials: []
+        materials: [],
+        reactions: []
       });
       return;
     }
@@ -848,11 +851,14 @@ export function mountSphPhaseDemoOverlay() {
       materials,
       emissiveByMaterial: surfaceEmissive(driver.demo),
       materialProperties: driver.demo.materialProperties,
+      reactions: driver.demo.reactions || [],
+      reactionContactRadiusM: driver.demo.reactionContactRadiusM,
       sphGpuParticleState,
       mlsMpmGpuParticleState
     });
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
+    overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
@@ -951,6 +957,15 @@ export function mountSphPhaseDemoOverlay() {
       || residentStep?.thermalStep?.backend
       || residentStep?.thermalStep?.result?.backend
       || 'pending';
+    const reactionTable = scene.getSphReactionTable?.() || overlay.__sphReactionTable || null;
+    const residentReactionStatus = residentStep?.stageStatus?.reaction
+      || residentStep?.reactionStep?.status
+      || residentStep?.reactionStep?.result?.status
+      || (reactionTable?.reactionCount > 0 ? 'pending' : 'no-derived-reactions');
+    const residentReactionBackend = residentStep?.stageBackends?.reaction
+      || residentStep?.reactionStep?.backend
+      || residentStep?.reactionStep?.result?.backend
+      || (reactionTable?.reactionCount > 0 ? 'pending' : 'not-required');
     const residentThermalBufferMode = residentStep?.nextParticleBufferMode || 'pending';
     statusEl.textContent = [
       `preflight        : ${pre.status} (feasible=${pre.feasibility.feasible})`,
@@ -970,6 +985,7 @@ export function mountSphPhaseDemoOverlay() {
       `resident source  : ${residentSourceMode} continued=${Boolean(residentContinued)} next=${Boolean(residentContinuationAvailable)}`,
       `compact summary  : status=${compactStatus} mode=${compactMode} reduction=${compactReduction}`,
       `resident thermal : status=${residentThermalStatus} backend=${residentThermalBackend} next=${residentThermalBufferMode}`,
+      `resident reaction: status=${residentReactionStatus} backend=${residentReactionBackend} reactions=${reactionTable?.reactionCount ?? 0}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
       `per-wall ledger  :\n${ledger}`,

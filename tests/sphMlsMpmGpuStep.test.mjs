@@ -7,6 +7,7 @@ import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
+  ULG_SPH_GPU_REACTION_STEP_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
@@ -841,6 +842,174 @@ test('MLS-MPM resident step can refresh SPH state and thermo through a retained 
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 6);
+});
+
+test('MLS-MPM resident step can convert materials through a retained reaction GPU step', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  let reactionCalls = 0;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1 },
+    p2gRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'projected',
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        gridNodes: new Float32Array(),
+        gridBuffer: tracker.buffer('p2g-grid-reaction'),
+        gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+        backend: 'webgpu',
+        status: 'updated',
+        sourceSchema: args.p2gGridProjection.schema,
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        updatedGridNodes: new Float32Array(),
+        updatedGridBuffer: tracker.buffer('updated-grid-reaction'),
+        updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'reconstructed',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: 512,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridShift: 1,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        mechanicsStrideFloats: 32,
+        state: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('g2p-state-before-thermal'),
+        mechanicsBuffer: tracker.buffer('g2p-mechanics-before-reaction'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    },
+    thermalStepRunner(args) {
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer('thermal-state-before-reaction'),
+        thermoBuffer: tracker.buffer('thermal-thermo-before-reaction'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.thermoBuffer.destroy();
+        }
+      };
+    },
+    reactionStepRunner(args) {
+      reactionCalls += 1;
+      assert.equal(args.sourceStateBuffer.label, 'thermal-state-before-reaction');
+      assert.equal(args.sourceThermoBuffer.label, 'thermal-thermo-before-reaction');
+      assert.equal(args.sourceMechanicsBuffer.label, 'g2p-mechanics-before-reaction');
+      assert.equal(args.readbackMode, 'no-full-readback');
+      assert.equal(args.retainOutputParticleBuffers, true);
+      return {
+        schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'reaction-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('reaction-state-after-thermal'),
+        thermoBuffer: tracker.buffer('reaction-thermo-after-thermal'),
+        mechanicsBuffer: tracker.buffer('reaction-mechanics-after-thermal'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.thermoBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(reactionCalls, 1);
+  assert.equal(step.stageStatus.thermal, 'thermal-step-executed');
+  assert.equal(step.stageStatus.reaction, 'reaction-step-executed');
+  assert.equal(step.stageBackends.reaction, 'webgpu');
+  assert.equal(step.thermalOutputReplacedByReactionStep, true);
+  assert.equal(step.g2pMechanicsBufferReplacedByReactionStep, true);
+  assert.equal(step.nextParticleBufferMode, 'retained-reaction-output-buffers');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'reaction-state-after-thermal');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer.label, 'reaction-thermo-after-thermal');
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'reaction-mechanics-after-thermal');
+  assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);
+  assert.equal(tracker.destroyed, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(tracker.destroyed, 9);
 });
 
 test('MLS-MPM resident steps ping-pong retained particle buffers across repeated steps', async () => {

@@ -1,5 +1,71 @@
 # ULG Implementation Log
 
+## 2026-06-11 03:22 AKDT - GPU-resident reaction/material conversion stage
+
+Prompt: Continue the core technology path and accept large refactors/breakage
+when it helps speed up GPU-resident first-principles simulation.
+
+Implemented the first table-driven SPH reaction stage for the resident WebGPU
+chain. Reaction discovery still derives the reaction family/product/enthalpy
+from the existing molecular and material-closure pipeline, but the per-step
+hot loop no longer needs a CPU particle-pair scan when WebGPU is available.
+The GPU step consumes packed reaction records, product phase mechanics rows,
+the retained SPH state/thermo buffers, the retained G2P mechanics buffer, and
+the closure-derived thermal material table. It proposes each particle's nearest
+valid reaction partner, resolves only mutual pairs, converts both particles to
+the product material id, adds the derived exothermic heat, resolves product
+phase/temperature/rest density through the thermal table, and resets MLS-MPM
+mechanics rows from derived product phase properties.
+
+Changes:
+
+- `ulg-gpu-abi/src/index.js` and `ulg-gpu-abi/src/wgsl.js`: added
+  `peercompute.ulg.sph-gpu-reaction-table.v0`,
+  `peercompute.ulg.sph-gpu-reaction-step.v0`, execution/parity schemas, packed
+  reaction/product-phase row layouts, and a two-entrypoint WGSL kernel
+  (`propose`, `resolve`).
+- `src/runtime/sph/sphReactionGpuKernel.js`: new reaction table builder, CPU
+  reference, WebGPU runner, parity report, no-full-readback execution path, and
+  output-buffer retention.
+- `src/runtime/sph/sphMlsMpmGpuStep.js`: resident chain now optionally runs
+  reaction after thermal, hands reaction state/thermo/mechanics buffers forward,
+  reports reaction stage status/backend, and cleans up superseded G2P/thermal
+  buffers without double-destroying retained outputs.
+- `src/runtime/sphPhaseDemo.js`: exposes the discovered reaction network and
+  reaction contact radius on the demo object so the scene can cache GPU tables
+  without rediscovering chemistry.
+- `src/visualization/sphPhaseScene.js` and
+  `src/visualization/sphPhaseDemoMount.js`: build/expose the reaction table
+  from the driver-provided reaction network, pass it into resident steps, and
+  add a `resident reaction` status row.
+- Tests: added focused ABI, reaction-kernel, and resident-chain coverage.
+
+Verification:
+
+- `node --test tests/abi.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs` passed (`28/28`).
+- `npm test` passed (`302/302`).
+- `npm run build` passed with the existing Vite large-chunk warning.
+- Existing focused HTTPS Chromium e2e passed:
+  `SPH phase demo runs derived material properties by default` (`1/1`).
+- Forced Na + liquid H2O browser probe with WebGPU enabled succeeded:
+  `navigator.gpu=true`, resident backend `webgpu`, readback
+  `no-full-readback`, stage statuses
+  `p2g/gridUpdate/g2p=webgpu-executed-no-full-readback`,
+  `thermal=thermal-step-executed`, `reaction=reaction-step-executed`, next
+  particle mode `retained-reaction-output-buffers`, and no browser errors.
+
+Remaining gaps:
+
+- The expensive reaction discovery/enthalpy/product-closure derivation itself
+  still runs through the current CPU-side closure chain and is cached before
+  the resident hot loop. Porting that solver chain to persistent WebGPU kernels
+  remains a separate compiler/runtime effort.
+- The visual renderer still uses CPU particle arrays; a sidecar audit identified
+  the next slice as compact resident render-row extraction from retained
+  state/thermo buffers.
+- Validation flags remain false; this is evidence-path GPU residency, not a
+  validated chemistry or phase-change claim.
+
 ## 2026-06-10 18:20 AKDT - Reaction gate correction: Na reacts with liquid water at room temperature
 
 Prompt: User challenged the chemistry gate: sodium/water should react at room

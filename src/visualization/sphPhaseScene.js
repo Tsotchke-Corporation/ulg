@@ -32,6 +32,7 @@ import {
   runMlsMpmResidentStepsWithOptionalWebGpu
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import { buildSphThermalMaterialTable } from '../runtime/sph/sphThermalGpuKernel.js';
+import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -383,6 +384,7 @@ export function createSphPhaseScene(container, {
   let mlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentSteps = null;
   let sphThermalMaterialTable = null;
+  let sphReactionTable = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -399,6 +401,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmResidentSteps = null;
   scene.userData.mlsMpmResidentRequestedReadbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
   scene.userData.sphThermalMaterialTable = null;
+  scene.userData.sphReactionTable = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -553,6 +556,16 @@ export function createSphPhaseScene(container, {
     ].join('|');
   }
 
+  function sphReactionTableSignature(table = sphReactionTable) {
+    if (!table) return 'no-reaction-table';
+    return [
+      table.reactionCount ?? 0,
+      table.productPhaseCount ?? 0,
+      Array.from(table.records || []).join(','),
+      Array.from(table.productPhaseRecords || []).join(',')
+    ].join('|');
+  }
+
   function mlsMpmMechanicsPredictionSignatureFor({
     sphParticleState = sphGpuParticleState,
     mlsMpmParticleState = mlsMpmGpuParticleState,
@@ -648,6 +661,7 @@ export function createSphPhaseScene(container, {
       gravityMPerS2.join(','),
       cflFactor,
       normalizedReadbackMode,
+      sphReactionTableSignature(),
       dims.join(',')
     ].join('|');
   }
@@ -1284,6 +1298,7 @@ export function createSphPhaseScene(container, {
         deviceResult: resolvedDeviceResult,
         readbackMode: requestedReadbackMode,
         thermalMaterialTable: sphThermalMaterialTable,
+        reactionTable: sphReactionTable,
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1423,6 +1438,7 @@ export function createSphPhaseScene(container, {
         deviceResult: resolvedDeviceResult,
         readbackMode: requestedReadbackMode,
         thermalMaterialTable: sphThermalMaterialTable,
+        reactionTable: sphReactionTable,
         parityTolerances,
         p2gRunner,
         gridUpdateRunner,
@@ -1523,17 +1539,34 @@ export function createSphPhaseScene(container, {
   // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
   // for hot matter and intrinsic colour from the optical closure). The renderer reconstructs a
   // continuous density surface from particles, but it does not invent material colour.
-  function setParticles({ positionsM, colorsRgb, materials = null, emissiveByMaterial = null, materialProperties = null, sphGpuParticleState: nextSphGpuParticleState = null, mlsMpmGpuParticleState: nextMlsMpmGpuParticleState = null }) {
+  function setParticles({
+    positionsM,
+    colorsRgb,
+    materials = null,
+    emissiveByMaterial = null,
+    materialProperties = null,
+    reactions = null,
+    reactionContactRadiusM = null,
+    sphGpuParticleState: nextSphGpuParticleState = null,
+    mlsMpmGpuParticleState: nextMlsMpmGpuParticleState = null
+  }) {
     const activeKeys = new Set();
     const batches = createContinuousSurfaceBatches({ positionsM, colorsRgb, materials, boxEdgeM, boxDimsM: dims });
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
     sphThermalMaterialTable = materialProperties
       ? buildSphThermalMaterialTable(materialProperties)
       : null;
+    sphReactionTable = materialProperties
+      ? buildSphReactionTable(reactions || [], {
+        materialProperties,
+        contactRadiusM: reactionContactRadiusM ?? nextSphGpuParticleState?.smoothingLengthM ?? 0
+      })
+      : null;
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
     opticalGpuLookupGeneration += 1;
     scene.userData.opticalGpuTable = opticalGpuTable;
     scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
+    scene.userData.sphReactionTable = sphReactionTable;
     scene.userData.opticalGpuLookup = opticalGpuLookup;
     scene.userData.opticalGpuLookupExecution = null;
     scene.userData.opticalGpuLookupDrawState = null;
@@ -1675,6 +1708,9 @@ export function createSphPhaseScene(container, {
     },
     getSphThermalMaterialTable() {
       return sphThermalMaterialTable;
+    },
+    getSphReactionTable() {
+      return sphReactionTable;
     },
     getOpticalGpuDrawState() {
       return scene.userData.opticalGpuLookupDrawState;

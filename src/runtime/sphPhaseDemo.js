@@ -585,6 +585,8 @@ export function createSphPhaseDemo(options = {}) {
   // a tight radius and never react (the bug this fixes). ~2.5 cells spans the contact gap.
   const reactionContactRadiusM = gridSpacingM * 2.5;
   const reactionTemperatureOf = (p) => equilibriumFromSpecificEnergy(demo.materialProperties[p.material], p.specificInternalEnergyJPerKg).temperatureK;
+  demo.reactions = reactions;
+  demo.reactionContactRadiusM = reactionContactRadiusM;
 
   return {
     demo,

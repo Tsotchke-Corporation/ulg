@@ -15,6 +15,8 @@ import {
   MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
+  SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
   createClosureTableDescriptor,
@@ -53,6 +55,10 @@ import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SET_SCHEMA,
+  ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA,
+  ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+  ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
@@ -67,6 +73,7 @@ import {
   mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl,
   opticalLookupWgsl,
+  sphReactionStepWgsl,
   sphThermalStepWgsl
 } from '../ulg-gpu-abi/src/wgsl.js';
 
@@ -225,6 +232,42 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
   assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(2\) var<storage, read> material_records/);
   assert.match(sphThermalStepWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> out_sph_thermo/);
   assert.match(sphThermalStepWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('SPH GPU reaction table ABI exposes derived reaction and product phase rows', () => {
+  assert.equal(ULG_SPH_GPU_REACTION_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-table.v0');
+  assert.equal(ULG_SPH_GPU_REACTION_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step.v0');
+  assert.equal(ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step-execution.v0');
+  assert.equal(ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step-parity.v0');
+  assert.equal(SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_REACTION_RECORD_ROW_LAYOUT.slice(0, 8), [
+    'reactantAMaterialId:f32',
+    'reactantBMaterialId:f32',
+    'productMaterialId:f32',
+    'activationTemperatureK:f32',
+    'specificEnthalpyJPerKg:f32',
+    'contactRadiusM:f32',
+    'phaseMaskA:f32',
+    'phaseMaskB:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.slice(0, 8), [
+    'materialId:f32',
+    'phaseId:f32',
+    'restDensityKgPerM3:f32',
+    'effectiveBulkModulusPa:f32',
+    'shearModulusPa:f32',
+    'lameLambdaPa:f32',
+    'soundSpeedMPerS:f32',
+    'eosModelId:f32'
+  ]);
+  assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(3\) var<storage, read> reaction_records/);
+  assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(7\) var<storage, read_write> proposals/);
+  assert.match(sphReactionStepWgsl, /fn propose/);
+  assert.match(sphReactionStepWgsl, /fn resolve/);
+  assert.match(sphReactionStepWgsl, /@compute @workgroup_size\(64\)/);
 });
 
 test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {

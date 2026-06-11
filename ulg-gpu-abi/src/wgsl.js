@@ -363,6 +363,369 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphReactionStepWgsl = `
+struct ReactionParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  material_count: u32,
+  segment_count: u32,
+  reset_mechanics: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+struct ThermalRows {
+  row0: vec4<f32>,
+  row1: vec4<f32>,
+  row2: vec4<f32>,
+};
+
+struct ProductMechanics {
+  rest_density: f32,
+  bulk: f32,
+  shear: f32,
+  lambda: f32,
+  sound_speed: f32,
+  eos_model: f32,
+  solid: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> product_phase_records: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> material_records: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> thermal_segments: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> proposals: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read_write> out_sph_state: array<vec4<f32>>;
+@group(0) @binding(9) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
+@group(0) @binding(10) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(11) var<uniform> params: ReactionParams;
+
+fn state_pos_mass(index: u32) -> vec4<f32> {
+  return sph_state[index * 2u];
+}
+
+fn state_vel_u(index: u32) -> vec4<f32> {
+  return sph_state[index * 2u + 1u];
+}
+
+fn thermo_row0(index: u32) -> vec4<f32> {
+  return sph_thermo[index * 3u];
+}
+
+fn thermo_row1(index: u32) -> vec4<f32> {
+  return sph_thermo[index * 3u + 1u];
+}
+
+fn thermo_row2(index: u32) -> vec4<f32> {
+  return sph_thermo[index * 3u + 2u];
+}
+
+fn reaction_row0(reaction_index: u32) -> vec4<f32> {
+  return reaction_records[reaction_index * 3u];
+}
+
+fn reaction_row1(reaction_index: u32) -> vec4<f32> {
+  return reaction_records[reaction_index * 3u + 1u];
+}
+
+fn reaction_row2(reaction_index: u32) -> vec4<f32> {
+  return reaction_records[reaction_index * 3u + 2u];
+}
+
+fn product_phase_row0(record_index: u32) -> vec4<f32> {
+  return product_phase_records[record_index * 3u];
+}
+
+fn product_phase_row1(record_index: u32) -> vec4<f32> {
+  return product_phase_records[record_index * 3u + 1u];
+}
+
+fn product_phase_row2(record_index: u32) -> vec4<f32> {
+  return product_phase_records[record_index * 3u + 2u];
+}
+
+fn segment_row0(segment_index: u32) -> vec4<f32> {
+  return thermal_segments[segment_index * 3u];
+}
+
+fn segment_row1(segment_index: u32) -> vec4<f32> {
+  return thermal_segments[segment_index * 3u + 1u];
+}
+
+fn segment_row2(segment_index: u32) -> vec4<f32> {
+  return thermal_segments[segment_index * 3u + 2u];
+}
+
+fn phase_mask_satisfied(mask_f: f32, phase_id_f: f32) -> bool {
+  let mask = u32(mask_f + 0.5);
+  if (mask == 0u) {
+    return true;
+  }
+  let phase_id = u32(phase_id_f + 0.5);
+  if (phase_id >= 31u) {
+    return false;
+  }
+  return (mask & (1u << phase_id)) != 0u;
+}
+
+fn phase_fraction(phase_id: f32, solid: f32, liquid: f32, gas: f32, plasma: f32) -> f32 {
+  if (phase_id == 1.0) { return solid; }
+  if (phase_id == 2.0) { return liquid; }
+  if (phase_id == 3.0) { return gas; }
+  if (phase_id == 4.0) { return plasma; }
+  return 0.0;
+}
+
+fn resolve_thermal_rows(material_id: f32, next_u: f32, source_row2: vec4<f32>) -> ThermalRows {
+  var material_segment_offset = 0u;
+  var material_segment_count = 0u;
+  var found_material = false;
+  for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
+    let record = material_records[record_index];
+    if (record.x == material_id) {
+      material_segment_offset = u32(record.y);
+      material_segment_count = u32(record.z);
+      found_material = true;
+      break;
+    }
+  }
+
+  if (!found_material || material_segment_count == 0u) {
+    return ThermalRows(
+      vec4<f32>(material_id, 0.0, 0.0, 0.0),
+      vec4<f32>(0.0, 0.0, 0.0, 0.0),
+      vec4<f32>(source_row2.x, source_row2.y, 255.0, 0.0)
+    );
+  }
+
+  var selected = material_segment_offset;
+  for (var local = 0u; local < material_segment_count; local = local + 1u) {
+    let candidate = material_segment_offset + local;
+    let row1 = segment_row1(candidate);
+    selected = candidate;
+    if (next_u <= row1.y || local + 1u == material_segment_count) {
+      break;
+    }
+  }
+
+  let seg0 = segment_row0(selected);
+  let seg1 = segment_row1(selected);
+  let seg2 = segment_row2(selected);
+  let denom = max(seg1.y - seg1.x, 1.0e-12);
+  let alpha = clamp((next_u - seg1.x) / denom, 0.0, 1.0);
+  let segment_type = seg0.y;
+  var temperature_k = seg1.z + alpha * (seg1.w - seg1.z);
+  var solid = 0.0;
+  var liquid = 0.0;
+  var gas = 0.0;
+  var plasma = 0.0;
+  var phase_id = seg0.z;
+  var rest_density = seg2.x;
+
+  if (segment_type == 2.0) {
+    temperature_k = seg1.z;
+    let from_fraction = 1.0 - alpha;
+    let to_fraction = alpha;
+    solid = phase_fraction(seg0.z, from_fraction, 0.0, 0.0, 0.0)
+      + phase_fraction(seg0.w, to_fraction, 0.0, 0.0, 0.0);
+    liquid = phase_fraction(seg0.z, 0.0, from_fraction, 0.0, 0.0)
+      + phase_fraction(seg0.w, 0.0, to_fraction, 0.0, 0.0);
+    gas = phase_fraction(seg0.z, 0.0, 0.0, from_fraction, 0.0)
+      + phase_fraction(seg0.w, 0.0, 0.0, to_fraction, 0.0);
+    plasma = phase_fraction(seg0.z, 0.0, 0.0, 0.0, from_fraction)
+      + phase_fraction(seg0.w, 0.0, 0.0, 0.0, to_fraction);
+    if (alpha >= 0.5) {
+      phase_id = seg0.w;
+      rest_density = seg2.y;
+    }
+  } else {
+    solid = phase_fraction(seg0.z, 1.0, 0.0, 0.0, 0.0);
+    liquid = phase_fraction(seg0.z, 0.0, 1.0, 0.0, 0.0);
+    gas = phase_fraction(seg0.z, 0.0, 0.0, 1.0, 0.0);
+    plasma = phase_fraction(seg0.z, 0.0, 0.0, 0.0, 1.0);
+  }
+
+  return ThermalRows(
+    vec4<f32>(material_id, phase_id, temperature_k, rest_density),
+    vec4<f32>(solid, liquid, gas, plasma),
+    vec4<f32>(source_row2.x, source_row2.y, 1.0, 0.0)
+  );
+}
+
+fn find_product_mechanics(material_id: f32, phase_id: f32) -> ProductMechanics {
+  for (var record_index = 0u; record_index < params.product_phase_count; record_index = record_index + 1u) {
+    let row0 = product_phase_row0(record_index);
+    if (row0.x == material_id && row0.y == phase_id) {
+      let row1 = product_phase_row1(record_index);
+      let row2 = product_phase_row2(record_index);
+      return ProductMechanics(row0.z, row0.w, row1.x, row1.y, row1.z, row1.w, row2.x, row2.y);
+    }
+  }
+  return ProductMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 255.0);
+}
+
+fn copy_particle(index: u32) {
+  out_sph_state[index * 2u] = sph_state[index * 2u];
+  out_sph_state[index * 2u + 1u] = sph_state[index * 2u + 1u];
+  out_sph_thermo[index * 3u] = sph_thermo[index * 3u];
+  out_sph_thermo[index * 3u + 1u] = sph_thermo[index * 3u + 1u];
+  out_sph_thermo[index * 3u + 2u] = sph_thermo[index * 3u + 2u];
+  let mechanics_base = index * 8u;
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    out_mls_mechanics[mechanics_base + row] = mls_mechanics[mechanics_base + row];
+  }
+}
+
+fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
+  let mechanics = find_product_mechanics(resolved.row0.x, resolved.row0.y);
+  var rest_density = resolved.row0.w;
+  if (rest_density <= 0.0) {
+    rest_density = mechanics.rest_density;
+  }
+  var rest_volume = 0.0;
+  if (rest_density > 0.0) {
+    rest_volume = mass_kg / rest_density;
+  }
+  let base = index * 8u;
+  out_mls_mechanics[base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  out_mls_mechanics[base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  out_mls_mechanics[base + 5u] = vec4<f32>(mechanics.solid, mechanics.status, mechanics.bulk, mechanics.shear);
+  out_mls_mechanics[base + 6u] = vec4<f32>(mechanics.lambda, mechanics.sound_speed, mechanics.eos_model, mechanics.status);
+  out_mls_mechanics[base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+@compute @workgroup_size(64)
+fn propose(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let self_thermo = thermo_row0(particle_index);
+  let self_material = self_thermo.x;
+  let self_phase = self_thermo.y;
+  let self_temperature = self_thermo.z;
+  let self_pos_mass = state_pos_mass(particle_index);
+  let self_pos = vec3<f32>(self_pos_mass.x, self_pos_mass.y, self_pos_mass.z);
+
+  var best_partner = -1.0;
+  var best_reaction = -1.0;
+  var best_role = 0.0;
+  var best_distance2 = 3.402823e38;
+
+  for (var reaction_index = 0u; reaction_index < params.reaction_count; reaction_index = reaction_index + 1u) {
+    let rx0 = reaction_row0(reaction_index);
+    let rx1 = reaction_row1(reaction_index);
+    let rx2 = reaction_row2(reaction_index);
+    if (rx2.x != 1.0) {
+      continue;
+    }
+
+    var partner_material = 0.0;
+    var partner_phase_mask = 0.0;
+    var role = 0.0;
+    if (self_material == rx0.x && phase_mask_satisfied(rx1.z, self_phase)) {
+      partner_material = rx0.y;
+      partner_phase_mask = rx1.w;
+      role = 1.0;
+    } else if (self_material == rx0.y && phase_mask_satisfied(rx1.w, self_phase)) {
+      partner_material = rx0.x;
+      partner_phase_mask = rx1.z;
+      role = 2.0;
+    } else {
+      continue;
+    }
+
+    let activation_k = rx0.w;
+    let contact_radius2 = rx1.y * rx1.y;
+    for (var other = 0u; other < params.particle_count; other = other + 1u) {
+      if (other == particle_index) {
+        continue;
+      }
+      let other_thermo = thermo_row0(other);
+      if (other_thermo.x != partner_material || !phase_mask_satisfied(partner_phase_mask, other_thermo.y)) {
+        continue;
+      }
+      if (max(self_temperature, other_thermo.z) < activation_k) {
+        continue;
+      }
+      let other_pos_mass = state_pos_mass(other);
+      let delta = self_pos - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
+      let distance2 = dot(delta, delta);
+      if (distance2 > contact_radius2) {
+        continue;
+      }
+      if (
+        distance2 < best_distance2
+        || (distance2 == best_distance2 && f32(other) < best_partner)
+      ) {
+        best_partner = f32(other);
+        best_reaction = f32(reaction_index);
+        best_role = role;
+        best_distance2 = distance2;
+      }
+    }
+  }
+
+  proposals[particle_index] = vec4<f32>(best_partner, best_reaction, best_role, best_distance2);
+}
+
+@compute @workgroup_size(64)
+fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let proposal = proposals[particle_index];
+  if (proposal.x < 0.0 || proposal.y < 0.0) {
+    copy_particle(particle_index);
+    return;
+  }
+  let partner_index = u32(proposal.x + 0.5);
+  if (partner_index >= params.particle_count) {
+    copy_particle(particle_index);
+    return;
+  }
+  let partner_proposal = proposals[partner_index];
+  if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
+    copy_particle(particle_index);
+    return;
+  }
+
+  let reaction_index = u32(proposal.y + 0.5);
+  let rx0 = reaction_row0(reaction_index);
+  let rx1 = reaction_row1(reaction_index);
+  let pos_mass = state_pos_mass(particle_index);
+  let vel_u = state_vel_u(particle_index);
+  let source_row2 = thermo_row2(particle_index);
+  let next_u = vel_u.w - rx1.x;
+  let resolved = resolve_thermal_rows(rx0.z, next_u, source_row2);
+
+  out_sph_state[particle_index * 2u] = pos_mass;
+  out_sph_state[particle_index * 2u + 1u] = vec4<f32>(vel_u.x, vel_u.y, vel_u.z, next_u);
+  out_sph_thermo[particle_index * 3u] = resolved.row0;
+  out_sph_thermo[particle_index * 3u + 1u] = resolved.row1;
+  out_sph_thermo[particle_index * 3u + 2u] = resolved.row2;
+  if (params.reset_mechanics != 0u) {
+    write_reacted_mechanics(particle_index, pos_mass.w, resolved);
+  } else {
+    let mechanics_base = particle_index * 8u;
+    for (var row = 0u; row < 8u; row = row + 1u) {
+      out_mls_mechanics[mechanics_base + row] = mls_mechanics[mechanics_base + row];
+    }
+  }
+}
+`;
+
 export const mlsMpmMechanicsPredictWgsl = `
 struct MechanicsParams {
   particle_count: u32,

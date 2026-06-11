@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 02:48 AKDT
+Updated: 2026-06-11 03:22 AKDT
 
 ## Done
 
@@ -89,6 +89,19 @@ Updated: 2026-06-11 02:48 AKDT
   own derived liquidus plus superheat, the preflight uses attached closures
   instead of reference fixtures, and room-temperature Na + H2O can react into
   a derived NaOH product closure when initialized in contact.
+- Added the first GPU-resident SPH reaction/material-conversion stage. The ABI
+  now declares packed reaction records and product phase mechanics rows;
+  `sphReactionGpuKernel.js` builds those tables from the first-principles
+  reaction network and derived product closures, runs a deterministic
+  mutual-nearest contact proposal/resolve kernel on WebGPU, resolves product
+  thermo rows through the existing thermal table, and resets retained MLS-MPM
+  mechanics rows from derived product phase properties. The resident MLS-MPM
+  chain now runs P2G -> grid update -> G2P -> thermal -> reaction without full
+  particle readback when WebGPU is available, then continues from
+  `retained-reaction-output-buffers`. Verified in Chromium with Na + liquid
+  H2O: all five resident stages ran on WebGPU, no full readback, and the
+  reaction stage retained output buffers. Scientific/material/chemistry/
+  phase/full-physics validation remain false.
 - Spawned sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - Used ICC repo registry/status and architecture summaries for MoonLab and peercompute.
 - Added a vanilla Vite/three.js ULG app.

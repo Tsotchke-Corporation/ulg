@@ -24,6 +24,9 @@ import {
 import {
   runSphThermalStepWebGpu
 } from './sphThermalGpuKernel.js';
+import {
+  runSphReactionStepWebGpu
+} from './sphReactionGpuKernel.js';
 
 export {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
@@ -249,19 +252,35 @@ function retainedThermalOutputBuffers(thermalStep) {
   };
 }
 
+function retainedReactionOutputBuffers(reactionStep) {
+  const source = reactionStep?.result || reactionStep;
+  return {
+    stateBuffer: source?.stateBuffer || null,
+    thermoBuffer: source?.thermoBuffer || null,
+    mechanicsBuffer: source?.mechanicsBuffer || null,
+    stateBufferByteLength: source?.stateBufferByteLength || 0,
+    thermoBufferByteLength: source?.thermoBufferByteLength || 0,
+    mechanicsBufferByteLength: source?.mechanicsBufferByteLength || 0,
+    destroyOutputParticleBuffers: source?.destroyOutputParticleBuffers || null
+  };
+}
+
 function buildNextParticleUploads({
   sphParticleState,
   mlsMpmParticleState,
   sphParticleUpload,
   g2pReconstruction,
   thermalStep = null,
+  reactionStep = null,
   particlePingPong
 }) {
   const retained = retainedG2pOutputBuffers(g2pReconstruction);
   const thermal = retainedThermalOutputBuffers(thermalStep);
-  const stateBuffer = thermal.stateBuffer || retained.stateBuffer;
-  const thermoBuffer = thermal.thermoBuffer || (sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null);
-  if (!stateBuffer || !retained.mechanicsBuffer) return null;
+  const reaction = retainedReactionOutputBuffers(reactionStep);
+  const stateBuffer = reaction.stateBuffer || thermal.stateBuffer || retained.stateBuffer;
+  const thermoBuffer = reaction.thermoBuffer || thermal.thermoBuffer || (sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null);
+  const mechanicsBuffer = reaction.mechanicsBuffer || retained.mechanicsBuffer;
+  if (!stateBuffer || !mechanicsBuffer) return null;
   if (!thermoBuffer) return null;
   return {
     sphParticleUpload: {
@@ -274,7 +293,7 @@ function buildNextParticleUploads({
       stateBuffer,
       thermoBuffer,
       ownsStateBuffer: true,
-      ownsThermoBuffer: Boolean(thermal.thermoBuffer),
+      ownsThermoBuffer: Boolean(reaction.thermoBuffer || thermal.thermoBuffer),
       slot: particlePingPong.nextSlot,
       sourceSlot: particlePingPong.sourceSlot,
       nextSlot: particlePingPong.nextSlot,
@@ -291,7 +310,7 @@ function buildNextParticleUploads({
       sourceSchema: mlsMpmParticleState.schema,
       particleCount: mlsMpmParticleState.particleCount,
       mechanicsStrideBytes: mlsMpmParticleState.mechanicsStrideBytes,
-      mechanicsBuffer: retained.mechanicsBuffer,
+      mechanicsBuffer,
       ownsMechanicsBuffer: true,
       slot: particlePingPong.nextSlot,
       sourceSlot: particlePingPong.sourceSlot,
@@ -315,6 +334,7 @@ function residentStepEnvelope({
   gridUpdate,
   g2pReconstruction,
   thermalStep = null,
+  reactionStep = null,
   compactGpuSummary = null,
   dt,
   gravityMPerS2,
@@ -323,13 +343,24 @@ function residentStepEnvelope({
   preferWebGpu,
   sourceSlot = 0
 }) {
-  const stages = [p2gGridProjection, gridUpdate, g2pReconstruction];
+  const optionalStages = [thermalStep, reactionStep].filter(Boolean).map((stage) => stage?.result || stage);
+  const stages = [p2gGridProjection, gridUpdate, g2pReconstruction, ...optionalStages];
   const backend = executionBackend(stages);
   const stageBuffersRetained = hasRetainedStageBuffers({ p2gGridProjection, gridUpdate });
   const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
   const thermalOutput = retainedThermalOutputBuffers(thermalStep);
+  const reactionOutput = retainedReactionOutputBuffers(reactionStep);
   const g2pOutputBuffersRetained = Boolean(g2pOutput.stateBuffer && g2pOutput.mechanicsBuffer);
-  const residentBuffersRetained = stageBuffersRetained && g2pOutputBuffersRetained;
+  const thermalOutputRequired = Boolean(thermalStep);
+  const reactionOutputRequired = Boolean(reactionStep);
+  const thermalOutputBuffersRetained = thermalOutputRequired && Boolean(thermalOutput.stateBuffer && thermalOutput.thermoBuffer);
+  const reactionOutputBuffersRetained = reactionOutputRequired && Boolean(reactionOutput.stateBuffer && reactionOutput.thermoBuffer && reactionOutput.mechanicsBuffer);
+  const thermalOutputSatisfied = !thermalOutputRequired || thermalOutputBuffersRetained;
+  const reactionOutputSatisfied = !reactionOutputRequired || reactionOutputBuffersRetained;
+  const residentBuffersRetained = stageBuffersRetained
+    && g2pOutputBuffersRetained
+    && thermalOutputSatisfied
+    && reactionOutputSatisfied;
   const noFullReadback = residentBuffersRetained
     && stages.every((stage) => stage?.backend === 'webgpu' && stage?.readbackMode === NO_FULL_READBACK_MODE);
   const readbackMode = noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
@@ -349,6 +380,7 @@ function residentStepEnvelope({
     sphParticleUpload,
     g2pReconstruction,
     thermalStep,
+    reactionStep,
     particlePingPong
   });
   const diagnostics = compactMlsMpmResidentStepDiagnostics({
@@ -379,36 +411,44 @@ function residentStepEnvelope({
     cflFactor,
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
-    state: g2pReconstruction?.state ?? new Float32Array(),
-    mechanics: g2pReconstruction?.mechanics ?? new Float32Array(),
+    state: (reactionStep?.state?.length ? reactionStep.state : (thermalStep?.state?.length ? thermalStep.state : g2pReconstruction?.state)) ?? new Float32Array(),
+    mechanics: (reactionStep?.mechanics?.length ? reactionStep.mechanics : g2pReconstruction?.mechanics) ?? new Float32Array(),
     p2gGridProjection,
     gridUpdate,
     g2pReconstruction,
+    thermalStep,
+    reactionStep,
     stageStatus: {
       p2g: stageStatus(p2gGridProjection),
       gridUpdate: stageStatus(gridUpdate),
       g2p: stageStatus(g2pReconstruction),
-      thermal: stageStatus(thermalStep?.result || thermalStep)
+      thermal: stageStatus(thermalStep?.result || thermalStep),
+      reaction: stageStatus(reactionStep?.result || reactionStep)
     },
     stageBackends: {
       p2g: p2gGridProjection?.backend || null,
       gridUpdate: gridUpdate?.backend || null,
       g2p: g2pReconstruction?.backend || null,
-      thermal: thermalStep?.backend || thermalStep?.result?.backend || null
+      thermal: thermalStep?.backend || thermalStep?.result?.backend || null,
+      reaction: reactionStep?.backend || reactionStep?.result?.backend || null
     },
     residentBuffersRetained,
     stageBuffersRetained,
     g2pOutputBuffersRetained,
+    thermalOutputBuffersRetained,
+    reactionOutputBuffersRetained,
     residentBufferMode: residentBuffersRetained ? 'retained-stage-and-output-buffers' : 'cpu-artifact-fallback',
     particlePingPong,
     nextParticleUploads,
     nextParticleBufferMode: nextParticleUploads
-      ? (thermalOutput.stateBuffer ? 'retained-thermal-output-and-g2p-mechanics-buffers' : 'retained-g2p-output-buffers')
+      ? (reactionOutput.stateBuffer ? 'retained-reaction-output-buffers' : (thermalOutput.stateBuffer ? 'retained-thermal-output-and-g2p-mechanics-buffers' : 'retained-g2p-output-buffers'))
       : 'not-available',
-    nextParticleStateBufferByteLength: thermalOutput.stateBufferByteLength || g2pOutput.stateBufferByteLength,
-    nextParticleThermoBufferByteLength: thermalOutput.thermoBufferByteLength,
-    nextParticleMechanicsBufferByteLength: g2pOutput.mechanicsBufferByteLength,
+    nextParticleStateBufferByteLength: reactionOutput.stateBufferByteLength || thermalOutput.stateBufferByteLength || g2pOutput.stateBufferByteLength,
+    nextParticleThermoBufferByteLength: reactionOutput.thermoBufferByteLength || thermalOutput.thermoBufferByteLength,
+    nextParticleMechanicsBufferByteLength: reactionOutput.mechanicsBufferByteLength || g2pOutput.mechanicsBufferByteLength,
     g2pStateBufferReplacedByThermalStep: Boolean(thermalOutput.stateBuffer),
+    thermalOutputReplacedByReactionStep: Boolean(reactionOutput.stateBuffer),
+    g2pMechanicsBufferReplacedByReactionStep: Boolean(reactionOutput.mechanicsBuffer),
     readbackMode,
     compactGpuSummary,
     normalHotLoopReadbackFree: noFullReadback,
@@ -450,6 +490,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   thermalMaterialTable = null,
   thermalStepRunner = runSphThermalStepWebGpu,
   thermalStepOptions = {},
+  reactionTable = null,
+  reactionStepRunner = runSphReactionStepWebGpu,
+  reactionStepOptions = {},
   sourceSlot = sphParticleUpload?.slot ?? 0,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -563,6 +606,37 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     }
   }
 
+  let reactionStep = null;
+  if (
+    reactionTable?.reactionCount > 0
+    && thermalMaterialTable
+    && typeof reactionStepRunner === 'function'
+    && g2pReconstruction?.backend === 'webgpu'
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+  ) {
+    const g2pOutput = retainedG2pOutputBuffers(g2pReconstruction);
+    const thermalOutput = retainedThermalOutputBuffers(thermalStep);
+    const sourceStateBuffer = thermalOutput.stateBuffer || g2pOutput.stateBuffer;
+    const sourceThermoBuffer = thermalOutput.thermoBuffer || sphParticleUpload.thermoBuffer;
+    if (sourceStateBuffer && sourceThermoBuffer && g2pOutput.mechanicsBuffer) {
+      reactionStep = await reactionStepRunner({
+        device: resolvedDevice,
+        sphParticleState,
+        mlsMpmParticleState,
+        reactionTable,
+        thermalMaterialTable,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        sourceStateBuffer,
+        sourceThermoBuffer,
+        sourceMechanicsBuffer: g2pOutput.mechanicsBuffer,
+        retainOutputParticleBuffers: true,
+        readbackMode: requestedReadbackMode,
+        ...reactionStepOptions
+      });
+    }
+  }
+
   const hasWebGpuLikeSummaryDevice = Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer);
   const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;
   let compactGpuSummary = null;
@@ -580,7 +654,8 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         mlsMpmParticleUpload,
         gridUpdate,
         g2pReconstruction,
-        thermalStep
+        thermalStep,
+        reactionStep
       });
     } catch (error) {
       compactGpuSummary = {
@@ -604,6 +679,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     gridUpdate,
     g2pReconstruction,
     thermalStep,
+    reactionStep,
     compactGpuSummary,
     dt: dtSeconds,
     gravityMPerS2: gravity,
@@ -622,14 +698,21 @@ export function destroyMlsMpmResidentStepBuffers(step) {
   step?.gridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
   step?.gridUpdate?.destroyUpdatedGridBuffer?.();
   if (step?.nextParticleUploads) {
+    const usedStateBuffer = step.nextParticleUploads.sphParticleUpload?.stateBuffer || null;
+    const usedThermoBuffer = step.nextParticleUploads.sphParticleUpload?.thermoBuffer || null;
+    const usedMechanicsBuffer = step.nextParticleUploads.mlsMpmParticleUpload?.mechanicsBuffer || null;
+    const g2pOutput = retainedG2pOutputBuffers(step.g2pReconstruction);
+    const thermalOutput = retainedThermalOutputBuffers(step.thermalStep);
     destroySphGpuParticleBuffers(step.nextParticleUploads.sphParticleUpload);
     destroyMlsMpmGpuParticleBuffers(step.nextParticleUploads.mlsMpmParticleUpload);
-    if (step.g2pStateBufferReplacedByThermalStep) {
-      const replacedStateBuffer = step.g2pReconstruction?.stateBuffer || step.g2pReconstruction?.gpuResult?.stateBuffer;
-      replacedStateBuffer?.destroy?.();
-    }
+    if (g2pOutput.stateBuffer && g2pOutput.stateBuffer !== usedStateBuffer) g2pOutput.stateBuffer.destroy?.();
+    if (g2pOutput.mechanicsBuffer && g2pOutput.mechanicsBuffer !== usedMechanicsBuffer) g2pOutput.mechanicsBuffer.destroy?.();
+    if (thermalOutput.stateBuffer && thermalOutput.stateBuffer !== usedStateBuffer) thermalOutput.stateBuffer.destroy?.();
+    if (thermalOutput.thermoBuffer && thermalOutput.thermoBuffer !== usedThermoBuffer) thermalOutput.thermoBuffer.destroy?.();
   } else if (step?.g2pReconstruction?.destroyOutputParticleBuffers) {
     step.g2pReconstruction.destroyOutputParticleBuffers();
+  } else if (step?.reactionStep?.destroyOutputParticleBuffers) {
+    step.reactionStep.destroyOutputParticleBuffers();
   } else if (step?.thermalStep?.destroyOutputParticleBuffers) {
     step.thermalStep.destroyOutputParticleBuffers();
   } else {
@@ -639,26 +722,28 @@ export function destroyMlsMpmResidentStepBuffers(step) {
 
 function cloneSphParticleStateForNext(source, step) {
   const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
+  const reactionResult = step.reactionStep?.result || step.reactionStep;
   const thermalResult = step.thermalStep?.result || step.thermalStep;
   return {
     ...source,
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
-    state: noFullReadback ? source.state : (thermalResult?.state?.length ? thermalResult.state : step.state),
+    state: noFullReadback ? source.state : (reactionResult?.state?.length ? reactionResult.state : (thermalResult?.state?.length ? thermalResult.state : step.state)),
     cpuStateStale: noFullReadback,
-    thermo: noFullReadback ? source.thermo : (thermalResult?.thermo?.length ? thermalResult.thermo : source.thermo)
+    thermo: noFullReadback ? source.thermo : (reactionResult?.thermo?.length ? reactionResult.thermo : (thermalResult?.thermo?.length ? thermalResult.thermo : source.thermo))
   };
 }
 
 function cloneMlsMpmParticleStateForNext(source, step) {
   const noFullReadback = step.readbackMode === NO_FULL_READBACK_MODE;
+  const reactionResult = step.reactionStep?.result || step.reactionStep;
   return {
     ...source,
     status: noFullReadback ? 'gpu-resident-unread-ready' : 'gpu-resident-readback-ready',
     step: step.particlePingPong?.nextStep ?? ((source.step ?? 0) + 1),
     time: step.particlePingPong?.nextTime ?? ((source.time ?? 0) + (step.dt ?? 0)),
-    mechanics: noFullReadback ? source.mechanics : step.mechanics,
+    mechanics: noFullReadback ? source.mechanics : (reactionResult?.mechanics?.length ? reactionResult.mechanics : step.mechanics),
     cpuStateStale: noFullReadback
   };
 }
@@ -674,6 +759,7 @@ function summarizeResidentStepForSequence(step, index) {
     stageBuffersRetained: step.stageBuffersRetained,
     g2pOutputBuffersRetained: step.g2pOutputBuffersRetained,
     thermalStepRetained: Boolean(step.thermalStep?.retainedOutputParticleBuffers || step.thermalStep?.result?.retainedOutputParticleBuffers),
+    reactionStepRetained: Boolean(step.reactionStep?.retainedOutputParticleBuffers || step.reactionStep?.result?.retainedOutputParticleBuffers),
     nextParticleBufferMode: step.nextParticleBufferMode,
     particlePingPong: { ...step.particlePingPong },
     diagnostics: {

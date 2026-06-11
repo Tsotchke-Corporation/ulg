@@ -18,6 +18,10 @@ export const ULG_SPH_GPU_THERMAL_MATERIAL_TABLE_SCHEMA = 'peercompute.ulg.sph-gp
 export const ULG_SPH_GPU_THERMAL_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-execution.v0';
 export const ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-thermal-step-parity.v0';
+export const ULG_SPH_GPU_REACTION_TABLE_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-table.v0';
+export const ULG_SPH_GPU_REACTION_STEP_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step.v0';
+export const ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step-execution.v0';
+export const ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA = 'peercompute.ulg.sph-gpu-reaction-step-parity.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer.v0';
 export const ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SET_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-particle-buffer-set.v0';
 export const ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA = 'peercompute.ulg.mls-mpm-gpu-mechanics-prediction.v0';
@@ -142,6 +146,34 @@ export const SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT = Object.freeze([
   'densityToKgPerM3:f32',
   'status:f32',
   'pad0:f32'
+]);
+export const SPH_GPU_REACTION_RECORD_ROW_LAYOUT = Object.freeze([
+  'reactantAMaterialId:f32',
+  'reactantBMaterialId:f32',
+  'productMaterialId:f32',
+  'activationTemperatureK:f32',
+  'specificEnthalpyJPerKg:f32',
+  'contactRadiusM:f32',
+  'phaseMaskA:f32',
+  'phaseMaskB:f32',
+  'status:f32',
+  'pad0:f32',
+  'pad1:f32',
+  'pad2:f32'
+]);
+export const SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT = Object.freeze([
+  'materialId:f32',
+  'phaseId:f32',
+  'restDensityKgPerM3:f32',
+  'effectiveBulkModulusPa:f32',
+  'shearModulusPa:f32',
+  'lameLambdaPa:f32',
+  'soundSpeedMPerS:f32',
+  'eosModelId:f32',
+  'solidFlag:f32',
+  'status:f32',
+  'pad0:f32',
+  'pad1:f32'
 ]);
 export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
   'deformationF00:f32',

@@ -697,7 +697,29 @@ Still remaining:
 
 - No-readback hot-loop mode.
 - Compact GPU summary buffers for normal-frame diagnostics.
-- Scene integration for configurable multi-step resident execution.
+- GPU-authoritative visible particle state.
+- Thermal, wall heat, phase, reaction, gas pressure, and render-field kernels.
+
+## 2026-06-11 Checkpoint - Scene-Scheduled Multi-Step Chain
+
+The browser scene now requests the repeated resident MLS-MPM execution wrapper
+directly. The default demo schedules two resident steps per scene update so the
+retained G2P outputs are actually consumed as the next step's particle buffers.
+
+Implemented:
+
+- `sphPhaseScene.refreshMlsMpmResidentSteps()` and
+  `sphPhaseScene.getMlsMpmResidentSteps()`.
+- Sequence publication that keeps the existing single-step P2G/grid/G2P getters
+  pointed at the final step for compatibility.
+- Sequence-level cleanup to avoid double-destroying retained resident buffers.
+- Demo-mount scheduling of two repeated resident steps.
+- Browser e2e and live WebGPU probe coverage for two-step ping-pong.
+
+Still remaining:
+
+- No-readback hot-loop mode.
+- Compact GPU summary buffers for normal-frame diagnostics.
 - GPU-authoritative visible particle state.
 - Thermal, wall heat, phase, reaction, gas pressure, and render-field kernels.
 

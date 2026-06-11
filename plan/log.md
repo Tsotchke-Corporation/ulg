@@ -8797,3 +8797,70 @@ Failures / open questions:
 - CPU state remains authoritative for visible motion, thermal state, phase
   changes, reactions, wall heat, gas pressure, and status.
 - No push was attempted.
+
+## 2026-06-11 01:32:20 AKDT - Scene-scheduled multi-step resident chain
+
+Prompt:
+
+- Continue the larger GPU-resident refactor; demo breakage is acceptable when
+  it speeds the architectural work.
+
+Actions:
+
+- Added scene APIs `refreshMlsMpmResidentSteps()` and
+  `getMlsMpmResidentSteps()`.
+- Wired the SPH phase demo mount to schedule two repeated resident MLS-MPM
+  steps per update.
+- Preserved existing single-step getters by publishing the sequence final step
+  to `getMlsMpmResidentStep()`, `getMlsMpmP2gGridProjection()`,
+  `getMlsMpmGridUpdate()`, and `getMlsMpmG2pReconstruction()`.
+- Added sequence-level cleanup for retained buffers to avoid double-destroying
+  P2G/grid-update/G2P artifacts.
+- Extended the default derived-material browser e2e to assert the sequence
+  artifact, final-step artifact, two-step ping-pong, and honest readback /
+  non-authoritative flags.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseRenderer.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- Browser HTTPS/WebGPU multi-step probe against `https://127.0.0.1:5173/`
+  using Chromium flags `--enable-unsafe-webgpu --enable-features=Vulkan`
+- `curl -k --max-time 10 https://100.86.83.35:5173/`
+- `npm run build`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks completed.
+- PASS: focused resident-step and SPH renderer tests passed `9/9`.
+- PASS: focused HTTPS browser e2e passed (`1/1`).
+- PASS: flagged browser WebGPU probe reported sequence schema
+  `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0`, backend
+  `webgpu`, status `resident-steps-executed`, `stepCount=2`,
+  `completedStepCount=2`, P2G/grid-update/G2P `webgpu-executed` in both
+  steps, ping-pong `0 -> 1` then `1 -> 0`, `activeGridNodeCount=280`,
+  `massDeltaKg=0`, and final retained G2P output buffers.
+- PASS: current Tailscale/VPN URL `https://100.86.83.35:5173/` returned `200`
+  while the Vite listener is bound to `0.0.0.0:5173`.
+- PASS: production build passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- The sequence still uses full parity/readback and reports
+  `normalHotLoopReadbackFree=false`.
+- GPU output is not yet authoritative for visible motion or CPU particle state.
+- Thermal, phase, reaction, wall heat, gas pressure, and status remain CPU-side.
+- No push was attempted.

@@ -1,6 +1,6 @@
 # Implementation Status
 
-Updated: 2026-06-11 01:20 AKDT
+Updated: 2026-06-11 01:32 AKDT
 
 ## Done
 
@@ -1269,5 +1269,42 @@ Not claimed:
   `normalHotLoopReadbackFree=false`, and `gpuAuthoritativeState=false`.
 - The live scene is not wired to run multiple resident steps per visual frame
   yet.
+- CPU state remains authoritative for visible motion, thermal state, phase
+  changes, reactions, wall heat, gas pressure, and status.
+
+## 2026-06-11 Update - Scene-Scheduled Multi-Step Resident Chain
+
+Completed:
+
+- Wired `sphPhaseScene` to expose `refreshMlsMpmResidentSteps()` and
+  `getMlsMpmResidentSteps()`.
+- The SPH phase demo mount now schedules two resident MLS-MPM steps per GPU
+  scene update.
+- The old single-step getters remain compatible by pointing at the sequence's
+  final step.
+- Added sequence-aware cleanup so resident stage buffers are destroyed as one
+  sequence instead of double-destroying P2G/grid-update/G2P artifacts.
+- Extended browser e2e coverage for the sequence artifact, final-step artifact,
+  two-step ping-pong metadata, and the explicit non-authoritative/readback
+  flags.
+
+Latest validation:
+
+- PASS: syntax checks for scene, mount, and browser e2e files.
+- PASS: focused resident-step and SPH renderer tests passed `9/9`.
+- PASS: focused HTTPS browser e2e passed against the live server.
+- PASS: flagged browser WebGPU probe reported two resident steps on WebGPU,
+  both with P2G/grid-update/G2P `webgpu-executed`, ping-pong `0 -> 1` then
+  `1 -> 0`, `activeGridNodeCount=280`, `massDeltaKg=0`, and final G2P output
+  buffers retained.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: Vite is listening on `0.0.0.0:5173`; local HTTPS returned `200` and
+  current Tailscale/VPN URL `https://100.86.83.35:5173/` returned `200`.
+
+Not claimed:
+
+- The sequence still reports `readbackMode=full-parity-readback`,
+  `normalHotLoopReadbackFree=false`, and `gpuAuthoritativeState=false`.
 - CPU state remains authoritative for visible motion, thermal state, phase
   changes, reactions, wall heat, gas pressure, and status.

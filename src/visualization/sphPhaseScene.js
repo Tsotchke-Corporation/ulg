@@ -26,7 +26,11 @@ import { runMlsMpmMechanicsPredictWithOptionalWebGpu } from '../runtime/sph/sphM
 import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from '../runtime/sph/sphGridGpuKernel.js';
 import { runMlsMpmGridUpdateWithOptionalWebGpu } from '../runtime/sph/sphGridUpdateGpuKernel.js';
 import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.js';
-import { runMlsMpmResidentStepWithOptionalWebGpu } from '../runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  destroyMlsMpmResidentStepsBuffers,
+  runMlsMpmResidentStepWithOptionalWebGpu,
+  runMlsMpmResidentStepsWithOptionalWebGpu
+} from '../runtime/sph/sphMlsMpmGpuStep.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -366,6 +370,9 @@ export function createSphPhaseScene(container, {
   let mlsMpmResidentStep = null;
   let mlsMpmResidentStepSignature = null;
   let pendingMlsMpmResidentStep = null;
+  let mlsMpmResidentSteps = null;
+  let mlsMpmResidentStepsSignature = null;
+  let pendingMlsMpmResidentSteps = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -379,6 +386,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmGridUpdate = null;
   scene.userData.mlsMpmG2pReconstruction = null;
   scene.userData.mlsMpmResidentStep = null;
+  scene.userData.mlsMpmResidentSteps = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -627,6 +635,77 @@ export function createSphPhaseScene(container, {
       cflFactor,
       dims.join(',')
     ].join('|');
+  }
+
+  function normalizeResidentStepCount(value) {
+    const count = Number(value);
+    return Number.isFinite(count) ? Math.max(1, Math.round(count)) : 1;
+  }
+
+  function mlsMpmResidentStepsSignatureFor({
+    stepCount = 1,
+    retainIntermediateSteps = false,
+    ...args
+  } = {}) {
+    const stepSignature = mlsMpmResidentStepSignatureFor(args);
+    if (!stepSignature) return null;
+    return [
+      stepSignature,
+      normalizeResidentStepCount(stepCount),
+      Boolean(retainIntermediateSteps)
+    ].join('|');
+  }
+
+  function clearMlsMpmResidentExecutionArtifacts() {
+    if (mlsMpmResidentSteps) {
+      destroyMlsMpmResidentStepsBuffers(mlsMpmResidentSteps);
+    } else {
+      mlsMpmP2gGridProjection?.gpuResult?.destroyGridBuffer?.();
+      mlsMpmP2gGridProjection?.destroyGridBuffer?.();
+      mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
+      mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
+      if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
+        mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
+      } else {
+        mlsMpmG2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
+      }
+    }
+    mlsMpmP2gGridProjection = null;
+    mlsMpmP2gGridProjectionSignature = null;
+    scene.userData.mlsMpmP2gGridProjection = null;
+    mlsMpmGridUpdate = null;
+    mlsMpmGridUpdateSignature = null;
+    scene.userData.mlsMpmGridUpdate = null;
+    mlsMpmG2pReconstruction = null;
+    mlsMpmG2pReconstructionSignature = null;
+    scene.userData.mlsMpmG2pReconstruction = null;
+    mlsMpmResidentStep = null;
+    mlsMpmResidentStepSignature = null;
+    scene.userData.mlsMpmResidentStep = null;
+    mlsMpmResidentSteps = null;
+    mlsMpmResidentStepsSignature = null;
+    scene.userData.mlsMpmResidentSteps = null;
+  }
+
+  function publishMlsMpmResidentStepArtifacts(step, signature, {
+    stepsExecution = null,
+    stepsSignature = null
+  } = {}) {
+    mlsMpmResidentSteps = stepsExecution;
+    mlsMpmResidentStepsSignature = stepsSignature;
+    scene.userData.mlsMpmResidentSteps = stepsExecution;
+    mlsMpmResidentStep = step;
+    mlsMpmResidentStepSignature = stepsExecution ? null : signature;
+    mlsMpmP2gGridProjection = step?.p2gGridProjection ?? null;
+    mlsMpmP2gGridProjectionSignature = signature;
+    mlsMpmGridUpdate = step?.gridUpdate ?? null;
+    mlsMpmGridUpdateSignature = signature;
+    mlsMpmG2pReconstruction = step?.g2pReconstruction ?? null;
+    mlsMpmG2pReconstructionSignature = signature;
+    scene.userData.mlsMpmResidentStep = step;
+    scene.userData.mlsMpmP2gGridProjection = mlsMpmP2gGridProjection;
+    scene.userData.mlsMpmGridUpdate = mlsMpmGridUpdate;
+    scene.userData.mlsMpmG2pReconstruction = mlsMpmG2pReconstruction;
   }
 
   async function refreshSphGpuParticleBuffers({
@@ -1133,8 +1212,7 @@ export function createSphPhaseScene(container, {
     g2pRunner = undefined
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
-      mlsMpmResidentStep = null;
-      scene.userData.mlsMpmResidentStep = null;
+      clearMlsMpmResidentExecutionArtifacts();
       return null;
     }
     const signature = mlsMpmResidentStepSignatureFor({
@@ -1201,26 +1279,8 @@ export function createSphPhaseScene(container, {
           stale: true
         };
       }
-      if (mlsMpmP2gGridProjection !== execution.p2gGridProjection) {
-        mlsMpmP2gGridProjection?.gpuResult?.destroyGridBuffer?.();
-        mlsMpmP2gGridProjection?.destroyGridBuffer?.();
-      }
-      if (mlsMpmGridUpdate !== execution.gridUpdate) {
-        mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
-        mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
-      }
-      mlsMpmResidentStep = execution;
-      mlsMpmResidentStepSignature = signature;
-      mlsMpmP2gGridProjection = execution.p2gGridProjection;
-      mlsMpmP2gGridProjectionSignature = signature;
-      mlsMpmGridUpdate = execution.gridUpdate;
-      mlsMpmGridUpdateSignature = signature;
-      mlsMpmG2pReconstruction = execution.g2pReconstruction;
-      mlsMpmG2pReconstructionSignature = signature;
-      scene.userData.mlsMpmResidentStep = execution;
-      scene.userData.mlsMpmP2gGridProjection = mlsMpmP2gGridProjection;
-      scene.userData.mlsMpmGridUpdate = mlsMpmGridUpdate;
-      scene.userData.mlsMpmG2pReconstruction = mlsMpmG2pReconstruction;
+      clearMlsMpmResidentExecutionArtifacts();
+      publishMlsMpmResidentStepArtifacts(execution, signature);
       return execution;
     })();
     pendingMlsMpmResidentStep = { signature, promise };
@@ -1228,6 +1288,118 @@ export function createSphPhaseScene(container, {
       return await promise;
     } finally {
       if (pendingMlsMpmResidentStep?.promise === promise) pendingMlsMpmResidentStep = null;
+    }
+  }
+
+  async function refreshMlsMpmResidentSteps({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    gridSpacingM = sphGpuParticleState?.smoothingLengthM,
+    dt = mlsMpmGpuParticleState?.mechanicsDtS ?? 0,
+    gravityMPerS2 = mlsMpmGpuParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
+    cflFactor = mlsMpmGpuParticleState?.gridCflFactor || 0.6,
+    parityTolerances = undefined,
+    p2gRunner = undefined,
+    gridUpdateRunner = undefined,
+    g2pRunner = undefined,
+    stepCount = 1,
+    retainIntermediateSteps = false
+  } = {}) {
+    if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
+      clearMlsMpmResidentExecutionArtifacts();
+      return null;
+    }
+    const normalizedStepCount = normalizeResidentStepCount(stepCount);
+    const signature = mlsMpmResidentStepsSignatureFor({
+      gridSpacingM,
+      dt,
+      gravityMPerS2,
+      cflFactor,
+      stepCount: normalizedStepCount,
+      retainIntermediateSteps
+    });
+    if (!force && mlsMpmResidentStepsSignature === signature && mlsMpmResidentSteps) {
+      return mlsMpmResidentSteps;
+    }
+    if (!force && pendingMlsMpmResidentSteps?.signature === signature) {
+      return pendingMlsMpmResidentSteps.promise;
+    }
+    const promise = (async () => {
+      const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
+        ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
+        : deviceResult;
+      const resolvedSphUpload = preferWebGpu
+        ? await refreshSphGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : sphGpuParticleUpload;
+      const resolvedMlsUpload = preferWebGpu
+        ? await refreshMlsMpmGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : mlsMpmGpuParticleUpload;
+      const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+        sphParticleState: sphGpuParticleState,
+        mlsMpmParticleState: mlsMpmGpuParticleState,
+        sphParticleUpload: resolvedSphUpload,
+        mlsMpmParticleUpload: resolvedMlsUpload,
+        gridSpacingM,
+        boxDimsM: dims,
+        dt,
+        gravityMPerS2,
+        cflFactor,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult: resolvedDeviceResult,
+        parityTolerances,
+        p2gRunner,
+        gridUpdateRunner,
+        g2pRunner,
+        stepCount: normalizedStepCount,
+        retainIntermediateSteps,
+        onDeviceLost() {
+          opticalGpuDeviceResultPromise = null;
+        }
+      });
+      execution.signature = signature;
+      if (
+        !running
+        || mlsMpmResidentStepsSignatureFor({
+          gridSpacingM,
+          dt,
+          gravityMPerS2,
+          cflFactor,
+          stepCount: normalizedStepCount,
+          retainIntermediateSteps
+        }) !== signature
+      ) {
+        return {
+          ...execution,
+          stale: true
+        };
+      }
+      clearMlsMpmResidentExecutionArtifacts();
+      publishMlsMpmResidentStepArtifacts(execution.finalStep, signature, {
+        stepsExecution: execution,
+        stepsSignature: signature
+      });
+      return execution;
+    })();
+    pendingMlsMpmResidentSteps = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingMlsMpmResidentSteps?.promise === promise) pendingMlsMpmResidentSteps = null;
     }
   }
 
@@ -1312,27 +1484,7 @@ export function createSphPhaseScene(container, {
     mlsMpmMechanicsPrediction = null;
     mlsMpmMechanicsPredictionSignature = null;
     scene.userData.mlsMpmMechanicsPrediction = null;
-    mlsMpmP2gGridProjection?.gpuResult?.destroyGridBuffer?.();
-    mlsMpmP2gGridProjection?.destroyGridBuffer?.();
-    mlsMpmP2gGridProjection = null;
-    mlsMpmP2gGridProjectionSignature = null;
-    scene.userData.mlsMpmP2gGridProjection = null;
-    mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
-    mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
-    mlsMpmGridUpdate = null;
-    mlsMpmGridUpdateSignature = null;
-    scene.userData.mlsMpmGridUpdate = null;
-    if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
-      mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
-    } else {
-      mlsMpmG2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
-    }
-    mlsMpmG2pReconstruction = null;
-    mlsMpmG2pReconstructionSignature = null;
-    scene.userData.mlsMpmG2pReconstruction = null;
-    mlsMpmResidentStep = null;
-    mlsMpmResidentStepSignature = null;
-    scene.userData.mlsMpmResidentStep = null;
+    clearMlsMpmResidentExecutionArtifacts();
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -1422,15 +1574,7 @@ export function createSphPhaseScene(container, {
     pmrem.dispose();
     if (sphGpuParticleUpload?.status === 'webgpu-uploaded') destroySphGpuParticleBuffers(sphGpuParticleUpload);
     if (mlsMpmGpuParticleUpload?.status === 'webgpu-uploaded') destroyMlsMpmGpuParticleBuffers(mlsMpmGpuParticleUpload);
-    mlsMpmP2gGridProjection?.gpuResult?.destroyGridBuffer?.();
-    mlsMpmP2gGridProjection?.destroyGridBuffer?.();
-    mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
-    mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
-    if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
-      mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
-    } else {
-      mlsMpmG2pReconstruction?.gpuResult?.destroyOutputParticleBuffers?.();
-    }
+    clearMlsMpmResidentExecutionArtifacts();
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
@@ -1481,6 +1625,9 @@ export function createSphPhaseScene(container, {
     getMlsMpmResidentStep() {
       return mlsMpmResidentStep;
     },
+    getMlsMpmResidentSteps() {
+      return mlsMpmResidentSteps;
+    },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,
@@ -1489,6 +1636,7 @@ export function createSphPhaseScene(container, {
     refreshMlsMpmGridUpdate,
     refreshMlsMpmG2pReconstruction,
     refreshMlsMpmResidentStep,
+    refreshMlsMpmResidentSteps,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

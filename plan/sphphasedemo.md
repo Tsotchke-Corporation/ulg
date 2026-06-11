@@ -1228,3 +1228,34 @@ Remaining before demo-visible GPU motion:
   repeated-step conservation checks.
 - Move thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
   pressure, and optical/render fields onto resident GPU buffers.
+
+## 2026-06-11 Scene-Scheduled Multi-Step Resident Chain
+
+Completed:
+
+- The live SPH phase scene now has a multi-step resident MLS-MPM API.
+- The demo mount schedules two resident GPU steps per update.
+- The compatibility getters for P2G, grid update, G2P, and resident step now
+  point at the sequence final step.
+- Sequence cleanup destroys retained buffers through the sequence owner to
+  avoid double-destroying final-step stage artifacts.
+
+Validation evidence:
+
+- Focused resident-step and SPH renderer tests passed `9/9`.
+- Focused HTTPS browser e2e passed against the live server.
+- Flagged browser WebGPU probe reported sequence schema
+  `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0`, `stepCount=2`,
+  `completedStepCount=2`, both steps on WebGPU, ping-pong `0 -> 1` and
+  `1 -> 0`, final retained output buffers, and honest
+  `full-parity-readback` / non-authoritative flags.
+- Production build passed with the known Vite large-chunk warning.
+- Local HTTPS and current Tailscale/VPN HTTPS both returned `200`.
+
+Remaining before demo-visible GPU motion:
+
+- Add no-readback mode and compact GPU summary-buffer diagnostics.
+- Promote repeated GPU output to visual/mechanical authority only after
+  repeated-step conservation checks.
+- Move thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
+  pressure, and optical/render fields onto resident GPU buffers.

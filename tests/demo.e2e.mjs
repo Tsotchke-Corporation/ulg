@@ -1181,6 +1181,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getMlsMpmGridUpdate?.()?.schema
       && scene?.getMlsMpmG2pReconstruction?.()?.schema
       && scene?.getMlsMpmResidentStep?.()?.schema
+      && scene?.getMlsMpmResidentSteps?.()?.schema
     );
   });
   const derivedSummary = await page.evaluate(() => {
@@ -1200,6 +1201,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmGridUpdate = scene?.getMlsMpmGridUpdate?.();
     const mlsMpmG2pReconstruction = scene?.getMlsMpmG2pReconstruction?.();
     const mlsMpmResidentStep = scene?.getMlsMpmResidentStep?.();
+    const mlsMpmResidentSteps = scene?.getMlsMpmResidentSteps?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1392,6 +1394,25 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         phaseChangeValidation: mlsMpmResidentStep?.phaseChangeValidation,
         fullPhysicsValidation: mlsMpmResidentStep?.fullPhysicsValidation
       },
+      mlsMpmResidentSteps: {
+        schema: mlsMpmResidentSteps?.schema,
+        backend: mlsMpmResidentSteps?.backend,
+        status: mlsMpmResidentSteps?.status,
+        stepCount: mlsMpmResidentSteps?.stepCount,
+        completedStepCount: mlsMpmResidentSteps?.completedStepCount,
+        retainIntermediateSteps: mlsMpmResidentSteps?.retainIntermediateSteps,
+        retainedIntermediateStepCount: mlsMpmResidentSteps?.retainedIntermediateStepCount,
+        finalStepSchema: mlsMpmResidentSteps?.finalStep?.schema,
+        finalStepStatus: mlsMpmResidentSteps?.finalStep?.status,
+        stepSummaries: mlsMpmResidentSteps?.stepSummaries,
+        readbackMode: mlsMpmResidentSteps?.readbackMode,
+        normalHotLoopReadbackFree: mlsMpmResidentSteps?.normalHotLoopReadbackFree,
+        gpuAuthoritativeState: mlsMpmResidentSteps?.gpuAuthoritativeState,
+        scientificValidation: mlsMpmResidentSteps?.scientificValidation,
+        sphValidation: mlsMpmResidentSteps?.sphValidation,
+        phaseChangeValidation: mlsMpmResidentSteps?.phaseChangeValidation,
+        fullPhysicsValidation: mlsMpmResidentSteps?.fullPhysicsValidation
+      },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
   });
@@ -1573,6 +1594,30 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmG2pReconstruction.sphValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.phaseChangeValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.fullPhysicsValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.schema).toBe('peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0');
+  expect(['cpu-reference', 'webgpu', 'mixed-fallback']).toContain(derivedSummary.mlsMpmResidentSteps.backend);
+  expect(derivedSummary.mlsMpmResidentSteps.status).toBe('resident-steps-executed');
+  expect(derivedSummary.mlsMpmResidentSteps.stepCount).toBe(2);
+  expect(derivedSummary.mlsMpmResidentSteps.completedStepCount).toBe(2);
+  expect(derivedSummary.mlsMpmResidentSteps.retainIntermediateSteps).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.retainedIntermediateStepCount).toBe(0);
+  expect(derivedSummary.mlsMpmResidentSteps.finalStepSchema).toBe('peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0');
+  expect([
+    'resident-step-cpu-or-fallback',
+    'resident-step-webgpu-executed'
+  ]).toContain(derivedSummary.mlsMpmResidentSteps.finalStepStatus);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries).toHaveLength(2);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[0].particlePingPong.sourceSlot).toBe(0);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[0].particlePingPong.nextSlot).toBe(1);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.sourceSlot).toBe(1);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.nextSlot).toBe(0);
+  expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('full-parity-readback');
+  expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.gpuAuthoritativeState).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.scientificValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.sphValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.phaseChangeValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentSteps.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.mlsMpmResidentStep.schema).toBe('peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0');
   expect(derivedSummary.mlsMpmResidentStep.stepSchema).toBe('peercompute.ulg.mls-mpm-gpu-resident-step.v0');
   expect(['cpu-reference', 'webgpu', 'mixed-fallback']).toContain(derivedSummary.mlsMpmResidentStep.backend);
@@ -1603,8 +1648,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.nextParticleBufferMode).toBe('retained-g2p-output-buffers');
     expect(derivedSummary.mlsMpmResidentStep.nextParticleStateBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.nextParticleMechanicsBufferByteLength).toBeGreaterThan(0);
-    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.sourceSlot).toBe(0);
-    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextSlot).toBe(1);
+    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.sourceSlot).toBe(1);
+    expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextSlot).toBe(0);
     expect(derivedSummary.mlsMpmResidentStep.particlePingPong.nextStep).toBe(
       derivedSummary.mlsMpmResidentStep.particlePingPong.step + 1
     );

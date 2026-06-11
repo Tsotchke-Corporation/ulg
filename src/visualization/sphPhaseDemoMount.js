@@ -35,6 +35,7 @@ const BLOB_SCALE_DEFAULT = 1;
 // base block (ice at −40 °F). Editable in the panel.
 const DROP_TEMP_DEFAULT_K = 1850;
 const BASE_TEMP_DEFAULT_K = 233.15;
+const RESIDENT_STEPS_PER_SCHEDULE = 2;
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -499,6 +500,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
   overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
   overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
+  overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
@@ -507,7 +509,7 @@ export function mountSphPhaseDemoOverlay() {
   let pendingMlsMpmP2gGridProjectionSignature = null;
   let pendingMlsMpmGridUpdateSignature = null;
   let pendingMlsMpmG2pReconstructionSignature = null;
-  let pendingMlsMpmResidentStepSignature = null;
+  let pendingMlsMpmResidentStepsSignature = null;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -664,7 +666,7 @@ export function mountSphPhaseDemoOverlay() {
     });
   }
 
-  function mlsMpmResidentStepSignature() {
+  function mlsMpmResidentStepsSignature(stepCount = RESIDENT_STEPS_PER_SCHEDULE) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
     const sphSignature = sphGpuParticleSignature(sph);
@@ -676,23 +678,29 @@ export function mountSphPhaseDemoOverlay() {
       sph?.smoothingLengthM ?? 0,
       mls?.mechanicsDtS ?? 0,
       (mls?.gravityMPerS2 ?? [0, -9.80665, 0]).join(','),
-      mls?.gridCflFactor ?? 0.6
+      mls?.gridCflFactor ?? 0.6,
+      Math.max(1, Math.round(Number(stepCount) || 1))
     ].join('|');
   }
 
-  function scheduleMlsMpmResidentStep() {
-    const signature = mlsMpmResidentStepSignature();
-    if (!signature || pendingMlsMpmResidentStepSignature === signature) return;
-    pendingMlsMpmResidentStepSignature = signature;
-    scene.refreshMlsMpmResidentStep?.({ preferWebGpu: true }).then((execution) => {
-      overlay.__mlsMpmResidentStep = execution;
-      overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.p2gGridProjection || null;
-      overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || execution?.gridUpdate || null;
-      overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || execution?.g2pReconstruction || null;
+  function scheduleMlsMpmResidentSteps(stepCount = RESIDENT_STEPS_PER_SCHEDULE) {
+    const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
+    const signature = mlsMpmResidentStepsSignature(normalizedStepCount);
+    if (!signature || pendingMlsMpmResidentStepsSignature === signature) return;
+    pendingMlsMpmResidentStepsSignature = signature;
+    scene.refreshMlsMpmResidentSteps?.({
+      preferWebGpu: true,
+      stepCount: normalizedStepCount
+    }).then((execution) => {
+      overlay.__mlsMpmResidentSteps = execution;
+      overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || execution?.finalStep || null;
+      overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.finalStep?.p2gGridProjection || null;
+      overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || execution?.finalStep?.gridUpdate || null;
+      overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || execution?.finalStep?.g2pReconstruction || null;
     }).catch((error) => {
-      overlay.__mlsMpmResidentStepError = error instanceof Error ? error.message : String(error);
+      overlay.__mlsMpmResidentStepsError = error instanceof Error ? error.message : String(error);
     }).finally(() => {
-      if (pendingMlsMpmResidentStepSignature === signature) pendingMlsMpmResidentStepSignature = null;
+      if (pendingMlsMpmResidentStepsSignature === signature) pendingMlsMpmResidentStepsSignature = null;
     });
   }
 
@@ -719,6 +727,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
     overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
     overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
+    overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
     pendingOpticalLookupSignature = null;
     pendingSphGpuParticleUploadSignature = null;
     pendingMlsMpmGpuParticleUploadSignature = null;
@@ -726,7 +735,7 @@ export function mountSphPhaseDemoOverlay() {
     pendingMlsMpmP2gGridProjectionSignature = null;
     pendingMlsMpmGridUpdateSignature = null;
     pendingMlsMpmG2pReconstructionSignature = null;
-    pendingMlsMpmResidentStepSignature = null;
+    pendingMlsMpmResidentStepsSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -796,11 +805,12 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
     overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
     overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
+    overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
     scheduleOpticalGpuLookupRefresh();
     scheduleSphGpuParticleUpload();
     scheduleMlsMpmGpuParticleUpload();
     scheduleMlsMpmMechanicsPrediction();
-    scheduleMlsMpmResidentStep();
+    scheduleMlsMpmResidentSteps();
   }
 
   function stepDemoForVisualTest(steps = 1) {

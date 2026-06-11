@@ -636,7 +636,6 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
     }
     await Promise.resolve();
     if (lostInfo) {
-      gpuResult.destroyGridBuffer?.();
       return executionFromProjection(cpuReference, {
         cpuReference,
         webgpuStatus: {

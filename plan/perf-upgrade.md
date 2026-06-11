@@ -625,6 +625,32 @@ Still remaining:
 - Thermal/phase/reaction kernels, gas pressure, wall heat ledgers, and render
   fields remain outside the resident GPU hot loop.
 
+## 2026-06-11 Checkpoint - Resident MLS-MPM Step Artifact
+
+The first resident-step runtime artifact now owns P2G, grid update, and G2P as
+one orchestrated chain. The scene no longer has to manually schedule each stage
+from UI code; it asks for one resident step and exposes the component stage
+artifacts for compatibility and evidence.
+
+Implemented GPU-resident pieces:
+
+- `runMlsMpmResidentStepWithOptionalWebGpu()` as the chain owner.
+- Shared WebGPU device and uploaded particle buffers across the stage wrappers.
+- Retained P2G grid buffer into grid update and retained grid-update velocity
+  buffer into G2P.
+- Compact step diagnostics for mass, momentum, active grid nodes, speed,
+  displacement, and volume-ratio range.
+- Browser overlay scheduling through `refreshMlsMpmResidentStep()`.
+
+Still remaining:
+
+- G2P output particle buffers are read back and destroyed; they are not yet
+  ping-ponged as the next resident input.
+- Normal runtime still performs full parity readback.
+- CPU particle state remains authoritative for visible motion, thermal updates,
+  phase updates, reactions, and status.
+- Compact GPU summary buffers need to replace full readbacks in the hot loop.
+
 ## Validation
 
 Required tests and evidence:

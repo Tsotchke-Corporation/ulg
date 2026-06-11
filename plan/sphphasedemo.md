@@ -1126,3 +1126,40 @@ Remaining before GPU-authoritative motion:
   candidate states after repeated-step parity and conservation checks.
 - Move thermal, wall heat, phase-equilibrium, reaction, gas pressure, and render
   fields onto resident GPU buffers.
+
+## 2026-06-11 GPU MLS-MPM Resident Step Checkpoint
+
+Completed:
+
+- Added a single MLS-MPM resident-step runtime artifact that orchestrates
+  stress-aware P2G, grid velocity update, and G2P reconstruction.
+- The resident step shares one WebGPU device, reuses uploaded particle buffers,
+  retains the P2G grid buffer into grid update, and retains the grid-update
+  velocity buffer into G2P.
+- The live SPH scene now schedules the resident step directly and backfills the
+  old P2G/grid-update/G2P accessors from that chain for compatibility.
+- Added compact step diagnostics for mass delta, momentum delta, active grid
+  nodes, max speed, max displacement, and volume-ratio range.
+
+Validation evidence:
+
+- Focused ABI/P2G/grid-update/G2P/resident-step tests passed `39/39`.
+- Browser e2e for the default derived-material SPH demo passed against the
+  live HTTPS server with the resident-step assertions.
+- Live browser probe with WebGPU flags reported resident step `webgpu`,
+  stage statuses `webgpu-executed` for P2G/grid-update/G2P, retained buffers
+  `true`, P2G/grid-update/G2P parity `pass`, `activeGridNodeCount=280`,
+  `massDeltaKg=0`, `particleCount=152`, and `gridNodeCount=13824`.
+- Full `npm test` passed `280/280`; production build passed with the known
+  large-chunk warning.
+
+Remaining before GPU-authoritative motion:
+
+- Add no-readback resident kernels and compact GPU summary buffers; the resident
+  step still reports `readbackMode=full-parity-readback`.
+- Retain and ping-pong G2P output particle buffers instead of destroying them
+  after parity readback.
+- Feed accepted repeated-step GPU output into visual/mechanical authority only
+  after conservation and repeated-step parity are established.
+- Move thermal, wall heat, phase-equilibrium, reaction, gas pressure, and render
+  fields onto resident GPU buffers.

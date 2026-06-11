@@ -26,6 +26,7 @@ import { runMlsMpmMechanicsPredictWithOptionalWebGpu } from '../runtime/sph/sphM
 import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from '../runtime/sph/sphGridGpuKernel.js';
 import { runMlsMpmGridUpdateWithOptionalWebGpu } from '../runtime/sph/sphGridUpdateGpuKernel.js';
 import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.js';
+import { runMlsMpmResidentStepWithOptionalWebGpu } from '../runtime/sph/sphMlsMpmGpuStep.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
@@ -362,6 +363,9 @@ export function createSphPhaseScene(container, {
   let mlsMpmG2pReconstruction = null;
   let mlsMpmG2pReconstructionSignature = null;
   let pendingMlsMpmG2pReconstruction = null;
+  let mlsMpmResidentStep = null;
+  let mlsMpmResidentStepSignature = null;
+  let pendingMlsMpmResidentStep = null;
   scene.userData.opticalGpuTable = opticalGpuTable;
   scene.userData.opticalGpuLookup = opticalGpuLookup;
   scene.userData.opticalGpuLookupExecution = null;
@@ -374,6 +378,7 @@ export function createSphPhaseScene(container, {
   scene.userData.mlsMpmP2gGridProjection = null;
   scene.userData.mlsMpmGridUpdate = null;
   scene.userData.mlsMpmG2pReconstruction = null;
+  scene.userData.mlsMpmResidentStep = null;
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
     if (!execution?.outputs) return [];
@@ -598,6 +603,28 @@ export function createSphPhaseScene(container, {
       mlsSignature,
       gridUpdate.signature ?? `${gridUpdate.schema}|${gridUpdate.backend}|${gridUpdate.gridNodeCount}|${gridUpdate.dt ?? 0}`,
       dt,
+      dims.join(',')
+    ].join('|');
+  }
+
+  function mlsMpmResidentStepSignatureFor({
+    sphParticleState = sphGpuParticleState,
+    mlsMpmParticleState = mlsMpmGpuParticleState,
+    gridSpacingM = sphParticleState?.smoothingLengthM ?? 0,
+    dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+    gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
+    cflFactor = mlsMpmParticleState?.gridCflFactor || 0.6
+  } = {}) {
+    const sphSignature = sphGpuParticleSignature(sphParticleState);
+    const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
+    if (!sphSignature || !mlsSignature) return null;
+    return [
+      sphSignature,
+      mlsSignature,
+      gridSpacingM,
+      dt,
+      gravityMPerS2.join(','),
+      cflFactor,
       dims.join(',')
     ].join('|');
   }
@@ -1090,6 +1117,120 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function refreshMlsMpmResidentStep({
+    preferWebGpu = true,
+    force = false,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    gridSpacingM = sphGpuParticleState?.smoothingLengthM,
+    dt = mlsMpmGpuParticleState?.mechanicsDtS ?? 0,
+    gravityMPerS2 = mlsMpmGpuParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
+    cflFactor = mlsMpmGpuParticleState?.gridCflFactor || 0.6,
+    parityTolerances = undefined,
+    p2gRunner = undefined,
+    gridUpdateRunner = undefined,
+    g2pRunner = undefined
+  } = {}) {
+    if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
+      mlsMpmResidentStep = null;
+      scene.userData.mlsMpmResidentStep = null;
+      return null;
+    }
+    const signature = mlsMpmResidentStepSignatureFor({
+      gridSpacingM,
+      dt,
+      gravityMPerS2,
+      cflFactor
+    });
+    if (!force && mlsMpmResidentStepSignature === signature && mlsMpmResidentStep) {
+      return mlsMpmResidentStep;
+    }
+    if (!force && pendingMlsMpmResidentStep?.signature === signature) {
+      return pendingMlsMpmResidentStep.promise;
+    }
+    const promise = (async () => {
+      const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
+        ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
+        : deviceResult;
+      const resolvedSphUpload = preferWebGpu
+        ? await refreshSphGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : sphGpuParticleUpload;
+      const resolvedMlsUpload = preferWebGpu
+        ? await refreshMlsMpmGpuParticleBuffers({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device,
+          deviceResult: resolvedDeviceResult
+        })
+        : mlsMpmGpuParticleUpload;
+      const execution = await runMlsMpmResidentStepWithOptionalWebGpu({
+        sphParticleState: sphGpuParticleState,
+        mlsMpmParticleState: mlsMpmGpuParticleState,
+        sphParticleUpload: resolvedSphUpload,
+        mlsMpmParticleUpload: resolvedMlsUpload,
+        gridSpacingM,
+        boxDimsM: dims,
+        dt,
+        gravityMPerS2,
+        cflFactor,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult: resolvedDeviceResult,
+        parityTolerances,
+        p2gRunner,
+        gridUpdateRunner,
+        g2pRunner,
+        onDeviceLost() {
+          opticalGpuDeviceResultPromise = null;
+        }
+      });
+      execution.signature = signature;
+      if (
+        !running
+        || mlsMpmResidentStepSignatureFor({ gridSpacingM, dt, gravityMPerS2, cflFactor }) !== signature
+      ) {
+        return {
+          ...execution,
+          stale: true
+        };
+      }
+      if (mlsMpmP2gGridProjection !== execution.p2gGridProjection) {
+        mlsMpmP2gGridProjection?.gpuResult?.destroyGridBuffer?.();
+        mlsMpmP2gGridProjection?.destroyGridBuffer?.();
+      }
+      if (mlsMpmGridUpdate !== execution.gridUpdate) {
+        mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
+        mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
+      }
+      mlsMpmResidentStep = execution;
+      mlsMpmResidentStepSignature = signature;
+      mlsMpmP2gGridProjection = execution.p2gGridProjection;
+      mlsMpmP2gGridProjectionSignature = signature;
+      mlsMpmGridUpdate = execution.gridUpdate;
+      mlsMpmGridUpdateSignature = signature;
+      mlsMpmG2pReconstruction = execution.g2pReconstruction;
+      mlsMpmG2pReconstructionSignature = signature;
+      scene.userData.mlsMpmResidentStep = execution;
+      scene.userData.mlsMpmP2gGridProjection = mlsMpmP2gGridProjection;
+      scene.userData.mlsMpmGridUpdate = mlsMpmGridUpdate;
+      scene.userData.mlsMpmG2pReconstruction = mlsMpmG2pReconstruction;
+      return execution;
+    })();
+    pendingMlsMpmResidentStep = { signature, promise };
+    try {
+      return await promise;
+    } finally {
+      if (pendingMlsMpmResidentStep?.promise === promise) pendingMlsMpmResidentStep = null;
+    }
+  }
+
   function ensureSurface(descriptorOrKey, properties = null) {
     const descriptor = renderDescriptorOf(descriptorOrKey);
     const key = descriptor.surfaceKey;
@@ -1184,6 +1325,9 @@ export function createSphPhaseScene(container, {
     mlsMpmG2pReconstruction = null;
     mlsMpmG2pReconstructionSignature = null;
     scene.userData.mlsMpmG2pReconstruction = null;
+    mlsMpmResidentStep = null;
+    mlsMpmResidentStepSignature = null;
+    scene.userData.mlsMpmResidentStep = null;
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       `${record.material}|${record.phase}`,
       record
@@ -1324,6 +1468,9 @@ export function createSphPhaseScene(container, {
     getMlsMpmG2pReconstruction() {
       return mlsMpmG2pReconstruction;
     },
+    getMlsMpmResidentStep() {
+      return mlsMpmResidentStep;
+    },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,
@@ -1331,6 +1478,7 @@ export function createSphPhaseScene(container, {
     refreshMlsMpmP2gGridProjection,
     refreshMlsMpmGridUpdate,
     refreshMlsMpmG2pReconstruction,
+    refreshMlsMpmResidentStep,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

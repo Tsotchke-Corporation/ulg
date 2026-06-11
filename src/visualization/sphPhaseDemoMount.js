@@ -498,6 +498,7 @@ export function mountSphPhaseDemoOverlay() {
   overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || null;
   overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
   overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
+  overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
   let pendingSphGpuParticleUploadSignature = null;
@@ -506,6 +507,7 @@ export function mountSphPhaseDemoOverlay() {
   let pendingMlsMpmP2gGridProjectionSignature = null;
   let pendingMlsMpmGridUpdateSignature = null;
   let pendingMlsMpmG2pReconstructionSignature = null;
+  let pendingMlsMpmResidentStepSignature = null;
 
   function scheduleOpticalGpuLookupRefresh() {
     const lookupState = scene.getOpticalGpuLookup?.();
@@ -662,6 +664,38 @@ export function mountSphPhaseDemoOverlay() {
     });
   }
 
+  function mlsMpmResidentStepSignature() {
+    const sph = scene.getSphGpuParticleState?.();
+    const mls = scene.getMlsMpmGpuParticleState?.();
+    const sphSignature = sphGpuParticleSignature(sph);
+    const mlsSignature = mlsMpmGpuParticleSignature(mls);
+    if (!sphSignature || !mlsSignature) return null;
+    return [
+      sphSignature,
+      mlsSignature,
+      sph?.smoothingLengthM ?? 0,
+      mls?.mechanicsDtS ?? 0,
+      (mls?.gravityMPerS2 ?? [0, -9.80665, 0]).join(','),
+      mls?.gridCflFactor ?? 0.6
+    ].join('|');
+  }
+
+  function scheduleMlsMpmResidentStep() {
+    const signature = mlsMpmResidentStepSignature();
+    if (!signature || pendingMlsMpmResidentStepSignature === signature) return;
+    pendingMlsMpmResidentStepSignature = signature;
+    scene.refreshMlsMpmResidentStep?.({ preferWebGpu: true }).then((execution) => {
+      overlay.__mlsMpmResidentStep = execution;
+      overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || execution?.p2gGridProjection || null;
+      overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || execution?.gridUpdate || null;
+      overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || execution?.g2pReconstruction || null;
+    }).catch((error) => {
+      overlay.__mlsMpmResidentStepError = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      if (pendingMlsMpmResidentStepSignature === signature) pendingMlsMpmResidentStepSignature = null;
+    });
+  }
+
   // Blob size is live: update the scene's surface scale and re-render without a reset.
   blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
 
@@ -684,6 +718,7 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmP2gGridProjection = scene.getMlsMpmP2gGridProjection?.() || null;
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
     overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
+    overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
     pendingOpticalLookupSignature = null;
     pendingSphGpuParticleUploadSignature = null;
     pendingMlsMpmGpuParticleUploadSignature = null;
@@ -691,6 +726,7 @@ export function mountSphPhaseDemoOverlay() {
     pendingMlsMpmP2gGridProjectionSignature = null;
     pendingMlsMpmGridUpdateSignature = null;
     pendingMlsMpmG2pReconstructionSignature = null;
+    pendingMlsMpmResidentStepSignature = null;
     syncParticles();
     renderStatus();
   }
@@ -759,11 +795,12 @@ export function mountSphPhaseDemoOverlay() {
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
     overlay.__mlsMpmG2pReconstruction = scene.getMlsMpmG2pReconstruction?.() || null;
+    overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
     scheduleOpticalGpuLookupRefresh();
     scheduleSphGpuParticleUpload();
     scheduleMlsMpmGpuParticleUpload();
     scheduleMlsMpmMechanicsPrediction();
-    scheduleMlsMpmP2gGridProjection();
+    scheduleMlsMpmResidentStep();
   }
 
   function stepDemoForVisualTest(steps = 1) {

@@ -8590,3 +8590,78 @@ Failures / open questions:
 - Thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
   pressure, and rendering fields remain outside the resident GPU hot loop.
 - No push was attempted.
+
+## 2026-06-11 00:59:17 AKDT - WebGPU MLS-MPM resident step
+
+Prompt:
+
+- Continue the GPU-resident MLS-MPM path, with permission to make larger
+  refactors if that speeds up the core technology path.
+
+Actions:
+
+- Added ABI schemas for `peercompute.ulg.mls-mpm-gpu-resident-step.v0` and
+  `peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0`.
+- Added `src/runtime/sph/sphMlsMpmGpuStep.js`, a chain owner for P2G -> grid
+  update -> G2P.
+- Shared one WebGPU device and uploaded particle buffers across the chain.
+- Passed retained P2G and grid-update buffers stage-to-stage.
+- Added compact diagnostics: mass delta, momentum delta, active grid nodes, max
+  speed, max displacement, and min/max volume ratio.
+- Changed the live scene/overlay to schedule `refreshMlsMpmResidentStep()` and
+  backfill the old P2G/grid-update/G2P getters from that chain.
+- Fixed a P2G optional-wrapper device-loss fallback bug that referenced
+  `gpuResult` before declaration.
+
+Files touched:
+
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/perf-upgrade.md`
+- `plan/sphphasedemo.md`
+- `src/runtime/sph/sphGridGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/demo.e2e.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `ulg-gpu-abi/src/index.js`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs`
+- `node --test tests/abi.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties by default"`
+- Browser HTTPS/WebGPU resident-step probe against `https://127.0.0.1:5173/`
+  using Chromium flags `--enable-unsafe-webgpu --enable-features=Vulkan`
+- `npm test`
+- `npm run build`
+
+Validation:
+
+- PASS: focused ABI/P2G/grid-update/G2P/resident-step tests passed `39/39`.
+- PASS: focused SPH browser e2e passed against the live HTTPS server (`1/1`).
+- PASS: flagged-WebGPU browser probe reported resident step `backend=webgpu`,
+  `status=resident-step-webgpu-executed`, P2G/grid-update/G2P stage statuses
+  `webgpu-executed`, retained buffers `true`, buffer mode
+  `retained-stage-buffers`, P2G/grid-update/G2P parity `pass`,
+  `activeGridNodeCount=280`, `massDeltaKg=0`, `maxSpeedMPerS=0.004903326742351055`,
+  `maxDisplacementM=0.0000024437904357910156`, `particleCount=152`, and
+  `gridNodeCount=13824`.
+- PASS: `npm test` passed `280/280`.
+- PASS: `npm run build` passed with the existing Vite large chunk warning.
+
+Failures / open questions:
+
+- The resident step still uses full parity readback and marks
+  `normalHotLoopReadbackFree=false`.
+- GPU output is not yet authoritative for visible motion; the CPU driver still
+  owns particles, thermal state, phase changes, reactions, and status.
+- G2P output particle buffers need retained ping-pong support.
+- Thermal conduction, phase equilibrium, wall heat ledgers, reactions, gas
+  pressure, and rendering fields remain outside the resident GPU hot loop.
+- No push was attempted.

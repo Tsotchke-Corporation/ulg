@@ -1180,6 +1180,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && scene?.getMlsMpmP2gGridProjection?.()?.schema
       && scene?.getMlsMpmGridUpdate?.()?.schema
       && scene?.getMlsMpmG2pReconstruction?.()?.schema
+      && scene?.getMlsMpmResidentStep?.()?.schema
     );
   });
   const derivedSummary = await page.evaluate(() => {
@@ -1198,6 +1199,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmP2gGridProjection = scene?.getMlsMpmP2gGridProjection?.();
     const mlsMpmGridUpdate = scene?.getMlsMpmGridUpdate?.();
     const mlsMpmG2pReconstruction = scene?.getMlsMpmG2pReconstruction?.();
+    const mlsMpmResidentStep = scene?.getMlsMpmResidentStep?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1349,6 +1351,40 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         sphValidation: mlsMpmG2pReconstruction?.sphValidation,
         phaseChangeValidation: mlsMpmG2pReconstruction?.phaseChangeValidation,
         fullPhysicsValidation: mlsMpmG2pReconstruction?.fullPhysicsValidation
+      },
+      mlsMpmResidentStep: {
+        schema: mlsMpmResidentStep?.schema,
+        stepSchema: mlsMpmResidentStep?.stepSchema,
+        backend: mlsMpmResidentStep?.backend,
+        status: mlsMpmResidentStep?.status,
+        stageStatus: mlsMpmResidentStep?.stageStatus,
+        stageBackends: mlsMpmResidentStep?.stageBackends,
+        residentBuffersRetained: mlsMpmResidentStep?.residentBuffersRetained,
+        residentBufferMode: mlsMpmResidentStep?.residentBufferMode,
+        readbackMode: mlsMpmResidentStep?.readbackMode,
+        normalHotLoopReadbackFree: mlsMpmResidentStep?.normalHotLoopReadbackFree,
+        gpuAuthoritativeState: mlsMpmResidentStep?.gpuAuthoritativeState,
+        particleCount: mlsMpmResidentStep?.particleCount,
+        gridNodeCount: mlsMpmResidentStep?.gridNodeCount,
+        stateStrideFloats: mlsMpmResidentStep?.stateStrideFloats,
+        mechanicsStrideFloats: mlsMpmResidentStep?.mechanicsStrideFloats,
+        diagnostics: {
+          particleCount: mlsMpmResidentStep?.diagnostics?.particleCount,
+          gridNodeCount: mlsMpmResidentStep?.diagnostics?.gridNodeCount,
+          activeGridNodeCount: mlsMpmResidentStep?.diagnostics?.activeGridNodeCount,
+          massDeltaKg: mlsMpmResidentStep?.diagnostics?.massDeltaKg,
+          maxSpeedMPerS: mlsMpmResidentStep?.diagnostics?.maxSpeedMPerS,
+          maxDisplacementM: mlsMpmResidentStep?.diagnostics?.maxDisplacementM,
+          fullPhysicsValidation: mlsMpmResidentStep?.diagnostics?.fullPhysicsValidation
+        },
+        p2gProjectionValidation: mlsMpmResidentStep?.p2gProjectionValidation,
+        stressProjectionValidation: mlsMpmResidentStep?.stressProjectionValidation,
+        gridUpdateValidation: mlsMpmResidentStep?.gridUpdateValidation,
+        g2pValidation: mlsMpmResidentStep?.g2pValidation,
+        gridValidation: mlsMpmResidentStep?.gridValidation,
+        sphValidation: mlsMpmResidentStep?.sphValidation,
+        phaseChangeValidation: mlsMpmResidentStep?.phaseChangeValidation,
+        fullPhysicsValidation: mlsMpmResidentStep?.fullPhysicsValidation
       },
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
     };
@@ -1531,6 +1567,41 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmG2pReconstruction.sphValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.phaseChangeValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.fullPhysicsValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.schema).toBe('peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0');
+  expect(derivedSummary.mlsMpmResidentStep.stepSchema).toBe('peercompute.ulg.mls-mpm-gpu-resident-step.v0');
+  expect(['cpu-reference', 'webgpu', 'mixed-fallback']).toContain(derivedSummary.mlsMpmResidentStep.backend);
+  expect([
+    'resident-step-cpu-or-fallback',
+    'resident-step-webgpu-executed'
+  ]).toContain(derivedSummary.mlsMpmResidentStep.status);
+  expect(derivedSummary.mlsMpmResidentStep.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+  expect(derivedSummary.mlsMpmResidentStep.gridNodeCount).toBe(derivedSummary.mlsMpmGridUpdate.gridNodeCount);
+  expect(derivedSummary.mlsMpmResidentStep.stateStrideFloats).toBe(8);
+  expect(derivedSummary.mlsMpmResidentStep.mechanicsStrideFloats).toBe(32);
+  expect(derivedSummary.mlsMpmResidentStep.diagnostics.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
+  expect(derivedSummary.mlsMpmResidentStep.diagnostics.gridNodeCount).toBe(derivedSummary.mlsMpmGridUpdate.gridNodeCount);
+  expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
+  expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
+  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);
+  expect(derivedSummary.mlsMpmResidentStep.readbackMode).toBe('full-parity-readback');
+  expect(derivedSummary.mlsMpmResidentStep.normalHotLoopReadbackFree).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.gpuAuthoritativeState).toBe(false);
+  if (derivedSummary.mlsMpmResidentStep.backend === 'webgpu') {
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.p2g).toBe('webgpu-executed');
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.gridUpdate).toBe('webgpu-executed');
+    expect(derivedSummary.mlsMpmResidentStep.stageStatus.g2p).toBe('webgpu-executed');
+    expect(derivedSummary.mlsMpmResidentStep.residentBuffersRetained).toBe(true);
+    expect(derivedSummary.mlsMpmResidentStep.residentBufferMode).toBe('retained-stage-buffers');
+  }
+  expect(derivedSummary.mlsMpmResidentStep.p2gProjectionValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.stressProjectionValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.gridUpdateValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.g2pValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.gridValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.sphValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.phaseChangeValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.fullPhysicsValidation).toBe(false);
+  expect(derivedSummary.mlsMpmResidentStep.diagnostics.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);

@@ -1160,3 +1160,44 @@ Not claimed:
 - P2G, grid update, and G2P need to be chained into one resident step with
   compact diagnostics before it can be used as the normal hot loop.
 - Thermal/phase/reaction/wall heat updates remain CPU-side in the live demo.
+
+## 2026-06-11 Update - WebGPU MLS-MPM Resident Step Slice
+
+Completed:
+
+- Added `src/runtime/sph/sphMlsMpmGpuStep.js` as the runtime owner for a
+  single MLS-MPM resident step: P2G -> grid update -> G2P.
+- Added resident-step ABI schemas:
+  `peercompute.ulg.mls-mpm-gpu-resident-step.v0` and
+  `peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0`.
+- The resident step shares a WebGPU device, reuses uploaded particle buffers,
+  retains the P2G grid buffer for grid update, and retains the updated velocity
+  grid buffer for G2P.
+- Added compact diagnostics for mass/momentum deltas, active grid nodes, max
+  speed, max displacement, and volume-ratio range.
+- Changed the live SPH scene/overlay to schedule the resident step directly
+  while preserving the old P2G/grid-update/G2P getters from the chain output.
+- Fixed a P2G device-loss fallback bug that referenced `gpuResult` before the
+  variable existed.
+
+Latest validation:
+
+- PASS: syntax checks for the new runtime module, scene, mount, P2G module, and
+  browser e2e file.
+- PASS: focused ABI/P2G/grid-update/G2P/resident-step tests passed `39/39`.
+- PASS: focused browser e2e passed against `https://127.0.0.1:5173` (`1/1`).
+- PASS: live flagged-WebGPU browser probe reported resident step `webgpu`,
+  P2G/grid-update/G2P all `webgpu-executed`, all three parity reports `pass`,
+  retained buffers `true`, `activeGridNodeCount=280`, `massDeltaKg=0`,
+  `particleCount=152`, and `gridNodeCount=13824`.
+- PASS: `npm test` (`280/280`).
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+
+Not claimed:
+
+- The visible SPH demo is still CPU-authoritative.
+- The resident step still reports `readbackMode=full-parity-readback`,
+  `normalHotLoopReadbackFree=false`, and `gpuAuthoritativeState=false`.
+- G2P output buffers are not yet retained as ping-pong inputs for repeated GPU
+  stepping.
+- Thermal/phase/reaction/wall heat updates remain CPU-side in the live demo.

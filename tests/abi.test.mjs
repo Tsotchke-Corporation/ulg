@@ -38,6 +38,8 @@ import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
+  ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_MECHANICS_PREDICTION_SCHEMA,
@@ -285,6 +287,14 @@ test('MLS-MPM GPU G2P reconstruction ABI exposes execution schemas and WGSL bind
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('MLS-MPM GPU resident step ABI exposes chain execution schemas', () => {
+  assert.equal(ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA, 'peercompute.ulg.mls-mpm-gpu-resident-step.v0');
+  assert.equal(
+    ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
+    'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0'
+  );
 });
 
 test('schema sketches validate representative artifacts', () => {

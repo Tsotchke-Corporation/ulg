@@ -239,13 +239,30 @@ function contract2(fnA, fnB, prim) {
 }
 
 // ---- STO-3G minimal basis (standard exponents/contraction coefficients) -----------------------
+// Universal STO-3G contraction coefficients (shared across all elements): the n=1/2/3 s and 2/3 p
+// fits. Exponents are element-specific (sourced from the Basis Set Exchange, STO-3G, verbatim).
+const S_1S = [0.15432897, 0.53532814, 0.44463454];
 const SP_2S = [-0.09996723, 0.39951283, 0.70011547];
 const SP_2P = [0.15591627, 0.60768372, 0.39195739];
-const S_1S = [0.15432897, 0.53532814, 0.44463454];
-// Each element: list of shells {l: 's'|'sp', exps, sCoef, (pCoef)}.
+const SP_3S = [-0.2196203690, 0.2255954336, 0.9003984260];
+const SP_3P = [0.0105876043, 0.5951670053, 0.4620010120];
+// Each element: list of shells {l: 's'|'sp', exps, sCoef, (pCoef)}. Coverage: H, He (period 1),
+// Li–Ne (period 2), Na–Ar (period 3). An 'sp' shell shares one exponent set for its s and p.
 const STO3G = {
   1: [{ l: 's', exps: [3.42525091, 0.62391373, 0.16885540], sCoef: S_1S }],
   2: [{ l: 's', exps: [6.36242139, 1.15892300, 0.31364979], sCoef: S_1S }],
+  3: [
+    { l: 's', exps: [16.11957475, 2.936200663, 0.7946504870], sCoef: S_1S },
+    { l: 'sp', exps: [0.6362897469, 0.1478600533, 0.04808867840], sCoef: SP_2S, pCoef: SP_2P }
+  ],
+  4: [
+    { l: 's', exps: [30.16787069, 5.495115306, 1.487192653], sCoef: S_1S },
+    { l: 'sp', exps: [1.314833110, 0.3055389383, 0.09937074560], sCoef: SP_2S, pCoef: SP_2P }
+  ],
+  5: [
+    { l: 's', exps: [48.79111318, 8.887362172, 2.405267040], sCoef: S_1S },
+    { l: 'sp', exps: [2.236956142, 0.5198204999, 0.1690617600], sCoef: SP_2S, pCoef: SP_2P }
+  ],
   6: [
     { l: 's', exps: [71.6168370, 13.0450960, 3.5305122], sCoef: S_1S },
     { l: 'sp', exps: [2.9412494, 0.6834831, 0.2222899], sCoef: SP_2S, pCoef: SP_2P }
@@ -257,6 +274,54 @@ const STO3G = {
   8: [
     { l: 's', exps: [130.7093200, 23.8088610, 6.4436083], sCoef: S_1S },
     { l: 'sp', exps: [5.0331513, 1.1695961, 0.3803890], sCoef: SP_2S, pCoef: SP_2P }
+  ],
+  9: [
+    { l: 's', exps: [166.6791340, 30.36081233, 8.216820672], sCoef: S_1S },
+    { l: 'sp', exps: [6.464803249, 1.502281245, 0.4885884864], sCoef: SP_2S, pCoef: SP_2P }
+  ],
+  10: [
+    { l: 's', exps: [207.0156070, 37.70815124, 10.20529731], sCoef: S_1S },
+    { l: 'sp', exps: [8.246315120, 1.916266291, 0.6232292721], sCoef: SP_2S, pCoef: SP_2P }
+  ],
+  11: [
+    { l: 's', exps: [250.7724300, 45.67851117, 12.36238776], sCoef: S_1S },
+    { l: 'sp', exps: [12.04019274, 2.797881859, 0.9099580170], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [1.478740622, 0.4125648801, 0.1614750979], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  12: [
+    { l: 's', exps: [299.2374137, 54.50646845, 14.75157752], sCoef: S_1S },
+    { l: 'sp', exps: [15.12182352, 3.513986579, 1.142857498], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [1.395448293, 0.3893265318, 0.1523797659], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  13: [
+    { l: 's', exps: [351.4214767, 64.01186067, 17.32410761], sCoef: S_1S },
+    { l: 'sp', exps: [18.89939621, 4.391813233, 1.428353970], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [1.395448293, 0.3893265318, 0.1523797659], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  14: [
+    { l: 's', exps: [407.7975514, 74.28083305, 20.10329229], sCoef: S_1S },
+    { l: 'sp', exps: [23.19365606, 5.389706871, 1.752899952], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [1.478740622, 0.4125648801, 0.1614750979], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  15: [
+    { l: 's', exps: [468.3656378, 85.31338559, 23.08913156], sCoef: S_1S },
+    { l: 'sp', exps: [28.03263958, 6.514182577, 2.118614352], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [1.743103231, 0.4863213771, 0.1903428909], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  16: [
+    { l: 's', exps: [533.1257359, 97.10951830, 26.28162542], sCoef: S_1S },
+    { l: 'sp', exps: [33.32975173, 7.745117521, 2.518952599], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [2.029194274, 0.5661400518, 0.2215833792], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  17: [
+    { l: 's', exps: [601.3456136, 109.5358542, 29.64467686], sCoef: S_1S },
+    { l: 'sp', exps: [38.96041889, 9.053563477, 2.944499834], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [2.129386495, 0.5940934274, 0.2325241410], sCoef: SP_3S, pCoef: SP_3P }
+  ],
+  18: [
+    { l: 's', exps: [674.4465184, 122.8512753, 33.24834945], sCoef: S_1S },
+    { l: 'sp', exps: [45.16424392, 10.49519900, 3.413364448], sCoef: SP_2S, pCoef: SP_2P },
+    { l: 'sp', exps: [2.621366518, 0.7313546050, 0.2862472356], sCoef: SP_3S, pCoef: SP_3P }
   ]
 };
 
@@ -267,7 +332,7 @@ export function buildBasis(atoms) {
   const basis = [];
   atoms.forEach((atom, atomIndex) => {
     const shells = STO3G[atom.Z];
-    if (!shells) throw new Error(`No STO-3G basis for Z=${atom.Z} (have H,He,C,N,O)`);
+    if (!shells) throw new Error(`No STO-3G basis for Z=${atom.Z} (have Z=1-18: H–Ar)`);
     for (const shell of shells) {
       const s = makeBasisFunction(atom.position, [0, 0, 0], shell.exps, shell.sCoef);
       s.atomIndex = atomIndex;

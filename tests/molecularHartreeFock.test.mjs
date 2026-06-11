@@ -132,3 +132,12 @@ test('Born-Oppenheimer MD: H2 oscillates on the PES with conserved energy', () =
   const drift = md.energyDriftHa / Math.abs(md.trajectory[0].totalHa);
   assert.ok(drift < 5e-3, `energy drift ${(drift * 100).toFixed(3)}%`);
 });
+
+test('extended STO-3G basis (period 2-3) matches published atomic energies', () => {
+  // Closed-shell atoms: total RHF/STO-3G energy should match the literature values for these Z.
+  const cases = [[4, -14.35188], [10, -126.60453], [12, -197.00735], [18, -521.22288]];
+  for (const [Z, ref] of cases) {
+    const e = rhf([{ Z, position: [0, 0, 0] }]).totalEnergyHa;
+    assert.ok(Math.abs(e - ref) < 0.02, `Z=${Z}: ${e} vs ${ref}`);
+  }
+});

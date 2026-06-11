@@ -11,7 +11,7 @@ export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
 
 const SURFACE_CONFIG = {
   h2o: {
-    resolution: 36,
+    resolution: 48,
     subtract: 24,
     isolation: 80,
     maxPolyCount: 120000,
@@ -25,7 +25,7 @@ const SURFACE_CONFIG = {
     }
   },
   fe: {
-    resolution: 34,
+    resolution: 46,
     subtract: 26,
     isolation: 82,
     maxPolyCount: 120000,
@@ -42,7 +42,7 @@ const SURFACE_CONFIG = {
   // ball influence makes the metaballs bleed together into a whispy volume; high transparency and
   // no depth-write let it read as steam drifting in front of the scene.
   steam: {
-    resolution: 28,
+    resolution: 36,
     subtract: 10,
     isolation: 24,
     maxPolyCount: 120000,
@@ -56,7 +56,7 @@ const SURFACE_CONFIG = {
     }
   },
   default: {
-    resolution: 34,
+    resolution: 46,
     subtract: 24,
     isolation: 80,
     maxPolyCount: 120000,
@@ -80,7 +80,11 @@ function clamp(value, min, max) {
 // of the wall to close into a rounded surface, so a blob resting against the floor/wall renders as a
 // complete dome instead of a sliced-off plane. The padding is mapped per-axis (below); the mesh
 // scale is widened by 1/(1-2·pad) so the padded [0,1] field still aligns with the box wireframe.
-const FIELD_PADDING = 0.14;
+// A metaball's surface extends ~radiusNorm·√((iso+sub)/iso) ≈ 1.15·radiusNorm from its centre, and
+// radiusNorm is clamped to ≤0.14, so the surface reaches ~0.16 past a wall-hugging particle — the
+// padding must exceed that to fully contain the dome. Resolutions are raised to keep box detail
+// since the box now occupies only (1−2·pad) of each field axis.
+const FIELD_PADDING = 0.22;
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
@@ -181,11 +185,15 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
     const y = positionsM[i * 3 + 1];
     const z = positionsM[i * 3 + 2];
     batch.positionsM.push(x, y, z);
+    // Isotropic mapping: every axis is normalized by the SAME factor (the largest box edge), so a
+    // metaball stays spherical in the field. A non-cubic box therefore occupies a sub-region of the
+    // [0,1] field cube (the short axes don't fill it) rather than being stretched to fill it — which
+    // would deform round blobs into ellipsoids. The mesh scale (below) is the matching scalar.
     const span = 1 - 2 * FIELD_PADDING;
     batch.normalizedPositions.push(
-      clamp(FIELD_PADDING + (x / dims[0]) * span, 0.001, 0.999),
-      clamp(FIELD_PADDING + (y / dims[1]) * span, 0.001, 0.999),
-      clamp(FIELD_PADDING + (z / dims[2]) * span, 0.001, 0.999)
+      clamp(FIELD_PADDING + (x / refEdgeM) * span, 0.001, 0.999),
+      clamp(FIELD_PADDING + (y / refEdgeM) * span, 0.001, 0.999),
+      clamp(FIELD_PADDING + (z / refEdgeM) * span, 0.001, 0.999)
     );
     batch.colorsRgb.push(
       clamp(colorsRgb[i * 3], 0, 1),
@@ -201,9 +209,10 @@ export function createContinuousSurfaceBatches({ positionsM, colorsRgb, material
   }));
 }
 
-export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null, surfaceRadiusM = null } = {}) {
+export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null, surfaceRadiusM = null, surfaceRadiusScale = 1 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
+  let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
   const scene = new THREE.Scene();
   // A dark slate background rather than near-black: the ice/water surfaces are physically
   // transmissive (clear), so they take their look from what is behind them — a pure-black void made
@@ -268,11 +277,12 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
       config.maxPolyCount
     );
     mesh.isolation = config.isolation;
-    // Widen the field cube by 1/(1-2·pad) per axis so the padded normalized positions map onto the
-    // box [0, L_axis]; centre stays at the box centre. Anisotropic scale handles a non-cubic box.
-    const widen = 1 / (2 * (1 - 2 * FIELD_PADDING));
-    mesh.scale.set(dims[0] * widen, dims[1] * widen, dims[2] * widen);
-    mesh.position.set(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+    // Isotropic scale (a single scalar) so metaballs render as spheres, not ellipsoids. With the
+    // refEdge-normalized positions above, this maps field-axis [pad, 1-pad] onto world [0, refEdge];
+    // a particle at box-axis coordinate L lands at world L because L/refEdge ≤ 1. Position is
+    // refEdge/2 on every axis (the field origin maps to world 0 on each axis).
+    mesh.scale.setScalar(refEdgeM / (2 * (1 - 2 * FIELD_PADDING)));
+    mesh.position.set(refEdgeM / 2, refEdgeM / 2, refEdgeM / 2);
     mesh.frustumCulled = false;
     mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;
     mesh.userData.materialKey = key;
@@ -306,7 +316,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
         mesh.material.emissiveIntensity = 0;
       }
       mesh.reset();
-      const radiusM = Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM;
+      // Isosurface (blob) size is decoupled from the container: the auto estimate (from particle
+      // spacing) or an explicit override is multiplied by a user-set scale, independent of box size.
+      const radiusM = (Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM) * radiusScale;
       const radiusNorm = clamp(radiusM / refEdgeM, 0.006, 0.14);
       const strength = (mesh.isolation + config.subtract) * radiusNorm * radiusNorm;
       for (let i = 0; i < batch.count; i += 1) {
@@ -368,5 +380,9 @@ export function createSphPhaseScene(container, { boxEdgeM = 10, boxDimsM = null,
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
 
-  return { setParticles, dispose, scene, camera };
+  function setSurfaceRadiusScale(scale) {
+    if (Number.isFinite(scale) && scale > 0) radiusScale = scale;
+  }
+
+  return { setParticles, setSurfaceRadiusScale, dispose, scene, camera };
 }

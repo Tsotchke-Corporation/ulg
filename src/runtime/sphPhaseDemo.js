@@ -20,24 +20,8 @@ import { createPhaseAwareEos } from './sph/multiMaterialEos.js';
 import { createMlsMpmCarrier } from './sph/mlsMpmCarrier.js';
 import { elementMaterialClosure } from './material/elementClosures.js';
 import { zForSymbol } from './electronicStructure/periodicTable.js';
-import { reactiveStep, deriveReactionEnthalpyJPerKg } from './sph/reactiveChemistry.js';
-
-// Combustion reaction network (2 H2 + O2 -> 2 H2O), enthalpy DERIVED from the molecular bonding
-// engine. Cached module-wide (the molecular HF/UHF calc runs once). Activation = H2 autoignition.
-let cachedReactions = null;
-function combustionReactions() {
-  if (cachedReactions) return cachedReactions;
-  const specificEnthalpyJPerKg = deriveReactionEnthalpyJPerKg({
-    reactants: [
-      { atoms: [{ Z: 1, position: [0, 0, 0] }, { Z: 1, position: [0, 0, 1.39] }], count: 2 },
-      { atoms: [{ Z: 8, position: [0, 0, 0] }, { Z: 8, position: [0, 0, 2.28] }], multiplicity: 3, count: 1 }
-    ],
-    products: [{ atoms: [{ Z: 8, position: [0, 0, 0] }, { Z: 1, position: [1.43, 0, 1.108] }, { Z: 1, position: [-1.43, 0, 1.108] }], count: 2 }],
-    productMassKgPerMol: 0.018016
-  });
-  cachedReactions = [{ a: 'h2', b: 'o2', product: 'h2o', activationTemperatureK: 773, specificEnthalpyJPerKg }];
-  return cachedReactions;
-}
+import { reactiveStep } from './sph/reactiveChemistry.js';
+import { discoverReactions } from './sph/reactionDiscovery.js';
 import { createSphPhaseScenario, computeThermodynamicPreflight } from './thermoPreflight.js';
 
 function fillCube({ material, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
@@ -197,6 +181,11 @@ export function particleColors(demo) {
     if (inc.visible) {
       return { rgb: [...inc.srgb], closureBacked: true, source: 'radiation-closure' };
     }
+    // Reaction-product compounds carry a colour derived from their HOMO–LUMO gap (absorption edge);
+    // use it directly since the metal/water optical paths don't apply to an arbitrary compound.
+    if (props.intrinsicColorSrgb) {
+      return { rgb: [...props.intrinsicColorSrgb], closureBacked: true, source: 'compound-closure' };
+    }
     // Metals: colour derived from the conduction-electron density (Drude plasma frequency). Water/
     // air: Beer–Lambert / Rayleigh. The electron density comes from the material closure.
     const c = intrinsicColorSrgb({ material: p.material, phase: eq.stablePhase, conductionElectronDensityPerM3: props.conductionElectronDensityPerM3 });
@@ -352,11 +341,18 @@ export function createSphPhaseDemo(options = {}) {
   }
   const dtStepS = mechanicalSubsteps * carrierDt; // sim-time advanced per driver.step
 
-  // Reactive chemistry: enabled when the two blocks are a reacting pair (H2 + O2 → H2O). The
-  // enthalpy is derived from the bonding engine; on contact above the activation temperature the
-  // reactant particles become product and release heat (→ temperature → steam → expansion).
-  const blockMaterials = [demo.dropMaterial, demo.baseMaterial];
-  const reactions = (blockMaterials.includes('h2') && blockMaterials.includes('o2')) ? combustionReactions() : [];
+  // Reactive chemistry: the reaction network is DISCOVERED from the two block materials — whether
+  // they react, into what, and with what enthalpy is derived from the molecular bonding engine
+  // (universal redox/acid–base families + a combinatorial fallback), not hardcoded. On contact above
+  // the activation temperature the reactant particles become the product and release the derived heat
+  // (→ temperature → phase change / steam → expansion). Any derived product-compound closure is
+  // registered into materialProperties so the product renders and carries thermodynamics.
+  const discovery = discoverReactions(demo.dropMaterial, demo.baseMaterial);
+  const reactions = discovery.reactions;
+  for (const [key, closure] of Object.entries(discovery.productClosures)) {
+    demo.materialProperties[key] = closure.properties;
+  }
+  demo.reactionNote = discovery.note;
   const reactionContactRadiusM = gridSpacingM * 1.2;
   const reactionTemperatureOf = (p) => equilibriumFromSpecificEnergy(demo.materialProperties[p.material], p.specificInternalEnergyJPerKg).temperatureK;
 

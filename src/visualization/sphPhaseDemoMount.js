@@ -27,6 +27,9 @@ const BOX_DIM_DEFAULTS_M = { x: 5, y: 5, z: 5 };
 // at a smaller edge; base block fills a larger footprint.
 const DROP_PARTICLE_EDGE_DEFAULT = 3;
 const BASE_PARTICLE_EDGE_DEFAULT = 5;
+// Default isosurface blob-size multiplier (1 = the auto estimate from particle spacing). Decoupled
+// from container size so resizing the box doesn't change how big the rendered blobs look.
+const BLOB_SCALE_DEFAULT = 1;
 // Selectable block materials: the two reference compounds (Fe and H₂O — full referenced closures)
 // plus the FULL set of metallic elements, whose closures are DERIVED on demand from the simulation
 // (jellium + atomic DFT + universal rules) — no per-material tables.
@@ -110,7 +113,7 @@ function buildOverlayShell() {
     <button id="sph-toggle" type="button" aria-label="Toggle controls" style="position:absolute;top:12px;left:12px;z-index:60;">☰ menu</button>
     <aside id="sph-panel" style="position:absolute;top:0;right:0;height:100%;width:min(360px,92vw);box-sizing:border-box;border-left:1px solid #14342c;padding:14px;padding-top:56px;overflow:auto;-webkit-overflow-scrolling:touch;background:rgba(5,11,14,0.96);z-index:55;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <strong style="color:#75f7b4;">SPH PHASE — molten iron on ice</strong>
+        <strong style="color:#75f7b4;">SPH PHASE — two materials interacting</strong>
         <button id="sph-close" type="button">close</button>
       </div>
       <p style="opacity:.6;font-size:11px;line-height:1.4;">CPU reference, reduced resolution. Colour is closure-backed, not demo-tuned: incandescent glow from the Planck radiation closure (first-principles from temperature); intrinsic colour from the optical closure (Drude reflectance for iron, Beer–Lambert O–H absorption for water/ice, Rayleigh for air). Heat capacity is first-principles too (equipartition air, Debye iron). Closures are derived, not yet validated against measured optics/EOS. Multi-material EOS / wall heat flux / conduction are P5.</p>
@@ -132,6 +135,8 @@ function buildOverlayShell() {
       <div id="sph-box" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">particles per block edge (N → N³ particles) — apply with Reset</div>
       <div id="sph-counts" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">isosurface blob size (× — independent of box) — live</div>
+      <div id="sph-blob" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0;"></div>
       <div class="terminal-head"><span>status</span></div>
       <pre id="sph-status" style="white-space:pre-wrap;font-size:12px;line-height:1.5;margin:6px 0;"></pre>
     </aside>
@@ -212,6 +217,15 @@ export function mountSphPhaseDemoOverlay() {
     countInputs[key] = input;
   }
 
+  const blobEl = overlay.querySelector('#sph-blob');
+  const blobInput = document.createElement('input');
+  blobInput.type = 'number';
+  blobInput.value = String(BLOB_SCALE_DEFAULT);
+  blobInput.step = '0.1';
+  blobInput.min = '0.1';
+  blobInput.style.cssText = 'width:100%;background:#0a1418;color:#bfe9d8;border:1px solid #14342c;';
+  blobEl.appendChild(blobInput);
+
   const elementsEl = overlay.querySelector('#sph-elements');
   const elementSelects = {};
   for (const [role, label, def] of [['drop', 'drop block', 'fe'], ['base', 'base block', 'h2o']]) {
@@ -258,7 +272,8 @@ export function mountSphPhaseDemoOverlay() {
     dropt: tempInputs.drop, baset: tempInputs.base,
     iceh: heightInputs.ice, ironh: heightInputs.iron,
     boxx: boxInputs.x, boxy: boxInputs.y, boxz: boxInputs.z,
-    dropn: countInputs.drop, basen: countInputs.base
+    dropn: countInputs.drop, basen: countInputs.base,
+    blob: blobInput
   };
   function applyUrlToControls() {
     const q = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -307,9 +322,13 @@ export function mountSphPhaseDemoOverlay() {
     };
   }
 
+  const blobScaleOf = () => { const v = Number(blobInput.value); return Number.isFinite(v) && v > 0 ? v : BLOB_SCALE_DEFAULT; };
   let driver = createSphPhaseDemo(driverOptionsFromControls());
-  let scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM });
+  let scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM, surfaceRadiusScale: blobScaleOf() });
   overlay.__sphScene = scene;
+
+  // Blob size is live: update the scene's surface scale and re-render without a reset.
+  blobInput.addEventListener('input', () => { scene.setSurfaceRadiusScale(blobScaleOf()); syncParticles(); });
 
   function syncParticles() {
     const colors = particleColors(driver.demo);
@@ -343,6 +362,7 @@ export function mountSphPhaseDemoOverlay() {
       `heat to walls    : ${fmt(pre.energyBudget.heatExportedToWallsJ)} J`,
       `masses (kg)      : Fe ${fmt(pre.masses.ironMassKg)}  ice ${fmt(pre.masses.iceMassKg)}  air ${fmt(pre.masses.airMassKg)}`,
       `particles        : ${driver.demo.dropMaterial} ${driver.demo.counts.drop}  ${driver.demo.baseMaterial} ${driver.demo.counts.base}  total ${driver.demo.counts.total}`,
+      `reaction         : ${driver.demo.reactionNote || '—'}`,
       `molecules/macro  : H2O ${fmt(pre.particleResolution.h2o.entitiesPerMacroParticle)}  Fe ${fmt(pre.particleResolution.fe.entitiesPerMacroParticle)}`,
       `water by phase   : ${water || '—'}`,
       `iron solid frac  : ${fmt(phase.ironSolidFraction, 3)}`,
@@ -377,7 +397,7 @@ export function mountSphPhaseDemoOverlay() {
     // The box dimensions may have changed, so rebuild the scene (its field/wireframe/camera are
     // sized to the box at creation) against the new driver's box.
     scene.dispose();
-    scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM });
+    scene = createSphPhaseScene(sceneContainer, { boxDimsM: driver.demo.box.dimensionsM, surfaceRadiusScale: blobScaleOf() });
     overlay.__sphScene = scene;
     syncParticles();
     renderStatus();

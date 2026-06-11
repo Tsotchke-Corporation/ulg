@@ -47,10 +47,13 @@ export function reactiveStep(state, { reactions, materialProperties, contactRadi
   for (const rx of reactions) {
     for (let i = 0; i < n; i += 1) {
       if (reacted[i] || particles[i].material !== rx.a) continue;
-      if (temperatureOf(particles[i]) < rx.activationTemperatureK) continue;
+      const ti = temperatureOf(particles[i]);
       for (let j = 0; j < n; j += 1) {
         if (reacted[j] || j === i || particles[j].material !== rx.b) continue;
-        if (temperatureOf(particles[j]) < rx.activationTemperatureK) continue;
+        // Gate on the CONTACT temperature (the hotter of the two): a hot reactant clears the
+        // activation barrier locally and ignites a cooler partner, which an each-must-be-hot test
+        // would wrongly forbid. The released heat then propagates the reaction front.
+        if (Math.max(ti, temperatureOf(particles[j])) < rx.activationTemperatureK) continue;
         const dx = particles[i].x[0] - particles[j].x[0];
         const dy = particles[i].x[1] - particles[j].x[1];
         const dz = particles[i].x[2] - particles[j].x[2];

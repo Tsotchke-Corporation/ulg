@@ -2,7 +2,11 @@ import './styles.css';
 import { createDemoRuntime } from './runtime/demoRuntime.js';
 import { formatHandoffAckStatus } from './runtime/handoffStatus.js';
 import { createWorkerTreeScene } from './visualization/workerTreeScene.js';
-import { createSphPhaseDemoApi, mountSphPhaseDemoOverlay } from './visualization/sphPhaseDemoMount.js';
+import {
+  SPH_PHASE_URL_PARAM_KEYS,
+  createSphPhaseDemoApi,
+  mountSphPhaseDemoOverlay
+} from './visualization/sphPhaseDemoMount.js';
 
 const app = document.querySelector('#app');
 const multiscaleUrl = new URL(
@@ -60,7 +64,8 @@ app.innerHTML = `
   </main>
 `;
 
-const scene = createWorkerTreeScene(document.querySelector('#scene'));
+const isSphPhaseRoute = hasSphPhaseUrlParams();
+const scene = isSphPhaseRoute ? null : createWorkerTreeScene(document.querySelector('#scene'));
 const launchMagnetarButton = document.querySelector('#launch-magnetar');
 const copyHandoffButton = document.querySelector('#copy-handoff');
 const handoffStatus = document.querySelector('#handoff-status');
@@ -76,7 +81,10 @@ const taskCount = document.querySelector('#task-count');
 const leaseCount = document.querySelector('#lease-count');
 const artifactCount = document.querySelector('#artifact-count');
 
-const runtime = await createDemoRuntime();
+const runtime = await createDemoRuntime({
+  deferTriadServices: isSphPhaseRoute,
+  deferGpuProbe: isSphPhaseRoute
+});
 runtime.launchPeerComputeMagnetarDemo = launchPeerComputeMagnetarDemo;
 runtime.sendPeerComputeHandoffToMultiscale = launchPeerComputeMagnetarDemo;
 Object.assign(runtime, createSphPhaseDemoApi());
@@ -84,11 +92,14 @@ window.__ulgDemo = runtime;
 
 const sphPhaseButton = document.querySelector('#run-sph-phase');
 sphPhaseButton.addEventListener('click', () => {
-  mountSphPhaseDemoOverlay();
+  openSphPhaseDemo();
 });
+if (isSphPhaseRoute) {
+  openSphPhaseDemo({ autoStart: true, hideMenu: true });
+}
 
 runtime.subscribe((_event, telemetry) => {
-  scene.setTelemetry(telemetry);
+  scene?.setTelemetry(telemetry);
   renderTelemetry(telemetry);
 });
 
@@ -137,7 +148,9 @@ copyHandoffButton.addEventListener('click', async () => {
   }
 });
 
-runtime.runSmoke();
+if (!isSphPhaseRoute) {
+  runtime.runSmoke();
+}
 
 async function launchPeerComputeMagnetarDemo() {
   const handoff = await createReadyPeerComputeHandoff();
@@ -233,6 +246,18 @@ async function copyTextToClipboard(text) {
   if (!copied) {
     throw new Error('clipboard unavailable');
   }
+}
+
+function openSphPhaseDemo(options = {}) {
+  const existing = document.querySelector('#sph-phase-overlay');
+  if (existing) return { overlay: existing, close: () => existing.querySelector('#sph-close')?.click() };
+  return mountSphPhaseDemoOverlay({ ...options, runtime });
+}
+
+function hasSphPhaseUrlParams() {
+  const query = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  return SPH_PHASE_URL_PARAM_KEYS.some((key) => query.has(key) || hash.has(key));
 }
 
 function renderTelemetry(telemetry) {

@@ -1,15 +1,46 @@
 import {
+  SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
+  SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+  SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
   SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
   SPH_GPU_RENDER_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
+  ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
-import { sphRenderFieldWgsl, sphRenderRowsWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
-import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
+import {
+  sphRenderMarchingCubeCellsWgsl,
+  sphRenderSurfaceDrawWgsl,
+  sphRenderSurfaceVerticesWgsl,
+  sphMaterialInterfaceCandidatesWgsl,
+  sphRenderFieldWgsl,
+  sphRenderRowsWgsl
+} from '../../../ulg-gpu-abi/src/wgsl.js';
+import {
+  GPU_PHASE_IDS,
+  gpuPhaseId,
+  requestOpticalGpuDevice,
+  stableOpticalMaterialId,
+  stableOpticalStateId,
+  stableOpticalStateKey
+} from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import { incandescentColor } from '../material/radiationClosure.js';
 import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
@@ -21,8 +52,22 @@ import {
 export {
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
+  sphRenderMarchingCubeCellsWgsl,
+  sphRenderSurfaceDrawWgsl,
+  sphRenderSurfaceVerticesWgsl,
+  sphMaterialInterfaceCandidatesWgsl,
   sphRenderFieldWgsl,
   sphRenderRowsWgsl
 };
@@ -30,9 +75,18 @@ export {
 export const SPH_GPU_RENDER_ROW_FLOATS = SPH_GPU_RENDER_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_ROW_FLOATS = SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_FIELD_CELL_FLOATS = SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT.length;
+export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
+export const SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS = SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length;
+export const SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS = SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length;
+export const SPH_GPU_RENDER_SURFACE_DRAW_FLOATS = SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length;
+export const SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS = SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT.length;
+export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 
 const RENDER_SCOPE = 'sph-resident-render-row-extraction';
 const RENDER_FIELD_SCOPE = 'sph-resident-render-field-splat';
+const FULL_READBACK_MODE = 'full-parity-readback';
+const NO_FULL_READBACK_MODE = 'no-full-readback';
 const PHASE_NAMES_BY_ID = Object.freeze(Object.fromEntries(
   Object.entries(GPU_PHASE_IDS).map(([name, id]) => [id, name])
 ));
@@ -42,7 +96,8 @@ const GPU_BUFFER_USAGE = {
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
-  UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
+  UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64,
+  INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256
 };
 
 const GPU_MAP_MODE = {
@@ -83,6 +138,26 @@ export function buildSphRenderMaterialMap(materialProperties = {}, reactionTable
     if (reaction.product) entries.set(reaction.productMaterialId, reaction.product);
     if (reaction.a) entries.set(reaction.aMaterialId, reaction.a);
     if (reaction.b) entries.set(reaction.bMaterialId, reaction.b);
+    for (const term of reaction.productTerms || []) {
+      if (term.material && Number.isFinite(term.materialId)) {
+        entries.set(term.materialId, term.material);
+      }
+    }
+    for (const term of reaction.reactantTerms || []) {
+      if (term.material && Number.isFinite(term.materialId)) {
+        entries.set(term.materialId, term.material);
+      }
+    }
+  }
+  for (const term of reactionTable?.productTermMetadata || []) {
+    if (term.material && Number.isFinite(term.materialId)) {
+      entries.set(term.materialId, term.material);
+    }
+  }
+  for (const term of reactionTable?.reactantTermMetadata || []) {
+    if (term.material && Number.isFinite(term.materialId)) {
+      entries.set(term.materialId, term.material);
+    }
   }
   return entries;
 }
@@ -125,7 +200,8 @@ export function emissiveByMaterialFromSphRenderRows(rows = []) {
 export function decodeSphRenderRows(renderRows, {
   materialProperties = {},
   reactionTable = null,
-  materialMap = buildSphRenderMaterialMap(materialProperties, reactionTable)
+  materialMap = buildSphRenderMaterialMap(materialProperties, reactionTable),
+  gasPressureSummary = null
 } = {}) {
   if (!(renderRows instanceof Float32Array)) {
     throw new TypeError('decodeSphRenderRows requires Float32Array render rows');
@@ -147,10 +223,21 @@ export function decodeSphRenderRows(renderRows, {
     const phase = phaseNameForId(phaseId);
     const renderKey = renderKeyFor(material, phase);
     const temperatureK = renderRows[offset + 6];
+    const h2oGas = gasPressureSummary?.bySpecies?.h2o || null;
+    const opticalState = material === 'h2o' && phase === 'gas' && h2oGas
+      ? {
+          temperatureK: Number.isFinite(h2oGas.temperatureK) ? h2oGas.temperatureK : temperatureK,
+          h2oPartialPressurePa: h2oGas.partialPressurePa,
+          pressurePa: gasPressureSummary.totalPressurePa,
+          source: gasPressureSummary.source || gasPressureSummary.status || 'gas-pressure-summary'
+        }
+      : null;
     const rgb = colorFor({ material, phase, temperatureK, materialProperties });
     positionsM.set([renderRows[offset], renderRows[offset + 1], renderRows[offset + 2]], index * 3);
     colorsRgb.set(rgb, index * 3);
-    materials[index] = { material, phase, renderKey };
+    materials[index] = opticalState
+      ? { material, phase, renderKey, opticalState }
+      : { material, phase, renderKey };
     rows.push({
       index,
       positionM: [renderRows[offset], renderRows[offset + 1], renderRows[offset + 2]],
@@ -164,7 +251,8 @@ export function decodeSphRenderRows(renderRows, {
       restDensityKgPerM3: renderRows[offset + 8],
       phaseFractionGas: renderRows[offset + 9],
       representedEntityCount: renderRows[offset + 10],
-      renderKey
+      renderKey,
+      opticalState
     });
   }
 
@@ -246,6 +334,7 @@ function createParamsArray(particleCount) {
 
 function createRenderFieldParamsArray({
   particleCount,
+  productEventCount = 0,
   surfaceCount,
   totalFieldCells,
   fieldPadding,
@@ -256,11 +345,85 @@ function createRenderFieldParamsArray({
   view.setUint32(0, particleCount, true);
   view.setUint32(4, surfaceCount, true);
   view.setUint32(8, totalFieldCells, true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, productEventCount, true);
   view.setFloat32(16, fieldPadding, true);
   view.setFloat32(20, refEdgeM, true);
   view.setFloat32(24, 0, true);
   view.setFloat32(28, 0, true);
+  return buffer;
+}
+
+function createMaterialInterfaceCandidateParamsArray({
+  surfaceCount,
+  totalFieldCells,
+  candidateCount,
+  fieldPadding,
+  refEdgeM,
+  isolationScale
+}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, surfaceCount, true);
+  view.setUint32(4, totalFieldCells, true);
+  view.setUint32(8, candidateCount, true);
+  view.setUint32(12, 0, true);
+  view.setFloat32(16, fieldPadding, true);
+  view.setFloat32(20, refEdgeM, true);
+  view.setFloat32(24, isolationScale, true);
+  view.setFloat32(28, 0, true);
+  return buffer;
+}
+
+function createMarchingCubesCandidateParamsArray({
+  surfaceCount,
+  totalFieldCells,
+  candidateCount,
+  fieldPadding,
+  refEdgeM,
+  isolationScale
+}) {
+  return createMaterialInterfaceCandidateParamsArray({
+    surfaceCount,
+    totalFieldCells,
+    candidateCount,
+    fieldPadding,
+    refEdgeM,
+    isolationScale
+  });
+}
+
+function createSurfaceVerticesParamsArray({
+  surfaceCount,
+  totalFieldCells,
+  maxVertexRows,
+  fieldPadding,
+  refEdgeM,
+  isolationScale
+}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, surfaceCount, true);
+  view.setUint32(4, maxVertexRows, true);
+  view.setUint32(8, totalFieldCells, true);
+  view.setUint32(12, 0, true);
+  view.setFloat32(16, fieldPadding, true);
+  view.setFloat32(20, refEdgeM, true);
+  view.setFloat32(24, isolationScale, true);
+  view.setFloat32(28, 0, true);
+  return buffer;
+}
+
+function createSurfaceDrawParamsArray({
+  surfaceCount,
+  sourceVertexRowCount,
+  maxCompactVertexRows
+}) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, surfaceCount, true);
+  view.setUint32(4, sourceVertexRowCount, true);
+  view.setUint32(8, maxCompactVertexRows, true);
+  view.setUint32(12, 0, true);
   return buffer;
 }
 
@@ -312,6 +475,9 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       descriptor.phaseId ?? (descriptor.phase ? gpuPhaseId(descriptor.phase) : GPU_PHASE_IDS.unknown),
       GPU_PHASE_IDS.unknown
     );
+    const opticalState = descriptor.opticalState || null;
+    const opticalStateId = finiteNumber(descriptor.opticalStateId ?? stableOpticalStateId(opticalState), 0);
+    const opticalStateKey = descriptor.opticalStateKey ?? stableOpticalStateKey(opticalState);
     const offset = index * SPH_GPU_RENDER_SURFACE_ROW_FLOATS;
     records.set([
       materialId,
@@ -327,16 +493,28 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       clamp(finiteNumber(color[1], 1), 0, 1),
       clamp(finiteNumber(color[2], 1), 0, 1),
       finiteNumber(descriptor.status, 1),
-      0,
-      0,
-      0
+      opticalStateId,
+      Number.isFinite(Number(descriptor.transparencyClassId)) ? Number(descriptor.transparencyClassId) : -1,
+      Number.isFinite(Number(descriptor.depthWriteFlag)) ? Number(descriptor.depthWriteFlag) : -1
     ], offset);
+    const renderPolicy = renderPolicyFieldsForSurface({
+      ...descriptor,
+      index,
+      phaseId
+    });
     const row = {
       index,
       surfaceKey: descriptor.surfaceKey ?? `${materialId}|${phaseId}`,
       material: descriptor.material ?? null,
       phase: descriptor.phase ?? null,
       renderKey: descriptor.renderKey ?? descriptor.material ?? null,
+      opticalState: opticalState ? { ...opticalState } : null,
+      opticalStateKey,
+      opticalStateId,
+      renderLayer: descriptor.renderLayer ?? renderPolicy.renderLayer,
+      renderOrder: renderPolicy.renderOrder,
+      transparencyClassId: renderPolicy.transparencyClassId,
+      depthWriteFlag: renderPolicy.depthWriteFlag,
       materialId,
       phaseId,
       fieldOffset,
@@ -390,10 +568,45 @@ function normalizedPositionFromRenderRow(renderRows, offset, fieldPadding, refEd
   ];
 }
 
+function phaseMatchesEventSurface(eventPhaseId, surfacePhaseId) {
+  return !(eventPhaseId > 0) || eventPhaseId === surfacePhaseId;
+}
+
+function accumulateMetaballSample({
+  cell,
+  position,
+  strength,
+  subtract,
+  supportNorm,
+  color,
+  density,
+  palette
+}) {
+  const dx = cell[0] - position[0];
+  const dy = cell[1] - position[1];
+  const dz = cell[2] - position[2];
+  const dist2 = dx * dx + dy * dy + dz * dz;
+  const value = strength / (0.000001 + dist2) - subtract;
+  if (value <= 0) return { density, palette };
+  const ratio = Math.sqrt(dist2) / Math.max(supportNorm, 1e-6);
+  const t = clamp(ratio, 0, 1);
+  const weight = 1 - t ** 3 * (t * (t * 6 - 15) + 10);
+  return {
+    density: density + value,
+    palette: [
+      palette[0] + color[0] * weight,
+      palette[1] + color[1] * weight,
+      palette[2] + color[2] * weight
+    ]
+  };
+}
+
 export function buildSphRenderFieldCpu({
   renderRows,
+  productEventRows = null,
   surfaceTable,
   particleCount = null,
+  productEventCount = null,
   fieldPadding = 0.22,
   refEdgeM = 10
 } = {}) {
@@ -403,8 +616,12 @@ export function buildSphRenderFieldCpu({
   if (renderRows.length % SPH_GPU_RENDER_ROW_FLOATS !== 0) {
     throw new RangeError('SPH render rows length must align to the render row stride');
   }
+  if (productEventRows && (!(productEventRows instanceof Float32Array) || productEventRows.length % SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS !== 0)) {
+    throw new RangeError('SPH product-event rows length must align to the product-event row stride');
+  }
   assertRenderFieldSurfaceTable(surfaceTable);
   const resolvedParticleCount = particleCount ?? (renderRows.length / SPH_GPU_RENDER_ROW_FLOATS);
+  const resolvedProductEventCount = productEventCount ?? (productEventRows?.length ? productEventRows.length / SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 0);
   const fieldRows = new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS);
   for (const surface of surfaceTable.metadata) {
     const resolution = surface.resolution;
@@ -417,34 +634,64 @@ export function buildSphRenderFieldCpu({
       const x = rem - y * resolution;
       const cell = [x / resolution, y / resolution, z / resolution];
       let density = 0;
-      let r = 0;
-      let g = 0;
-      let b = 0;
+      let palette = [0, 0, 0];
       for (let particleIndex = 0; particleIndex < resolvedParticleCount; particleIndex += 1) {
         const renderOffset = particleIndex * SPH_GPU_RENDER_ROW_FLOATS;
         const materialId = renderRows[renderOffset + 4];
         const phaseId = renderRows[renderOffset + 5];
         if (materialId !== surface.materialId || phaseId !== surface.phaseId) continue;
         const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
-        const dx = cell[0] - particle[0];
-        const dy = cell[1] - particle[1];
-        const dz = cell[2] - particle[2];
-        const dist2 = dx * dx + dy * dy + dz * dz;
-        const value = surface.strength / (0.000001 + dist2) - surface.subtract;
-        if (value <= 0) continue;
-        density += value;
-        const ratio = Math.sqrt(dist2) / Math.max(supportNorm, 1e-6);
-        const t = clamp(ratio, 0, 1);
-        const weight = 1 - t ** 3 * (t * (t * 6 - 15) + 10);
-        r += surface.colorLinear[0] * weight;
-        g += surface.colorLinear[1] * weight;
-        b += surface.colorLinear[2] * weight;
+        const accumulated = accumulateMetaballSample({
+          cell,
+          position: particle,
+          strength: surface.strength,
+          subtract: surface.subtract,
+          supportNorm,
+          color: surface.colorLinear,
+          density,
+          palette
+        });
+        density = accumulated.density;
+        palette = accumulated.palette;
+      }
+      for (let eventIndex = 0; eventIndex < resolvedProductEventCount; eventIndex += 1) {
+        if (!productEventRows) break;
+        const eventOffset = eventIndex * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS;
+        const status = productEventRows[eventOffset + 18];
+        const materialId = productEventRows[eventOffset + 4];
+        const phaseId = productEventRows[eventOffset + 11];
+        const unplacedMassKg = productEventRows[eventOffset + 13];
+        if (
+          status !== 1
+          || !(unplacedMassKg > 0)
+          || materialId !== surface.materialId
+          || !phaseMatchesEventSurface(phaseId, surface.phaseId)
+        ) {
+          continue;
+        }
+        const eventPosition = [
+          clamp(fieldPadding + (productEventRows[eventOffset] / Math.max(refEdgeM, 1e-12)) * (1 - 2 * fieldPadding), 0.001, 0.999),
+          clamp(fieldPadding + (productEventRows[eventOffset + 1] / Math.max(refEdgeM, 1e-12)) * (1 - 2 * fieldPadding), 0.001, 0.999),
+          clamp(fieldPadding + (productEventRows[eventOffset + 2] / Math.max(refEdgeM, 1e-12)) * (1 - 2 * fieldPadding), 0.001, 0.999)
+        ];
+        const accumulated = accumulateMetaballSample({
+          cell,
+          position: eventPosition,
+          strength: surface.strength,
+          subtract: surface.subtract,
+          supportNorm,
+          color: surface.colorLinear,
+          density,
+          palette
+        });
+        density = accumulated.density;
+        palette = accumulated.palette;
       }
       const fieldOffset = (surface.fieldOffset + cellIndex) * SPH_GPU_RENDER_FIELD_CELL_FLOATS;
       fieldRows[fieldOffset] = density;
-      fieldRows[fieldOffset + 1] = r;
-      fieldRows[fieldOffset + 2] = g;
-      fieldRows[fieldOffset + 3] = b;
+      fieldRows[fieldOffset + 1] = palette[0];
+      fieldRows[fieldOffset + 2] = palette[1];
+      fieldRows[fieldOffset + 3] = palette[2];
     }
   }
   return {
@@ -453,6 +700,7 @@ export function buildSphRenderFieldCpu({
     status: 'render-field-built',
     kernelScope: RENDER_FIELD_SCOPE,
     particleCount: resolvedParticleCount,
+    productEventCount: resolvedProductEventCount,
     surfaceCount: surfaceTable.surfaceCount,
     totalFieldCells: surfaceTable.totalFieldCells,
     maxFieldCellCount: surfaceTable.maxFieldCellCount,
@@ -492,14 +740,2635 @@ export function splitSphRenderFieldBySurface(renderField) {
   });
 }
 
+function normalizeVector3(vector) {
+  const length = Math.hypot(vector[0], vector[1], vector[2]);
+  if (!(length > 0)) return [0, 0, 0];
+  return [vector[0] / length, vector[1] / length, vector[2] / length];
+}
+
+function cellPhysicalCenterM(x, y, z, resolution, fieldPadding, refEdgeM) {
+  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+  const toM = (coord) => (((coord + 0.5) / resolution) - fieldPadding) * refEdgeM / span;
+  return [toM(x), toM(y), toM(z)];
+}
+
+function fieldCoordPhysicalM(x, y, z, resolution, fieldPadding, refEdgeM) {
+  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+  const toM = (coord) => ((coord / resolution) - fieldPadding) * refEdgeM / span;
+  return [toM(x), toM(y), toM(z)];
+}
+
+function fieldIndex3d(x, y, z, resolution) {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+function writeInterfaceCandidateRow(candidateRows, offset, {
+  surface,
+  axisId,
+  centroidM = [0, 0, 0],
+  areaM2 = 0,
+  normal = [0, 0, 0],
+  normalAreaVectorM2 = [0, 0, 0],
+  crossingSign = 0,
+  status = 0
+}) {
+  candidateRows.set([
+    surface.index,
+    surface.materialId,
+    surface.phaseId,
+    axisId,
+    centroidM[0],
+    centroidM[1],
+    centroidM[2],
+    areaM2,
+    normal[0],
+    normal[1],
+    normal[2],
+    normalAreaVectorM2[0],
+    normalAreaVectorM2[1],
+    normalAreaVectorM2[2],
+    crossingSign,
+    status
+  ], offset);
+}
+
+export function deriveSphMaterialInterfaceCandidateField(renderField, {
+  isolationScale = 1
+} = {}) {
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA || !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('deriveSphMaterialInterfaceCandidateField requires an SPH render field');
+  }
+  const surfaceFields = splitSphRenderFieldBySurface(renderField);
+  const candidateCount = Math.max(0, renderField.totalFieldCells || 0) * 3;
+  const candidateRows = new Float32Array(candidateCount * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS);
+  let activeCandidateCount = 0;
+  const surfaces = surfaceFields.map((surface) => {
+    const resolution = surface.resolution;
+    const isolation = surface.isolation * finiteNumber(isolationScale, 1);
+    const fieldPadding = finiteNumber(renderField.fieldPadding, 0.22);
+    const refEdgeM = Math.max(finiteNumber(renderField.refEdgeM, 1), 1e-12);
+    const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+    const cellSizeM = refEdgeM / (span * Math.max(resolution, 1));
+    const faceAreaM2 = cellSizeM * cellSizeM;
+    const candidateOffset = surface.fieldOffset * 3;
+    const activeStart = activeCandidateCount;
+    let activeCellCount = 0;
+
+    for (let z = 0; z < resolution; z += 1) {
+      for (let y = 0; y < resolution; y += 1) {
+        for (let x = 0; x < resolution; x += 1) {
+          const cellIndex = fieldIndex3d(x, y, z, resolution);
+          const value = surface.field[cellIndex];
+          if (value >= isolation) activeCellCount += 1;
+          const neighbors = [
+            [x + 1, y, z, 0],
+            [x, y + 1, z, 1],
+            [x, y, z + 1, 2]
+          ];
+          for (const [nx, ny, nz, axis] of neighbors) {
+            const candidateIndex = (surface.fieldOffset + cellIndex) * 3 + axis;
+            const candidateOffsetFloats = candidateIndex * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+            writeInterfaceCandidateRow(candidateRows, candidateOffsetFloats, {
+              surface,
+              axisId: axis
+            });
+            if (nx >= resolution || ny >= resolution || nz >= resolution) continue;
+            const neighbor = surface.field[fieldIndex3d(nx, ny, nz, resolution)];
+            const inside = value >= isolation;
+            const neighborInside = neighbor >= isolation;
+            if (inside === neighborInside) continue;
+            const sign = inside ? 1 : -1;
+            const normal = [0, 0, 0];
+            normal[axis] = sign;
+            const normalAreaVectorM2 = normal.map((component) => component * faceAreaM2);
+            const center = cellPhysicalCenterM(
+              (x + nx) * 0.5,
+              (y + ny) * 0.5,
+              (z + nz) * 0.5,
+              resolution,
+              fieldPadding,
+              refEdgeM
+            );
+            writeInterfaceCandidateRow(candidateRows, candidateOffsetFloats, {
+              surface,
+              axisId: axis,
+              centroidM: center,
+              areaM2: faceAreaM2,
+              normal,
+              normalAreaVectorM2,
+              crossingSign: sign,
+              status: 1
+            });
+            activeCandidateCount += 1;
+          }
+        }
+      }
+    }
+
+    return {
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      resolution,
+      isolation,
+      activeCellCount,
+      candidateOffset,
+      candidateCount: surface.fieldCellCount * 3,
+      activeCandidateCount: activeCandidateCount - activeStart,
+      status: activeCandidateCount > activeStart
+        ? 'interface-candidates-active'
+        : (activeCellCount > 0 ? 'interface-candidates-active-without-crossing' : 'interface-candidates-empty')
+    };
+  });
+
+  return {
+    schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+    backend: 'cpu-reference',
+    status: activeCandidateCount > 0 ? 'material-interface-candidate-field-ready' : 'material-interface-candidate-field-empty',
+    sourceSchema: renderField.schema,
+    sourceBackend: renderField.backend,
+    surfaceCount: surfaces.length,
+    totalFieldCells: renderField.totalFieldCells,
+    candidateCount,
+    activeCandidateCount,
+    rowLayout: [...SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT],
+    rowStrideFloats: SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
+    candidateRows,
+    candidateRowByteLength: candidateRows.byteLength,
+    candidateShape: 'fixed-render-field-cell-axis-triplets',
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    forceCouplingValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function summarizeMaterialInterfaceCandidateSurfaces(renderField, candidateRows, isolationScale = 1) {
+  const metadata = renderField.surfaceTable?.metadata || [];
+  const activeBySurface = new Array(metadata.length).fill(0);
+  const rowCount = candidateRows.length / SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+  for (let candidateIndex = 0; candidateIndex < rowCount; candidateIndex += 1) {
+    const offset = candidateIndex * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+    const status = candidateRows[offset + 15];
+    if (!(status > 0)) continue;
+    const surfaceIndex = Math.round(candidateRows[offset]);
+    if (surfaceIndex >= 0 && surfaceIndex < activeBySurface.length) {
+      activeBySurface[surfaceIndex] += 1;
+    }
+  }
+  return metadata.map((surface) => {
+    const isolation = surface.isolation * finiteNumber(isolationScale, 1);
+    let activeCellCount = 0;
+    for (let cellIndex = 0; cellIndex < surface.fieldCellCount; cellIndex += 1) {
+      const offset = (surface.fieldOffset + cellIndex) * SPH_GPU_RENDER_FIELD_CELL_FLOATS;
+      if (renderField.fieldRows?.[offset] >= isolation) activeCellCount += 1;
+    }
+    const activeCandidateCount = activeBySurface[surface.index] || 0;
+    return {
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      resolution: surface.resolution,
+      isolation,
+      activeCellCount,
+      candidateOffset: surface.fieldOffset * 3,
+      candidateCount: surface.fieldCellCount * 3,
+      activeCandidateCount,
+      status: activeCandidateCount > 0
+        ? 'interface-candidates-active'
+        : (activeCellCount > 0 ? 'interface-candidates-active-without-crossing' : 'interface-candidates-empty')
+    };
+  });
+}
+
+export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
+  device,
+  renderField,
+  fieldRowsBuffer = null,
+  surfaceBuffer = null,
+  isolationScale = 1
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('buildSphMaterialInterfaceCandidateFieldWebGpu requires a WebGPU-like device');
+  }
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA) {
+    throw new TypeError('buildSphMaterialInterfaceCandidateFieldWebGpu requires an SPH render field');
+  }
+  if (!fieldRowsBuffer && !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('buildSphMaterialInterfaceCandidateFieldWebGpu requires fieldRows or fieldRowsBuffer');
+  }
+  if (!surfaceBuffer && !(renderField.surfaceTable?.records instanceof Float32Array)) {
+    throw new TypeError('buildSphMaterialInterfaceCandidateFieldWebGpu requires surface table records or surfaceBuffer');
+  }
+  const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
+  const totalFieldCells = renderField.totalFieldCells ?? 0;
+  const candidateCount = totalFieldCells * 3;
+  const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
+  const borrowedSurfaceBuffer = surfaceBuffer || null;
+  const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-interface-source-render-field',
+    renderField.fieldRows,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const sourceSurfaceBuffer = borrowedSurfaceBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-interface-render-surfaces',
+    renderField.surfaceTable.records
+  );
+  const candidateRowsBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-interface-candidates',
+    new Float32Array(candidateCount * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS),
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-interface-candidate-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createMaterialInterfaceCandidateParamsArray({
+    surfaceCount,
+    totalFieldCells,
+    candidateCount,
+    fieldPadding: finiteNumber(renderField.fieldPadding, 0.22),
+    refEdgeM: finiteNumber(renderField.refEdgeM, 10),
+    isolationScale: finiteNumber(isolationScale, 1)
+  }));
+
+  const module = device.createShaderModule({ label: 'ulg-sph-interface-candidates', code: sphMaterialInterfaceCandidatesWgsl });
+  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-interface-candidates',
+    module,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
+      { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
+      { binding: 2, resource: { buffer: candidateRowsBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(
+    Math.ceil(Math.max(1, (renderField.maxFieldCellCount || 0) * 3) / 64),
+    Math.max(1, surfaceCount)
+  );
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  const bytes = await readBuffer(
+    device,
+    candidateRowsBuffer,
+    candidateCount * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    'ulg-sph-interface-candidate-readback'
+  );
+  const candidateRows = new Float32Array(bytes);
+
+  if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
+  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  candidateRowsBuffer.destroy?.();
+  paramsBuffer.destroy?.();
+
+  const surfaces = summarizeMaterialInterfaceCandidateSurfaces(renderField, candidateRows, isolationScale);
+  const activeCandidateCount = surfaces.reduce((sum, surface) => sum + surface.activeCandidateCount, 0);
+  return {
+    schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+    backend: 'webgpu',
+    status: activeCandidateCount > 0 ? 'material-interface-candidate-field-ready' : 'material-interface-candidate-field-empty',
+    sourceSchema: renderField.schema,
+    sourceBackend: renderField.backend,
+    surfaceCount,
+    totalFieldCells,
+    candidateCount,
+    activeCandidateCount,
+    rowLayout: [...SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT],
+    rowStrideFloats: SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
+    candidateRows,
+    candidateRowByteLength: candidateRows.byteLength,
+    candidateShape: 'fixed-render-field-cell-axis-triplets',
+    surfaces,
+    fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
+    surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    candidateReadback: true,
+    scientificValidation: false,
+    sphValidation: false,
+    forceCouplingValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+const MARCHING_CUBE_EDGE_CORNER_PAIRS = Object.freeze([
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 0],
+  [4, 5],
+  [5, 6],
+  [6, 7],
+  [7, 4],
+  [0, 4],
+  [1, 5],
+  [2, 6],
+  [3, 7]
+]);
+const MARCHING_CUBE_TETRAHEDRA = Object.freeze([
+  [0, 5, 1, 6],
+  [0, 1, 2, 6],
+  [0, 2, 3, 6],
+  [0, 3, 7, 6],
+  [0, 7, 4, 6],
+  [0, 4, 5, 6]
+]);
+const MARCHING_CUBE_MAX_TRIANGLES_PER_CELL = 12;
+const MARCHING_CUBE_MAX_VERTICES_PER_CELL = MARCHING_CUBE_MAX_TRIANGLES_PER_CELL * 3;
+
+function marchingCubeVoxelCount(resolution) {
+  const voxelResolution = Math.max(0, Math.round(finiteNumber(resolution, 0)) - 1);
+  return voxelResolution * voxelResolution * voxelResolution;
+}
+
+function marchingCubeEdgeCrossingCount(cornerDensities, isolation) {
+  let count = 0;
+  for (const [leftIndex, rightIndex] of MARCHING_CUBE_EDGE_CORNER_PAIRS) {
+    if ((cornerDensities[leftIndex] >= isolation) !== (cornerDensities[rightIndex] >= isolation)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function writeMarchingCubeCellRow(candidateRows, offset, {
+  surface,
+  voxelLinearIndex = 0,
+  centerM = [0, 0, 0],
+  cellSizeM = 0,
+  caseIndex = 0,
+  edgeCrossingCount = 0,
+  triangleCount = 0,
+  vertexCount = 0,
+  densityMin = 0,
+  densityMax = 0,
+  isolation = 0,
+  status = 0
+}) {
+  candidateRows.set([
+    surface.index,
+    surface.materialId,
+    surface.phaseId,
+    voxelLinearIndex,
+    centerM[0],
+    centerM[1],
+    centerM[2],
+    cellSizeM,
+    caseIndex,
+    edgeCrossingCount,
+    triangleCount,
+    vertexCount,
+    densityMin,
+    densityMax,
+    isolation,
+    status
+  ], offset);
+}
+
+function vectorSubtract(a, b) {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function vectorCross(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]
+  ];
+}
+
+function triangleNormal(a, b, c) {
+  return normalizeVector3(vectorCross(vectorSubtract(b, a), vectorSubtract(c, a)));
+}
+
+function vectorAverage(vectors) {
+  if (!vectors.length) return [0, 0, 0];
+  const sum = vectors.reduce((acc, vector) => [
+    acc[0] + vector[0],
+    acc[1] + vector[1],
+    acc[2] + vector[2]
+  ], [0, 0, 0]);
+  return [sum[0] / vectors.length, sum[1] / vectors.length, sum[2] / vectors.length];
+}
+
+function interpolateIsoPoint(a, b, valueA, valueB, isolation) {
+  const denom = valueB - valueA;
+  const t = Math.abs(denom) > 1e-12 ? clamp((isolation - valueA) / denom, 0, 1) : 0.5;
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t
+  ];
+}
+
+function emitSurfaceTriangle(vertexRows, {
+  surface,
+  triangleIndex,
+  sourceVoxelLinearIndex,
+  isolation,
+  vertices,
+  outwardHint = null,
+  density = isolation
+}) {
+  let orientedVertices = vertices;
+  let normal = triangleNormal(vertices[0], vertices[1], vertices[2]);
+  if (
+    Array.isArray(outwardHint)
+    && outwardHint.length >= 3
+    && normal[0] * outwardHint[0] + normal[1] * outwardHint[1] + normal[2] * outwardHint[2] < 0
+  ) {
+    orientedVertices = [vertices[0], vertices[2], vertices[1]];
+    normal = triangleNormal(orientedVertices[0], orientedVertices[1], orientedVertices[2]);
+  }
+  for (let vertexIndex = 0; vertexIndex < 3; vertexIndex += 1) {
+    const vertex = orientedVertices[vertexIndex];
+    vertexRows.push(
+      surface.index,
+      surface.materialId,
+      surface.phaseId,
+      triangleIndex,
+      vertexIndex,
+      vertex[0],
+      vertex[1],
+      vertex[2],
+      normal[0],
+      normal[1],
+      normal[2],
+      surface.opticalStateId || 0,
+      density,
+      isolation,
+      sourceVoxelLinearIndex,
+      1
+    );
+  }
+}
+
+function emitTetraSurfaceTriangles({
+  vertexRows,
+  surface,
+  cornerPositions,
+  cornerDensities,
+  tetrahedron,
+  isolation,
+  sourceVoxelLinearIndex,
+  triangleIndex
+}) {
+  const inside = [];
+  const outside = [];
+  for (const cornerIndex of tetrahedron) {
+    if (cornerDensities[cornerIndex] >= isolation) {
+      inside.push(cornerIndex);
+    } else {
+      outside.push(cornerIndex);
+    }
+  }
+  if (inside.length === 0 || inside.length === 4) return triangleIndex;
+
+  if (inside.length === 1 || inside.length === 3) {
+    const source = inside.length === 1 ? inside[0] : outside[0];
+    const targets = inside.length === 1 ? outside : inside;
+    const sourcePosition = cornerPositions[source];
+    const targetPositions = targets.map((target) => cornerPositions[target]);
+    const outwardHint = inside.length === 1
+      ? vectorSubtract(vectorAverage(targetPositions), sourcePosition)
+      : vectorSubtract(sourcePosition, vectorAverage(targetPositions));
+    const vertices = targets.map((target) => interpolateIsoPoint(
+      cornerPositions[source],
+      cornerPositions[target],
+      cornerDensities[source],
+      cornerDensities[target],
+      isolation
+    ));
+    emitSurfaceTriangle(vertexRows, {
+      surface,
+      triangleIndex,
+      sourceVoxelLinearIndex,
+      isolation,
+      vertices,
+      outwardHint
+    });
+    return triangleIndex + 1;
+  }
+
+  const [insideA, insideB] = inside;
+  const [outsideA, outsideB] = outside;
+  const edgeA0 = interpolateIsoPoint(
+    cornerPositions[insideA],
+    cornerPositions[outsideA],
+    cornerDensities[insideA],
+    cornerDensities[outsideA],
+    isolation
+  );
+  const edgeA1 = interpolateIsoPoint(
+    cornerPositions[insideA],
+    cornerPositions[outsideB],
+    cornerDensities[insideA],
+    cornerDensities[outsideB],
+    isolation
+  );
+  const edgeB0 = interpolateIsoPoint(
+    cornerPositions[insideB],
+    cornerPositions[outsideA],
+    cornerDensities[insideB],
+    cornerDensities[outsideA],
+    isolation
+  );
+  const edgeB1 = interpolateIsoPoint(
+    cornerPositions[insideB],
+    cornerPositions[outsideB],
+    cornerDensities[insideB],
+    cornerDensities[outsideB],
+    isolation
+  );
+  const outwardHint = vectorSubtract(
+    vectorAverage([cornerPositions[outsideA], cornerPositions[outsideB]]),
+    vectorAverage([cornerPositions[insideA], cornerPositions[insideB]])
+  );
+  emitSurfaceTriangle(vertexRows, {
+    surface,
+    triangleIndex,
+    sourceVoxelLinearIndex,
+    isolation,
+    vertices: [edgeA0, edgeA1, edgeB0],
+    outwardHint
+  });
+  emitSurfaceTriangle(vertexRows, {
+    surface,
+    triangleIndex: triangleIndex + 1,
+    sourceVoxelLinearIndex,
+    isolation,
+    vertices: [edgeB0, edgeA1, edgeB1],
+    outwardHint
+  });
+  return triangleIndex + 2;
+}
+
+export function deriveSphRenderMarchingCubeCellsCpu(renderField, {
+  isolationScale = 1
+} = {}) {
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA || !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('deriveSphRenderMarchingCubeCellsCpu requires an SPH render field with fieldRows');
+  }
+  const surfaceFields = splitSphRenderFieldBySurface(renderField);
+  const candidateCount = Math.max(0, renderField.totalFieldCells || 0);
+  const cellRows = new Float32Array(candidateCount * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS);
+  let activeCellCount = 0;
+  let reservedTriangleCount = 0;
+  let reservedVertexCount = 0;
+  const surfaces = surfaceFields.map((surface) => {
+    const resolution = surface.resolution;
+    const voxelResolution = Math.max(0, resolution - 1);
+    const voxelCount = marchingCubeVoxelCount(resolution);
+    const isolation = surface.isolation * finiteNumber(isolationScale, 1);
+    const fieldPadding = finiteNumber(renderField.fieldPadding, 0.22);
+    const refEdgeM = Math.max(finiteNumber(renderField.refEdgeM, 1), 1e-12);
+    const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+    const cellSizeM = refEdgeM / (span * Math.max(resolution, 1));
+    const activeStart = activeCellCount;
+    const triangleStart = reservedTriangleCount;
+
+    for (let voxelIndex = 0; voxelIndex < voxelCount; voxelIndex += 1) {
+      const z = Math.floor(voxelIndex / (voxelResolution * voxelResolution));
+      const rem = voxelIndex - z * voxelResolution * voxelResolution;
+      const y = Math.floor(rem / voxelResolution);
+      const x = rem - y * voxelResolution;
+      const cornerDensities = [
+        surface.field[fieldIndex3d(x, y, z, resolution)],
+        surface.field[fieldIndex3d(x + 1, y, z, resolution)],
+        surface.field[fieldIndex3d(x + 1, y + 1, z, resolution)],
+        surface.field[fieldIndex3d(x, y + 1, z, resolution)],
+        surface.field[fieldIndex3d(x, y, z + 1, resolution)],
+        surface.field[fieldIndex3d(x + 1, y, z + 1, resolution)],
+        surface.field[fieldIndex3d(x + 1, y + 1, z + 1, resolution)],
+        surface.field[fieldIndex3d(x, y + 1, z + 1, resolution)]
+      ];
+      let caseIndex = 0;
+      for (let cornerIndex = 0; cornerIndex < cornerDensities.length; cornerIndex += 1) {
+        if (cornerDensities[cornerIndex] >= isolation) caseIndex |= (1 << cornerIndex);
+      }
+      const edgeCrossingCount = marchingCubeEdgeCrossingCount(cornerDensities, isolation);
+      const active = caseIndex !== 0 && caseIndex !== 255;
+      const triangleCount = active ? MARCHING_CUBE_MAX_TRIANGLES_PER_CELL : 0;
+      const vertexCount = triangleCount * 3;
+      const centerM = fieldCoordPhysicalM(
+        x + 0.5,
+        y + 0.5,
+        z + 0.5,
+        resolution,
+        fieldPadding,
+        refEdgeM
+      );
+      writeMarchingCubeCellRow(cellRows, (surface.fieldOffset + voxelIndex) * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS, {
+        surface,
+        voxelLinearIndex: voxelIndex,
+        centerM,
+        cellSizeM,
+        caseIndex,
+        edgeCrossingCount,
+        triangleCount,
+        vertexCount,
+        densityMin: Math.min(...cornerDensities),
+        densityMax: Math.max(...cornerDensities),
+        isolation,
+        status: active ? 1 : 0
+      });
+      if (active) {
+        activeCellCount += 1;
+        reservedTriangleCount += triangleCount;
+        reservedVertexCount += vertexCount;
+      }
+    }
+
+    const surfaceActiveCellCount = activeCellCount - activeStart;
+    const surfaceTriangleCount = reservedTriangleCount - triangleStart;
+    return {
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      resolution,
+      isolation,
+      voxelResolution,
+      voxelCount,
+      cellOffset: surface.fieldOffset,
+      cellCount: surface.fieldCellCount,
+      activeCellCount: surfaceActiveCellCount,
+      reservedTriangleCount: surfaceTriangleCount,
+      reservedVertexCount: surfaceTriangleCount * 3,
+      status: surfaceActiveCellCount > 0 ? 'marching-cube-cells-active' : 'marching-cube-cells-empty'
+    };
+  });
+
+  return {
+    schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+    backend: 'cpu-reference',
+    status: activeCellCount > 0 ? 'marching-cube-cells-ready' : 'marching-cube-cells-empty',
+    sourceRenderFieldSchema: renderField.schema,
+    sourceRenderFieldBackend: renderField.backend,
+    cubeShape: 'fixed-surface-voxel-cubes',
+    surfaceCount: surfaces.length,
+    totalFieldCells: renderField.totalFieldCells,
+    totalCubeCells: candidateCount,
+    maxSurfaceCubeCells: Math.max(0, ...(surfaces.map((surface) => surface.voxelCount))),
+    activeCellCount,
+    reservedTriangleCount,
+    reservedVertexCount,
+    rowLayout: [...SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS,
+    cellRows,
+    cellRowsByteLength: cellRows.byteLength,
+    marchingCubeCellReadback: true,
+    renderFieldReadback: Boolean(renderField.renderFieldReadback),
+    emissionStatus: 'pending-prefix-compact-and-triangle-emission',
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+export function deriveSphRenderSurfaceVerticesCpu(renderField, {
+  isolationScale = 1
+} = {}) {
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA || !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('deriveSphRenderSurfaceVerticesCpu requires an SPH render field with fieldRows');
+  }
+  const surfaceFields = splitSphRenderFieldBySurface(renderField);
+  const vertexRows = [];
+  let triangleCount = 0;
+  let activeCellCount = 0;
+  const surfaces = surfaceFields.map((surface) => {
+    const resolution = surface.resolution;
+    const voxelResolution = Math.max(0, resolution - 1);
+    const voxelCount = marchingCubeVoxelCount(resolution);
+    const isolation = surface.isolation * finiteNumber(isolationScale, 1);
+    const fieldPadding = finiteNumber(renderField.fieldPadding, 0.22);
+    const refEdgeM = Math.max(finiteNumber(renderField.refEdgeM, 1), 1e-12);
+    const triangleStart = triangleCount;
+    const vertexStart = vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+    const activeCellStart = activeCellCount;
+
+    for (let voxelIndex = 0; voxelIndex < voxelCount; voxelIndex += 1) {
+      const z = Math.floor(voxelIndex / (voxelResolution * voxelResolution));
+      const rem = voxelIndex - z * voxelResolution * voxelResolution;
+      const y = Math.floor(rem / voxelResolution);
+      const x = rem - y * voxelResolution;
+      const cornerDensities = [
+        surface.field[fieldIndex3d(x, y, z, resolution)],
+        surface.field[fieldIndex3d(x + 1, y, z, resolution)],
+        surface.field[fieldIndex3d(x + 1, y + 1, z, resolution)],
+        surface.field[fieldIndex3d(x, y + 1, z, resolution)],
+        surface.field[fieldIndex3d(x, y, z + 1, resolution)],
+        surface.field[fieldIndex3d(x + 1, y, z + 1, resolution)],
+        surface.field[fieldIndex3d(x + 1, y + 1, z + 1, resolution)],
+        surface.field[fieldIndex3d(x, y + 1, z + 1, resolution)]
+      ];
+      let caseIndex = 0;
+      for (let cornerIndex = 0; cornerIndex < cornerDensities.length; cornerIndex += 1) {
+        if (cornerDensities[cornerIndex] >= isolation) caseIndex |= (1 << cornerIndex);
+      }
+      if (caseIndex === 0 || caseIndex === 255) continue;
+      activeCellCount += 1;
+      const cornerPositions = [
+        fieldCoordPhysicalM(x, y, z, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x + 1, y, z, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x + 1, y + 1, z, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x, y + 1, z, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x, y, z + 1, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x + 1, y, z + 1, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x + 1, y + 1, z + 1, resolution, fieldPadding, refEdgeM),
+        fieldCoordPhysicalM(x, y + 1, z + 1, resolution, fieldPadding, refEdgeM)
+      ];
+      for (const tetrahedron of MARCHING_CUBE_TETRAHEDRA) {
+        triangleCount = emitTetraSurfaceTriangles({
+          vertexRows,
+          surface,
+          cornerPositions,
+          cornerDensities,
+          tetrahedron,
+          isolation,
+          sourceVoxelLinearIndex: voxelIndex,
+          triangleIndex: triangleCount
+        });
+      }
+    }
+
+    const surfaceTriangleCount = triangleCount - triangleStart;
+    const surfaceVertexCount = surfaceTriangleCount * 3;
+    const renderPolicy = renderPolicyFieldsForSurface(surface);
+    return {
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      renderLayer: surface.renderLayer ?? renderPolicy.renderLayer,
+      renderOrder: renderPolicy.renderOrder,
+      transparencyClassId: renderPolicy.transparencyClassId,
+      depthWriteFlag: renderPolicy.depthWriteFlag,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      opticalStateId: surface.opticalStateId || 0,
+      resolution,
+      isolation,
+      voxelResolution,
+      voxelCount,
+      fieldOffset: surface.fieldOffset,
+      fieldCellCount: surface.fieldCellCount,
+      activeCellCount: activeCellCount - activeCellStart,
+      triangleOffset: triangleStart,
+      triangleCount: surfaceTriangleCount,
+      vertexOffset: vertexStart,
+      vertexCount: surfaceVertexCount,
+      status: surfaceTriangleCount > 0 ? 'surface-vertices-ready' : 'surface-vertices-empty'
+    };
+  });
+  const vertexRowsArray = Float32Array.from(vertexRows);
+  return {
+    schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+    backend: 'cpu-reference',
+    status: triangleCount > 0 ? 'surface-vertices-ready' : 'surface-vertices-empty',
+    sourceRenderFieldSchema: renderField.schema,
+    sourceRenderFieldBackend: renderField.backend,
+    surfaceExtractionMethod: 'tetrahedralized-render-field-cubes',
+    compactionMode: 'cpu-compact',
+    surfaceCount: surfaces.length,
+    totalFieldCells: renderField.totalFieldCells,
+    activeCellCount,
+    triangleCount,
+    vertexCount: triangleCount * 3,
+    maxTrianglesPerCell: MARCHING_CUBE_MAX_TRIANGLES_PER_CELL,
+    maxVerticesPerCell: MARCHING_CUBE_MAX_VERTICES_PER_CELL,
+    rowLayout: [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+    vertexRows: vertexRowsArray,
+    vertexRowsByteLength: vertexRowsArray.byteLength,
+    surfaceVertexReadback: true,
+    renderFieldReadback: Boolean(renderField.renderFieldReadback),
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function assertSurfaceVertexField(vertexField) {
+  if (
+    vertexField?.schema !== ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
+    || !(vertexField.vertexRows instanceof Float32Array)
+  ) {
+    throw new TypeError('surface vertex field requires packed vertexRows');
+  }
+  if (vertexField.vertexRows.length % SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS !== 0) {
+    throw new RangeError('surface vertex rows must align to the vertex row stride');
+  }
+}
+
+function transparencyClassForPhaseId(phaseId) {
+  const id = Math.round(finiteNumber(phaseId, 0));
+  if (id === GPU_PHASE_IDS.gas) return 3;
+  if (id === GPU_PHASE_IDS.liquid) return 2;
+  return 0;
+}
+
+function renderPolicyFieldsForSurface(surface = {}) {
+  const explicitTransparency = Number(surface.transparencyClassId);
+  const transparencyClassId = Number.isFinite(explicitTransparency) && explicitTransparency >= 0
+    ? explicitTransparency
+    : transparencyClassForPhaseId(surface.phaseId);
+  const explicitDepthWrite = Number(surface.depthWriteFlag);
+  const depthWriteFlag = Number.isFinite(explicitDepthWrite) && explicitDepthWrite >= 0
+    ? explicitDepthWrite
+    : (transparencyClassId > 0 ? 0 : 1);
+  const explicitRenderOrder = Number(surface.renderOrder);
+  const surfaceIndex = finiteNumber(surface.surfaceIndex ?? surface.index, 0);
+  const renderOrder = Number.isFinite(explicitRenderOrder)
+    ? explicitRenderOrder
+    : (transparencyClassId * 1000 + surfaceIndex);
+  return {
+    renderLayer: surface.renderLayer ?? null,
+    renderOrder,
+    transparencyClassId,
+    depthWriteFlag
+  };
+}
+
+function writeSurfaceDrawRow(drawRows, offset, {
+  surfaceIndex = 0,
+  materialId = 0,
+  phaseId = 0,
+  opticalStateId = 0,
+  vertexOffset = 0,
+  vertexCount = 0,
+  triangleOffset = 0,
+  triangleCount = 0,
+  renderOrder = 0,
+  transparencyClassId = 0,
+  depthWriteFlag = 1,
+  status = 0,
+  boundsCenterM = [0, 0, 0],
+  boundsRadiusM = 0
+}) {
+  drawRows.set([
+    surfaceIndex,
+    materialId,
+    phaseId,
+    opticalStateId,
+    vertexOffset,
+    vertexCount,
+    triangleOffset,
+    triangleCount,
+    renderOrder,
+    transparencyClassId,
+    depthWriteFlag,
+    status,
+    boundsCenterM[0],
+    boundsCenterM[1],
+    boundsCenterM[2],
+    boundsRadiusM
+  ], offset);
+}
+
+function writeSurfaceDrawIndirectRow(indirectRows, offset, {
+  vertexCount = 0,
+  instanceCount = 0,
+  firstVertex = 0,
+  firstInstance = 0
+}) {
+  indirectRows.set([
+    Math.max(0, Math.round(finiteNumber(vertexCount, 0))),
+    Math.max(0, Math.round(finiteNumber(instanceCount, 0))),
+    Math.max(0, Math.round(finiteNumber(firstVertex, 0))),
+    Math.max(0, Math.round(finiteNumber(firstInstance, 0)))
+  ], offset);
+}
+
+function surfaceRecordsFromSurfaceVertexMetadata(surfaceVertices) {
+  const surfaces = surfaceVertices?.surfaces || [];
+  const surfaceCount = Math.max(0, Math.round(finiteNumber(surfaceVertices?.surfaceCount, surfaces.length)));
+  const records = new Float32Array(surfaceCount * SPH_GPU_RENDER_SURFACE_ROW_FLOATS);
+  for (let index = 0; index < surfaceCount; index += 1) {
+    const surface = surfaces[index] || {};
+    const offset = index * SPH_GPU_RENDER_SURFACE_ROW_FLOATS;
+    const color = Array.isArray(surface.colorLinear) || ArrayBuffer.isView(surface.colorLinear)
+      ? surface.colorLinear
+      : [1, 1, 1];
+    records.set([
+      finiteNumber(surface.materialId, 0),
+      finiteNumber(surface.phaseId, GPU_PHASE_IDS.unknown),
+      finiteNumber(surface.fieldOffset ?? surface.cellOffset, 0),
+      finiteNumber(surface.fieldCellCount ?? surface.cellCount ?? surface.voxelCount ?? 0, 0),
+      finiteNumber(surface.resolution, 0),
+      finiteNumber(surface.isolation, 0),
+      finiteNumber(surface.subtract, 0),
+      finiteNumber(surface.strength, 0),
+      finiteNumber(surface.radiusNorm, 0),
+      clamp(finiteNumber(color[0], 1), 0, 1),
+      clamp(finiteNumber(color[1], 1), 0, 1),
+      clamp(finiteNumber(color[2], 1), 0, 1),
+      1,
+      finiteNumber(surface.opticalStateId, 0),
+      Number.isFinite(Number(surface.transparencyClassId)) ? Number(surface.transparencyClassId) : -1,
+      Number.isFinite(Number(surface.depthWriteFlag)) ? Number(surface.depthWriteFlag) : -1
+    ], offset);
+  }
+  return records;
+}
+
+export function deriveSphRenderSurfaceDrawMetadataCpu(surfaceVertices) {
+  assertSurfaceVertexField(surfaceVertices);
+  const surfaceDescriptors = surfaceVertices.surfaces || [];
+  const groups = new Map();
+  for (const surface of surfaceDescriptors) {
+    const surfaceIndex = Math.round(finiteNumber(surface.surfaceIndex ?? surface.index, surfaceDescriptors.indexOf(surface)));
+    const renderPolicy = renderPolicyFieldsForSurface({
+      ...surface,
+      surfaceIndex
+    });
+    groups.set(surfaceIndex, {
+      surface,
+      surfaceIndex,
+      vertexOffset: Infinity,
+      vertexCount: 0,
+      triangleIds: new Set(),
+      minTriangle: Infinity,
+      min: [Infinity, Infinity, Infinity],
+      max: [-Infinity, -Infinity, -Infinity],
+      ...renderPolicy
+    });
+  }
+
+  const rowCount = surfaceVertices.vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const offset = rowIndex * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+    if (!(surfaceVertices.vertexRows[offset + 15] > 0)) continue;
+    const surfaceIndex = Math.round(surfaceVertices.vertexRows[offset]);
+    let group = groups.get(surfaceIndex);
+    if (!group) {
+      const phaseId = surfaceVertices.vertexRows[offset + 2];
+      group = {
+        surface: {
+          surfaceKey: `surface-${surfaceIndex}`,
+          materialId: surfaceVertices.vertexRows[offset + 1],
+          phaseId,
+          opticalStateId: surfaceVertices.vertexRows[offset + 11] || 0
+        },
+        surfaceIndex,
+        vertexOffset: Infinity,
+        vertexCount: 0,
+        triangleIds: new Set(),
+        minTriangle: Infinity,
+        min: [Infinity, Infinity, Infinity],
+        max: [-Infinity, -Infinity, -Infinity],
+        ...renderPolicyFieldsForSurface({
+          phaseId,
+          surfaceIndex
+        })
+      };
+      groups.set(surfaceIndex, group);
+    }
+    group.vertexOffset = Math.min(group.vertexOffset, rowIndex);
+    group.vertexCount += 1;
+    const triangleIndex = Math.round(surfaceVertices.vertexRows[offset + 3]);
+    group.triangleIds.add(triangleIndex);
+    group.minTriangle = Math.min(group.minTriangle, triangleIndex);
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = surfaceVertices.vertexRows[offset + 5 + axis];
+      group.min[axis] = Math.min(group.min[axis], value);
+      group.max[axis] = Math.max(group.max[axis], value);
+    }
+  }
+
+  const sortedGroups = [...groups.values()].sort((a, b) => a.surfaceIndex - b.surfaceIndex);
+  const drawRows = new Float32Array(sortedGroups.length * SPH_GPU_RENDER_SURFACE_DRAW_FLOATS);
+  const drawIndirectRows = new Uint32Array(sortedGroups.length * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS);
+  let activeSurfaceCount = 0;
+  let totalVertexCount = 0;
+  let totalTriangleCount = 0;
+  const surfaces = sortedGroups.map((group, drawIndex) => {
+    const vertexCount = group.vertexCount;
+    const triangleCount = group.triangleIds.size;
+    const active = vertexCount > 0 && triangleCount > 0;
+    if (active) activeSurfaceCount += 1;
+    totalVertexCount += vertexCount;
+    totalTriangleCount += triangleCount;
+    const boundsCenterM = active
+      ? [
+          (group.min[0] + group.max[0]) * 0.5,
+          (group.min[1] + group.max[1]) * 0.5,
+          (group.min[2] + group.max[2]) * 0.5
+        ]
+      : [0, 0, 0];
+    const boundsRadiusM = active
+      ? Math.hypot(
+        group.max[0] - boundsCenterM[0],
+        group.max[1] - boundsCenterM[1],
+        group.max[2] - boundsCenterM[2]
+      )
+      : 0;
+    const { renderOrder, transparencyClassId, depthWriteFlag } = renderPolicyFieldsForSurface({
+      ...group.surface,
+      surfaceIndex: group.surfaceIndex,
+      renderOrder: group.renderOrder,
+      transparencyClassId: group.transparencyClassId,
+      depthWriteFlag: group.depthWriteFlag
+    });
+    const vertexOffset = active ? group.vertexOffset : 0;
+    const triangleOffset = active ? group.minTriangle : 0;
+    writeSurfaceDrawRow(drawRows, drawIndex * SPH_GPU_RENDER_SURFACE_DRAW_FLOATS, {
+      surfaceIndex: group.surfaceIndex,
+      materialId: group.surface.materialId,
+      phaseId: group.surface.phaseId,
+      opticalStateId: group.surface.opticalStateId || 0,
+      vertexOffset,
+      vertexCount,
+      triangleOffset,
+      triangleCount,
+      renderOrder,
+      transparencyClassId,
+      depthWriteFlag,
+      status: active ? 1 : 0,
+      boundsCenterM,
+      boundsRadiusM
+    });
+    writeSurfaceDrawIndirectRow(drawIndirectRows, drawIndex * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS, {
+      vertexCount: active ? vertexCount : 0,
+      instanceCount: active ? 1 : 0,
+      firstVertex: vertexOffset,
+      firstInstance: group.surfaceIndex
+    });
+    return {
+      surfaceKey: group.surface.surfaceKey,
+      material: group.surface.material,
+      phase: group.surface.phase,
+      renderKey: group.surface.renderKey,
+      renderLayer: group.surface.renderLayer ?? group.renderLayer ?? null,
+      surfaceIndex: group.surfaceIndex,
+      materialId: group.surface.materialId,
+      phaseId: group.surface.phaseId,
+      opticalStateId: group.surface.opticalStateId || 0,
+      vertexOffset,
+      vertexCount,
+      triangleOffset,
+      triangleCount,
+      renderOrder,
+      transparencyClassId,
+      depthWriteFlag,
+      boundsCenterM,
+      boundsRadiusM,
+      status: active ? 'surface-draw-ready' : 'surface-draw-empty'
+    };
+  });
+
+  return {
+    schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
+    backend: 'cpu-reference',
+    status: activeSurfaceCount > 0 ? 'surface-draw-metadata-ready' : 'surface-draw-metadata-empty',
+    sourceSurfaceVertexSchema: surfaceVertices.schema,
+    sourceSurfaceVertexBackend: surfaceVertices.backend,
+    surfaceCount: surfaces.length,
+    activeSurfaceCount,
+    vertexCount: totalVertexCount,
+    triangleCount: totalTriangleCount,
+    rowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
+    drawRows,
+    drawRowsByteLength: drawRows.byteLength,
+    drawIndirectSchema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
+    drawIndirectRowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT],
+    drawIndirectRowStrideUints: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
+    drawIndirectRows,
+    drawIndirectRowsByteLength: drawIndirectRows.byteLength,
+    compactionMode: 'cpu-prefix-from-compact-vertices',
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function assertSurfaceDrawMetadata(drawMetadata) {
+  if (
+    drawMetadata?.schema !== ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA
+    || !(drawMetadata.drawRows instanceof Float32Array)
+  ) {
+    throw new TypeError('surface draw metadata requires packed drawRows');
+  }
+  if (drawMetadata.drawRows.length % SPH_GPU_RENDER_SURFACE_DRAW_FLOATS !== 0) {
+    throw new RangeError('surface draw rows must align to the draw row stride');
+  }
+}
+
+function summarizeSurfaceDrawRows(drawRows, sourceSurfaces = []) {
+  const surfaceCount = drawRows.length / SPH_GPU_RENDER_SURFACE_DRAW_FLOATS;
+  let activeSurfaceCount = 0;
+  let vertexCount = 0;
+  let triangleCount = 0;
+  const surfaces = [];
+  for (let index = 0; index < surfaceCount; index += 1) {
+    const offset = index * SPH_GPU_RENDER_SURFACE_DRAW_FLOATS;
+    const sourceSurface = sourceSurfaces[index] || {};
+    const active = drawRows[offset + 11] > 0;
+    const surfaceVertexCount = Math.round(finiteNumber(drawRows[offset + 5], 0));
+    const surfaceTriangleCount = Math.round(finiteNumber(drawRows[offset + 7], 0));
+    if (active) activeSurfaceCount += 1;
+    vertexCount += surfaceVertexCount;
+    triangleCount += surfaceTriangleCount;
+    surfaces.push({
+      surfaceKey: sourceSurface.surfaceKey,
+      material: sourceSurface.material,
+      phase: sourceSurface.phase,
+      renderKey: sourceSurface.renderKey,
+      surfaceIndex: Math.round(finiteNumber(drawRows[offset], index)),
+      materialId: drawRows[offset + 1],
+      phaseId: drawRows[offset + 2],
+      opticalStateId: drawRows[offset + 3],
+      vertexOffset: Math.round(finiteNumber(drawRows[offset + 4], 0)),
+      vertexCount: surfaceVertexCount,
+      triangleOffset: Math.round(finiteNumber(drawRows[offset + 6], 0)),
+      triangleCount: surfaceTriangleCount,
+      renderOrder: drawRows[offset + 8],
+      transparencyClassId: drawRows[offset + 9],
+      depthWriteFlag: drawRows[offset + 10],
+      boundsCenterM: [drawRows[offset + 12], drawRows[offset + 13], drawRows[offset + 14]],
+      boundsRadiusM: drawRows[offset + 15],
+      status: active ? 'surface-draw-ready' : 'surface-draw-empty'
+    });
+  }
+  return { surfaces, activeSurfaceCount, vertexCount, triangleCount };
+}
+
+function assertMarchingCubeCellField(cellField) {
+  if (
+    cellField?.schema !== ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA
+    || !(cellField.cellRows instanceof Float32Array)
+  ) {
+    throw new TypeError('marching-cube cell field requires packed cellRows');
+  }
+  if (cellField.cellRows.length % SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS !== 0) {
+    throw new RangeError('marching-cube cell rows must align to the cell row stride');
+  }
+}
+
+function summarizeMarchingCubeCellSurfaces(renderField, cellRows, isolationScale = 1) {
+  const metadata = renderField.surfaceTable?.metadata || [];
+  const activeBySurface = new Array(metadata.length).fill(0);
+  const trianglesBySurface = new Array(metadata.length).fill(0);
+  const rowCount = cellRows.length / SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const offset = rowIndex * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS;
+    if (!(cellRows[offset + 15] > 0)) continue;
+    const surfaceIndex = Math.round(cellRows[offset]);
+    if (surfaceIndex >= 0 && surfaceIndex < activeBySurface.length) {
+      activeBySurface[surfaceIndex] += 1;
+      trianglesBySurface[surfaceIndex] += cellRows[offset + 10] || 0;
+    }
+  }
+  return metadata.map((surface) => {
+    const activeCellCount = activeBySurface[surface.index] || 0;
+    const reservedTriangleCount = trianglesBySurface[surface.index] || 0;
+    return {
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      resolution: surface.resolution,
+      isolation: surface.isolation * finiteNumber(isolationScale, 1),
+      voxelResolution: Math.max(0, surface.resolution - 1),
+      voxelCount: marchingCubeVoxelCount(surface.resolution),
+      cellOffset: surface.fieldOffset,
+      cellCount: surface.fieldCellCount,
+      activeCellCount,
+      reservedTriangleCount,
+      reservedVertexCount: reservedTriangleCount * 3,
+      status: activeCellCount > 0 ? 'marching-cube-cells-active' : 'marching-cube-cells-empty'
+    };
+  });
+}
+
+export async function buildSphRenderMarchingCubeCellsWebGpu({
+  device,
+  renderField,
+  fieldRowsBuffer = null,
+  surfaceBuffer = null,
+  isolationScale = 1,
+  readbackMode = FULL_READBACK_MODE,
+  retainCellRowsBuffer = false
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('buildSphRenderMarchingCubeCellsWebGpu requires a WebGPU-like device');
+  }
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA) {
+    throw new TypeError('buildSphRenderMarchingCubeCellsWebGpu requires an SPH render field');
+  }
+  if (!fieldRowsBuffer && !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('buildSphRenderMarchingCubeCellsWebGpu requires fieldRows or fieldRowsBuffer');
+  }
+  if (!surfaceBuffer && !(renderField.surfaceTable?.records instanceof Float32Array)) {
+    throw new TypeError('buildSphRenderMarchingCubeCellsWebGpu requires surface table records or surfaceBuffer');
+  }
+  const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
+  const totalFieldCells = renderField.totalFieldCells ?? 0;
+  const candidateCount = totalFieldCells;
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
+  const borrowedSurfaceBuffer = surfaceBuffer || null;
+  const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-marching-cube-source-render-field',
+    renderField.fieldRows,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const sourceSurfaceBuffer = borrowedSurfaceBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-marching-cube-render-surfaces',
+    renderField.surfaceTable.records
+  );
+  const cellRowsBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-marching-cube-cells',
+    new Float32Array(candidateCount * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS),
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-marching-cube-cell-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createMarchingCubesCandidateParamsArray({
+    surfaceCount,
+    totalFieldCells,
+    candidateCount,
+    fieldPadding: finiteNumber(renderField.fieldPadding, 0.22),
+    refEdgeM: finiteNumber(renderField.refEdgeM, 10),
+    isolationScale: finiteNumber(isolationScale, 1)
+  }));
+
+  const module = device.createShaderModule({ label: 'ulg-sph-marching-cube-cells', code: sphRenderMarchingCubeCellsWgsl });
+  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-marching-cube-cells',
+    module,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
+      { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
+      { binding: 2, resource: { buffer: cellRowsBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(
+    Math.ceil(Math.max(1, renderField.maxFieldCellCount || 0) / 64),
+    Math.max(1, surfaceCount)
+  );
+  pass.end();
+  let cellRows;
+  if (!noFullReadback) {
+    device.queue.submit([encoder.finish()]);
+    const bytes = await readBuffer(
+      device,
+      cellRowsBuffer,
+      candidateCount * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+      'ulg-sph-marching-cube-cell-readback'
+    );
+    cellRows = new Float32Array(bytes);
+  } else {
+    if (device.queue?.onSubmittedWorkDone) {
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    } else {
+      device.queue.submit([encoder.finish()]);
+    }
+    cellRows = new Float32Array();
+  }
+
+  if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
+  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  if (!retainCellRowsBuffer) cellRowsBuffer.destroy?.();
+  paramsBuffer.destroy?.();
+
+  const surfaces = cellRows.length
+    ? summarizeMarchingCubeCellSurfaces(renderField, cellRows, isolationScale)
+    : (renderField.surfaceTable?.metadata || []).map((surface) => ({
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      resolution: surface.resolution,
+      isolation: surface.isolation * finiteNumber(isolationScale, 1),
+      voxelResolution: Math.max(0, surface.resolution - 1),
+      voxelCount: marchingCubeVoxelCount(surface.resolution),
+      cellOffset: surface.fieldOffset,
+      cellCount: surface.fieldCellCount,
+      activeCellCount: null,
+      reservedTriangleCount: null,
+      reservedVertexCount: null,
+      status: 'marching-cube-cell-summary-not-read'
+    }));
+  const activeCellCount = surfaces.reduce((sum, surface) => sum + (surface.activeCellCount || 0), 0);
+  const reservedTriangleCount = surfaces.reduce((sum, surface) => sum + (surface.reservedTriangleCount || 0), 0);
+  const cellRowsByteLength = candidateCount * SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const result = {
+    schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+    backend: 'webgpu',
+    status: noFullReadback ? 'marching-cube-cells-resident' : (activeCellCount > 0 ? 'marching-cube-cells-ready' : 'marching-cube-cells-empty'),
+    sourceRenderFieldSchema: renderField.schema,
+    sourceRenderFieldBackend: renderField.backend,
+    cubeShape: 'fixed-surface-voxel-cubes',
+    surfaceCount,
+    totalFieldCells,
+    totalCubeCells: candidateCount,
+    maxSurfaceCubeCells: Math.max(0, ...(surfaces.map((surface) => surface.voxelCount || 0))),
+    activeCellCount,
+    reservedTriangleCount,
+    reservedVertexCount: reservedTriangleCount * 3,
+    rowLayout: [...SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS,
+    cellRows,
+    cellRowsByteLength,
+    cellRowsBufferByteLength: retainCellRowsBuffer ? cellRowsByteLength : 0,
+    cellRowsBufferRetained: Boolean(retainCellRowsBuffer),
+    fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
+    surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    marchingCubeCellReadback: !noFullReadback,
+    renderFieldReadback: Boolean(renderField.renderFieldReadback),
+    emissionStatus: 'pending-prefix-compact-and-triangle-emission',
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (retainCellRowsBuffer) {
+    result.cellRowsBuffer = cellRowsBuffer;
+    result.destroyMarchingCubeCellBuffers = () => cellRowsBuffer.destroy?.();
+  }
+  return result;
+}
+
+export async function deriveSphRenderMarchingCubeCellsWithOptionalWebGpu({
+  renderField,
+  preferWebGpu = false,
+  navigatorRef = globalThis.navigator,
+  device = null,
+  deviceResult = null,
+  webGpuRunner = buildSphRenderMarchingCubeCellsWebGpu,
+  isolationScale = 1,
+  parityTolerance = 1e-6,
+  readbackMode = FULL_READBACK_MODE,
+  ...runnerArgs
+} = {}) {
+  const canBuildCpu = renderField?.fieldRows instanceof Float32Array && renderField.fieldRows.length > 0;
+  const cpuReference = canBuildCpu ? deriveSphRenderMarchingCubeCellsCpu(renderField, { isolationScale }) : null;
+  if (!preferWebGpu) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'not-requested' },
+      marchingCubeCellReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const resolvedDeviceResult = device
+    ? { status: 'webgpu-device-ready', device, reason: 'provided device' }
+    : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
+  if (!resolvedDeviceResult?.device) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-unavailable-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: resolvedDeviceResult?.reason || 'webgpu device unavailable' },
+      marchingCubeCellReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  try {
+    const webgpu = await webGpuRunner({
+      ...runnerArgs,
+      renderField,
+      isolationScale,
+      readbackMode,
+      device: resolvedDeviceResult.device
+    });
+    assertMarchingCubeCellField(webgpu);
+    if (cpuReference && webgpu.cellRows.length > 0) {
+      const parityMaxAbsDiff = maxAbsDiff(cpuReference.cellRows, webgpu.cellRows);
+      if (!(parityMaxAbsDiff <= parityTolerance)) {
+        return {
+          schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+          backend: 'cpu-reference',
+          status: 'webgpu-parity-failed-cpu-reference',
+          cpuReference,
+          webgpu,
+          result: cpuReference,
+          webgpuStatus: { status: 'fallback-cpu', reason: 'marching-cube cell parity drift', parityMaxAbsDiff },
+          marchingCubeCellReadback: false,
+          scientificValidation: false,
+          sphValidation: false,
+          surfaceExtractionValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
+      return {
+        schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'webgpu-accepted',
+        cpuReference,
+        webgpu,
+        result: webgpu,
+        webgpuStatus: { status: 'webgpu-executed', parityMaxAbsDiff },
+        marchingCubeCellReadback: true,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    return {
+      schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+      backend: 'webgpu',
+      status: 'webgpu-resident-no-full-readback',
+      cpuReference,
+      webgpu,
+      result: webgpu,
+      webgpuStatus: { status: 'webgpu-executed-no-full-readback' },
+      marchingCubeCellReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  } catch (error) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-error-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
+      marchingCubeCellReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+}
+
+function summarizeSurfaceVertexRows(renderField, vertexRows, isolationScale = 1) {
+  const metadata = renderField.surfaceTable?.metadata || [];
+  const triangleSets = metadata.map(() => new Set());
+  const vertexCounts = new Array(metadata.length).fill(0);
+  const rowCount = vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const offset = rowIndex * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+    if (!(vertexRows[offset + 15] > 0)) continue;
+    const surfaceIndex = Math.round(vertexRows[offset]);
+    if (surfaceIndex >= 0 && surfaceIndex < metadata.length) {
+      vertexCounts[surfaceIndex] += 1;
+      triangleSets[surfaceIndex].add(Math.round(vertexRows[offset + 3]));
+    }
+  }
+  return metadata.map((surface) => {
+    const vertexCount = vertexCounts[surface.index] || 0;
+    const triangleCount = triangleSets[surface.index]?.size || 0;
+    const renderPolicy = renderPolicyFieldsForSurface(surface);
+    return {
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      renderLayer: surface.renderLayer ?? renderPolicy.renderLayer,
+      renderOrder: renderPolicy.renderOrder,
+      transparencyClassId: renderPolicy.transparencyClassId,
+      depthWriteFlag: renderPolicy.depthWriteFlag,
+      materialId: surface.materialId,
+      phaseId: surface.phaseId,
+      opticalStateKey: surface.opticalStateKey || 'default',
+      opticalStateId: surface.opticalStateId || 0,
+      resolution: surface.resolution,
+      isolation: surface.isolation * finiteNumber(isolationScale, 1),
+      voxelResolution: Math.max(0, surface.resolution - 1),
+      voxelCount: marchingCubeVoxelCount(surface.resolution),
+      fieldOffset: surface.fieldOffset,
+      fieldCellCount: surface.fieldCellCount,
+      activeCellCount: null,
+      triangleOffset: null,
+      triangleCount,
+      vertexOffset: null,
+      vertexCount,
+      status: triangleCount > 0 ? 'surface-vertices-ready' : 'surface-vertices-empty'
+    };
+  });
+}
+
+function compactSurfaceVertexSlotRows(slotRows) {
+  if (!(slotRows instanceof Float32Array) || slotRows.length === 0) return new Float32Array();
+  const rows = [];
+  for (let offset = 0; offset < slotRows.length; offset += SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS) {
+    if (slotRows[offset + 15] > 0) {
+      const row = Array.from(slotRows.slice(offset, offset + SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS));
+      const compactVertexIndex = rows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+      row[3] = Math.floor(compactVertexIndex / 3);
+      row[4] = compactVertexIndex % 3;
+      rows.push(...row);
+    }
+  }
+  return Float32Array.from(rows);
+}
+
+export async function buildSphRenderSurfaceVerticesWebGpu({
+  device,
+  renderField,
+  fieldRowsBuffer = null,
+  surfaceBuffer = null,
+  isolationScale = 1,
+  readbackMode = FULL_READBACK_MODE,
+  retainVertexRowsBuffer = false,
+  maxVertexRows = null
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('buildSphRenderSurfaceVerticesWebGpu requires a WebGPU-like device');
+  }
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA) {
+    throw new TypeError('buildSphRenderSurfaceVerticesWebGpu requires an SPH render field');
+  }
+  if (!fieldRowsBuffer && !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('buildSphRenderSurfaceVerticesWebGpu requires fieldRows or fieldRowsBuffer');
+  }
+  if (!surfaceBuffer && !(renderField.surfaceTable?.records instanceof Float32Array)) {
+    throw new TypeError('buildSphRenderSurfaceVerticesWebGpu requires surface table records or surfaceBuffer');
+  }
+  const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
+  const totalFieldCells = renderField.totalFieldCells ?? 0;
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const requiredVertexRows = totalFieldCells * MARCHING_CUBE_MAX_VERTICES_PER_CELL;
+  const resolvedMaxVertexRows = Math.max(requiredVertexRows, Math.round(finiteNumber(
+    maxVertexRows,
+    requiredVertexRows
+  )));
+  const fixedSlotVertexRowsByteLength = resolvedMaxVertexRows
+    * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
+  const borrowedSurfaceBuffer = surfaceBuffer || null;
+  const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-surface-vertices-source-render-field',
+    renderField.fieldRows,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const sourceSurfaceBuffer = borrowedSurfaceBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-surface-vertices-render-surfaces',
+    renderField.surfaceTable.records
+  );
+  const vertexRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-vertices',
+    size: Math.max(4, fixedSlotVertexRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  if (fixedSlotVertexRowsByteLength > 0) {
+    device.queue.writeBuffer(vertexRowsBuffer, 0, new Float32Array(resolvedMaxVertexRows * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS));
+  }
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-vertex-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createSurfaceVerticesParamsArray({
+    surfaceCount,
+    totalFieldCells,
+    maxVertexRows: resolvedMaxVertexRows,
+    fieldPadding: finiteNumber(renderField.fieldPadding, 0.22),
+    refEdgeM: finiteNumber(renderField.refEdgeM, 10),
+    isolationScale: finiteNumber(isolationScale, 1)
+  }));
+
+  const module = device.createShaderModule({ label: 'ulg-sph-surface-vertices', code: sphRenderSurfaceVerticesWgsl });
+  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-surface-vertices',
+    module,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
+      { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
+      { binding: 2, resource: { buffer: vertexRowsBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(
+    Math.ceil(Math.max(1, renderField.maxFieldCellCount || 0) / 64),
+    Math.max(1, surfaceCount)
+  );
+  pass.end();
+
+  let vertexRows = new Float32Array();
+  let vertexCount = null;
+  let triangleCount = null;
+  let overflowCount = 0;
+  if (!noFullReadback) {
+    device.queue.submit([encoder.finish()]);
+    if (resolvedMaxVertexRows > 0) {
+      const vertexBytes = await readBuffer(
+        device,
+        vertexRowsBuffer,
+        fixedSlotVertexRowsByteLength,
+        'ulg-sph-surface-vertex-readback'
+      );
+      vertexRows = compactSurfaceVertexSlotRows(new Float32Array(vertexBytes));
+      vertexCount = vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+      triangleCount = vertexCount / 3;
+    }
+  } else {
+    if (device.queue?.onSubmittedWorkDone) {
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    } else {
+      device.queue.submit([encoder.finish()]);
+    }
+  }
+
+  if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
+  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  if (!retainVertexRowsBuffer) vertexRowsBuffer.destroy?.();
+  paramsBuffer.destroy?.();
+
+  const surfaces = vertexRows.length
+    ? summarizeSurfaceVertexRows(renderField, vertexRows, isolationScale)
+    : (renderField.surfaceTable?.metadata || []).map((surface) => {
+      const renderPolicy = renderPolicyFieldsForSurface(surface);
+      return {
+        surfaceKey: surface.surfaceKey,
+        material: surface.material,
+        phase: surface.phase,
+        renderKey: surface.renderKey,
+        renderLayer: surface.renderLayer ?? renderPolicy.renderLayer,
+        renderOrder: renderPolicy.renderOrder,
+        transparencyClassId: renderPolicy.transparencyClassId,
+        depthWriteFlag: renderPolicy.depthWriteFlag,
+        materialId: surface.materialId,
+        phaseId: surface.phaseId,
+        opticalStateKey: surface.opticalStateKey || 'default',
+        opticalStateId: surface.opticalStateId || 0,
+        resolution: surface.resolution,
+        isolation: surface.isolation * finiteNumber(isolationScale, 1),
+        voxelResolution: Math.max(0, surface.resolution - 1),
+        voxelCount: marchingCubeVoxelCount(surface.resolution),
+        fieldOffset: surface.fieldOffset,
+        fieldCellCount: surface.fieldCellCount,
+        activeCellCount: null,
+        triangleOffset: null,
+        triangleCount: null,
+        vertexOffset: null,
+        vertexCount: null,
+        status: 'surface-vertex-summary-not-read'
+      };
+    });
+  const result = {
+    schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+    backend: 'webgpu',
+    status: noFullReadback ? 'surface-vertices-resident-fixed-slots' : ((triangleCount || 0) > 0 ? 'surface-vertices-ready' : 'surface-vertices-empty'),
+    sourceRenderFieldSchema: renderField.schema,
+    sourceRenderFieldBackend: renderField.backend,
+    surfaceExtractionMethod: 'tetrahedralized-render-field-cubes',
+    compactionMode: noFullReadback ? 'webgpu-fixed-cell-slots' : 'webgpu-fixed-cell-slots-debug-compacted',
+    surfaceCount,
+    totalFieldCells,
+    activeCellCount: null,
+    triangleCount,
+    vertexCount,
+    overflowCount,
+    maxTrianglesPerCell: MARCHING_CUBE_MAX_TRIANGLES_PER_CELL,
+    maxVerticesPerCell: MARCHING_CUBE_MAX_VERTICES_PER_CELL,
+    maxVertexRows: resolvedMaxVertexRows,
+    rowLayout: [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+    vertexRows,
+    vertexRowsByteLength: vertexRows.byteLength,
+    fixedSlotVertexRowsByteLength,
+    fixedSlotVertexRowCount: resolvedMaxVertexRows,
+    vertexRowsBufferByteLength: retainVertexRowsBuffer ? fixedSlotVertexRowsByteLength : 0,
+    vertexRowsBufferRowCount: retainVertexRowsBuffer ? resolvedMaxVertexRows : 0,
+    vertexRowsBufferRetained: Boolean(retainVertexRowsBuffer),
+    counterBufferRetained: false,
+    counterReadback: false,
+    fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
+    surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    surfaceVertexReadback: !noFullReadback,
+    renderFieldReadback: Boolean(renderField.renderFieldReadback),
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (retainVertexRowsBuffer) {
+    result.vertexRowsBuffer = vertexRowsBuffer;
+    result.destroySurfaceVertexBuffers = () => {
+      vertexRowsBuffer.destroy?.();
+    };
+  }
+  return result;
+}
+
+export async function deriveSphRenderSurfaceVerticesWithOptionalWebGpu({
+  renderField,
+  preferWebGpu = false,
+  navigatorRef = globalThis.navigator,
+  device = null,
+  deviceResult = null,
+  webGpuRunner = buildSphRenderSurfaceVerticesWebGpu,
+  isolationScale = 1,
+  parityTolerance = 1e-5,
+  readbackMode = FULL_READBACK_MODE,
+  ...runnerArgs
+} = {}) {
+  const canBuildCpu = renderField?.fieldRows instanceof Float32Array && renderField.fieldRows.length > 0;
+  const cpuReference = canBuildCpu ? deriveSphRenderSurfaceVerticesCpu(renderField, { isolationScale }) : null;
+  if (!preferWebGpu) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'not-requested' },
+      surfaceVertexReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const resolvedDeviceResult = device
+    ? { status: 'webgpu-device-ready', device, reason: 'provided device' }
+    : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
+  if (!resolvedDeviceResult?.device) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-unavailable-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: resolvedDeviceResult?.reason || 'webgpu device unavailable' },
+      surfaceVertexReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  try {
+    const webgpu = await webGpuRunner({
+      ...runnerArgs,
+      renderField,
+      isolationScale,
+      readbackMode,
+      device: resolvedDeviceResult.device
+    });
+    assertSurfaceVertexField(webgpu);
+    if (cpuReference && webgpu.vertexRows.length > 0) {
+      const parityMaxAbsDiff = maxAbsDiff(cpuReference.vertexRows, webgpu.vertexRows);
+      if (!(parityMaxAbsDiff <= parityTolerance)) {
+        return {
+          schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+          backend: 'cpu-reference',
+          status: 'webgpu-parity-failed-cpu-reference',
+          cpuReference,
+          webgpu,
+          result: cpuReference,
+          webgpuStatus: { status: 'fallback-cpu', reason: 'surface vertex parity drift', parityMaxAbsDiff },
+          surfaceVertexReadback: false,
+          scientificValidation: false,
+          sphValidation: false,
+          surfaceExtractionValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
+      return {
+        schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'webgpu-accepted',
+        cpuReference,
+        webgpu,
+        result: webgpu,
+        webgpuStatus: { status: 'webgpu-executed', parityMaxAbsDiff },
+        surfaceVertexReadback: true,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+      backend: 'webgpu',
+      status: 'webgpu-resident-no-full-readback',
+      cpuReference,
+      webgpu,
+      result: webgpu,
+      webgpuStatus: { status: 'webgpu-executed-no-full-readback' },
+      surfaceVertexReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  } catch (error) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-error-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
+      surfaceVertexReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+}
+
+export async function buildSphRenderSurfaceDrawMetadataWebGpu({
+  device,
+  surfaceVertices,
+  surfaceBuffer = null,
+  readbackMode = FULL_READBACK_MODE,
+  retainDrawRowsBuffer = false,
+  retainCompactedVertexRowsBuffer = false,
+  retainDrawIndirectRowsBuffer = false
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('buildSphRenderSurfaceDrawMetadataWebGpu requires a WebGPU-like device');
+  }
+  if (surfaceVertices?.schema !== ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA) {
+    throw new TypeError('buildSphRenderSurfaceDrawMetadataWebGpu requires an SPH surface vertex field');
+  }
+  const hasBorrowedVertexBuffer = Boolean(surfaceVertices.vertexRowsBuffer);
+  const hasVertexRows = surfaceVertices.vertexRows instanceof Float32Array && surfaceVertices.vertexRows.length > 0;
+  if (!hasBorrowedVertexBuffer && !hasVertexRows) {
+    throw new TypeError('buildSphRenderSurfaceDrawMetadataWebGpu requires vertexRows or a retained vertexRowsBuffer');
+  }
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const sourceVertexRowCount = Math.max(0, Math.round(finiteNumber(
+    hasBorrowedVertexBuffer
+      ? (surfaceVertices.vertexRowsBufferRowCount || surfaceVertices.maxVertexRows || (
+          surfaceVertices.vertexRowsBufferByteLength
+            ? surfaceVertices.vertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+            : 0
+        ))
+      : (surfaceVertices.vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS),
+    0
+  )));
+  const surfaceCount = Math.max(
+    0,
+    Math.round(finiteNumber(surfaceVertices.surfaceCount, surfaceVertices.surfaces?.length || 0))
+  );
+  const compactedVertexRowsByteLength = sourceVertexRowCount
+    * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const drawRowsByteLength = surfaceCount
+    * SPH_GPU_RENDER_SURFACE_DRAW_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const drawIndirectRowsByteLength = surfaceCount
+    * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS
+    * Uint32Array.BYTES_PER_ELEMENT;
+  const borrowedSurfaceBuffer = surfaceBuffer || null;
+  const sourceVertexRowsBuffer = hasBorrowedVertexBuffer
+    ? surfaceVertices.vertexRowsBuffer
+    : writeStorageBuffer(
+        device,
+        'ulg-sph-surface-draw-source-vertices',
+        surfaceVertices.vertexRows,
+        GPU_BUFFER_USAGE.COPY_SRC
+      );
+  const sourceSurfaceBuffer = borrowedSurfaceBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-surface-draw-surfaces',
+    surfaceRecordsFromSurfaceVertexMetadata(surfaceVertices)
+  );
+  const compactedVertexRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-draw-compacted-vertices',
+    size: Math.max(4, compactedVertexRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  if (compactedVertexRowsByteLength > 0) {
+    device.queue.writeBuffer(
+      compactedVertexRowsBuffer,
+      0,
+      new Float32Array(sourceVertexRowCount * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS)
+    );
+  }
+  const drawRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-draw-metadata',
+    size: Math.max(4, drawRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  if (drawRowsByteLength > 0) {
+    device.queue.writeBuffer(drawRowsBuffer, 0, new Float32Array(surfaceCount * SPH_GPU_RENDER_SURFACE_DRAW_FLOATS));
+  }
+  const drawIndirectRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-draw-indirect',
+    size: Math.max(4, drawIndirectRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  if (drawIndirectRowsByteLength > 0) {
+    device.queue.writeBuffer(
+      drawIndirectRowsBuffer,
+      0,
+      new Uint32Array(surfaceCount * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS)
+    );
+  }
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-draw-params',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createSurfaceDrawParamsArray({
+    surfaceCount,
+    sourceVertexRowCount,
+    maxCompactVertexRows: sourceVertexRowCount
+  }));
+
+  const module = device.createShaderModule({ label: 'ulg-sph-surface-draw', code: sphRenderSurfaceDrawWgsl });
+  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-surface-draw',
+    module,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform'),
+      computeBufferBinding(5, 'storage')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
+      { binding: 1, resource: { buffer: sourceVertexRowsBuffer } },
+      { binding: 2, resource: { buffer: compactedVertexRowsBuffer } },
+      { binding: 3, resource: { buffer: drawRowsBuffer } },
+      { binding: 4, resource: { buffer: paramsBuffer } },
+      { binding: 5, resource: { buffer: drawIndirectRowsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(Math.max(1, surfaceCount));
+  pass.end();
+
+  let drawRows = new Float32Array();
+  let drawIndirectRows = new Uint32Array();
+  let compactedVertexRows = new Float32Array();
+  let activeSurfaceCount = null;
+  let vertexCount = null;
+  let triangleCount = null;
+  let surfaces;
+  if (!noFullReadback) {
+    device.queue.submit([encoder.finish()]);
+    if (drawRowsByteLength > 0) {
+      const drawBytes = await readBuffer(
+        device,
+        drawRowsBuffer,
+        drawRowsByteLength,
+        'ulg-sph-surface-draw-readback'
+      );
+      drawRows = new Float32Array(drawBytes);
+      const summary = summarizeSurfaceDrawRows(drawRows, surfaceVertices.surfaces || []);
+      surfaces = summary.surfaces;
+      activeSurfaceCount = summary.activeSurfaceCount;
+      vertexCount = summary.vertexCount;
+      triangleCount = summary.triangleCount;
+      if (vertexCount > 0) {
+        const compactedBytes = await readBuffer(
+          device,
+          compactedVertexRowsBuffer,
+          vertexCount * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          'ulg-sph-surface-draw-compacted-vertex-readback'
+        );
+        compactedVertexRows = new Float32Array(compactedBytes);
+      }
+      if (drawIndirectRowsByteLength > 0) {
+        const indirectBytes = await readBuffer(
+          device,
+          drawIndirectRowsBuffer,
+          drawIndirectRowsByteLength,
+          'ulg-sph-surface-draw-indirect-readback'
+        );
+        drawIndirectRows = new Uint32Array(indirectBytes);
+      }
+    } else {
+      surfaces = [];
+      activeSurfaceCount = 0;
+      vertexCount = 0;
+      triangleCount = 0;
+      drawIndirectRows = new Uint32Array();
+    }
+  } else {
+    if (device.queue?.onSubmittedWorkDone) {
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    } else {
+      device.queue.submit([encoder.finish()]);
+    }
+    surfaces = (surfaceVertices.surfaces || []).map((surface, index) => ({
+      ...(() => {
+        const renderPolicy = renderPolicyFieldsForSurface({ ...surface, surfaceIndex: index });
+        return {
+          surfaceKey: surface.surfaceKey,
+          material: surface.material,
+          phase: surface.phase,
+          renderKey: surface.renderKey,
+          renderLayer: surface.renderLayer ?? renderPolicy.renderLayer,
+          surfaceIndex: index,
+          materialId: surface.materialId,
+          phaseId: surface.phaseId,
+          opticalStateId: surface.opticalStateId || 0,
+          vertexOffset: null,
+          vertexCount: null,
+          triangleOffset: null,
+          triangleCount: null,
+          renderOrder: renderPolicy.renderOrder,
+          transparencyClassId: renderPolicy.transparencyClassId,
+          depthWriteFlag: renderPolicy.depthWriteFlag,
+          boundsCenterM: [0, 0, 0],
+          boundsRadiusM: null,
+          status: 'surface-draw-summary-not-read'
+        };
+      })()
+    }));
+  }
+
+  if (!hasBorrowedVertexBuffer) sourceVertexRowsBuffer.destroy?.();
+  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  const keepDrawRowsBuffer = retainDrawRowsBuffer || noFullReadback;
+  const keepCompactedVertexRowsBuffer = retainCompactedVertexRowsBuffer || noFullReadback;
+  const keepDrawIndirectRowsBuffer = retainDrawIndirectRowsBuffer || noFullReadback;
+  if (!keepDrawRowsBuffer) drawRowsBuffer.destroy?.();
+  if (!keepCompactedVertexRowsBuffer) compactedVertexRowsBuffer.destroy?.();
+  if (!keepDrawIndirectRowsBuffer) drawIndirectRowsBuffer.destroy?.();
+  paramsBuffer.destroy?.();
+
+  const result = {
+    schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
+    backend: 'webgpu',
+    status: noFullReadback ? 'surface-draw-resident' : ((activeSurfaceCount || 0) > 0 ? 'surface-draw-metadata-ready' : 'surface-draw-metadata-empty'),
+    sourceSurfaceVertexSchema: surfaceVertices.schema,
+    sourceSurfaceVertexBackend: surfaceVertices.backend,
+    surfaceCount,
+    activeSurfaceCount,
+    vertexCount,
+    triangleCount,
+    rowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
+    drawRows,
+    drawRowsByteLength,
+    drawRowsBufferByteLength: keepDrawRowsBuffer ? drawRowsByteLength : 0,
+    drawRowsBufferRetained: keepDrawRowsBuffer,
+    drawIndirectSchema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
+    drawIndirectRowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT],
+    drawIndirectRowStrideUints: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
+    drawIndirectRows,
+    drawIndirectRowsByteLength,
+    drawIndirectRowsBufferByteLength: keepDrawIndirectRowsBuffer ? drawIndirectRowsByteLength : 0,
+    drawIndirectRowsBufferRetained: keepDrawIndirectRowsBuffer,
+    compactedVertexRows,
+    compactedVertexRowsByteLength: compactedVertexRows.byteLength,
+    compactedVertexRowsBufferByteLength: keepCompactedVertexRowsBuffer ? compactedVertexRowsByteLength : 0,
+    compactedVertexRowsBufferRetained: keepCompactedVertexRowsBuffer,
+    sourceVertexRowCount,
+    sourceVertexRowsBufferBound: hasBorrowedVertexBuffer,
+    surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    surfaceDrawReadback: !noFullReadback,
+    compactionMode: 'webgpu-surface-prefix-scan-compact',
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (keepDrawRowsBuffer) result.drawRowsBuffer = drawRowsBuffer;
+  if (keepDrawIndirectRowsBuffer) result.drawIndirectRowsBuffer = drawIndirectRowsBuffer;
+  if (keepCompactedVertexRowsBuffer) result.compactedVertexRowsBuffer = compactedVertexRowsBuffer;
+  if (keepDrawRowsBuffer || keepCompactedVertexRowsBuffer || keepDrawIndirectRowsBuffer) {
+    result.destroySurfaceDrawBuffers = () => {
+      if (keepDrawRowsBuffer) drawRowsBuffer.destroy?.();
+      if (keepCompactedVertexRowsBuffer) compactedVertexRowsBuffer.destroy?.();
+      if (keepDrawIndirectRowsBuffer) drawIndirectRowsBuffer.destroy?.();
+    };
+  }
+  return result;
+}
+
+export async function deriveSphRenderSurfaceDrawMetadataWithOptionalWebGpu({
+  surfaceVertices,
+  preferWebGpu = false,
+  navigatorRef = globalThis.navigator,
+  device = null,
+  deviceResult = null,
+  webGpuRunner = buildSphRenderSurfaceDrawMetadataWebGpu,
+  parityTolerance = 1e-6,
+  readbackMode = FULL_READBACK_MODE,
+  ...runnerArgs
+} = {}) {
+  const cpuReference = surfaceVertices?.vertexRows instanceof Float32Array
+    ? deriveSphRenderSurfaceDrawMetadataCpu(surfaceVertices)
+    : null;
+  if (!preferWebGpu) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'not-requested' },
+      surfaceDrawReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const resolvedDeviceResult = device
+    ? { status: 'webgpu-device-ready', device, reason: 'provided device' }
+    : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
+  if (!resolvedDeviceResult?.device) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-unavailable-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: resolvedDeviceResult?.reason || 'webgpu device unavailable' },
+      surfaceDrawReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  try {
+    const webgpu = await webGpuRunner({
+      ...runnerArgs,
+      surfaceVertices,
+      readbackMode,
+      device: resolvedDeviceResult.device
+    });
+    assertSurfaceDrawMetadata(webgpu);
+    if (cpuReference && webgpu.drawRows.length > 0) {
+      const parityMaxAbsDiff = maxAbsDiff(cpuReference.drawRows, webgpu.drawRows);
+      if (!(parityMaxAbsDiff <= parityTolerance)) {
+        return {
+          schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+          backend: 'cpu-reference',
+          status: 'webgpu-parity-failed-cpu-reference',
+          cpuReference,
+          webgpu,
+          result: cpuReference,
+          webgpuStatus: { status: 'fallback-cpu', reason: 'surface draw metadata parity drift', parityMaxAbsDiff },
+          surfaceDrawReadback: false,
+          scientificValidation: false,
+          sphValidation: false,
+          surfaceExtractionValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
+      return {
+        schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'webgpu-accepted',
+        cpuReference,
+        webgpu,
+        result: webgpu,
+        webgpuStatus: { status: 'webgpu-executed', parityMaxAbsDiff },
+        surfaceDrawReadback: true,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+      backend: 'webgpu',
+      status: 'webgpu-resident-no-full-readback',
+      cpuReference,
+      webgpu,
+      result: webgpu,
+      webgpuStatus: { status: 'webgpu-executed-no-full-readback' },
+      surfaceDrawReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  } catch (error) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-error-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
+      surfaceDrawReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+}
+
+function assertMaterialInterfaceCandidateField(candidateField) {
+  if (
+    candidateField?.schema !== ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA
+    || !(candidateField.candidateRows instanceof Float32Array)
+  ) {
+    throw new TypeError('compactSphMaterialInterfaceCandidates requires a material-interface candidate field');
+  }
+  if (candidateField.candidateRows.length % SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS !== 0) {
+    throw new RangeError('material-interface candidate rows must align to the candidate row stride');
+  }
+}
+
+export function compactSphMaterialInterfaceCandidates(candidateField) {
+  assertMaterialInterfaceCandidateField(candidateField);
+  const candidateRows = candidateField.candidateRows;
+  const surfaceAccumulators = (candidateField.surfaces || []).map((surface) => ({
+    ...surface,
+    crossingFaceCount: 0,
+    surfaceAreaM2: 0,
+    normalAreaSum: [0, 0, 0],
+    centroidAreaSum: [0, 0, 0],
+    elementOffset: 0,
+    elementCount: 0
+  }));
+  const elementValues = [];
+  const elements = [];
+  const rowCount = candidateRows.length / SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+  for (let candidateIndex = 0; candidateIndex < rowCount; candidateIndex += 1) {
+    const offset = candidateIndex * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS;
+    const status = candidateRows[offset + 15];
+    if (!(status > 0)) continue;
+    const surfaceIndex = Math.round(candidateRows[offset]);
+    const surface = surfaceAccumulators[surfaceIndex];
+    if (!surface) continue;
+    if (surface.elementCount === 0) surface.elementOffset = elements.length;
+    const areaM2 = candidateRows[offset + 7];
+    const normalAreaVectorM2 = [
+      candidateRows[offset + 11],
+      candidateRows[offset + 12],
+      candidateRows[offset + 13]
+    ];
+    const centroidM = [
+      candidateRows[offset + 4],
+      candidateRows[offset + 5],
+      candidateRows[offset + 6]
+    ];
+    const normal = [
+      candidateRows[offset + 8],
+      candidateRows[offset + 9],
+      candidateRows[offset + 10]
+    ];
+    const element = {
+      index: elements.length,
+      surfaceIndex,
+      surfaceKey: surface.surfaceKey,
+      material: surface.material,
+      phase: surface.phase,
+      renderKey: surface.renderKey,
+      materialId: candidateRows[offset + 1],
+      phaseId: candidateRows[offset + 2],
+      axisId: candidateRows[offset + 3],
+      centroidM,
+      areaM2,
+      normal,
+      normalAreaVectorM2,
+      crossingSign: candidateRows[offset + 14],
+      status: 'interface-element-ready'
+    };
+    elements.push(element);
+    elementValues.push(
+      element.surfaceIndex,
+      element.materialId,
+      element.phaseId,
+      element.axisId,
+      element.centroidM[0],
+      element.centroidM[1],
+      element.centroidM[2],
+      element.areaM2,
+      element.normal[0],
+      element.normal[1],
+      element.normal[2],
+      element.normalAreaVectorM2[0],
+      element.normalAreaVectorM2[1],
+      element.normalAreaVectorM2[2],
+      element.crossingSign,
+      1
+    );
+    surface.crossingFaceCount += 1;
+    surface.surfaceAreaM2 += areaM2;
+    surface.normalAreaSum[0] += normalAreaVectorM2[0];
+    surface.normalAreaSum[1] += normalAreaVectorM2[1];
+    surface.normalAreaSum[2] += normalAreaVectorM2[2];
+    surface.centroidAreaSum[0] += centroidM[0] * areaM2;
+    surface.centroidAreaSum[1] += centroidM[1] * areaM2;
+    surface.centroidAreaSum[2] += centroidM[2] * areaM2;
+    surface.elementCount += 1;
+  }
+  const surfaces = surfaceAccumulators.map((surface) => ({
+    surfaceKey: surface.surfaceKey,
+    material: surface.material,
+    phase: surface.phase,
+    renderKey: surface.renderKey,
+    materialId: surface.materialId,
+    phaseId: surface.phaseId,
+    opticalStateKey: surface.opticalStateKey || 'default',
+    resolution: surface.resolution,
+    isolation: surface.isolation,
+    activeCellCount: surface.activeCellCount,
+    crossingFaceCount: surface.crossingFaceCount,
+    candidateOffset: surface.candidateOffset,
+    candidateCount: surface.candidateCount,
+    activeCandidateCount: surface.activeCandidateCount,
+    elementOffset: surface.elementOffset,
+    elementCount: surface.elementCount,
+    surfaceAreaM2: surface.surfaceAreaM2,
+    meanOutwardNormal: normalizeVector3(surface.normalAreaSum),
+    areaCentroidM: surface.surfaceAreaM2 > 0
+      ? surface.centroidAreaSum.map((value) => value / surface.surfaceAreaM2)
+      : [null, null, null],
+    normalDerivation: 'render-field-isosurface-threshold-crossing-candidates',
+    surfaceAreaDerivation: 'fixed-cell-axis-candidate-face-area-sum',
+    status: surface.surfaceAreaM2 > 0
+      ? 'material-interface-derived'
+      : (surface.activeCellCount > 0 ? 'material-interface-active-without-crossing' : 'material-interface-empty')
+  }));
+  const totalSurfaceAreaM2 = surfaces.reduce((sum, surface) => sum + surface.surfaceAreaM2, 0);
+  const readySurfaceCount = surfaces.filter((surface) => surface.surfaceAreaM2 > 0).length;
+  return {
+    schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
+    status: readySurfaceCount > 0 ? 'material-interface-field-ready' : 'material-interface-field-empty',
+    sourceSchema: candidateField.sourceSchema,
+    sourceBackend: candidateField.sourceBackend,
+    candidateFieldSchema: candidateField.schema,
+    candidateBackend: candidateField.backend,
+    surfaceCount: surfaces.length,
+    readySurfaceCount,
+    totalSurfaceAreaM2,
+    candidateCount: candidateField.candidateCount,
+    activeCandidateCount: candidateField.activeCandidateCount,
+    candidateStrideFloats: candidateField.rowStrideFloats,
+    candidateShape: candidateField.candidateShape,
+    elementCount: elements.length,
+    elementLayout: [...SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT],
+    elementStrideFloats: SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
+    elementRows: Float32Array.from(elementValues),
+    elements,
+    forceCouplingStatus: readySurfaceCount > 0
+      ? 'blocked-pressure-force-solver-not-implemented'
+      : 'blocked-material-surface-normals-not-resolved',
+    surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    forceCouplingValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function maxAbsDiff(left, right) {
+  if (!(left instanceof Float32Array) || !(right instanceof Float32Array) || left.length !== right.length) {
+    return Infinity;
+  }
+  let diff = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    diff = Math.max(diff, Math.abs(left[i] - right[i]));
+  }
+  return diff;
+}
+
+export async function deriveSphMaterialInterfaceCandidateFieldWithOptionalWebGpu({
+  renderField,
+  preferWebGpu = false,
+  navigatorRef = globalThis.navigator,
+  device = null,
+  deviceResult = null,
+  webGpuRunner = buildSphMaterialInterfaceCandidateFieldWebGpu,
+  isolationScale = 1,
+  parityTolerance = 1e-6
+} = {}) {
+  const cpuReference = deriveSphMaterialInterfaceCandidateField(renderField, { isolationScale });
+  if (!preferWebGpu) {
+    return {
+      schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'not-requested' },
+      candidateReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  if (typeof webGpuRunner !== 'function') {
+    return {
+      schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-runner-missing-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: 'material interface candidate WebGPU runner not implemented' },
+      candidateReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const resolvedDeviceResult = device
+    ? { status: 'webgpu-device-ready', device, reason: 'provided device' }
+    : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
+  if (!resolvedDeviceResult?.device) {
+    return {
+      schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-unavailable-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: resolvedDeviceResult?.reason || 'webgpu device unavailable' },
+      candidateReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  try {
+    const webgpu = await webGpuRunner({
+      renderField,
+      isolationScale,
+      device: resolvedDeviceResult.device,
+      candidateCount: cpuReference.candidateCount,
+      rowStrideFloats: cpuReference.rowStrideFloats
+    });
+    assertMaterialInterfaceCandidateField(webgpu);
+    const parityMaxAbsDiff = maxAbsDiff(cpuReference.candidateRows, webgpu.candidateRows);
+    if (!(parityMaxAbsDiff <= parityTolerance)) {
+      return {
+        schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+        backend: 'cpu-reference',
+        status: 'webgpu-parity-failed-cpu-reference',
+        cpuReference,
+        webgpu,
+        result: cpuReference,
+        webgpuStatus: { status: 'fallback-cpu', reason: 'candidate row parity drift', parityMaxAbsDiff },
+        candidateReadback: false,
+        scientificValidation: false,
+        sphValidation: false,
+        forceCouplingValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    return {
+      schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+      backend: 'webgpu',
+      status: 'webgpu-accepted',
+      cpuReference,
+      webgpu,
+      result: webgpu,
+      webgpuStatus: { status: 'webgpu-executed', parityMaxAbsDiff },
+      candidateReadback: true,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+  } catch (error) {
+    return {
+      schema: ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-error-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
+      candidateReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+}
+
+export function deriveSphMaterialInterfaceField(renderField, {
+  isolationScale = 1
+} = {}) {
+  const candidateField = deriveSphMaterialInterfaceCandidateField(renderField, { isolationScale });
+  return compactSphMaterialInterfaceCandidates(candidateField);
+}
+
 export async function buildSphRenderFieldWebGpu({
   device,
   renderRows,
   renderRowsBuffer = null,
+  productEventRows = null,
+  productEventBuffer = null,
   surfaceTable,
   particleCount = null,
+  productEventCount = null,
   fieldPadding = 0.22,
-  refEdgeM = 10
+  refEdgeM = 10,
+  readbackMode = FULL_READBACK_MODE,
+  retainFieldRowsBuffer = false,
+  retainSurfaceBuffer = false
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderFieldWebGpu requires a WebGPU-like device');
@@ -510,16 +3379,30 @@ export async function buildSphRenderFieldWebGpu({
   if (renderRows && renderRows.length % SPH_GPU_RENDER_ROW_FLOATS !== 0) {
     throw new RangeError('SPH render rows length must align to the render row stride');
   }
+  if (productEventRows && (!(productEventRows instanceof Float32Array) || productEventRows.length % SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS !== 0)) {
+    throw new RangeError('SPH product-event rows length must align to the product-event row stride');
+  }
   assertRenderFieldSurfaceTable(surfaceTable);
   const resolvedParticleCount = particleCount ?? (renderRows?.length ? renderRows.length / SPH_GPU_RENDER_ROW_FLOATS : 0);
+  const resolvedProductEventCount = productEventCount ?? (
+    productEventRows?.length ? productEventRows.length / SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 0
+  );
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedRenderRowsBuffer = renderRowsBuffer || null;
+  const borrowedProductEventBuffer = productEventBuffer || null;
   const renderFieldInputSource = borrowedRenderRowsBuffer
-    ? 'resident-render-rows-buffer'
-    : 'uploaded-render-rows';
+    ? (borrowedProductEventBuffer ? 'resident-render-rows-and-product-events-buffer' : 'resident-render-rows-buffer')
+    : (borrowedProductEventBuffer ? 'uploaded-render-rows-with-resident-product-events' : 'uploaded-render-rows');
   const sourceRowsBuffer = borrowedRenderRowsBuffer || writeStorageBuffer(
     device,
     'ulg-sph-render-field-source-rows',
     renderRows,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const sourceProductEventBuffer = borrowedProductEventBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-render-field-product-events',
+    productEventRows || new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
     GPU_BUFFER_USAGE.COPY_SRC
   );
   const surfaceBuffer = writeStorageBuffer(
@@ -540,6 +3423,7 @@ export async function buildSphRenderFieldWebGpu({
   });
   device.queue.writeBuffer(paramsBuffer, 0, createRenderFieldParamsArray({
     particleCount: resolvedParticleCount,
+    productEventCount: borrowedProductEventBuffer || productEventRows ? resolvedProductEventCount : 0,
     surfaceCount: surfaceTable.surfaceCount,
     totalFieldCells: surfaceTable.totalFieldCells,
     fieldPadding,
@@ -552,11 +3436,12 @@ export async function buildSphRenderFieldWebGpu({
     module,
     entryPoint: 'main',
     bindings: [
-      computeBufferBinding(0, 'read-only-storage'),
-      computeBufferBinding(1, 'read-only-storage'),
-      computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
-    ]
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'storage'),
+        computeBufferBinding(3, 'uniform'),
+        computeBufferBinding(4, 'read-only-storage')
+      ]
   });
   const bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
@@ -564,7 +3449,8 @@ export async function buildSphRenderFieldWebGpu({
       { binding: 0, resource: { buffer: sourceRowsBuffer } },
       { binding: 1, resource: { buffer: surfaceBuffer } },
       { binding: 2, resource: { buffer: fieldRowsBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
+      { binding: 3, resource: { buffer: paramsBuffer } },
+      { binding: 4, resource: { buffer: sourceProductEventBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -573,26 +3459,44 @@ export async function buildSphRenderFieldWebGpu({
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(Math.max(1, surfaceTable.maxFieldCellCount) / 64), Math.max(1, surfaceTable.surfaceCount));
   pass.end();
-  device.queue.submit([encoder.finish()]);
-  const fieldBytes = await readBuffer(
-    device,
-    fieldRowsBuffer,
-    surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
-    'ulg-sph-render-field-readback'
-  );
-  const fieldRows = new Float32Array(fieldBytes);
+  let fieldRows;
+  if (!noFullReadback) {
+    device.queue.submit([encoder.finish()]);
+    const fieldBytes = await readBuffer(
+      device,
+      fieldRowsBuffer,
+      surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+      'ulg-sph-render-field-readback'
+    );
+    fieldRows = new Float32Array(fieldBytes);
+  } else {
+    if (device.queue?.onSubmittedWorkDone) {
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    } else {
+      device.queue.submit([encoder.finish()]);
+    }
+    fieldRows = new Float32Array();
+  }
 
   if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
-  surfaceBuffer.destroy?.();
-  fieldRowsBuffer.destroy?.();
+  if (!borrowedProductEventBuffer) sourceProductEventBuffer.destroy?.();
+  if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
+  if (!retainFieldRowsBuffer) fieldRowsBuffer.destroy?.();
   paramsBuffer.destroy?.();
 
-  return {
+  const fieldRowByteLength = surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const result = {
     schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
     backend: 'webgpu',
     status: 'render-field-built',
     kernelScope: RENDER_FIELD_SCOPE,
     particleCount: resolvedParticleCount,
+    productEventCount: borrowedProductEventBuffer || productEventRows ? resolvedProductEventCount : 0,
+    productEventBufferBound: Boolean(borrowedProductEventBuffer || productEventRows),
+    productEventBufferByteLength: (borrowedProductEventBuffer || productEventRows)
+      ? resolvedProductEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT
+      : 0,
     surfaceCount: surfaceTable.surfaceCount,
     totalFieldCells: surfaceTable.totalFieldCells,
     maxFieldCellCount: surfaceTable.maxFieldCellCount,
@@ -600,16 +3504,32 @@ export async function buildSphRenderFieldWebGpu({
     rowLayout: [...SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_FIELD_CELL_FLOATS,
     fieldRows,
-    fieldRowByteLength: fieldRows.byteLength,
+    fieldRowByteLength,
     fieldPadding,
     refEdgeM,
     renderFieldInputSource,
-    renderFieldReadback: true,
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    renderFieldReadback: !noFullReadback,
+    fullReadbackPerformed: !noFullReadback,
+    normalHotLoopReadbackFree: noFullReadback,
+    fieldRowsBufferRetained: Boolean(retainFieldRowsBuffer),
+    fieldRowsBufferByteLength: retainFieldRowsBuffer ? fieldRowByteLength : 0,
+    surfaceBufferRetained: Boolean(retainSurfaceBuffer),
+    surfaceBufferByteLength: retainSurfaceBuffer ? surfaceTable.records.byteLength : 0,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+  if (retainFieldRowsBuffer) result.fieldRowsBuffer = fieldRowsBuffer;
+  if (retainSurfaceBuffer) result.surfaceBuffer = surfaceBuffer;
+  if (retainFieldRowsBuffer || retainSurfaceBuffer) {
+    result.destroyRenderFieldBuffers = () => {
+      if (retainFieldRowsBuffer) fieldRowsBuffer.destroy?.();
+      if (retainSurfaceBuffer) surfaceBuffer.destroy?.();
+    };
+  }
+  return result;
 }
 
 export async function buildSphRenderFieldWithOptionalWebGpu({
@@ -664,7 +3584,8 @@ export async function buildSphRenderFieldWithOptionalWebGpu({
       webgpu,
       result: webgpu,
       webgpuStatus: { status: 'webgpu-executed' },
-      renderFieldReadback: true,
+      renderFieldReadback: Boolean(webgpu.renderFieldReadback),
+      readbackMode: webgpu.readbackMode ?? FULL_READBACK_MODE,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -693,12 +3614,14 @@ export async function extractSphRenderRowsWebGpu({
   sphParticleUpload = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
-  retainRenderRowsBuffer = false
+  retainRenderRowsBuffer = false,
+  readbackMode = FULL_READBACK_MODE
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('extractSphRenderRowsWebGpu requires a WebGPU-like device');
   }
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-render-source-state', sphParticleState.state);
@@ -743,9 +3666,23 @@ export async function extractSphRenderRowsWebGpu({
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
   pass.end();
-  device.queue.submit([encoder.finish()]);
-  const bytes = await readBuffer(device, renderRowsBuffer, sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT);
-  const renderRows = new Float32Array(bytes);
+  let renderRows;
+  const renderRowsByteLength = sphParticleState.particleCount
+    * SPH_GPU_RENDER_ROW_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  if (!noFullReadback) {
+    device.queue.submit([encoder.finish()]);
+    const bytes = await readBuffer(device, renderRowsBuffer, renderRowsByteLength);
+    renderRows = new Float32Array(bytes);
+  } else {
+    if (device.queue?.onSubmittedWorkDone) {
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    } else {
+      device.queue.submit([encoder.finish()]);
+    }
+    renderRows = new Float32Array();
+  }
   let retainedRowsBufferDestroyed = false;
   const destroyRetainedRenderRowsBuffer = () => {
     if (retainedRowsBufferDestroyed) return;
@@ -767,10 +3704,15 @@ export async function extractSphRenderRowsWebGpu({
     rowLayout: [...SPH_GPU_RENDER_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_ROW_FLOATS,
     renderRows,
-    renderRowByteLength: renderRows.byteLength,
+    renderRowByteLength: renderRowsByteLength,
+    renderRowsReadbackByteLength: renderRows.byteLength,
     renderRowsBufferRetained: Boolean(retainRenderRowsBuffer),
-    renderRowsBufferByteLength: sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT,
-    compactRenderReadback: true,
+    renderRowsBufferByteLength: renderRowsByteLength,
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    renderRowsReadback: !noFullReadback,
+    compactRenderReadback: !noFullReadback,
+    fullReadbackPerformed: !noFullReadback,
+    normalHotLoopReadbackFree: noFullReadback,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -836,7 +3778,8 @@ export async function extractSphRenderRowsWithOptionalWebGpu({
       webgpu,
       result: webgpu,
       webgpuStatus: { status: 'webgpu-executed' },
-      compactRenderReadback: true,
+      compactRenderReadback: Boolean(webgpu.compactRenderReadback),
+      readbackMode: webgpu.readbackMode ?? FULL_READBACK_MODE,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,

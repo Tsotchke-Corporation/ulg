@@ -1,10 +1,328 @@
 # Implementation Status
 
-Updated: 2026-06-11 11:56 AKDT
+Updated: 2026-06-12 03:15 AKDT
 
 ## Done
 
 - Read `agents.md`, `/home/cos/projects/AGENTS.md`, and the ULG v0.5 PDF.
+- Completed the first cold-start cache/performance slice for the SPH demo.
+  `discoverReactions()` now keeps material-property-backed reactions cacheable
+  by hashing stable material-property provenance into its cache key, accepts
+  persisted reaction records, and can reuse supplied/product cold-cache
+  closures. The live SPH overlay now starts initial material/reaction/view-state
+  rebuilds through the supervised `ulg-runtime` worker when available, writes
+  localStorage cold-start reaction/product records, exposes `cold cache`,
+  `cache clear`, and `perf trace` diagnostics, and provides a
+  scoped `Clear Cache` button. If FPS drops below 30 during CPU closure work the
+  banner reports `deriving material or reaction properties`. The ultra-low-FPS
+  auto-pause behavior has been removed; long 0.1 FPS cold-start periods remain
+  an active performance target rather than a playback-control behavior. Manual
+  Step/Play can reconstruct the interactive driver from cache after worker
+  prepopulation without forcing cold derivation on initial load. Remaining cache
+  work: thermal/optical/static table reuse, GPU warmup metadata, stale-record
+  browser probes, PeerCompute state mirroring, and measured cold/warm/clear
+  deltas.
+- Added the first resident GPU gas/product ledger slice. The no-full-readback
+  reaction path now binds proposals into a compact summary pass and returns a
+  128-byte f32x4 readback with event count, consumed mass, visible/unplaced
+  product mass, gas mass/moles, heat, and residuals. Resident diagnostics,
+  repeated-step summaries, and overlay status expose the ledger, and sealed-box
+  pressure can be derived from the resident summary for guarded single-gas
+  reactions without scanning stale CPU particle arrays. Multi-gas per-species
+  resident buffers and force/wall pressure feedback remain pending.
+- Added per-gas-product resident compact ledger rows. A separate 32-byte f32x4
+  row is emitted for each gas product with material id, mass, moles,
+  visible/unplaced mass, event count, gas-product index, and status. The decoder
+  aggregates duplicate gas rows by material, resident diagnostics preserve the
+  species ledger, and the sealed-box pressure diagnostic now consumes
+  material-keyed resident gas species before aggregate fallback. Remaining
+  reaction work: dynamic or inventory-backed product append, stricter
+  atom/charge residual summaries, and force/wall pressure feedback.
+- Added compact resident product inventory and atom/charge residual ledgers.
+  Product-inventory rows now report per-product-term mass, visible/unplaced
+  mass, moles, routing, charge contribution, raw mass, and mass scale without
+  full particle readback. Reaction tables now carry formula-derived atom-term
+  rows for reactants and products, static-table cache restore preserves them,
+  and a compact WebGPU atom-residual pass reports atom residuals by atomic
+  number plus charge residuals. Resident diagnostics and the SPH overlay expose
+  product-inventory and atom-residual row counts. Remaining reaction work:
+  strict validity gates using the residuals/energetics, pressure feedback into
+  forces and wall ledgers, and dynamic/renderable product storage.
+- Reprioritized cold-start work per `plan/todo/reprioritize.md`. Cache
+  correctness remains active, but cold/warm timing polish, stale-record browser
+  probes, and GPU warmup persistence are deferred until reaction, pressure,
+  steam, hot-loop, and material-resolver schemas stabilize. Worker static-table
+  reuse now ignores particle count alone but rejects stale reaction-table
+  bundles when a changed smoothing/contact radius changes the derived reaction
+  table.
+- Added the WebGPU-Ocean/marching-cubes performance todo to the active plan.
+  The hot-loop phase will evaluate fixed-point/tiled GPU P2G scatter, GPU
+  cell/neighbor structures, and a WebGPU marching-cubes surface extractor for
+  continuous PBR material volumes before returning to cold-start timing polish.
+- Added strict reaction gate and pressure wall-load feedback contracts. Compact
+  reaction summaries now include `peercompute.ulg.sph-reaction-strict-gate.v0`,
+  which blocks strict force coupling on provisional energetics or atom/charge
+  residual drift while reporting product mass scaling separately. Gas-pressure
+  summaries now attach `peercompute.ulg.sph-sealed-gas-pressure-feedback.v0`
+  with gauge pressure, six wall force ledgers, net force, and an explicit force
+  coupling blocker. Resident diagnostics and overlay text surface the strict
+  gate and pressure feedback status. Remaining: use surface/gas-cell gradients
+  to turn the wall/pressure ledger into validated force coupling.
+- Completed the first phase-resolved H2O vapor optics slice. The SPH demo now
+  derives a bucketed gas-phase optical state from sealed-box H2O partial
+  pressure, total pressure, temperature, droplet radius, saturation pressure,
+  supersaturation ratio, condensed fraction, vapor/condensed density, droplet
+  number density, and scattering coefficient. Pure vapor stays nearly invisible
+  from the O-H absorption closure; supersaturated vapor reaches the
+  Clausius-Clapeyron plus droplet scattering closure and uses the
+  condensed-droplet PBR render model. The optical CPU cache key now handles
+  nested/string state fields, and the optical GPU lookup ABI appends optical
+  depth, scatter, absorption, and optical-state id diagnostics. Remaining:
+  make this state per-cell/per-particle GPU-resident and gate vapor surface
+  visibility directly from closure-derived optical depth/scattering.
+- Added the first material-interface and pressure/interface coupling checkpoint.
+  `peercompute.ulg.sph-material-interface-field.v0` now derives aggregate
+  per-surface area, threshold crossing count, area centroid, and mean outward
+  normal from the same render-field density grids used for continuous surfaces.
+  `peercompute.ulg.sph-pressure-interface-coupling.v0` joins that interface
+  field with the sealed gas pressure feedback and reports
+  `pressure-interface-coupling-ready-for-solver` only when pressure and
+  interface geometry are available. Force coupling remains explicitly blocked
+  with `blocked-pressure-force-solver-not-implemented`; no particle/grid force
+  application has been added.
+- Extended that checkpoint with local interface element rows and a non-applied
+  pressure-force preview. Interface fields now include f32x4-aligned local
+  rows with centroid, area, normal, normal-area vector, material, phase, and
+  surface ids. The preview multiplies uniform gas pressure by local normal-area
+  vectors and reports per-surface/net force diagnostics, but keeps
+  `forceApplicationStatus = not-applied-diagnostic-preview` and all validation
+  flags false. Remaining: GPU-resident element generation and a conservative
+  pressure-force solver with parity/conservation tests before applying forces.
+- Tightened the resident render-field blob flicker guard. Under-threshold
+  transient frames now retain the last valid marching-cubes mesh through the
+  existing inactive-frame grace window instead of immediately clearing to an
+  empty field, and new surfaces start hidden until their field crosses the
+  isosurface threshold. Validation: focused renderer/kernel tests passed
+  `22/22`, full `npm test` passed `390/390`, and the live HTTPS Playwright run
+  passed the SPH/runtime browser coverage while the unrelated supervised
+  service smoke timed out on legacy service telemetry.
+- Added the GPU-shaped material-interface candidate buffer. The ABI now has
+  `peercompute.ulg.sph-material-interface-candidate-field.v0` and a fixed
+  f32x4 cell-axis candidate row shape, with one inactive-or-active candidate
+  per render-field cell and positive axis. `deriveSphMaterialInterfaceField()`
+  now compacts from that candidate field, and
+  `sphMaterialInterfaceCandidatesWgsl` plus
+  `buildSphMaterialInterfaceCandidateFieldWebGpu()` provide the matching
+  WebGPU candidate-row pass behind explicit parity/readback gates. Validation:
+  focused ABI/render-kernel tests passed `30/30`, the broader SPH slice passed
+  `59/59`, live HTTPS SPH e2e passed `1/1`, and full `npm test` passed
+  `393/393`. Remaining: consume the candidate buffer in a conservative
+  pressure-force solver before enabling force application.
+- Added the conservative pressure-interface force solver artifact. The ABI now
+  includes `peercompute.ulg.sph-pressure-interface-force-solver.v0` and a
+  16-float force row carrying interface identity, centroid, area, material
+  force, equal/opposite gas reaction force, pressure, and status. The solver
+  reports `solver-ready-not-applied`, pairwise conservation residuals, and a
+  pending MLS-MPM grid-force target; it does not yet mutate particle state or
+  grid momentum. Validation: focused ABI/headless tests passed `34/34`, broader
+  SPH tests passed `59/59`, live HTTPS SPH e2e passed `1/1`, and full
+  `npm test` passed `393/393`. Remaining: implement the MLS-MPM/WebGPU
+  grid-force consumer and apply only after parity/conservation checks pass.
+- Added the pressure-interface MLS-MPM grid-force consumer and tightened the
+  flicker test coverage. Grid update now accepts the pressure-interface solver
+  force rows, scatters material-force impulses to mass-bearing grid nodes using
+  the same quadratic MLS-MPM weights on CPU and in WGSL, and exposes
+  `pressure-interface-grid-force-consumer-applied`,
+  `grid-momentum-impulse-consumed`, row-count, and applied-impulse diagnostics
+  through the grid-update execution envelope. Inactive grid nodes are skipped
+  so default zero-position rows cannot inflate impulse summaries. The render
+  flicker guard now has direct grace-window coverage through
+  `hideRenderFieldSurfaceAfterGrace()`: the last valid mesh is retained without
+  reset/update during the inactive grace frames and hidden only after expiry.
+  Validation: focused renderer/grid/ABI tests passed `43/43`, broader SPH tests
+  passed `95/95`, live HTTPS SPH e2e passed `1/1`, full `npm test` passed
+  `396/396`, and both production and Pages builds passed. Remaining: wire the
+  pressure solver rows from the resident render-state/pressure path into the
+  resident MLS-MPM step so the demo’s gas pressure can visibly push material
+  surfaces in the live simulation.
+- Wired pressure-interface force rows into resident MLS-MPM steps. The latest
+  resident render-state solver is now a one-frame-delayed input to standalone
+  grid update, single resident steps, and repeated resident steps; resident
+  signatures include the pressure force-row payload so stale cached resident
+  steps are not reused after pressure/interface changes. Resident step
+  envelopes, diagnostics, and repeated-step summaries expose solver schema,
+  application status, row count, applied impulse, and consumer status. CPU and
+  WebGPU grid-update routing remain parity-gated. Validation: focused
+  resident-step tests passed `14/14`, broader SPH tests passed `96/96`, live
+  HTTPS SPH e2e passed `1/1`, full `npm test` passed `397/397`, and both
+  production and Pages builds passed. Remaining: use the next render/physics
+  loop to observe this one-frame-delayed pressure force in the live demo and
+  then move into GPU marching cubes/WebGPU-Ocean hot-loop work.
+- Completed the first GPU-resident render-field/marching-cube hot-loop slice.
+  `buildSphRenderFieldWebGpu()` now has an explicit no-full-readback mode with
+  retained render-field and surface buffers, so normal hot-loop execution can
+  keep the density grid GPU-resident. The ABI now exposes
+  `peercompute.ulg.sph-gpu-render-marching-cube-cells.v0` plus an f32x4
+  fixed-voxel row layout, and `sphRenderMarchingCubeCellsWgsl` classifies each
+  render-field voxel cube into corner mask, edge crossing count, density range,
+  reserved triangle/vertex counts, and active status. CPU reference and
+  optional WebGPU wrappers cover parity/readback and resident no-readback
+  execution. Validation: focused ABI/render-kernel tests passed `34/34`, the
+  broader filtered runtime slice passed `401/401`, live HTTPS SPH e2e passed
+  `1/1`, full `npm test` passed `401/401`, and both production and Pages builds
+  passed. Remaining: add prefix/compaction plus actual WebGPU triangle
+  emission, wire the emitted surface buffers into the renderer, and profile the
+  live no-readback path against the current CPU MarchingCubes object update.
+- Added the first deterministic surface-vertex emission contract after the
+  marching-cube classification pass. The ABI now exposes
+  `peercompute.ulg.sph-gpu-render-surface-vertices.v0` and a f32x4 per-vertex
+  row carrying surface/material/phase ids, compact debug triangle/vertex ids,
+  position, normal, optical-state id, density/isolation, source voxel, and
+  status. The CPU reference emits tetrahedralized render-field cube triangles
+  from first-principles scalar density rows, and the WebGPU WGSL path writes the
+  same tetrahedralized vertices into deterministic fixed slots
+  (`totalFieldCells * 36`) instead of nondeterministic atomic append. Full
+  readback mode compacts those slots only for parity/debug; no-full-readback
+  mode can retain the fixed-slot GPU vertex buffer. Also fixed the classifier
+  CPU/WGSL reservation mismatch to `12/36` and corrected the render-field
+  coordinate conversion for marching-cube cell centers and emitted vertices.
+  Validation: focused ABI/render-kernel tests passed `36/36`, broader SPH tests
+  passed `102/102`, live HTTPS SPH e2e passed `1/1`, full `npm test` passed
+  `403/403`, and both production and Pages builds passed. Remaining: add the
+  prefix/compaction and per-surface draw/indirect metadata buffers, then wire
+  emitted vertices into a WebGPU/Three draw path while keeping CPU
+  `MarchingCubes` as fallback.
+- Added surface draw metadata rows for the emitted vertex path. The ABI now
+  exposes `peercompute.ulg.sph-gpu-render-surface-draw.v0` and a f32x4
+  per-surface row with material/phase/optical ids, vertex and triangle offsets
+  and counts, render-order/depth flags, status, and bounds. The CPU reference
+  derives this metadata from compact surface vertices as the draw-stage prefix
+  anchor, and the optional wrapper gives the future WebGPU prefix/draw metadata
+  kernel the same parity/fallback envelope as the rest of the render pipeline.
+  Validation: focused ABI/render tests passed `38/38`, broader SPH tests
+  passed `104/104`, live HTTPS SPH e2e passed `1/1`, full `npm test` passed
+  `405/405`, and both production and Pages builds passed. Remaining:
+  implement the actual WebGPU prefix/compaction kernel, produce draw-indirect
+  rows from fixed slots without CPU readback, and bind those rows to a renderer
+  path.
+- Added GPU-resident sparse product-event staging for reaction products. The
+  reaction ABI now declares
+  `peercompute.ulg.sph-gpu-reaction-product-event.v0`, and the no-full-readback
+  reaction path can retain a separate particle-major product-event buffer with
+  one row per source particle/product term. Verification readback is optional;
+  normal resident runs keep the product-event rows WebGPU-resident, expose row
+  counts/buffer bytes in resident diagnostics and the SPH overlay, and destroy
+  the retained buffer with the resident step.
+- Added resident product-event render-field consumption. The SPH render-field
+  ABI now binds the retained product-event buffer and splats only unplaced
+  product mass, avoiding double-rendering products already emitted into source
+  slots. The scene now creates synthetic surface entries from the generic
+  reaction product inventory/product-term metadata, so event-only gas or
+  condensed products can render as spawned volume through the same
+  material/phase optical table path. Remaining product-event consumers:
+  pressure/EOS and field-force kernels.
+- Added a compact product-event/product-inventory pressure bridge. Resident gas
+  pressure now still prefers the per-species GPU gas ledger, but can fall back
+  to gas product-event readback rows or compact product-inventory rows when
+  sparse event rows stay GPU-resident. It filters through generic reaction
+  product routing metadata, reports the resident product-gas source/rows, and
+  avoids full particle readback. This is a pressure diagnostic input bridge;
+  EOS and force-field kernels still need resident consumption for dynamics.
+- Added `peercompute.ulg.sph-resident-product-mass.v0` as the explicit resident
+  product-mass handle. Reaction results and resident MLS-MPM steps now expose
+  the retained product-event buffer, row count/stride, product-inventory count,
+  unplaced mass, gas mass, and the `unplaced-product-mass-only` consumption
+  policy in one object. Buffer destruction is guarded through the handle, and
+  the SPH overlay reports that EOS/force coupling remains blocked until
+  field/gas kernels consume the resident mass directly.
+- Added the first resident product-mass P2G consumption slice. The MLS-MPM P2G
+  CPU reference and WebGPU binding contract now accept a resident product-mass
+  sidecar, bind the sparse product-event buffer as read-only storage, and
+  deposit only ready rows with positive `unplacedMassKg` into grid mass. Repeated
+  resident steps carry the prior product-mass handle into the next P2G before
+  cleanup, with a preserve hook so borrowed product-event buffers are not
+  destroyed early. This is mass/inertia participation only; pressure/EOS force
+  coupling remains blocked until product-event rows carry mechanics/EOS state
+  or a gas-cell EOS kernel consumes the resident inventory.
+- Expanded product-event rows to carry derived mechanics/EOS metadata. The
+  product-event ABI now has 32 f32 values: the original render/pressure fields
+  plus product velocity, support volume, effective bulk modulus, shear modulus,
+  Lame lambda, sound speed, EOS model id, solid flag, and mechanics status.
+  `sphReactionProductEventWgsl` derives those fields from reaction product
+  phase records, and P2G now consumes product-event velocity plus EOS pressure
+  when support volume and closure-derived EOS fields are present. Remaining:
+  validate a gas-cell/pressure-gradient force solve and add GPU append/compaction
+  for multiple generations of unplaced products.
+- Extended the cold-start/performance slice with finer diagnostics and cache
+  coverage. Resident MLS-MPM steps now report per-stage timing for device
+  acquisition, P2G, grid update, G2P, thermal, reaction, and compact summary;
+  worker SPH rebuild artifacts report `createSphPhaseDemo`, view-state, and
+  preflight timing; scene particle sync reports batching, thermal table/graph,
+  reaction table, optical table, and surface-application timing. The demo now
+  pre-spawns `ulg-runtime`, consumes partial material-closure cache hits instead
+  of discarding all hits when a runtime default is missing, derives only missing
+  runtime materials individually, and persists deterministic thermal, closure
+  graph, phase-response, optical/PBR, reaction-table, and GPU warmup signature
+  records into the cold-start cache. Remaining work: actually rehydrate these
+  table rows into WebGPU uploads across reloads, move cache serialization off
+  the UI thread, and record measured cold/warm deltas.
+- Added the first balanced multi-product CPU reference reaction execution
+  path. `reactionDiscovery()` now preserves balanced `reactants[]` and
+  `products[]` terms in `stoichiometry` and rejects stale persistent reaction
+  records that lack those terms. `reactiveStep()` can allocate contact-pair mass
+  across all product terms by stoichiometric coefficient and molar mass, so
+  room-temperature Na + liquid H2O now produces both NaOH and H2 instead of
+  collapsing both reactants to one product. This is still a reduced
+  macro-particle reference path; strict validated thermochemistry, full extent
+  solving, resident WebGPU multi-product execution, and gas force coupling
+  remain open.
+- Added a sealed-box gas-pressure diagnostic. The SPH demo now derives baseline
+  air moles from the scenario gas closure and adds gas-phase SPH products/vapor
+  by material, temperature, and molar mass to compute per-species partial
+  pressures and total pressure. The overlay exposes a `gas pressure` row and
+  the Na/H2O browser test verifies positive H2 partial pressure after reaction.
+  Pressure is diagnostic only until the resident gas EOS consumes the same
+  species inventory.
+- Rebuilt the ULG Triad PDF current-status artifact after the cold-start,
+  balanced-reaction, and gas-pressure continuation. The checked-in
+  `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf` now preserves the original body and
+  appends the current status, validation, active risks, and immediate next work
+  through page 71. Focused browser validation, full `npm test` (`339/339`),
+  `npm run build`, `npm run build:pages`, and `git diff --check` passed at this
+  checkpoint.
+- Moved SPH static table/GPU-warmup cache serialization into the supervised
+  `ulg-runtime` worker. `ulg-runtime` now advertises and executes
+  `sph.static-table-cache`; `src/runtime/sph/sphColdStartCache.js` owns the
+  static table cache schemas, typed-array payload hashing, warm unchanged-record
+  detection, generator invalidation, and rehydration helpers. Static table
+  records are stored under a separate localStorage key so reaction cold-cache
+  lookups do not parse the large thermal/optical/reaction table payload. The
+  overlay persists the worker-returned snapshot and exposes compact counts,
+  bytes, backend, and timing only. Validation passed: focused cache/contract
+  tests (`7/7`), focused HTTPS SPH browser group (`3/3`), `npm run build`,
+  `npm run build:pages`, `git diff --check`, and full `npm test` (`342/342`).
+- Added warm static-table cache consumption in the SPH scene. The cache module
+  now rehydrates scene-consumable bundles for thermal material tables, thermal
+  closure graph banks/sets, thermal phase-response tables, optical/PBR tables,
+  and reaction tables. Graph-bank rows are converted back into per-graph CPU
+  closure objects with local sample/edge/status offsets so thermal/reaction CPU
+  fallbacks still work. `sphPhaseScene.setParticles()` accepts the guarded
+  bundle and uses cached families when present; the overlay records
+  `staticTableCacheStatus` and `staticTableCacheFamilies`. Focused unit/browser
+  coverage and full `npm test` now pass at `343/343`.
+- Advanced resident balanced reaction execution beyond the old single-product
+  conversion. Packed SPH reaction tables now include reactant term rows,
+  product term rows, and gas-product rows in the GPU combined record; static
+  table cache rehydration restores the same order. The resident CPU reference
+  computes limiting extent from coefficient times molar mass, preserves excess
+  reactant mass in-place, applies event heat across product mass, and records a
+  fixed-buffer reaction ledger with visible and unplaced product/gas inventory.
+  The WGSL reaction resolve kernel now reads reactant/product term rows and
+  emits fixed-slot products while preserving leftover reactants. Focused
+  reaction/static-cache/ABI tests pass (`30/30`) and the broader
+  chemistry/discovery/SPH/resident slice passes (`54/54`). Remaining work:
+  resident GPU gas/product ledger buffers, compact no-full-readback pressure
+  summaries, and dynamic or inventory-backed product append.
 - Added the strict first-principles material-property provenance gate and then
   replaced the production/default Fe, H2O, air, H2, O2, element, and product
   closure paths with a generic derivation pipeline. The production path now
@@ -1059,7 +1377,7 @@ Completed:
 - Refreshed Infinite Context Coder for ULG. ICC status is current at git head
   `5ebf3d10d64b705d4178e23ad72b08fb24de6cbf`; memory now covers 190 files and
   627 chunks.
-- Updated `plan/sphphasedemo.md` and `plan/perf-upgrade.md` with the honest
+- Updated `plan/todo/sphphasedemo.md` and `plan/todo/perf-upgrade.md` with the honest
   GPU-resident optical/PBR target and added nuclear/isotope closure requirements
   for radioactive decay, fission, fusion, activation, and ionizing-radiation
   transport.
@@ -1628,7 +1946,7 @@ Completed:
 - Recording `renderFieldInputSource = resident-render-rows-buffer`,
   `renderRowsBufferRetained`, and retained-buffer byte length in the live demo
   telemetry and browser e2e expectations.
-- Added the flat closure-law graph WebGPU target to `plan/perf-upgrade.md`.
+- Added the flat closure-law graph WebGPU target to `plan/todo/perf-upgrade.md`.
   The intended architecture is CPU compile/validation of the law graph followed
   by WebGPU evaluation from flat closure node/edge/table buffers. This belongs
   before the full 60 Hz SPH/MLS-MPM/nuclear hot loop because it removes
@@ -1896,3 +2214,832 @@ Not claimed:
 - Compact thermal/phase GPU summaries are still pending.
 - The transparent z-buffer/render-order fix remains queued until the five
   current GPU-runtime tasks are complete.
+
+## 2026-06-11 Update - SPH Box/Grid, Worker Rebuild, Cache/Warnings, Reaction Candidates
+
+Completed:
+
+- Continuous SPH surface radius is now derived from particle spacing or the
+  packed smoothing length, not the box dimensions. Increasing the sealed box
+  size now leaves rendered blobs at the same physical size while the MLS-MPM
+  grid dimensions and node count grow.
+- The SPH phase overlay now shows WebGPU/CPU warnings plus separate render,
+  physics, and resident FPS counters. CPU closure work is visible as a warning
+  while active.
+- Derived material closures are mirrored into
+  `peercompute.ulg.sph-derived-closure-cache.v1` in `localStorage` and reused
+  on later rebuilds when required runtime defaults are present.
+- Added `sph.phase.rebuild` to the `ulg-runtime` service contract and worker.
+  The SPH overlay now submits material/reaction/view-state rebuilds through the
+  supervised worker when `window.__ulgDemo` provides `runSphPhaseRebuild()`,
+  applies the returned typed arrays/buffers, and falls back to main-thread
+  derivation only if the worker path fails or is unavailable.
+- Added a DOM-free `createSphPhaseViewState()` runtime helper shared by the
+  overlay and worker.
+- Added `src/runtime/chemistry/` formula/candidate utilities for general
+  formula parsing and balanced reaction candidates. The SPH reaction discovery
+  adapter now consumes balanced candidate records for active metal + water and
+  binary ionic element/nonmetal pairs, including Na + Cl/Cl2 and balanced
+  Fe(OH)2 for Fe + H2O.
+- Regenerated `docs/` with `npm run build:pages`.
+
+Latest validation:
+
+- PASS: focused renderer, contract, chemistry, and reactive-chemistry Node
+  tests (`22/22`).
+- PASS: focused `tests/reactionDiscovery.test.mjs` (`7/7`; slow integration
+  evidence).
+- PASS: focused HTTPS Chromium e2e (`1/1`).
+- PASS: manual HTTPS Chromium worker/grid probe reported worker status
+  `complete`, view state source `peercompute-worker-packed-state`, and
+  expanded grid `30x18x18` for a 10 m X box at `dx=0.400m`.
+- PASS: `npm run build` and `npm run build:pages` with the existing Vite
+  large-chunk warning.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- General reaction energetics are still mixed: negative derived energies are
+  used where available, but crude generated geometries that produce false
+  endothermic signs fall back to explicit provisional candidate energetics.
+- Runtime chemistry still applies one product key per contact; full
+  stoichiometric multi-product particle conversion and gas byproduct pressure
+  accounting remain future work.
+- Product-closure derivation for heavy compounds can be slow and should move
+  behind worker/WebGPU-resident cache/peer reuse before broad all-element UI
+  sweeps.
+
+## 2026-06-11 Update - PeerCompute Local Closure Cache Invalidation
+
+Completed:
+
+- Upgraded the browser-local SPH material closure cache to
+  `peercompute.ulg.local-derived-closure-cache.v2` while preserving the
+  existing localStorage namespace so the browser can build a larger reusable
+  library over time.
+- Cache records are now hash-keyed and indexed by material. Each record stores
+  `inputHash`, `methodHash`, `validityDomainHash`, `propertiesHash`, and a
+  generator fingerprint.
+- The generator fingerprint includes the material-closure method version, app
+  version, module/build URL, and source strings for the participating material
+  derivation functions. A code/bundle update changes the fingerprint and causes
+  old records to be reported stale instead of consumed.
+- Lookup now rejects stale records for schema, method-version,
+  generator-fingerprint, material-key, guard-hash, or properties-hash mismatch.
+  The SPH status row reports stale count alongside hits/misses/stored records.
+
+Latest validation:
+
+- PASS: manual HTTPS Chromium probe seeded a v1 localStorage record and verified
+  `schema-mismatch`, `stale=1`, v2 replacement records, generator fingerprint,
+  input hash, and material index writes.
+- PASS: focused HTTPS Chromium e2e (`1/1`) with the v2 cache schema and
+  generator fingerprint assertion.
+- PASS: `npm run build` and `npm run build:pages` with the existing Vite
+  large-chunk warning.
+- PASS: `git diff --check`.
+
+Not claimed:
+
+- This is browser-local persistence and invalidation. It does not yet publish
+  the closure library into a networked PeerCompute peer cache or deduplicate
+  across machines.
+- Cache invalidation is only as strong as the generator fingerprint inputs; the
+  next production-grade step is to include repo commit/content hashes from the
+  service artifact envelope when available.
+
+## 2026-06-11 Planning Update - Reaction Stoichiometry And Energetics
+
+Added `plan/todo/reaction-stoichiometry-energetics-plan.md` to turn the two known
+chemistry gaps into an implementation path:
+
+- strict first-principles mode must reject provisional candidate energetics
+  instead of accepting heuristic signs when crude geometries fail;
+- balanced candidate equations must survive through the SPH adapter, CPU
+  runtime, WebGPU reaction tables, gas inventory, and sealed-box pressure
+  coupling;
+- reaction closures need their own provenance-keyed cache, separate from
+  material closure records;
+- CPU and WebGPU tests must prove multi-product stoichiometry, gas byproducts,
+  pressure contribution, and atom/mass/charge/energy conservation.
+
+This is a plan-only checkpoint. The current executable runtime still has the
+single-product conversion and provisional-energy gaps documented above.
+
+## 2026-06-11 Planning Update - Phase-Resolved Steam Optics And Cache Findings
+
+Added `plan/todo/phase-resolved-steam-optics-plan.md` so water, vapor, ice, and
+visible steam can diverge through phase/state/microstructure-resolved optical
+closures. The current code already keys render optics by phase, but pure vapor is
+modeled as nearly invisible; visible white steam needs a condensation/droplet
+scattering closure rather than a hard-coded white alpha.
+
+Added `plan/todo/cold-start-cache-performance-plan.md` with measured cold/warm
+startup evidence and the remediation path for reaction/product closure caching,
+material-property-backed reaction memoization, and timing diagnostics.
+
+Plan file cleanup:
+
+- Moved completed audit/handoff artifacts to `plan/done/`.
+- Moved forward-looking plans to `plan/todo/`.
+- Moved empty/superseded documents to `plan/moot/`.
+- Kept `plan/plan.md`, `plan/log.md`, `plan/tests.md`,
+  `plan/implementation-status.md`, and the v0.5 PDF at top level because they
+  remain active operating ledgers/spec artifacts.
+
+Performance/cache investigation findings:
+
+- Cold material closure derivation remains significant, but the largest visible
+  miss is reaction/product closure derivation.
+- `discoverReactions()` disables its in-memory cache whenever
+  `options.materialProperties` is present, which is the normal demo path, so
+  repeated material-property-backed discovery still reruns expensive chemistry.
+- Browser `localStorage` currently persists material closures, not full reaction
+  closures, product-closure derivation results, thermal graph uploads, optical
+  state buckets, or WebGPU pipeline warmup.
+- The worker rebuild path now receives cached material closures through
+  `optionsWithCachedClosures()`, but it still has to recompute uncached
+  reaction/product closures.
+
+## 2026-06-11 Planning Update - WebGPU Material Property Resolvers
+
+Added `plan/todo/webgpu-material-property-resolvers-plan.md` after auditing the
+current optical path. The current relativistic/interband optical model is
+implemented in JavaScript on the CPU; WebGPU only consumes packed optical rows
+through `opticalLookupWgsl`. The new todo plan enumerates the resolver families
+that must move toward WebGPU residency:
+
+- atomic Kohn-Sham/KH/LSDA electronic structure;
+- element bulk thermomechanics and jellium/radial-density cold curves;
+- molecular/compound HF/UHF/all-element electronic closures;
+- formula, mixture, and gas statistical mechanics;
+- phase equilibrium and thermal response graph construction;
+- mechanics/EOS/viscosity/transport tables;
+- optical/PBR/emission/opacity derivation;
+- balanced reaction discovery/energetics/execution;
+- radiation, nuclear, and Cherenkov closures;
+- cache/provenance and flat resolver-graph execution.
+
+The plan preserves CPU validation and cache-key construction as control-plane
+work, but treats hidden main-thread numeric closure resolution during the live
+demo as a bug once a worker or WebGPU resolver exists.
+
+## 2026-06-11 Planning Update - Cold-Start Cache Remediation
+
+Expanded `plan/todo/cold-start-cache-performance-plan.md` into the active
+cold-start remediation plan. The plan now explicitly targets the main bug:
+`discoverReactions()` disables its in-memory cache when `materialProperties` is
+provided, even though that is the normal SPH demo path. The fix is to hash stable
+material-property provenance fields instead of turning caching off.
+
+The remediation plan now also covers cacheable artifacts beyond material
+closures:
+
+- reaction closures;
+- product reuse decisions;
+- thermal material tables, graph banks, and phase-response tables;
+- optical/PBR state buckets and spectral rows;
+- material id maps and static WebGPU table rows;
+- GPU warmup signatures and in-session pipeline/bind-group reuse metadata.
+
+It also adds a required retro SPH `clear cache` button that clears only ULG SPH
+cache families, resets in-memory signatures, reports cleared counts, and forces a
+controlled cold rebuild.
+
+## 2026-06-11 Planning Update - Overarching Remaining Todo Order
+
+Added `plan/todo/overarching-completion-plan.md` after reviewing every active
+todo file and the unchecked cross-repo items in `plan/plan.md`. The ordering is:
+
+1. baseline/plan hygiene and live-demo status;
+2. cold-start cache coordinator, reaction/product/table cache persistence, GPU
+   warmup reuse, and SPH `clear cache`;
+3. balanced reaction closures, strict energetics, CPU multi-product reference,
+   and gas byproduct ledgers;
+4. sealed gas pressure and phase-resolved steam/droplet optics;
+5. ice-on-molten-iron preflight, six wall controls, particle-resolution
+   controls, and energy feasibility;
+6. no-full-readback GPU runtime authority, compact summaries, resident thermal,
+   reaction, gas, wall, and render buffers;
+7. WebGPU material resolver migration, starting with resolver manifests and
+   optical/EOS/thermal numeric kernels before electronic/molecular solvers;
+8. scientific fidelity frontier work such as PBE/LDA+U, larger molecular basis,
+   UMP2, periodic DFT/QHA, shared clocks, neighbor lists, and stiff EOS;
+9. nuclear/radiation/Cherenkov closures;
+10. PeerCompute/Eshkol/MoonLab integration and final profiling/demo evidence.
+
+Immediate next work remains Phase 1: timing spans, cache coordinator,
+material-property-backed reaction memoization, reaction/product cache records,
+and clear-cache UI wiring.
+
+## 2026-06-12 Status Update - Rendered Blob Flicker
+
+Before resuming the next todo item, the SPH marching-cubes renderer was
+stabilized against one-frame blob flicker:
+
+- resident render-field surfaces now use a narrow hysteresis band around the
+  isosurface threshold;
+- inactive marching-cubes surfaces are retained for a short grace period before
+  their geometry is cleared;
+- transparent/transmissive surfaces now get deterministic per-surface ordering
+  inside each render layer;
+- surface recreation no longer follows transient material-property object
+  identity when the optical/config signature is unchanged.
+
+Validation completed:
+
+- focused renderer and resident SPH suites passed;
+- the live HTTPS Vite SPH Playwright derived-material demo passed;
+- a browser probe sampled 24 frames with stable `2/2` visible blob surfaces;
+- full `npm test` passed `384/384`;
+- `git diff --check` passed.
+
+## 2026-06-12 Status Update - Resident Product-Event Merge
+
+The resident product-event/product-mass merge prerequisite is now directly
+covered:
+
+- carried resident product-event buffers and newly emitted product-event
+  buffers can be concatenated on the GPU without full particle readback;
+- merged handles preserve cumulative source row-count and byte-length metadata,
+  so repeated-step diagnostics do not collapse history to a two-buffer view;
+- repeated-step cleanup can destroy superseded input generations after the next
+  merged buffer exists, while single-step cleanup still preserves caller-owned
+  input handles by default;
+- `nextParticleUploads.residentProductMass` carries the merged handle forward
+  for the next P2G/render/gas consumer.
+
+Validation completed:
+
+- resident MLS-MPM merge test passed;
+- adjacent P2G/render/phase/renderer suites passed `58/58`;
+- `git diff --check` passed.
+
+Remaining work in this area:
+
+- bind the merged resident product mass into all remaining EOS/gas-cell/field
+  and pressure/force consumers;
+- keep force coupling guarded by strict reaction and pressure-gradient evidence.
+
+## 2026-06-12 Status Update - Resident Gas Pressure Continuity
+
+The resident product-mass handle now carries compact gas-species pressure
+state:
+
+- reaction summaries with gas-species rows create resident product-mass handles
+  with a compact gas ledger;
+- product-mass merges aggregate gas species by material across carried and newly
+  emitted generations;
+- sealed-box pressure now prefers the merged resident product-mass gas ledger
+  over the latest reaction summary, avoiding current-step-only pressure
+  undercounts while product events remain GPU resident;
+- the overlay recognizes the new `gpu-resident-product-mass-gas-species-ledger`
+  source as resident pressure.
+
+Validation completed:
+
+- focused resident/pressure/reaction tests passed `33/33`;
+- adjacent P2G/render/phase/renderer/reaction tests passed `67/67`;
+- live HTTPS Playwright SPH derived-material test passed `1/1`;
+- `git diff --check` passed.
+
+Remaining work:
+
+- convert the diagnostic pressure ledger into force coupling only after
+  pressure gradients/normals or gas-cell fields are derived;
+- continue toward GPU-resident gas/field force consumers without material
+  special cases.
+
+## 2026-06-12 Status Update - Pressure-Cell Field Contract
+
+The sealed-gas pressure feedback now exposes a compact pressure-cell field:
+
+- `peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0` is derived from the
+  gas EOS summary;
+- the current sealed-box field is one uniform gas cell with zero pressure
+  gradient, matching the uniform gas state;
+- pressure feedback now lists force-coupling prerequisites and blocks particle
+  force application on missing material surface normals/areas instead of a
+  vague missing-gradient reason.
+
+Validation completed:
+
+- phase pressure tests passed `14/14`;
+- adjacent resident/render/reaction tests passed `67/67`;
+- live HTTPS SPH Playwright test passed `1/1`;
+- `git diff --check` passed.
+
+Remaining work:
+
+- derive material surface normals/areas or an interface field before any gas
+  pressure force is applied to particles or grid nodes.
+
+## 2026-06-12 Status Update - GPU Surface Draw Compaction
+
+The rendered-blob flicker guard remains in place and the next render hot-loop
+slice now replaces the previous surface-draw GPU stub:
+
+- `sphRenderSurfaceDrawWgsl` scans fixed-slot surface vertices on the GPU,
+  computes deterministic per-surface prefix offsets, writes a compact surface
+  vertex buffer, and emits per-surface draw metadata rows;
+- `buildSphRenderSurfaceDrawMetadataWebGpu()` now returns retained
+  `compactedVertexRowsBuffer` and `drawRowsBuffer` handles for no-full-readback
+  resident rendering instead of throwing;
+- full-readback debug mode decodes compact vertices and draw rows for CPU parity
+  checks, while no-full-readback mode keeps the compact vertex/draw buffers
+  resident;
+- the current ABI still stores draw offsets/counts as f32 values, so very large
+  meshes above exact f32 integer range still need a future u32 draw-indirect ABI.
+
+Validation completed:
+
+- syntax checks passed for the render kernel, WGSL ABI, and render/ABI tests;
+- focused render/ABI tests passed `40/40`;
+- adjacent SPH/render/reaction/ABI coverage passed `106/106`;
+- full `npm test` passed `407/407`;
+- `npm run build`, `npm run build:pages`, and the live HTTPS Playwright SPH
+  smoke passed;
+- Infinite Context Coder was refreshed for `ulg`.
+
+Remaining work:
+
+- compile/exercise the new draw shader in a browser WebGPU smoke path;
+- wire the compacted vertex buffer and draw rows into the live renderer while
+  keeping CPU `MarchingCubes` as fallback;
+- add u32 draw-indirect rows before relying on very high vertex counts.
+
+## 2026-06-12 Status Update - Browser WebGPU Surface Draw Smoke
+
+The surface draw compaction shader is now exercised in Chromium WebGPU:
+
+- added an opt-in Playwright WebGPU launch flag
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1` for focused shader smoke tests without
+  changing the normal demo e2e browser path;
+- added a browser test that imports the Vite-served render runtime, requests a
+  real WebGPU device, dispatches `buildSphRenderSurfaceDrawMetadataWebGpu()`,
+  and verifies compacted vertex rows plus draw metadata against a tiny CPU
+  fixture;
+- fixed a browser-only WGSL parse bug by replacing reserved local identifier
+  `active` with explicit names in the marching-cube classifier and surface draw
+  shaders;
+- kept the normal HTTPS SPH demo smoke passing without unsafe WebGPU flags.
+
+Validation completed:
+
+- focused render/ABI tests passed `40/40`;
+- opt-in browser WebGPU surface-draw smoke passed `1/1`;
+- normal live HTTPS SPH e2e smoke passed `1/1`;
+- full `npm test` passed `407/407`;
+- `npm run build` and `npm run build:pages` passed.
+
+Remaining work:
+
+- wire compact surface vertex/draw buffers into the visible renderer;
+- add a u32 draw-indirect ABI and transparent-depth tests before replacing CPU
+  `MarchingCubes` for high-count live surfaces.
+
+## 2026-06-12 Status Update - Resident Surface Draw Sidecar
+
+The live SPH render refresh now builds a GPU-resident surface draw artifact next
+to the existing Three `MarchingCubes` fallback:
+
+- the resident render-field pass retains its field and surface buffers only long
+  enough to feed `buildSphRenderSurfaceVerticesWebGpu()` and
+  `buildSphRenderSurfaceDrawMetadataWebGpu()`;
+- the scene then releases the transient render-field and fixed-slot vertex
+  buffers while keeping only the compacted vertex buffer and draw metadata
+  buffer as `peercompute.ulg.sph-resident-surface-draw.v0`;
+- `sphResidentRenderState` now reports the retained surface draw buffer status,
+  no-full-readback mode, compaction mode, and the explicit
+  `pending-three-webgpu-binding` visible-renderer bridge;
+- the status overlay now includes a `surface draw` line so live runs expose
+  whether the compact draw source is resident or unavailable.
+
+Validation completed:
+
+- syntax checks passed for `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`, and `tests/demo.e2e.mjs`;
+- focused render/ABI/renderer tests passed `53/53`;
+- normal live HTTPS SPH e2e smoke passed `1/1`;
+- opt-in Chromium WebGPU surface-draw shader smoke passed `1/1`;
+- full `npm test` passed `407/407`;
+- `npm run build` and `npm run build:pages` passed.
+- Infinite Context Coder was refreshed for `ulg` (`237` files indexed,
+  `1096` memory chunks).
+
+Remaining work:
+
+- bind the retained compacted vertex and draw metadata buffers into an actual
+  visible WebGPU render pass;
+- replace f32 draw offsets/counts with a u32 draw-indirect ABI before relying on
+  large generated meshes;
+- add transparent-depth tests for surfaces viewed through water/steam/glass once
+  the WebGPU renderer bridge owns visible draw ordering.
+
+## 2026-06-12 Status Update - Surface Draw Indirect And WebGPU Overlay
+
+The surface draw path now has the first visible WebGPU bridge boundary:
+
+- the render ABI exposes
+  `peercompute.ulg.sph-gpu-render-surface-draw-indirect.v0`, a standard u32
+  draw-indirect row with `vertexCount`, `instanceCount`, `firstVertex`, and
+  `firstInstance`;
+- the CPU reference emits the indirect rows beside the existing f32 diagnostic
+  draw metadata, and the WebGPU surface-draw kernel writes a retained
+  `INDIRECT | STORAGE` buffer while it still has exact u32 prefix/count values;
+- the resident surface-draw sidecar now retains and reports the u32 indirect
+  buffer along with compacted vertex and f32 metadata buffers;
+- `sphPhaseScene` can create a transparent raw-WebGPU overlay canvas that reads
+  the compacted vertex storage buffer and submits `drawIndirect()` per surface,
+  while the current Three/WebGL `MarchingCubes` path remains the fallback;
+- the browser smoke validates the overlay shader and indirect draw path against
+  an offscreen WebGPU render target. Headless Chromium canvas presentation is
+  not treated as required evidence; the production overlay reports an explicit
+  fallback if canvas presentation is unavailable.
+
+Validation completed:
+
+- syntax checks passed for scene, render kernel, WGSL ABI, and browser tests;
+- focused render/ABI tests passed `40/40`;
+- focused Chromium WebGPU surface-draw shader plus offscreen overlay render-pass
+  smoke passed `1/1`;
+- normal live HTTPS SPH e2e smoke passed `1/1`;
+- full `npm test` passed `407/407`;
+- `npm run build`, `npm run build:pages`, and `git diff --check` passed.
+
+Remaining work:
+
+- replace the debug overlay color path with closure/PBR optical table sampling;
+- decide whether the production visible bridge should remain a raw WebGPU
+  overlay or copy into Three-owned WebGPU buffers once Three WebGPU integration
+  is worth the complexity;
+- add z/depth ordering coverage for transparent water, steam, and nested
+  surfaces before the overlay can supersede the WebGL fallback.
+
+## 2026-06-12 Status Update - Vapor Visibility From Derived Optics
+
+The steam/water rendering path now uses the derived optical closure to decide
+whether gas-phase H2O should draw as geometry:
+
+- `resolveOpticalSurfaceVisibility()` classifies vapor surfaces from optical
+  depth and droplet scattering, not from the `steam` render label;
+- pure H2O vapor with negligible optical depth stays optically hidden, while
+  supersaturated droplet steam remains visible through the existing
+  Clausius-Clapeyron droplet-scattering closure;
+- the gate is applied to both CPU particle-batch MarchingCubes surfaces and
+  resident render-field surfaces, using the existing inactive grace-frame path
+  to avoid threshold flicker;
+- liquid water and ice remain geometrically visible even when they are
+  transmissive, so condensed phases are not hidden just because opacity is low.
+
+Validation completed:
+
+- syntax checks passed for `src/visualization/sphPhaseScene.js` and
+  `tests/sphPhaseRenderer.test.mjs`;
+- focused renderer tests passed `14/14`;
+- focused optics/render/SPH demo tests passed `80/80`;
+- live HTTPS Playwright SPH smoke passed `1/1`.
+
+Remaining work:
+
+- move H2O vapor/droplet microphysics into resident per-cell or per-particle
+  GPU data instead of rebuilding state on the CPU;
+- add an explicit UI diagnostic for pure-vapor versus condensed-steam optical
+  mode;
+- audit transparent depth ordering for water/steam/nested surfaces.
+
+## 2026-06-12 Status Update - Resident Draw Transparency Policy
+
+The resident surface draw path now carries the renderer's optical transparency
+policy into draw metadata instead of relying only on phase:
+
+- scene-generated render-field surface descriptors include render layer, render
+  order, transparency class, and depth-write policy derived from the same
+  optical/PBR closure rows used by the Three material path;
+- the render-field surface table preserves transparency class and depth-write
+  flags in existing reserved row slots, so the 16-float ABI row length is
+  unchanged;
+- CPU draw metadata and the WebGPU surface-draw WGSL prefer those explicit
+  policy slots and fall back to phase-derived policy only when no policy is
+  supplied;
+- tests now cover a glass-like solid/transmissive case that phase-only logic
+  would incorrectly treat as opaque/depth-writing.
+
+Validation completed:
+
+- syntax checks passed for scene, render kernel, WGSL, and render/ABI tests;
+- focused render/ABI tests passed `55/55`;
+- browser WebGPU surface-draw shader smoke passed `1/1`;
+- normal live HTTPS SPH demo smoke passed `1/1`.
+
+Remaining work:
+
+- use the retained resident draw metadata to sort the raw WebGPU overlay by
+  render order and depth policy;
+- feed closure-derived PBR optical table rows into the overlay shader instead
+  of fixed debug phase colors;
+- add browser coverage for transparent surfaces viewed through other
+  transparent/nested surfaces.
+
+## 2026-06-12 Status Update - Resident Overlay Draw Order
+
+The raw WebGPU resident surface overlay now consumes the resident draw-order
+metadata instead of drawing surfaces in raw surface-index order:
+
+- `residentSurfaceDrawOrder()` sorts retained surfaces by render order,
+  depth-write flag, transparency class, and surface index;
+- the overlay bridge stores ordered surface indices and indirect-buffer offsets
+  and issues `drawIndirect()` in that order;
+- resident render-state and Playwright snapshots now expose the bridge draw
+  ordering policy and ordered offsets.
+
+Validation completed:
+
+- syntax checks passed for scene and e2e updates;
+- focused renderer tests passed `15/15`;
+- focused Chromium WebGPU surface-draw shader smoke passed `1/1`;
+- normal live HTTPS SPH demo smoke passed `1/1`.
+
+Known limitation:
+
+- the full unsafe-WebGPU SPH e2e path still times out in headless Chromium
+  before resident readback status, matching the previous overlay smoke
+  limitation. Focused offscreen WebGPU shader coverage remains the useful
+  overlay evidence.
+
+Remaining work:
+
+- feed closure-derived PBR optical table rows into the overlay shader instead
+  of fixed debug phase colors;
+- add browser coverage for transparent surfaces viewed through other
+  transparent/nested surfaces after overlay PBR data is available.
+
+## 2026-06-12 Status Update - Resident Overlay Optical/PBR Rows
+
+The raw WebGPU resident surface overlay now consumes the closure-derived optical
+GPU table instead of fixed debug colors:
+
+- compact resident surface vertices already carry material id, phase id, and
+  optical state id; the overlay shader now uses those IDs to look up the
+  matching optical record in WGSL;
+- the overlay bridge uploads the existing `peercompute.ulg.optical-gpu-table.v0`
+  records to a resident storage buffer and binds it alongside compact surface
+  vertices and camera data;
+- fragment shading now derives base color, opacity, metalness, roughness,
+  transmission handling, blocked status, and a small PBR-style lighting response
+  from the optical row;
+- the demo status line, resident render-state snapshot, and Playwright summary
+  expose `closure-derived-optical-gpu-table` plus the bound optical record count
+  so fallback/debug rendering is visible.
+
+Validation completed:
+
+- syntax checks passed for scene, mount, renderer test, and e2e updates;
+- focused renderer tests passed `16/16`;
+- focused render/kernel/ABI tests passed `57/57`;
+- focused Chromium WebGPU surface-draw shader smoke passed `1/1`;
+- normal live HTTPS SPH demo smoke passed `1/1`.
+
+Known limitation:
+
+- this is still a lightweight raw WebGPU overlay shader, not a complete IBL or
+  refraction-equivalent replacement for Three's `MeshPhysicalMaterial`. The
+  material inputs now come from the closure-derived optical rows; deeper nested
+  transparency/depth behavior still needs dedicated browser coverage and a depth
+  attachment or order-independent transparency strategy.
+
+Remaining work:
+
+- add transparent/nested-surface browser coverage;
+- decide whether the overlay should add a depth attachment, weighted blended
+  OIT, or hand off to a fuller WebGPU PBR render path;
+- continue moving resident material-property resolution and render extraction
+  work off the CPU hot loop.
+
+## 2026-06-12 Status Update - Resident Overlay Depth Attachment
+
+The raw WebGPU resident overlay now has a real depth attachment and separate
+opaque/transparent depth policies:
+
+- the bridge creates compatible opaque and transparent render pipelines from an
+  explicit WebGPU bind-group layout;
+- opaque surfaces render with `depthWriteEnabled: true`; transparent/vapor
+  surfaces render with depth testing but no depth writes;
+- the render pass creates and resizes a `depth24plus` texture alongside the
+  overlay canvas, clears it each overlay frame, and switches pipelines per
+  resident draw metadata;
+- resident render-state, surface-draw sidecar state, bridge state, status text,
+  and Playwright snapshots expose the depth policy, depth format, and depth
+  attachment readiness;
+- a browser WebGPU pixel test now proves that far transparent and far opaque
+  draws are occluded by a near opaque depth write.
+
+Validation completed:
+
+- syntax checks passed for scene, mount, renderer test, and e2e updates;
+- focused renderer tests passed `16/16`;
+- focused Chromium WebGPU overlay tests passed `2/2`, including pixel readback
+  for depth occlusion;
+- normal live HTTPS SPH demo smoke passed `1/1`.
+
+Known limitation:
+
+- transparent surfaces are still ordered by surface/layer metadata and do not
+  write depth. This fixes opaque occlusion of transparent/vapor surfaces, but it
+  is not order-independent transparency and does not match full
+  `MeshPhysicalMaterial` transmission/refraction.
+
+Remaining work:
+
+- implement weighted blended OIT or another order-independent transparent pass
+  for transparent/vapor surfaces;
+- extend optical overlay shading toward attenuation, IOR/refraction, and
+  spectral/optical-depth use;
+- continue moving resident material-property resolution and render extraction
+  work off the CPU hot loop.
+
+## 2026-06-12 Status Update - Resident Overlay Weighted Blended OIT
+
+Transparent/vapor surfaces in the raw WebGPU resident overlay now use weighted
+blended order-independent transparency:
+
+- the overlay shader has a transparent OIT fragment entry point that accumulates
+  closure-derived premultiplied color and revealage;
+- the bridge creates `rgba16float` accumulation and `rgba8unorm` revealage
+  targets, then composites them over the opaque canvas pass;
+- opaque surfaces still write `depth24plus`; transparent/vapor surfaces test
+  against that depth but accumulate into OIT targets instead of relying on
+  surface order for alpha blending;
+- the bridge, resident sidecar, render-state snapshot, status text, and
+  Playwright summary expose the transparency composite mode, OIT target formats,
+  target readiness, and last opaque/transparent draw counts.
+
+Validation completed:
+
+- syntax checks passed for scene, mount, renderer test, and e2e updates;
+- focused renderer tests passed `16/16`;
+- focused Chromium WebGPU overlay tests passed `2/2`, covering OIT pipeline
+  submission and depth pixel readback;
+- normal live HTTPS SPH demo smoke passed `1/1`, with the default scene using
+  `weighted-blended-oit`.
+
+Known limitation:
+
+- weighted blended OIT improves transparent/vapor composition but is still an
+  approximation. It does not yet implement physical refraction, attenuation
+  distance, IOR bending, spectral dispersion, or shared depth with the underlying
+  Three/WebGL scene.
+
+Remaining work:
+
+- extend optical overlay shading to use attenuation, IOR/refraction, spectral
+  rows, and optical depth;
+- decide whether to keep the overlay as the long-term renderer or migrate to a
+  fuller WebGPU PBR path;
+- continue moving resident material-property resolution and render extraction
+  work off the CPU hot loop.
+
+## 2026-06-12 Status Update - Resident Overlay Optical Attenuation And IOR
+
+The raw WebGPU overlay now uses more of the closure-derived optical material row
+instead of only base color and opacity:
+
+- the WGSL optical material lookup carries IOR, attenuation RGB, attenuation
+  distance, absorption coefficient, scattering coefficient, and optical depth;
+- overlay shading uses IOR-derived Fresnel, Beer-Lambert-style attenuation from
+  optical depth/absorption, and scattering-driven rim haze;
+- transmissive overlay alpha is now derived from transmission plus optical depth
+  instead of forcing every non-vapor transmissive surface fully opaque in the raw
+  overlay path;
+- vapor alpha uses derived opacity and optical depth, preserving the earlier
+  vapor visibility behavior while giving the resident overlay a derived
+  transparency signal.
+
+Validation completed:
+
+- syntax checks passed for scene, renderer test, and e2e updates;
+- focused renderer tests passed `16/16`;
+- focused Chromium WebGPU overlay tests passed `2/2`;
+- normal live HTTPS SPH demo smoke passed `1/1`.
+
+Known limitation:
+
+- this is still a screen-space approximation. It does not trace refracted rays
+  through geometry or sample spectral rows directly yet; it only consumes the
+  compact PBR/optical row derived from the spectral closure.
+
+Remaining work:
+
+- sample spectral rows or preintegrated spectral bands in the overlay shader;
+- move more material/optical state resolution to resident WebGPU buffers rather
+  than CPU-prepared rows;
+- continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 Status Update - Resident Overlay Spectral Rows
+
+The raw WebGPU overlay now binds and samples the optical spectral row buffer:
+
+- the overlay bind group includes the optical spectral sample storage buffer
+  alongside optical material records;
+- WGSL resolves the optical record's spectral offset/count, samples up to a
+  bounded spectral band window, maps wavelength response to approximate linear
+  RGB, and blends that spectral tint with the compact optical base color;
+- bridge telemetry, resident sidecar state, render-state snapshots, status text,
+  and Playwright summaries expose spectral sample count and stride, proving the
+  live resident overlay has spectral rows resident on GPU.
+
+Validation completed:
+
+- syntax checks passed for scene, mount, renderer test, and e2e updates;
+- focused renderer tests passed `16/16`;
+- focused Chromium WebGPU overlay tests passed `2/2`;
+- normal live HTTPS SPH demo smoke passed `1/1`.
+
+Known limitation:
+
+- the wavelength-to-RGB conversion is a compact GPU approximation for real-time
+  rendering. It is not a full color-matching-function integration yet, but it
+  uses generalized spectral samples from the optical closure rather than
+  material-specific renderer constants.
+
+Remaining work:
+
+- replace the compact wavelength mapping with preintegrated color-matching
+  weights or a small spectral LUT;
+- move generation/resolution of spectral optical rows further into resident
+  WebGPU material resolvers;
+- continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 Status Update - Manual Resident SPH Watch
+
+The headed browser demo now reaches and runs the resident WebGPU path without
+WebGPU validation warnings:
+
+- `https://127.0.0.1:5173/?sph=1` loads the SPH overlay, derives the material
+  and reaction state, and reaches `peercompute-worker-packed-state`;
+- Play toggles to the resident GPU loop, not the CPU driver, so normal physics
+  fps stays `0.0` while resident fps advances;
+- resident status reaches backend `webgpu`, readback
+  `requested=no-full-readback actual=no-full-readback`, and surface draw bridge
+  `webgpu-storage-indirect-overlay`;
+- headed Chromium watch for 90 seconds after Play produced zero WebGPU warnings
+  and no crash. Evidence is in
+  `test-results/manual-sph-watch-running-serialized/`.
+
+Cleanup completed in this slice:
+
+- empty resident product-event, pressure-force, and spectral-sample storage
+  bindings now upload one full zeroed ABI row while preserving zero counts;
+- resident product-event merge-copy is awaited before the merged buffer is
+  reused;
+- resident GPU scheduling is single-flight in both the UI and scene layer to
+  prevent in-flight buffer destruction.
+
+Known limitations:
+
+- the demo still warns that render-field readback is active because
+  MarchingCubes consumes CPU arrays;
+- the 90-second watch did not show convincing melting/phase-change progression;
+- the resident loop is stable but only around 3.9 resident fps at the watched
+  settings, so more hot-loop work remains.
+
+## 2026-06-12 Status Update - Resident Pressure Force Rows And Physics FPS
+
+The pressure-interface path now has a cleaner live resident contract:
+
+- `sphPhaseScene` uploads pressure-interface solver rows once into a retained
+  WebGPU storage buffer keyed by the solver signature;
+- standalone grid update, single resident step, and repeated resident steps pass
+  that retained buffer into the MLS-MPM grid-update kernel instead of rebuilding
+  the pressure-force storage input every step;
+- the resident render-state snapshot exposes pressure-force row upload status,
+  retained-buffer state, and byte length;
+- the render-state force-coupling status now reports the solver-ready state
+  instead of the older pre-solver blocker once `gasPressureInterfaceForceSolver`
+  has produced conservative force rows;
+- the UI physics FPS counter now counts accepted resident WebGPU steps when the
+  demo is running from the worker/view-state path without a CPU driver, so Play no
+  longer displays `physics fps 0.0` while resident physics is advancing.
+
+Product-mass diagnostics were also corrected:
+
+- retained product-event buffers now report
+  `resident-product-mass-p2g-eos-sidecar-ready`, matching the existing P2G
+  mechanics/EOS sidecar consumption;
+- summary-only product handles still report that no EOS buffer is available.
+
+Validation completed:
+
+- focused pressure/resident/grid/render tests passed;
+- the live HTTPS browser SPH smoke passed against `https://127.0.0.1:5173`;
+- focused Chromium WebGPU overlay tests passed;
+- `git diff --check`, `npm run build`, and `npm run build:pages` passed.
+
+Remaining work:
+
+- pressure coupling is still a uniform sealed-gas/interface force row solve, not
+  a full gas-cell pressure-gradient solver;
+- render-field readback and CPU MarchingCubes are still the dominant hot-loop
+  architecture gap;
+- the demo still needs stronger phase-change progression evidence after the
+  hot-loop and thermodynamic coupling work advances.

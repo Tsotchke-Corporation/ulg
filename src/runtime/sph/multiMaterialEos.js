@@ -20,7 +20,10 @@
 // stays incompressible and who expands — comes from the rest-density reference, which is physical.
 // Evidence-only: this is still a reduced reference, so the demo's sphValidation stays false.
 
-import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
+import {
+  cachedParticleEquilibriumFromSpecificEnergy,
+  stablePhaseFromSpecificEnergy
+} from '../material/phaseEquilibrium.js';
 
 const TAIT_EXPONENT = 7;
 const R_GAS = 8.314462618; // J/(mol K)
@@ -40,11 +43,11 @@ export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, m
   return function phaseAwareEos({ density, specificInternalEnergyJPerKg, particle }) {
     const props = materialProperties[particle?.material];
     if (!props) return { pressurePa: 0, soundSpeedMPerS: 0 };
-    const eq = equilibriumFromSpecificEnergy(props, specificInternalEnergyJPerKg);
-    const phase = eq.stablePhase || 'liquid';
+    const phase = stablePhaseFromSpecificEnergy(props, specificInternalEnergyJPerKg) || 'liquid';
     const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
     const rho0 = Number.isFinite(ph.densityKgPerM3) ? ph.densityKgPerM3 : density;
     if (phase === 'gas') {
+      const eq = cachedParticleEquilibriumFromSpecificEnergy(props, particle, specificInternalEnergyJPerKg);
       const Rspecific = R_GAS / props.molarMassKgPerMol;
       const cp = ph.cpJPerKgK;
       const gamma = cp > Rspecific ? cp / (cp - Rspecific) : 1.33; // cp/cv, cv = cp - R/M

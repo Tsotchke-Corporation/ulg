@@ -18,15 +18,32 @@ import {
   MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT,
+  SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT,
+  SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
   SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
+  SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
+  SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
+  SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
   SPH_GPU_RENDER_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_RESPONSE_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_RESPONSE_ROW_LAYOUT,
+  SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT,
+  SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT,
+  SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_HEADER_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
+  SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
+  SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_ROW_LAYOUT,
+  SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT,
   SPH_GPU_THERMAL_MATERIAL_RECORD_ROW_LAYOUT,
   SPH_GPU_THERMAL_PHASE_SEGMENT_ROW_LAYOUT,
   createClosureTableDescriptor,
@@ -71,10 +88,30 @@ import {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+  ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
+  ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
+  ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+  ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
+  ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+  ULG_REACTION_CLOSURE_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
+  ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_COUPLING_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA,
   ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_SET_SCHEMA,
@@ -94,7 +131,17 @@ import {
   mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl,
   opticalLookupWgsl,
+  sphReactionAtomResidualWgsl,
+  sphReactionGasSpeciesSummaryWgsl,
+  sphReactionProductEventWgsl,
+  sphReactionProductInventoryWgsl,
+  sphReactionSummaryFinalizeWgsl,
+  sphReactionSummaryPartialsWgsl,
   sphReactionStepWgsl,
+  sphMaterialInterfaceCandidatesWgsl,
+  sphRenderMarchingCubeCellsWgsl,
+  sphRenderSurfaceDrawWgsl,
+  sphRenderSurfaceVerticesWgsl,
   sphRenderFieldWgsl,
   sphRenderRowsWgsl,
   sphThermalStepWgsl
@@ -245,7 +292,7 @@ test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
   assert.equal(OPTICAL_GPU_RECORD_ROW_LAYOUT.length, 24);
   assert.equal(OPTICAL_GPU_SPECTRAL_SAMPLE_ROW_LAYOUT.length, 8);
   assert.equal(OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT.length, 4);
-  assert.equal(OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT.length, 12);
+  assert.equal(OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT.length, 16);
   assert.deepEqual(OPTICAL_GPU_RECORD_ROW_LAYOUT.slice(0, 4), [
     'materialId:f32',
     'phaseId:f32',
@@ -258,6 +305,12 @@ test('optical GPU table ABI exposes stable storage-buffer row layouts', () => {
     'transmittance:f32',
     'absorptionCoefficientPerM:f32',
     'scatteringCoefficientPerM:f32'
+  ]);
+  assert.deepEqual(OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT.slice(12), [
+    'opticalDepth:f32',
+    'scatteringCoefficientPerM:f32',
+    'absorptionCoefficientPerM:f32',
+    'opticalStateId:f32'
   ]);
   assert.match(opticalLookupWgsl, /@group\(0\) @binding\(0\) var<storage, read> optical_records/);
   assert.match(opticalLookupWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> optical_outputs/);
@@ -357,12 +410,23 @@ test('SPH GPU thermal material table ABI exposes closure-derived row layouts', (
 
 test('SPH GPU reaction table ABI exposes derived reaction and product phase rows', () => {
   assert.equal(ULG_SPH_GPU_REACTION_TABLE_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-table.v0');
+  assert.equal(ULG_REACTION_CLOSURE_SCHEMA, 'peercompute.ulg.reaction-closure.v0');
   assert.equal(ULG_SPH_GPU_REACTION_STEP_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step.v0');
   assert.equal(ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step-execution.v0');
   assert.equal(ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-step-parity.v0');
   assert.equal(SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length, 8);
+  assert.equal(SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length, 8);
   assert.equal(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length, 12);
   assert.equal(SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length % 4, 0);
+  assert.equal(SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length % 4, 0);
   assert.equal(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(SPH_GPU_REACTION_RECORD_ROW_LAYOUT.slice(0, 8), [
     'reactantAMaterialId:f32',
@@ -373,6 +437,55 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'contactRadiusM:f32',
     'phaseMaskA:f32',
     'phaseMaskB:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_HEADER_ROW_LAYOUT.slice(0, 8), [
+    'reactionIndex:f32',
+    'reactantTermOffset:f32',
+    'reactantTermCount:f32',
+    'productTermOffset:f32',
+    'productTermCount:f32',
+    'gasProductTermOffset:f32',
+    'gasProductTermCount:f32',
+    'specificEnthalpyJPerKg:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT.slice(0, 8), [
+    'reactionIndex:f32',
+    'materialId:f32',
+    'coefficient:f32',
+    'molarMassKgPerMol:f32',
+    'phaseMask:f32',
+    'roleId:f32',
+    'charge:f32',
+    'stoichiometricMoles:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.slice(0, 8), [
+    'reactionIndex:f32',
+    'materialId:f32',
+    'coefficient:f32',
+    'molarMassKgPerMol:f32',
+    'massFraction:f32',
+    'routingId:f32',
+    'targetPhasePolicyId:f32',
+    'status:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.slice(0, 7), [
+    'reactionIndex:f32',
+    'productTermIndex:f32',
+    'materialId:f32',
+    'molesPerExtent:f32',
+    'molarMassKgPerMol:f32',
+    'pressureRoutingId:f32',
+    'status:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT, [
+    'reactionIndex:f32',
+    'termKindId:f32',
+    'termIndex:f32',
+    'atomicNumberZ:f32',
+    'atomsPerFormula:f32',
+    'coefficient:f32',
+    'charge:f32',
+    'status:f32'
   ]);
   assert.deepEqual(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.slice(0, 8), [
     'materialId:f32',
@@ -390,10 +503,187 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(7\) var<storage, read_write> proposals/);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(12\) var<storage, read> thermal_graph_nodes/);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(13\) var<storage, read> thermal_graph_samples/);
+  assert.match(sphReactionStepWgsl, /reactant_term_count: u32/);
+  assert.match(sphReactionStepWgsl, /product_term_count: u32/);
+  assert.match(sphReactionStepWgsl, /gas_product_count: u32/);
+  assert.match(sphReactionStepWgsl, /fn reaction_header_row0/);
+  assert.match(sphReactionStepWgsl, /let base = \(params\.reaction_count \+ params\.product_phase_count\) \* 3u/);
+  assert.match(sphReactionStepWgsl, /fn reactant_term_for_material/);
+  assert.match(sphReactionStepWgsl, /fn product_term_row0/);
+  assert.match(sphReactionStepWgsl, /let product_base = reactant_base \+ params\.reactant_term_count \* 3u/);
   assert.doesNotMatch(sphReactionStepWgsl, /thermal_segments/);
   assert.match(sphReactionStepWgsl, /fn propose/);
   assert.match(sphReactionStepWgsl, /fn resolve/);
   assert.match(sphReactionStepWgsl, /@compute @workgroup_size\(64\)/);
+  assert.equal(ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA, 'peercompute.ulg.sph-gpu-reaction-summary.v0');
+  assert.equal(
+    ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
+    'peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
+    'peercompute.ulg.sph-gpu-reaction-product-inventory.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+    'peercompute.ulg.sph-gpu-reaction-product-event.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
+    'peercompute.ulg.sph-gpu-reaction-atom-residual.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-gpu-reaction-summary-execution.v0'
+  );
+  assert.equal(SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT.length, 32);
+  assert.equal(SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT.slice(0, 8), [
+    'particleCount:f32',
+    'reactionCount:f32',
+    'productTermCount:f32',
+    'gasProductCount:f32',
+    'changedMaterialCount:f32',
+    'changedMassCount:f32',
+    'visibleProductMassKg:f32',
+    'visibleGasProductMassKg:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT.slice(16, 24), [
+    'canonicalReactionEventCount:f32',
+    'consumedReactantMassKg:f32',
+    'expectedProductMassKg:f32',
+    'rawProductMassKg:f32',
+    'ledgerVisibleProductMassKg:f32',
+    'ledgerUnplacedProductMassKg:f32',
+    'ledgerGasProductMassKg:f32',
+    'ledgerVisibleGasProductMassKg:f32'
+  ]);
+  assert.equal(SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_ROW_LAYOUT.length, 8);
+  assert.deepEqual(SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_ROW_LAYOUT, [
+    'materialId:f32',
+    'massKg:f32',
+    'moles:f32',
+    'visibleMassKg:f32',
+    'unplacedMassKg:f32',
+    'eventCount:f32',
+    'gasProductIndex:f32',
+    'status:f32'
+  ]);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT.length, 16);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT.slice(0, 8), [
+    'materialId:f32',
+    'massKg:f32',
+    'visibleMassKg:f32',
+    'unplacedMassKg:f32',
+    'moles:f32',
+    'eventCount:f32',
+    'productTermIndex:f32',
+    'reactionIndex:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_INVENTORY_ROW_LAYOUT.slice(8, 16), [
+    'routingId:f32',
+    'chargeMol:f32',
+    'massResidualKg:f32',
+    'status:f32',
+    'coefficient:f32',
+    'molarMassKgPerMol:f32',
+    'rawMassKg:f32',
+    'massScale:f32'
+  ]);
+  assert.equal(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length, 32);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.slice(0, 8), [
+    'positionXM:f32',
+    'positionYM:f32',
+    'positionZM:f32',
+    'massKg:f32',
+    'materialId:f32',
+    'productTermIndex:f32',
+    'reactionIndex:f32',
+    'sourceParticleIndex:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.slice(8, 16), [
+    'partnerParticleIndex:f32',
+    'moles:f32',
+    'routingId:f32',
+    'phaseId:f32',
+    'visibleMassKg:f32',
+    'unplacedMassKg:f32',
+    'coefficient:f32',
+    'molarMassKgPerMol:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.slice(16, 20), [
+    'temperatureK:f32',
+    'restDensityKgPerM3:f32',
+    'status:f32',
+    'pad0:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.slice(20, 24), [
+    'velocityXMPerS:f32',
+    'velocityYMPerS:f32',
+    'velocityZMPerS:f32',
+    'supportVolumeM3:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.slice(24, 32), [
+    'effectiveBulkModulusPa:f32',
+    'shearModulusPa:f32',
+    'lameLambdaPa:f32',
+    'soundSpeedMPerS:f32',
+    'eosModelId:f32',
+    'solidFlag:f32',
+    'mechanicsStatus:f32',
+    'pad1:f32'
+  ]);
+  assert.equal(SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT.length, 8);
+  assert.deepEqual(SPH_GPU_REACTION_ATOM_RESIDUAL_ROW_LAYOUT, [
+    'reactionIndex:f32',
+    'atomicNumberZ:f32',
+    'atomResidualMol:f32',
+    'chargeResidualMol:f32',
+    'eventCount:f32',
+    'termKindId:f32',
+    'termIndex:f32',
+    'status:f32'
+  ]);
+  assert.match(sphReactionSummaryPartialsWgsl, /struct ReactionSummaryParams/);
+  assert.match(sphReactionSummaryPartialsWgsl, /reactant_term_count: u32/);
+  assert.match(sphReactionSummaryPartialsWgsl, /product_term_count: u32/);
+  assert.match(sphReactionSummaryPartialsWgsl, /gas_product_count: u32/);
+  assert.match(sphReactionSummaryPartialsWgsl, /has_proposals: u32/);
+  assert.match(sphReactionSummaryPartialsWgsl, /@group\(0\) @binding\(4\) var<storage, read> reaction_records/);
+  assert.match(sphReactionSummaryPartialsWgsl, /@group\(0\) @binding\(7\) var<storage, read> proposals/);
+  assert.match(sphReactionSummaryPartialsWgsl, /let product_base = reactant_base \+ params\.reactant_term_count \* 3u/);
+  assert.match(sphReactionSummaryPartialsWgsl, /fn gas_product_term_match/);
+  assert.match(sphReactionSummaryPartialsWgsl, /fn reactant_term_for_material/);
+  assert.match(sphReactionSummaryPartialsWgsl, /wg_ledger_unplaced_gas_product_mass/);
+  assert.match(sphReactionSummaryPartialsWgsl, /@compute @workgroup_size\(64\)/);
+  assert.match(sphReactionSummaryFinalizeWgsl, /@group\(0\) @binding\(0\) var<storage, read> partial_summaries/);
+  assert.match(sphReactionSummaryFinalizeWgsl, /reaction_summary\[7u\] = vec4<f32>/);
+  assert.match(sphReactionSummaryFinalizeWgsl, /f32\(params\.gas_product_count\)/);
+  assert.match(sphReactionGasSpeciesSummaryWgsl, /@group\(0\) @binding\(5\) var<storage, read> proposals/);
+  assert.match(sphReactionGasSpeciesSummaryWgsl, /fn gas_product_row0/);
+  assert.match(sphReactionGasSpeciesSummaryWgsl, /fn reactant_term_for_material/);
+  assert.match(sphReactionGasSpeciesSummaryWgsl, /gas_species_summaries\[out_base\]/);
+  assert.match(sphReactionGasSpeciesSummaryWgsl, /let species_moles = species_mass \/ molar_mass/);
+  assert.match(sphReactionProductInventoryWgsl, /@group\(0\) @binding\(6\) var<storage, read_write> product_inventory/);
+  assert.match(sphReactionProductInventoryWgsl, /fn product_term_row3/);
+  assert.match(sphReactionProductInventoryWgsl, /let unplaced_mass_kg = max\(mass_kg - visible_mass_kg, 0\.0\)/);
+  assert.match(sphReactionProductInventoryWgsl, /moles \* charge/);
+  assert.match(sphReactionProductEventWgsl, /@group\(0\) @binding\(6\) var<storage, read_write> product_events/);
+  assert.match(sphReactionProductEventWgsl, /let particle_index = linear_index \/ params\.product_term_count/);
+  assert.match(sphReactionProductEventWgsl, /let product_term_index = linear_index - particle_index \* params\.product_term_count/);
+  assert.match(sphReactionProductEventWgsl, /let out_base = linear_index \* 8u/);
+  assert.match(sphReactionProductEventWgsl, /struct ProductMechanics/);
+  assert.match(sphReactionProductEventWgsl, /fn product_mechanics_for/);
+  assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 2u\] = vec4<f32>\(f32\(partner_index\), row_moles, routing_id, phase_id\)/);
+  assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 4u\] = vec4<f32>\(temperature_k, rest_density_kg_per_m3, 1\.0, 0\.0\)/);
+  assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 5u\] = vec4<f32>\(product_velocity\.x, product_velocity\.y, product_velocity\.z, support_volume_m3\)/);
+  assert.match(sphReactionProductEventWgsl, /product_events\[out_base \+ 7u\] = vec4<f32>/);
+  assert.match(sphReactionProductEventWgsl, /@compute @workgroup_size\(64\)/);
+  assert.match(sphReactionAtomResidualWgsl, /atom_term_count: u32/);
+  assert.match(sphReactionAtomResidualWgsl, /@group\(0\) @binding\(4\) var<storage, read_write> atom_residuals/);
+  assert.match(sphReactionAtomResidualWgsl, /fn atom_term_row/);
+  assert.match(sphReactionAtomResidualWgsl, /charge_residual_mol/);
+  assert.match(sphReactionAtomResidualWgsl, /@compute @workgroup_size\(1\)/);
 });
 
 test('SPH GPU render rows ABI exposes compact render-state rows', () => {
@@ -430,8 +720,54 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
 test('SPH GPU render field ABI exposes material-phase surface fields', () => {
   assert.equal(ULG_SPH_GPU_RENDER_FIELD_SCHEMA, 'peercompute.ulg.sph-gpu-render-field.v0');
   assert.equal(
+    ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+    'peercompute.ulg.sph-material-interface-candidate-field.v0'
+  );
+  assert.equal(
+    ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-material-interface-candidate-field-execution.v0'
+  );
+  assert.equal(ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA, 'peercompute.ulg.sph-material-interface-field.v0');
+  assert.equal(ULG_SPH_PRESSURE_INTERFACE_COUPLING_SCHEMA, 'peercompute.ulg.sph-pressure-interface-coupling.v0');
+  assert.equal(
+    ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
+    'peercompute.ulg.sph-pressure-interface-force-preview.v0'
+  );
+  assert.equal(
+    ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+    'peercompute.ulg.sph-pressure-interface-force-solver.v0'
+  );
+  assert.equal(
     ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
     'peercompute.ulg.sph-gpu-render-field-execution.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-marching-cube-cells.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-marching-cube-cells-execution.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-surface-vertices.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-surface-vertices-execution.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-surface-draw.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-surface-draw-execution.v0'
+  );
+  assert.equal(
+    ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
+    'peercompute.ulg.sph-gpu-render-surface-draw-indirect.v0'
   );
   assert.equal(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length, 16);
   assert.equal(SPH_GPU_RENDER_SURFACE_ROW_LAYOUT.length % 4, 0);
@@ -451,7 +787,7 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
     'colorLinearG:f32',
     'colorLinearB:f32',
     'status:f32',
-    'pad0:f32',
+    'opticalStateId:f32',
     'pad1:f32',
     'pad2:f32'
   ]);
@@ -461,13 +797,172 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
     'paletteLinearG:f32',
     'paletteLinearB:f32'
   ]);
+  assert.equal(SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.slice(0, 8), [
+    'surfaceIndex:f32',
+    'materialId:f32',
+    'phaseId:f32',
+    'voxelLinearIndex:f32',
+    'centerXM:f32',
+    'centerYM:f32',
+    'centerZM:f32',
+    'cellSizeM:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.slice(8), [
+    'cornerMask:f32',
+    'edgeCrossingCount:f32',
+    'reservedTriangleCount:f32',
+    'reservedVertexCount:f32',
+    'densityMin:f32',
+    'densityMax:f32',
+    'isolation:f32',
+    'status:f32'
+  ]);
+  assert.equal(SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.slice(0, 8), [
+    'surfaceIndex:f32',
+    'materialId:f32',
+    'phaseId:f32',
+    'triangleIndex:f32',
+    'vertexIndex:f32',
+    'positionXM:f32',
+    'positionYM:f32',
+    'positionZM:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.slice(8), [
+    'normalX:f32',
+    'normalY:f32',
+    'normalZ:f32',
+    'opticalStateId:f32',
+    'density:f32',
+    'isolation:f32',
+    'sourceVoxelLinearIndex:f32',
+    'status:f32'
+  ]);
+  assert.equal(SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.slice(0, 8), [
+    'surfaceIndex:f32',
+    'materialId:f32',
+    'phaseId:f32',
+    'opticalStateId:f32',
+    'vertexOffset:f32',
+    'vertexCount:f32',
+    'triangleOffset:f32',
+    'triangleCount:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.slice(8), [
+    'renderOrder:f32',
+    'transparencyClassId:f32',
+    'depthWriteFlag:f32',
+    'status:f32',
+    'boundsCenterXM:f32',
+    'boundsCenterYM:f32',
+    'boundsCenterZM:f32',
+    'boundsRadiusM:f32'
+  ]);
+  assert.deepEqual(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT, [
+    'vertexCount:u32',
+    'instanceCount:u32',
+    'firstVertex:u32',
+    'firstInstance:u32'
+  ]);
+  assert.equal(SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.slice(0, 8), [
+    'surfaceIndex:f32',
+    'materialId:f32',
+    'phaseId:f32',
+    'axisId:f32',
+    'centroidXM:f32',
+    'centroidYM:f32',
+    'centroidZM:f32',
+    'areaM2:f32'
+  ]);
+  assert.deepEqual(SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.slice(8), [
+    'normalX:f32',
+    'normalY:f32',
+    'normalZ:f32',
+    'normalAreaXM2:f32',
+    'normalAreaYM2:f32',
+    'normalAreaZM2:f32',
+    'crossingSign:f32',
+    'status:f32'
+  ]);
+  assert.equal(SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT, SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT);
+  assert.equal(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length, 16);
+  assert.equal(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length % 4, 0);
+  assert.deepEqual(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.slice(0, 8), [
+    'surfaceIndex:f32',
+    'materialId:f32',
+    'phaseId:f32',
+    'axisId:f32',
+    'centroidXM:f32',
+    'centroidYM:f32',
+    'centroidZM:f32',
+    'areaM2:f32'
+  ]);
+  assert.deepEqual(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.slice(8), [
+    'materialForceXN:f32',
+    'materialForceYN:f32',
+    'materialForceZN:f32',
+    'gasReactionForceXN:f32',
+    'gasReactionForceYN:f32',
+    'gasReactionForceZN:f32',
+    'pressurePa:f32',
+    'status:f32'
+  ]);
   assert.match(sphRenderFieldWgsl, /struct RenderFieldParams/);
   assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(0\) var<storage, read> render_rows/);
   assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(1\) var<storage, read> render_surfaces/);
   assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> render_field_cells/);
+  assert.match(sphRenderFieldWgsl, /product_event_count: u32/);
+  assert.match(sphRenderFieldWgsl, /@group\(0\) @binding\(4\) var<storage, read> product_events/);
+  assert.match(sphRenderFieldWgsl, /fn product_event_row3/);
+  assert.match(sphRenderFieldWgsl, /event_unplaced_mass_kg <= 0\.0/);
   assert.match(sphRenderFieldWgsl, /material_id/);
   assert.match(sphRenderFieldWgsl, /phase_id/);
+  assert.match(sphMaterialInterfaceCandidatesWgsl, /struct InterfaceCandidateParams/);
+  assert.match(sphMaterialInterfaceCandidatesWgsl, /@group\(0\) @binding\(0\) var<storage, read> render_surfaces/);
+  assert.match(sphMaterialInterfaceCandidatesWgsl, /@group\(0\) @binding\(1\) var<storage, read> render_field_cells/);
+  assert.match(sphMaterialInterfaceCandidatesWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> interface_candidates/);
+  assert.match(sphMaterialInterfaceCandidatesWgsl, /local_candidate_index \/ 3u/);
+  assert.match(sphMaterialInterfaceCandidatesWgsl, /field_offset \* 3u \+ local_candidate_index/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /struct MarchingCubesCandidateParams/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /@group\(0\) @binding\(0\) var<storage, read> render_surfaces/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /@group\(0\) @binding\(1\) var<storage, read> render_field_cells/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> marching_cubes_candidates/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /corner_mask/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /edge_crossing_count/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /reserved_triangle_count/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /cell_is_active/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /select\(0\.0, 12\.0, cell_is_active\)/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /struct SurfaceVertexParams/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /@group\(0\) @binding\(0\) var<storage, read> render_surfaces/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /@group\(0\) @binding\(1\) var<storage, read> render_field_cells/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> surface_vertices/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /fn sv_emit_tetra/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /\(field_offset \+ local_voxel_index\) \* 36u/);
+  assert.match(sphRenderSurfaceDrawWgsl, /struct SurfaceDrawParams/);
+  assert.match(sphRenderSurfaceDrawWgsl, /@group\(0\) @binding\(0\) var<storage, read> render_surfaces/);
+  assert.match(sphRenderSurfaceDrawWgsl, /@group\(0\) @binding\(1\) var<storage, read> source_surface_vertices/);
+  assert.match(sphRenderSurfaceDrawWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> compact_surface_vertices/);
+  assert.match(sphRenderSurfaceDrawWgsl, /@group\(0\) @binding\(3\) var<storage, read_write> surface_draw_rows/);
+  assert.match(sphRenderSurfaceDrawWgsl, /@group\(0\) @binding\(5\) var<storage, read_write> surface_draw_indirect_rows: array<vec4<u32>>/);
+  assert.match(sphRenderSurfaceDrawWgsl, /explicit_transparency_class_id = surface_row3\.z/);
+  assert.match(sphRenderSurfaceDrawWgsl, /explicit_depth_write_flag = surface_row3\.w/);
+  assert.match(sphRenderSurfaceDrawWgsl, /prefix_vertex_count/);
+  assert.match(sphRenderSurfaceDrawWgsl, /surface_is_active/);
+  assert.match(sphRenderSurfaceDrawWgsl, /sd_write_compact_vertex/);
+  assert.match(sphRenderSurfaceDrawWgsl, /sd_write_draw_indirect_row/);
   assert.match(sphRenderFieldWgsl, /@compute @workgroup_size\(64, 1, 1\)/);
+  assert.match(sphRenderMarchingCubeCellsWgsl, /@compute @workgroup_size\(64, 1, 1\)/);
+  assert.match(sphRenderSurfaceVerticesWgsl, /@compute @workgroup_size\(64, 1, 1\)/);
+  assert.match(sphRenderSurfaceDrawWgsl, /@compute @workgroup_size\(1, 1, 1\)/);
 });
 
 test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () => {
@@ -535,9 +1030,12 @@ test('MLS-MPM GPU P2G grid projection ABI exposes f32x4-aligned grid rows', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_nodes: array<vec4<f32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /resident_product_event_count: u32/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(5\) var<storage, read> product_events: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn quadratic_weights/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /event_unplaced_mass_kg <= 0.0/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
 });
 
@@ -562,6 +1060,13 @@ test('MLS-MPM GPU grid update ABI exposes f32x4-aligned velocity rows', () => {
   assert.match(mlsMpmGridUpdateWgsl, /struct GridUpdateParams/);
   assert.match(mlsMpmGridUpdateWgsl, /var<storage, read> p2g_grid_nodes/);
   assert.match(mlsMpmGridUpdateWgsl, /var<storage, read_write> updated_grid_nodes/);
+  assert.match(mlsMpmGridUpdateWgsl, /pressure_force_row_count: u32/);
+  assert.match(
+    mlsMpmGridUpdateWgsl,
+    /@group\(0\) @binding\(3\) var<storage, read> pressure_force_rows: array<vec4<f32>>/
+  );
+  assert.match(mlsMpmGridUpdateWgsl, /fn grid_update_quadratic_weights/);
+  assert.match(mlsMpmGridUpdateWgsl, /momentum = momentum \+ params\.dt \* weight \* force_row2\.xyz/);
   assert.match(mlsMpmGridUpdateWgsl, /@compute @workgroup_size\(64\)/);
 });
 

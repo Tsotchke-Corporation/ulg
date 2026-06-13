@@ -1,0 +1,68 @@
+# ULG production-audit policies for demo, hot-loop, closure, reaction, and
+# handoff-readiness gates.
+
+profiles:
+  - name: sph-phase-demo-ready
+    default: true
+    targets: [sph-phase-demo-ready, sph-demo, phase-demo, demo]
+    required_artifacts: [index, memory, architecture]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+      warn_on:
+        medium: 0
+        low: 0
+
+  - name: resident-hot-loop-ready
+    targets: [resident-hot-loop-ready, hot-loop, resident-webgpu]
+    required_artifacts: [index, memory, architecture, git-history]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+        medium: 0
+      warn_on:
+        low: 0
+
+  - name: material-closure-ready
+    targets: [material-closure-ready, materials, closures, optics, eos]
+    required_artifacts: [index, memory, architecture, git-history]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+        medium: 0
+      warn_on:
+        low: 0
+
+  - name: reaction-closure-ready
+    targets: [reaction-closure-ready, reactions, chemistry]
+    required_artifacts: [index, memory, architecture, git-history]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+        medium: 0
+      warn_on:
+        low: 0
+
+  - name: triad-handoff-ready
+    targets: [triad-handoff-ready, triad, handoff, integration]
+    required_artifacts: [index, memory, architecture, git-history]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+      warn_on:
+        medium: 0
+        low: 0
+
+  - name: no-regression
+    targets: [no-regression, smoke, sanity]
+    required_artifacts: [index]
+    presets: []
+    verdict:
+      fail_on:
+        high: 0
+      warn_on: {}

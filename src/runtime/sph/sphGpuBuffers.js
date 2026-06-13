@@ -382,6 +382,7 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     soundSpeedScale: scaleOptions.soundSpeedScale,
     minGasSoundSpeedMPerS: scaleOptions.minGasSoundSpeedMPerS,
     mechanicsDtS: finiteNumber(state.gpuMechanics?.dt, 0),
+    mechanicalSubsteps: Math.max(1, Math.round(finiteNumber(state.gpuMechanics?.mechanicalSubsteps, 1))),
     gridCflFactor: finiteNumber(state.gpuMechanics?.gridCflFactor, 0),
     gravityMPerS2: Array.isArray(state.gpuMechanics?.gravityMPerS2)
       ? state.gpuMechanics.gravityMPerS2.map((value) => finiteNumber(value, 0))

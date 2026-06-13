@@ -32,6 +32,12 @@ const OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM = Object.freeze([380, 430, 480, 530, 
 const opticalRenderParamCache = new Map();
 const uhfEnergy = (atoms, multiplicity) => _uhf(atoms, { multiplicity }).totalEnergyHa;
 const interbandTransitionCache = new Map();
+const WATER_VAPOR_GAS_CONSTANT_J_PER_KG_K = 461.522;
+const WATER_TRIPLE_POINT_K = 273.16;
+const WATER_TRIPLE_POINT_PRESSURE_PA = 611.657;
+const WATER_VAPORIZATION_LATENT_HEAT_J_PER_KG = 2.5e6;
+const LIQUID_WATER_DENSITY_KG_PER_M3 = 997;
+export const WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL = 'clausius-clapeyron-droplet-scattering-v0';
 
 function gauss(x, mu, s1, s2) {
   const t = (x - mu) * (x < mu ? 1 / s1 : 1 / s2);
@@ -98,6 +104,21 @@ function stableNumber(value) {
   return Number.isFinite(value) ? Number(value).toPrecision(10) : String(value ?? 'null');
 }
 
+function stableValueKey(value) {
+  if (value == null) return 'null';
+  if (Array.isArray(value)) return `[${value.map(stableValueKey).join(',')}]`;
+  if (typeof value === 'object') return `{${stableObjectKey(value)}}`;
+  if (typeof value === 'number') return stableNumber(value);
+  return String(value);
+}
+
+function stableObjectKey(value) {
+  if (!value || typeof value !== 'object') return 'none';
+  return Object.keys(value).sort()
+    .map((key) => `${key}:${stableValueKey(value[key])}`)
+    .join('|');
+}
+
 function oscillatorCacheKey(oscillators) {
   if (!Array.isArray(oscillators) || oscillators.length === 0) return 'none';
   return oscillators
@@ -111,11 +132,12 @@ function oscillatorCacheKey(oscillators) {
     .join('|');
 }
 
-function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, properties, conductionElectronDensityPerM3 } = {}) {
+function opticalRenderCacheKey({ material, phase = 'liquid', pathLengthM = 0.3, properties, conductionElectronDensityPerM3, opticalState = null } = {}) {
   return [
     material ?? 'unknown',
     phase ?? 'unknown',
     stableNumber(pathLengthM),
+    stableObjectKey(opticalState),
     stableNumber(conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3),
     stableNumber(properties?.electronicGapEv),
     oscillatorCacheKey(properties?.opticalInterbandOscillators),
@@ -134,6 +156,7 @@ function cloneOpticalRenderParams(params) {
     spectralSamples: Array.isArray(params.spectralSamples)
       ? params.spectralSamples.map((sample) => ({ ...sample }))
       : params.spectralSamples,
+    dropletMicrophysics: params.dropletMicrophysics ? { ...params.dropletMicrophysics } : params.dropletMicrophysics,
     pbr: params.pbr
       ? {
           ...params.pbr,
@@ -174,6 +197,93 @@ export function clearOpticalRenderParamsCache() {
 function opticalDepthToOpacity(opticalDepth) {
   if (!(opticalDepth > 0)) return 0;
   return 1 - Math.exp(-Math.min(80, opticalDepth));
+}
+
+export function waterSaturationPressurePa(temperatureK) {
+  const t = Number(temperatureK);
+  if (!(t > 0)) return null;
+  return WATER_TRIPLE_POINT_PRESSURE_PA * Math.exp(
+    (WATER_VAPORIZATION_LATENT_HEAT_J_PER_KG / WATER_VAPOR_GAS_CONSTANT_J_PER_KG_K)
+    * (1 / WATER_TRIPLE_POINT_K - 1 / t)
+  );
+}
+
+function waterDropletScatteringCoefficientAtNm(nm, {
+  scatteringCoefficientPerM,
+  dropletRadiusM
+}) {
+  if (!(scatteringCoefficientPerM > 0)) return 0;
+  const radius = Number(dropletRadiusM);
+  if (!(radius > 0)) return scatteringCoefficientPerM;
+  const wavelengthM = nm * 1e-9;
+  const sizeParameter = (2 * Math.PI * radius) / wavelengthM;
+  if (sizeParameter >= 0.3) return scatteringCoefficientPerM;
+  const refNm = 550;
+  return scatteringCoefficientPerM * (refNm / nm) ** 4;
+}
+
+export function waterDropletOpticalMicrophysics({
+  temperatureK = null,
+  h2oPartialPressurePa = null,
+  pressurePa = null,
+  dropletRadiusM = 1e-6,
+  pathLengthM = 0.3
+} = {}) {
+  const temperature = Number(temperatureK);
+  const vaporPressure = Number(h2oPartialPressurePa ?? pressurePa);
+  const radius = Number(dropletRadiusM);
+  const saturationPressurePa = waterSaturationPressurePa(temperature);
+  if (!(temperature > 0) || !(vaporPressure > 0) || !(saturationPressurePa > 0) || !(radius > 0)) {
+    return {
+      model: WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL,
+      status: 'pure-vapor-or-state-missing',
+      temperatureK: Number.isFinite(temperature) ? temperature : null,
+      h2oPartialPressurePa: Number.isFinite(vaporPressure) ? vaporPressure : null,
+      pressurePa: Number.isFinite(Number(pressurePa)) ? Number(pressurePa) : null,
+      saturationPressurePa,
+      supersaturationRatio: null,
+      condensedMassFraction: 0,
+      vaporDensityKgPerM3: 0,
+      condensedMassDensityKgPerM3: 0,
+      dropletRadiusM: Number.isFinite(radius) && radius > 0 ? radius : null,
+      dropletNumberDensityPerM3: 0,
+      dropletCrossSectionM2: 0,
+      mieExtinctionEfficiency: 0,
+      scatteringCoefficientPerM: 0,
+      opticalDepth: 0,
+      pathLengthM
+    };
+  }
+  const supersaturationRatio = vaporPressure / saturationPressurePa;
+  const condensedMassFraction = supersaturationRatio > 1 ? clamp01(1 - 1 / supersaturationRatio) : 0;
+  const vaporDensityKgPerM3 = vaporPressure / (WATER_VAPOR_GAS_CONSTANT_J_PER_KG_K * temperature);
+  const condensedMassDensityKgPerM3 = vaporDensityKgPerM3 * condensedMassFraction;
+  const dropletVolumeM3 = (4 / 3) * Math.PI * radius ** 3;
+  const dropletMassKg = dropletVolumeM3 * LIQUID_WATER_DENSITY_KG_PER_M3;
+  const dropletNumberDensityPerM3 = dropletMassKg > 0 ? condensedMassDensityKgPerM3 / dropletMassKg : 0;
+  const geometricCrossSectionM2 = Math.PI * radius ** 2;
+  const mieExtinctionEfficiency = 2;
+  const scatteringCoefficientPerM = dropletNumberDensityPerM3 * geometricCrossSectionM2 * mieExtinctionEfficiency;
+  const opticalDepth = scatteringCoefficientPerM * Math.max(0, Number(pathLengthM) || 0);
+  return {
+    model: WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL,
+    status: condensedMassFraction > 0 ? 'supersaturated-condensed-droplets' : 'subsaturated-pure-vapor',
+    temperatureK: temperature,
+    h2oPartialPressurePa: vaporPressure,
+    pressurePa: Number.isFinite(Number(pressurePa)) ? Number(pressurePa) : null,
+    saturationPressurePa,
+    supersaturationRatio,
+    condensedMassFraction,
+    vaporDensityKgPerM3,
+    condensedMassDensityKgPerM3,
+    dropletRadiusM: radius,
+    dropletNumberDensityPerM3,
+    dropletCrossSectionM2: geometricCrossSectionM2,
+    mieExtinctionEfficiency,
+    scatteringCoefficientPerM,
+    opticalDepth,
+    pathLengthM
+  };
 }
 
 function complexAdd(a, b) { return [a[0] + b[0], a[1] + b[1]]; }
@@ -690,7 +800,7 @@ function compoundGapRenderParams({ properties, phase = 'solid', pathLengthM = 0.
  *    faked here.
  * closureBacked: true; opticalValidation stays false.
  */
-function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3, properties = null, conductionElectronDensityPerM3 = null } = {}) {
+function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0.3, properties = null, conductionElectronDensityPerM3 = null, opticalState = null } = {}) {
   const conductionDensity = conductionElectronDensityPerM3 ?? properties?.conductionElectronDensityPerM3 ?? null;
   if (conductionDensity > 0) {
     return metalOpticalRenderParams(conductionDensity, {
@@ -709,17 +819,40 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
     const attenuationColor = isVapor ? [1, 1, 1] : atten.attenuationColor;
     const attenuationDistanceM = isVapor ? atten.attenuationDistanceM * 50 : atten.attenuationDistanceM;
     const absorptionCoefficientPerM = 1 / attenuationDistanceM;
-    const opticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+    const absorptionOpticalDepth = absorptionCoefficientPerM * Math.max(0, pathLengthM);
+    const dropletMicrophysics = isVapor
+      ? waterDropletOpticalMicrophysics({ ...(opticalState || {}), pathLengthM })
+      : null;
+    const scatteringCoefficientPerM = dropletMicrophysics?.scatteringCoefficientPerM || 0;
+    const scatteringOpticalDepth = dropletMicrophysics?.opticalDepth || 0;
+    const opticalDepth = absorptionOpticalDepth + scatteringOpticalDepth;
     const ballisticTransmission = Math.exp(-Math.min(80, opticalDepth));
     const transmission = Math.min(1, Math.max(0, (1 - fresnelR0) * ballisticTransmission));
     const opacity = opticalDepthToOpacity(opticalDepth);
-    const roughness = isVapor ? 0.9 : (isSolid ? 0.5 : 0.08);
+    const roughness = isVapor ? (scatteringCoefficientPerM > 0 ? 1 : 0.9) : (isSolid ? 0.5 : 0.08);
     const waterPhase = isVapor ? 'gas' : (isSolid ? 'solid' : 'liquid');
-    const baseColor = isVapor ? [1, 1, 1] : attenuationColor;
+    const scatteringColor = scatteringCoefficientPerM > 0
+      ? spectralResponseToSrgb((nm) => {
+          const s = waterDropletScatteringCoefficientAtNm(nm, {
+            scatteringCoefficientPerM,
+            dropletRadiusM: dropletMicrophysics?.dropletRadiusM
+          });
+          return s / Math.max(scatteringCoefficientPerM, 1e-30);
+        })
+      : null;
+    const baseColor = isVapor
+      ? (scatteringColor ? [scatteringColor.r, scatteringColor.g, scatteringColor.b] : [1, 1, 1])
+      : attenuationColor;
     const spectralSamples = OPTICAL_RENDER_SAMPLE_WAVELENGTHS_NM.map((nm) => absorptionSpectralSample(nm, {
       absorptionCoefficientPerM: isVapor ? waterAbsorption(nm) / 50 : waterAbsorption(nm),
       pathLengthM,
       reflectance: fresnelR0,
+      scatteringCoefficientPerM: isVapor
+        ? waterDropletScatteringCoefficientAtNm(nm, {
+          scatteringCoefficientPerM,
+          dropletRadiusM: dropletMicrophysics?.dropletRadiusM
+        })
+        : 0,
       n,
       k: 0
     }));
@@ -731,20 +864,28 @@ function deriveOpticalRenderParams({ material, phase = 'liquid', pathLengthM = 0
       opacity,
       attenuationColor,
       attenuationDistanceM,
-      condensationScatter: 0,
-      internalScatter: 0,
+      condensationScatter: scatteringCoefficientPerM,
+      internalScatter: scatteringCoefficientPerM,
+      scatteringCoefficientPerM,
+      dropletMicrophysics,
       opticalDepth,
       absorptionCoefficientPerM,
       provenance: {
         status: 'derived',
-        source: 'beer-lambert-oh-overtone-optical-depth',
-        method: 'O-H overtone absorption -> luminous attenuation distance -> Beer-Lambert opacity/transmission',
-        inputs: { pathLengthM, phase: waterPhase },
+        source: scatteringCoefficientPerM > 0
+          ? 'clausius-clapeyron-condensed-droplet-mie-rayleigh-scattering'
+          : 'beer-lambert-oh-overtone-optical-depth',
+        method: scatteringCoefficientPerM > 0
+          ? 'saturation vapor pressure -> excess vapor condensed fraction -> droplet number density -> Mie/Rayleigh extinction + O-H absorption'
+          : 'O-H overtone absorption -> luminous attenuation distance -> Beer-Lambert opacity/transmission',
+        inputs: { pathLengthM, phase: waterPhase, opticalState: opticalState || null },
         validation: false
       }
     }, {
       baseColorSrgb: baseColor,
-      renderModel: isVapor ? 'molecular-vapor-transparent-spectrum' : 'molecular-transparent-beer-lambert-pbr',
+      renderModel: isVapor
+        ? (scatteringCoefficientPerM > 0 ? 'molecular-condensed-droplet-scattering-pbr' : 'molecular-vapor-transparent-spectrum')
+        : 'molecular-transparent-beer-lambert-pbr',
       spectralSamples
     });
   }

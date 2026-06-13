@@ -3,6 +3,7 @@ import { defineConfig } from '@playwright/test';
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:5173';
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === '1';
 const webServerTimeout = Number(process.env.PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS || 20_000);
+const enableUnsafeWebGpu = process.env.PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU === '1';
 
 export default defineConfig({
   testDir: '.',
@@ -23,7 +24,10 @@ export default defineConfig({
     {
       name: 'chromium',
       use: {
-        browserName: 'chromium'
+        browserName: 'chromium',
+        launchOptions: enableUnsafeWebGpu
+          ? { args: ['--enable-unsafe-webgpu'] }
+          : undefined
       }
     }
   ]

@@ -1,0 +1,53 @@
+# ULG-side assistant goals. Used by ICC assistant-status/next-action style
+# commands when available, and by human/agent handoff readers today.
+
+goals:
+  - id: resident-physics-continuity
+    priority: high
+    goal: Keep resident MLS-MPM/SPH physics advancing from GPU-resident state across reset, play, and repeated continuation paths
+    reason: A visible demo cannot be trusted if later resident substeps collapse to zero active grid nodes or stale CPU-packed state
+    tags: [sph, mls-mpm, webgpu, demo]
+
+  - id: gpu-resident-hot-loop
+    priority: high
+    goal: Move render-field extraction, surface generation, closure resolution, and force coupling out of the CPU/readback path
+    depends_on: [resident-physics-continuity]
+    reason: Current Three/MarchingCubes fallback is correct enough for proof but too CPU/readback-heavy for target frame rates
+    tags: [webgpu, performance, rendering, marching-cubes]
+
+  - id: first-principles-material-properties
+    priority: high
+    goal: Ensure all material properties, optics, opacity, EOS, viscosity, and phase behavior are derived from lower-level electronic/MD/closure solvers or valid cached derivations
+    reason: Per project rule, hardcoded material constants or one-off material patches are bugs unless they are explicit non-physics placeholders
+    tags: [materials, optics, eos, closures]
+
+  - id: general-reaction-closure-chain
+    priority: high
+    goal: Generalize reactions for element-element, element-compound, and compound-compound pairs with balanced products, energetics, gas products, pressure coupling, and GPU-resident execution
+    reason: Na+H2O-style special cases are not acceptable; reaction discovery and execution must be general and first-principles-backed
+    tags: [chemistry, reactions, webgpu, pressure]
+
+  - id: sealed-box-phase-demo
+    priority: high
+    goal: Demonstrate the iron-on-ice sealed-box phase scenario with emergent heating, melting, steam, pressure, cooling, and solidification
+    depends_on: [first-principles-material-properties, general-reaction-closure-chain, gpu-resident-hot-loop]
+    reason: This is the user-facing target scenario for first-principles material/phase behavior in the SPH/MLS-MPM stack
+    tags: [demo, phase-change, sealed-box]
+
+  - id: triad-handoff-evidence
+    priority: medium
+    goal: Keep ULG handoff artifacts aligned with the runtime contracts, quantum-reference inputs, closure metadata, and browser evidence produced by this repository
+    reason: The triad demo must communicate what is proven, what is reduced-scope evidence, and what remains blocked
+    tags: [triad, contracts, handoff]
+
+  - id: cold-start-cache-correctness
+    priority: medium
+    goal: Persist and invalidate material, reaction, thermal, optical, and GPU warmup closures so reloads avoid repeated expensive derivations without reusing stale generator output
+    reason: Cold-start stalls currently dominate perceived performance and can hide real physics/rendering regressions
+    tags: [cache, state, localstorage, performance]
+
+  - id: docs-plan-hygiene
+    priority: low
+    goal: Keep plan/plan.md, plan/log.md, plan/tests.md, and todo/done/moot plan folders aligned with each slice
+    reason: The project relies on handoff continuity across long-running agents and token-compacted sessions
+    tags: [planning, handoff]

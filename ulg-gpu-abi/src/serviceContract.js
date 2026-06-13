@@ -17,6 +17,8 @@ export const ULG_TASK_KINDS = Object.freeze({
   closureDerive: 'eshkol.closure.derive',
   quantumResponse: 'moonlab.quantum.response',
   simulationStep: 'simulation.step',
+  sphPhaseRebuild: 'sph.phase.rebuild',
+  sphStaticTableCache: 'sph.static-table-cache',
   closureConsume: 'closure.consume'
 });
 
@@ -44,6 +46,8 @@ export const ULG_SERVICE_CAPABILITIES = deepFreeze({
   ],
   [ULG_SERVICE_IDS.ulgRuntime]: [
     'ulg.simulation.step',
+    'ulg.sph.phase.rebuild',
+    'ulg.sph.static-table-cache',
     'ulg.closure.consume',
     'ulg.invariants.reference'
   ]
@@ -52,7 +56,12 @@ export const ULG_SERVICE_CAPABILITIES = deepFreeze({
 export const ULG_SERVICE_TASK_KINDS = deepFreeze({
   [ULG_SERVICE_IDS.eshkol]: [ULG_TASK_KINDS.closureDerive],
   [ULG_SERVICE_IDS.moonlab]: [ULG_TASK_KINDS.quantumResponse],
-  [ULG_SERVICE_IDS.ulgRuntime]: [ULG_TASK_KINDS.simulationStep, ULG_TASK_KINDS.closureConsume]
+  [ULG_SERVICE_IDS.ulgRuntime]: [
+    ULG_TASK_KINDS.simulationStep,
+    ULG_TASK_KINDS.sphPhaseRebuild,
+    ULG_TASK_KINDS.sphStaticTableCache,
+    ULG_TASK_KINDS.closureConsume
+  ]
 });
 
 const SERVICE_CONTRACTS = deepFreeze({

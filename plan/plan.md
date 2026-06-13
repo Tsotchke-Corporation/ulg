@@ -148,6 +148,116 @@ physics work:
 - [x] Add Phase 3A field-closure sample descriptors over observed scalar fields
   and surface compact `simulationFieldClosureSample*` telemetry without
   claiming material properties, EOS, SPH, or phase-change readiness.
+- [x] Fix SPH box/grid scaling so larger container dimensions increase the
+  MLS-MPM grid dimensions/node count while continuous surface radii remain tied
+  to particle spacing/smoothing length, not box size.
+- [x] Add visible SPH demo runtime warnings, decoupled render/physics/resident
+  FPS telemetry, and PeerCompute-compatible localStorage closure cache reuse.
+- [x] Guard the localStorage closure cache with input/method/validity hashes and
+  a material-generator fingerprint so cached material properties persist across
+  runs but stale records are ignored when generating code changes.
+- [x] Add `sph.phase.rebuild` to the supervised `ulg-runtime` service and wire
+  SPH control rebuilds through the worker so material/reaction/view-state
+  rebuilds do not block the UI when the runtime is available.
+- [x] Add a formula-parser-driven reaction candidate layer for general
+  element/compound pairs, including active-metal/water and charge-balanced
+  binary ionic candidates, and route the SPH adapter through balanced
+  stoichiometry records instead of the old limited compound recognizer.
+- [x] Restore visible resident playback motion in the SPH demo after moving
+  away from the raw WebGPU overlay: playback now keeps renewing GPU-resident
+  continuation chains, preserves the initial render-field pass needed to derive
+  pressure-interface force rows, and forces a Three/MarchingCubes visual refresh
+  when compact resident diagnostics cross the visible-motion threshold.
+- [x] Fix resident MLS-MPM reset-path physics continuity: multi-substep
+  GPU-resident runs now use sequence-owned pressure-interface force buffers,
+  skip no-op reaction output buffers, and keep G2P as the authoritative
+  mechanical state across thermo-only passes. Post-reset browser evidence now
+  shows all four continued substeps with active grid nodes and visible
+  displacement instead of substep 1+ collapsing to zero.
+- [ ] Implement `plan/todo/reaction-stoichiometry-energetics-plan.md`: strict
+  first-principles reaction energetics, balanced multi-product CPU/WebGPU
+  reaction execution, gas byproduct routing, sealed-box pressure coupling, and
+  reaction-closure cache reuse. Current slice complete: packed reactant,
+  product, and gas-product rows are uploaded/restored with the reaction table;
+  the resident CPU reference computes limiting extent, excess-reactant
+  leftovers, event heat, and visible/unplaced product ledgers; the WGSL resolve
+  pass now consumes reactant/product term rows for fixed-buffer product
+  emission. Current resident slice complete: no-full-readback reaction steps
+  produce a 128-byte compact GPU summary with canonical event count, consumed
+  mass, visible/unplaced product mass, gas mass/moles, heat, and residuals; the
+  demo can derive sealed-box pressure from that resident summary under a
+  guarded single gas-species path. Current per-gas slice complete: a separate
+  32-byte-per-gas-product compact resident ledger reports material id, mass,
+  moles, visible/unplaced mass, event count, gas-product index, and status; the
+  demo pressure diagnostic now consumes the per-species GPU ledger for multiple
+  gas products before using aggregate fallback. Current product/residual slice
+  complete: product-inventory rows and atom/charge residual rows are emitted by
+  compact WebGPU summary passes without full particle readback, preserved in
+  resident diagnostics, and surfaced in the SPH overlay. Current strict
+  gate/pressure slice complete: compact summaries now carry a strict reaction
+  gate for atom/charge/provisional-energetics blockers, and gas-pressure
+  summaries carry a gauge-pressure six-wall force ledger whose force coupling is
+  blocked when strict gates fail or when pressure gradients/normals are not yet
+  resolved. Current renderable-storage slice complete: no-full-readback
+  reaction steps can retain a sparse particle-major product-event WebGPU buffer
+  without copying it back to JavaScript, and resident diagnostics/overlay rows
+  expose its capacity, active verification rows, bytes, and lifetime status.
+  Current render bridge complete: the SPH render-field ABI can bind the
+  retained product-event buffer, and the scene adds generic product-inventory
+  surface descriptors so unplaced event products render as spawned volume
+  without sparse event readback. Current pressure bridge complete: gas pressure
+  can derive gas products from the per-species gas ledger, product-event
+  readback rows, or compact product-inventory rows without full particle
+  readback. Current resident-mass contract complete:
+  `peercompute.ulg.sph-resident-product-mass.v0` exposes the retained
+  product-event buffer, row count/stride, unplaced mass, gas mass, consumption
+  policy, and guarded destruction to downstream kernels. Current P2G sidecar
+  slice complete: repeated resident steps carry the resident product-mass handle
+  into the next P2G stage, P2G binds product-event rows as read-only storage,
+  and unplaced product mass contributes to grid mass without double-counting
+  visible emitted products. Current mechanics/EOS product-event slice complete:
+  product-event rows now carry closure-derived product velocity, support volume,
+  bulk/shear/Lame constants, sound speed, EOS model id, solid flag, and mechanics
+  status, and P2G consumes those fields for product-event momentum and local EOS
+  pressure when support volume is present. Remaining: validated gas-cell or
+  pressure-gradient force coupling and GPU append/compaction for multiple
+  generations of unplaced resident products.
+- [ ] Implement `plan/todo/phase-resolved-steam-optics-plan.md`: phase/state
+  keyed optical closures, H2O vapor vs condensed-droplet steam scattering,
+  state-bucketed optical cache invalidation, and GPU-resident optical lookup
+  plumbing.
+- [ ] Implement `plan/todo/cold-start-cache-performance-plan.md`: persist and
+  reuse reaction/product closures, stop bypassing reaction cache for
+  material-property-backed discovery, persist thermal/optical/static table and
+  GPU warmup artifacts where valid, expose timing/cache diagnostics for worker
+  rebuilds, and add a visible SPH `clear cache` control. First slice complete:
+  material-property-backed `discoverReactions()` cache keys, persisted
+  reaction/product cold-start records, worker-first SPH startup diagnostics,
+  low-FPS CPU-derivation warning messaging, cached interactive Step/Play
+  rebuilds, and the `clear cache` button are live. Remaining:
+  GPU upload/warmup persistence, stale-record browser probes, measured
+  cold/warm/clear deltas, and the long 0.1 FPS cold-start period.
+- [ ] Implement `plan/todo/webgpu-material-property-resolvers-plan.md`: move
+  expensive material-property resolver families from JavaScript into
+  WebGPU-resident kernels/flat closure graphs with worker/PeerCompute fallback,
+  including relativistic optics, element/compound thermomechanics, reactions,
+  radiation/nuclear effects, cache provenance, and visible CPU fallback
+  warnings. First slice complete: an additive
+  `src/runtime/material/materialResolverManifest.js` scaffold now enumerates
+  the resolver family inventory, CPU anchors/status, WebGPU residency targets,
+  cache key ingredients, status labels, and explicit false validation flags.
+- [ ] Follow `plan/todo/overarching-completion-plan.md` as the active ordering
+  plan for the remaining ULG, SPH, material resolver, performance, reaction,
+  steam/gas, nuclear/radiation, PeerCompute, Eshkol, MoonLab, and tooling todo
+  items.
+- [ ] Add the hot-loop WebGPU-Ocean/marching-cubes performance slice from
+  `plan/todo/perf-upgrade.md`: fixed-point/tiled GPU P2G where appropriate,
+  GPU cell/neighbor structures, and GPU-resident marching cubes for continuous
+  material volumes after pressure/steam contracts stabilize and before
+  returning to cold-start timing polish.
+- [ ] Replace provisional candidate energetics and heavy product-closure
+  derivations with cached worker/WebGPU-resident lower-level solvers for the
+  full element/compound reaction space.
 - [ ] Keep the dev server running for live inspection.
 
 ### PeerCompute
@@ -335,6 +445,14 @@ physics work:
 - [x] Use sidecar agents for MoonLab, Eshkol, peercompute, and ICC/swarm.
 - [x] Ensure ICC parser dependencies are available before refreshing indexes.
 - [x] Register `eshkol` and `ulg` with ICC when persistent tool artifacts are wanted.
+- [x] Add a ULG repo-local `.icc/` configuration modeled on Eshkol's policy
+  layout, plus `npm run icc:update` to refresh the ICC index, memory, status,
+  and architecture snapshot into `.icc`.
+- [x] Rewrite repo-local `.icc` policy docs so the editable configuration reads
+  as ULG-native policy rather than copied sibling-repo wording.
+- [x] Add a user Codex `icc` skill at `/home/cos/.codex/skills/icc/SKILL.md`
+  so future sessions can trigger the ICC workflow from skill metadata.
+- [x] Write the 2026-06-12 repo-root todo handoff at `todo-handoff-6-12.md`.
 - [ ] Use swarm lightly for status/context until a ULG-specific profile exists.
 
 ## Integration Rule

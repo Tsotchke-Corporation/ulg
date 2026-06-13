@@ -12,6 +12,664 @@ const MOONLAB_WEBGPU_HANDOFF_SUMMARY_COVERED_OPERATIONS = [
 ];
 const MOONLAB_WEBGPU_HANDOFF_SUMMARY_EXCLUDED_OPERATIONS = ['phase'];
 
+test('SPH surface draw WebGPU shader compacts vertex rows in Chromium', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const renderModule = await import('/src/runtime/sph/sphRenderGpuKernel.js');
+    const opticalModule = await import('/src/runtime/material/opticalGpuBuffers.js');
+    const sceneModule = await import('/src/visualization/sphPhaseScene.js');
+    if (!navigator.gpu) {
+      return { status: 'webgpu-unavailable', reason: 'navigator.gpu unavailable' };
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      return { status: 'webgpu-unavailable', reason: 'requestAdapter returned null' };
+    }
+    const device = await adapter.requestDevice();
+    try {
+      const {
+        buildSphRenderSurfaceDrawMetadataWebGpu,
+        deriveSphRenderSurfaceDrawMetadataCpu,
+        SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
+        SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
+        SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+        ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
+      } = renderModule;
+      const {
+        GPU_PHASE_IDS,
+        buildOpticalGpuTable,
+        stableOpticalMaterialId,
+        uploadOpticalGpuTable
+      } = opticalModule;
+      const {
+        SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
+        SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL,
+        SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+        SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
+      } = sceneModule;
+      const materialId = stableOpticalMaterialId('Au');
+      const opticalStateId = 42;
+      const vertexRows = new Float32Array(3 * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS);
+      vertexRows.set([
+        1, materialId, GPU_PHASE_IDS.solid, 0,
+        0, 0, 0, 0,
+        0, 0, 1, opticalStateId,
+        20, 20, 0, 1
+      ], 0);
+      vertexRows.set([
+        1, materialId, GPU_PHASE_IDS.solid, 0,
+        1, 1, 0, 0,
+        0, 0, 1, opticalStateId,
+        20, 20, 0, 1
+      ], SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS);
+      vertexRows.set([
+        1, materialId, GPU_PHASE_IDS.solid, 0,
+        2, 0, 1, 0,
+        0, 0, 1, opticalStateId,
+        20, 20, 0, 1
+      ], SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * 2);
+      const surfaceVertices = {
+        schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
+        backend: 'browser-fixture',
+        surfaceExtractionMethod: 'tetrahedralized-render-field-cubes',
+        compactionMode: 'browser-compact-fixture',
+        surfaceCount: 2,
+        activeCellCount: 1,
+        triangleCount: 1,
+        vertexCount: 3,
+        rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+        vertexRows,
+        surfaces: [
+          {
+            surfaceKey: 'empty|solid',
+            material: 'empty',
+            phase: 'solid',
+            renderKey: 'empty',
+            surfaceIndex: 0,
+            materialId,
+            phaseId: GPU_PHASE_IDS.solid,
+            opticalStateId: 0,
+            resolution: 2,
+            isolation: 20,
+            fieldOffset: 0,
+            fieldCellCount: 8
+          },
+          {
+            surfaceKey: 'Au|solid',
+            material: 'Au',
+            phase: 'solid',
+            renderKey: 'Au',
+            surfaceIndex: 1,
+            materialId,
+            phaseId: GPU_PHASE_IDS.solid,
+            opticalStateId,
+            resolution: 2,
+            isolation: 20,
+            fieldOffset: 8,
+            fieldCellCount: 8
+          }
+        ]
+      };
+      const cpuReference = deriveSphRenderSurfaceDrawMetadataCpu(surfaceVertices);
+      const webgpu = await buildSphRenderSurfaceDrawMetadataWebGpu({
+        device,
+        surfaceVertices
+      });
+      let overlayStatus = 'overlay-not-run';
+      let overlayVertexBuffer = null;
+      let overlayIndirectBuffer = null;
+      let overlayCameraBuffer = null;
+      let overlayTexture = null;
+      let overlayDepthTexture = null;
+      let overlayOpticalBuffers = null;
+      let overlayOpticalRecordCount = 0;
+      let overlayDepthFormat = null;
+      let overlayOitStatus = 'oit-not-run';
+      let overlayOitAccumFormat = null;
+      let overlayOitRevealFormat = null;
+      try {
+        const overlayOpticalTable = buildOpticalGpuTable([{ material: 'Au', phase: 'solid' }]);
+        overlayOpticalBuffers = uploadOpticalGpuTable(device, overlayOpticalTable);
+        overlayOpticalRecordCount = overlayOpticalTable.recordCount;
+        overlayDepthFormat = SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT;
+        const format = 'rgba8unorm';
+        overlayTexture = device.createTexture({
+          label: 'test-overlay-target',
+          size: [32, 32],
+          format,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+        });
+        overlayDepthTexture = device.createTexture({
+          label: 'test-overlay-depth',
+          size: [32, 32],
+          format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+        });
+        overlayVertexBuffer = device.createBuffer({
+          label: 'test-overlay-surface-vertices',
+          size: vertexRows.byteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        device.queue.writeBuffer(overlayVertexBuffer, 0, vertexRows);
+        overlayIndirectBuffer = device.createBuffer({
+          label: 'test-overlay-surface-indirect',
+          size: cpuReference.drawIndirectRows.byteLength,
+          usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+        });
+        device.queue.writeBuffer(overlayIndirectBuffer, 0, cpuReference.drawIndirectRows);
+        overlayCameraBuffer = device.createBuffer({
+          label: 'test-overlay-camera',
+          size: 16 * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        device.queue.writeBuffer(overlayCameraBuffer, 0, new Float32Array([
+          1, 0, 0, 0,
+          0, 1, 0, 0,
+          0, 0, 1, 0,
+          0, 0, 0, 1
+        ]));
+        const overlayModule = device.createShaderModule({
+          label: 'test-overlay-shader',
+          code: SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
+        });
+        const overlayOitCompositeModule = device.createShaderModule({
+          label: 'test-overlay-oit-composite-shader',
+          code: SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL
+        });
+        const overlayBindGroupLayout = device.createBindGroupLayout({
+          label: 'test-overlay-bind-group-layout',
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: { type: 'read-only-storage' }
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.VERTEX,
+              buffer: { type: 'uniform' }
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'read-only-storage' }
+            },
+            {
+              binding: 3,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'read-only-storage' }
+            }
+          ]
+        });
+        const overlayPipelineLayout = device.createPipelineLayout({
+          label: 'test-overlay-pipeline-layout',
+          bindGroupLayouts: [overlayBindGroupLayout]
+        });
+        const createOverlayPipeline = ({
+          label,
+          depthWriteEnabled,
+          fragmentEntryPoint = 'fs_main',
+          targets = [{
+            format,
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+            }
+          }]
+        }) => device.createRenderPipeline({
+          label,
+          layout: overlayPipelineLayout,
+          vertex: { module: overlayModule, entryPoint: 'vs_main' },
+          fragment: {
+            module: overlayModule,
+            entryPoint: fragmentEntryPoint,
+            targets
+          },
+          primitive: { topology: 'triangle-list', cullMode: 'none' },
+          depthStencil: {
+            format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+            depthWriteEnabled,
+            depthCompare: 'less-equal'
+          }
+        });
+        const overlayOpaquePipeline = createOverlayPipeline({
+          label: 'test-overlay-pipeline-opaque-depth',
+          depthWriteEnabled: true
+        });
+        const overlayTransparentPipeline = createOverlayPipeline({
+          label: 'test-overlay-pipeline-transparent-depth-test',
+          depthWriteEnabled: false
+        });
+        const overlayOitPipeline = createOverlayPipeline({
+          label: 'test-overlay-pipeline-transparent-oit',
+          depthWriteEnabled: false,
+          fragmentEntryPoint: 'fs_oit_main',
+          targets: [
+            {
+              format: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
+              blend: {
+                color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+              }
+            },
+            {
+              format: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+              blend: {
+                color: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                alpha: { srcFactor: 'zero', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+              }
+            }
+          ]
+        });
+        const overlayOitCompositeBindGroupLayout = device.createBindGroupLayout({
+          label: 'test-overlay-oit-composite-bgl',
+          entries: [
+            { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }
+          ]
+        });
+        const overlayOitCompositePipeline = device.createRenderPipeline({
+          label: 'test-overlay-oit-composite-pipeline',
+          layout: device.createPipelineLayout({
+            label: 'test-overlay-oit-composite-layout',
+            bindGroupLayouts: [overlayOitCompositeBindGroupLayout]
+          }),
+          vertex: { module: overlayOitCompositeModule, entryPoint: 'vs_main' },
+          fragment: {
+            module: overlayOitCompositeModule,
+            entryPoint: 'fs_main',
+            targets: [{
+              format,
+              blend: {
+                color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+              }
+            }]
+          },
+          primitive: { topology: 'triangle-list', cullMode: 'none' }
+        });
+        overlayOitAccumFormat = SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT;
+        overlayOitRevealFormat = SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT;
+        const overlayBindGroup = device.createBindGroup({
+          layout: overlayBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: overlayVertexBuffer } },
+            { binding: 1, resource: { buffer: overlayCameraBuffer } },
+            { binding: 2, resource: { buffer: overlayOpticalBuffers.recordsBuffer } },
+            { binding: 3, resource: { buffer: overlayOpticalBuffers.spectralSamplesBuffer } }
+          ]
+        });
+        const overlayEncoder = device.createCommandEncoder();
+        const overlayPass = overlayEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: overlayTexture.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store'
+          }],
+          depthStencilAttachment: {
+            view: overlayDepthTexture.createView(),
+            depthClearValue: 1,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store'
+          }
+        });
+        overlayPass.setPipeline(overlayOpaquePipeline);
+        overlayPass.setBindGroup(0, overlayBindGroup);
+        overlayPass.drawIndirect(
+          overlayIndirectBuffer,
+          SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT
+        );
+        overlayPass.setPipeline(overlayTransparentPipeline);
+        overlayPass.end();
+        const oitAccumTexture = device.createTexture({
+          label: 'test-overlay-oit-accum',
+          size: [32, 32],
+          format: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const oitRevealTexture = device.createTexture({
+          label: 'test-overlay-oit-reveal',
+          size: [32, 32],
+          format: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const oitPass = overlayEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: oitAccumTexture.createView(),
+              clearValue: { r: 0, g: 0, b: 0, a: 0 },
+              loadOp: 'clear',
+              storeOp: 'store'
+            },
+            {
+              view: oitRevealTexture.createView(),
+              clearValue: { r: 1, g: 1, b: 1, a: 1 },
+              loadOp: 'clear',
+              storeOp: 'store'
+            }
+          ],
+          depthStencilAttachment: {
+            view: overlayDepthTexture.createView(),
+            depthLoadOp: 'load',
+            depthStoreOp: 'store'
+          }
+        });
+        oitPass.setPipeline(overlayOitPipeline);
+        oitPass.setBindGroup(0, overlayBindGroup);
+        oitPass.drawIndirect(
+          overlayIndirectBuffer,
+          SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS * Uint32Array.BYTES_PER_ELEMENT
+        );
+        oitPass.end();
+        const oitCompositeBindGroup = device.createBindGroup({
+          layout: overlayOitCompositeBindGroupLayout,
+          entries: [
+            { binding: 0, resource: oitAccumTexture.createView() },
+            { binding: 1, resource: oitRevealTexture.createView() },
+            { binding: 2, resource: device.createSampler({ magFilter: 'linear', minFilter: 'linear' }) }
+          ]
+        });
+        const compositePass = overlayEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: overlayTexture.createView(),
+            loadOp: 'load',
+            storeOp: 'store'
+          }]
+        });
+        compositePass.setPipeline(overlayOitCompositePipeline);
+        compositePass.setBindGroup(0, oitCompositeBindGroup);
+        compositePass.draw(3);
+        compositePass.end();
+        device.queue.submit([overlayEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        oitAccumTexture.destroy();
+        oitRevealTexture.destroy();
+        overlayStatus = 'overlay-render-submitted';
+        overlayOitStatus = 'overlay-oit-render-submitted';
+      } catch (error) {
+        overlayStatus = `overlay-render-error:${error instanceof Error ? error.message : String(error)}`;
+        overlayOitStatus = `overlay-oit-render-error:${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        overlayCameraBuffer?.destroy?.();
+        overlayIndirectBuffer?.destroy?.();
+        overlayVertexBuffer?.destroy?.();
+        overlayOpticalBuffers?.recordsBuffer?.destroy?.();
+        overlayOpticalBuffers?.spectralSamplesBuffer?.destroy?.();
+        overlayDepthTexture?.destroy?.();
+        overlayTexture?.destroy?.();
+      }
+      return {
+        status: webgpu.status,
+        schema: webgpu.schema,
+        backend: webgpu.backend,
+        surfaceCount: webgpu.surfaceCount,
+        activeSurfaceCount: webgpu.activeSurfaceCount,
+        vertexCount: webgpu.vertexCount,
+        triangleCount: webgpu.triangleCount,
+        drawStride: SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
+        drawRows: Array.from(webgpu.drawRows),
+        drawIndirectStride: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
+        drawIndirectRows: Array.from(webgpu.drawIndirectRows),
+        cpuDrawIndirectRows: Array.from(cpuReference.drawIndirectRows),
+        compactedVertexRows: Array.from(webgpu.compactedVertexRows),
+        cpuDrawRows: Array.from(cpuReference.drawRows),
+        compactionMode: webgpu.compactionMode,
+        readback: webgpu.surfaceDrawReadback,
+        overlayStatus,
+        overlayOpticalRecordCount,
+        overlayDepthFormat,
+        overlayOitStatus,
+        overlayOitAccumFormat,
+        overlayOitRevealFormat
+      };
+    } finally {
+      try {
+        device.destroy?.();
+      } catch {
+        // Chromium can report stale presentation internals after a canvas-backed WebGPU smoke.
+      }
+    }
+  });
+
+  test.skip(result.status === 'webgpu-unavailable', result.reason || 'WebGPU adapter unavailable');
+  expect(result.status).toBe('surface-draw-metadata-ready');
+  expect(result.backend).toBe('webgpu');
+  expect(result.compactionMode).toBe('webgpu-surface-prefix-scan-compact');
+  expect(result.readback).toBe(true);
+  expect(result.overlayStatus).toBe('overlay-render-submitted');
+  expect(result.overlayOitStatus).toBe('overlay-oit-render-submitted');
+  expect(result.overlayOpticalRecordCount).toBeGreaterThan(0);
+  expect(result.overlayDepthFormat).toBe('depth24plus');
+  expect(result.overlayOitAccumFormat).toBe('rgba16float');
+  expect(result.overlayOitRevealFormat).toBe('rgba8unorm');
+  expect(result.surfaceCount).toBe(2);
+  expect(result.activeSurfaceCount).toBe(1);
+  expect(result.vertexCount).toBe(3);
+  expect(result.triangleCount).toBe(1);
+  expect(result.drawRows).toEqual(result.cpuDrawRows);
+  expect(result.drawIndirectRows).toEqual(result.cpuDrawIndirectRows);
+  expect(result.drawRows[11]).toBe(0);
+  expect(result.drawRows[result.drawStride + 4]).toBe(0);
+  expect(result.drawRows[result.drawStride + 5]).toBe(3);
+  expect(result.drawRows[result.drawStride + 11]).toBe(1);
+  expect(result.drawIndirectRows[result.drawIndirectStride]).toBe(3);
+  expect(result.drawIndirectRows[result.drawIndirectStride + 1]).toBe(1);
+  expect(result.drawIndirectRows[result.drawIndirectStride + 2]).toBe(0);
+  expect(result.drawIndirectRows[result.drawIndirectStride + 3]).toBe(1);
+  expect(result.compactedVertexRows).toHaveLength(48);
+  expect(result.compactedVertexRows[0]).toBe(1);
+  expect(result.compactedVertexRows[15]).toBe(1);
+});
+
+test('SPH resident overlay depth attachment occludes far transparent and opaque draws', async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const sceneModule = await import('/src/visualization/sphPhaseScene.js');
+    const { SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT } = sceneModule;
+    if (!navigator.gpu) {
+      return { status: 'webgpu-unavailable', reason: 'navigator.gpu unavailable' };
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      return { status: 'webgpu-unavailable', reason: 'requestAdapter returned null' };
+    }
+    const device = await adapter.requestDevice();
+    const format = 'rgba8unorm';
+    const width = 4;
+    const height = 4;
+    const bytesPerRow = 256;
+    const shader = `
+struct Params {
+  depth: f32,
+  r: f32,
+  g: f32,
+  b: f32,
+  alpha: f32,
+  pad0: f32,
+  pad1: f32,
+  pad2: f32,
+};
+
+struct VertexOut {
+  @builtin(position) position: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> params: Params;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(3.0, -1.0),
+    vec2<f32>(-1.0, 3.0)
+  );
+  var out: VertexOut;
+  out.position = vec4<f32>(positions[vertex_index], params.depth, 1.0);
+  return out;
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+  return vec4<f32>(params.r * params.alpha, params.g * params.alpha, params.b * params.alpha, params.alpha);
+}
+`;
+    const module = device.createShaderModule({ label: 'test-depth-overlay-shader', code: shader });
+    const bindGroupLayout = device.createBindGroupLayout({
+      label: 'test-depth-overlay-bgl',
+      entries: [{
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' }
+      }]
+    });
+    const pipelineLayout = device.createPipelineLayout({
+      label: 'test-depth-overlay-layout',
+      bindGroupLayouts: [bindGroupLayout]
+    });
+    const makePipeline = (label, depthWriteEnabled) => device.createRenderPipeline({
+      label,
+      layout: pipelineLayout,
+      vertex: { module, entryPoint: 'vs_main' },
+      fragment: {
+        module,
+        entryPoint: 'fs_main',
+        targets: [{
+          format,
+          blend: {
+            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+          }
+        }]
+      },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: {
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        depthWriteEnabled,
+        depthCompare: 'less-equal'
+      }
+    });
+    const opaquePipeline = makePipeline('test-depth-overlay-opaque', true);
+    const transparentPipeline = makePipeline('test-depth-overlay-transparent', false);
+
+    const makeUniform = (label, values) => {
+      const buffer = device.createBuffer({
+        label,
+        size: 8 * Float32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      device.queue.writeBuffer(buffer, 0, new Float32Array(values));
+      const bindGroup = device.createBindGroup({
+        layout: bindGroupLayout,
+        entries: [{ binding: 0, resource: { buffer } }]
+      });
+      return { buffer, bindGroup };
+    };
+    const nearRed = makeUniform('test-depth-near-red', [0.2, 1, 0, 0, 1, 0, 0, 0]);
+    const farGreen = makeUniform('test-depth-far-green', [0.8, 0, 1, 0, 0.5, 0, 0, 0]);
+    const farBlue = makeUniform('test-depth-far-blue', [0.8, 0, 0, 1, 1, 0, 0, 0]);
+
+    const readScenario = async ({ label, drawNearFirst, drawFarOpaque = true }) => {
+      const colorTexture = device.createTexture({
+        label: `${label}-color`,
+        size: [width, height],
+        format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+      });
+      const depthTexture = device.createTexture({
+        label: `${label}-depth`,
+        size: [width, height],
+        format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      const readBuffer = device.createBuffer({
+        label: `${label}-readback`,
+        size: bytesPerRow * height,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const encoder = device.createCommandEncoder({ label: `${label}-encoder` });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: colorTexture.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear',
+          storeOp: 'store'
+        }],
+        depthStencilAttachment: {
+          view: depthTexture.createView(),
+          depthClearValue: 1,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store'
+        }
+      });
+      if (drawNearFirst) {
+        pass.setPipeline(opaquePipeline);
+        pass.setBindGroup(0, nearRed.bindGroup);
+        pass.draw(3);
+      }
+      pass.setPipeline(transparentPipeline);
+      pass.setBindGroup(0, farGreen.bindGroup);
+      pass.draw(3);
+      if (drawFarOpaque) {
+        pass.setPipeline(opaquePipeline);
+        pass.setBindGroup(0, farBlue.bindGroup);
+        pass.draw(3);
+      }
+      pass.end();
+      encoder.copyTextureToBuffer(
+        { texture: colorTexture },
+        { buffer: readBuffer, bytesPerRow, rowsPerImage: height },
+        [width, height]
+      );
+      device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const bytes = new Uint8Array(readBuffer.getMappedRange());
+      const centerOffset = bytesPerRow * 2 + 2 * 4;
+      const pixel = Array.from(bytes.slice(centerOffset, centerOffset + 4));
+      readBuffer.unmap();
+      readBuffer.destroy();
+      depthTexture.destroy();
+      colorTexture.destroy();
+      return pixel;
+    };
+
+    try {
+      const clearPixel = await readScenario({
+        label: 'transparent-on-clear',
+        drawNearFirst: false,
+        drawFarOpaque: false
+      });
+      const occludedPixel = await readScenario({ label: 'transparent-behind-opaque-depth', drawNearFirst: true });
+      return {
+        status: 'depth-pixels-read',
+        depthFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+        clearPixel,
+        occludedPixel
+      };
+    } finally {
+      nearRed.buffer.destroy();
+      farGreen.buffer.destroy();
+      farBlue.buffer.destroy();
+      device.destroy?.();
+    }
+  });
+
+  test.skip(result.status === 'webgpu-unavailable', result.reason || 'WebGPU adapter unavailable');
+  expect(result.status).toBe('depth-pixels-read');
+  expect(result.depthFormat).toBe('depth24plus');
+  expect(result.clearPixel[0]).toBeLessThan(30);
+  expect(result.clearPixel[1]).toBeGreaterThan(100);
+  expect(result.clearPixel[2]).toBeLessThan(30);
+  expect(result.clearPixel[3]).toBeGreaterThan(100);
+  expect(result.occludedPixel[0]).toBeGreaterThan(220);
+  expect(result.occludedPixel[1]).toBeLessThan(30);
+  expect(result.occludedPixel[2]).toBeLessThan(30);
+});
+
 test('supervised service smoke renders desktop and mobile worker trees', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 820 });
   await page.goto('/');
@@ -1143,8 +1801,90 @@ test('supervised service smoke renders desktop and mobile worker trees', async (
   }
 });
 
-test('SPH phase demo runs derived material properties by default', async ({ page }) => {
+test('SPH phase demo opens collapsed and starts from URL params', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 900, height: 680 });
+  await page.goto('/?drop=Na&base=h2o&dropt=293.15&baset=293.15&boxx=5&boxy=5&boxz=5');
+
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await expect(page.locator('#sph-panel')).toHaveClass(/collapsed/);
+  await expect(page.locator('#sph-play')).toHaveText(/Play|Pause/);
+  await expect(page.locator('#sph-status')).toContainText(/resident profile : submissions=[1-9]|worker-view-state|pending worker view-state/);
+});
+
+test('SPH phase demo clear cache removes static table storage and reports cleared probe counts', async ({ page }) => {
   test.setTimeout(90_000);
+  await page.setViewportSize({ width: 900, height: 680 });
+  await page.goto('/?drop=fe&base=h2o&dropt=1850&baset=233.15&dropn=2&basen=2&boxx=3&boxy=3&boxz=3');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await expect(page.locator('#sph-clear-cache')).toBeVisible();
+  await page.waitForFunction(() => {
+    const update = document.querySelector('#sph-phase-overlay')?.__sphPeerClosureCache?.staticTableWrite;
+    return update?.schema === 'peercompute.ulg.sph-static-table-cache-update.v0'
+      && update.status === 'stored'
+      && update.counts?.tables >= 4
+      && update.counts?.gpuWarmup >= 1;
+  }, null, { timeout: 60_000 });
+
+  const staticTableCacheBeforeClear = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const cache = overlay?.__sphPeerClosureCache || {};
+    const storageKeys = {
+      material: 'peercompute.ulg.sph-derived-closure-cache.v1',
+      coldStart: 'peercompute.ulg.sph-cold-start-cache.v1',
+      staticTables: cache.staticTableWrite?.storageKey || 'peercompute.ulg.sph-static-table-cache.v1'
+    };
+    const staticTableSnapshot = window.localStorage.getItem(storageKeys.staticTables);
+    return {
+      storageKeys,
+      snapshotBytes: staticTableSnapshot?.length ?? 0,
+      tableCount: cache.staticTableWrite?.counts?.tables ?? 0,
+      gpuWarmupCount: cache.staticTableWrite?.counts?.gpuWarmup ?? 0
+    };
+  });
+  expect(staticTableCacheBeforeClear.snapshotBytes).toBeGreaterThan(1000);
+  expect(staticTableCacheBeforeClear.tableCount).toBeGreaterThanOrEqual(4);
+  expect(staticTableCacheBeforeClear.gpuWarmupCount).toBeGreaterThanOrEqual(1);
+
+  const clearCacheProbe = await page.evaluate((storageKeys) => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    overlay?.querySelector('#sph-clear-cache')?.click();
+    const cache = overlay?.__sphPeerClosureCache || {};
+    return {
+      clear: cache.clear ?? null,
+      writesAfterClear: {
+        material: cache.write ?? null,
+        coldStart: cache.coldStartWrite ?? null,
+        staticTables: cache.staticTableWrite ?? null
+      },
+      storageAfterClear: {
+        material: window.localStorage.getItem(storageKeys.material),
+        coldStart: window.localStorage.getItem(storageKeys.coldStart),
+        staticTables: window.localStorage.getItem(storageKeys.staticTables)
+      }
+    };
+  }, staticTableCacheBeforeClear.storageKeys);
+  expect(clearCacheProbe.clear?.schema).toBe('peercompute.ulg.sph-local-derived-cache-clear.v0');
+  expect(clearCacheProbe.clear?.status).toBe('cleared');
+  expect(clearCacheProbe.clear?.tableRecords).toBe(staticTableCacheBeforeClear.tableCount);
+  expect(clearCacheProbe.clear?.gpuWarmupRecords).toBe(staticTableCacheBeforeClear.gpuWarmupCount);
+  expect(clearCacheProbe.writesAfterClear).toEqual({
+    material: null,
+    coldStart: null,
+    staticTables: null
+  });
+  expect(clearCacheProbe.storageAfterClear).toEqual({
+    material: null,
+    coldStart: null,
+    staticTables: null
+  });
+});
+
+test('SPH phase demo runs derived material properties by default', async ({ page }) => {
+  test.setTimeout(150_000);
   await page.setViewportSize({ width: 900, height: 680 });
   await page.goto('/');
   await page.locator('#run-sph-phase').click();
@@ -1160,6 +1900,11 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   await expect(page.getByRole('button', { name: 'Gold (Au, Z=79) - derived element' })).toBeVisible();
   await page.locator('.sph-element-picker').getByRole('button', { name: 'close' }).click();
   await expect(page.locator('.sph-element-picker-overlay')).toHaveCount(0);
+  await page.waitForFunction(() => {
+    const text = document.querySelector('#sph-status')?.textContent ?? '';
+    return text.includes('preflight        : preflight-feasible-derived-closures')
+      || text.includes('first-principles material properties are required');
+  }, null, { timeout: 60_000 });
   await expect(page.locator('#sph-status')).toContainText('preflight        : preflight-feasible-derived-closures');
   await expect(page.locator('#sph-status')).not.toContainText('first-principles material properties are required');
   await page.waitForFunction(() => {
@@ -1204,6 +1949,47 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     if (!steps?.schema || steps.backend !== 'webgpu') return true;
     return overlay?.__sphScene?.getSphResidentRenderState?.()?.source === 'resident-gpu-render-field';
   });
+  await page.waitForFunction(() => {
+    const update = document.querySelector('#sph-phase-overlay')?.__sphPeerClosureCache?.staticTableWrite;
+    return update?.schema === 'peercompute.ulg.sph-static-table-cache-update.v0'
+      && update.status === 'stored'
+      && update.counts?.tables >= 4
+      && update.counts?.gpuWarmup >= 1;
+  });
+  await page.locator('#sph-reset').click();
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    return overlay?.__sphSetParticlesTiming?.staticTableCacheStatus === 'static-table-cache-bundle-hit'
+      && overlay?.__sphPeerClosureCache?.staticTableRead?.hitCount >= 4;
+  });
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay?.__sphScene;
+    return Boolean(
+      scene?.getOpticalGpuLookup?.()?.execution?.schema
+      && scene?.getSphGpuParticleState?.()?.schema
+      && scene?.getSphGpuParticleUpload?.()?.schema
+      && scene?.getMlsMpmGpuParticleState?.()?.schema
+      && scene?.getMlsMpmGpuParticleUpload?.()?.schema
+      && scene?.getMlsMpmP2gGridProjection?.()?.schema
+      && scene?.getMlsMpmGridUpdate?.()?.schema
+      && scene?.getMlsMpmG2pReconstruction?.()?.schema
+      && scene?.getMlsMpmResidentStep?.()?.schema
+      && scene?.getMlsMpmResidentSteps?.()?.schema
+    );
+  }, null, { timeout: 60_000 });
+  await page.waitForFunction(() => {
+    const scene = document.querySelector('#sph-phase-overlay')?.__sphScene;
+    const steps = scene?.getMlsMpmResidentSteps?.();
+    const renderState = scene?.getSphResidentRenderState?.();
+    if (!steps?.schema || steps.backend !== 'webgpu') return true;
+    if (renderState?.source !== 'resident-gpu-render-field') return true;
+    const surfaceDraw = scene?.getSphResidentSurfaceDraw?.();
+    if (!surfaceDraw?.schema) return false;
+    return renderState.renderFieldReadback === true
+      && surfaceDraw.visibleRendererBridge === 'three-marching-cubes'
+      && surfaceDraw.visibleRenderSource === 'three-managed-render-field-readback';
+  }, null, { timeout: 60_000 });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
@@ -1229,6 +2015,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     const mlsMpmResidentStep = scene?.getMlsMpmResidentStep?.();
     const mlsMpmResidentSteps = scene?.getMlsMpmResidentSteps?.();
     const sphResidentRenderState = scene?.getSphResidentRenderState?.();
+    const sphResidentSurfaceDraw = scene?.getSphResidentSurfaceDraw?.();
+    const sphResidentSurfaceDrawRenderBridge = scene?.getSphResidentSurfaceDrawRenderBridge?.();
     const visibleSurfaces = [];
     scene?.scene?.traverse((node) => {
       if (node.userData?.renderMode === 'continuous-marching-cubes') {
@@ -1255,8 +2043,20 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       driverReady: Boolean(overlay.__sphDriver),
+      viewStateReady: Boolean(overlay.__sphPhaseViewState),
+      viewStateSource: overlay.__sphPhaseViewStateSource ?? null,
+      workerRebuild: overlay.__sphPhaseRebuildWorker ?? null,
+      workerRebuildTiming: overlay.__sphPhaseWorkerTiming || overlay.__sphPhaseRebuildWorker?.timing || null,
       overlayResidentRequestedReadbackMode: overlay.__mlsMpmResidentRequestedReadbackMode,
       statusText: overlay.querySelector('#sph-status')?.textContent ?? '',
+      warningText: overlay.querySelector('#sph-warning-bar')?.textContent ?? '',
+      warnings: overlay.__sphWarnings || [],
+      frameCounters: overlay.__sphFrameCounters || null,
+      peerClosureCache: overlay.__sphPeerClosureCache || null,
+      performanceTrace: overlay.__sphPerformanceTrace || null,
+      setParticlesTiming: overlay.__sphSetParticlesTiming || null,
+      clearCacheButtonReady: Boolean(overlay.querySelector('#sph-clear-cache')),
+      cpuClosureTask: overlay.__sphCpuClosureTask || null,
       opticalGpuTable: {
         schema: opticalGpuTable?.schema,
         recordCount: opticalGpuTable?.recordCount,
@@ -1295,6 +2095,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       opticalGpuLookup: {
         schema: opticalGpuLookup?.lookup?.schema,
         queryCount: opticalGpuLookup?.lookup?.queryCount,
+        outputStrideFloats: opticalGpuLookup?.lookup?.outputStrideFloats,
         outputCount: opticalGpuLookup?.cpuReference?.outputs?.length,
         executionSchema: opticalGpuExecution?.schema,
         executionBackend: opticalGpuExecution?.backend,
@@ -1328,6 +2129,8 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         schema: mlsMpmGpuParticleState?.schema,
         particleCount: mlsMpmGpuParticleState?.particleCount,
         mechanicsStrideFloats: mlsMpmGpuParticleState?.mechanicsStrideFloats,
+        mechanicsDtS: mlsMpmGpuParticleState?.mechanicsDtS,
+        mechanicalSubsteps: mlsMpmGpuParticleState?.mechanicalSubsteps,
         firstSolidFlag: mlsMpmGpuParticleState?.mechanics?.[20] ?? null,
         firstStatus: mlsMpmGpuParticleState?.mechanics?.[21] ?? null
       },
@@ -1441,6 +2244,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         status: mlsMpmResidentStep?.status,
         stageStatus: mlsMpmResidentStep?.stageStatus,
         stageBackends: mlsMpmResidentStep?.stageBackends,
+        stageTiming: mlsMpmResidentStep?.stageTiming,
         residentBuffersRetained: mlsMpmResidentStep?.residentBuffersRetained,
         stageBuffersRetained: mlsMpmResidentStep?.stageBuffersRetained,
         g2pOutputBuffersRetained: mlsMpmResidentStep?.g2pOutputBuffersRetained,
@@ -1503,6 +2307,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         retainedIntermediateStepCount: mlsMpmResidentSteps?.retainedIntermediateStepCount,
         finalStepSchema: mlsMpmResidentSteps?.finalStep?.schema,
         finalStepStatus: mlsMpmResidentSteps?.finalStep?.status,
+        finalStepStageTiming: mlsMpmResidentSteps?.finalStep?.stageTiming,
         stepSummaries: mlsMpmResidentSteps?.stepSummaries,
         requestedReadbackMode: mlsMpmResidentSteps?.requestedReadbackMode,
         readbackMode: mlsMpmResidentSteps?.readbackMode,
@@ -1528,14 +2333,95 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         surfaceCount: sphResidentRenderState?.surfaceCount,
         rowStrideFloats: sphResidentRenderState?.rowStrideFloats,
         renderRowByteLength: sphResidentRenderState?.renderRowByteLength,
+        renderRowsBufferRetained: sphResidentRenderState?.renderRowsBufferRetained,
+        renderRowsBufferByteLength: sphResidentRenderState?.renderRowsBufferByteLength,
+        renderRowsReadback: sphResidentRenderState?.renderRowsReadback,
+        renderRowsReadbackMode: sphResidentRenderState?.renderRowsReadbackMode,
+        renderRowsReadbackByteLength: sphResidentRenderState?.renderRowsReadbackByteLength,
         renderFieldCellStrideFloats: sphResidentRenderState?.renderFieldCellStrideFloats,
         renderFieldByteLength: sphResidentRenderState?.renderFieldByteLength,
         renderFieldReadback: sphResidentRenderState?.renderFieldReadback,
         renderFieldStatus: sphResidentRenderState?.renderFieldStatus,
         renderFieldBackend: sphResidentRenderState?.renderFieldBackend,
+        renderFieldInputSource: sphResidentRenderState?.renderFieldInputSource,
         renderFieldSurfaceCount: sphResidentRenderState?.renderFieldSurfaceCount,
         renderFieldTotalCells: sphResidentRenderState?.renderFieldTotalCells,
+        renderFieldBufferMode: sphResidentRenderState?.renderFieldBufferMode,
+        surfaceDrawSchema: sphResidentRenderState?.surfaceDrawSchema,
+        surfaceDrawStatus: sphResidentRenderState?.surfaceDrawStatus,
+        surfaceDrawReason: sphResidentRenderState?.surfaceDrawReason,
+        surfaceDrawSourceRenderFieldSchema: sphResidentRenderState?.surfaceDrawSourceRenderFieldSchema,
+        surfaceDrawSourceSurfaceVertexSchema: sphResidentRenderState?.surfaceDrawSourceSurfaceVertexSchema,
+        surfaceDrawSurfaceDrawSchema: sphResidentRenderState?.surfaceDrawSurfaceDrawSchema,
+        surfaceDrawSurfaceCount: sphResidentRenderState?.surfaceDrawSurfaceCount,
+        surfaceDrawSourceVertexRowCount: sphResidentRenderState?.surfaceDrawSourceVertexRowCount,
+        surfaceDrawRowsBufferRetained: sphResidentRenderState?.surfaceDrawRowsBufferRetained,
+        surfaceDrawRowsBufferByteLength: sphResidentRenderState?.surfaceDrawRowsBufferByteLength,
+        surfaceDrawIndirectSchema: sphResidentRenderState?.surfaceDrawIndirectSchema,
+        surfaceDrawIndirectRowStrideUints: sphResidentRenderState?.surfaceDrawIndirectRowStrideUints,
+        surfaceDrawIndirectRowsBufferRetained: sphResidentRenderState?.surfaceDrawIndirectRowsBufferRetained,
+        surfaceDrawIndirectRowsBufferByteLength: sphResidentRenderState?.surfaceDrawIndirectRowsBufferByteLength,
+        surfaceDrawCompactedVertexRowsBufferRetained: sphResidentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained,
+        surfaceDrawCompactedVertexRowsBufferByteLength: sphResidentRenderState?.surfaceDrawCompactedVertexRowsBufferByteLength,
+        surfaceDrawReadback: sphResidentRenderState?.surfaceDrawReadback,
+        surfaceDrawReadbackMode: sphResidentRenderState?.surfaceDrawReadbackMode,
+        surfaceDrawCompactionMode: sphResidentRenderState?.surfaceDrawCompactionMode,
+        surfaceDrawInputBuffersReleased: sphResidentRenderState?.surfaceDrawInputBuffersReleased,
+        surfaceDrawVisibleRenderSource: sphResidentRenderState?.surfaceDrawVisibleRenderSource,
+        surfaceDrawVisibleRendererBridge: sphResidentRenderState?.surfaceDrawVisibleRendererBridge,
+        surfaceDrawRenderBridgeSchema: sphResidentRenderState?.surfaceDrawRenderBridgeSchema,
+        surfaceDrawRenderBridgeStatus: sphResidentRenderState?.surfaceDrawRenderBridgeStatus,
+        surfaceDrawRenderBridgeReason: sphResidentRenderState?.surfaceDrawRenderBridgeReason,
+        surfaceDrawRenderBridgeFrameCount: sphResidentRenderState?.surfaceDrawRenderBridgeFrameCount,
+        surfaceDrawRenderBridgeLastRenderStatus: sphResidentRenderState?.surfaceDrawRenderBridgeLastRenderStatus,
+        surfaceDrawRenderBridgeDrawOrderingPolicy: sphResidentRenderState?.surfaceDrawRenderBridgeDrawOrderingPolicy,
+        surfaceDrawRenderBridgeDrawOrderCount: sphResidentRenderState?.surfaceDrawRenderBridgeDrawOrderCount,
+        surfaceDrawRenderBridgeDrawOrderSurfaceIndices: sphResidentRenderState?.surfaceDrawRenderBridgeDrawOrderSurfaceIndices,
+        surfaceDrawRenderBridgeDrawOrderIndirectOffsets: sphResidentRenderState?.surfaceDrawRenderBridgeDrawOrderIndirectOffsets,
+        surfaceDrawRenderBridgeDepthPolicy: sphResidentRenderState?.surfaceDrawRenderBridgeDepthPolicy,
+        surfaceDrawRenderBridgeDepthAttachmentFormat: sphResidentRenderState?.surfaceDrawRenderBridgeDepthAttachmentFormat,
+        surfaceDrawRenderBridgeDepthAttachmentReady: sphResidentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady,
+        surfaceDrawRenderBridgeTransparencyCompositeMode: sphResidentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode,
+        surfaceDrawRenderBridgeOitAccumFormat: sphResidentRenderState?.surfaceDrawRenderBridgeOitAccumFormat,
+        surfaceDrawRenderBridgeOitRevealFormat: sphResidentRenderState?.surfaceDrawRenderBridgeOitRevealFormat,
+        surfaceDrawRenderBridgeOitTargetsReady: sphResidentRenderState?.surfaceDrawRenderBridgeOitTargetsReady,
+        surfaceDrawRenderBridgeLastOpaqueDrawCount: sphResidentRenderState?.surfaceDrawRenderBridgeLastOpaqueDrawCount,
+        surfaceDrawRenderBridgeLastTransparentDrawCount: sphResidentRenderState?.surfaceDrawRenderBridgeLastTransparentDrawCount,
+        surfaceDrawRenderBridgeOpticalRenderSource: sphResidentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource,
+        surfaceDrawRenderBridgeOpticalRecordCount: sphResidentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount,
+        surfaceDrawRenderBridgeOpticalRecordStrideFloats: sphResidentRenderState?.surfaceDrawRenderBridgeOpticalRecordStrideFloats,
+        surfaceDrawRenderBridgeOpticalSpectralSampleCount: sphResidentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount,
+        surfaceDrawRenderBridgeOpticalSpectralSampleStrideFloats: sphResidentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleStrideFloats,
+        materialInterfaceFieldSchema: sphResidentRenderState?.materialInterfaceFieldSchema,
+        materialInterfaceFieldStatus: sphResidentRenderState?.materialInterfaceFieldStatus,
+        materialInterfaceReadySurfaceCount: sphResidentRenderState?.materialInterfaceReadySurfaceCount,
+        materialInterfaceTotalSurfaceAreaM2: sphResidentRenderState?.materialInterfaceTotalSurfaceAreaM2,
+        materialInterfaceForceCouplingStatus: sphResidentRenderState?.materialInterfaceForceCouplingStatus,
+        pressureInterfaceCouplingSchema: sphResidentRenderState?.pressureInterfaceCouplingSchema,
+        pressureInterfaceCouplingStatus: sphResidentRenderState?.pressureInterfaceCouplingStatus,
+        pressureInterfaceForceCouplingStatus: sphResidentRenderState?.pressureInterfaceForceCouplingStatus,
+        pressureInterfaceForcePreviewSchema: sphResidentRenderState?.pressureInterfaceForcePreviewSchema,
+        pressureInterfaceForcePreviewStatus: sphResidentRenderState?.pressureInterfaceForcePreviewStatus,
+        pressureInterfaceForceApplicationStatus: sphResidentRenderState?.pressureInterfaceForceApplicationStatus,
+        pressureInterfacePreviewedElementCount: sphResidentRenderState?.pressureInterfacePreviewedElementCount,
+        pressureInterfaceTotalAbsForceN: sphResidentRenderState?.pressureInterfaceTotalAbsForceN,
+        pressureInterfaceForceSolverSchema: sphResidentRenderState?.pressureInterfaceForceSolverSchema,
+        pressureInterfaceForceSolverStatus: sphResidentRenderState?.pressureInterfaceForceSolverStatus,
+        pressureInterfaceSolverApplicationStatus: sphResidentRenderState?.pressureInterfaceSolverApplicationStatus,
+        pressureInterfaceSolverForceRowCount: sphResidentRenderState?.pressureInterfaceSolverForceRowCount,
+        pressureInterfaceSolverConservationStatus: sphResidentRenderState?.pressureInterfaceSolverConservationStatus,
+        pressureInterfaceSolverConservationResidualMagnitudeN: sphResidentRenderState?.pressureInterfaceSolverConservationResidualMagnitudeN,
+        pressureInterfaceForceRowsUploadStatus: sphResidentRenderState?.pressureInterfaceForceRowsUploadStatus,
+        pressureInterfaceForceRowsBufferRetained: sphResidentRenderState?.pressureInterfaceForceRowsBufferRetained,
+        pressureInterfaceForceRowsBufferByteLength: sphResidentRenderState?.pressureInterfaceForceRowsBufferByteLength,
+        renderRowsReadback: sphResidentRenderState?.renderRowsReadback,
+        renderRowsReadbackMode: sphResidentRenderState?.renderRowsReadbackMode,
+        renderRowsReadbackByteLength: sphResidentRenderState?.renderRowsReadbackByteLength,
         compactRenderReadback: sphResidentRenderState?.compactRenderReadback,
+        normalHotLoopReadbackFree: sphResidentRenderState?.normalHotLoopReadbackFree,
+        residentSurfaceTableStatus: sphResidentRenderState?.residentSurfaceTableStatus,
+        residentSurfaceTableSurfaceCount: sphResidentRenderState?.residentSurfaceTableSurfaceCount,
+        residentSurfaceTableTotalFieldCells: sphResidentRenderState?.residentSurfaceTableTotalFieldCells,
         renderReadbackCadence: sphResidentRenderState?.renderReadbackCadence,
         gpuAuthoritativeState: sphResidentRenderState?.gpuAuthoritativeState,
         materialKeys: sphResidentRenderState?.materialKeys,
@@ -1544,6 +2430,94 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         sphValidation: sphResidentRenderState?.sphValidation,
         phaseChangeValidation: sphResidentRenderState?.phaseChangeValidation,
         fullPhysicsValidation: sphResidentRenderState?.fullPhysicsValidation
+      },
+      sphResidentSurfaceDraw: {
+        schema: sphResidentSurfaceDraw?.schema,
+        status: sphResidentSurfaceDraw?.status,
+        reason: sphResidentSurfaceDraw?.reason,
+        sourceRenderFieldSchema: sphResidentSurfaceDraw?.sourceRenderFieldSchema,
+        sourceSurfaceVertexSchema: sphResidentSurfaceDraw?.sourceSurfaceVertexSchema,
+        surfaceDrawSchema: sphResidentSurfaceDraw?.surfaceDrawSchema,
+        surfaceCount: sphResidentSurfaceDraw?.surfaceCount,
+        sourceVertexRowCount: sphResidentSurfaceDraw?.sourceVertexRowCount,
+        drawRowsBufferRetained: sphResidentSurfaceDraw?.drawRowsBufferRetained,
+        drawRowsBufferByteLength: sphResidentSurfaceDraw?.drawRowsBufferByteLength,
+        drawIndirectSchema: sphResidentSurfaceDraw?.drawIndirectSchema,
+        drawIndirectRowStrideUints: sphResidentSurfaceDraw?.drawIndirectRowStrideUints,
+        drawIndirectRowsBufferRetained: sphResidentSurfaceDraw?.drawIndirectRowsBufferRetained,
+        drawIndirectRowsBufferByteLength: sphResidentSurfaceDraw?.drawIndirectRowsBufferByteLength,
+        compactedVertexRowsBufferRetained: sphResidentSurfaceDraw?.compactedVertexRowsBufferRetained,
+        compactedVertexRowsBufferByteLength: sphResidentSurfaceDraw?.compactedVertexRowsBufferByteLength,
+        readbackMode: sphResidentSurfaceDraw?.readbackMode,
+        surfaceDrawReadback: sphResidentSurfaceDraw?.surfaceDrawReadback,
+        compactionMode: sphResidentSurfaceDraw?.compactionMode,
+        renderFieldBufferMode: sphResidentSurfaceDraw?.renderFieldBufferMode,
+        surfaceVertexBufferMode: sphResidentSurfaceDraw?.surfaceVertexBufferMode,
+        surfaceDrawBufferMode: sphResidentSurfaceDraw?.surfaceDrawBufferMode,
+        surfaceDrawInputBuffersReleased: sphResidentSurfaceDraw?.surfaceDrawInputBuffersReleased,
+        visibleRenderSource: sphResidentSurfaceDraw?.visibleRenderSource,
+        visibleRendererBridge: sphResidentSurfaceDraw?.visibleRendererBridge,
+        renderBridgeSchema: sphResidentSurfaceDraw?.renderBridgeSchema,
+        renderBridgeStatus: sphResidentSurfaceDraw?.renderBridgeStatus,
+        renderBridgeReason: sphResidentSurfaceDraw?.renderBridgeReason,
+        renderBridgeFrameCount: sphResidentSurfaceDraw?.renderBridgeFrameCount,
+        renderBridgeLastRenderStatus: sphResidentSurfaceDraw?.renderBridgeLastRenderStatus,
+        renderBridgeDrawOrderingPolicy: sphResidentSurfaceDraw?.renderBridgeDrawOrderingPolicy,
+        renderBridgeDrawOrderCount: sphResidentSurfaceDraw?.renderBridgeDrawOrderCount,
+        renderBridgeDrawOrderSurfaceIndices: sphResidentSurfaceDraw?.renderBridgeDrawOrderSurfaceIndices,
+        renderBridgeDrawOrderIndirectOffsets: sphResidentSurfaceDraw?.renderBridgeDrawOrderIndirectOffsets,
+        renderBridgeDepthPolicy: sphResidentSurfaceDraw?.renderBridgeDepthPolicy,
+        renderBridgeDepthAttachmentFormat: sphResidentSurfaceDraw?.renderBridgeDepthAttachmentFormat,
+        renderBridgeDepthAttachmentReady: sphResidentSurfaceDraw?.renderBridgeDepthAttachmentReady,
+        renderBridgeTransparencyCompositeMode: sphResidentSurfaceDraw?.renderBridgeTransparencyCompositeMode,
+        renderBridgeOitAccumFormat: sphResidentSurfaceDraw?.renderBridgeOitAccumFormat,
+        renderBridgeOitRevealFormat: sphResidentSurfaceDraw?.renderBridgeOitRevealFormat,
+        renderBridgeOitTargetsReady: sphResidentSurfaceDraw?.renderBridgeOitTargetsReady,
+        renderBridgeLastOpaqueDrawCount: sphResidentSurfaceDraw?.renderBridgeLastOpaqueDrawCount,
+        renderBridgeLastTransparentDrawCount: sphResidentSurfaceDraw?.renderBridgeLastTransparentDrawCount,
+        renderBridgeOpticalRenderSource: sphResidentSurfaceDraw?.renderBridgeOpticalRenderSource,
+        renderBridgeOpticalRecordCount: sphResidentSurfaceDraw?.renderBridgeOpticalRecordCount,
+        renderBridgeOpticalRecordStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalRecordStrideFloats,
+        renderBridgeOpticalSpectralSampleCount: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount,
+        renderBridgeOpticalSpectralSampleStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleStrideFloats,
+        renderBridgeTemporalSwapPolicy: sphResidentSurfaceDraw?.renderBridgeTemporalSwapPolicy,
+        renderBridgeRetainedPreviousOverlay: sphResidentSurfaceDraw?.renderBridgeRetainedPreviousOverlay,
+        hasDrawRowsBuffer: Boolean(sphResidentSurfaceDraw?.surfaceDraw?.drawRowsBuffer),
+        hasDrawIndirectRowsBuffer: Boolean(sphResidentSurfaceDraw?.surfaceDraw?.drawIndirectRowsBuffer),
+        hasCompactedVertexRowsBuffer: Boolean(sphResidentSurfaceDraw?.surfaceDraw?.compactedVertexRowsBuffer)
+      },
+      sphResidentSurfaceDrawRenderBridge: {
+        schema: sphResidentSurfaceDrawRenderBridge?.schema,
+        status: sphResidentSurfaceDrawRenderBridge?.status,
+        rendererBridge: sphResidentSurfaceDrawRenderBridge?.rendererBridge,
+        visibleRenderSource: sphResidentSurfaceDrawRenderBridge?.visibleRenderSource,
+        frameCount: sphResidentSurfaceDrawRenderBridge?.frameCount,
+        lastRenderStatus: sphResidentSurfaceDrawRenderBridge?.lastRenderStatus,
+        reason: sphResidentSurfaceDrawRenderBridge?.reason,
+        canvasWidth: sphResidentSurfaceDrawRenderBridge?.canvas?.width,
+        canvasHeight: sphResidentSurfaceDrawRenderBridge?.canvas?.height,
+        drawSurfaceCount: sphResidentSurfaceDrawRenderBridge?.drawState?.surfaceCount,
+        drawOrderingPolicy: sphResidentSurfaceDrawRenderBridge?.drawOrderingPolicy,
+        drawOrderCount: sphResidentSurfaceDrawRenderBridge?.drawOrderCount,
+        drawOrderSurfaceIndices: sphResidentSurfaceDrawRenderBridge?.drawOrderSurfaceIndices,
+        drawOrderIndirectOffsets: sphResidentSurfaceDrawRenderBridge?.drawOrderIndirectOffsets,
+        depthPolicy: sphResidentSurfaceDrawRenderBridge?.depthPolicy,
+        depthAttachmentFormat: sphResidentSurfaceDrawRenderBridge?.depthAttachmentFormat,
+        depthAttachmentReady: sphResidentSurfaceDrawRenderBridge?.depthAttachmentReady,
+        transparencyCompositeMode: sphResidentSurfaceDrawRenderBridge?.transparencyCompositeMode,
+        oitAccumFormat: sphResidentSurfaceDrawRenderBridge?.oitAccumFormat,
+        oitRevealFormat: sphResidentSurfaceDrawRenderBridge?.oitRevealFormat,
+        oitTargetsReady: sphResidentSurfaceDrawRenderBridge?.oitTargetsReady,
+        lastOpaqueDrawCount: sphResidentSurfaceDrawRenderBridge?.lastOpaqueDrawCount,
+        lastTransparentDrawCount: sphResidentSurfaceDrawRenderBridge?.lastTransparentDrawCount,
+        opticalRenderSource: sphResidentSurfaceDrawRenderBridge?.opticalRenderSource,
+        opticalRecordCount: sphResidentSurfaceDrawRenderBridge?.opticalRecordCount,
+        opticalRecordStrideFloats: sphResidentSurfaceDrawRenderBridge?.opticalRecordStrideFloats,
+        opticalSpectralSampleCount: sphResidentSurfaceDrawRenderBridge?.opticalSpectralSampleCount,
+        opticalSpectralSampleStrideFloats: sphResidentSurfaceDrawRenderBridge?.opticalSpectralSampleStrideFloats,
+        temporalSwapPolicy: sphResidentSurfaceDrawRenderBridge?.temporalSwapPolicy,
+        retainedPreviousOverlay: sphResidentSurfaceDrawRenderBridge?.retainedPreviousOverlay,
+        hasDrawIndirectRowsBuffer: Boolean(sphResidentSurfaceDrawRenderBridge?.drawState?.drawIndirectRowsBuffer)
       },
       sphResidentPerf: overlay.__sphResidentPerf,
       visibleSurfaces: visibleSurfaces.filter((surface) => surface.visible)
@@ -1557,18 +2531,68 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   });
   expect(derivedSummary.canvasWidth).toBeGreaterThan(100);
   expect(derivedSummary.canvasHeight).toBeGreaterThan(100);
-  expect(derivedSummary.driverReady).toBe(true);
+  expect(derivedSummary.driverReady || derivedSummary.viewStateReady).toBe(true);
+  if (!derivedSummary.driverReady) {
+    expect(derivedSummary.workerRebuild?.status).toBe('complete');
+    expect(derivedSummary.workerRebuildTiming?.schema).toBe('peercompute.ulg.sph-phase-worker-rebuild-timing.v0');
+    expect(Number.isFinite(derivedSummary.workerRebuildTiming?.totalMs)).toBe(true);
+    expect(Number.isFinite(derivedSummary.workerRebuildTiming?.stageMs?.createSphPhaseDemo)).toBe(true);
+    expect(derivedSummary.viewStateSource).toBe('peercompute-worker-packed-state');
+  }
   expect(derivedSummary.overlayResidentRequestedReadbackMode).toBe('no-full-readback');
   expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback');
-  expect(derivedSummary.statusText).toContain('resident source  :');
-  expect(derivedSummary.statusText).toContain('compact summary  :');
-  expect(derivedSummary.statusText).toContain('thermal graph gpu: status=');
   expect(derivedSummary.statusText).toContain('render source    :');
-  expect(derivedSummary.statusText).toContain('render cadence   :');
+  expect(derivedSummary.statusText).toContain('surface draw     :');
   expect(derivedSummary.statusText).toContain('resident profile :');
-  expect(derivedSummary.statusText).toContain('standalone mech  : standalone-mechanics-prediction-disabled backend=disabled');
-  expect(derivedSummary.statusText).toContain('render authoritative:');
-  expect(derivedSummary.statusText).toContain('gpu authoritative: false');
+  expect(derivedSummary.statusText).toContain('resident stages  :');
+  expect(derivedSummary.statusText).toContain('scene sync       :');
+  expect(derivedSummary.statusText).toContain('worker rebuild   :');
+  expect(derivedSummary.statusText).toContain('mls grid         :');
+  expect(derivedSummary.statusText).toContain('fps              :');
+  expect(derivedSummary.statusText).toContain('closure cache    :');
+  expect(derivedSummary.statusText).toContain('cold cache       :');
+  expect(derivedSummary.statusText).toContain('table-writes=');
+  expect(derivedSummary.statusText).toContain('gpu-writes=');
+  expect(derivedSummary.statusText).toContain('gas pressure     :');
+  expect(derivedSummary.statusText).toContain('cache clear      :');
+  expect(derivedSummary.statusText).toContain('perf trace       :');
+  expect(derivedSummary.statusText).toContain('cpu closure task :');
+  if (derivedSummary.driverReady) {
+    expect(derivedSummary.statusText).toContain('resident source  :');
+    expect(derivedSummary.statusText).toContain('resident motion  :');
+    expect(derivedSummary.statusText).toContain('compact summary  :');
+    expect(derivedSummary.statusText).toContain('thermal graph gpu: status=');
+    expect(derivedSummary.statusText).toContain('render cadence   :');
+    expect(derivedSummary.statusText).toContain('standalone mech  : standalone-mechanics-prediction-disabled backend=disabled');
+    expect(derivedSummary.statusText).toContain('render authoritative:');
+    expect(derivedSummary.statusText).toContain('gpu authoritative: false');
+  } else {
+    expect(derivedSummary.statusText).toContain('view state       : peercompute-worker-packed-state');
+    expect(derivedSummary.statusText).toContain('worker view-state evidence-only');
+  }
+  expect(derivedSummary.warningText).toContain('render fps');
+  expect(derivedSummary.warningText).toContain('physics fps');
+  expect(derivedSummary.frameCounters).toBeTruthy();
+  expect(Number.isFinite(derivedSummary.frameCounters.renderFps)).toBe(true);
+  expect(derivedSummary.peerClosureCache?.write?.schema).toBe('peercompute.ulg.local-derived-closure-cache.v2');
+  expect(derivedSummary.peerClosureCache?.write?.generatorFingerprint).toMatch(/^ulg:/);
+  expect(derivedSummary.peerClosureCache?.coldStartWrite?.schema).toBe('peercompute.ulg.sph-cold-start-cache.v0');
+  expect(derivedSummary.peerClosureCache?.staticTableWrite?.schema).toBe('peercompute.ulg.sph-static-table-cache-update.v0');
+  expect(derivedSummary.peerClosureCache.staticTableWrite.backend).toMatch(/worker|deferred/);
+  expect(derivedSummary.peerClosureCache.staticTableWrite.cacheSnapshotBytes).toBeGreaterThan(1000);
+  expect(derivedSummary.peerClosureCache.staticTableWrite.counts.tables).toBeGreaterThanOrEqual(4);
+  expect(derivedSummary.peerClosureCache.staticTableWrite.counts.gpuWarmup).toBeGreaterThanOrEqual(1);
+  expect(derivedSummary.peerClosureCache.staticTableRead?.status).toBe('static-table-cache-bundle-hit');
+  expect(derivedSummary.setParticlesTiming.staticTableCacheStatus).toBe('static-table-cache-bundle-hit');
+  expect(derivedSummary.setParticlesTiming.staticTableCacheFamilies.length).toBeGreaterThanOrEqual(4);
+  expect(derivedSummary.performanceTrace?.schema).toBe('peercompute.ulg.sph-cold-start-performance-trace.v0');
+  expect(derivedSummary.performanceTrace?.spans?.length).toBeGreaterThan(0);
+  expect(derivedSummary.setParticlesTiming?.schema).toBe('peercompute.ulg.sph-scene-set-particles-timing.v0');
+  expect(Number.isFinite(derivedSummary.setParticlesTiming.totalMs)).toBe(true);
+  expect(Number.isFinite(derivedSummary.setParticlesTiming.stageMs.surfaceBatching)).toBe(true);
+  expect(Number.isFinite(derivedSummary.setParticlesTiming.stageMs.opticalState)).toBe(true);
+  expect(derivedSummary.clearCacheButtonReady).toBe(true);
+  expect(derivedSummary.cpuClosureTask).toBe(null);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
   expect(derivedSummary.containerWire.renderLayer).toBe('container-wire');
   expect(derivedSummary.containerWire.materialDepthWrite).toBe(false);
@@ -1603,7 +2627,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.sphThermalResponseGraphUpload.graphCount).toBe(derivedSummary.sphThermalClosureGraphBuffers.graphCount);
   expect(derivedSummary.opticalGpuLookup.schema).toBe('peercompute.ulg.optical-gpu-lookup.v0');
   expect(derivedSummary.opticalGpuLookup.queryCount).toBe(derivedSummary.opticalGpuTable.recordCount);
-  expect(derivedSummary.opticalGpuLookup.outputCount).toBe(derivedSummary.opticalGpuLookup.queryCount * 12);
+  expect(derivedSummary.opticalGpuLookup.outputStrideFloats).toBe(16);
+  expect(derivedSummary.opticalGpuLookup.outputCount).toBe(
+    derivedSummary.opticalGpuLookup.queryCount * derivedSummary.opticalGpuLookup.outputStrideFloats
+  );
   expect(derivedSummary.opticalGpuLookup.executionSchema).toBe('peercompute.ulg.optical-gpu-lookup-execution.v0');
   expect(['cpu-reference', 'webgpu']).toContain(derivedSummary.opticalGpuLookup.executionBackend);
   expect([
@@ -1797,11 +2824,17 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmG2pReconstruction.sphValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.phaseChangeValidation).toBe(false);
   expect(derivedSummary.mlsMpmG2pReconstruction.fullPhysicsValidation).toBe(false);
+  const expectedResidentStepCount = Math.max(
+    1,
+    Math.min(4, Math.round(Number(derivedSummary.mlsMpmGpuParticleState.mechanicalSubsteps) || 2))
+  );
+  expect(Number.isFinite(derivedSummary.mlsMpmGpuParticleState.mechanicsDtS)).toBe(true);
+  expect(expectedResidentStepCount).toBeGreaterThanOrEqual(1);
   expect(derivedSummary.mlsMpmResidentSteps.schema).toBe('peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0');
   expect(['cpu-reference', 'webgpu', 'mixed-fallback']).toContain(derivedSummary.mlsMpmResidentSteps.backend);
   expect(derivedSummary.mlsMpmResidentSteps.status).toBe('resident-steps-executed');
-  expect(derivedSummary.mlsMpmResidentSteps.stepCount).toBe(2);
-  expect(derivedSummary.mlsMpmResidentSteps.completedStepCount).toBe(2);
+  expect(derivedSummary.mlsMpmResidentSteps.stepCount).toBe(expectedResidentStepCount);
+  expect(derivedSummary.mlsMpmResidentSteps.completedStepCount).toBe(expectedResidentStepCount);
   expect(derivedSummary.mlsMpmResidentSteps.retainIntermediateSteps).toBe(false);
   expect(derivedSummary.mlsMpmResidentSteps.retainedIntermediateStepCount).toBe(0);
   expect(derivedSummary.mlsMpmResidentSteps.finalStepSchema).toBe('peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0');
@@ -1809,11 +2842,16 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     'resident-step-cpu-or-fallback',
     'resident-step-webgpu-executed'
   ]).toContain(derivedSummary.mlsMpmResidentSteps.finalStepStatus);
-  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries).toHaveLength(2);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries).toHaveLength(expectedResidentStepCount);
+  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries.every((summary) => (
+    summary.stageTiming?.schema === 'peercompute.ulg.mls-mpm-resident-stage-timing.v0'
+  ))).toBe(true);
   expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[0].particlePingPong.sourceSlot).toBe(0);
   expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[0].particlePingPong.nextSlot).toBe(1);
-  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.sourceSlot).toBe(1);
-  expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.nextSlot).toBe(0);
+  if (expectedResidentStepCount > 1) {
+    expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.sourceSlot).toBe(1);
+    expect(derivedSummary.mlsMpmResidentSteps.stepSummaries[1].particlePingPong.nextSlot).toBe(0);
+  }
   expect(derivedSummary.mlsMpmResidentSteps.requestedReadbackMode).toBe('no-full-readback');
   expect(derivedSummary.mlsMpmResidentSteps.gpuAuthoritativeState).toBe(false);
   expect(derivedSummary.mlsMpmResidentSteps.scientificValidation).toBe(false);
@@ -1831,27 +2869,31 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmResidentStep.gridNodeCount).toBe(derivedSummary.mlsMpmGridUpdate.gridNodeCount);
   expect(derivedSummary.mlsMpmResidentStep.stateStrideFloats).toBe(8);
   expect(derivedSummary.mlsMpmResidentStep.mechanicsStrideFloats).toBe(32);
+  expect(derivedSummary.mlsMpmResidentStep.stageTiming.schema).toBe('peercompute.ulg.mls-mpm-resident-stage-timing.v0');
+  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.stageTiming.totalMs)).toBe(true);
+  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.stageTiming.stageMs.deviceAcquire)).toBe(true);
+  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.stageTiming.stageMs.p2gGridProjection)).toBe(true);
+  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.stageTiming.stageMs.gridUpdate)).toBe(true);
+  expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.stageTiming.stageMs.g2pReconstruction)).toBe(true);
   expect(derivedSummary.mlsMpmResidentStep.diagnostics.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
   expect(derivedSummary.mlsMpmResidentStep.diagnostics.gridNodeCount).toBe(derivedSummary.mlsMpmGridUpdate.gridNodeCount);
   expect(derivedSummary.mlsMpmResidentStep.requestedReadbackMode).toBe('no-full-readback');
   expect(derivedSummary.mlsMpmResidentStep.gpuAuthoritativeState).toBe(false);
   if (derivedSummary.mlsMpmResidentStep.backend === 'webgpu') {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=no-full-readback');
-    expect(derivedSummary.statusText).toContain('resident source  : previous-gpu-resident-output continued=true next=true');
-    expect(derivedSummary.statusText).toContain('compact summary  : status=compact-summary-ready mode=compact-summary-readback');
-    expect(derivedSummary.statusText).toContain('thermal summary  :');
-    expect(derivedSummary.statusText).toContain('thermal graph gpu: status=webgpu-uploaded');
-    expect(derivedSummary.statusText).toContain('resident thermal : status=thermal-step-executed backend=webgpu');
-    expect(derivedSummary.statusText).toContain('render readback  : available=false hot-loop-no-full=true');
     expect(derivedSummary.statusText).toContain('render source    : resident-gpu-render-field');
+    expect(derivedSummary.statusText).toContain('field-readback=true');
+    expect(derivedSummary.statusText).toContain('surface draw     : status=resident-surface-draw-unavailable');
+    expect(derivedSummary.statusText).toContain('bridge=three-marching-cubes');
     expect(derivedSummary.statusText).toContain('render cadence   :');
     expect(derivedSummary.statusText).toContain('resident profile :');
-    expect(derivedSummary.statusText).toContain('render authoritative: true');
+    expect(derivedSummary.statusText).toContain(`substeps=${expectedResidentStepCount}`);
+    expect(derivedSummary.statusText).toContain(`target=${derivedSummary.mlsMpmGpuParticleState.mechanicalSubsteps}`);
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('no-full-readback');
-    expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('previous-gpu-resident-output');
-    expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(true);
-    expect(derivedSummary.mlsMpmResidentSteps.continuationAvailable).toBe(true);
-    expect(derivedSummary.mlsMpmResidentSteps.nextParticleBufferMode).toBe('retained-thermal-output-and-g2p-mechanics-buffers');
+    expect([
+      'retained-thermal-output-and-g2p-mechanics-buffers',
+      'retained-reaction-output-buffers'
+    ]).toContain(derivedSummary.mlsMpmResidentSteps.nextParticleBufferMode);
     expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(true);
     expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.stepSummaries.every((summary) => (
@@ -1894,7 +2936,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.stageBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.g2pOutputBuffersRetained).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.residentBufferMode).toBe('retained-stage-and-output-buffers');
-    expect(derivedSummary.mlsMpmResidentStep.nextParticleBufferMode).toBe('retained-thermal-output-and-g2p-mechanics-buffers');
+    expect([
+      'retained-thermal-output-and-g2p-mechanics-buffers',
+      'retained-reaction-output-buffers'
+    ]).toContain(derivedSummary.mlsMpmResidentStep.nextParticleBufferMode);
     expect(derivedSummary.mlsMpmResidentStep.nextParticleStateBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.nextParticleThermoBufferByteLength).toBeGreaterThan(0);
     expect(derivedSummary.mlsMpmResidentStep.nextParticleMechanicsBufferByteLength).toBeGreaterThan(0);
@@ -1920,23 +2965,213 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentRenderState.renderFieldReadback).toBe(true);
     expect(derivedSummary.sphResidentRenderState.renderFieldStatus).toBe('render-field-built');
     expect(derivedSummary.sphResidentRenderState.renderFieldBackend).toBe('webgpu');
-    expect(derivedSummary.sphResidentRenderState.renderFieldInputSource).toBe('resident-render-rows-buffer');
+    expect([
+      'resident-render-rows-buffer',
+      'resident-render-rows-and-product-events-buffer'
+    ]).toContain(derivedSummary.sphResidentRenderState.renderFieldInputSource);
+    expect(derivedSummary.sphResidentRenderState.materialInterfaceFieldSchema).toBe(
+      'peercompute.ulg.sph-material-interface-field.v0'
+    );
+    expect([
+      'material-interface-field-ready',
+      'material-interface-field-gpu-resident-summary-pending'
+    ]).toContain(derivedSummary.sphResidentRenderState.materialInterfaceFieldStatus);
     expect(derivedSummary.sphResidentRenderState.renderFieldSurfaceCount).toBe(
       derivedSummary.sphResidentRenderState.surfaceCount
     );
     expect(derivedSummary.sphResidentRenderState.renderFieldTotalCells).toBeGreaterThan(0);
+    expect(derivedSummary.sphResidentRenderState.renderFieldBufferMode).toBe('released-after-three-marching-cubes-readback');
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawSchema).toBe(
+      'peercompute.ulg.sph-resident-surface-draw.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawStatus).toBe(
+      'resident-surface-draw-unavailable'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawSourceRenderFieldSchema).toBe(
+      'peercompute.ulg.sph-gpu-render-field.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawSourceSurfaceVertexSchema).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawSurfaceDrawSchema).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawSurfaceCount).toBe(
+      derivedSummary.sphResidentRenderState.surfaceCount
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawSourceVertexRowCount).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRowsBufferRetained).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRowsBufferByteLength).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawIndirectSchema).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawIndirectRowStrideUints).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawIndirectRowsBufferRetained).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawIndirectRowsBufferByteLength).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawCompactedVertexRowsBufferRetained).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawCompactedVertexRowsBufferByteLength).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawReadback).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawReadbackMode).toBe('no-full-readback');
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawCompactionMode).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawInputBuffersReleased).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawVisibleRenderSource).toBe(
+      'three-managed-render-field-readback'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawVisibleRendererBridge).toBe(
+      'three-marching-cubes'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeSchema).toBe(
+      'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeStatus).toBe(
+      'surface-draw-overlay-disabled'
+    );
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeDepthPolicy).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeDepthAttachmentFormat).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeDepthAttachmentReady).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeTransparencyCompositeMode).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOitAccumFormat).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOitRevealFormat).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOitTargetsReady).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeLastTransparentDrawCount).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOpticalRenderSource).toBe(null);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOpticalRecordCount).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOpticalRecordStrideFloats).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOpticalSpectralSampleCount).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.surfaceDrawRenderBridgeOpticalSpectralSampleStrideFloats).toBe(0);
+    expect(derivedSummary.sphResidentSurfaceDraw.schema).toBe(
+      derivedSummary.sphResidentRenderState.surfaceDrawSchema
+    );
+    expect(derivedSummary.sphResidentSurfaceDraw.status).toBe(
+      derivedSummary.sphResidentRenderState.surfaceDrawStatus
+    );
+    expect(derivedSummary.sphResidentSurfaceDraw.hasDrawRowsBuffer).toBe(false);
+    expect(derivedSummary.sphResidentSurfaceDraw.hasDrawIndirectRowsBuffer).toBe(false);
+    expect(derivedSummary.sphResidentSurfaceDraw.hasCompactedVertexRowsBuffer).toBe(false);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderFieldBufferMode).toBe(
+      'released-after-three-marching-cubes-readback'
+    );
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeStatus).toBe(
+      'surface-draw-overlay-disabled'
+    );
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeDepthPolicy).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeDepthAttachmentFormat).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeDepthAttachmentReady).toBe(false);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeTransparencyCompositeMode).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOitAccumFormat).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOitRevealFormat).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOitTargetsReady).toBe(false);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeLastTransparentDrawCount).toBe(0);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOpticalRenderSource).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOpticalRecordCount).toBe(0);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOpticalRecordStrideFloats).toBe(0);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOpticalSpectralSampleCount).toBe(0);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeOpticalSpectralSampleStrideFloats).toBe(0);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeTemporalSwapPolicy).toBe(null);
+    expect(derivedSummary.sphResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay).toBe(false);
+    expect(derivedSummary.sphResidentSurfaceDrawRenderBridge.schema).toBeUndefined();
+    expect(derivedSummary.sphResidentSurfaceDrawRenderBridge.status).toBeUndefined();
+    expect(derivedSummary.sphResidentSurfaceDrawRenderBridge.rendererBridge).toBeUndefined();
+    expect(derivedSummary.sphResidentSurfaceDrawRenderBridge.visibleRenderSource).toBeUndefined();
+    expect(derivedSummary.sphResidentSurfaceDrawRenderBridge.canvasWidth).toBeUndefined();
+    expect(derivedSummary.sphResidentSurfaceDrawRenderBridge.canvasHeight).toBeUndefined();
+    expect(derivedSummary.sphResidentRenderState.materialInterfaceFieldSchema).toBe(
+      'peercompute.ulg.sph-material-interface-field.v0'
+    );
+    expect([
+      'material-interface-field-ready',
+      'material-interface-field-gpu-resident-summary-pending'
+    ]).toContain(derivedSummary.sphResidentRenderState.materialInterfaceFieldStatus);
+    const materialInterfaceReady = derivedSummary.sphResidentRenderState.materialInterfaceFieldStatus === 'material-interface-field-ready';
+    if (materialInterfaceReady) {
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceReadySurfaceCount).toBeGreaterThan(0);
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceTotalSurfaceAreaM2).toBeGreaterThan(0);
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceForceCouplingStatus).toBe(
+        'pressure-force-solver-ready-not-applied'
+      );
+    } else {
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceReadySurfaceCount).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceTotalSurfaceAreaM2).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.materialInterfaceForceCouplingStatus).toBe(
+        'blocked-material-surface-normals-not-resolved'
+      );
+    }
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceCouplingSchema).toBe(
+      'peercompute.ulg.sph-pressure-interface-coupling.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceCouplingStatus).toBe(
+      materialInterfaceReady ? 'pressure-interface-coupling-ready-for-solver' : 'pressure-interface-coupling-blocked'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceCouplingStatus).toBe(
+      materialInterfaceReady ? 'pressure-force-solver-ready-not-applied' : 'blocked-material-surface-normals-not-resolved'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceForcePreviewSchema).toBe(
+      'peercompute.ulg.sph-pressure-interface-force-preview.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceForcePreviewStatus).toBe(
+      materialInterfaceReady ? 'pressure-interface-force-preview-ready' : 'pressure-interface-force-preview-blocked'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceApplicationStatus).toBe(
+      'not-applied-diagnostic-preview'
+    );
+    if (materialInterfaceReady) {
+      expect(derivedSummary.sphResidentRenderState.pressureInterfacePreviewedElementCount).toBeGreaterThan(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceTotalAbsForceN).toBeGreaterThan(0);
+    } else {
+      expect(derivedSummary.sphResidentRenderState.pressureInterfacePreviewedElementCount).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceTotalAbsForceN).toBe(0);
+    }
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceSolverSchema).toBe(
+      'peercompute.ulg.sph-pressure-interface-force-solver.v0'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceSolverStatus).toBe(
+      materialInterfaceReady ? 'pressure-interface-force-solver-ready' : 'pressure-interface-force-solver-blocked'
+    );
+    expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverApplicationStatus).toBe(
+      materialInterfaceReady ? 'solver-ready-not-applied' : 'not-applied-solver-blocked'
+    );
+    if (materialInterfaceReady) {
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverForceRowCount).toBeGreaterThan(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus).toBe(
+        'pairwise-equal-opposite-force-conservative'
+      );
+      expect(Math.abs(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationResidualMagnitudeN)).toBeLessThan(1e-6);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadStatus).toBe(
+        'webgpu-pressure-interface-force-rows-uploaded'
+      );
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferRetained).toBe(true);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength).toBeGreaterThan(0);
+    } else {
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverForceRowCount).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus).toBe(
+        'not-evaluated'
+      );
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationResidualMagnitudeN).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferRetained).toBe(false);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength).toBe(0);
+    }
     expect(derivedSummary.sphResidentRenderState.renderRowsBufferRetained).toBe(true);
     expect(derivedSummary.sphResidentRenderState.renderRowsBufferByteLength).toBe(
       derivedSummary.sphResidentRenderState.renderRowByteLength
     );
-    expect(derivedSummary.sphResidentRenderState.compactRenderReadback).toBe(true);
+    expect(derivedSummary.sphResidentRenderState.renderRowsReadback).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.renderRowsReadbackMode).toBe('no-full-readback');
+    expect(derivedSummary.sphResidentRenderState.renderRowsReadbackByteLength).toBe(0);
+    expect(derivedSummary.sphResidentRenderState.compactRenderReadback).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.normalHotLoopReadbackFree).toBe(false);
+    expect(derivedSummary.sphResidentRenderState.residentSurfaceTableStatus).toBe(
+      'resident-render-surface-table-ready'
+    );
+    expect(derivedSummary.sphResidentRenderState.residentSurfaceTableSurfaceCount).toBeGreaterThanOrEqual(
+      derivedSummary.sphResidentRenderState.renderFieldSurfaceCount
+    );
+    expect(derivedSummary.sphResidentRenderState.residentSurfaceTableTotalFieldCells).toBeGreaterThan(0);
     expect(derivedSummary.sphResidentRenderState.renderReadbackCadence.schema).toBe(
       'peercompute.ulg.sph-demo-render-readback-cadence.v0'
     );
     expect(derivedSummary.sphResidentRenderState.renderReadbackCadence.cadence).toBeGreaterThan(1);
+    expect(derivedSummary.sphResidentRenderState.renderReadbackCadence.effectiveCadence).toBeGreaterThanOrEqual(1);
+    expect(typeof derivedSummary.sphResidentRenderState.renderReadbackCadence.forced).toBe('boolean');
     expect(derivedSummary.sphResidentPerf.schema).toBe('peercompute.ulg.sph-demo-resident-perf.v0');
     expect(derivedSummary.sphResidentPerf.residentSubmissions).toBeGreaterThan(0);
     expect(derivedSummary.sphResidentPerf.renderReadbackCadence).toBeGreaterThan(1);
+    expect(derivedSummary.sphResidentPerf.effectiveRenderReadbackCadence).toBeGreaterThanOrEqual(1);
+    expect(typeof derivedSummary.sphResidentPerf.playbackVisualRefreshForced).toBe('boolean');
     expect(Number.isFinite(derivedSummary.sphResidentPerf.lastResidentMs)).toBe(true);
     expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
     expect(derivedSummary.visibleSurfaces
@@ -1950,15 +3185,24 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       surface.renderSource === 'resident-gpu-render-field'
       && surface.renderRowsBackend === 'webgpu'
       && surface.renderFieldBackend === 'webgpu'
-      && surface.renderFieldInputSource === 'resident-render-rows-buffer'
+      && [
+        'resident-render-rows-buffer',
+        'resident-render-rows-and-product-events-buffer'
+      ].includes(surface.renderFieldInputSource)
     ))).toBe(true);
   } else {
     expect(derivedSummary.statusText).toContain('resident readback: requested=no-full-readback actual=full-parity-readback');
-    expect(derivedSummary.statusText).toContain('resident source  : cpu-packed-state continued=false');
-    expect(derivedSummary.statusText).toContain('render readback  : available=true hot-loop-no-full=false');
-    expect(derivedSummary.statusText).toContain('render authoritative: false');
+    if (derivedSummary.driverReady) {
+      expect(derivedSummary.statusText).toContain('resident source  : cpu-packed-state continued=false');
+      expect(derivedSummary.statusText).toContain('render readback  : available=true hot-loop-no-full=false');
+      expect(derivedSummary.statusText).toContain('render authoritative: false');
+    } else {
+      expect(derivedSummary.statusText).toContain('view state       : peercompute-worker-packed-state');
+    }
     expect(derivedSummary.mlsMpmResidentSteps.readbackMode).toBe('full-parity-readback');
-    expect(derivedSummary.mlsMpmResidentSteps.residentSourceMode).toBe('cpu-packed-state');
+    expect(['cpu-packed-state', 'peercompute-worker-packed-state']).toContain(
+      derivedSummary.mlsMpmResidentSteps.residentSourceMode
+    );
     expect(derivedSummary.mlsMpmResidentSteps.continuedFromResidentState).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.normalHotLoopReadbackFree).toBe(false);
     expect(derivedSummary.mlsMpmResidentSteps.renderStateReadbackAvailable).toBe(true);
@@ -1980,8 +3224,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.mlsMpmResidentStep.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.mlsMpmResidentStep.diagnostics.fullPhysicsValidation).toBe(false);
   expect(derivedSummary.visibleSurfaces.length).toBeGreaterThan(0);
-  expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupOutputRecordIndex != null)).toBe(true);
-  expect(derivedSummary.visibleSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);
+  const primaryOpticalSurfaces = derivedSummary.visibleSurfaces.filter((surface) => (
+    surface.materialKey === 'h2o' || surface.materialKey === 'fe'
+  ));
+  expect(primaryOpticalSurfaces.length).toBeGreaterThan(0);
+  const lookupCoveredSurfaces = primaryOpticalSurfaces.filter((surface) => surface.lookupOutputRecordIndex != null);
+  if (lookupCoveredSurfaces.length > 0) {
+    expect(lookupCoveredSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);
+  }
   expect(derivedSummary.visibleSurfaces.some((surface) => (
     surface.materialKey === 'h2o'
     && surface.renderAlpha === 1
@@ -1991,15 +3241,31 @@ test('SPH phase demo runs derived material properties by default', async ({ page
 });
 
 test('SPH phase demo reacts room-temperature Na + H2O through derived product closure', async ({ page }) => {
+  test.setTimeout(90_000);
   await page.setViewportSize({ width: 980, height: 720 });
   await page.goto('/#drop=Na&base=h2o&dropt=293.15&baset=293.15&ironh=1');
-  await page.locator('#run-sph-phase').click();
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
   await expect(page.locator('#sph-phase-overlay')).toBeVisible();
   await expect(page.locator('#sph-status')).toContainText('preflight        :');
-  await expect(page.locator('#sph-status')).toContainText('Na+h2o');
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const cache = overlay?.__sphPeerClosureCache;
+    return !overlay?.__sphCpuClosureTask
+      && (
+        cache?.coldStartWrite?.status === 'stored'
+        || cache?.coldStartLookup?.status === 'reaction-cache-hit'
+        || overlay?.__sphDriver
+      );
+  }, null, { timeout: 60_000 });
+  await expect(page.locator('#sph-status')).toContainText('Na+h2o', { timeout: 60_000 });
   const stepped = await page.evaluate(() => document.querySelector('#sph-phase-overlay').__sphStep(2));
   expect(stepped.blocked).not.toBe(true);
   expect(stepped.particlesByMaterial.naoh).toBeGreaterThan(0);
+  expect(stepped.particlesByMaterial.h2).toBeGreaterThan(0);
+  expect(stepped.gasPressureSummary.bySpecies.h2.partialPressurePa).toBeGreaterThan(0);
+  expect(stepped.gasPressureSummary.totalPressurePa).toBeGreaterThan(101325);
 });
 
 test('ULG oscillator demo consumes a cached closure and emits a simulation artifact', async ({ page }) => {

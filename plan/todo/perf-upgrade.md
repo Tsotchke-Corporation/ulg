@@ -111,6 +111,184 @@ All frame-loop simulation layers should communicate through WebGPU buffers:
 The CPU should bind these resources and dispatch kernels. It should not inspect
 or transform them per particle each frame.
 
+## UI Nonblocking Worker Target
+
+CPU-heavy work that remains before full GPU residency must not run on the UI
+thread. Until the WebGPU closure/runtime path is authoritative, the browser demo
+must push expensive rebuild-time and validation-time work into workers:
+
+- material closure derivation,
+- optical closure table construction,
+- reaction discovery and candidate ranking,
+- thermal closure graph/table construction,
+- initial SPH/MLS-MPM particle packing,
+- optional CPU parity/reference runs,
+- full-field CPU render fallbacks.
+
+The preferred control-plane shape is PeerCompute-compatible: the UI submits a
+typed job to a local CPU/WASM compute worker, receives progress/status records,
+and applies only the final compact result on the main thread. If a task is still
+running on the CPU main thread, the demo must visibly say so instead of silently
+locking the UI.
+
+The live SPH overlay should also show two counters:
+
+- **Render FPS**: normal `requestAnimationFrame` presentation cadence.
+- **Physics FPS**: accepted simulation/resident-step cadence. This may differ
+  from render FPS once physics and rendering are decoupled.
+
+These counters are diagnostics, not validation. They make it obvious whether the
+renderer is smooth while physics is slow, or whether closure/rebuild work is
+blocking both.
+
+## PeerCompute Local Closure Cache
+
+Derived closures and compact closure-derived tables should be cached in the
+PeerCompute state representation and mirrored to browser `localStorage` when the
+demo is running locally. This lets later peers and browser reloads benefit from
+existing derived values instead of recomputing them.
+
+Cache records must be content/provenance keyed, not material-name-only:
+
+- material or formula key,
+- closure family and schema version,
+- derivation method/version,
+- input hash / formula / atom counts / phase model,
+- validity-domain hash,
+- source commit/runtime ABI where available,
+- validation flags and blockers.
+
+The runtime may reuse cached values only when the key, schema, validity domain,
+and provenance guard match. Cache hits should still be surfaced in diagnostics
+as `peercompute-local-cache-hit`; stale or mismatched values should be ignored
+and recomputed through the lower-level chain. This cache is a performance layer,
+not a source of truth; every cached material, optical, thermal, or reaction
+closure remains derived and provenance-checked.
+
+Implemented browser-local cache guard:
+
+- The SPH overlay stores v2 records under
+  `peercompute.ulg.sph-derived-closure-cache.v1` so browser reloads can build a
+  local material-closure library.
+- Each record carries `inputHash`, `methodHash`, `validityDomainHash`,
+  `propertiesHash`, and a `generatorFingerprint`.
+- The generator fingerprint is derived from the material-closure method version,
+  app version, module URL/build chunk identity, and source strings for the
+  material derivation/generator functions. Production hashed bundles therefore
+  invalidate when the generating code bundle changes; dev builds invalidate when
+  the participating function sources change.
+- Lookup rejects records with schema, method-version, generator-fingerprint,
+  material-key, guard-hash, or properties-hash mismatches and reports them as
+  stale instead of consuming them.
+- The top-level cache keeps a material index pointing to hash-keyed records so
+  the local library can grow beyond one record per material while still looking
+  up common demo materials quickly.
+
+## Required Runtime Warnings
+
+The top of the SPH demo must show warning banners when:
+
+- WebGPU is unsupported, unavailable, lost, or falling back to CPU.
+- CPU closure work is active on the main thread or in a CPU/WASM worker.
+- The normal hot loop is not fully GPU-resident.
+
+The warning should identify the active blocker or CPU task where possible, for
+example `reaction discovery`, `material closure derivation`, `optical table`,
+`thermal graph`, `CPU parity`, or `render-field readback`.
+
+## Box/Grid Scaling Fix
+
+Increasing the sealed box size must increase the MLS-MPM simulation domain and
+grid node count at fixed grid spacing. It must not make the rendered material
+isosurface blobs larger.
+
+Required behavior:
+
+- MLS-MPM grid dimensions are derived from `boxDimsM / gridSpacingM`.
+- The status panel reports grid dimensions/node count so box scaling is visible.
+- Continuous isosurface radius is derived from particle spacing,
+  smoothing length, or local occupancy, not from the largest box edge.
+- Render-field resolution may grow with the domain or cap detail explicitly, but
+  it must never hide box scaling by inflating metaballs.
+- Tests compare a fixed particle cloud in small vs large boxes and require
+  stable blob radius plus increased grid node count.
+
+## WebGPU-Ocean Lessons And Marching Cubes
+
+User-provided reference:
+
+- `https://github.com/matsuoka-601/WebGPU-Ocean`
+
+Initial decision:
+
+- Incorporate the relevant WebGPU-Ocean patterns in the hot-loop GPU residency
+  phase, after reaction inventory/residual/pressure/steam contracts are stable
+  enough to define the data that must move through the GPU.
+- Do not move this after cold-start timing polish; the Ocean lessons target the
+  frame-loop performance problem directly.
+- Do not let renderer polish preempt core physics. The renderer work matters
+  when it keeps field generation and surface extraction GPU resident.
+
+Placement update, 2026-06-11 23:12 AKDT:
+
+- Keep the just-finished product-event render-field bridge in Phase 2 because
+  it makes reaction products visible without sparse event readback.
+- Next consume product-event mass in EOS/pressure/field kernels and finish the
+  phase-resolved steam/gas contract.
+- Then bring the WebGPU-Ocean lessons forward into the hot-loop phase before
+  cold-start timing polish: fixed-point/tiled P2G, GPU cell/neighbor structures,
+  and WebGPU marching cubes. This directly targets the live-frame bottleneck
+  instead of optimizing startup around schemas that are still changing.
+
+Placement update, 2026-06-11 23:43 AKDT:
+
+- The first resident product-mass P2G sidecar slice is now complete: product
+  event rows can stay GPU-resident and contribute unplaced product mass to P2G
+  grid mass through a stable storage-buffer binding.
+- Do not treat this as pressure/EOS completion. The next correctness slice must
+  add product mechanics/EOS fields or a GPU gas-cell EOS inventory before
+  pressure forces can be validated.
+- The WebGPU-Ocean lessons should come immediately after that resident
+  product-pressure contract: keep P2G/grid/surface fields GPU-resident, add
+  fixed-point or tiled accumulation where browser atomics require it, and move
+  continuous surface extraction to WebGPU marching cubes instead of CPU mesh
+  extraction.
+
+Placement update, 2026-06-11 23:54 AKDT:
+
+- Product-event rows now carry closure-derived mechanics/EOS metadata and P2G
+  can consume that metadata without CPU readback. This satisfies the immediate
+  "product mechanics fields" prerequisite for resident product-event dynamics.
+- The next correctness/performance bridge is still gas-cell/pressure-gradient
+  force coupling, then WebGPU-Ocean-style hot-loop residency: GPU cell/neighbor
+  structures, tiled/fixed-point accumulation where required, and WebGPU marching
+  cubes for continuous surfaces.
+
+Applicable patterns to evaluate and implement:
+
+- Fixed-point integer `atomicAdd` accumulation for browser-portable P2G scatter
+  of mass, momentum, and stress rows where the current deterministic gather path
+  is too slow.
+- GPU-side grid, cell, sort/prefix, and neighbor structures so SPH/MLS-MPM
+  local interactions do not depend on CPU pair loops.
+- A GPU-resident surface path. Screen-space fluid rendering is useful for
+  transparent liquids and vapor/droplet visualization, while WebGPU marching
+  cubes is the required todo for continuous PBR material volumes.
+
+WebGPU marching-cubes todo:
+
+- Build a scalar field or signed-density field from resident SPH/MLS-MPM rows
+  into a 3D WebGPU storage texture/buffer.
+- Classify voxels and generate case ids on GPU.
+- Prefix-sum active voxel triangle counts.
+- Emit triangle vertices, normals, material ids, phase ids, optical state ids,
+  and draw-indirect metadata into GPU buffers.
+- Bind the generated surface buffers to Three.js/WebGPU or a native WebGPU draw
+  path without CPU mesh extraction.
+- Preserve transparent-material depth ordering and z-buffer behavior for water,
+  steam droplets, glass container walls, and embedded/overlapping materials.
+- Keep CPU extraction only as a debug/parity fallback.
+
 ## Current Optical/PBR Checkpoint
 
 As of 2026-06-10 22:36 AKDT, the optical/PBR chain has its first GPU-facing

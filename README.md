@@ -21,6 +21,12 @@ This repo currently implements the first executable slice:
 - Phase 3A carrier topology primitives: normalized particle state, deterministic spatial hashes, radius-limited neighbor pairs, and closure-sampled edge messages with antisymmetric force checks for future field/material/EOS operators, without claiming SPH or phase-change validation;
 - Phase 3A field observers over neighbor graphs with compact-support scalar smoothing summaries for future material/EOS closure inputs, still without claiming an SPH solver or phase-change validation;
 - Phase 3A field-closure sample descriptors over observed scalar fields for future closure-field interpolation, without claiming material, EOS, SPH, or phase-change validation;
+- an SPH Phase overlay that starts first-principles material/reaction/view-state
+  rebuilds in the supervised `ulg-runtime` worker when available, persists
+  derived material plus reaction/product cold-start records in browser storage,
+  exposes cache/timing diagnostics and a scoped `Clear Cache` control, and
+  warns when CPU-backed derivation is dragging FPS instead of silently hiding
+  the stall;
 - a direct browser handoff launcher that opens PeerCompute Multiscale and reports scenario/readiness ack status;
 - a three.js worker-tree visualization.
 
@@ -41,6 +47,10 @@ The Vite demo exports `window.__ulgDemo` for smoke tests and browser inspection.
 `window.__ulgDemo.createPeerComputeHandoff()` exports the current artifact cache
 as `peercompute.ulg.demo-handoff.v0` packets for PeerCompute/Multiscale
 ingestion.
+Use the `SPH Phase` button for the two-material SPH/MLS-MPM evidence slice. The
+overlay reports separate render, physics, and resident FPS; warns when WebGPU or
+closure work falls back to CPU; and includes `Clear Cache` for ULG SPH
+localStorage cache families only.
 `window.__ulgDemo.runOscillatorDemo()` stores a toy harmonic table closure in
 the `ClosureRegistry`, resolves it in range, submits a supervised
 `simulation.step` task to `ulg-runtime`, requests WebGPU with CPU-reference

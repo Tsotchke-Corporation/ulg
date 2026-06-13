@@ -460,25 +460,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var out0 = vec4<f32>(0.0, 0.0, 0.0, 0.0);
   var out1 = vec4<f32>(0.0, 0.0, 0.0, 1.0);
   var out2 = vec4<f32>(0.0, 0.0, 255.0, -1.0);
+  var out3 = vec4<f32>(0.0, 0.0, 0.0, query.z);
 
   for (var record_index = 0u; record_index < optical_params.record_count; record_index = record_index + 1u) {
     let row0 = record_row(record_index, 0u);
-    if (row0.x == query.x && row0.y == query.y) {
+    let row5 = record_row(record_index, 5u);
+    if (row0.x == query.x && row0.y == query.y && row5.w == query.z) {
       let row1 = record_row(record_index, 1u);
       let row2 = record_row(record_index, 2u);
       let row4 = record_row(record_index, 4u);
-      let row5 = record_row(record_index, 5u);
       matched_index = f32(record_index);
       out0 = vec4<f32>(row1.x, row1.y, row1.z, row2.z);
       out1 = vec4<f32>(row1.w, row2.x, row2.y, row2.w);
       out2 = vec4<f32>(row4.z, row4.w, row5.z, matched_index);
+      out3 = vec4<f32>(row5.x, row4.y, row4.x, row5.w);
       break;
     }
   }
 
-  optical_outputs[query_index * 3u] = out0;
-  optical_outputs[query_index * 3u + 1u] = out1;
-  optical_outputs[query_index * 3u + 2u] = out2;
+  optical_outputs[query_index * 4u] = out0;
+  optical_outputs[query_index * 4u + 1u] = out1;
+  optical_outputs[query_index * 4u + 2u] = out2;
+  optical_outputs[query_index * 4u + 3u] = out3;
 }
 `;
 
@@ -737,8 +740,12 @@ struct ReactionParams {
   material_count: u32,
   response_count: u32,
   reset_mechanics: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
   _pad0: u32,
   _pad1: u32,
+  _pad2: u32,
 };
 
 struct ThermalRows {
@@ -758,38 +765,58 @@ struct ProductMechanics {
   status: f32,
 };
 
-@group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
+struct ReactantTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  status: f32,
+};
+
+struct ProductTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  routing_id: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> particle_records: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_sph_state: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> unpack_mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> source_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> phase_response_records: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> phase_responses: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> proposals: array<vec4<f32>>;
-@group(0) @binding(8) var<storage, read_write> out_sph_state: array<vec4<f32>>;
-@group(0) @binding(9) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
-@group(0) @binding(10) var<storage, read_write> out_mls_mechanics: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read_write> out_particle_records: array<vec4<f32>>;
+@group(0) @binding(9) var<storage, read_write> unpack_sph_state: array<vec4<f32>>;
+@group(0) @binding(10) var<storage, read_write> unpack_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(11) var<uniform> params: ReactionParams;
 @group(0) @binding(12) var<storage, read> thermal_graph_nodes: array<vec4<f32>>;
 @group(0) @binding(13) var<storage, read> thermal_graph_samples: array<vec4<f32>>;
+@group(0) @binding(14) var<storage, read_write> pack_particle_records: array<vec4<f32>>;
+@group(0) @binding(15) var<storage, read> source_mls_mechanics: array<vec4<f32>>;
+
+const REACTION_PARTICLE_RECORD_VEC4S: u32 = 13u;
 
 fn state_pos_mass(index: u32) -> vec4<f32> {
-  return sph_state[index * 2u];
+  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S];
 }
 
 fn state_vel_u(index: u32) -> vec4<f32> {
-  return sph_state[index * 2u + 1u];
+  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 1u];
 }
 
 fn thermo_row0(index: u32) -> vec4<f32> {
-  return sph_thermo[index * 3u];
+  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 2u];
 }
 
 fn thermo_row1(index: u32) -> vec4<f32> {
-  return sph_thermo[index * 3u + 1u];
+  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 3u];
 }
 
 fn thermo_row2(index: u32) -> vec4<f32> {
-  return sph_thermo[index * 3u + 2u];
+  return particle_records[index * REACTION_PARTICLE_RECORD_VEC4S + 4u];
 }
 
 fn reaction_row0(reaction_index: u32) -> vec4<f32> {
@@ -814,6 +841,47 @@ fn product_phase_row1(record_index: u32) -> vec4<f32> {
 
 fn product_phase_row2(record_index: u32) -> vec4<f32> {
   return reaction_records[(params.reaction_count + record_index) * 3u + 2u];
+}
+
+fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u];
+}
+
+fn reaction_header_row1(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 1u];
+}
+
+fn reaction_header_row2(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 2u];
+}
+
+fn product_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u];
+}
+
+fn product_term_row1(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+fn reactant_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u];
+}
+
+fn reactant_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u + 2u];
 }
 
 fn response_row0(response_index: u32) -> vec4<f32> {
@@ -971,14 +1039,22 @@ fn find_product_mechanics(material_id: f32, phase_id: f32) -> ProductMechanics {
 }
 
 fn copy_particle(index: u32) {
-  out_sph_state[index * 2u] = sph_state[index * 2u];
-  out_sph_state[index * 2u + 1u] = sph_state[index * 2u + 1u];
-  out_sph_thermo[index * 3u] = sph_thermo[index * 3u];
-  out_sph_thermo[index * 3u + 1u] = sph_thermo[index * 3u + 1u];
-  out_sph_thermo[index * 3u + 2u] = sph_thermo[index * 3u + 2u];
-  let mechanics_base = index * 8u;
-  for (var row = 0u; row < 8u; row = row + 1u) {
-    out_mls_mechanics[mechanics_base + row] = mls_mechanics[mechanics_base + row];
+  let base = index * REACTION_PARTICLE_RECORD_VEC4S;
+  for (var row = 0u; row < REACTION_PARTICLE_RECORD_VEC4S; row = row + 1u) {
+    out_particle_records[base + row] = particle_records[base + row];
+  }
+}
+
+fn copy_particle_with_mass(index: u32, mass_kg: f32) {
+  copy_particle(index);
+  let base = index * REACTION_PARTICLE_RECORD_VEC4S;
+  let pos_mass = particle_records[base];
+  out_particle_records[base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
+  let rest_density = particle_records[base + 2u].w;
+  if (rest_density > 0.0) {
+    let mechanics_base = base + 5u;
+    let volume_row = out_particle_records[mechanics_base + 4u];
+    out_particle_records[mechanics_base + 4u] = vec4<f32>(volume_row.x, volume_row.y, volume_row.z, max(mass_kg, 0.0) / rest_density);
   }
 }
 
@@ -992,15 +1068,103 @@ fn write_reacted_mechanics(index: u32, mass_kg: f32, resolved: ThermalRows) {
   if (rest_density > 0.0) {
     rest_volume = mass_kg / rest_density;
   }
-  let base = index * 8u;
-  out_mls_mechanics[base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_mls_mechanics[base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_mls_mechanics[base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
-  out_mls_mechanics[base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  out_mls_mechanics[base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
-  out_mls_mechanics[base + 5u] = vec4<f32>(mechanics.solid, mechanics.status, mechanics.bulk, mechanics.shear);
-  out_mls_mechanics[base + 6u] = vec4<f32>(mechanics.lambda, mechanics.sound_speed, mechanics.eos_model, mechanics.status);
-  out_mls_mechanics[base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  let out_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
+  out_particle_records[out_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_particle_records[out_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_particle_records[out_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  out_particle_records[out_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  out_particle_records[out_base + 4u] = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  out_particle_records[out_base + 5u] = vec4<f32>(mechanics.solid, mechanics.status, mechanics.bulk, mechanics.shear);
+  out_particle_records[out_base + 6u] = vec4<f32>(mechanics.lambda, mechanics.sound_speed, mechanics.eos_model, mechanics.status);
+  out_particle_records[out_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+fn write_product_particle(index: u32, material_id: f32, mass_kg: f32, next_u: f32) {
+  let pos_mass = state_pos_mass(index);
+  let vel_u = state_vel_u(index);
+  let source_row2 = thermo_row2(index);
+  let resolved = resolve_thermal_rows(material_id, next_u, source_row2);
+  let out_base = index * REACTION_PARTICLE_RECORD_VEC4S;
+  out_particle_records[out_base] = vec4<f32>(pos_mass.x, pos_mass.y, pos_mass.z, max(mass_kg, 0.0));
+  out_particle_records[out_base + 1u] = vec4<f32>(vel_u.x, vel_u.y, vel_u.z, next_u);
+  out_particle_records[out_base + 2u] = resolved.row0;
+  out_particle_records[out_base + 3u] = resolved.row1;
+  out_particle_records[out_base + 4u] = resolved.row2;
+  if (params.reset_mechanics != 0u) {
+    write_reacted_mechanics(index, max(mass_kg, 0.0), resolved);
+  } else {
+    let mechanics_base = index * REACTION_PARTICLE_RECORD_VEC4S + 5u;
+    for (var row = 0u; row < 8u; row = row + 1u) {
+      out_particle_records[mechanics_base + row] = particle_records[mechanics_base + row];
+    }
+  }
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(max(header0.y, 0.0));
+  let reactant_term_count = u32(max(header0.z, 0.0));
+  for (var local = 0u; local < reactant_term_count; local = local + 1u) {
+    let term_index = reactant_term_offset + local;
+    let term0 = reactant_term_row0(term_index);
+    let term2 = reactant_term_row2(term_index);
+    if (term0.y == material_id && term2.z == 1.0) {
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+    }
+  }
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_term_for_local_slot(reaction_index: u32, local_slot: u32) -> ProductTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_count = u32(max(header1.x, 0.0));
+  if (product_term_count == 0u) {
+    let rx0 = reaction_row0(reaction_index);
+    return ProductTerm(rx0.z, 1.0, 0.0, 0.0, 1.0);
+  }
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let local = min(local_slot, product_term_count - 1u);
+  let term_index = product_term_offset + local;
+  let term0 = product_term_row0(term_index);
+  let term1 = product_term_row1(term_index);
+  return ProductTerm(term0.y, term0.z, term0.w, term1.y, term1.w);
+}
+
+fn product_raw_mass_sum(reaction_index: u32, extent_mol: f32) -> f32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var sum = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      sum = sum + extent_mol * term0.z * term0.w;
+    }
+  }
+  return sum;
+}
+
+@compute @workgroup_size(64)
+fn pack_source(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  let source_state_base = particle_index * 2u;
+  let source_thermo_base = particle_index * 3u;
+  let source_mechanics_base = particle_index * 8u;
+  let out_base = particle_index * REACTION_PARTICLE_RECORD_VEC4S;
+  pack_particle_records[out_base] = source_sph_state[source_state_base];
+  pack_particle_records[out_base + 1u] = source_sph_state[source_state_base + 1u];
+  pack_particle_records[out_base + 2u] = source_sph_thermo[source_thermo_base];
+  pack_particle_records[out_base + 3u] = source_sph_thermo[source_thermo_base + 1u];
+  pack_particle_records[out_base + 4u] = source_sph_thermo[source_thermo_base + 2u];
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    pack_particle_records[out_base + 5u + row] = source_mls_mechanics[source_mechanics_base + row];
+  }
 }
 
 @compute @workgroup_size(64)
@@ -1105,25 +1269,1578 @@ fn resolve(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let reaction_index = u32(proposal.y + 0.5);
   let rx0 = reaction_row0(reaction_index);
   let rx1 = reaction_row1(reaction_index);
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
   let pos_mass = state_pos_mass(particle_index);
+  let partner_pos_mass = state_pos_mass(partner_index);
   let vel_u = state_vel_u(particle_index);
-  let source_row2 = thermo_row2(particle_index);
-  let next_u = vel_u.w - rx1.x;
-  let resolved = resolve_thermal_rows(rx0.z, next_u, source_row2);
+  let partner_vel_u = state_vel_u(partner_index);
+  let self_thermo = thermo_row0(particle_index);
+  let partner_thermo = thermo_row0(partner_index);
+  let product_term_count = u32(max(header1.x, 0.0));
+  let self_term = reactant_term_for_material(reaction_index, self_thermo.x);
+  let partner_term = reactant_term_for_material(reaction_index, partner_thermo.x);
+  let has_stoichiometry = self_term.status == 1.0
+    && partner_term.status == 1.0
+    && self_term.coefficient > 0.0
+    && partner_term.coefficient > 0.0
+    && self_term.molar_mass > 0.0
+    && partner_term.molar_mass > 0.0
+    && product_term_count > 0u;
 
-  out_sph_state[particle_index * 2u] = pos_mass;
-  out_sph_state[particle_index * 2u + 1u] = vec4<f32>(vel_u.x, vel_u.y, vel_u.z, next_u);
-  out_sph_thermo[particle_index * 3u] = resolved.row0;
-  out_sph_thermo[particle_index * 3u + 1u] = resolved.row1;
-  out_sph_thermo[particle_index * 3u + 2u] = resolved.row2;
-  if (params.reset_mechanics != 0u) {
-    write_reacted_mechanics(particle_index, pos_mass.w, resolved);
+  if (!has_stoichiometry) {
+    var legacy_product_material_id = rx0.z;
+    var legacy_next_mass = pos_mass.w;
+    let legacy_next_u = vel_u.w - rx1.x;
+    if (product_term_count > 0u) {
+      let product_term_offset = u32(max(header0.w, 0.0));
+      let slot_index = select(1u, 0u, particle_index < partner_index);
+      let local_term = min(slot_index, product_term_count - 1u);
+      let term_index = product_term_offset + local_term;
+      let term0 = product_term_row0(term_index);
+      let term1 = product_term_row1(term_index);
+      legacy_product_material_id = term0.y;
+      if (product_term_count > 1u) {
+        legacy_next_mass = max((pos_mass.w + partner_pos_mass.w) * term1.x, 0.0);
+      }
+    }
+    write_product_particle(particle_index, legacy_product_material_id, legacy_next_mass, legacy_next_u);
+    return;
+  }
+
+  let self_limiting_extent = pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
+  let partner_limiting_extent = partner_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
+  let extent_mol = min(self_limiting_extent, partner_limiting_extent);
+  let self_consumed = min(pos_mass.w, extent_mol * self_term.coefficient * self_term.molar_mass);
+  let partner_consumed = min(partner_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+  let consumed_mass = self_consumed + partner_consumed;
+  let raw_product_mass = product_raw_mass_sum(reaction_index, extent_mol);
+  if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
+    copy_particle(particle_index);
+    return;
+  }
+
+  let source0_index = min(particle_index, partner_index);
+  let source1_index = max(particle_index, partner_index);
+  let source0_pos_mass = state_pos_mass(source0_index);
+  let source1_pos_mass = state_pos_mass(source1_index);
+  let source0_thermo = thermo_row0(source0_index);
+  let source1_thermo = thermo_row0(source1_index);
+  let source0_term = reactant_term_for_material(reaction_index, source0_thermo.x);
+  let source1_term = reactant_term_for_material(reaction_index, source1_thermo.x);
+  let source0_consumed = min(source0_pos_mass.w, extent_mol * source0_term.coefficient * source0_term.molar_mass);
+  let source1_consumed = min(source1_pos_mass.w, extent_mol * source1_term.coefficient * source1_term.molar_mass);
+  let source0_remaining = max(source0_pos_mass.w - source0_consumed, 0.0);
+  let source1_remaining = max(source1_pos_mass.w - source1_consumed, 0.0);
+  let source0_free = source0_remaining <= max(source0_pos_mass.w, 1.0) * 1.0e-7;
+  let source1_free = source1_remaining <= max(source1_pos_mass.w, 1.0) * 1.0e-7;
+  let product_u = ((self_consumed * vel_u.w) + (partner_consumed * partner_vel_u.w) - rx1.x * consumed_mass) / consumed_mass;
+  let product_mass_scale = consumed_mass / raw_product_mass;
+
+  var emits_product = false;
+  var local_product_slot = 0u;
+  var emitted_product_mass = 0.0;
+  if (product_term_count == 1u) {
+    if (particle_index == source0_index && source0_free) {
+      emits_product = true;
+      emitted_product_mass = select(consumed_mass, source0_consumed, source1_free);
+    }
+    if (particle_index == source1_index && source1_free) {
+      emits_product = true;
+      emitted_product_mass = select(consumed_mass, source1_consumed, source0_free);
+    }
   } else {
-    let mechanics_base = particle_index * 8u;
-    for (var row = 0u; row < 8u; row = row + 1u) {
-      out_mls_mechanics[mechanics_base + row] = mls_mechanics[mechanics_base + row];
+    if (particle_index == source0_index && source0_free) {
+      emits_product = true;
+      local_product_slot = 0u;
+    }
+    if (particle_index == source1_index && source1_free) {
+      emits_product = true;
+      local_product_slot = select(0u, 1u, source0_free);
+    }
+    if (emits_product && local_product_slot < product_term_count) {
+      let product_term = product_term_for_local_slot(reaction_index, local_product_slot);
+      emitted_product_mass = extent_mol * product_term.coefficient * product_term.molar_mass * product_mass_scale;
     }
   }
+
+  if (emits_product) {
+    let product_term = product_term_for_local_slot(reaction_index, local_product_slot);
+    if (product_term.status == 1.0 && product_term.material_id > 0.0 && emitted_product_mass > 0.0) {
+      write_product_particle(particle_index, product_term.material_id, emitted_product_mass, product_u);
+      return;
+    }
+  }
+
+  let self_remaining = max(pos_mass.w - self_consumed, 0.0);
+  copy_particle_with_mass(particle_index, self_remaining);
+}
+
+@compute @workgroup_size(64)
+fn unpack(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+  let base = particle_index * REACTION_PARTICLE_RECORD_VEC4S;
+  unpack_sph_state[particle_index * 2u] = out_particle_records[base];
+  unpack_sph_state[particle_index * 2u + 1u] = out_particle_records[base + 1u];
+  unpack_sph_thermo[particle_index * 3u] = out_particle_records[base + 2u];
+  unpack_sph_thermo[particle_index * 3u + 1u] = out_particle_records[base + 3u];
+  unpack_sph_thermo[particle_index * 3u + 2u] = out_particle_records[base + 4u];
+  let mechanics_base = particle_index * 8u;
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    unpack_mls_mechanics[mechanics_base + row] = out_particle_records[base + 5u + row];
+  }
+}
+`;
+
+export const sphReactionSummaryPartialsWgsl = `
+struct ReactionSummaryParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
+  partial_count: u32,
+  has_proposals: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
+struct ReactantTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  status: f32,
+};
+
+struct ProductMechanics {
+  rest_density: f32,
+  effective_bulk: f32,
+  shear: f32,
+  lambda: f32,
+  sound_speed: f32,
+  eos_model_id: f32,
+  solid_flag: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> next_state: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> next_thermo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> partial_summaries: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: ReactionSummaryParams;
+@group(0) @binding(7) var<storage, read> proposals: array<vec4<f32>>;
+
+var<workgroup> wg_changed_material: array<f32, 64>;
+var<workgroup> wg_changed_mass: array<f32, 64>;
+var<workgroup> wg_visible_product_mass: array<f32, 64>;
+var<workgroup> wg_visible_gas_product_mass: array<f32, 64>;
+var<workgroup> wg_output_gas_phase_mass: array<f32, 64>;
+var<workgroup> wg_source_mass: array<f32, 64>;
+var<workgroup> wg_next_mass: array<f32, 64>;
+var<workgroup> wg_thermal_ready: array<f32, 64>;
+var<workgroup> wg_thermal_problem: array<f32, 64>;
+var<workgroup> wg_finite_temperature: array<f32, 64>;
+var<workgroup> wg_canonical_events: array<f32, 64>;
+var<workgroup> wg_consumed_reactant_mass: array<f32, 64>;
+var<workgroup> wg_expected_product_mass: array<f32, 64>;
+var<workgroup> wg_raw_product_mass: array<f32, 64>;
+var<workgroup> wg_ledger_visible_product_mass: array<f32, 64>;
+var<workgroup> wg_ledger_unplaced_product_mass: array<f32, 64>;
+var<workgroup> wg_ledger_gas_product_mass: array<f32, 64>;
+var<workgroup> wg_ledger_visible_gas_product_mass: array<f32, 64>;
+var<workgroup> wg_ledger_unplaced_gas_product_mass: array<f32, 64>;
+var<workgroup> wg_sealed_box_gas_product_moles: array<f32, 64>;
+var<workgroup> wg_reaction_heat: array<f32, 64>;
+var<workgroup> wg_ledger_mass_residual: array<f32, 64>;
+var<workgroup> wg_ledger_ready_events: array<f32, 64>;
+var<workgroup> wg_ledger_problem_events: array<f32, 64>;
+var<workgroup> wg_mutual_pairs: array<f32, 64>;
+
+fn product_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u];
+}
+
+fn product_term_row1(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+fn reaction_row1(reaction_index: u32) -> vec4<f32> {
+  return reaction_records[reaction_index * 3u + 1u];
+}
+
+fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u];
+}
+
+fn reaction_header_row1(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 1u];
+}
+
+fn reactant_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u];
+}
+
+fn reactant_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u + 2u];
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(max(header0.y, 0.0));
+  let reactant_term_count = u32(max(header0.z, 0.0));
+  for (var local = 0u; local < reactant_term_count; local = local + 1u) {
+    let term_index = reactant_term_offset + local;
+    let term0 = reactant_term_row0(term_index);
+    let term2 = reactant_term_row2(term_index);
+    if (term0.y == material_id && term2.z == 1.0) {
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+    }
+  }
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var sum = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      sum = sum + extent_mol * term0.z * term0.w;
+    }
+  }
+  return sum;
+}
+
+fn product_term_material_match(reaction_index: u32, material_id: f32) -> bool {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.y == material_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn gas_product_term_material_match(reaction_index: u32, material_id: f32) -> bool {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term1.y == 1.0 && term0.y == material_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn gas_product_mass_for_extent(reaction_index: u32, extent_mol: f32, mass_scale: f32) -> vec2<f32> {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var mass_kg = 0.0;
+  var moles = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term1.y == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      moles = moles + extent_mol * term0.z * mass_scale;
+      mass_kg = mass_kg + extent_mol * term0.z * term0.w * mass_scale;
+    }
+  }
+  return vec2<f32>(mass_kg, moles);
+}
+
+fn product_term_match(material_id: f32) -> bool {
+  for (var term_index = 0u; term_index < params.product_term_count; term_index = term_index + 1u) {
+    let term0 = product_term_row0(term_index);
+    let term1 = product_term_row1(term_index);
+    if (term1.w == 1.0 && term0.y == material_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn gas_product_term_match(material_id: f32) -> bool {
+  for (var term_index = 0u; term_index < params.product_term_count; term_index = term_index + 1u) {
+    let term0 = product_term_row0(term_index);
+    let term1 = product_term_row1(term_index);
+    if (term1.w == 1.0 && term1.y == 1.0 && term0.y == material_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+@compute @workgroup_size(64)
+fn main(
+  @builtin(global_invocation_id) global_id: vec3<u32>,
+  @builtin(local_invocation_id) local_id: vec3<u32>,
+  @builtin(workgroup_id) workgroup_id: vec3<u32>
+) {
+  let local = local_id.x;
+  let particle_index = global_id.x;
+  wg_changed_material[local] = 0.0;
+  wg_changed_mass[local] = 0.0;
+  wg_visible_product_mass[local] = 0.0;
+  wg_visible_gas_product_mass[local] = 0.0;
+  wg_output_gas_phase_mass[local] = 0.0;
+  wg_source_mass[local] = 0.0;
+  wg_next_mass[local] = 0.0;
+  wg_thermal_ready[local] = 0.0;
+  wg_thermal_problem[local] = 0.0;
+  wg_finite_temperature[local] = 0.0;
+  wg_canonical_events[local] = 0.0;
+  wg_consumed_reactant_mass[local] = 0.0;
+  wg_expected_product_mass[local] = 0.0;
+  wg_raw_product_mass[local] = 0.0;
+  wg_ledger_visible_product_mass[local] = 0.0;
+  wg_ledger_unplaced_product_mass[local] = 0.0;
+  wg_ledger_gas_product_mass[local] = 0.0;
+  wg_ledger_visible_gas_product_mass[local] = 0.0;
+  wg_ledger_unplaced_gas_product_mass[local] = 0.0;
+  wg_sealed_box_gas_product_moles[local] = 0.0;
+  wg_reaction_heat[local] = 0.0;
+  wg_ledger_mass_residual[local] = 0.0;
+  wg_ledger_ready_events[local] = 0.0;
+  wg_ledger_problem_events[local] = 0.0;
+  wg_mutual_pairs[local] = 0.0;
+
+  if (particle_index < params.particle_count) {
+    let source_pos_mass = source_state[particle_index * 2u];
+    let next_pos_mass = next_state[particle_index * 2u];
+    let source_row0 = source_thermo[particle_index * 3u];
+    let next_row0 = next_thermo[particle_index * 3u];
+    let next_row2 = next_thermo[particle_index * 3u + 2u];
+    wg_source_mass[local] = source_pos_mass.w;
+    wg_next_mass[local] = next_pos_mass.w;
+    if (source_row0.x != next_row0.x) {
+      wg_changed_material[local] = 1.0;
+    }
+    if (abs(source_pos_mass.w - next_pos_mass.w) > max(max(source_pos_mass.w, next_pos_mass.w), 1.0) * 1.0e-7) {
+      wg_changed_mass[local] = 1.0;
+    }
+    if (product_term_match(next_row0.x)) {
+      wg_visible_product_mass[local] = next_pos_mass.w;
+    }
+    if (gas_product_term_match(next_row0.x)) {
+      wg_visible_gas_product_mass[local] = next_pos_mass.w;
+    }
+    if (next_row0.y == 3.0) {
+      wg_output_gas_phase_mass[local] = next_pos_mass.w;
+    }
+    if (next_row2.z == 1.0) {
+      wg_thermal_ready[local] = 1.0;
+    } else {
+      wg_thermal_problem[local] = 1.0;
+    }
+    if (next_row0.z == next_row0.z) {
+      wg_finite_temperature[local] = 1.0;
+    }
+
+    if (params.has_proposals != 0u) {
+      let proposal = proposals[particle_index];
+      if (proposal.x >= 0.0 && proposal.y >= 0.0) {
+        let partner_index = u32(proposal.x + 0.5);
+        if (partner_index < params.particle_count && particle_index < partner_index) {
+          let partner_proposal = proposals[partner_index];
+          if (partner_proposal.x >= 0.0 && u32(partner_proposal.x + 0.5) == particle_index && partner_proposal.y == proposal.y) {
+            wg_mutual_pairs[local] = 1.0;
+            let reaction_index = u32(proposal.y + 0.5);
+            let partner_source_pos_mass = source_state[partner_index * 2u];
+            let self_source_row0 = source_thermo[particle_index * 3u];
+            let partner_source_row0 = source_thermo[partner_index * 3u];
+            let self_term = reactant_term_for_material(reaction_index, self_source_row0.x);
+            let partner_term = reactant_term_for_material(reaction_index, partner_source_row0.x);
+            let header1 = reaction_header_row1(reaction_index);
+            let product_term_count = u32(max(header1.x, 0.0));
+            let has_stoichiometry = self_term.status == 1.0
+              && partner_term.status == 1.0
+              && self_term.coefficient > 0.0
+              && partner_term.coefficient > 0.0
+              && self_term.molar_mass > 0.0
+              && partner_term.molar_mass > 0.0
+              && product_term_count > 0u;
+            if (has_stoichiometry) {
+              let self_extent = source_pos_mass.w / max(self_term.coefficient * self_term.molar_mass, 1.0e-20);
+              let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
+              let extent_mol = min(self_extent, partner_extent);
+              let self_consumed = min(source_pos_mass.w, extent_mol * self_term.coefficient * self_term.molar_mass);
+              let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+              let consumed_mass = self_consumed + partner_consumed;
+              let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
+              if (extent_mol > 0.0 && consumed_mass > 0.0 && raw_product_mass > 0.0) {
+                let mass_scale = consumed_mass / raw_product_mass;
+                let partner_next_pos_mass = next_state[partner_index * 2u];
+                let self_next_row0 = next_thermo[particle_index * 3u];
+                let partner_next_row0 = next_thermo[partner_index * 3u];
+                var event_visible_product_mass = 0.0;
+                var event_visible_gas_product_mass = 0.0;
+                if (product_term_material_match(reaction_index, self_next_row0.x)) {
+                  event_visible_product_mass = event_visible_product_mass + next_pos_mass.w;
+                }
+                if (product_term_material_match(reaction_index, partner_next_row0.x)) {
+                  event_visible_product_mass = event_visible_product_mass + partner_next_pos_mass.w;
+                }
+                if (gas_product_term_material_match(reaction_index, self_next_row0.x)) {
+                  event_visible_gas_product_mass = event_visible_gas_product_mass + next_pos_mass.w;
+                }
+                if (gas_product_term_material_match(reaction_index, partner_next_row0.x)) {
+                  event_visible_gas_product_mass = event_visible_gas_product_mass + partner_next_pos_mass.w;
+                }
+                let gas = gas_product_mass_for_extent(reaction_index, extent_mol, mass_scale);
+                let rx1 = reaction_row1(reaction_index);
+                wg_canonical_events[local] = 1.0;
+                wg_consumed_reactant_mass[local] = consumed_mass;
+                wg_expected_product_mass[local] = consumed_mass;
+                wg_raw_product_mass[local] = raw_product_mass;
+                wg_ledger_visible_product_mass[local] = event_visible_product_mass;
+                wg_ledger_unplaced_product_mass[local] = max(consumed_mass - event_visible_product_mass, 0.0);
+                wg_ledger_gas_product_mass[local] = gas.x;
+                wg_ledger_visible_gas_product_mass[local] = event_visible_gas_product_mass;
+                wg_ledger_unplaced_gas_product_mass[local] = max(gas.x - event_visible_gas_product_mass, 0.0);
+                wg_sealed_box_gas_product_moles[local] = gas.y;
+                wg_reaction_heat[local] = -rx1.x * consumed_mass;
+                wg_ledger_mass_residual[local] = raw_product_mass - consumed_mass;
+                wg_ledger_ready_events[local] = 1.0;
+              } else {
+                wg_ledger_problem_events[local] = 1.0;
+              }
+            } else {
+              wg_ledger_problem_events[local] = 1.0;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  workgroupBarrier();
+  var stride = 32u;
+  loop {
+    if (local < stride) {
+      wg_changed_material[local] = wg_changed_material[local] + wg_changed_material[local + stride];
+      wg_changed_mass[local] = wg_changed_mass[local] + wg_changed_mass[local + stride];
+      wg_visible_product_mass[local] = wg_visible_product_mass[local] + wg_visible_product_mass[local + stride];
+      wg_visible_gas_product_mass[local] = wg_visible_gas_product_mass[local] + wg_visible_gas_product_mass[local + stride];
+      wg_output_gas_phase_mass[local] = wg_output_gas_phase_mass[local] + wg_output_gas_phase_mass[local + stride];
+      wg_source_mass[local] = wg_source_mass[local] + wg_source_mass[local + stride];
+      wg_next_mass[local] = wg_next_mass[local] + wg_next_mass[local + stride];
+      wg_thermal_ready[local] = wg_thermal_ready[local] + wg_thermal_ready[local + stride];
+      wg_thermal_problem[local] = wg_thermal_problem[local] + wg_thermal_problem[local + stride];
+      wg_finite_temperature[local] = wg_finite_temperature[local] + wg_finite_temperature[local + stride];
+      wg_canonical_events[local] = wg_canonical_events[local] + wg_canonical_events[local + stride];
+      wg_consumed_reactant_mass[local] = wg_consumed_reactant_mass[local] + wg_consumed_reactant_mass[local + stride];
+      wg_expected_product_mass[local] = wg_expected_product_mass[local] + wg_expected_product_mass[local + stride];
+      wg_raw_product_mass[local] = wg_raw_product_mass[local] + wg_raw_product_mass[local + stride];
+      wg_ledger_visible_product_mass[local] = wg_ledger_visible_product_mass[local] + wg_ledger_visible_product_mass[local + stride];
+      wg_ledger_unplaced_product_mass[local] = wg_ledger_unplaced_product_mass[local] + wg_ledger_unplaced_product_mass[local + stride];
+      wg_ledger_gas_product_mass[local] = wg_ledger_gas_product_mass[local] + wg_ledger_gas_product_mass[local + stride];
+      wg_ledger_visible_gas_product_mass[local] = wg_ledger_visible_gas_product_mass[local] + wg_ledger_visible_gas_product_mass[local + stride];
+      wg_ledger_unplaced_gas_product_mass[local] = wg_ledger_unplaced_gas_product_mass[local] + wg_ledger_unplaced_gas_product_mass[local + stride];
+      wg_sealed_box_gas_product_moles[local] = wg_sealed_box_gas_product_moles[local] + wg_sealed_box_gas_product_moles[local + stride];
+      wg_reaction_heat[local] = wg_reaction_heat[local] + wg_reaction_heat[local + stride];
+      wg_ledger_mass_residual[local] = wg_ledger_mass_residual[local] + wg_ledger_mass_residual[local + stride];
+      wg_ledger_ready_events[local] = wg_ledger_ready_events[local] + wg_ledger_ready_events[local + stride];
+      wg_ledger_problem_events[local] = wg_ledger_problem_events[local] + wg_ledger_problem_events[local + stride];
+      wg_mutual_pairs[local] = wg_mutual_pairs[local] + wg_mutual_pairs[local + stride];
+    }
+    workgroupBarrier();
+    if (stride == 1u) {
+      break;
+    }
+    stride = stride / 2u;
+  }
+
+  if (local == 0u) {
+    let base = workgroup_id.x * 8u;
+    partial_summaries[base] = vec4<f32>(
+      wg_changed_material[0u],
+      wg_changed_mass[0u],
+      wg_visible_product_mass[0u],
+      wg_visible_gas_product_mass[0u]
+    );
+    partial_summaries[base + 1u] = vec4<f32>(
+      wg_output_gas_phase_mass[0u],
+      wg_source_mass[0u],
+      wg_next_mass[0u],
+      wg_next_mass[0u] - wg_source_mass[0u]
+    );
+    partial_summaries[base + 2u] = vec4<f32>(
+      wg_thermal_ready[0u],
+      wg_thermal_problem[0u],
+      wg_finite_temperature[0u],
+      1.0
+    );
+    partial_summaries[base + 3u] = vec4<f32>(
+      wg_canonical_events[0u],
+      wg_consumed_reactant_mass[0u],
+      wg_expected_product_mass[0u],
+      wg_raw_product_mass[0u]
+    );
+    partial_summaries[base + 4u] = vec4<f32>(
+      wg_ledger_visible_product_mass[0u],
+      wg_ledger_unplaced_product_mass[0u],
+      wg_ledger_gas_product_mass[0u],
+      wg_ledger_visible_gas_product_mass[0u]
+    );
+    partial_summaries[base + 5u] = vec4<f32>(
+      wg_ledger_unplaced_gas_product_mass[0u],
+      wg_sealed_box_gas_product_moles[0u],
+      wg_reaction_heat[0u],
+      wg_ledger_mass_residual[0u]
+    );
+    partial_summaries[base + 6u] = vec4<f32>(
+      wg_ledger_ready_events[0u],
+      wg_ledger_problem_events[0u],
+      wg_mutual_pairs[0u],
+      select(0.0, 1.0, params.has_proposals != 0u)
+    );
+    partial_summaries[base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  }
+}
+`;
+
+export const sphReactionSummaryFinalizeWgsl = `
+struct ReactionSummaryParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
+  partial_count: u32,
+  has_proposals: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
+@group(0) @binding(0) var<storage, read> partial_summaries: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> reaction_summary: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> params: ReactionSummaryParams;
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+  var changed_material = 0.0;
+  var changed_mass = 0.0;
+  var visible_product_mass = 0.0;
+  var visible_gas_product_mass = 0.0;
+  var output_gas_phase_mass = 0.0;
+  var source_mass = 0.0;
+  var next_mass = 0.0;
+  var thermal_ready = 0.0;
+  var thermal_problem = 0.0;
+  var finite_temperature = 0.0;
+  var canonical_events = 0.0;
+  var consumed_reactant_mass = 0.0;
+  var expected_product_mass = 0.0;
+  var raw_product_mass = 0.0;
+  var ledger_visible_product_mass = 0.0;
+  var ledger_unplaced_product_mass = 0.0;
+  var ledger_gas_product_mass = 0.0;
+  var ledger_visible_gas_product_mass = 0.0;
+  var ledger_unplaced_gas_product_mass = 0.0;
+  var sealed_box_gas_product_moles = 0.0;
+  var reaction_heat = 0.0;
+  var ledger_mass_residual = 0.0;
+  var ledger_ready_events = 0.0;
+  var ledger_problem_events = 0.0;
+  var mutual_pairs = 0.0;
+  var compact_ledger_available = 0.0;
+  for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
+    let base = partial_index * 8u;
+    let row0 = partial_summaries[base];
+    let row1 = partial_summaries[base + 1u];
+    let row2 = partial_summaries[base + 2u];
+    let row3 = partial_summaries[base + 3u];
+    let row4 = partial_summaries[base + 4u];
+    let row5 = partial_summaries[base + 5u];
+    let row6 = partial_summaries[base + 6u];
+    changed_material = changed_material + row0.x;
+    changed_mass = changed_mass + row0.y;
+    visible_product_mass = visible_product_mass + row0.z;
+    visible_gas_product_mass = visible_gas_product_mass + row0.w;
+    output_gas_phase_mass = output_gas_phase_mass + row1.x;
+    source_mass = source_mass + row1.y;
+    next_mass = next_mass + row1.z;
+    thermal_ready = thermal_ready + row2.x;
+    thermal_problem = thermal_problem + row2.y;
+    finite_temperature = finite_temperature + row2.z;
+    canonical_events = canonical_events + row3.x;
+    consumed_reactant_mass = consumed_reactant_mass + row3.y;
+    expected_product_mass = expected_product_mass + row3.z;
+    raw_product_mass = raw_product_mass + row3.w;
+    ledger_visible_product_mass = ledger_visible_product_mass + row4.x;
+    ledger_unplaced_product_mass = ledger_unplaced_product_mass + row4.y;
+    ledger_gas_product_mass = ledger_gas_product_mass + row4.z;
+    ledger_visible_gas_product_mass = ledger_visible_gas_product_mass + row4.w;
+    ledger_unplaced_gas_product_mass = ledger_unplaced_gas_product_mass + row5.x;
+    sealed_box_gas_product_moles = sealed_box_gas_product_moles + row5.y;
+    reaction_heat = reaction_heat + row5.z;
+    ledger_mass_residual = ledger_mass_residual + row5.w;
+    ledger_ready_events = ledger_ready_events + row6.x;
+    ledger_problem_events = ledger_problem_events + row6.y;
+    mutual_pairs = mutual_pairs + row6.z;
+    compact_ledger_available = max(compact_ledger_available, row6.w);
+  }
+  reaction_summary[0u] = vec4<f32>(
+    f32(params.particle_count),
+    f32(params.reaction_count),
+    f32(params.product_term_count),
+    f32(params.gas_product_count)
+  );
+  reaction_summary[1u] = vec4<f32>(
+    changed_material,
+    changed_mass,
+    visible_product_mass,
+    visible_gas_product_mass
+  );
+  reaction_summary[2u] = vec4<f32>(
+    output_gas_phase_mass,
+    source_mass,
+    next_mass,
+    next_mass - source_mass
+  );
+  reaction_summary[3u] = vec4<f32>(
+    thermal_ready,
+    thermal_problem,
+    finite_temperature,
+    1.0
+  );
+  reaction_summary[4u] = vec4<f32>(
+    canonical_events,
+    consumed_reactant_mass,
+    expected_product_mass,
+    raw_product_mass
+  );
+  reaction_summary[5u] = vec4<f32>(
+    ledger_visible_product_mass,
+    ledger_unplaced_product_mass,
+    ledger_gas_product_mass,
+    ledger_visible_gas_product_mass
+  );
+  reaction_summary[6u] = vec4<f32>(
+    ledger_unplaced_gas_product_mass,
+    sealed_box_gas_product_moles,
+    reaction_heat,
+    ledger_mass_residual
+  );
+  reaction_summary[7u] = vec4<f32>(
+    ledger_ready_events,
+    ledger_problem_events,
+    mutual_pairs,
+    compact_ledger_available
+  );
+}
+`;
+
+export const sphReactionProductInventoryWgsl = `
+struct ReactionSummaryParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
+  partial_count: u32,
+  has_proposals: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
+struct ReactantTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  status: f32,
+};
+
+struct ProductMechanics {
+  rest_density: f32,
+  effective_bulk: f32,
+  shear: f32,
+  lambda: f32,
+  sound_speed: f32,
+  eos_model_id: f32,
+  solid_flag: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> next_state: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> next_thermo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> proposals: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> product_inventory: array<vec4<f32>>;
+@group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
+
+fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u];
+}
+
+fn reaction_header_row1(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 1u];
+}
+
+fn reactant_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u];
+}
+
+fn reactant_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u + 2u];
+}
+
+fn product_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u];
+}
+
+fn product_term_row1(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+fn product_term_row3(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 3u];
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(max(header0.y, 0.0));
+  let reactant_term_count = u32(max(header0.z, 0.0));
+  for (var local = 0u; local < reactant_term_count; local = local + 1u) {
+    let term_index = reactant_term_offset + local;
+    let term0 = reactant_term_row0(term_index);
+    let term2 = reactant_term_row2(term_index);
+    if (term0.y == material_id && term2.z == 1.0) {
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+    }
+  }
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var sum = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      sum = sum + extent_mol * term0.z * term0.w;
+    }
+  }
+  return sum;
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let product_term_index = global_id.x;
+  if (product_term_index >= params.product_term_count) {
+    return;
+  }
+  let term0 = product_term_row0(product_term_index);
+  let term1 = product_term_row1(product_term_index);
+  let term3 = product_term_row3(product_term_index);
+  let reaction_index = u32(max(term0.x, 0.0));
+  let material_id = term0.y;
+  let coefficient = term0.z;
+  let molar_mass = term0.w;
+  let routing_id = term1.y;
+  let status = term1.w;
+  let charge = term3.z;
+  var raw_mass_kg = 0.0;
+  var mass_kg = 0.0;
+  var moles = 0.0;
+  var visible_mass_kg = 0.0;
+  var event_count = 0.0;
+  var mass_scale_acc = 0.0;
+
+  if (params.has_proposals != 0u && status == 1.0 && molar_mass > 0.0 && coefficient > 0.0) {
+    for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+      let proposal = proposals[particle_index];
+      if (proposal.x < 0.0 || proposal.y < 0.0 || u32(proposal.y + 0.5) != reaction_index) {
+        continue;
+      }
+      let partner_index = u32(proposal.x + 0.5);
+      if (partner_index >= params.particle_count || particle_index >= partner_index) {
+        continue;
+      }
+      let partner_proposal = proposals[partner_index];
+      if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
+        continue;
+      }
+      let source_pos_mass = source_state[particle_index * 2u];
+      let partner_source_pos_mass = source_state[partner_index * 2u];
+      let source_row0 = source_thermo[particle_index * 3u];
+      let partner_source_row0 = source_thermo[partner_index * 3u];
+      let source_term = reactant_term_for_material(reaction_index, source_row0.x);
+      let partner_term = reactant_term_for_material(reaction_index, partner_source_row0.x);
+      let has_stoichiometry = source_term.status == 1.0
+        && partner_term.status == 1.0
+        && source_term.coefficient > 0.0
+        && partner_term.coefficient > 0.0
+        && source_term.molar_mass > 0.0
+        && partner_term.molar_mass > 0.0;
+      if (!has_stoichiometry) {
+        continue;
+      }
+      let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
+      let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
+      let extent_mol = min(source_extent, partner_extent);
+      let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
+      let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+      let consumed_mass = source_consumed + partner_consumed;
+      let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
+      if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
+        continue;
+      }
+      let mass_scale = consumed_mass / raw_product_mass;
+      let row_raw_mass = extent_mol * coefficient * molar_mass;
+      let row_mass = row_raw_mass * mass_scale;
+      raw_mass_kg = raw_mass_kg + row_raw_mass;
+      mass_kg = mass_kg + row_mass;
+      moles = moles + row_mass / molar_mass;
+      mass_scale_acc = mass_scale_acc + mass_scale;
+      let next0 = next_thermo[particle_index * 3u];
+      let next1 = next_thermo[partner_index * 3u];
+      if (next0.x == material_id) {
+        visible_mass_kg = visible_mass_kg + next_state[particle_index * 2u].w;
+      }
+      if (next1.x == material_id) {
+        visible_mass_kg = visible_mass_kg + next_state[partner_index * 2u].w;
+      }
+      event_count = event_count + 1.0;
+    }
+  }
+
+  let out_base = product_term_index * 4u;
+  let unplaced_mass_kg = max(mass_kg - visible_mass_kg, 0.0);
+  let mean_mass_scale = select(0.0, mass_scale_acc / event_count, event_count > 0.0);
+  product_inventory[out_base] = vec4<f32>(material_id, mass_kg, visible_mass_kg, unplaced_mass_kg);
+  product_inventory[out_base + 1u] = vec4<f32>(moles, event_count, f32(product_term_index), f32(reaction_index));
+  product_inventory[out_base + 2u] = vec4<f32>(routing_id, moles * charge, raw_mass_kg - mass_kg, status);
+  product_inventory[out_base + 3u] = vec4<f32>(coefficient, molar_mass, raw_mass_kg, mean_mass_scale);
+}
+`;
+
+export const sphReactionProductEventWgsl = `
+struct ReactionSummaryParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
+  partial_count: u32,
+  has_proposals: u32,
+  atom_term_count: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
+struct ReactantTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  status: f32,
+};
+
+struct ProductMechanics {
+  rest_density: f32,
+  effective_bulk: f32,
+  shear: f32,
+  lambda: f32,
+  sound_speed: f32,
+  eos_model_id: f32,
+  solid_flag: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> next_state: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> next_thermo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> proposals: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> product_events: array<vec4<f32>>;
+@group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
+
+fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u];
+}
+
+fn reaction_header_row1(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 1u];
+}
+
+fn reactant_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u];
+}
+
+fn reactant_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u + 2u];
+}
+
+fn product_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u];
+}
+
+fn product_term_row1(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let product_base = header_base + params.reaction_count * 4u + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+fn product_phase_row0(phase_index: u32) -> vec4<f32> {
+  let phase_base = params.reaction_count * 3u;
+  return reaction_records[phase_base + phase_index * 3u];
+}
+
+fn product_phase_row1(phase_index: u32) -> vec4<f32> {
+  let phase_base = params.reaction_count * 3u;
+  return reaction_records[phase_base + phase_index * 3u + 1u];
+}
+
+fn product_phase_row2(phase_index: u32) -> vec4<f32> {
+  let phase_base = params.reaction_count * 3u;
+  return reaction_records[phase_base + phase_index * 3u + 2u];
+}
+
+fn product_mechanics_for(material_id: f32, phase_id: f32) -> ProductMechanics {
+  for (var phase_index = 0u; phase_index < params.product_phase_count; phase_index = phase_index + 1u) {
+    let row0 = product_phase_row0(phase_index);
+    let row1 = product_phase_row1(phase_index);
+    let row2 = product_phase_row2(phase_index);
+    if (row0.x == material_id && row0.y == phase_id && row2.y == 1.0) {
+      return ProductMechanics(
+        row0.z,
+        row0.w,
+        row1.x,
+        row1.y,
+        row1.z,
+        row1.w,
+        row2.x,
+        row2.y
+      );
+    }
+  }
+  return ProductMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(max(header0.y, 0.0));
+  let reactant_term_count = u32(max(header0.z, 0.0));
+  for (var local = 0u; local < reactant_term_count; local = local + 1u) {
+    let term_index = reactant_term_offset + local;
+    let term0 = reactant_term_row0(term_index);
+    let term2 = reactant_term_row2(term_index);
+    if (term0.y == material_id && term2.z == 1.0) {
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+    }
+  }
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var sum = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      sum = sum + extent_mol * term0.z * term0.w;
+    }
+  }
+  return sum;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let linear_index = global_id.x;
+  let event_capacity = params.particle_count * params.product_term_count;
+  if (linear_index >= event_capacity || params.particle_count == 0u) {
+    return;
+  }
+  let particle_index = linear_index / params.product_term_count;
+  let product_term_index = linear_index - particle_index * params.product_term_count;
+	  let out_base = linear_index * 8u;
+	  product_events[out_base] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+	  product_events[out_base + 1u] = vec4<f32>(0.0, f32(product_term_index), 0.0, f32(particle_index));
+	  product_events[out_base + 2u] = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+	  product_events[out_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+	  product_events[out_base + 4u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+	  product_events[out_base + 5u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+	  product_events[out_base + 6u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+	  product_events[out_base + 7u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  if (params.has_proposals == 0u || particle_index >= params.particle_count) {
+    return;
+  }
+
+  let term0 = product_term_row0(product_term_index);
+  let term1 = product_term_row1(product_term_index);
+  let reaction_index = u32(max(term0.x, 0.0));
+  let material_id = term0.y;
+	  let coefficient = term0.z;
+	  let molar_mass = term0.w;
+	  let routing_id = term1.y;
+	  let target_phase_id = term1.z;
+	  let status = term1.w;
+  let proposal = proposals[particle_index];
+  if (proposal.x < 0.0 || proposal.y < 0.0 || u32(proposal.y + 0.5) != reaction_index || status != 1.0 || molar_mass <= 0.0 || coefficient <= 0.0) {
+    return;
+  }
+  let partner_index = u32(proposal.x + 0.5);
+  if (partner_index >= params.particle_count || particle_index >= partner_index) {
+    return;
+  }
+  let partner_proposal = proposals[partner_index];
+  if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
+    return;
+  }
+
+  let source_pos_mass = source_state[particle_index * 2u];
+  let partner_source_pos_mass = source_state[partner_index * 2u];
+  let source_row0 = source_thermo[particle_index * 3u];
+  let partner_source_row0 = source_thermo[partner_index * 3u];
+  let source_term = reactant_term_for_material(reaction_index, source_row0.x);
+  let partner_term = reactant_term_for_material(reaction_index, partner_source_row0.x);
+  let has_stoichiometry = source_term.status == 1.0
+    && partner_term.status == 1.0
+    && source_term.coefficient > 0.0
+    && partner_term.coefficient > 0.0
+    && source_term.molar_mass > 0.0
+    && partner_term.molar_mass > 0.0;
+  if (!has_stoichiometry) {
+    return;
+  }
+  let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
+  let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
+  let extent_mol = min(source_extent, partner_extent);
+  let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
+  let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+  let consumed_mass = source_consumed + partner_consumed;
+  let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
+  if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
+    return;
+  }
+  let mass_scale = consumed_mass / raw_product_mass;
+  let row_mass = extent_mol * coefficient * molar_mass * mass_scale;
+  let row_moles = row_mass / molar_mass;
+	  let next0 = next_thermo[particle_index * 3u];
+	  let next1 = next_thermo[partner_index * 3u];
+	  var visible_mass_kg = 0.0;
+	  var phase_id = target_phase_id;
+	  var temperature_k = 0.5 * (source_row0.z + partner_source_row0.z);
+	  var rest_density_kg_per_m3 = 0.0;
+	  if (next0.x == material_id) {
+	    visible_mass_kg = visible_mass_kg + next_state[particle_index * 2u].w;
+	    phase_id = select(phase_id, next0.y, phase_id <= 0.0);
+	    temperature_k = next0.z;
+	    rest_density_kg_per_m3 = next0.w;
+	  }
+	  if (next1.x == material_id) {
+	    visible_mass_kg = visible_mass_kg + next_state[partner_index * 2u].w;
+	    phase_id = select(phase_id, next1.y, phase_id <= 0.0);
+	    temperature_k = next1.z;
+	    rest_density_kg_per_m3 = next1.w;
+	  }
+  let unplaced_mass_kg = max(row_mass - visible_mass_kg, 0.0);
+	  let product_mechanics = product_mechanics_for(material_id, phase_id);
+	  rest_density_kg_per_m3 = select(
+	    rest_density_kg_per_m3,
+	    product_mechanics.rest_density,
+	    rest_density_kg_per_m3 <= 0.0 && product_mechanics.rest_density > 0.0
+	  );
+	  let source_velocity = source_state[particle_index * 2u + 1u].xyz;
+	  let partner_velocity = source_state[partner_index * 2u + 1u].xyz;
+	  let product_velocity = (source_velocity * source_consumed + partner_velocity * partner_consumed)
+	    / max(consumed_mass, 1.0e-20);
+	  let support_volume_m3 = select(
+	    0.0,
+	    unplaced_mass_kg / max(rest_density_kg_per_m3, 1.0e-20),
+	    unplaced_mass_kg > 0.0 && rest_density_kg_per_m3 > 0.0
+	  );
+	  let midpoint = 0.5 * (source_pos_mass.xyz + partner_source_pos_mass.xyz);
+	  product_events[out_base] = vec4<f32>(midpoint.x, midpoint.y, midpoint.z, row_mass);
+	  product_events[out_base + 1u] = vec4<f32>(material_id, f32(product_term_index), f32(reaction_index), f32(particle_index));
+	  product_events[out_base + 2u] = vec4<f32>(f32(partner_index), row_moles, routing_id, phase_id);
+	  product_events[out_base + 3u] = vec4<f32>(visible_mass_kg, unplaced_mass_kg, coefficient, molar_mass);
+	  product_events[out_base + 4u] = vec4<f32>(temperature_k, rest_density_kg_per_m3, 1.0, 0.0);
+	  product_events[out_base + 5u] = vec4<f32>(product_velocity.x, product_velocity.y, product_velocity.z, support_volume_m3);
+	  product_events[out_base + 6u] = vec4<f32>(
+	    product_mechanics.effective_bulk,
+	    product_mechanics.shear,
+	    product_mechanics.lambda,
+	    product_mechanics.sound_speed
+	  );
+	  product_events[out_base + 7u] = vec4<f32>(
+	    product_mechanics.eos_model_id,
+	    product_mechanics.solid_flag,
+	    product_mechanics.status,
+	    0.0
+	  );
+	}
+`;
+
+export const sphReactionAtomResidualWgsl = `
+struct ReactionSummaryParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
+  partial_count: u32,
+  has_proposals: u32,
+  atom_term_count: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
+struct ReactantTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> proposals: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> atom_residuals: array<vec4<f32>>;
+@group(0) @binding(5) var<uniform> params: ReactionSummaryParams;
+
+fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u];
+}
+
+fn reaction_header_row1(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 1u];
+}
+
+fn reactant_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u];
+}
+
+fn reactant_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u + 2u];
+}
+
+fn product_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u];
+}
+
+fn product_term_row1(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+fn atom_term_row(atom_term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  let gas_base = product_base + params.product_term_count * 4u;
+  let atom_base = gas_base + params.gas_product_count * 2u;
+  return reaction_records[atom_base + atom_term_index * 2u];
+}
+
+fn atom_term_row1(atom_term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  let gas_base = product_base + params.product_term_count * 4u;
+  let atom_base = gas_base + params.gas_product_count * 2u;
+  return reaction_records[atom_base + atom_term_index * 2u + 1u];
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(max(header0.y, 0.0));
+  let reactant_term_count = u32(max(header0.z, 0.0));
+  for (var local = 0u; local < reactant_term_count; local = local + 1u) {
+    let term_index = reactant_term_offset + local;
+    let term0 = reactant_term_row0(term_index);
+    let term2 = reactant_term_row2(term_index);
+    if (term0.y == material_id && term2.z == 1.0) {
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+    }
+  }
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var sum = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      sum = sum + extent_mol * term0.z * term0.w;
+    }
+  }
+  return sum;
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let atom_term_index = global_id.x;
+  if (atom_term_index >= params.atom_term_count) {
+    return;
+  }
+  let atom0 = atom_term_row(atom_term_index);
+  let atom1 = atom_term_row1(atom_term_index);
+  let reaction_index = u32(max(atom0.x, 0.0));
+  let term_kind_id = atom0.y;
+  let source_term_index = atom0.z;
+  let atomic_number_z = atom0.w;
+  let atoms_per_formula = atom1.x;
+  let coefficient = atom1.y;
+  let charge = atom1.z;
+  let status = atom1.w;
+  var atom_residual_mol = 0.0;
+  var charge_residual_mol = 0.0;
+  var event_count = 0.0;
+
+  if (params.has_proposals != 0u && status == 1.0 && atomic_number_z > 0.0 && atoms_per_formula > 0.0 && coefficient > 0.0) {
+    for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+      let proposal = proposals[particle_index];
+      if (proposal.x < 0.0 || proposal.y < 0.0 || u32(proposal.y + 0.5) != reaction_index) {
+        continue;
+      }
+      let partner_index = u32(proposal.x + 0.5);
+      if (partner_index >= params.particle_count || particle_index >= partner_index) {
+        continue;
+      }
+      let partner_proposal = proposals[partner_index];
+      if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
+        continue;
+      }
+      let source_pos_mass = source_state[particle_index * 2u];
+      let partner_source_pos_mass = source_state[partner_index * 2u];
+      let source_row0 = source_thermo[particle_index * 3u];
+      let partner_source_row0 = source_thermo[partner_index * 3u];
+      let source_term = reactant_term_for_material(reaction_index, source_row0.x);
+      let partner_term = reactant_term_for_material(reaction_index, partner_source_row0.x);
+      let has_stoichiometry = source_term.status == 1.0
+        && partner_term.status == 1.0
+        && source_term.coefficient > 0.0
+        && partner_term.coefficient > 0.0
+        && source_term.molar_mass > 0.0
+        && partner_term.molar_mass > 0.0;
+      if (!has_stoichiometry) {
+        continue;
+      }
+      let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
+      let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
+      let extent_mol = min(source_extent, partner_extent);
+      let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
+      let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+      let consumed_mass = source_consumed + partner_consumed;
+      let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
+      if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
+        continue;
+      }
+      let mass_scale = consumed_mass / raw_product_mass;
+      let product_side_scale = select(1.0, mass_scale, term_kind_id == 2.0);
+      let sign = select(-1.0, 1.0, term_kind_id == 2.0);
+      let term_moles = extent_mol * coefficient * product_side_scale;
+      atom_residual_mol = atom_residual_mol + sign * term_moles * atoms_per_formula;
+      charge_residual_mol = charge_residual_mol + sign * term_moles * charge;
+      event_count = event_count + 1.0;
+    }
+  }
+
+  let out_base = atom_term_index * 2u;
+  atom_residuals[out_base] = vec4<f32>(f32(reaction_index), atomic_number_z, atom_residual_mol, charge_residual_mol);
+  atom_residuals[out_base + 1u] = vec4<f32>(event_count, term_kind_id, source_term_index, status);
+}
+`;
+
+export const sphReactionGasSpeciesSummaryWgsl = `
+struct ReactionSummaryParams {
+  particle_count: u32,
+  reaction_count: u32,
+  product_phase_count: u32,
+  reactant_term_count: u32,
+  product_term_count: u32,
+  gas_product_count: u32,
+  partial_count: u32,
+  has_proposals: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
+};
+
+struct ReactantTerm {
+  material_id: f32,
+  coefficient: f32,
+  molar_mass: f32,
+  status: f32,
+};
+
+@group(0) @binding(0) var<storage, read> source_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> next_state: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> next_thermo: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> reaction_records: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> proposals: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> gas_species_summaries: array<vec4<f32>>;
+@group(0) @binding(7) var<uniform> params: ReactionSummaryParams;
+
+fn reaction_row1(reaction_index: u32) -> vec4<f32> {
+  return reaction_records[reaction_index * 3u + 1u];
+}
+
+fn reaction_header_row0(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u];
+}
+
+fn reaction_header_row1(reaction_index: u32) -> vec4<f32> {
+  let base = (params.reaction_count + params.product_phase_count) * 3u;
+  return reaction_records[base + reaction_index * 4u + 1u];
+}
+
+fn reactant_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u];
+}
+
+fn reactant_term_row2(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  return reaction_records[reactant_base + term_index * 3u + 2u];
+}
+
+fn product_term_row0(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u];
+}
+
+fn product_term_row1(term_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  return reaction_records[product_base + term_index * 4u + 1u];
+}
+
+fn gas_product_row0(gas_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  let gas_base = product_base + params.product_term_count * 4u;
+  return reaction_records[gas_base + gas_index * 2u];
+}
+
+fn gas_product_row1(gas_index: u32) -> vec4<f32> {
+  let header_base = (params.reaction_count + params.product_phase_count) * 3u;
+  let reactant_base = header_base + params.reaction_count * 4u;
+  let product_base = reactant_base + params.reactant_term_count * 3u;
+  let gas_base = product_base + params.product_term_count * 4u;
+  return reaction_records[gas_base + gas_index * 2u + 1u];
+}
+
+fn reactant_term_for_material(reaction_index: u32, material_id: f32) -> ReactantTerm {
+  let header0 = reaction_header_row0(reaction_index);
+  let reactant_term_offset = u32(max(header0.y, 0.0));
+  let reactant_term_count = u32(max(header0.z, 0.0));
+  for (var local = 0u; local < reactant_term_count; local = local + 1u) {
+    let term_index = reactant_term_offset + local;
+    let term0 = reactant_term_row0(term_index);
+    let term2 = reactant_term_row2(term_index);
+    if (term0.y == material_id && term2.z == 1.0) {
+      return ReactantTerm(term0.y, term0.z, term0.w, term2.z);
+    }
+  }
+  return ReactantTerm(0.0, 0.0, 0.0, 0.0);
+}
+
+fn product_raw_mass_sum_for_extent(reaction_index: u32, extent_mol: f32) -> f32 {
+  let header0 = reaction_header_row0(reaction_index);
+  let header1 = reaction_header_row1(reaction_index);
+  let product_term_offset = u32(max(header0.w, 0.0));
+  let product_term_count = u32(max(header1.x, 0.0));
+  var sum = 0.0;
+  for (var local = 0u; local < product_term_count; local = local + 1u) {
+    let term0 = product_term_row0(product_term_offset + local);
+    let term1 = product_term_row1(product_term_offset + local);
+    if (term1.w == 1.0 && term0.z > 0.0 && term0.w > 0.0) {
+      sum = sum + extent_mol * term0.z * term0.w;
+    }
+  }
+  return sum;
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let gas_index = global_id.x;
+  if (gas_index >= params.gas_product_count) {
+    return;
+  }
+  let gas0 = gas_product_row0(gas_index);
+  let gas1 = gas_product_row1(gas_index);
+  let reaction_index = u32(max(gas0.x, 0.0));
+  let material_id = gas0.z;
+  let moles_per_extent = gas0.w;
+  let molar_mass = gas1.x;
+  let status = gas1.z;
+  var mass_kg = 0.0;
+  var moles = 0.0;
+  var visible_mass_kg = 0.0;
+  var event_count = 0.0;
+
+  if (params.has_proposals != 0u && status == 1.0 && molar_mass > 0.0 && moles_per_extent > 0.0) {
+    for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+      let proposal = proposals[particle_index];
+      if (proposal.x < 0.0 || proposal.y < 0.0 || u32(proposal.y + 0.5) != reaction_index) {
+        continue;
+      }
+      let partner_index = u32(proposal.x + 0.5);
+      if (partner_index >= params.particle_count || particle_index >= partner_index) {
+        continue;
+      }
+      let partner_proposal = proposals[partner_index];
+      if (partner_proposal.x < 0.0 || u32(partner_proposal.x + 0.5) != particle_index || partner_proposal.y != proposal.y) {
+        continue;
+      }
+      let source_pos_mass = source_state[particle_index * 2u];
+      let partner_source_pos_mass = source_state[partner_index * 2u];
+      let source_row0 = source_thermo[particle_index * 3u];
+      let partner_source_row0 = source_thermo[partner_index * 3u];
+      let source_term = reactant_term_for_material(reaction_index, source_row0.x);
+      let partner_term = reactant_term_for_material(reaction_index, partner_source_row0.x);
+      let has_stoichiometry = source_term.status == 1.0
+        && partner_term.status == 1.0
+        && source_term.coefficient > 0.0
+        && partner_term.coefficient > 0.0
+        && source_term.molar_mass > 0.0
+        && partner_term.molar_mass > 0.0;
+      if (!has_stoichiometry) {
+        continue;
+      }
+      let source_extent = source_pos_mass.w / max(source_term.coefficient * source_term.molar_mass, 1.0e-20);
+      let partner_extent = partner_source_pos_mass.w / max(partner_term.coefficient * partner_term.molar_mass, 1.0e-20);
+      let extent_mol = min(source_extent, partner_extent);
+      let source_consumed = min(source_pos_mass.w, extent_mol * source_term.coefficient * source_term.molar_mass);
+      let partner_consumed = min(partner_source_pos_mass.w, extent_mol * partner_term.coefficient * partner_term.molar_mass);
+      let consumed_mass = source_consumed + partner_consumed;
+      let raw_product_mass = product_raw_mass_sum_for_extent(reaction_index, extent_mol);
+      if (extent_mol <= 0.0 || consumed_mass <= 0.0 || raw_product_mass <= 0.0) {
+        continue;
+      }
+      let mass_scale = consumed_mass / raw_product_mass;
+      let species_mass = extent_mol * moles_per_extent * molar_mass * mass_scale;
+      let species_moles = species_mass / molar_mass;
+      let next0 = next_thermo[particle_index * 3u];
+      let next1 = next_thermo[partner_index * 3u];
+      let next_mass0 = next_state[particle_index * 2u].w;
+      let next_mass1 = next_state[partner_index * 2u].w;
+      mass_kg = mass_kg + species_mass;
+      moles = moles + species_moles;
+      if (next0.x == material_id) {
+        visible_mass_kg = visible_mass_kg + next_mass0;
+      }
+      if (next1.x == material_id) {
+        visible_mass_kg = visible_mass_kg + next_mass1;
+      }
+      event_count = event_count + 1.0;
+    }
+  }
+
+  let out_base = gas_index * 2u;
+  gas_species_summaries[out_base] = vec4<f32>(material_id, mass_kg, moles, visible_mass_kg);
+  gas_species_summaries[out_base + 1u] = vec4<f32>(max(mass_kg - visible_mass_kg, 0.0), event_count, f32(gas_index), status);
 }
 `;
 
@@ -1159,10 +2876,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 export const sphRenderFieldWgsl = `
 struct RenderFieldParams {
-  particle_count: u32,
-  surface_count: u32,
-  total_field_cells: u32,
-  _pad0: u32,
+	  particle_count: u32,
+	  surface_count: u32,
+	  total_field_cells: u32,
+	  product_event_count: u32,
   field_padding: f32,
   ref_edge_m: f32,
   _pad1: f32,
@@ -1170,9 +2887,10 @@ struct RenderFieldParams {
 };
 
 @group(0) @binding(0) var<storage, read> render_rows: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
-@group(0) @binding(3) var<uniform> params: RenderFieldParams;
+	@group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
+	@group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
+	@group(0) @binding(3) var<uniform> params: RenderFieldParams;
+	@group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
 
 fn render_row0(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * 3u];
@@ -1190,9 +2908,29 @@ fn surface_row1(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u + 1u];
 }
 
-fn surface_row2(surface_index: u32) -> vec4<f32> {
-  return render_surfaces[surface_index * 4u + 2u];
-}
+	fn surface_row2(surface_index: u32) -> vec4<f32> {
+	  return render_surfaces[surface_index * 4u + 2u];
+	}
+
+	fn product_event_row0(event_index: u32) -> vec4<f32> {
+	  return product_events[event_index * 8u];
+	}
+
+	fn product_event_row1(event_index: u32) -> vec4<f32> {
+	  return product_events[event_index * 8u + 1u];
+	}
+
+	fn product_event_row2(event_index: u32) -> vec4<f32> {
+	  return product_events[event_index * 8u + 2u];
+	}
+
+	fn product_event_row3(event_index: u32) -> vec4<f32> {
+	  return product_events[event_index * 8u + 3u];
+	}
+
+	fn product_event_row4(event_index: u32) -> vec4<f32> {
+	  return product_events[event_index * 8u + 4u];
+	}
 
 fn smooth_palette_weight(ratio: f32) -> f32 {
   let t = clamp(ratio, 0.0, 1.0);
@@ -1240,7 +2978,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   var density = 0.0;
   var palette = vec3<f32>(0.0, 0.0, 0.0);
-  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
+	  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
     let row0 = render_row0(particle_index);
     let row1 = render_row1(particle_index);
     if (row1.x != material_id || row1.y != phase_id) {
@@ -1254,17 +2992,842 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let delta = cell - particle;
     let dist2 = dot(delta, delta);
     let value = strength / (0.000001 + dist2) - subtract;
-    if (value > 0.0) {
-      density = density + value;
-      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
-      palette = palette + color * smooth_palette_weight(ratio);
-    }
-  }
+	    if (value > 0.0) {
+	      density = density + value;
+	      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
+	      palette = palette + color * smooth_palette_weight(ratio);
+	    }
+	  }
+
+	  for (var event_index = 0u; event_index < params.product_event_count; event_index = event_index + 1u) {
+	    let event0 = product_event_row0(event_index);
+	    let event1 = product_event_row1(event_index);
+	    let event2 = product_event_row2(event_index);
+	    let event3 = product_event_row3(event_index);
+	    let event4 = product_event_row4(event_index);
+	    let event_material_id = event1.x;
+	    let event_phase_id = event2.w;
+	    let event_unplaced_mass_kg = event3.y;
+	    let event_status = event4.z;
+	    if (
+	      event_status != 1.0
+	      || event_unplaced_mass_kg <= 0.0
+	      || event_material_id != material_id
+	      || (event_phase_id > 0.0 && event_phase_id != phase_id)
+	    ) {
+	      continue;
+	    }
+	    let event_position = vec3<f32>(
+	      clamp(params.field_padding + (event0.x / ref_edge) * span, 0.001, 0.999),
+	      clamp(params.field_padding + (event0.y / ref_edge) * span, 0.001, 0.999),
+	      clamp(params.field_padding + (event0.z / ref_edge) * span, 0.001, 0.999)
+	    );
+	    let delta = cell - event_position;
+	    let dist2 = dot(delta, delta);
+	    let value = strength / (0.000001 + dist2) - subtract;
+	    if (value > 0.0) {
+	      density = density + value;
+	      let ratio = sqrt(dist2) / max(support_norm, 1.0e-6);
+	      palette = palette + color * smooth_palette_weight(ratio);
+	    }
+	  }
 
   let out_index = field_offset + cell_index;
   if (out_index < params.total_field_cells) {
     render_field_cells[out_index] = vec4<f32>(density, palette);
   }
+}
+`;
+
+export const sphMaterialInterfaceCandidatesWgsl = `
+struct InterfaceCandidateParams {
+  surface_count: u32,
+  total_field_cells: u32,
+  candidate_count: u32,
+  _pad0: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  isolation_scale: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> interface_candidates: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: InterfaceCandidateParams;
+
+fn surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn surface_row1(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 1u];
+}
+
+fn field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+fn write_candidate(candidate_index: u32, row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>, row3: vec4<f32>) {
+  if (candidate_index >= params.candidate_count) {
+    return;
+  }
+  let base = candidate_index * 4u;
+  interface_candidates[base] = row0;
+  interface_candidates[base + 1u] = row1;
+  interface_candidates[base + 2u] = row2;
+  interface_candidates[base + 3u] = row3;
+}
+
+fn physical_coord_m(coord: f32, resolution: u32) -> f32 {
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  return ((((coord + 0.5) / f32(resolution)) - params.field_padding) * max(params.ref_edge_m, 1.0e-12)) / span;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let local_candidate_index = global_id.x;
+  let surface_index = global_id.y;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+
+  let s0 = surface_row0(surface_index);
+  let s1 = surface_row1(surface_index);
+  let field_offset = u32(s0.z);
+  let field_cell_count = u32(s0.w);
+  let cell_index = local_candidate_index / 3u;
+  let axis = local_candidate_index - cell_index * 3u;
+  if (cell_index >= field_cell_count) {
+    return;
+  }
+
+  let candidate_index = field_offset * 3u + local_candidate_index;
+  let base_row0 = vec4<f32>(f32(surface_index), s0.x, s0.y, f32(axis));
+  write_candidate(
+    candidate_index,
+    base_row0,
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 0.0),
+    vec4<f32>(0.0, 0.0, 0.0, 0.0)
+  );
+
+  let resolution = max(u32(s1.x), 1u);
+  let xy_count = resolution * resolution;
+  let z = cell_index / xy_count;
+  let rem = cell_index - z * xy_count;
+  let y = rem / resolution;
+  let x = rem - y * resolution;
+
+  var nx = x;
+  var ny = y;
+  var nz = z;
+  if (axis == 0u) {
+    nx = x + 1u;
+  } else if (axis == 1u) {
+    ny = y + 1u;
+  } else {
+    nz = z + 1u;
+  }
+  if (nx >= resolution || ny >= resolution || nz >= resolution) {
+    return;
+  }
+
+  let value = render_field_cells[field_offset + cell_index].x;
+  let neighbor = render_field_cells[field_offset + field_index_3d(nx, ny, nz, resolution)].x;
+  let isolation = s1.y * params.isolation_scale;
+  let inside = value >= isolation;
+  let neighbor_inside = neighbor >= isolation;
+  if (inside == neighbor_inside) {
+    return;
+  }
+
+  var sign = -1.0;
+  if (inside) {
+    sign = 1.0;
+  }
+  var normal = vec3<f32>(0.0, 0.0, 0.0);
+  if (axis == 0u) {
+    normal.x = sign;
+  } else if (axis == 1u) {
+    normal.y = sign;
+  } else {
+    normal.z = sign;
+  }
+
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  let cell_size_m = max(params.ref_edge_m, 1.0e-12) / (span * f32(resolution));
+  let area_m2 = cell_size_m * cell_size_m;
+  let centroid = vec3<f32>(
+    physical_coord_m((f32(x) + f32(nx)) * 0.5, resolution),
+    physical_coord_m((f32(y) + f32(ny)) * 0.5, resolution),
+    physical_coord_m((f32(z) + f32(nz)) * 0.5, resolution)
+  );
+  let normal_area = normal * area_m2;
+  write_candidate(
+    candidate_index,
+    base_row0,
+    vec4<f32>(centroid, area_m2),
+    vec4<f32>(normal, normal_area.x),
+    vec4<f32>(normal_area.y, normal_area.z, sign, 1.0)
+  );
+}
+`;
+
+export const sphRenderMarchingCubeCellsWgsl = `
+struct MarchingCubesCandidateParams {
+  surface_count: u32,
+  total_field_cells: u32,
+  candidate_count: u32,
+  _pad0: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  isolation_scale: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> marching_cubes_candidates: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: MarchingCubesCandidateParams;
+
+fn mc_surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn mc_surface_row1(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 1u];
+}
+
+fn mc_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+fn mc_density(field_offset: u32, x: u32, y: u32, z: u32, resolution: u32) -> f32 {
+  return render_field_cells[field_offset + mc_field_index_3d(x, y, z, resolution)].x;
+}
+
+fn mc_physical_coord_m(coord: f32, resolution: u32) -> f32 {
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  return (((coord / f32(resolution)) - params.field_padding) * max(params.ref_edge_m, 1.0e-12)) / span;
+}
+
+fn mc_edge_crossing(a: f32, b: f32, isolation: f32) -> u32 {
+  if ((a >= isolation) != (b >= isolation)) {
+    return 1u;
+  }
+  return 0u;
+}
+
+fn mc_write_candidate(candidate_index: u32, row0: vec4<f32>, row1: vec4<f32>, row2: vec4<f32>, row3: vec4<f32>) {
+  if (candidate_index >= params.candidate_count) {
+    return;
+  }
+  let base = candidate_index * 4u;
+  marching_cubes_candidates[base] = row0;
+  marching_cubes_candidates[base + 1u] = row1;
+  marching_cubes_candidates[base + 2u] = row2;
+  marching_cubes_candidates[base + 3u] = row3;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let local_voxel_index = global_id.x;
+  let surface_index = global_id.y;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+
+  let s0 = mc_surface_row0(surface_index);
+  let s1 = mc_surface_row1(surface_index);
+  let field_offset = u32(s0.z);
+  let field_cell_count = u32(s0.w);
+  let resolution = max(u32(s1.x), 1u);
+  if (resolution <= 1u) {
+    return;
+  }
+
+  let voxel_resolution = resolution - 1u;
+  let voxel_xy_count = voxel_resolution * voxel_resolution;
+  let voxel_count = voxel_xy_count * voxel_resolution;
+  if (local_voxel_index >= voxel_count || local_voxel_index >= field_cell_count) {
+    return;
+  }
+
+  let candidate_index = field_offset + local_voxel_index;
+  let z = local_voxel_index / voxel_xy_count;
+  let rem = local_voxel_index - z * voxel_xy_count;
+  let y = rem / voxel_resolution;
+  let x = rem - y * voxel_resolution;
+  let isolation = s1.y * params.isolation_scale;
+
+  let v0 = mc_density(field_offset, x, y, z, resolution);
+  let v1 = mc_density(field_offset, x + 1u, y, z, resolution);
+  let v2 = mc_density(field_offset, x + 1u, y + 1u, z, resolution);
+  let v3 = mc_density(field_offset, x, y + 1u, z, resolution);
+  let v4 = mc_density(field_offset, x, y, z + 1u, resolution);
+  let v5 = mc_density(field_offset, x + 1u, y, z + 1u, resolution);
+  let v6 = mc_density(field_offset, x + 1u, y + 1u, z + 1u, resolution);
+  let v7 = mc_density(field_offset, x, y + 1u, z + 1u, resolution);
+
+  var corner_mask = 0u;
+  if (v0 >= isolation) { corner_mask = corner_mask | 1u; }
+  if (v1 >= isolation) { corner_mask = corner_mask | 2u; }
+  if (v2 >= isolation) { corner_mask = corner_mask | 4u; }
+  if (v3 >= isolation) { corner_mask = corner_mask | 8u; }
+  if (v4 >= isolation) { corner_mask = corner_mask | 16u; }
+  if (v5 >= isolation) { corner_mask = corner_mask | 32u; }
+  if (v6 >= isolation) { corner_mask = corner_mask | 64u; }
+  if (v7 >= isolation) { corner_mask = corner_mask | 128u; }
+
+  var edge_crossing_count = 0u;
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v0, v1, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v1, v2, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v2, v3, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v3, v0, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v4, v5, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v5, v6, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v6, v7, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v7, v4, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v0, v4, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v1, v5, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v2, v6, isolation);
+  edge_crossing_count = edge_crossing_count + mc_edge_crossing(v3, v7, isolation);
+
+  let cell_is_active = corner_mask != 0u && corner_mask != 255u;
+  let reserved_triangle_count = select(0.0, 12.0, cell_is_active);
+  let reserved_vertex_count = reserved_triangle_count * 3.0;
+  let status = select(0.0, 1.0, cell_is_active);
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  let cell_size_m = max(params.ref_edge_m, 1.0e-12) / (span * f32(resolution));
+  let center = vec3<f32>(
+    mc_physical_coord_m(f32(x) + 0.5, resolution),
+    mc_physical_coord_m(f32(y) + 0.5, resolution),
+    mc_physical_coord_m(f32(z) + 0.5, resolution)
+  );
+  let density_min = min(min(min(v0, v1), min(v2, v3)), min(min(v4, v5), min(v6, v7)));
+  let density_max = max(max(max(v0, v1), max(v2, v3)), max(max(v4, v5), max(v6, v7)));
+
+  mc_write_candidate(
+    candidate_index,
+    vec4<f32>(f32(surface_index), s0.x, s0.y, f32(local_voxel_index)),
+    vec4<f32>(center, cell_size_m),
+    vec4<f32>(f32(corner_mask), f32(edge_crossing_count), reserved_triangle_count, reserved_vertex_count),
+    vec4<f32>(density_min, density_max, isolation, status)
+  );
+}
+`;
+
+export const sphRenderSurfaceVerticesWgsl = `
+struct SurfaceVertexParams {
+  surface_count: u32,
+  max_vertex_rows: u32,
+  total_field_cells: u32,
+  _pad0: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  isolation_scale: f32,
+  _pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> surface_vertices: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: SurfaceVertexParams;
+
+fn sv_surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn sv_surface_row1(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 1u];
+}
+
+fn sv_surface_row3(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 3u];
+}
+
+fn sv_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+fn sv_density(field_offset: u32, x: u32, y: u32, z: u32, resolution: u32) -> f32 {
+  return render_field_cells[field_offset + sv_field_index_3d(x, y, z, resolution)].x;
+}
+
+fn sv_physical_coord_m(coord: f32, resolution: u32) -> f32 {
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  return (((coord / f32(resolution)) - params.field_padding) * max(params.ref_edge_m, 1.0e-12)) / span;
+}
+
+fn sv_corner_position(corner: u32, x: u32, y: u32, z: u32, resolution: u32) -> vec3<f32> {
+  var cx = x;
+  var cy = y;
+  var cz = z;
+  if (corner == 1u || corner == 2u || corner == 5u || corner == 6u) { cx = x + 1u; }
+  if (corner == 2u || corner == 3u || corner == 6u || corner == 7u) { cy = y + 1u; }
+  if (corner >= 4u) { cz = z + 1u; }
+  return vec3<f32>(
+    sv_physical_coord_m(f32(cx), resolution),
+    sv_physical_coord_m(f32(cy), resolution),
+    sv_physical_coord_m(f32(cz), resolution)
+  );
+}
+
+fn sv_corner_density(field_offset: u32, corner: u32, x: u32, y: u32, z: u32, resolution: u32) -> f32 {
+  var cx = x;
+  var cy = y;
+  var cz = z;
+  if (corner == 1u || corner == 2u || corner == 5u || corner == 6u) { cx = x + 1u; }
+  if (corner == 2u || corner == 3u || corner == 6u || corner == 7u) { cy = y + 1u; }
+  if (corner >= 4u) { cz = z + 1u; }
+  return sv_density(field_offset, cx, cy, cz, resolution);
+}
+
+fn sv_tetra_corner(tetra_index: u32, slot: u32) -> u32 {
+  if (tetra_index == 0u) {
+    if (slot == 0u) { return 0u; }
+    if (slot == 1u) { return 5u; }
+    if (slot == 2u) { return 1u; }
+    return 6u;
+  }
+  if (tetra_index == 1u) {
+    if (slot == 0u) { return 0u; }
+    if (slot == 1u) { return 1u; }
+    if (slot == 2u) { return 2u; }
+    return 6u;
+  }
+  if (tetra_index == 2u) {
+    if (slot == 0u) { return 0u; }
+    if (slot == 1u) { return 2u; }
+    if (slot == 2u) { return 3u; }
+    return 6u;
+  }
+  if (tetra_index == 3u) {
+    if (slot == 0u) { return 0u; }
+    if (slot == 1u) { return 3u; }
+    if (slot == 2u) { return 7u; }
+    return 6u;
+  }
+  if (tetra_index == 4u) {
+    if (slot == 0u) { return 0u; }
+    if (slot == 1u) { return 7u; }
+    if (slot == 2u) { return 4u; }
+    return 6u;
+  }
+  if (slot == 0u) { return 0u; }
+  if (slot == 1u) { return 4u; }
+  if (slot == 2u) { return 5u; }
+  return 6u;
+}
+
+fn sv_interpolate(a: vec3<f32>, b: vec3<f32>, value_a: f32, value_b: f32, isolation: f32) -> vec3<f32> {
+  let denom = value_b - value_a;
+  let t = select(0.5, clamp((isolation - value_a) / denom, 0.0, 1.0), abs(denom) > 1.0e-12);
+  return a + (b - a) * t;
+}
+
+fn sv_triangle_normal(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> vec3<f32> {
+  let n = cross(b - a, c - a);
+  let len = length(n);
+  if (len <= 1.0e-12) {
+    return vec3<f32>(0.0, 0.0, 0.0);
+  }
+  return n / len;
+}
+
+fn sv_write_vertex(
+  row_index: u32,
+  surface_index: u32,
+  material_id: f32,
+  phase_id: f32,
+  triangle_index: u32,
+  vertex_index: u32,
+  position: vec3<f32>,
+  normal: vec3<f32>,
+  optical_state_id: f32,
+  density: f32,
+  isolation: f32,
+  source_voxel_index: u32
+) {
+  if (row_index >= params.max_vertex_rows) {
+    return;
+  }
+  let base = row_index * 4u;
+  surface_vertices[base] = vec4<f32>(f32(surface_index), material_id, phase_id, f32(triangle_index));
+  surface_vertices[base + 1u] = vec4<f32>(f32(vertex_index), position.x, position.y, position.z);
+  surface_vertices[base + 2u] = vec4<f32>(normal.x, normal.y, normal.z, optical_state_id);
+  surface_vertices[base + 3u] = vec4<f32>(density, isolation, f32(source_voxel_index), 1.0);
+}
+
+fn sv_emit_triangle(
+  base_vertex_row: u32,
+  local_vertex_offset: u32,
+  surface_index: u32,
+  material_id: f32,
+  phase_id: f32,
+  optical_state_id: f32,
+  source_voxel_index: u32,
+  isolation: f32,
+  outward_hint: vec3<f32>,
+  a: vec3<f32>,
+  b: vec3<f32>,
+  c: vec3<f32>
+) -> u32 {
+  if (local_vertex_offset + 2u >= 36u) {
+    return local_vertex_offset;
+  }
+  var va = a;
+  var vb = b;
+  var vc = c;
+  var normal = sv_triangle_normal(va, vb, vc);
+  if (dot(normal, outward_hint) < 0.0) {
+    vb = c;
+    vc = b;
+    normal = sv_triangle_normal(va, vb, vc);
+  }
+  let triangle_index = (base_vertex_row + local_vertex_offset) / 3u;
+  sv_write_vertex(base_vertex_row + local_vertex_offset, surface_index, material_id, phase_id, triangle_index, 0u, va, normal, optical_state_id, isolation, isolation, source_voxel_index);
+  sv_write_vertex(base_vertex_row + local_vertex_offset + 1u, surface_index, material_id, phase_id, triangle_index, 1u, vb, normal, optical_state_id, isolation, isolation, source_voxel_index);
+  sv_write_vertex(base_vertex_row + local_vertex_offset + 2u, surface_index, material_id, phase_id, triangle_index, 2u, vc, normal, optical_state_id, isolation, isolation, source_voxel_index);
+  return local_vertex_offset + 3u;
+}
+
+fn sv_emit_tetra(
+  tetra_index: u32,
+  base_vertex_row: u32,
+  local_vertex_offset: u32,
+  surface_index: u32,
+  material_id: f32,
+  phase_id: f32,
+  optical_state_id: f32,
+  field_offset: u32,
+  x: u32,
+  y: u32,
+  z: u32,
+  resolution: u32,
+  source_voxel_index: u32,
+  isolation: f32
+) -> u32 {
+  var inside: array<u32, 4>;
+  var outside: array<u32, 4>;
+  var inside_count = 0u;
+  var outside_count = 0u;
+  for (var slot = 0u; slot < 4u; slot = slot + 1u) {
+    let corner = sv_tetra_corner(tetra_index, slot);
+    let density = sv_corner_density(field_offset, corner, x, y, z, resolution);
+    if (density >= isolation) {
+      inside[inside_count] = corner;
+      inside_count = inside_count + 1u;
+    } else {
+      outside[outside_count] = corner;
+      outside_count = outside_count + 1u;
+    }
+  }
+  if (inside_count == 0u || inside_count == 4u) {
+    return local_vertex_offset;
+  }
+  var offset = local_vertex_offset;
+  if (inside_count == 1u || inside_count == 3u) {
+    let source = select(outside[0], inside[0], inside_count == 1u);
+    let target0 = select(inside[0], outside[0], inside_count == 1u);
+    let target1 = select(inside[1], outside[1], inside_count == 1u);
+    let target2 = select(inside[2], outside[2], inside_count == 1u);
+    let ps = sv_corner_position(source, x, y, z, resolution);
+    let vs = sv_corner_density(field_offset, source, x, y, z, resolution);
+    let p0 = sv_interpolate(ps, sv_corner_position(target0, x, y, z, resolution), vs, sv_corner_density(field_offset, target0, x, y, z, resolution), isolation);
+    let p1 = sv_interpolate(ps, sv_corner_position(target1, x, y, z, resolution), vs, sv_corner_density(field_offset, target1, x, y, z, resolution), isolation);
+    let p2 = sv_interpolate(ps, sv_corner_position(target2, x, y, z, resolution), vs, sv_corner_density(field_offset, target2, x, y, z, resolution), isolation);
+    let target_center = (
+      sv_corner_position(target0, x, y, z, resolution)
+      + sv_corner_position(target1, x, y, z, resolution)
+      + sv_corner_position(target2, x, y, z, resolution)
+    ) / 3.0;
+    let outward_hint = select(ps - target_center, target_center - ps, inside_count == 1u);
+    offset = sv_emit_triangle(base_vertex_row, offset, surface_index, material_id, phase_id, optical_state_id, source_voxel_index, isolation, outward_hint, p0, p1, p2);
+    return offset;
+  }
+
+  let inside_a = inside[0];
+  let inside_b = inside[1];
+  let outside_a = outside[0];
+  let outside_b = outside[1];
+  let pia = sv_corner_position(inside_a, x, y, z, resolution);
+  let pib = sv_corner_position(inside_b, x, y, z, resolution);
+  let poa = sv_corner_position(outside_a, x, y, z, resolution);
+  let pob = sv_corner_position(outside_b, x, y, z, resolution);
+  let via = sv_corner_density(field_offset, inside_a, x, y, z, resolution);
+  let vib = sv_corner_density(field_offset, inside_b, x, y, z, resolution);
+  let voa = sv_corner_density(field_offset, outside_a, x, y, z, resolution);
+  let vob = sv_corner_density(field_offset, outside_b, x, y, z, resolution);
+  let edge_a0 = sv_interpolate(pia, poa, via, voa, isolation);
+  let edge_a1 = sv_interpolate(pia, pob, via, vob, isolation);
+  let edge_b0 = sv_interpolate(pib, poa, vib, voa, isolation);
+  let edge_b1 = sv_interpolate(pib, pob, vib, vob, isolation);
+  let outward_hint = ((poa + pob) * 0.5) - ((pia + pib) * 0.5);
+  offset = sv_emit_triangle(base_vertex_row, offset, surface_index, material_id, phase_id, optical_state_id, source_voxel_index, isolation, outward_hint, edge_a0, edge_a1, edge_b0);
+  offset = sv_emit_triangle(base_vertex_row, offset, surface_index, material_id, phase_id, optical_state_id, source_voxel_index, isolation, outward_hint, edge_b0, edge_a1, edge_b1);
+  return offset;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let local_voxel_index = global_id.x;
+  let surface_index = global_id.y;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+
+  let s0 = sv_surface_row0(surface_index);
+  let s1 = sv_surface_row1(surface_index);
+  let s3 = sv_surface_row3(surface_index);
+  let field_offset = u32(s0.z);
+  let field_cell_count = u32(s0.w);
+  let resolution = max(u32(s1.x), 1u);
+  if (resolution <= 1u) {
+    return;
+  }
+
+  let voxel_resolution = resolution - 1u;
+  let voxel_xy_count = voxel_resolution * voxel_resolution;
+  let voxel_count = voxel_xy_count * voxel_resolution;
+  if (local_voxel_index >= voxel_count || local_voxel_index >= field_cell_count) {
+    return;
+  }
+
+  let z = local_voxel_index / voxel_xy_count;
+  let rem = local_voxel_index - z * voxel_xy_count;
+  let y = rem / voxel_resolution;
+  let x = rem - y * voxel_resolution;
+  let isolation = s1.y * params.isolation_scale;
+  var local_vertex_offset = 0u;
+  let base_vertex_row = (field_offset + local_voxel_index) * 36u;
+  for (var tetra_index = 0u; tetra_index < 6u; tetra_index = tetra_index + 1u) {
+    local_vertex_offset = sv_emit_tetra(
+      tetra_index,
+      base_vertex_row,
+      local_vertex_offset,
+      surface_index,
+      s0.x,
+      s0.y,
+      s3.y,
+      field_offset,
+      x,
+      y,
+      z,
+      resolution,
+      local_voxel_index,
+      isolation
+    );
+  }
+}
+`;
+
+export const sphRenderSurfaceDrawWgsl = `
+struct SurfaceDrawParams {
+  surface_count: u32,
+  source_vertex_row_count: u32,
+  max_compact_vertex_rows: u32,
+  _pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> source_surface_vertices: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> compact_surface_vertices: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> surface_draw_rows: array<vec4<f32>>;
+@group(0) @binding(4) var<uniform> params: SurfaceDrawParams;
+@group(0) @binding(5) var<storage, read_write> surface_draw_indirect_rows: array<vec4<u32>>;
+
+fn sd_surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn sd_surface_row3(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 3u];
+}
+
+fn sd_vertex_row0(row_index: u32) -> vec4<f32> {
+  return source_surface_vertices[row_index * 4u];
+}
+
+fn sd_vertex_row1(row_index: u32) -> vec4<f32> {
+  return source_surface_vertices[row_index * 4u + 1u];
+}
+
+fn sd_vertex_row2(row_index: u32) -> vec4<f32> {
+  return source_surface_vertices[row_index * 4u + 2u];
+}
+
+fn sd_vertex_row3(row_index: u32) -> vec4<f32> {
+  return source_surface_vertices[row_index * 4u + 3u];
+}
+
+fn sd_surface_index_from_row(row0: vec4<f32>) -> u32 {
+  return u32(max(0.0, round(row0.x)));
+}
+
+fn sd_is_active(row3: vec4<f32>) -> bool {
+  return row3.w > 0.0;
+}
+
+fn sd_transparency_class(phase_id: f32) -> f32 {
+  let phase = u32(max(0.0, round(phase_id)));
+  if (phase == 3u) {
+    return 3.0;
+  }
+  if (phase == 2u) {
+    return 2.0;
+  }
+  return 0.0;
+}
+
+fn sd_write_compact_vertex(
+  write_row: u32,
+  source_surface_index: u32,
+  source_row0: vec4<f32>,
+  source_row1: vec4<f32>,
+  source_row2: vec4<f32>,
+  source_row3: vec4<f32>
+) {
+  if (write_row >= params.max_compact_vertex_rows) {
+    return;
+  }
+  let base = write_row * 4u;
+  compact_surface_vertices[base] = vec4<f32>(
+    f32(source_surface_index),
+    source_row0.y,
+    source_row0.z,
+    f32(write_row / 3u)
+  );
+  compact_surface_vertices[base + 1u] = vec4<f32>(
+    f32(write_row % 3u),
+    source_row1.y,
+    source_row1.z,
+    source_row1.w
+  );
+  compact_surface_vertices[base + 2u] = source_row2;
+  compact_surface_vertices[base + 3u] = source_row3;
+}
+
+fn sd_write_draw_row(
+  surface_index: u32,
+  material_id: f32,
+  phase_id: f32,
+  optical_state_id: f32,
+  vertex_offset: u32,
+  vertex_count: u32,
+  triangle_offset: u32,
+  triangle_count: u32,
+  render_order: f32,
+  transparency_class_id: f32,
+  depth_write_flag: f32,
+  status: f32,
+  bounds_center: vec3<f32>,
+  bounds_radius_m: f32
+) {
+  let base = surface_index * 4u;
+  surface_draw_rows[base] = vec4<f32>(f32(surface_index), material_id, phase_id, optical_state_id);
+  surface_draw_rows[base + 1u] = vec4<f32>(f32(vertex_offset), f32(vertex_count), f32(triangle_offset), f32(triangle_count));
+  surface_draw_rows[base + 2u] = vec4<f32>(render_order, transparency_class_id, depth_write_flag, status);
+  surface_draw_rows[base + 3u] = vec4<f32>(bounds_center, bounds_radius_m);
+}
+
+fn sd_write_draw_indirect_row(
+  surface_index: u32,
+  vertex_count: u32,
+  instance_count: u32,
+  first_vertex: u32,
+  first_instance: u32
+) {
+  surface_draw_indirect_rows[surface_index] = vec4<u32>(
+    vertex_count,
+    instance_count,
+    first_vertex,
+    first_instance
+  );
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let surface_index = global_id.x;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+
+  let surface_row0 = sd_surface_row0(surface_index);
+  let surface_row3 = sd_surface_row3(surface_index);
+  var prefix_vertex_count = 0u;
+  for (var row_index = 0u; row_index < params.source_vertex_row_count; row_index = row_index + 1u) {
+    let row0 = sd_vertex_row0(row_index);
+    let row3 = sd_vertex_row3(row_index);
+    let source_surface_index = sd_surface_index_from_row(row0);
+    if (sd_is_active(row3) && source_surface_index < surface_index) {
+      prefix_vertex_count = prefix_vertex_count + 1u;
+    }
+  }
+
+  var vertex_count = 0u;
+  var min_pos = vec3<f32>(1.0e30, 1.0e30, 1.0e30);
+  var max_pos = vec3<f32>(-1.0e30, -1.0e30, -1.0e30);
+  for (var row_index = 0u; row_index < params.source_vertex_row_count; row_index = row_index + 1u) {
+    let row0 = sd_vertex_row0(row_index);
+    let row1 = sd_vertex_row1(row_index);
+    let row2 = sd_vertex_row2(row_index);
+    let row3 = sd_vertex_row3(row_index);
+    let source_surface_index = sd_surface_index_from_row(row0);
+    if (sd_is_active(row3) && source_surface_index == surface_index) {
+      let write_row = prefix_vertex_count + vertex_count;
+      sd_write_compact_vertex(write_row, source_surface_index, row0, row1, row2, row3);
+      let position = vec3<f32>(row1.y, row1.z, row1.w);
+      min_pos = min(min_pos, position);
+      max_pos = max(max_pos, position);
+      vertex_count = vertex_count + 1u;
+    }
+  }
+
+  let surface_is_active = vertex_count > 0u;
+  let triangle_count = vertex_count / 3u;
+  let vertex_offset = select(0u, prefix_vertex_count, surface_is_active);
+  let triangle_offset = select(0u, prefix_vertex_count / 3u, surface_is_active);
+  let bounds_center = select(vec3<f32>(0.0, 0.0, 0.0), (min_pos + max_pos) * 0.5, surface_is_active);
+  let bounds_delta = max_pos - bounds_center;
+  let bounds_radius_m = select(0.0, length(bounds_delta), surface_is_active);
+  let explicit_transparency_class_id = surface_row3.z;
+  let transparency_class_id = select(
+    sd_transparency_class(surface_row0.y),
+    explicit_transparency_class_id,
+    explicit_transparency_class_id >= 0.0
+  );
+  let render_order = transparency_class_id * 1000.0 + f32(surface_index);
+  let explicit_depth_write_flag = surface_row3.w;
+  let depth_write_flag = select(
+    select(1.0, 0.0, transparency_class_id > 0.0),
+    explicit_depth_write_flag,
+    explicit_depth_write_flag >= 0.0
+  );
+  sd_write_draw_row(
+    surface_index,
+    surface_row0.x,
+    surface_row0.y,
+    surface_row3.y,
+    vertex_offset,
+    vertex_count,
+    triangle_offset,
+    triangle_count,
+    render_order,
+    transparency_class_id,
+    depth_write_flag,
+    select(0.0, 1.0, surface_is_active),
+    bounds_center,
+    bounds_radius_m
+  );
+  sd_write_draw_indirect_row(
+    surface_index,
+    select(0u, vertex_count, surface_is_active),
+    select(0u, 1u, surface_is_active),
+    vertex_offset,
+    surface_index
+  );
 }
 `;
 
@@ -1416,9 +3979,9 @@ struct P2gProjectionParams {
   grid_spacing_m: f32,
   inv_grid_spacing_m: f32,
   dt: f32,
-  pad0: f32,
-  pad1: f32,
-  pad2: f32,
+  resident_product_event_count: u32,
+  pad0: u32,
+  pad1: u32,
 };
 
 struct StressRows {
@@ -1432,6 +3995,7 @@ struct StressRows {
 @group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> grid_nodes: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> params: P2gProjectionParams;
+@group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
 
 fn quadratic_weights(fx: f32) -> vec3<f32> {
   let a = 1.5 - fx;
@@ -1445,6 +4009,38 @@ fn weight_at(weights: vec3<f32>, offset: i32) -> f32 {
   if (offset == 1) { return weights.y; }
   if (offset == 2) { return weights.z; }
   return 0.0;
+}
+
+fn product_event_row0(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u];
+}
+
+fn product_event_row1(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 1u];
+}
+
+fn product_event_row2(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 2u];
+}
+
+fn product_event_row3(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 3u];
+}
+
+fn product_event_row4(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 4u];
+}
+
+fn product_event_row5(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 5u];
+}
+
+fn product_event_row6(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 6u];
+}
+
+fn product_event_row7(event_index: u32) -> vec4<f32> {
+  return product_events[event_index * 8u + 7u];
 }
 
 fn det3(
@@ -1634,6 +4230,58 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     momentum = momentum + weight * particle_momentum;
   }
 
+  for (var event_index = 0u; event_index < params.resident_product_event_count; event_index = event_index + 1u) {
+    let event0 = product_event_row0(event_index);
+    let event3 = product_event_row3(event_index);
+    let event4 = product_event_row4(event_index);
+    let event5 = product_event_row5(event_index);
+    let event6 = product_event_row6(event_index);
+    let event7 = product_event_row7(event_index);
+    let event_unplaced_mass_kg = event3.y;
+    let event_status = event4.z;
+    if (event_status != 1.0 || event_unplaced_mass_kg <= 0.0) {
+      continue;
+    }
+    let event_grid = event0.xyz * params.inv_grid_spacing_m;
+    let base_x = i32(floor(event_grid.x - 0.5));
+    let base_y = i32(floor(event_grid.y - 0.5));
+    let base_z = i32(floor(event_grid.z - 0.5));
+    let ox = node_i - base_x;
+    let oy = node_j - base_y;
+    let oz = node_k - base_z;
+    if (ox < 0 || ox > 2 || oy < 0 || oy > 2 || oz < 0 || oz > 2) {
+      continue;
+    }
+    let wx = quadratic_weights(event_grid.x - f32(base_x));
+    let wy = quadratic_weights(event_grid.y - f32(base_y));
+    let wz = quadratic_weights(event_grid.z - f32(base_z));
+    let weight = weight_at(wx, ox) * weight_at(wy, oy) * weight_at(wz, oz);
+    mass = mass + weight * event_unplaced_mass_kg;
+    let support_volume_m3 = max(event5.w, 0.0);
+    let rest_density_kg_per_m3 = event4.y;
+    let sound_speed_m_per_s = event6.w;
+    let eos_model_id = event7.x;
+    var pressure_affine = vec3<f32>(0.0);
+    if (params.dt != 0.0 && support_volume_m3 > 0.0) {
+      let event_density = event_unplaced_mass_kg / max(support_volume_m3, 1.0e-30);
+      let event_pressure = packed_pressure(
+        event_density,
+        rest_density_kg_per_m3,
+        sound_speed_m_per_s,
+        eos_model_id
+      );
+      let event_stress_scale = -params.dt * support_volume_m3 * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
+      let diagonal_affine = event_stress_scale * -event_pressure;
+      let event_dpos = node_pos - event0.xyz;
+      pressure_affine = vec3<f32>(
+        diagonal_affine * event_dpos.x,
+        diagonal_affine * event_dpos.y,
+        diagonal_affine * event_dpos.z
+      );
+    }
+    momentum = momentum + weight * (event_unplaced_mass_kg * event5.xyz + pressure_affine);
+  }
+
   let status = select(0.0, 1.0, mass > 0.0);
   grid_nodes[node_index * 2u] = vec4<f32>(mass, momentum.x, momentum.y, momentum.z);
   grid_nodes[node_index * 2u + 1u] = vec4<f32>(node_pos.x, node_pos.y, node_pos.z, status);
@@ -1647,7 +4295,7 @@ struct GridUpdateParams {
   grid_ny: u32,
   grid_nz: u32,
   shift: u32,
-  pad_u0: u32,
+  pressure_force_row_count: u32,
   pad_u1: u32,
   pad_u2: u32,
   grid_spacing_m: f32,
@@ -1667,6 +4315,21 @@ struct GridUpdateParams {
 @group(0) @binding(0) var<storage, read> p2g_grid_nodes: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> updated_grid_nodes: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: GridUpdateParams;
+@group(0) @binding(3) var<storage, read> pressure_force_rows: array<vec4<f32>>;
+
+fn grid_update_quadratic_weights(fx: f32) -> vec3<f32> {
+  let a = 1.5 - fx;
+  let b = fx - 1.0;
+  let c = fx - 0.5;
+  return vec3<f32>(0.5 * a * a, 0.75 - b * b, 0.5 * c * c);
+}
+
+fn grid_update_weight_at(weights: vec3<f32>, offset: i32) -> f32 {
+  if (offset == 0) { return weights.x; }
+  if (offset == 1) { return weights.y; }
+  if (offset == 2) { return weights.z; }
+  return 0.0;
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -1678,11 +4341,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row0 = p2g_grid_nodes[node_index * 2u];
   let row1 = p2g_grid_nodes[node_index * 2u + 1u];
   let mass = row0.x;
+  var momentum = row0.yzw;
+  let node_i = i32(round(row1.x / max(params.grid_spacing_m, 1.0e-12)));
+  let node_j = i32(round(row1.y / max(params.grid_spacing_m, 1.0e-12)));
+  let node_k = i32(round(row1.z / max(params.grid_spacing_m, 1.0e-12)));
+
+  if (mass > 0.0) {
+    for (var force_index = 0u; force_index < params.pressure_force_row_count; force_index = force_index + 1u) {
+      let force_row1 = pressure_force_rows[force_index * 4u + 1u];
+      let force_row2 = pressure_force_rows[force_index * 4u + 2u];
+      let force_row3 = pressure_force_rows[force_index * 4u + 3u];
+      if (force_row3.w <= 0.0) {
+        continue;
+      }
+      let force_grid = force_row1.xyz / max(params.grid_spacing_m, 1.0e-12);
+      let base_x = i32(floor(force_grid.x - 0.5));
+      let base_y = i32(floor(force_grid.y - 0.5));
+      let base_z = i32(floor(force_grid.z - 0.5));
+      let ox = node_i - base_x;
+      let oy = node_j - base_y;
+      let oz = node_k - base_z;
+      if (ox < 0 || ox > 2 || oy < 0 || oy > 2 || oz < 0 || oz > 2) {
+        continue;
+      }
+      let wx = grid_update_quadratic_weights(force_grid.x - f32(base_x));
+      let wy = grid_update_quadratic_weights(force_grid.y - f32(base_y));
+      let wz = grid_update_quadratic_weights(force_grid.z - f32(base_z));
+      let weight = grid_update_weight_at(wx, ox) * grid_update_weight_at(wy, oy) * grid_update_weight_at(wz, oz);
+      momentum = momentum + params.dt * weight * force_row2.xyz;
+    }
+  }
+
   var velocity = vec3<f32>(0.0, 0.0, 0.0);
   var status = 0.0;
 
   if (mass > 0.0) {
-    velocity = row0.yzw / mass + vec3<f32>(params.gravity_x, params.gravity_y, params.gravity_z) * params.dt;
+    velocity = momentum / mass + vec3<f32>(params.gravity_x, params.gravity_y, params.gravity_z) * params.dt;
     let vmax = params.cfl_factor * params.grid_spacing_m / max(params.dt, 1.0e-12);
     let speed2 = dot(velocity, velocity);
     if (speed2 > vmax * vmax) {

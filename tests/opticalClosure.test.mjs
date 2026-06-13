@@ -10,7 +10,9 @@ import {
   metalRelativisticColorSrgb,
   opticalRenderParams,
   relativisticInterbandOscillators,
-  spectralResponseToSrgb
+  spectralResponseToSrgb,
+  waterDropletOpticalMicrophysics,
+  waterSaturationPressurePa
 } from '../src/runtime/material/opticalClosure.js';
 import { deriveElementProperties } from '../src/runtime/material/elementClosures.js';
 import { SPH_PHASE_CLOSURE_SCHEMAS } from '../ulg-gpu-abi/src/index.js';
@@ -95,6 +97,77 @@ test('render params are derived from the optics: iron opaque metal, water refrac
   assert.ok(steam.ior < 1.01); // vapour barely refracts (n ~ 1)
   assert.ok(steam.transmission > water.transmission); // pure vapour is optically thinner than liquid
   assert.equal(steam.condensationScatter, 0);
+});
+
+test('supersaturated water vapor derives visible droplet scattering without changing pure vapor', () => {
+  clearOpticalRenderParamsCache();
+  const temperatureK = 293.15;
+  const saturationPressurePa = waterSaturationPressurePa(temperatureK);
+  assert.ok(saturationPressurePa > 2000 && saturationPressurePa < 3000);
+
+  const pureVapor = opticalRenderParams({
+    material: 'h2o',
+    phase: 'gas',
+    pathLengthM: 1,
+    opticalState: {
+      temperatureK,
+      h2oPartialPressurePa: 0.5 * saturationPressurePa,
+      dropletRadiusM: 1e-6
+    }
+  });
+  const condensedSteam = opticalRenderParams({
+    material: 'h2o',
+    phase: 'gas',
+    pathLengthM: 1,
+    opticalState: {
+      temperatureK,
+      h2oPartialPressurePa: 1.2 * saturationPressurePa,
+      dropletRadiusM: 1e-6
+    }
+  });
+  const microphysics = waterDropletOpticalMicrophysics({
+    temperatureK,
+    h2oPartialPressurePa: 1.2 * saturationPressurePa,
+    dropletRadiusM: 1e-6,
+    pathLengthM: 1
+  });
+
+  assert.equal(pureVapor.renderModel, 'molecular-vapor-transparent-spectrum');
+  assert.equal(pureVapor.condensationScatter, 0);
+  assert.ok(pureVapor.transmission > 0.95);
+  assert.equal(condensedSteam.renderModel, 'molecular-condensed-droplet-scattering-pbr');
+  assert.ok(condensedSteam.condensationScatter > 0);
+  assert.ok(condensedSteam.opacity > pureVapor.opacity);
+  assert.ok(condensedSteam.transmission < pureVapor.transmission);
+  assert.equal(pureVapor.dropletMicrophysics.status, 'subsaturated-pure-vapor');
+  assert.equal(condensedSteam.dropletMicrophysics.status, 'supersaturated-condensed-droplets');
+  assert.ok(Math.abs(condensedSteam.dropletMicrophysics.condensedMassFraction - microphysics.condensedMassFraction) < 1e-12);
+  assert.ok(condensedSteam.spectralSamples.some((sample) => sample.scatteringCoefficientPerM > 0));
+  assert.equal(condensedSteam.provenance.source, 'clausius-clapeyron-condensed-droplet-mie-rayleigh-scattering');
+  const largerDroplets = opticalRenderParams({
+    material: 'h2o',
+    phase: 'gas',
+    pathLengthM: 1,
+    opticalState: {
+      temperatureK,
+      h2oPartialPressurePa: 1.2 * saturationPressurePa,
+      dropletRadiusM: 2e-6
+    }
+  });
+  assert.notEqual(largerDroplets.condensationScatter, condensedSteam.condensationScatter);
+
+  condensedSteam.baseColorSrgb[0] = 0;
+  const reread = opticalRenderParams({
+    material: 'h2o',
+    phase: 'gas',
+    pathLengthM: 1,
+    opticalState: {
+      temperatureK,
+      h2oPartialPressurePa: 1.2 * saturationPressurePa,
+      dropletRadiusM: 1e-6
+    }
+  });
+  assert.ok(reread.baseColorSrgb[0] > 0.9);
 });
 
 test('gold opacity is derived from conductor skin depth, not a generic translucent fallback', () => {

@@ -2,13 +2,20 @@ import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
   SPH_GPU_PARTICLE_STATE_ROW_LAYOUT,
   SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT,
+  SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT,
+  SPH_GPU_REACTION_HEADER_ROW_LAYOUT,
+  SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT,
+  SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT,
   SPH_GPU_REACTION_RECORD_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_REACTION_CLOSURE_SCHEMA,
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_PARITY_SCHEMA,
   ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+  ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
   ULG_SPH_GPU_REACTION_TABLE_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
@@ -19,6 +26,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import { describeChemicalFormula } from '../chemistry/formula.js';
 import {
   buildSphThermalClosureGraphBank,
   buildSphThermalClosureGraphBuffers,
@@ -30,6 +38,10 @@ import {
   ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA,
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA
 } from './sphThermalGpuKernel.js';
+import {
+  createResidentProductMassHandle,
+  runSphReactionSummaryWebGpu
+} from './sphReactionGpuSummary.js';
 
 export {
   ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
@@ -40,11 +52,23 @@ export {
 };
 
 export const SPH_REACTION_RECORD_FLOATS = SPH_GPU_REACTION_RECORD_ROW_LAYOUT.length;
+export const SPH_REACTION_HEADER_FLOATS = SPH_GPU_REACTION_HEADER_ROW_LAYOUT.length;
+export const SPH_REACTION_REACTANT_TERM_FLOATS = SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT.length;
+export const SPH_REACTION_PRODUCT_TERM_FLOATS = SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT.length;
+export const SPH_REACTION_GAS_PRODUCT_FLOATS = SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT.length;
+export const SPH_REACTION_ATOM_TERM_FLOATS = SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT.length;
 export const SPH_REACTION_PRODUCT_PHASE_FLOATS = SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.length;
+const SPH_REACTION_PACKED_PARTICLE_VEC4S = 13;
+const SPH_REACTION_PACKED_PARTICLE_FLOATS = SPH_REACTION_PACKED_PARTICLE_VEC4S * 4;
 
 const REACTION_SCOPE = 'sph-reaction-mutual-contact-derived-network';
 const REACTION_STATUS = Object.freeze({ ready: 1, missingProductMaterial: 255, invalidReaction: 254 });
 const PRODUCT_PHASE_STATUS = Object.freeze({ ready: 1, missingPhase: 255 });
+const REACTION_TERM_STATUS = Object.freeze({ ready: 1, missingMaterialProperties: 255 });
+const REACTION_PRODUCT_ROUTING = Object.freeze({ condensed: 0, gas: 1 });
+const REACTION_PRESSURE_ROUTING = Object.freeze({ sealedBoxGasInventory: 1 });
+const REACTION_ROLE_IDS = Object.freeze({ a: 1, b: 2, other: 3 });
+const REACTION_ATOM_TERM_KIND_IDS = Object.freeze({ reactant: 1, product: 2 });
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const R_GAS = 8.314462618;
@@ -117,6 +141,144 @@ function materialPropertiesFor(material, materialProperties) {
     ?? materialProperties[String(material).toLowerCase()]
     ?? materialProperties[String(material).toUpperCase()]
     ?? null;
+}
+
+function normalizeFormulaKey(formula) {
+  return String(formula || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function materialKeyForTerm(term, materialProperties = {}, fallback = null) {
+  const candidates = [
+    term?.material,
+    term?.product,
+    term?.key,
+    normalizeFormulaKey(term?.formula),
+    typeof term?.formula === 'string' ? term.formula.toLowerCase() : null,
+    term?.formula,
+    fallback
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (materialProperties[candidate]) return candidate;
+    const lower = String(candidate).toLowerCase();
+    if (materialProperties[lower]) return lower;
+  }
+  return candidates[0] || null;
+}
+
+function termCoefficient(term) {
+  const coefficient = finiteNumber(term?.coefficient, 1);
+  return coefficient > 0 ? coefficient : 1;
+}
+
+function termMolarMassKgPerMol(term, materialProperties = {}) {
+  const properties = materialPropertiesFor(term?.material, materialProperties);
+  const molarMass = finiteNumber(properties?.molarMassKgPerMol, 0);
+  return molarMass > 0 ? molarMass : 0;
+}
+
+function productTermsForReaction(reaction, materialProperties = {}) {
+  const sourceTerms = reaction?.stoichiometry?.products?.length
+    ? reaction.stoichiometry.products
+    : [{ coefficient: 1, formula: reaction?.product, material: reaction?.product }];
+  return sourceTerms
+    .map((term) => ({
+      ...term,
+      coefficient: termCoefficient(term),
+      material: materialKeyForTerm(term, materialProperties, reaction?.product)
+    }))
+    .filter((term) => term.material);
+}
+
+function reactantTermsForReaction(reaction, materialProperties = {}) {
+  const fallback = [
+    { coefficient: 1, formula: reaction?.a, material: reaction?.a, role: 'a' },
+    { coefficient: 1, formula: reaction?.b, material: reaction?.b, role: 'b' }
+  ].filter((term) => term.material);
+  const sourceTerms = reaction?.stoichiometry?.reactants?.length ? reaction.stoichiometry.reactants : fallback;
+  return sourceTerms
+    .map((term, index) => {
+      const fallbackMaterial = index === 0 ? reaction?.a : index === 1 ? reaction?.b : null;
+      const material = materialKeyForTerm(term, materialProperties, fallbackMaterial);
+      const normalized = normalizeFormulaKey(term?.formula || material);
+      const role = normalized === normalizeFormulaKey(reaction?.a)
+        ? 'a'
+        : normalized === normalizeFormulaKey(reaction?.b)
+          ? 'b'
+          : index === 0
+            ? 'a'
+            : index === 1
+              ? 'b'
+              : 'other';
+      return {
+        ...term,
+        material,
+        role,
+        coefficient: termCoefficient(term)
+      };
+    })
+    .filter((term) => term.material);
+}
+
+function productMassFractions(productTerms, materialProperties = {}) {
+  const weighted = productTerms.map((term) => {
+    const molarMassKgPerMol = termMolarMassKgPerMol(term, materialProperties);
+    return {
+      ...term,
+      molarMassKgPerMol,
+      massWeight: molarMassKgPerMol > 0 ? term.coefficient * molarMassKgPerMol : 0
+    };
+  });
+  const total = weighted.reduce((sum, term) => sum + term.massWeight, 0);
+  const fallbackFraction = weighted.length ? 1 / weighted.length : 0;
+  return weighted.map((term) => ({
+    ...term,
+    massFraction: total > 0 ? term.massWeight / total : fallbackFraction
+  }));
+}
+
+function termPhaseMask(term, reaction) {
+  return phaseMask(reaction?.phaseRequirements?.[term?.material])
+    || phaseMask(reaction?.phaseRequirements?.[String(term?.material || '').toLowerCase()])
+    || phaseMask(reaction?.phaseRequirements?.[term?.formula]);
+}
+
+function termIsGas(term, materialProperties = {}) {
+  const properties = materialPropertiesFor(term?.material, materialProperties);
+  const phases = properties?.phases || [];
+  const gasOnlyMaterial = phases.length > 0 && phases.every((phase) => phase?.name === 'gas');
+  return gasOnlyMaterial
+    || String(term?.phase || '').toLowerCase() === 'gas'
+    || String(term?.targetPhase || '').toLowerCase() === 'gas'
+    || String(term?.routing || '').toLowerCase() === 'gas';
+}
+
+function atomEntriesForTerm(term) {
+  const atomCounts = term?.atomCounts || (() => {
+    try {
+      return describeChemicalFormula(term?.formula || term?.material).atomCounts;
+    } catch {
+      return null;
+    }
+  })();
+  return Object.entries(atomCounts || {})
+    .map(([Z, count]) => ({ Z: Number(Z), count: finiteNumber(count, 0) }))
+    .filter((entry) => Number.isFinite(entry.Z) && entry.Z > 0 && entry.count > 0)
+    .sort((left, right) => left.Z - right.Z);
+}
+
+function productPhaseRangeFor(productPhaseMetadata, material) {
+  const materialId = stableOpticalMaterialId(material);
+  let offset = 0;
+  for (const item of productPhaseMetadata || []) {
+    if (item.materialId === materialId) {
+      return {
+        offset,
+        count: item.phaseCount || 0
+      };
+    }
+    offset += item.phaseCount || 0;
+  }
+  return { offset: 0, count: 0 };
 }
 
 function phaseMask(phases) {
@@ -227,28 +389,57 @@ export function buildSphReactionTable(reactions = [], {
   minGasSoundSpeedMPerS = DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
 } = {}) {
   const records = [];
+  const reactionHeaders = [];
+  const reactantTermRecords = [];
+  const productTermRecords = [];
+  const gasProductRecords = [];
+  const atomTermRecords = [];
   const metadata = [];
+  const reactantTermMetadata = [];
+  const productTermMetadata = [];
+  const gasProductMetadata = [];
+  const atomTermMetadata = [];
   const productPhaseRecords = [];
   const productPhaseMetadata = [];
   const productPhaseKeys = new Set();
   const options = { soundSpeedScale, minGasSoundSpeedMPerS };
 
-  for (const reaction of reactions || []) {
+  for (let reactionIndex = 0; reactionIndex < (reactions || []).length; reactionIndex += 1) {
+    const reaction = reactions[reactionIndex];
     const a = reaction?.a;
     const b = reaction?.b;
-    const product = reaction?.product;
+    const productTerms = productMassFractions(productTermsForReaction(reaction, materialProperties), materialProperties);
+    const reactantTerms = reactantTermsForReaction(reaction, materialProperties);
+    const primaryProductTerm = productTerms[0] || { material: reaction?.product, coefficient: 1, massFraction: 1 };
+    const product = primaryProductTerm.material || reaction?.product;
     const aMaterialId = stableOpticalMaterialId(a);
     const bMaterialId = stableOpticalMaterialId(b);
     const productMaterialId = stableOpticalMaterialId(product);
+    for (const term of productTerms) {
+      appendProductPhaseRecords({
+        product: term.material,
+        materialProperties,
+        productPhaseKeys,
+        productPhaseRecords,
+        metadata: productPhaseMetadata,
+        options
+      });
+    }
     const productProperties = materialPropertiesFor(product, materialProperties);
+    const allProductPropertiesReady = productTerms.length > 0 && productTerms.every((term) => (
+      materialPropertiesFor(term.material, materialProperties)?.phases?.length
+    ));
     const activationTemperatureK = finiteNumber(reaction?.activationTemperatureK, 0);
     const specificEnthalpyJPerKg = finiteNumber(reaction?.specificEnthalpyJPerKg, 0);
     const radius = finiteNumber(reaction?.contactRadiusM ?? contactRadiusM, 0);
-    const status = a && b && product && radius > 0 && productProperties?.phases?.length
+    const status = a && b && product && radius > 0 && allProductPropertiesReady
       ? REACTION_STATUS.ready
-      : (!productProperties?.phases?.length ? REACTION_STATUS.missingProductMaterial : REACTION_STATUS.invalidReaction);
+      : (!productProperties?.phases?.length || !allProductPropertiesReady ? REACTION_STATUS.missingProductMaterial : REACTION_STATUS.invalidReaction);
     const phaseMaskA = phaseMask(reaction?.phaseRequirements?.[a]);
     const phaseMaskB = phaseMask(reaction?.phaseRequirements?.[b]);
+    const reactantTermOffset = reactantTermRecords.length / SPH_REACTION_REACTANT_TERM_FLOATS;
+    const productTermOffset = productTermRecords.length / SPH_REACTION_PRODUCT_TERM_FLOATS;
+    const gasProductTermOffset = gasProductRecords.length / SPH_REACTION_GAS_PRODUCT_FLOATS;
     records.push(
       aMaterialId,
       bMaterialId,
@@ -262,6 +453,186 @@ export function buildSphReactionTable(reactions = [], {
       0,
       0,
       0
+    );
+    for (const term of reactantTerms) {
+      const materialId = stableOpticalMaterialId(term.material);
+      const properties = materialPropertiesFor(term.material, materialProperties);
+      const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
+      const termStatus = molarMassKgPerMol > 0 ? REACTION_TERM_STATUS.ready : REACTION_TERM_STATUS.missingMaterialProperties;
+      const reactantTermIndex = reactantTermRecords.length / SPH_REACTION_REACTANT_TERM_FLOATS;
+      reactantTermRecords.push(
+        reactionIndex,
+        materialId,
+        term.coefficient,
+        molarMassKgPerMol,
+        termPhaseMask(term, reaction),
+        REACTION_ROLE_IDS[term.role] || REACTION_ROLE_IDS.other,
+        finiteNumber(term.charge, 0),
+        term.coefficient,
+        stableOpticalMaterialId(term.material),
+        stableOpticalMaterialId(term.formula || term.material),
+        termStatus,
+        0
+      );
+      reactantTermMetadata.push({
+        reactionIndex,
+        reactantTermIndex,
+        material: term.material,
+        materialId,
+        formula: term.formula || term.material,
+        coefficient: term.coefficient,
+        molarMassKgPerMol,
+        role: term.role,
+        phaseMask: termPhaseMask(term, reaction),
+        status: termStatus
+      });
+      const reactantAtomEntries = atomEntriesForTerm(term);
+      for (let atomIndex = 0; atomIndex < reactantAtomEntries.length; atomIndex += 1) {
+        const atom = reactantAtomEntries[atomIndex];
+        const chargeForRow = atomIndex === 0 ? finiteNumber(term.charge, 0) : 0;
+        const atomTermIndex = atomTermRecords.length / SPH_REACTION_ATOM_TERM_FLOATS;
+        atomTermRecords.push(
+          reactionIndex,
+          REACTION_ATOM_TERM_KIND_IDS.reactant,
+          reactantTermIndex,
+          atom.Z,
+          atom.count,
+          term.coefficient,
+          chargeForRow,
+          termStatus
+        );
+        atomTermMetadata.push({
+          reactionIndex,
+          atomTermIndex,
+          termKind: 'reactant',
+          termKindId: REACTION_ATOM_TERM_KIND_IDS.reactant,
+          termIndex: reactantTermIndex,
+          material: term.material,
+          formula: term.formula || term.material,
+          atomicNumberZ: atom.Z,
+          atomsPerFormula: atom.count,
+          coefficient: term.coefficient,
+          charge: chargeForRow,
+          status: termStatus
+        });
+      }
+    }
+    for (const term of productTerms) {
+      const materialId = stableOpticalMaterialId(term.material);
+      const properties = materialPropertiesFor(term.material, materialProperties);
+      const molarMassKgPerMol = finiteNumber(properties?.molarMassKgPerMol, 0);
+      const gas = termIsGas(term, materialProperties);
+      const phaseRange = productPhaseRangeFor(productPhaseMetadata, term.material);
+      const productTermIndex = productTermRecords.length / SPH_REACTION_PRODUCT_TERM_FLOATS;
+      const termStatus = molarMassKgPerMol > 0 && properties?.phases?.length
+        ? REACTION_TERM_STATUS.ready
+        : REACTION_TERM_STATUS.missingMaterialProperties;
+      productTermRecords.push(
+        reactionIndex,
+        materialId,
+        term.coefficient,
+        molarMassKgPerMol,
+        term.massFraction,
+        gas ? REACTION_PRODUCT_ROUTING.gas : REACTION_PRODUCT_ROUTING.condensed,
+        gas ? GPU_PHASE_IDS.gas : 0,
+        termStatus,
+        stableOpticalMaterialId(term.formula || term.material),
+        stableOpticalMaterialId(term.material),
+        termPhaseMask(term, reaction),
+        phaseRange.offset,
+        phaseRange.count,
+        gas ? materialId : 0,
+        finiteNumber(term.charge, 0),
+        0
+      );
+      productTermMetadata.push({
+        reactionIndex,
+        productTermIndex,
+        material: term.material,
+        materialId,
+        formula: term.formula || term.material,
+        coefficient: term.coefficient,
+        molarMassKgPerMol,
+        massFraction: term.massFraction,
+        routing: gas ? 'gas' : 'condensed',
+        phaseRecordOffset: phaseRange.offset,
+        phaseRecordCount: phaseRange.count,
+        status: termStatus
+      });
+      const productAtomEntries = atomEntriesForTerm(term);
+      for (let atomIndex = 0; atomIndex < productAtomEntries.length; atomIndex += 1) {
+        const atom = productAtomEntries[atomIndex];
+        const chargeForRow = atomIndex === 0 ? finiteNumber(term.charge, 0) : 0;
+        const atomTermIndex = atomTermRecords.length / SPH_REACTION_ATOM_TERM_FLOATS;
+        atomTermRecords.push(
+          reactionIndex,
+          REACTION_ATOM_TERM_KIND_IDS.product,
+          productTermIndex,
+          atom.Z,
+          atom.count,
+          term.coefficient,
+          chargeForRow,
+          termStatus
+        );
+        atomTermMetadata.push({
+          reactionIndex,
+          atomTermIndex,
+          termKind: 'product',
+          termKindId: REACTION_ATOM_TERM_KIND_IDS.product,
+          termIndex: productTermIndex,
+          material: term.material,
+          formula: term.formula || term.material,
+          atomicNumberZ: atom.Z,
+          atomsPerFormula: atom.count,
+          coefficient: term.coefficient,
+          charge: chargeForRow,
+          status: termStatus
+        });
+      }
+      if (gas) {
+        const gasRecordIndex = gasProductRecords.length / SPH_REACTION_GAS_PRODUCT_FLOATS;
+        gasProductRecords.push(
+          reactionIndex,
+          productTermIndex,
+          materialId,
+          term.coefficient,
+          molarMassKgPerMol,
+          REACTION_PRESSURE_ROUTING.sealedBoxGasInventory,
+          termStatus,
+          0
+        );
+        gasProductMetadata.push({
+          reactionIndex,
+          gasRecordIndex,
+          productTermIndex,
+          material: term.material,
+          materialId,
+          formula: term.formula || term.material,
+          coefficient: term.coefficient,
+          molarMassKgPerMol,
+          pressureRouting: 'sealed-box-gas-inventory',
+          status: termStatus
+        });
+      }
+    }
+    const gasProductTermCount = (gasProductRecords.length / SPH_REACTION_GAS_PRODUCT_FLOATS) - gasProductTermOffset;
+    reactionHeaders.push(
+      reactionIndex,
+      reactantTermOffset,
+      reactantTerms.length,
+      productTermOffset,
+      productTerms.length,
+      gasProductTermOffset,
+      gasProductTermCount,
+      specificEnthalpyJPerKg,
+      activationTemperatureK,
+      radius,
+      status,
+      productMaterialId,
+      phaseMaskA,
+      phaseMaskB,
+      reaction?.stoichiometry?.atomBalance?.balanced ? 1 : 0,
+      reaction?.stoichiometry?.chargeBalance?.balanced ? 1 : 0
     );
     metadata.push({
       a,
@@ -277,32 +648,76 @@ export function buildSphReactionTable(reactions = [], {
       phaseMaskB,
       status,
       energyModel: reaction?.energyModel ?? null,
-      activationModel: reaction?.activationModel ?? null
-    });
-    appendProductPhaseRecords({
-      product,
-      materialProperties,
-      productPhaseKeys,
-      productPhaseRecords,
-      metadata: productPhaseMetadata,
-      options
+      activationModel: reaction?.activationModel ?? null,
+      reactionClosureSchema: ULG_REACTION_CLOSURE_SCHEMA,
+      stoichiometry: reaction?.stoichiometry ?? null,
+      reactantTermOffset,
+      reactantTermCount: reactantTerms.length,
+      productTermOffset,
+      productTermCount: productTerms.length,
+      gasProductTermOffset,
+      gasProductTermCount,
+      productTerms: productTermMetadata.filter((term) => term.reactionIndex === reactionIndex),
+      reactantTerms: reactantTermMetadata.filter((term) => term.reactionIndex === reactionIndex),
+      gasProductTerms: gasProductMetadata.filter((term) => term.reactionIndex === reactionIndex)
     });
   }
 
   return {
     schema: ULG_SPH_GPU_REACTION_TABLE_SCHEMA,
+    reactionClosureSchema: ULG_REACTION_CLOSURE_SCHEMA,
     status: records.length ? 'derived-reaction-table-ready' : 'no-derived-reactions',
     reactionCount: records.length / SPH_REACTION_RECORD_FLOATS,
+    reactionHeaderCount: reactionHeaders.length / SPH_REACTION_HEADER_FLOATS,
+    reactantTermCount: reactantTermRecords.length / SPH_REACTION_REACTANT_TERM_FLOATS,
+    productTermCount: productTermRecords.length / SPH_REACTION_PRODUCT_TERM_FLOATS,
+    gasProductCount: gasProductRecords.length / SPH_REACTION_GAS_PRODUCT_FLOATS,
+    atomTermCount: atomTermRecords.length / SPH_REACTION_ATOM_TERM_FLOATS,
     productPhaseCount: productPhaseRecords.length / SPH_REACTION_PRODUCT_PHASE_FLOATS,
-    combinedRecordCount: (records.length + productPhaseRecords.length) / SPH_REACTION_RECORD_FLOATS,
+    combinedRecordCount: (
+      records.length
+      + productPhaseRecords.length
+      + reactionHeaders.length
+      + reactantTermRecords.length
+      + productTermRecords.length
+      + gasProductRecords.length
+      + atomTermRecords.length
+    ) / 4,
     recordLayout: [...SPH_GPU_REACTION_RECORD_ROW_LAYOUT],
+    reactionHeaderLayout: [...SPH_GPU_REACTION_HEADER_ROW_LAYOUT],
+    reactantTermLayout: [...SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT],
+    productTermLayout: [...SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT],
+    gasProductLayout: [...SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT],
+    atomTermLayout: [...SPH_GPU_REACTION_ATOM_TERM_ROW_LAYOUT],
     productPhaseLayout: [...SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT],
     recordStrideFloats: SPH_REACTION_RECORD_FLOATS,
+    reactionHeaderStrideFloats: SPH_REACTION_HEADER_FLOATS,
+    reactantTermStrideFloats: SPH_REACTION_REACTANT_TERM_FLOATS,
+    productTermStrideFloats: SPH_REACTION_PRODUCT_TERM_FLOATS,
+    gasProductStrideFloats: SPH_REACTION_GAS_PRODUCT_FLOATS,
+    atomTermStrideFloats: SPH_REACTION_ATOM_TERM_FLOATS,
     productPhaseStrideFloats: SPH_REACTION_PRODUCT_PHASE_FLOATS,
     records: new Float32Array(records),
+    reactionHeaders: new Float32Array(reactionHeaders),
+    reactantTermRecords: new Float32Array(reactantTermRecords),
+    productTermRecords: new Float32Array(productTermRecords),
+    gasProductRecords: new Float32Array(gasProductRecords),
+    atomTermRecords: new Float32Array(atomTermRecords),
     productPhaseRecords: new Float32Array(productPhaseRecords),
-    combinedRecords: new Float32Array([...records, ...productPhaseRecords]),
+    combinedRecords: new Float32Array([
+      ...records,
+      ...productPhaseRecords,
+      ...reactionHeaders,
+      ...reactantTermRecords,
+      ...productTermRecords,
+      ...gasProductRecords,
+      ...atomTermRecords
+    ]),
     metadata,
+    reactantTermMetadata,
+    productTermMetadata,
+    gasProductMetadata,
+    atomTermMetadata,
     productPhaseMetadata,
     scientificValidation: false,
     materialValidation: false,
@@ -324,6 +739,351 @@ function reactionRecord(table, index) {
     phaseMaskA: table.records[offset + 6],
     phaseMaskB: table.records[offset + 7],
     status: table.records[offset + 8]
+  };
+}
+
+function reactionHeaderRecord(table, index) {
+  if (!table.reactionHeaders?.length) {
+    const rx = reactionRecord(table, index);
+    return {
+      reactionIndex: index,
+      productTermOffset: 0,
+      productTermCount: 0,
+      gasProductTermOffset: 0,
+      gasProductTermCount: 0,
+      specificEnthalpyJPerKg: rx.specificEnthalpyJPerKg,
+      activationTemperatureK: rx.activationTemperatureK,
+      contactRadiusM: rx.contactRadiusM,
+      status: rx.status,
+      primaryProductMaterialId: rx.productMaterialId
+    };
+  }
+  const offset = index * SPH_REACTION_HEADER_FLOATS;
+  return {
+    reactionIndex: table.reactionHeaders[offset],
+    reactantTermOffset: table.reactionHeaders[offset + 1],
+    reactantTermCount: table.reactionHeaders[offset + 2],
+    productTermOffset: table.reactionHeaders[offset + 3],
+    productTermCount: table.reactionHeaders[offset + 4],
+    gasProductTermOffset: table.reactionHeaders[offset + 5],
+    gasProductTermCount: table.reactionHeaders[offset + 6],
+    specificEnthalpyJPerKg: table.reactionHeaders[offset + 7],
+    activationTemperatureK: table.reactionHeaders[offset + 8],
+    contactRadiusM: table.reactionHeaders[offset + 9],
+    status: table.reactionHeaders[offset + 10],
+    primaryProductMaterialId: table.reactionHeaders[offset + 11],
+    phaseMaskA: table.reactionHeaders[offset + 12],
+    phaseMaskB: table.reactionHeaders[offset + 13],
+    atomBalanceStatus: table.reactionHeaders[offset + 14],
+    chargeBalanceStatus: table.reactionHeaders[offset + 15]
+  };
+}
+
+function reactantTermRecord(table, termIndex) {
+  if (!table.reactantTermRecords?.length) return null;
+  const offset = termIndex * SPH_REACTION_REACTANT_TERM_FLOATS;
+  return {
+    reactantTermIndex: termIndex,
+    reactionIndex: table.reactantTermRecords[offset],
+    materialId: table.reactantTermRecords[offset + 1],
+    coefficient: table.reactantTermRecords[offset + 2],
+    molarMassKgPerMol: table.reactantTermRecords[offset + 3],
+    phaseMask: table.reactantTermRecords[offset + 4],
+    roleId: table.reactantTermRecords[offset + 5],
+    charge: table.reactantTermRecords[offset + 6],
+    stoichiometricMoles: table.reactantTermRecords[offset + 7],
+    materialKeyHash: table.reactantTermRecords[offset + 8],
+    formulaHash: table.reactantTermRecords[offset + 9],
+    status: table.reactantTermRecords[offset + 10]
+  };
+}
+
+function reactantTermsForReactionTableRecord(table, reactionIndex) {
+  const header = reactionHeaderRecord(table, reactionIndex);
+  const count = Math.max(0, Math.round(finiteNumber(header.reactantTermCount, 0)));
+  const offset = Math.max(0, Math.round(finiteNumber(header.reactantTermOffset, 0)));
+  const terms = [];
+  for (let index = 0; index < count; index += 1) {
+    const term = reactantTermRecord(table, offset + index);
+    if (term && Math.round(term.status) === REACTION_TERM_STATUS.ready) terms.push(term);
+  }
+  return terms;
+}
+
+function productTermRecord(table, termIndex) {
+  if (!table.productTermRecords?.length) return null;
+  const offset = termIndex * SPH_REACTION_PRODUCT_TERM_FLOATS;
+  return {
+    productTermIndex: termIndex,
+    reactionIndex: table.productTermRecords[offset],
+    materialId: table.productTermRecords[offset + 1],
+    coefficient: table.productTermRecords[offset + 2],
+    molarMassKgPerMol: table.productTermRecords[offset + 3],
+    massFraction: table.productTermRecords[offset + 4],
+    routingId: table.productTermRecords[offset + 5],
+    targetPhasePolicyId: table.productTermRecords[offset + 6],
+    status: table.productTermRecords[offset + 7],
+    formulaHash: table.productTermRecords[offset + 8],
+    materialKeyHash: table.productTermRecords[offset + 9],
+    phaseMask: table.productTermRecords[offset + 10],
+    productPhaseRecordOffset: table.productTermRecords[offset + 11],
+    productPhaseRecordCount: table.productTermRecords[offset + 12],
+    gasSpeciesId: table.productTermRecords[offset + 13],
+    charge: table.productTermRecords[offset + 14]
+  };
+}
+
+function productTermsForReactionTableRecord(table, reactionIndex) {
+  const header = reactionHeaderRecord(table, reactionIndex);
+  const count = Math.max(0, Math.round(finiteNumber(header.productTermCount, 0)));
+  const offset = Math.max(0, Math.round(finiteNumber(header.productTermOffset, 0)));
+  const terms = [];
+  for (let index = 0; index < count; index += 1) {
+    const term = productTermRecord(table, offset + index);
+    if (term && Math.round(term.status) === REACTION_TERM_STATUS.ready) terms.push(term);
+  }
+  if (terms.length) return terms;
+  const rx = reactionRecord(table, reactionIndex);
+  return [{
+    reactionIndex,
+    materialId: rx.productMaterialId,
+    coefficient: 1,
+    molarMassKgPerMol: 0,
+    massFraction: 1,
+    routingId: REACTION_PRODUCT_ROUTING.condensed,
+    status: REACTION_TERM_STATUS.ready
+  }];
+}
+
+function termMetadataFor(table, kind, term) {
+  const list = kind === 'product' ? table.productTermMetadata : table.reactantTermMetadata;
+  return (list || []).find((item) => (
+    item[`${kind}TermIndex`] === term?.[`${kind}TermIndex`]
+    || (item.reactionIndex === term?.reactionIndex && item.materialId === term?.materialId)
+  )) || null;
+}
+
+function materialLedgerKey(table, term, kind = 'product') {
+  const metadata = termMetadataFor(table, kind, term);
+  if (metadata?.material) return String(metadata.material);
+  return String(Math.round(finiteNumber(term?.materialId, 0)));
+}
+
+function updateMassBucket(target, key, massKg) {
+  if (!key || !(Math.abs(massKg) > 0)) return;
+  target[key] = (target[key] || 0) + massKg;
+  if (Math.abs(target[key]) < 1e-12) target[key] = 0;
+}
+
+function createReactionLedger() {
+  return {
+    schema: 'peercompute.ulg.sph-gpu-reaction-ledger.v0',
+    status: 'fixed-particle-buffer-stoichiometric-ledger',
+    eventCount: 0,
+    productMassKgByMaterial: {},
+    gasMassKgByMaterial: {},
+    visibleProductMassKgByMaterial: {},
+    unplacedProductMassKgByMaterial: {},
+    heatJ: 0,
+    massResidualKg: 0,
+    unplacedProductMassKg: 0,
+    scientificValidation: false,
+    chemistryValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function appendReactionLedgerEvent(ledger, event) {
+  ledger.events ??= [];
+  ledger.events.push(event);
+  ledger.eventCount += 1;
+  ledger.heatJ += event.heatJ || 0;
+  ledger.massResidualKg += event.massResidualKg || 0;
+  ledger.unplacedProductMassKg += event.unplacedProductMassKg || 0;
+  for (const product of event.products || []) {
+    updateMassBucket(ledger.productMassKgByMaterial, product.material, product.massKg);
+    updateMassBucket(ledger.visibleProductMassKgByMaterial, product.material, product.visibleMassKg);
+    updateMassBucket(ledger.unplacedProductMassKgByMaterial, product.material, product.unplacedMassKg);
+    if (product.routing === 'gas') {
+      updateMassBucket(ledger.gasMassKgByMaterial, product.material, product.massKg);
+    }
+  }
+}
+
+function sourceInfoForReaction({ sphParticleState, index, reactantTerms }) {
+  const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
+  const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+  const materialId = sphParticleState.thermo[thermoOffset];
+  const term = reactantTerms.find((candidate) => candidate.materialId === materialId) || null;
+  if (!term) return null;
+  const massKg = sphParticleState.state[stateOffset + 3];
+  const molarMassKgPerMol = finiteNumber(term.molarMassKgPerMol, 0);
+  const coefficient = finiteNumber(term.coefficient, 0);
+  if (!(massKg > 0) || !(molarMassKgPerMol > 0) || !(coefficient > 0)) return null;
+  return {
+    index,
+    term,
+    materialId,
+    massKg,
+    specificInternalEnergyJPerKg: sphParticleState.state[stateOffset + 7],
+    availableMoles: massKg / molarMassKgPerMol,
+    limitingExtentMol: massKg / (coefficient * molarMassKgPerMol)
+  };
+}
+
+function normalizedProductRecords({ table, productTerms, extentMol, consumedMassKg }) {
+  const rawProducts = productTerms.map((term) => {
+    const coefficient = finiteNumber(term.coefficient, 0);
+    const molarMassKgPerMol = finiteNumber(term.molarMassKgPerMol, 0);
+    return {
+      term,
+      material: materialLedgerKey(table, term, 'product'),
+      rawMassKg: Math.max(extentMol * coefficient * molarMassKgPerMol, 0),
+      routing: Math.round(finiteNumber(term.routingId, 0)) === REACTION_PRODUCT_ROUTING.gas ? 'gas' : 'condensed'
+    };
+  });
+  const rawProductMassKg = rawProducts.reduce((sum, product) => sum + product.rawMassKg, 0);
+  const massScale = rawProductMassKg > 0 ? consumedMassKg / rawProductMassKg : 0;
+  return {
+    rawProductMassKg,
+    massScale,
+    products: rawProducts.map((product) => ({
+      ...product,
+      massKg: product.rawMassKg * massScale
+    }))
+  };
+}
+
+function planStoichiometricFixedBufferEvent({
+  table,
+  reactionIndex,
+  sourceIndices,
+  sphParticleState
+}) {
+  const reactantTerms = reactantTermsForReactionTableRecord(table, reactionIndex);
+  const productTerms = productTermsForReactionTableRecord(table, reactionIndex)
+    .filter((term) => finiteNumber(term.molarMassKgPerMol, 0) > 0 && finiteNumber(term.coefficient, 0) > 0);
+  if (reactantTerms.length < 2 || productTerms.length === 0) return null;
+  const sources = sourceIndices.map((index) => sourceInfoForReaction({ sphParticleState, index, reactantTerms }));
+  if (sources.some((source) => !source || !(source.limitingExtentMol > 0))) return null;
+  const extentMol = Math.min(...sources.map((source) => source.limitingExtentMol));
+  if (!(extentMol > 0)) return null;
+  const consumed = sources.map((source) => {
+    const consumedMassKg = Math.min(
+      source.massKg,
+      extentMol * source.term.coefficient * source.term.molarMassKgPerMol
+    );
+    return {
+      ...source,
+      consumedMassKg,
+      remainingMassKg: Math.max(0, source.massKg - consumedMassKg)
+    };
+  });
+  const consumedMassKg = consumed.reduce((sum, source) => sum + source.consumedMassKg, 0);
+  if (!(consumedMassKg > 0)) return null;
+  const { products, rawProductMassKg } = normalizedProductRecords({
+    table,
+    productTerms,
+    extentMol,
+    consumedMassKg
+  });
+  if (!products.length) return null;
+  const rx = reactionRecord(table, reactionIndex);
+  const consumedEnergyJ = consumed.reduce(
+    (sum, source) => sum + source.consumedMassKg * source.specificInternalEnergyJPerKg,
+    0
+  );
+  const heatJ = -rx.specificEnthalpyJPerKg * consumedMassKg;
+  const productSpecificInternalEnergyJPerKg = (consumedEnergyJ + heatJ) / consumedMassKg;
+  const freeSlots = consumed.filter((source) => {
+    const epsilon = Math.max(source.massKg, 1) * 1e-7;
+    return source.remainingMassKg <= epsilon;
+  }).sort((left, right) => left.index - right.index);
+  const visibleByIndex = new Map();
+  const productVisibility = products.map((product) => ({
+    ...product,
+    visibleMassKg: 0,
+    unplacedMassKg: product.massKg
+  }));
+  if (productVisibility.length === 1) {
+    for (const source of freeSlots) {
+      const massKg = freeSlots.length === 1
+        ? consumedMassKg
+        : source.consumedMassKg;
+      visibleByIndex.set(source.index, {
+        kind: 'product',
+        productIndex: 0,
+        product: productVisibility[0],
+        massKg,
+        specificInternalEnergyJPerKg: productSpecificInternalEnergyJPerKg
+      });
+      productVisibility[0].visibleMassKg += massKg;
+      productVisibility[0].unplacedMassKg = Math.max(0, productVisibility[0].unplacedMassKg - massKg);
+    }
+  } else {
+    for (let slot = 0; slot < freeSlots.length && slot < productVisibility.length; slot += 1) {
+      const product = productVisibility[slot];
+      visibleByIndex.set(freeSlots[slot].index, {
+        kind: 'product',
+        productIndex: slot,
+        product,
+        massKg: product.massKg,
+        specificInternalEnergyJPerKg: productSpecificInternalEnergyJPerKg
+      });
+      product.visibleMassKg += product.massKg;
+      product.unplacedMassKg = 0;
+    }
+  }
+  const outputs = new Map();
+  for (const source of consumed) {
+    const visible = visibleByIndex.get(source.index);
+    if (visible) {
+      outputs.set(source.index, visible);
+    } else {
+      outputs.set(source.index, {
+        kind: 'reactant',
+        source,
+        massKg: source.remainingMassKg,
+        consumedMassKg: source.consumedMassKg
+      });
+    }
+  }
+  return {
+    extentMol,
+    consumedMassKg,
+    rawProductMassKg,
+    heatJ,
+    productSpecificInternalEnergyJPerKg,
+    outputs,
+    event: {
+      schema: 'peercompute.ulg.sph-gpu-reaction-ledger-event.v0',
+      reactionIndex,
+      extentMol,
+      consumedMassKg,
+      rawProductMassKg,
+      productMassKg: consumedMassKg,
+      massResidualKg: rawProductMassKg - consumedMassKg,
+      heatJ,
+      fixedParticleBuffer: true,
+      unplacedProductMassKg: productVisibility.reduce((sum, product) => sum + product.unplacedMassKg, 0),
+      reactants: consumed.map((source) => ({
+        material: materialLedgerKey(table, source.term, 'reactant'),
+        materialId: source.materialId,
+        coefficient: source.term.coefficient,
+        consumedMassKg: source.consumedMassKg,
+        remainingMassKg: source.remainingMassKg
+      })),
+      products: productVisibility.map((product) => ({
+        material: product.material,
+        materialId: product.term.materialId,
+        coefficient: product.term.coefficient,
+        massKg: product.massKg,
+        rawMassKg: product.rawMassKg,
+        visibleMassKg: product.visibleMassKg,
+        unplacedMassKg: product.unplacedMassKg,
+        routing: product.routing
+      }))
+    }
   };
 }
 
@@ -404,6 +1164,13 @@ function resetMechanicsForProduct(mechanics, index, massKg, resolved, productMec
   ], offset);
 }
 
+function updateMechanicsRestVolumeForMass(mechanics, thermo, index, massKg) {
+  const mechanicsOffset = index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+  const restDensity = finiteNumber(thermo[thermoOffset + 3], 0);
+  if (restDensity > 0) mechanics[mechanicsOffset + 19] = massKg / restDensity;
+}
+
 function findBestProposal(index, sphParticleState, reactionTable) {
   const state = sphParticleState.state;
   const thermo = sphParticleState.thermo;
@@ -418,7 +1185,7 @@ function findBestProposal(index, sphParticleState, reactionTable) {
   let bestPartner = -1;
   let bestReaction = -1;
   let bestRole = 0;
-  let bestDistance2 = Number.POSITIVE_INFINITY;
+  let bestDistance2 = 3.402823e38;
 
   for (let reactionIndex = 0; reactionIndex < reactionTable.reactionCount; reactionIndex += 1) {
     const rx = reactionRecord(reactionTable, reactionIndex);
@@ -477,6 +1244,9 @@ function outputEnvelope({
   proposals,
   eventCount,
   conversionCount,
+  reactionLedger = null,
+  reactionSummary = null,
+  residentProductMass = createResidentProductMassHandle(reactionSummary),
   stateBuffer = null,
   thermoBuffer = null,
   mechanicsBuffer = null,
@@ -485,7 +1255,8 @@ function outputEnvelope({
   mechanicsBufferByteLength = mechanics.byteLength,
   retainedOutputParticleBuffers = false,
   destroyOutputParticleBuffers = null,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  sourceParticlePackMode = null
 }) {
   return {
     schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
@@ -505,6 +1276,10 @@ function outputEnvelope({
       : null,
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
+    reactionHeaderCount: reactionTable.reactionHeaderCount ?? 0,
+    reactantTermCount: reactionTable.reactantTermCount ?? 0,
+    productTermCount: reactionTable.productTermCount ?? 0,
+    gasProductCount: reactionTable.gasProductCount ?? 0,
     productPhaseCount: reactionTable.productPhaseCount,
     materialCount: thermalMaterialTable.materialCount,
     segmentCount: thermalMaterialTable.segmentCount,
@@ -520,6 +1295,10 @@ function outputEnvelope({
     thermoLayout: [...SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT],
     mechanicsLayout: [...MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT],
     reactionRecordLayout: [...SPH_GPU_REACTION_RECORD_ROW_LAYOUT],
+    reactionHeaderLayout: [...SPH_GPU_REACTION_HEADER_ROW_LAYOUT],
+    reactantTermLayout: [...SPH_GPU_REACTION_REACTANT_TERM_ROW_LAYOUT],
+    productTermLayout: [...SPH_GPU_REACTION_PRODUCT_TERM_ROW_LAYOUT],
+    gasProductLayout: [...SPH_GPU_REACTION_GAS_PRODUCT_ROW_LAYOUT],
     productPhaseLayout: [...SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT],
     stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
     thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
@@ -530,6 +1309,28 @@ function outputEnvelope({
     proposals,
     eventCount,
     conversionCount,
+    reactionLedger,
+    reactionLedgerStatus: reactionLedger?.status ?? (
+      reactionSummary?.compactLedgerAvailable
+        ? 'compact-gpu-stoichiometric-ledger-summary'
+        : (
+      reactionTable.gasProductCount > 0 || reactionTable.productTermCount > sphParticleState.particleCount
+        ? 'not-collected-for-this-backend'
+        : null
+        )
+    ),
+    reactionSummary,
+    reactionSummaryStatus: reactionSummary?.status ?? null,
+    residentProductMass,
+    residentProductMassSchema: residentProductMass?.schema ?? null,
+    residentProductMassStatus: residentProductMass?.status ?? null,
+    residentProductMassBufferRetained: residentProductMass?.productEventBufferRetained ?? false,
+    residentProductMassBufferByteLength: residentProductMass?.productEventBufferByteLength ?? 0,
+    residentProductMassProductEventRowCount: residentProductMass?.productEventRowCount ?? 0,
+    residentProductMassUnplacedProductMassKg: residentProductMass?.unplacedProductMassKg ?? null,
+    residentProductMassUnplacedGasProductMassKg: residentProductMass?.unplacedGasProductMassKg ?? null,
+    residentProductMassConsumePolicy: residentProductMass?.consumeMassPolicy ?? null,
+    residentProductMassEosCouplingStatus: residentProductMass?.eosCouplingStatus ?? null,
     stateBuffer,
     thermoBuffer,
     mechanicsBuffer,
@@ -539,6 +1340,7 @@ function outputEnvelope({
     retainedOutputParticleBuffers,
     destroyOutputParticleBuffers,
     readbackMode,
+    sourceParticlePackMode,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
     normalHotLoopReadbackFree: readbackMode === NO_FULL_READBACK_MODE,
     scientificValidation: false,
@@ -567,6 +1369,7 @@ export function runSphReactionStepCpu({
   const thermo = new Float32Array(sphParticleState.thermo);
   const mechanics = new Float32Array(mlsMpmParticleState.mechanics);
   const proposals = new Float32Array(sphParticleState.particleCount * 4);
+  const reactionLedger = createReactionLedger();
   let conversionCount = 0;
 
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
@@ -580,31 +1383,95 @@ export function runSphReactionStepCpu({
     if (partner < 0 || reactionIndex < 0) continue;
     const partnerIndex = Math.round(partner);
     if (partnerIndex < 0 || partnerIndex >= sphParticleState.particleCount) continue;
+    if (index > partnerIndex) continue;
     const partnerOffset = partnerIndex * 4;
     if (Math.round(proposals[partnerOffset]) !== index || proposals[partnerOffset + 1] !== reactionIndex) continue;
     const rx = reactionRecord(reactionTable, Math.round(reactionIndex));
-    const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
-    const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
-    const nextU = sphParticleState.state[stateOffset + 7] - rx.specificEnthalpyJPerKg;
-    state[stateOffset + 7] = nextU;
-    const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
-      graphSet: resolvedGraphSet,
-      responseTable: resolvedPhaseResponseTable,
-      materialId: rx.productMaterialId,
-      specificInternalEnergyJPerKg: nextU
+    const sourceIndices = [index, partnerIndex];
+    const fixedBufferPlan = planStoichiometricFixedBufferEvent({
+      table: reactionTable,
+      reactionIndex: Math.round(reactionIndex),
+      sourceIndices,
+      sphParticleState
     });
-    writeResolvedThermoRow(thermo, index, rx.productMaterialId, resolved, [
-      sphParticleState.thermo[thermoOffset + 8],
-      sphParticleState.thermo[thermoOffset + 9]
-    ]);
-    resetMechanicsForProduct(
-      mechanics,
-      index,
-      sphParticleState.state[stateOffset + 3],
-      resolved,
-      productPhaseRecord(reactionTable, rx.productMaterialId, resolved.phaseId)
-    );
-    conversionCount += 1;
+    if (fixedBufferPlan) {
+      for (const sourceIndex of sourceIndices) {
+        const output = fixedBufferPlan.outputs.get(sourceIndex);
+        if (!output) continue;
+        const stateOffset = sourceIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
+        const thermoOffset = sourceIndex * SPH_GPU_PARTICLE_THERMO_FLOATS;
+        if (output.kind === 'reactant') {
+          state[stateOffset + 3] = Math.max(output.massKg, 0);
+          updateMechanicsRestVolumeForMass(mechanics, thermo, sourceIndex, state[stateOffset + 3]);
+          continue;
+        }
+        const materialId = output.product?.term?.materialId || rx.productMaterialId;
+        const nextMass = Math.max(output.massKg, 0);
+        const nextU = output.specificInternalEnergyJPerKg;
+        state[stateOffset + 3] = nextMass;
+        state[stateOffset + 7] = nextU;
+        const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
+          graphSet: resolvedGraphSet,
+          responseTable: resolvedPhaseResponseTable,
+          materialId,
+          specificInternalEnergyJPerKg: nextU
+        });
+        writeResolvedThermoRow(thermo, sourceIndex, materialId, resolved, [
+          sphParticleState.thermo[thermoOffset + 8],
+          sphParticleState.thermo[thermoOffset + 9]
+        ]);
+        resetMechanicsForProduct(
+          mechanics,
+          sourceIndex,
+          nextMass,
+          resolved,
+          productPhaseRecord(reactionTable, materialId, resolved.phaseId)
+        );
+        conversionCount += 1;
+      }
+      appendReactionLedgerEvent(reactionLedger, fixedBufferPlan.event);
+      continue;
+    }
+    const productTerms = productTermsForReactionTableRecord(reactionTable, Math.round(reactionIndex));
+    const sourceMasses = sourceIndices.map((sourceIndex) => {
+      const stateOffset = sourceIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
+      return sphParticleState.state[stateOffset + 3];
+    });
+    const totalSourceMass = sourceMasses.reduce((sum, mass) => sum + mass, 0);
+    for (let slotIndex = 0; slotIndex < sourceIndices.length; slotIndex += 1) {
+      const sourceIndex = sourceIndices[slotIndex];
+      const term = productTerms[Math.min(slotIndex, productTerms.length - 1)] || productTerms[0];
+      const materialId = term?.materialId || rx.productMaterialId;
+      const massFraction = productTerms.length === 1
+        ? sourceMasses[slotIndex] / Math.max(totalSourceMass, sourceMasses[slotIndex], 1)
+        : finiteNumber(term.massFraction, sourceMasses[slotIndex] / Math.max(totalSourceMass, sourceMasses[slotIndex], 1));
+      const stateOffset = sourceIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
+      const thermoOffset = sourceIndex * SPH_GPU_PARTICLE_THERMO_FLOATS;
+      const nextMass = productTerms.length === 1
+        ? sourceMasses[slotIndex]
+        : Math.max(totalSourceMass * massFraction, 0);
+      const nextU = sphParticleState.state[stateOffset + 7] - rx.specificEnthalpyJPerKg;
+      state[stateOffset + 3] = nextMass;
+      state[stateOffset + 7] = nextU;
+      const resolved = resolveThermalStateFromGraphPhaseResponseCpu({
+        graphSet: resolvedGraphSet,
+        responseTable: resolvedPhaseResponseTable,
+        materialId,
+        specificInternalEnergyJPerKg: nextU
+      });
+      writeResolvedThermoRow(thermo, sourceIndex, materialId, resolved, [
+        sphParticleState.thermo[thermoOffset + 8],
+        sphParticleState.thermo[thermoOffset + 9]
+      ]);
+      resetMechanicsForProduct(
+        mechanics,
+        sourceIndex,
+        nextMass,
+        resolved,
+        productPhaseRecord(reactionTable, materialId, resolved.phaseId)
+      );
+      conversionCount += 1;
+    }
   }
 
   return outputEnvelope({
@@ -621,7 +1488,8 @@ export function runSphReactionStepCpu({
     mechanics,
     proposals,
     conversionCount,
-    eventCount: conversionCount / 2
+    eventCount: reactionLedger.eventCount || conversionCount / 2,
+    reactionLedger: reactionLedger.eventCount > 0 ? reactionLedger : null
   });
 }
 
@@ -636,15 +1504,47 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
+function packReactionParticleRecords(sphParticleState, mlsMpmParticleState) {
+  const packed = new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS);
+  for (let index = 0; index < sphParticleState.particleCount; index += 1) {
+    const out = index * SPH_REACTION_PACKED_PARTICLE_FLOATS;
+    packed.set(
+      sphParticleState.state.slice(
+        index * SPH_GPU_PARTICLE_STATE_FLOATS,
+        index * SPH_GPU_PARTICLE_STATE_FLOATS + SPH_GPU_PARTICLE_STATE_FLOATS
+      ),
+      out
+    );
+    packed.set(
+      sphParticleState.thermo.slice(
+        index * SPH_GPU_PARTICLE_THERMO_FLOATS,
+        index * SPH_GPU_PARTICLE_THERMO_FLOATS + SPH_GPU_PARTICLE_THERMO_FLOATS
+      ),
+      out + SPH_GPU_PARTICLE_STATE_FLOATS
+    );
+    packed.set(
+      mlsMpmParticleState.mechanics.slice(
+        index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+        index * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      ),
+      out + SPH_GPU_PARTICLE_STATE_FLOATS + SPH_GPU_PARTICLE_THERMO_FLOATS
+    );
+  }
+  return packed;
+}
+
 function createParamsArray({
   particleCount,
   reactionCount,
   productPhaseCount,
+  reactantTermCount,
+  productTermCount,
+  gasProductCount,
   materialCount,
   segmentCount,
   resetMechanics
 }) {
-  const buffer = new ArrayBuffer(32);
+  const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, reactionCount, true);
@@ -652,8 +1552,12 @@ function createParamsArray({
   view.setUint32(12, materialCount, true);
   view.setUint32(16, segmentCount, true);
   view.setUint32(20, resetMechanics ? 1 : 0, true);
-  view.setUint32(24, 0, true);
-  view.setUint32(28, 0, true);
+  view.setUint32(24, reactantTermCount, true);
+  view.setUint32(28, productTermCount, true);
+  view.setUint32(32, gasProductCount, true);
+  view.setUint32(36, 0, true);
+  view.setUint32(40, 0, true);
+  view.setUint32(44, 0, true);
   return buffer;
 }
 
@@ -702,9 +1606,23 @@ export async function runSphReactionStepWebGpu({
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
   const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
-  const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-state', sphParticleState.state);
-  const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-thermo', sphParticleState.thermo);
-  const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-sph-reaction-source-mechanics', mlsMpmParticleState.mechanics);
+  const sourceUsesBorrowedGpuBuffers = Boolean(borrowedStateBuffer || borrowedThermoBuffer || borrowedMechanicsBuffer);
+  const packedParticleRecords = sourceUsesBorrowedGpuBuffers
+    ? new Float32Array(sphParticleState.particleCount * SPH_REACTION_PACKED_PARTICLE_FLOATS)
+    : packReactionParticleRecords(sphParticleState, mlsMpmParticleState);
+  const packedParticleRecordBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-packed-source-particles', packedParticleRecords);
+  const localSourceStateBuffer = sourceUsesBorrowedGpuBuffers && !borrowedStateBuffer
+    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-state-fallback', sphParticleState.state)
+    : null;
+  const localSourceThermoBuffer = sourceUsesBorrowedGpuBuffers && !borrowedThermoBuffer
+    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-thermo-fallback', sphParticleState.thermo)
+    : null;
+  const localSourceMechanicsBuffer = sourceUsesBorrowedGpuBuffers && !borrowedMechanicsBuffer
+    ? writeStorageBuffer(device, 'ulg-sph-reaction-pack-source-mechanics-fallback', mlsMpmParticleState.mechanics)
+    : null;
+  const packSourceStateBuffer = borrowedStateBuffer || localSourceStateBuffer;
+  const packSourceThermoBuffer = borrowedThermoBuffer || localSourceThermoBuffer;
+  const packSourceMechanicsBuffer = borrowedMechanicsBuffer || localSourceMechanicsBuffer;
   const resolvedGraphSet = thermalClosureGraphSet || buildSphThermalClosureGraphBuffers(thermalMaterialTable);
   const resolvedGraphBank = thermalClosureGraphBank || resolvedGraphSet.graphBank || buildSphThermalClosureGraphBank(resolvedGraphSet);
   const resolvedPhaseResponseTable = thermalPhaseResponseTable || buildSphThermalPhaseResponseTable(thermalMaterialTable, resolvedGraphSet);
@@ -735,46 +1653,72 @@ export async function runSphReactionStepWebGpu({
     new Float32Array(sphParticleState.particleCount * 4),
     GPU_BUFFER_USAGE.COPY_SRC
   );
+  const outPackedParticleRecordBuffer = writeStorageBuffer(
+    device,
+    'ulg-sph-reaction-packed-output-particles',
+    new Float32Array(packedParticleRecords.length),
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
   const outStateBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-state', new Float32Array(sphParticleState.state.length), GPU_BUFFER_USAGE.COPY_SRC);
   const outThermoBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-thermo', new Float32Array(sphParticleState.thermo.length), GPU_BUFFER_USAGE.COPY_SRC);
   const outMechanicsBuffer = writeStorageBuffer(device, 'ulg-sph-reaction-output-mechanics', new Float32Array(mlsMpmParticleState.mechanics.length), GPU_BUFFER_USAGE.COPY_SRC);
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-reaction-params',
-    size: 32,
+    size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     reactionCount: reactionTable.reactionCount,
     productPhaseCount: reactionTable.productPhaseCount,
+    reactantTermCount: reactionTable.reactantTermCount ?? 0,
+    productTermCount: reactionTable.productTermCount ?? 0,
+    gasProductCount: reactionTable.gasProductCount ?? 0,
     materialCount: resolvedPhaseResponseTable.materialCount,
     segmentCount: resolvedPhaseResponseTable.responseCount,
     resetMechanics
   }));
 
   const module = device.createShaderModule({ label: 'ulg-sph-reaction-step', code: sphReactionStepWgsl });
+  const packBindings = [
+    computeBufferBinding(1, 'read-only-storage'),
+    computeBufferBinding(4, 'read-only-storage'),
+    computeBufferBinding(11, 'uniform'),
+    computeBufferBinding(14, 'storage'),
+    computeBufferBinding(15, 'read-only-storage')
+  ];
   const reactionBindings = [
     computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(3, 'read-only-storage'),
     computeBufferBinding(7, 'storage'),
     computeBufferBinding(11, 'uniform')
   ];
   const reactionResolveBindings = [
     computeBufferBinding(0, 'read-only-storage'),
-    computeBufferBinding(1, 'read-only-storage'),
-    computeBufferBinding(2, 'read-only-storage'),
     computeBufferBinding(3, 'read-only-storage'),
     computeBufferBinding(5, 'read-only-storage'),
     computeBufferBinding(6, 'read-only-storage'),
     computeBufferBinding(7, 'storage'),
     computeBufferBinding(8, 'storage'),
-    computeBufferBinding(9, 'storage'),
-    computeBufferBinding(10, 'storage'),
     computeBufferBinding(11, 'uniform'),
     computeBufferBinding(12, 'read-only-storage'),
     computeBufferBinding(13, 'read-only-storage')
   ];
+  const unpackBindings = [
+    computeBufferBinding(2, 'storage'),
+    computeBufferBinding(8, 'storage'),
+    computeBufferBinding(9, 'storage'),
+    computeBufferBinding(10, 'storage'),
+    computeBufferBinding(11, 'uniform')
+  ];
+  const packPipelineInfo = sourceUsesBorrowedGpuBuffers
+    ? createExplicitComputePipeline(device, {
+      label: 'ulg-sph-reaction-pack-source',
+      module,
+      entryPoint: 'pack_source',
+      bindings: packBindings
+    })
+    : null;
   const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createExplicitComputePipeline(device, {
     label: 'ulg-sph-reaction-propose',
     module,
@@ -787,11 +1731,16 @@ export async function runSphReactionStepWebGpu({
     entryPoint: 'resolve',
     bindings: reactionResolveBindings
   });
+  const { pipeline: unpackPipeline, bindGroupLayout: unpackBindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-reaction-unpack',
+    module,
+    entryPoint: 'unpack',
+    bindings: unpackBindings
+  });
   const proposeBindEntries = (layout) => ({
     layout,
     entries: [
-      { binding: 0, resource: { buffer: stateBuffer } },
-      { binding: 1, resource: { buffer: thermoBuffer } },
+      { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
       { binding: 11, resource: { buffer: paramsBuffer } }
@@ -800,33 +1749,102 @@ export async function runSphReactionStepWebGpu({
   const resolveBindEntries = (layout) => ({
     layout,
     entries: [
-      { binding: 0, resource: { buffer: stateBuffer } },
-      { binding: 1, resource: { buffer: thermoBuffer } },
-      { binding: 2, resource: { buffer: mechanicsBuffer } },
+      { binding: 0, resource: { buffer: packedParticleRecordBuffer } },
       { binding: 3, resource: { buffer: reactionRecordBuffer } },
       { binding: 5, resource: { buffer: phaseResponseRecordBuffer } },
       { binding: 6, resource: { buffer: phaseResponseBuffer } },
       { binding: 7, resource: { buffer: proposalBuffer } },
-      { binding: 8, resource: { buffer: outStateBuffer } },
-      { binding: 9, resource: { buffer: outThermoBuffer } },
-      { binding: 10, resource: { buffer: outMechanicsBuffer } },
+      { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
       { binding: 11, resource: { buffer: paramsBuffer } },
       { binding: 12, resource: { buffer: graphNodeBuffer } },
       { binding: 13, resource: { buffer: graphSampleBuffer } }
     ]
   });
+  const unpackBindEntries = (layout) => ({
+    layout,
+    entries: [
+      { binding: 2, resource: { buffer: outMechanicsBuffer } },
+      { binding: 8, resource: { buffer: outPackedParticleRecordBuffer } },
+      { binding: 9, resource: { buffer: outStateBuffer } },
+      { binding: 10, resource: { buffer: outThermoBuffer } },
+      { binding: 11, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const packBindGroup = packPipelineInfo
+    ? device.createBindGroup({
+      layout: packPipelineInfo.bindGroupLayout,
+      entries: [
+        { binding: 1, resource: { buffer: packSourceStateBuffer } },
+        { binding: 4, resource: { buffer: packSourceThermoBuffer } },
+        { binding: 11, resource: { buffer: paramsBuffer } },
+        { binding: 14, resource: { buffer: packedParticleRecordBuffer } },
+        { binding: 15, resource: { buffer: packSourceMechanicsBuffer } }
+      ]
+    })
+    : null;
   const proposeBindGroup = device.createBindGroup(proposeBindEntries(proposeBindGroupLayout));
   const resolveBindGroup = device.createBindGroup(resolveBindEntries(resolveBindGroupLayout));
+  const unpackBindGroup = device.createBindGroup(unpackBindEntries(unpackBindGroupLayout));
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
+  if (packPipelineInfo && packBindGroup) {
+    pass.setPipeline(packPipelineInfo.pipeline);
+    pass.setBindGroup(0, packBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  }
   pass.setPipeline(proposePipeline);
   pass.setBindGroup(0, proposeBindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
   pass.setPipeline(resolvePipeline);
   pass.setBindGroup(0, resolveBindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
+  pass.setPipeline(unpackPipeline);
+  pass.setBindGroup(0, unpackBindGroup);
+  pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
   pass.end();
   device.queue.submit([encoder.finish()]);
+
+  let reactionSummary = null;
+  const temporarySummaryBuffers = [];
+  if (noFullReadback && reactionTable.productTermCount > 0) {
+    try {
+      const summarySourceStateBuffer = packSourceStateBuffer
+        || writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-state', sphParticleState.state);
+      const summarySourceThermoBuffer = packSourceThermoBuffer
+        || writeStorageBuffer(device, 'ulg-sph-reaction-summary-source-thermo', sphParticleState.thermo);
+      if (!packSourceStateBuffer) temporarySummaryBuffers.push(summarySourceStateBuffer);
+      if (!packSourceThermoBuffer) temporarySummaryBuffers.push(summarySourceThermoBuffer);
+      reactionSummary = await runSphReactionSummaryWebGpu({
+        device,
+        sphParticleState,
+        reactionTable,
+        sourceStateBuffer: summarySourceStateBuffer,
+        sourceThermoBuffer: summarySourceThermoBuffer,
+	        nextStateBuffer: outStateBuffer,
+	        nextThermoBuffer: outThermoBuffer,
+	        reactionRecordBuffer,
+	        proposalBuffer,
+	        readProductEvents: false,
+	        retainProductEventBuffer: retainOutputParticleBuffers
+	      });
+    } catch (error) {
+      reactionSummary = {
+        schema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'reaction-compact-summary-unavailable',
+        reason: error instanceof Error ? error.message : String(error),
+        reactionSummaryAvailable: false,
+        fullParticleReadbackPerformed: false,
+        scientificValidation: false,
+        chemistryValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    } finally {
+      for (const buffer of temporarySummaryBuffers) buffer?.destroy?.();
+    }
+  }
 
   let state = new Float32Array();
   let thermo = new Float32Array();
@@ -847,15 +1865,17 @@ export async function runSphReactionStepWebGpu({
     await device.queue.onSubmittedWorkDone();
   }
 
-  if (!borrowedStateBuffer) stateBuffer.destroy?.();
-  if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-  if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
   for (const buffer of [
+    packedParticleRecordBuffer,
+    outPackedParticleRecordBuffer,
     reactionRecordBuffer,
     proposalBuffer,
-    paramsBuffer
+    paramsBuffer,
+    localSourceStateBuffer,
+    localSourceThermoBuffer,
+    localSourceMechanicsBuffer
   ]) {
-    buffer.destroy?.();
+    buffer?.destroy?.();
   }
   if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
   if (!retainOutputParticleBuffers) {
@@ -864,7 +1884,19 @@ export async function runSphReactionStepWebGpu({
     outMechanicsBuffer.destroy?.();
   }
 
-  return outputEnvelope({
+	  const residentProductMass = createResidentProductMassHandle(reactionSummary);
+	  let outputParticleBuffersDestroyed = false;
+	  const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
+	    ? () => {
+	      if (outputParticleBuffersDestroyed) return;
+	      outputParticleBuffersDestroyed = true;
+	      outStateBuffer.destroy?.();
+	      outThermoBuffer.destroy?.();
+	      outMechanicsBuffer.destroy?.();
+	      residentProductMass?.destroyResidentProductMassBuffers?.();
+	    }
+	    : null;
+	  return outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
     mlsMpmParticleState,
@@ -880,6 +1912,8 @@ export async function runSphReactionStepWebGpu({
     proposals,
     eventCount: null,
     conversionCount: null,
+    reactionSummary,
+    residentProductMass,
     stateBuffer: retainOutputParticleBuffers ? outStateBuffer : null,
     thermoBuffer: retainOutputParticleBuffers ? outThermoBuffer : null,
     mechanicsBuffer: retainOutputParticleBuffers ? outMechanicsBuffer : null,
@@ -887,14 +1921,9 @@ export async function runSphReactionStepWebGpu({
     thermoBufferByteLength: sphParticleState.thermo.byteLength,
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
-    destroyOutputParticleBuffers: retainOutputParticleBuffers
-      ? () => {
-        outStateBuffer.destroy?.();
-        outThermoBuffer.destroy?.();
-        outMechanicsBuffer.destroy?.();
-      }
-      : null,
-    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
+	    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
+    readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays'
   });
 }
 

@@ -114,10 +114,29 @@ export function createMlsMpmCarrier({
   const gnx = Math.round(dims[0] / dx) + 5;
   const gny = Math.round(dims[1] / dx) + 5;
   const gnz = Math.round(dims[2] / dx) + 5;
+  const ng = gnx * gny * gnz;
+  const gridMass = new Float64Array(ng);
+  const gridMom = new Float64Array(ng * 3); // momentum, then velocity in place
+  const activeNodeEpochs = new Uint32Array(ng);
+  const activeNodes = [];
+  let activeEpoch = 1;
   const nodeIndex = (i, j, k) => ((i + shift) * gny + (j + shift)) * gnz + (k + shift);
   const inRangeX = (i) => i + shift >= 0 && i + shift < gnx;
   const inRangeY = (j) => j + shift >= 0 && j + shift < gny;
   const inRangeZ = (k) => k + shift >= 0 && k + shift < gnz;
+  const markActiveNode = (idx) => {
+    if (activeNodeEpochs[idx] === activeEpoch) return;
+    activeNodeEpochs[idx] = activeEpoch;
+    activeNodes.push(idx);
+  };
+  const advanceActiveEpoch = () => {
+    if (activeEpoch >= 0xffffffff) {
+      activeNodeEpochs.fill(0);
+      activeEpoch = 1;
+      return;
+    }
+    activeEpoch += 1;
+  };
 
   function ensureParticleState(p) {
     if (p.mpmF === undefined) {
@@ -132,9 +151,7 @@ export function createMlsMpmCarrier({
   function step(state) {
     const particles = state.particles;
     const n = particles.length;
-    const ng = gnx * gny * gnz;
-    const gridMass = new Float64Array(ng);
-    const gridMom = new Float64Array(ng * 3); // momentum, then velocity in place
+    activeNodes.length = 0;
 
     // --- P2G: scatter mass, momentum (APIC) + internal stress to the grid ---
     for (let pi = 0; pi < n; pi += 1) {
@@ -181,6 +198,7 @@ export function createMlsMpmCarrier({
             const dposy = (baseY + b - p.x[1] * invDx) * dx;
             const dposz = (baseZ + c - p.x[2] * invDx) * dx;
             const idx = nodeIndex(baseX + a, baseY + b, baseZ + c);
+            markActiveNode(idx);
             gridMass[idx] += w * p.massKg;
             // momentum += w (m v + aff · dpos)
             gridMom[idx * 3] += w * (p.massKg * p.v[0] + aff[0] * dposx + aff[1] * dposy + aff[2] * dposz);
@@ -192,34 +210,35 @@ export function createMlsMpmCarrier({
     }
 
     // --- grid update: momentum -> velocity, gravity, wall boundary conditions ---
-    for (let i = 0; i < gnx; i += 1) {
-      for (let j = 0; j < gny; j += 1) {
-        for (let k = 0; k < gnz; k += 1) {
-          const idx = (i * gny + j) * gnz + k;
-          const m = gridMass[idx];
-          if (m <= 0) continue;
-          let vx = gridMom[idx * 3] / m + dt * gravity[0];
-          let vy = gridMom[idx * 3 + 1] / m + dt * gravity[1];
-          let vz = gridMom[idx * 3 + 2] / m + dt * gravity[2];
-          // CFL velocity clamp: no node may move a particle more than ~cflFactor of a cell per step.
-          // This is the key stability guard for energetic flows (impacts, steam expansion) — without
-          // it a spike in velocity jumps particles across grid cells and the sim blows up.
-          const sp2 = vx * vx + vy * vy + vz * vz;
-          if (sp2 > vMax2) { const s = vMax / Math.sqrt(sp2); vx *= s; vy *= s; vz *= s; }
-          // Separating wall BC: zero the into-wall normal component (no reflection → no energy
-          // injected at the boundary, which the reflecting BC could do). Material piles against the
-          // sealed wall instead of bouncing unstably.
-          const wx = (i - shift) * dx;
-          const wy = (j - shift) * dx;
-          const wz = (k - shift) * dx;
-          if ((wx < dx && vx < 0) || (wx > dims[0] - dx && vx > 0)) vx = 0;
-          if ((wy < dx && vy < 0) || (wy > dims[1] - dx && vy > 0)) vy = 0;
-          if ((wz < dx && vz < 0) || (wz > dims[2] - dx && vz > 0)) vz = 0;
-          gridMom[idx * 3] = vx;
-          gridMom[idx * 3 + 1] = vy;
-          gridMom[idx * 3 + 2] = vz;
-        }
-      }
+    const plane = gny * gnz;
+    for (let ni = 0; ni < activeNodes.length; ni += 1) {
+      const idx = activeNodes[ni];
+      const m = gridMass[idx];
+      if (m <= 0) continue;
+      let vx = gridMom[idx * 3] / m + dt * gravity[0];
+      let vy = gridMom[idx * 3 + 1] / m + dt * gravity[1];
+      let vz = gridMom[idx * 3 + 2] / m + dt * gravity[2];
+      // CFL velocity clamp: no node may move a particle more than ~cflFactor of a cell per step.
+      // This is the key stability guard for energetic flows (impacts, steam expansion) — without
+      // it a spike in velocity jumps particles across grid cells and the sim blows up.
+      const sp2 = vx * vx + vy * vy + vz * vz;
+      if (sp2 > vMax2) { const s = vMax / Math.sqrt(sp2); vx *= s; vy *= s; vz *= s; }
+      // Separating wall BC: zero the into-wall normal component (no reflection → no energy
+      // injected at the boundary, which the reflecting BC could do). Material piles against the
+      // sealed wall instead of bouncing unstably.
+      const i = Math.floor(idx / plane);
+      const rem = idx - i * plane;
+      const j = Math.floor(rem / gnz);
+      const k = rem - j * gnz;
+      const wx = (i - shift) * dx;
+      const wy = (j - shift) * dx;
+      const wz = (k - shift) * dx;
+      if ((wx < dx && vx < 0) || (wx > dims[0] - dx && vx > 0)) vx = 0;
+      if ((wy < dx && vy < 0) || (wy > dims[1] - dx && vy > 0)) vy = 0;
+      if ((wz < dx && vz < 0) || (wz > dims[2] - dx && vz > 0)) vz = 0;
+      gridMom[idx * 3] = vx;
+      gridMom[idx * 3 + 1] = vy;
+      gridMom[idx * 3 + 2] = vz;
     }
 
     // --- G2P: gather velocity + reconstruct affine C, advect, update volume J ---
@@ -285,7 +304,17 @@ export function createMlsMpmCarrier({
     }
     state.step = (state.step ?? 0) + 1;
     state.time = (state.time ?? 0) + dt;
-    return { state };
+    const activeGridNodes = activeNodes.length;
+    for (let ni = 0; ni < activeNodes.length; ni += 1) {
+      const idx = activeNodes[ni];
+      gridMass[idx] = 0;
+      gridMom[idx * 3] = 0;
+      gridMom[idx * 3 + 1] = 0;
+      gridMom[idx * 3 + 2] = 0;
+    }
+    activeNodes.length = 0;
+    advanceActiveEpoch();
+    return { state, activeGridNodes };
   }
 
   return { backend: 'mls-mpm', integrator: 'apic', dt, gridNodesPerAxis: [gnx, gny, gnz], step };

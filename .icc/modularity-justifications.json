@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "thresholds": {
+    "max_file_lines": 2000
+  },
+  "justifications": [
+    {
+      "path_patterns": [
+        "src/visualization/sphPhaseScene.js",
+        "src/visualization/sphPhaseDemoMount.js",
+        "src/runtime/sph/sphRenderGpuKernel.js",
+        "src/runtime/sph/sphReactionGpuKernel.js",
+        "src/runtime/sph/sphMlsMpmGpuStep.js",
+        "src/runtime/sph/sphThermalGpuKernel.js",
+        "ulg-gpu-abi/src/wgsl.js",
+        "ulg-gpu-abi/src/index.js",
+        "tests/demo.e2e.mjs",
+        "tests/sphMlsMpmGpuStep.test.mjs",
+        "tests/sphRenderGpuKernel.test.mjs",
+        "tests/abi.test.mjs",
+        "plan/log.md",
+        "plan/tests.md",
+        "plan/implementation-status.md"
+      ],
+      "status": "temporary_runtime_integration_boundary",
+      "task_id": "ulg-webgpu-resident-hot-loop-modularization",
+      "reason": "These files are current architecture-bearing integration surfaces for the SPH/MLS-MPM resident chain, render-field ABI, browser demo mount, and long-running project evidence logs. They are allowed to remain large only while the GPU-resident hot-loop, reaction, and material closure contracts are still being stabilized.",
+      "mitigation": "New behavior should move into focused runtime modules, kernels, or tests when practical. Split these files behind existing public APIs as the WebGPU marching-cubes, closure graph, reaction, and material resolver boundaries stabilize."
+    },
+    {
+      "path_patterns": [
+        "docs/assets/*.js",
+        "docs/service-assets/**/*.json",
+        "docs/service-assets/**/*.js",
+        "public/service-assets/**/*.json",
+        "public/service-assets/**/*.js"
+      ],
+      "status": "generated_or_staged_asset",
+      "task_id": "ulg-service-asset-staging",
+      "reason": "These are generated Vite bundles or staged service assets copied from sibling repos for browser handoff and GitHub Pages demos.",
+      "mitigation": "Regenerate through `npm run build:pages` or `npm run stage:service-assets`; avoid hand-editing generated assets."
+    }
+  ]
+}
+

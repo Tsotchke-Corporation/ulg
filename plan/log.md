@@ -1,5 +1,445 @@
 # ULG Implementation Log
 
+## 2026-06-11 23:54 AKDT - Product-Event Mechanics/EOS Rows
+
+- Expanded `peercompute.ulg.sph-gpu-reaction-product-event.v0` from 20 to 32
+  f32 values while keeping the original render/pressure offsets stable.
+- `sphReactionProductEventWgsl` now writes product velocity, support volume,
+  effective bulk modulus, shear modulus, Lame lambda, sound speed, EOS model id,
+  solid flag, and mechanics status from closure-derived product phase records.
+- `decodeSphReactionProductEventValues()` exposes the added mechanics fields for
+  verification and future gas-cell/pressure kernels.
+- MLS-MPM P2G now consumes product-event velocity and applies local EOS pressure
+  stress only when the event carries support volume, rest density, sound speed,
+  and EOS model id.
+- Validation: syntax checks for the ABI/WGSL/P2G/reaction-summary tests passed;
+  focused ABI/P2G/reaction-summary/render-field suite passed `47/47`.
+
+## 2026-06-11 23:43 AKDT - Resident Product-Mass P2G Sidecar
+
+- Added optional `residentProductMass` inputs to the MLS-MPM P2G CPU reference,
+  optional WebGPU wrapper, and WebGPU runner.
+- Added a stable P2G product-event storage binding plus
+  `resident_product_event_count`; the shader deposits only ready event rows with
+  positive `unplacedMassKg` into grid mass.
+- Repeated resident MLS-MPM steps now carry the prior resident product-mass
+  handle into the next P2G stage. Cleanup accepts a preserve handle so borrowed
+  product-event buffers are not destroyed before the borrowing step completes.
+- This is mass-only grid participation. Pressure/EOS force coupling remains
+  blocked until product events carry mechanics/EOS fields or a gas-cell EOS
+  kernel consumes the resident inventory, and multi-generation product-event
+  buffers still need GPU append/compaction.
+- Validation: syntax checks for P2G/resident-step/WGSL/tests passed; focused
+  ABI/P2G/resident-step suite passed `39/39`.
+
+## 2026-06-11 23:28:32 AKDT - Resident product-mass handle
+
+Prompt: continue from the pressure bridge and Boyle sidecar audit. The next
+critical path item was making product-event mass a stable resident contract
+before attempting EOS/field-force consumption.
+
+Actions:
+
+- Added `peercompute.ulg.sph-resident-product-mass.v0` in
+  `src/runtime/sph/sphReactionGpuSummary.js`.
+- Added `createResidentProductMassHandle()`, which exposes retained
+  product-event buffer metadata, row count/stride, product-inventory count,
+  visible/unplaced mass, unplaced gas mass, and the
+  `unplaced-product-mass-only` consumption policy.
+- Threaded the handle through reaction-step outputs in
+  `src/runtime/sph/sphReactionGpuKernel.js`.
+- Threaded the handle through resident MLS-MPM diagnostics, step envelopes, and
+  sequence summaries in `src/runtime/sph/sphMlsMpmGpuStep.js`.
+- Replaced nested `reactionSummary.destroyProductEventBuffer()` cleanup with
+  guarded `destroyResidentProductMassBuffers()` cleanup.
+- Updated resident render refresh to prefer `finalStep.residentProductMass`
+  before falling back to nested reaction-summary product-event fields.
+- Added a SPH overlay status line for resident product mass, including the
+  intentionally blocked EOS coupling status.
+- Tightened resident-step tests around product-event buffer ownership,
+  row-count preservation, unplaced-mass policy, sequence summaries, and
+  destruction count.
+
+Commands:
+
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check src/runtime/sph/sphReactionGpuSummary.js && node --check src/runtime/sph/sphReactionGpuKernel.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/visualization/sphPhaseScene.js`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs`
+  passed `59/59`.
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs`
+  passed `76/76`.
+- `git diff --check`
+
+Note:
+
+- `node --test tests/demo.e2e.mjs` was attempted once and failed because that
+  file is a Playwright test file. It should be run with the Playwright runner.
+
+Remaining:
+
+- Bind `peercompute.ulg.sph-resident-product-mass.v0` into MLS-MPM/SPH grid,
+  gas-cell, EOS, and force kernels so spawned products affect dynamics rather
+  than only render/pressure diagnostics.
+
+## 2026-06-11 23:27:00 AKDT - Product-event pressure bridge
+
+Prompt: continue after reordering the todo to keep Ocean/hot-loop work before
+cold-start polish, with product-event mass next on the pressure/EOS path.
+
+Actions:
+
+- Extended `gasPressureSummaryFromResidentReaction()` so resident pressure
+  still prefers per-species gas ledger rows, then falls back to gas
+  product-event rows when verification readback is present, then to compact
+  product-inventory rows when event rows remain GPU-resident.
+- Filtered product-derived pressure inputs through generic product routing
+  metadata, so condensed products are excluded from gas pressure without
+  material-specific reaction cases.
+- Added resident product-gas source/row diagnostics to the pressure summary.
+- Updated the overlay's current pressure selector to accept all
+  `gpu-resident-reaction-*` pressure sources, not only the old aggregate source.
+- Added tests for product-event pressure rows and compact product-inventory
+  pressure fallback.
+
+Files touched:
+
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/sphPhaseDemo.test.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/todo/reaction-stoichiometry-energetics-plan.md`
+- `plan/todo/overarching-completion-plan.md`
+
+Commands:
+
+- `node --check src/runtime/sphPhaseDemo.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/sphPhaseDemo.test.mjs`
+- `node --test tests/sphPhaseDemo.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  passed `31/31`.
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs`
+  passed `76/76`.
+- `git diff --check`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+  indexed 237 files / 119,369 lines.
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py build-memory --repo ulg`
+  wrote 1,010 memory chunks.
+
+Remaining:
+
+- This is diagnostic pressure aggregation. EOS, gas-cell, and force-field
+  kernels still need direct resident consumption of product-event/product-
+  inventory mass before pressure changes dynamics.
+
+## 2026-06-11 23:12:19 AKDT - Product-event render bridge and Ocean-priority reorder
+
+Prompt: decide whether WebGPU-Ocean lessons should move earlier or later,
+reorder the todo accordingly, then proceed.
+
+Actions:
+
+- Confirmed `plan/todo/reprioritize.md` keeps cold-start timing polish deferred
+  behind reaction, pressure, steam, hot-loop, and material-resolver contracts.
+- Kept the WebGPU-Ocean lessons in the hot-loop GPU-residency phase, after
+  reaction product/pressure/steam contracts but before cold-start timing polish.
+- Updated the active todo order in `plan/todo/overarching-completion-plan.md`
+  and `plan/todo/perf-upgrade.md`.
+- Extended the render-field ABI so `sphRenderFieldWgsl` binds the retained
+  product-event buffer at binding 4 and accepts `product_event_count` in
+  `RenderFieldParams`.
+- Updated CPU and WGSL render-field paths to splat only product-event rows with
+  positive `unplacedMassKg`, preventing double-render of products already
+  emitted into fixed source/partner particle slots.
+- Added `createProductEventSurfaceBatches()` in the SPH scene. It creates
+  event-only material/phase surface descriptors from generic
+  `productInventory.records` and `productTermMetadata`, not material-specific
+  reaction patches.
+- Wired resident render refresh to pass `reactionSummary.productEventBuffer`
+  and `productEventRowCount` into the WebGPU render-field build, and to include
+  product-event surface counts/keys in resident render diagnostics.
+- Updated focused tests for ABI assertions, unplaced-only product-event
+  splatting, retained product-event buffer handoff, and event-only product
+  surface creation.
+
+Commands:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check ulg-gpu-abi/src/wgsl.js`
+- `node --check tests/sphPhaseRenderer.test.mjs && node --check tests/sphRenderGpuKernel.test.mjs && node --check tests/abi.test.mjs && node --check tests/sphReactionGpuSummary.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs`
+  passed `63/63`.
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+  indexed 237 files / 119,029 lines.
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py build-memory --repo ulg`
+  wrote 1,008 memory chunks.
+
+Remaining:
+
+- Product-event mass is visible in the resident render-field path, but pressure,
+  EOS, and force-field kernels still need to consume it as resident mass.
+- Three.js MarchingCubes still requires compact field readback; the later
+  WebGPU marching-cubes slice should remove CPU mesh extraction/readback from
+  the normal visual path.
+
+## 2026-06-11 22:56:55 AKDT - GPU-resident sparse product-event staging
+
+Prompt: Continue after accepting the reprioritized todo order and WebGPU-Ocean
+hot-loop lessons. The immediate slice was the interrupted product-event staging
+work for renderable reaction products.
+
+Actions:
+
+- Closed the completed Huygens sidecar audit after using its recommendation:
+  keep product events in a separate sparse GPU buffer, not in reaction
+  `combinedRecords`.
+- Added `peercompute.ulg.sph-gpu-reaction-product-event.v0` and a f32x4-aligned
+  product-event row layout in `ulg-gpu-abi/src/index.js`.
+- Added `sphReactionProductEventWgsl` in `ulg-gpu-abi/src/wgsl.js`.
+  The pass uses particle-major sparse indexing:
+  `sourceParticleIndex * productTermCount + productTermIndex`, initializes empty
+  rows, marks rows ready only for mutual proposal events, and recomputes extent,
+  mass scale, moles, visible mass, and unplaced mass from the balanced term
+  table.
+- Extended `src/runtime/sph/sphReactionGpuSummary.js` with optional
+  product-event verification readback and no-readback retained-buffer mode.
+  Readback count/bytes stay zero when the buffer remains GPU-resident.
+- Wired no-full-readback reaction steps in
+  `src/runtime/sph/sphReactionGpuKernel.js` to retain product-event storage only
+  when output particle buffers are retained. The destroy hook now also releases
+  the product-event buffer.
+- Threaded product-event diagnostics through
+  `src/runtime/sph/sphMlsMpmGpuStep.js` resident diagnostics and repeated-step
+  summaries, and added explicit cleanup in the resident-step destroy path.
+- Extended the SPH overlay in `src/visualization/sphPhaseDemoMount.js` to show
+  product-event row count, active verification rows, retained buffer bytes,
+  readback bytes, and retained-buffer status.
+- Refreshed Infinite Context Coder:
+  - `index --repo ulg`: 237 files, 118369 lines.
+  - `build-memory --repo ulg`: 237 files, 1001 chunks.
+
+Commands:
+
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphReactionGpuKernel.js && node --check src/runtime/sph/sphReactionGpuSummary.js && node --check tests/sphReactionGpuSummary.test.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/abi.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py index --repo ulg`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py build-memory --repo ulg`
+
+Validation:
+
+- PASS: syntax checks for touched runtime, overlay, ABI, and tests.
+- PASS: ABI/reaction-summary/resident-step/reaction-kernel focused suite
+  (`44/44`).
+
+Open questions / next work:
+
+- Product-event rows are staged and lifetime-managed, but the renderer and
+  downstream pressure/EOS/field kernels do not yet consume them as spawned
+  product volume.
+- Continue with the ordered plan: renderer/EOS consumption of product events,
+  then phase-resolved steam/sealed-gas microphysics, then hot-loop GPU
+  residency/marching-cubes work before cold-start timing polish.
+
+## 2026-06-11 22:38:04 AKDT - Strict reaction gate and pressure wall-load feedback
+
+Prompt: Continue after reprioritizing around reaction correctness, pressure
+feedback, hot-loop residency, and WebGPU-Ocean/marching-cubes lessons.
+
+Actions:
+
+- Added `reactionStrictGateFromSummary()` and
+  `peercompute.ulg.sph-reaction-strict-gate.v0` in
+  `src/runtime/sph/sphReactionGpuSummary.js`.
+- The strict gate blocks force coupling on provisional energetics, atom residual
+  drift, charge residual drift, missing atom residual rows, or reaction-table
+  metadata that is not atom-balanced. Product raw-mass scaling is reported as a
+  warning instead of being mislabeled as a conservation failure.
+- Threaded strict-gate status/blockers through
+  `src/runtime/sph/sphMlsMpmGpuStep.js` resident diagnostics and repeated-step
+  summaries.
+- Added `gasPressureFeedbackSummary()` and
+  `peercompute.ulg.sph-sealed-gas-pressure-feedback.v0` in
+  `src/runtime/sphPhaseDemo.js`.
+- Every gas-pressure summary now carries:
+  - pressure gauge against external 1 atm by default;
+  - six wall force rows with areas, normals, force vectors, and roles;
+  - total absolute wall load and net force;
+  - explicit force-coupling blocker status.
+- Added pressure feedback to `src/runtime/sphPhaseViewState.js`,
+  `src/services/ulgRuntime.worker.js`, and the SPH overlay pressure row in
+  `src/visualization/sphPhaseDemoMount.js`.
+- Added tests in `tests/sphReactionGpuSummary.test.mjs`,
+  `tests/sphMlsMpmGpuStep.test.mjs`, and `tests/sphPhaseDemo.test.mjs`.
+
+Commands:
+
+- `node --check src/runtime/sph/sphReactionGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sphPhaseDemo.js && node --check src/runtime/sphPhaseViewState.js && node --check src/services/ulgRuntime.worker.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/sphReactionGpuSummary.test.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/sphPhaseDemo.test.mjs`
+- `node --test tests/sphReactionGpuSummary.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphColdStartCache.test.mjs tests/ulgRuntimeWorkerCacheCoverage.test.mjs`
+
+Validation:
+
+- PASS: syntax checks for edited runtime, worker, overlay, and focused tests.
+- PASS: reaction-summary/resident/phase pressure suite (`27/27`).
+- PASS: ABI/reaction/static-cache/worker coverage suite (`31/31`).
+
+Open questions / next work:
+
+- Pressure feedback is still a wall-load ledger, not a validated force solve.
+  True force coupling needs gas-cell pressure gradients or material-surface
+  normals before it can push particles/grid nodes honestly.
+- Unplaced product inventory is still not dynamic/renderable state.
+
+## 2026-06-11 22:28:53 AKDT - Product inventory, atom residuals, reprioritized hot-loop plan
+
+Prompt: The user asked to keep going, add WebGPU marching cubes if not already
+on the todo list, investigate localStorage persistence/particle-count cache
+misses, evaluate `https://github.com/matsuoka-601/WebGPU-Ocean`, then read
+`plan/todo/reprioritize.md`, decide whether Ocean lessons belong earlier or
+later, reorder the todo, and proceed.
+
+Actions:
+
+- Read `Agents.md` and `plan/todo/reprioritize.md`.
+- Accepted the reprioritization: keep cache correctness contracts active, but
+  defer cold-start timing polish until reaction, pressure, steam, hot-loop, and
+  material resolver schemas stabilize.
+- Finished the compact resident product/residual slice:
+  - `src/runtime/sph/sphReactionGpuSummary.js` now allocates, dispatches,
+    copies, decodes, returns, and destroys atom-residual WebGPU buffers.
+  - `src/runtime/sph/sphMlsMpmGpuStep.js` preserves atom-residual counts,
+    byte lengths, and compact summaries in resident diagnostics and repeated
+    step summaries.
+  - `src/visualization/sphPhaseDemoMount.js` shows atom-residual row/byte counts
+    in the SPH reaction ledger overlay row.
+  - `tests/sphReactionGpuSummary.test.mjs`, `tests/sphMlsMpmGpuStep.test.mjs`,
+    and `tests/abi.test.mjs` cover the atom-residual decoder, WebGPU pass
+    command stream, resident diagnostics, and ABI/WGSL layouts.
+- Incorporated cache-audit findings from the sidecar agent:
+  - material/reaction closure cache keys do not include particle count;
+  - particle count can indirectly change static reaction tables by changing
+    smoothing/contact radius;
+  - `src/services/ulgRuntime.worker.js` now rejects static reaction table cache
+    reuse when the cached contact radius does not match the current view state,
+    while still allowing particle-count-only changes when derived table inputs
+    are unchanged;
+  - `tests/ulgRuntimeWorkerCacheCoverage.test.mjs` locks that behavior.
+- Tried to clone the WebGPU-Ocean reference for local inspection, but shell
+  network access to GitHub failed quickly. The planning decision still records
+  the intended incorporation path: use the Ocean-style lessons in the hot-loop
+  GPU residency phase, not ahead of reaction correctness and not after
+  cold-start timing polish.
+- Updated `plan/todo/overarching-completion-plan.md`,
+  `plan/todo/perf-upgrade.md`,
+  `plan/todo/reaction-stoichiometry-energetics-plan.md`, `plan/plan.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+
+Commands:
+
+- `node --check src/runtime/sph/sphReactionGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/services/ulgRuntime.worker.js && node --check src/visualization/sphPhaseDemoMount.js && node --check tests/abi.test.mjs && node --check tests/sphReactionGpuSummary.test.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/ulgRuntimeWorkerCacheCoverage.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/ulgRuntimeWorkerCacheCoverage.test.mjs`
+- `node --test tests/sphColdStartCache.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs`
+- `git clone --depth 1 https://github.com/matsuoka-601/WebGPU-Ocean.git /tmp/WebGPU-Ocean`
+
+Validation:
+
+- PASS: syntax checks for the edited runtime, worker, visualization, and tests.
+- PASS: focused ABI/reaction-summary/resident-worker coverage (`33/33`).
+- PASS: focused static-cache/reaction/demo coverage (`23/23`).
+
+Failures / fixes:
+
+- The first focused run failed because the repeated-step fake summary omitted
+  the new atom-residual fields. The fake summary now carries atom residual
+  counts and byte lengths, matching the single-step fake and resident
+  diagnostics.
+- The WebGPU-Ocean local clone failed with `Failed to connect to github.com port
+  443`. No source files were copied from that repo.
+
+Open questions / next work:
+
+- Use compact atom/charge/mass residuals and provisional energetics status as
+  strict reaction validity gates.
+- Feed resident gas pressure into forces and wall ledgers.
+- Replace inventory-only unplaced product handling with dynamic or renderable
+  product storage.
+- Refresh ICC after this checkpoint.
+- Revisit WebGPU-Ocean locally if network access becomes available; the hot-loop
+  todo now includes fixed-point scatter, GPU neighbor/grid, and WebGPU
+  marching-cubes work.
+
+## 2026-06-11 20:16 AKDT - Material resolver manifest scaffold
+
+Prompt: Implement an additive material resolver manifest scaffold for the
+WebGPU material-property resolver migration. The prompt requested subagents,
+avoiding overwrites in the dirty tree, not pushing, and keeping the change
+general rather than one-off material patches. This session did not expose a
+callable LLM subagent tool, so the work used parallel read-only inspection
+passes and a narrow additive edit.
+
+Added `src/runtime/material/materialResolverManifest.js` as a declarative ES
+module for Phase 1 of `plan/todo/webgpu-material-property-resolvers-plan.md`.
+The manifest enumerates the material resolver families needed for first-
+principles material properties and WebGPU migration: electronic
+structure/band optics, molecular geometry/MD, thermodynamic phase/EOS,
+mechanical properties, optical PBR closures, reaction energetics/products,
+radiation/nuclear closures, and cache/fingerprint policy. Each resolver entry
+has a stable `peercompute.ulg.material-resolver.*.v0` id, CPU anchor/status
+where known, desired WebGPU residency target, cache key ingredients, a current
+status label, and validation flags all set to `false`.
+
+Added `tests/materialResolverManifest.test.mjs` to lock the family inventory,
+stable id shape, required fields, false validation flags, general/no-material-
+specific scaffold policy, and cache/fingerprint policy guards.
+
+Files touched:
+
+- `src/runtime/material/materialResolverManifest.js`
+- `tests/materialResolverManifest.test.mjs`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+
+Verification:
+
+- `node -v` reported `v24.16.0`.
+- `node --check src/runtime/material/materialResolverManifest.js` passed.
+- `node --check tests/materialResolverManifest.test.mjs` passed.
+- `node --test tests/materialResolverManifest.test.mjs` passed (`4/4`).
+- `npm test` ran the full node suite and finished `359/360` passing. The new
+  manifest tests passed inside the full run. The single failure was an existing
+  dirty-tree ABI expectation in `tests/abi.test.mjs` for `SPH GPU render field
+  ABI exposes material-phase surface fields`: current row layout contains
+  `opticalStateId:f32` where the test still expects `pad0:f32`. This failure is
+  outside the additive manifest slice and was not changed here.
+
+No commit or push was made.
+
+## 2026-06-11 12:52 AKDT - SPH URL-param auto-launch
+
+Prompt: Modify the SPH demo behavior so URL params open the SPH demo by
+default, hide the menu, and start the sim.
+
+Implemented a URL-param launch path for the SPH phase overlay without changing
+the broader SPH physics stack. `src/main.js` now imports the SPH URL parameter
+key list, detects known SPH controls or explicit `sph`/`sphPhase` flags in the
+query string or hash, and routes both button clicks and URL launches through a
+shared duplicate-safe `openSphPhaseDemo()` helper. URL-driven launches pass
+`autoStart: true` and `hideMenu: true`.
+
+The overlay path in `src/visualization/sphPhaseDemoMount.js` already accepted
+query/hash control values, collapsed its drawer when `hideMenu`/`autoStart` is
+set, and flipped the play button to `Pause` while scheduling the run loop. Added
+focused e2e coverage in `tests/demo.e2e.mjs` for direct URL launch with SPH
+params, collapsed controls, `Pause` state, and a nonzero resident submission
+count proving the sim loop started.
+
+Verification:
+
+- `node --check src/main.js` passed.
+- `node --check src/visualization/sphPhaseDemoMount.js` passed.
+- `node --check tests/demo.e2e.mjs` passed.
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo opens collapsed and starts from URL params"` passed (`1/1`, 55.5s) against the already-running HTTPS Vite server.
+
+No commit or push was made.
+
 ## 2026-06-11 03:22 AKDT - GPU-resident reaction/material conversion stage
 
 Prompt: Continue the core technology path and accept large refactors/breakage
@@ -1194,6 +1634,235 @@ Open / blockers:
   full-physics validation.
 - PeerCompute still needs a small adapter projection for the new
   `closure-refresh-request` and closure-table WGSL descriptor fields.
+- No push was attempted.
+
+## 2026-06-11 13:24 AKDT - SPH box/grid fix, worker rebuild, cache/warnings, and reaction candidate integration
+
+Prompt:
+
+- User pointed out the missing grid box fixes after asking for CPU-heavy tasks
+  to move to PeerCompute CPU/WASM workers, separate render/physics FPS counters,
+  WebGPU/CPU closure warnings, PeerCompute/localStorage closure caching, and
+  general reaction discovery for element/compound pairs without one-off
+  patches.
+
+Concrete actions:
+
+- Verified the box/grid bug path and changed continuous surface batching so
+  `surfaceRadiusM` is based on particle spacing or packed smoothing length,
+  not box dimensions. Kept the MLS-MPM grid spec tied to `boxDimsM` and
+  `gridSpacingM`, so a larger box adds cells instead of making isosurfaces
+  bigger.
+- Added an SPH renderer regression that compares a 5 m and 10 m box with the
+  same particles: the surface radius stays fixed and the MLS-MPM grid
+  dimensions/node count grow.
+- Added visible SPH warning/FPS telemetry: WebGPU fallback warning, active CPU
+  closure task warning, hot-loop residency warning, render-field readback
+  warning, plus separate render/physics/resident FPS counters.
+- Added a PeerCompute-compatible localStorage closure cache
+  (`peercompute.ulg.sph-derived-closure-cache.v1`) and wired SPH rebuilds to
+  read/write derived material closures when runtime defaults are present.
+- Added `src/runtime/sphPhaseViewState.js` so particle colors/descriptors,
+  SPH/MLS-MPM packed buffers, material properties, reactions, totals, phase
+  summaries, and box metadata can be built outside the DOM.
+- Added `sph.phase.rebuild` to the ULG service contract and `ulg-runtime`
+  worker. The worker now builds `createSphPhaseDemo()` plus a serializable
+  view state and returns a simulation artifact.
+- Added `runSphPhaseRebuild()` to `createDemoRuntime()` and passed the runtime
+  into the SPH overlay. Control changes now prefer the supervised worker,
+  apply the returned `peercompute-worker-packed-state`, and only fall back to
+  main-thread rebuilds on failure/unavailability.
+- Fixed async status refresh so P2G/grid-update/G2P completions repaint the
+  status panel; the live panel now reports concrete expanded grid dimensions
+  after worker-applied box changes.
+- Integrated the chemistry subagent's formula parser/candidate layer under
+  `src/runtime/chemistry/`. Reaction discovery now parses formula/demo keys,
+  classifies nonmetals without the old conduction-density false positive,
+  emits balanced candidate stoichiometry, and consumes candidates for active
+  metal + water plus binary ionic element/nonmetal pairs.
+- Added a guard so large light-element candidate reactions avoid slow crude
+  STO-3G product solves by default and use explicit provisional candidate
+  energetics instead; negative derived energies remain authoritative when
+  available.
+- Updated tests for balanced Na/Cl and Na/Cl2 candidates, Li/Na/Cs water
+  candidates in the pure chemistry layer, lighter SPH adapter candidate cases,
+  and Fe + H2O now producing balanced Fe(OH)2 instead of the old FeOH reduced
+  product.
+- Regenerated the GitHub Pages build in `docs/`.
+
+Files touched:
+
+- `src/main.js`
+- `src/runtime/demoRuntime.js`
+- `src/runtime/sph/reactionDiscovery.js`
+- `src/runtime/sphPhaseViewState.js`
+- `src/runtime/chemistry/formula.js`
+- `src/runtime/chemistry/reactionCandidates.js`
+- `src/services/ulgRuntime.worker.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/chemistryReactionCandidates.test.mjs`
+- `tests/contract-fixtures.test.mjs`
+- `tests/reactionDiscovery.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `tests/demo.e2e.mjs`
+- `ulg-gpu-abi/src/serviceContract.js`
+- `docs/index.html`
+- `docs/assets/*`
+- `plan/perf-upgrade.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 13:24:34 AKDT`.
+- `node --check src/runtime/demoRuntime.js`
+- `node --check src/main.js`
+- `node --check src/runtime/sphPhaseViewState.js`
+- `node --check src/runtime/sph/reactionDiscovery.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check src/services/ulgRuntime.worker.js`
+- `node --test tests/sphPhaseRenderer.test.mjs`
+- `node --test tests/contract-fixtures.test.mjs`
+- `node --test tests/chemistryReactionCandidates.test.mjs`
+- `node --test tests/reactiveChemistry.test.mjs`
+- `node --test tests/reactionDiscovery.test.mjs`
+- `node --test tests/contract-fixtures.test.mjs tests/sphPhaseRenderer.test.mjs tests/chemistryReactionCandidates.test.mjs tests/reactiveChemistry.test.mjs`
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- Manual Chromium/Playwright HTTPS probe that changed the SPH box X dimension
+  from 5 m to 10 m and waited for worker rebuild plus concrete grid status.
+- `npm run build`
+- `npm run build:pages`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks for touched runtime, worker, visualization, and test
+  files.
+- PASS: `tests/sphPhaseRenderer.test.mjs` (`8/8`), including the box/grid
+  regression.
+- PASS: `tests/contract-fixtures.test.mjs` (`4/4`) with `sph.phase.rebuild`
+  task capsule coverage.
+- PASS: `tests/chemistryReactionCandidates.test.mjs` and
+  `tests/reactiveChemistry.test.mjs` (`10/10`).
+- PASS: focused fast suite
+  `tests/contract-fixtures.test.mjs tests/sphPhaseRenderer.test.mjs
+  tests/chemistryReactionCandidates.test.mjs tests/reactiveChemistry.test.mjs`
+  (`22/22`).
+- PASS: `tests/reactionDiscovery.test.mjs` (`7/7`). This remains slow because
+  it derives product closures for SPH integration evidence.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: manual browser worker/grid probe reported `sph.phase.rebuild` worker
+  status `complete`, `viewStateSource=peercompute-worker-packed-state`,
+  closure-cache hits, `cpu closure task : idle`, and
+  `mls grid : dims=30x18x18 nodes=9720 dx=0.400m` after the box change.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` passed with the existing Vite large-chunk warning
+  and regenerated `docs/`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- An initial focused e2e run failed earlier with `ReferenceError: gridUpdate is
+  not defined`; fixed by defining grid-status locals before rendering.
+- A first reaction-discovery integration run blocked Na/H2O and Mg/O2 because
+  crude generated product geometries produced false endothermic signs. The
+  adapter now records rejected derived energies and uses explicit provisional
+  candidate energetics for those cases until the proper solver is available.
+- A probe and one test attempt spent too long on heavy all-element/product
+  closure derivations (`Al2O3`/`CsOH` style). Fast tests now keep those in the
+  pure candidate layer; broad product-closure sweeps need worker/WebGPU-resident
+  caching before becoming interactive.
+- The runtime still applies one product key to both reacting particles; full
+  stoichiometric multi-product conversion and gas byproduct pressure are not
+  implemented yet.
+- Some CPU-heavy derivation remains. The worker rebuild removes the UI-blocking
+  control-change path when available, but optical/thermal/reaction closure
+  resolution and product derivation still need deeper WebGPU/worker residency.
+- No push was attempted.
+
+## 2026-06-11 13:34 AKDT - PeerCompute local closure-cache invalidation
+
+Prompt:
+
+- User clarified that precomputed material properties should persist between
+  runs through localStorage/PeerCompute, grow into a larger fast-retrieval
+  library, and invalidate when the code that generated them changes.
+
+Concrete actions:
+
+- Upgraded the SPH browser-local cache schema from
+  `peercompute.ulg.local-derived-closure-cache.v1` to v2 while keeping the same
+  localStorage namespace (`peercompute.ulg.sph-derived-closure-cache.v1`) so the
+  browser can accumulate a reusable library.
+- Added hash-keyed material records plus a material index instead of replacing
+  one record per material name.
+- Each v2 cache record now carries `inputHash`, `methodHash`,
+  `validityDomainHash`, `propertiesHash`, `methodVersion`, and
+  `generatorFingerprint`.
+- The generator fingerprint is computed from the material-closure method
+  version, app version, `import.meta.url`/build identity, and source strings for
+  the participating material derivation functions. This invalidates production
+  cache entries when the generated bundle changes, and dev cache entries when
+  those generator functions change.
+- Lookup rejects records with mismatched record schema, method version,
+  generator fingerprint, material key, guard hashes, or properties hash. Stale
+  records are counted and reported rather than consumed.
+- Updated the SPH status row to show `stale=...` in the closure-cache summary.
+- Updated the focused browser e2e expectation to require the v2 cache schema and
+  a `ulg:*` generator fingerprint.
+- Regenerated the GitHub Pages build in `docs/`.
+
+Files touched:
+
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/demo.e2e.mjs`
+- `docs/index.html`
+- `docs/assets/*`
+- `plan/perf-upgrade.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check tests/demo.e2e.mjs`
+- Manual HTTPS Chromium probe that seeded a v1 localStorage record, opened the
+  SPH demo, and inspected `overlay.__sphPeerClosureCache` plus stored v2
+  records.
+- `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs -g "SPH phase demo runs derived material properties by default"`
+- `npm run build`
+- `npm run build:pages`
+- `git diff --check`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 13:34:21 AKDT`.
+
+Validation:
+
+- PASS: syntax checks for the touched overlay and e2e files.
+- PASS: manual HTTPS Chromium cache probe rejected seeded v1 data as
+  `schema-mismatch`, reported `stale=1`, wrote v2 records, and produced
+  generator fingerprint `ulg:653567f6`, input hashes, and material index keys
+  for H2O/Fe/air/H2/O2/FeOH2.
+- PASS: focused HTTPS Chromium e2e passed `1/1` against
+  `https://127.0.0.1:5173/`.
+- PASS: `npm run build` passed with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` passed with the existing Vite large-chunk warning
+  and regenerated `docs/`.
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- This is still a browser-local cache. Peer-to-peer publication/import of the
+  material closure library remains future PeerCompute state work.
+- The invalidation fingerprint is code/bundle based but does not yet include a
+  git commit hash from a signed service artifact envelope.
 - No push was attempted.
 
 ## 2026-06-11 09:43:13 AKDT - Retained render rows and flat closure graph perf target
@@ -10476,3 +11145,3037 @@ Failures / open questions:
   GPU-resident renderer gap. MarchingCubes still receives CPU-side field arrays
   after render-field readbacks.
 - No push was attempted.
+
+## 2026-06-11 13:38 AKDT - Reaction energetics and stoichiometry remediation plan
+
+Prompt: User observed that performance can stay extremely slow for several
+minutes and then speed up by about 30x, asked whether closure derivation/cache
+explains that behavior, and asked for a plan to solve the remaining chemistry
+gaps: provisional reaction energetics when crude generated geometries give bad
+signs, and runtime chemistry converting a contact pair to one product material
+instead of full multi-product stoichiometry with gas byproducts/pressure.
+
+What happened:
+
+- Audited the current reaction path:
+  - `src/runtime/chemistry/reactionCandidates.js` already emits balanced
+    reactant/product terms for families such as active metal + water.
+  - `src/runtime/sph/reactionDiscovery.js` flattens the chosen candidate back to
+    `{ a, b, product }` and can fall back to
+    `provisional-heuristic-not-scientifically-validated` energetics if the fast
+    derived sign is not usable.
+  - `src/runtime/sph/reactiveChemistry.js` converts both contact particles to
+    the one product material.
+  - `src/runtime/sph/sphReactionGpuKernel.js` and `ulg-gpu-abi/src/wgsl.js`
+    pack/execute one product material id per reaction, so H2 and other gas
+    byproducts are not represented in the runtime pressure state.
+- Added `plan/reaction-stoichiometry-energetics-plan.md` covering:
+  - why cold closure derivation/cache/warmup can explain the slow-then-fast
+    performance profile;
+  - a balanced reaction closure ABI;
+  - general candidate enumeration for element/compound pairs;
+  - strict-mode rejection of provisional energetics;
+  - staged geometry/energy refinement instead of heuristic sign replacement;
+  - reaction-closure cache keys and invalidation;
+  - CPU reference multi-product stoichiometric extent;
+  - WebGPU term-table reaction execution;
+  - gas byproduct routing and sealed-box pressure coupling;
+  - acceptance tests.
+- Updated `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` so the new plan is linked from the active
+  work breakdown, test strategy, and status ledger.
+
+Files touched:
+
+- `plan/reaction-stoichiometry-energetics-plan.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `pwd && git status --short --branch`
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `ls plan && sed -n '1,220p' plan/plan.md && sed -n '1,180p' plan/log.md`
+- `tail -n 220 plan/log.md`
+- `tail -n 180 plan/tests.md`
+- `tail -n 160 plan/implementation-status.md`
+- `tail -n 180 plan/perf-upgrade.md`
+- `sed -n '1,260p' src/runtime/chemistry/reactionCandidates.js`
+- `sed -n '1,260p' src/runtime/sph/reactionDiscovery.js`
+- `sed -n '1,260p' src/runtime/sph/reactiveChemistry.js`
+- `rg -n "provisional|stoich|product|enthalpy|gas|pressure|reaction" src/runtime src/visualization tests plan -g '!docs/**'`
+- `sed -n '260,620p' src/runtime/sph/reactionDiscovery.js`
+- `sed -n '220,420p' src/runtime/chemistry/reactionCandidates.js`
+- `rg -n "buildSphReactionTable|reaction.*row|productPhase|specificEnthalpy|productMaterialId" src/runtime/sph src/visualization ulg-gpu-abi/src tests/sphReactionGpuKernel.test.mjs`
+- `sed -n '223,320p' src/runtime/sph/sphReactionGpuKernel.js`
+- `sed -n '1000,1135p' ulg-gpu-abi/src/wgsl.js`
+- `sed -n '570,620p' src/runtime/sph/reactionDiscovery.js`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 13:38:31 AKDT`.
+- `sed -n '620,700p' src/runtime/sph/reactionDiscovery.js`
+- `sed -n '1,260p' plan/perf-upgrade.md`
+- `tail -n 90 plan/plan.md`
+- `git diff --check`
+- `sed -n '1,280p' plan/reaction-stoichiometry-energetics-plan.md`
+- `tail -n 150 plan/log.md`
+- `git status --short --branch`
+
+Validation:
+
+- PASS: `git diff --check`.
+
+Failures / open questions:
+
+- No runtime fix was implemented in this slice; the new plan documents the
+  implementation path.
+- The exact WebGPU gas representation remains to be selected during
+  implementation: gas particles, gas cells, or a hybrid. The plan allows either
+  as long as pressure derives from species moles, temperature, volume, and EOS.
+- No push was attempted.
+
+## 2026-06-11 14:13 AKDT - Plan folder triage, steam optics plan, and cold-start cache investigation
+
+Prompt: User asked to add a plan for why steam and water look identical and put
+it in todo; move plan files to `todo`, `done`, or `moot` while leaving the
+high-level plan PDF in place; then investigate why performance is extremely
+slow before speeding up and why localStorage cache does not seem to help.
+
+What happened:
+
+- Preserved top-level active operating/spec files:
+  - `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`
+  - `plan/plan.md`
+  - `plan/log.md`
+  - `plan/tests.md`
+  - `plan/implementation-status.md`
+- Moved completed audit/handoff artifacts to `plan/done/`:
+  - `claude-audit.md`
+  - `claude-changes-audit-2026-06-10.md`
+  - `claude-work-audit-2026-06-09.md`
+  - `claudehandoff.md`
+  - `codex-handoff-2026-06-10.md`
+- Moved forward-looking plans to `plan/todo/`:
+  - `frontier-todo.md`
+  - `perf-upgrade.md`
+  - `sphphasedemo.md`
+  - existing user-moved `reaction-stoichiometry-energetics-plan.md`
+- Moved empty/superseded files to `plan/moot/`:
+  - `agents.md`
+  - `next-steps-2026-06-10.md`
+  - `ulg-runtime-plan.md`
+- Added `plan/todo/phase-resolved-steam-optics-plan.md`, covering:
+  - phase/state/microstructure optical cache keys;
+  - pure H2O vapor remaining optically thin;
+  - visible steam emerging only from derived condensation/droplet scattering;
+  - CPU/WebGPU optical table plumbing and tests.
+- Added `plan/todo/cold-start-cache-performance-plan.md`, covering:
+  - reaction closure cache records;
+  - material-property-backed reaction memoization;
+  - product closure reuse;
+  - timing diagnostics;
+  - persisted thermal/optical/static-table cache follow-ups.
+- Updated `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` to point at the new todo plans and record the
+  cache/performance findings.
+
+Performance/cache findings:
+
+- Code inspection confirmed `optionsWithCachedClosures()` reads browser
+  localStorage material records and the worker rebuild path now passes those
+  closures into `sph.phase.rebuild` task options.
+- `discoverReactions()` still disables its in-memory `discoveryCache` whenever
+  `options.materialProperties` is present. The normal demo passes material
+  properties, so reaction/product closure derivation can rerun even after
+  material cache hits.
+- The localStorage cache stores material closures. It does not yet persist full
+  reaction closures, reaction energetics, product closure reuse decisions,
+  thermal graph/phase-response tables, optical state buckets, WebGPU pipelines,
+  or warmed GPU uploads.
+- Node probe evidence:
+  - `createFirstPrinciplesMaterialClosures()` took about 4.1 s.
+  - `discoverReactions('Na', 'h2o', { materialProperties })` took about 7.2 s,
+    then about 5.5 s on immediate repeat.
+  - `discoverReactions('fe', 'h2o', { materialProperties })` took about 2.2 s,
+    then about 1.7 s on immediate repeat.
+  - `createSphPhaseDemo({ dropMaterial: 'Na', baseMaterial: 'h2o' })` took
+    about 10.8 s cold.
+  - Supplying already-derived material/product closures reduced Na/H2O startup
+    to about 5.5 s, showing material cache helps but does not cover reaction
+    discovery/energetics.
+- Browser HTTPS probe evidence against `https://127.0.0.1:5173/`:
+  - cold Na/H2O tiny-particle load with empty localStorage took about 23.9 s;
+  - it wrote seven material closure records for `h2o`, `fe`, `air`, `h2`,
+    `o2`, `Na`, and `naoh`;
+  - warm reload hit all seven records and reported `consumed=true`, but still
+    took about 19.3 s.
+
+Files touched:
+
+- `plan/done/claude-audit.md`
+- `plan/done/claude-changes-audit-2026-06-10.md`
+- `plan/done/claude-work-audit-2026-06-09.md`
+- `plan/done/claudehandoff.md`
+- `plan/done/codex-handoff-2026-06-10.md`
+- `plan/moot/agents.md`
+- `plan/moot/next-steps-2026-06-10.md`
+- `plan/moot/ulg-runtime-plan.md`
+- `plan/todo/frontier-todo.md`
+- `plan/todo/perf-upgrade.md`
+- `plan/todo/sphphasedemo.md`
+- `plan/todo/reaction-stoichiometry-energetics-plan.md`
+- `plan/todo/phase-resolved-steam-optics-plan.md`
+- `plan/todo/cold-start-cache-performance-plan.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `pwd && find .. -name AGENTS.md -print`
+- `find plan -maxdepth 2 -type f | sort`
+- `git status --short --branch`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 14:13:47 AKDT`.
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `for f in plan/*.md plan/todo/*.md; do printf '%s\n' "$f"; sed -n '1,36p' "$f" | sed 's/^/  /'; done`
+- `find plan -maxdepth 1 -type d -printf '%p\n' | sort`
+- `find plan/done plan/moot plan/todo -maxdepth 1 -type f -printf '%p\n' | sort`
+- `rg -n "PEER_CLOSURE_CACHE|readPeerClosureCache|cachedClosuresForMaterials|writePeerClosureCache|closureRecordFromProperties|peerClosureCache|deriveMaterial|createSphPhaseViewState|runSphPhaseRebuild|materialProperties|localStorage" src/visualization/sphPhaseDemoMount.js src/runtime/sphPhaseViewState.js src/services/ulgRuntime.worker.js src/runtime/demoRuntime.js`
+- `rg -n "sph.phase.rebuild|createSphPhaseViewState|discoverReactions|deriveMaterialProperties|deriveFormulaMaterialProperties|createSphPhaseDemo" src/runtime src/services tests | sed -n '1,220p'`
+- `ps -eo pid,cmd | rg 'vite|5173'`
+- `curl -k -I https://127.0.0.1:5173/`
+- `node -v && npm -v`
+- `nl -ba src/visualization/sphPhaseDemoMount.js ...`
+- `nl -ba src/runtime/demoRuntime.js ...`
+- `nl -ba src/services/ulgRuntime.worker.js ...`
+- `nl -ba src/runtime/sphPhaseViewState.js ...`
+- `nl -ba src/runtime/sphPhaseDemo.js ...`
+- `nl -ba src/runtime/material/materialClosures.js ...`
+- `nl -ba src/runtime/material/materialDerivation.js ...`
+- Node timing probe for `createSphPhaseDemo()` cold/repeated Na/H2O and Fe/H2O.
+- Node timing probe for `createFirstPrinciplesMaterialClosures()` and
+  `discoverReactions()` with `materialProperties`.
+- `rg -n "__sph|window\\.__ulgDemo|window\\.__" src/visualization/sphPhaseDemoMount.js src/main.js tests/demo.e2e.mjs | sed -n '1,200p'`
+- Browser Playwright cold/warm localStorage probe against
+  `https://127.0.0.1:5173/?sph=1&drop=Na&base=h2o&dropn=1&basen=1&boxx=5&boxy=5&boxz=5`.
+- Node timing probe with material/product closures supplied to
+  `createSphPhaseDemo()`.
+- `find plan -maxdepth 2 -type f | sort`
+- `rg -n "reaction-stoichiometry|phase-resolved-steam|perf-upgrade|sphphasedemo|frontier-todo|next-steps-2026-06-10|ulg-runtime-plan|claude-audit|codex-handoff" plan/plan.md plan/implementation-status.md plan/tests.md plan/todo/*.md plan/moot/*.md plan/done/*.md`
+- `git diff --check`
+- `find plan -maxdepth 2 -type f | sort`
+- `rg -n "plan/reaction-stoichiometry-energetics-plan.md|plan/perf-upgrade.md|plan/sphphasedemo.md|plan/frontier-todo.md" plan/plan.md plan/implementation-status.md plan/tests.md plan/todo/*.md`
+- `git status --short --branch`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS: plan file layout check shows active top-level operating/spec files plus
+  sorted `plan/todo/`, `plan/done/`, and `plan/moot/` entries.
+- PASS: active docs no longer point at old top-level paths for the moved
+  reaction/perf/SPH/frontier plans.
+
+Failures / open questions:
+
+- No performance code fix was implemented in this slice. The investigation
+  identifies the next target as reaction/product closure caching plus
+  material-property-backed reaction memoization.
+- No push was attempted.
+
+## 2026-06-11 14:26:06 AKDT - WebGPU Material Property Resolver Todo Plan
+
+Prompt:
+
+> are the relativistic optics closures already implemented in webgpu? can you make a todo plan for moving all material properties resolvers to webgpu enumerate them.
+
+Actions:
+
+- Audited the current relativistic/interband optical path.
+- Confirmed `src/runtime/material/opticalClosure.js` derives scalar-relativistic
+  interband oscillators, Drude/Drude-Lorentz response, spectral/PBR rows, and
+  opacity in JavaScript on the CPU.
+- Confirmed `src/runtime/material/opticalGpuBuffers.js` calls
+  `opticalRenderParams()` during table build, then packs already-derived rows
+  for upload/lookup.
+- Confirmed `ulg-gpu-abi/src/wgsl.js` `opticalLookupWgsl` is a material/phase
+  id lookup and row-copy kernel, not a relativistic optical derivation kernel.
+- Checked material/electronic/chemistry/SPH runtime files to enumerate resolver
+  families that still need WebGPU migration.
+- Checked the deferred tool registry for an infinite-context-coder tool; no
+  ICC tool was exposed in this session.
+- Added `plan/todo/webgpu-material-property-resolvers-plan.md`.
+- Updated `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` to track the new todo and test gates.
+
+Files touched:
+
+- `plan/todo/webgpu-material-property-resolvers-plan.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `rg -n "peercompute|Multiscale|ULG|material|WebGPU" /home/cos/.codex/memories/MEMORY.md`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 14:26:06 AKDT`.
+- `git status --short --branch`
+- `nl -ba src/runtime/material/opticalGpuBuffers.js | sed -n '187,262p;574,748p'`
+- `nl -ba ulg-gpu-abi/src/wgsl.js | sed -n '434,535p'`
+- `nl -ba src/runtime/material/opticalClosure.js | sed -n '321,506p;781,809p'`
+- `nl -ba src/runtime/material/elementClosures.js | sed -n '120,150p;210,258p;292,330p'`
+- `sed -n '1,240p' plan/plan.md`
+- `sed -n '1,220p' plan/tests.md`
+- `sed -n '1,220p' plan/implementation-status.md`
+- `find plan -maxdepth 2 -type f | sort`
+- `tail -n 140 plan/log.md`
+- `tail -n 120 plan/plan.md`
+- `tail -n 120 plan/tests.md`
+- `tail -n 80 plan/implementation-status.md`
+- `rg --files src/runtime/material src/runtime/chemistry src/runtime/sph | sort`
+- `rg -n "export function|function .*\\(|export const|class " src/runtime/material src/runtime/chemistry src/runtime/sph | sed -n '1,260p'`
+- `rg -n "Kohn|Sham|Hartree|Koelling|Harmon|radial|HF|UHF|molecular|BOMD|MP2|Schrodinger|Schr" src/runtime src/physics src -g '!node_modules/**' | sed -n '1,240p'`
+- `sed -n '1,220p' plan/todo/perf-upgrade.md`
+- `sed -n '1,220p' plan/todo/cold-start-cache-performance-plan.md`
+- `sed -n '1,220p' plan/todo/reaction-stoichiometry-energetics-plan.md`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS: plan layout check shows
+  `plan/todo/webgpu-material-property-resolvers-plan.md` in the active todo
+  folder.
+- PASS: tracker references to the new plan were found in `plan/plan.md`,
+  `plan/tests.md`, `plan/implementation-status.md`, and this log.
+
+Failures / open questions:
+
+- The `rg` command that included `src/physics` reported that path does not
+  exist; relevant electronic-structure results were still found under
+  `src/runtime/electronicStructure`.
+- No source code changes were made and no push was attempted.
+
+## 2026-06-11 14:30:00 AKDT - Cold-Start Performance Remediation Todo Expansion
+
+Prompt:
+
+> add a todo plan for coldstart performance remediation which should find a solution for " Main root cause: discoverReactions() disables its in-memory cache when materialProperties is provided, which is the normal demo path. We also do not yet persist full reaction closures, product reuse decisions, thermal/optical tables, or GPU warmup artifacts." I'm guessing most of this should be cachable. and we should probably have a "clear cache" button in the UI.
+
+Actions:
+
+- Read `/home/cos/projects/AGENTS.md` and confirmed plan/log/test update
+  requirements.
+- Reviewed the existing `plan/todo/cold-start-cache-performance-plan.md` and
+  expanded it instead of adding a duplicate todo file.
+- Added the quoted root cause as the plan's remediation target.
+- Added a cache-coordinator slice covering material, reaction, product reuse,
+  thermal/phase table, optical/PBR table, static WebGPU row, and GPU warmup
+  cache families.
+- Specified the `discoverReactions()` fix: use stable material-property
+  provenance hashes in the cache key instead of disabling the cache when
+  `materialProperties` is supplied.
+- Added localStorage/PeerCompute persistence requirements for full reaction
+  closures, product reuse decisions, thermal/optical/static table rows, and GPU
+  warmup signatures.
+- Added required SPH UI behavior for a retro `clear cache` button that clears
+  only ULG SPH cache families, resets in-memory signatures, reports cleared
+  counts, and forces a controlled cold rebuild.
+- Updated `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` with the expanded remediation scope.
+
+Files touched:
+
+- `plan/todo/cold-start-cache-performance-plan.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `sed -n '1,260p' plan/todo/cold-start-cache-performance-plan.md`
+- `rg -n "cold-start|cache|clear cache|localStorage|reaction cache|thermal graph|optical table|GPU warmup" plan/plan.md plan/tests.md plan/implementation-status.md plan/log.md src/visualization/sphPhaseDemoMount.js src/runtime/sphPhaseViewState.js`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 14:30:00 AKDT`.
+- `git status --short --branch`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS: docs reference check found the expanded cold-start plan, the
+  `discoverReactions()` / `materialProperties` root cause, GPU warmup cache
+  scope, and SPH `clear cache` requirements in the active plan/tracker docs.
+
+Failures / open questions:
+
+- No implementation was done in this prompt; this is the todo-plan expansion for
+  the next cold-start performance slice.
+- No push was attempted.
+
+## 2026-06-11 14:47:26 AKDT - Overarching Remaining Todo Completion Plan
+
+Prompt:
+
+> examine all remaining todo items and make an overarching plan to complete them all in the order that makes the most sense to you.
+
+Actions:
+
+- Read `/home/cos/projects/AGENTS.md`, `plan/plan.md`, and the recent tail of
+  `plan/log.md`.
+- Inventoried active todo files under `plan/todo/`:
+  - `cold-start-cache-performance-plan.md`
+  - `frontier-todo.md`
+  - `perf-upgrade.md`
+  - `phase-resolved-steam-optics-plan.md`
+  - `reaction-stoichiometry-energetics-plan.md`
+  - `sphphasedemo.md`
+  - `webgpu-material-property-resolvers-plan.md`
+- Inventoried unchecked top-level `plan/plan.md` items for ULG, PeerCompute,
+  Eshkol, MoonLab, and tooling.
+- Used the workspace memory quick pass for PeerCompute/Multiscale context, which
+  confirmed that PeerCompute work should stay grounded in `ComputeManager`,
+  `NodeKernel`, Multiscale schemas, and existing handoff docs.
+- Added `plan/todo/overarching-completion-plan.md` with a 10-phase ordering:
+  baseline, cold-start cache, balanced reactions, gas/steam optics, SPH
+  preflight/controls, GPU hot loop, WebGPU material resolvers, scientific
+  fidelity frontier, nuclear/radiation, cross-repo integration, and final
+  profiling/demo evidence.
+- Updated `plan/plan.md`, `plan/tests.md`, and
+  `plan/implementation-status.md` to track the overarching plan and phase gates.
+
+Files touched:
+
+- `plan/todo/overarching-completion-plan.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+
+Commands run:
+
+- `sed -n '1,260p' /home/cos/projects/AGENTS.md`
+- `sed -n '1,260p' plan/plan.md`
+- `tail -n 220 plan/log.md`
+- `find plan/todo -maxdepth 1 -type f | sort && rg -n "^- \\[ \\]|^#|^##|^###|First Slice|Acceptance|Implementation Plan|Remediation Plan|Required|Goal|Purpose|Current|Open|Next" plan/todo/*.md plan/plan.md`
+- `rg -n "peercompute|Multiscale|ULG|material|WebGPU|todo" /home/cos/.codex/memories/MEMORY.md`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 14:47:26 AKDT`.
+- `git status --short --branch`
+- `sed -n '240,390p' plan/plan.md`
+- `sed -n '1,220p' plan/todo/frontier-todo.md`
+- `sed -n '1,340p' plan/todo/reaction-stoichiometry-energetics-plan.md`
+- `sed -n '1,190p' plan/todo/phase-resolved-steam-optics-plan.md`
+- `sed -n '1,330p' plan/todo/cold-start-cache-performance-plan.md`
+- `sed -n '1,220p' plan/todo/perf-upgrade.md && sed -n '878,1228p' plan/todo/perf-upgrade.md`
+- `sed -n '1,190p' plan/todo/sphphasedemo.md && sed -n '214,360p' plan/todo/sphphasedemo.md && sed -n '447,620p' plan/todo/sphphasedemo.md && sed -n '920,1040p' plan/todo/sphphasedemo.md && sed -n '1270,1335p' plan/todo/sphphasedemo.md`
+- `sed -n '1,470p' plan/todo/webgpu-material-property-resolvers-plan.md`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS: docs reference check found the overarching plan in `plan/todo/`,
+  `plan/plan.md`, `plan/tests.md`, `plan/implementation-status.md`, and this
+  log.
+- PASS: active todo inventory still shows all prior todo files plus
+  `plan/todo/overarching-completion-plan.md`.
+
+Failures / open questions:
+
+- No implementation was done in this prompt; this is a plan-ordering slice.
+- No push was attempted.
+
+## 2026-06-11 15:26:20 AKDT - SPH Cold-Start Cache First Slice And Worker-First UI
+
+Prompt:
+
+> sounds good. now get to work and wjen youre done update the ulg triad pdf to represent current status.
+
+Additional prompt during implementation:
+
+> also. mske sure you decouple the heavy lifting out of the main thread by using peercompute workers so rendering, physics, and the ui can run asynchronously and remain responsive
+
+Additional prompt during implementation:
+
+> also when expensive cpu tasks cause fps to dip below 30 post a messagewarning that says "deriving material or reaction properties" and when fps drops below 10 due to cache misses, just pause the sim until cache is loaded with a message about prepopuating cache with first principles derivations. when its ready then provide a play button
+
+Actions:
+
+- Re-read `/home/cos/projects/AGENTS.md`, `plan/plan.md`,
+  `plan/tests.md`, the active cold-start/overarching todo files, and the
+  current SPH/reaction runtime code.
+- Spawned a read-only sidecar explorer for the Triad PDF provenance. Finding:
+  `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf` is a binary-only checked-in PDF,
+  produced by Pandoc/LaTeX, with no source markdown/HTML/TeX/Mermaid file in
+  this repo history. Local tools available for an addendum/update path include
+  `pandoc`, `lualatex`, and `pdfunite`.
+- Fixed `discoverReactions()` caching so `options.materialProperties` now
+  contributes a stable material-property/provenance digest to the cache key
+  instead of disabling caching.
+- Added reaction discovery cache record/key schemas, memory cache clear/info
+  helpers, persistent record restore support, and cloned cache-hit returns to
+  avoid caller mutation.
+- Reused supplied/persisted product closures during stoichiometric,
+  metal-water, metal-oxygen, and combinatorial reaction discovery before
+  deriving a fresh product closure.
+- Added a browser SPH cold-start cache family in
+  `src/visualization/sphPhaseDemoMount.js` for persisted reaction records,
+  product reuse records, placeholder table metadata, and placeholder GPU warmup
+  metadata.
+- Added `cold cache`, `cache clear`, low-FPS derivation warning, and `perf trace` rows to
+  the SPH overlay, plus a scoped `Clear Cache` button that clears only the ULG
+  SPH material/cold-start cache families and resets the in-memory reaction
+  discovery cache.
+- Changed initial SPH overlay startup to prefer the supervised
+  `ulg-runtime` `sph.phase.rebuild` worker instead of cold-building
+  `createSphPhaseDemo()` on the main thread. Main-thread creation remains a
+  fallback when the runtime worker API is unavailable.
+- Persisted material and reaction/product cold-start cache records after worker
+  rebuild completion, and exposed the worker timing in `overlay.__sphPerformanceTrace`.
+- Added low-FPS UX behavior: while CPU closure work is active and render FPS
+  drops below 30, the warning banner emits the exact message
+  `deriving material or reaction properties`; the later ultra-low-FPS
+  auto-pause branch was removed so the demo does not block playback behind a
+  cache-prepopulation gate.
+- Added a cached interactive-driver path: manual Step/Play can reconstruct the
+  previous main-thread driver from warm cache after worker prepopulation, so
+  the existing reaction stepping path remains testable without forcing cold
+  derivation during initial UI load.
+- Updated tests for material-property-backed reaction cache hits, persistent
+  reaction record hits, worker-first SPH startup diagnostics, clear-cache UI
+  presence, cold-cache records, and cached Na/H2O stepping.
+- Updated `plan/plan.md`, `plan/todo/cold-start-cache-performance-plan.md`,
+  `plan/todo/overarching-completion-plan.md`, `plan/tests.md`,
+  `plan/implementation-status.md`, and `README.md` to mark the cold-start first
+  slice complete while leaving thermal/optical/static table cache reuse,
+  GPU warmup persistence, stale browser probes, PeerCompute state mirroring,
+  and measured cold/warm/clear deltas open.
+
+Files touched:
+
+- `README.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/todo/cold-start-cache-performance-plan.md`
+- `plan/todo/overarching-completion-plan.md`
+- `src/runtime/sph/reactionDiscovery.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/runtime/sphPhaseViewState.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/demo.e2e.mjs`
+- `tests/reactionDiscovery.test.mjs`
+
+Commands run:
+
+- `rg -n "peercompute|Multiscale|ulg|infinite context" /home/cos/.codex/memories/MEMORY.md`
+- `sed -n '1,220p' /home/cos/projects/AGENTS.md`
+- `git status --short --branch`
+- `sed -n '1560,2045p' src/visualization/sphPhaseDemoMount.js`
+- `sed -n '2045,2380p' src/visualization/sphPhaseDemoMount.js`
+- `sed -n '1,260p' src/runtime/sph/reactionDiscovery.js`
+- `sed -n '260,620p' src/runtime/sph/reactionDiscovery.js`
+- `sed -n '620,980p' src/runtime/sph/reactionDiscovery.js`
+- `sed -n '1,260p' src/visualization/sphPhaseDemoMount.js`
+- `sed -n '260,760p' src/visualization/sphPhaseDemoMount.js`
+- `sed -n '760,1200p' src/visualization/sphPhaseDemoMount.js`
+- `sed -n '1200,1560p' src/visualization/sphPhaseDemoMount.js`
+- `sed -n '1,260p' src/services/ulgRuntime.worker.js`
+- `sed -n '1,260p' src/runtime/demoRuntime.js`
+- `rg -n "runSphPhaseRebuild|sph.phase.rebuild|createSphPhaseViewState|reactionDiscovery" src tests -S`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check src/runtime/sph/reactionDiscovery.js`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check src/runtime/sphPhaseViewState.js`
+- `node --check tests/reactionDiscovery.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/reactionDiscovery.test.mjs`
+- `node --test tests/contract-fixtures.test.mjs tests/sphPhaseRenderer.test.mjs tests/chemistryReactionCandidates.test.mjs`
+- `ps -eo pid,ppid,stat,cmd | rg -i "vite|npm run dev|5173|playwright"`
+- `npm pkg get scripts`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+- `npm test`
+- `npm run build`
+- `npm run build:pages`
+- `date '+%Y-%m-%d %H:%M:%S %Z'` reported
+  `2026-06-11 15:26:20 AKDT`.
+- `which pdfunite || true; which pandoc || true; which lualatex || true`
+- `pdfinfo plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf | sed -n '1,40p'`
+
+Validation:
+
+- PASS: syntax checks for touched SPH/reaction runtime, view-state, mount, and
+  e2e/unit test files.
+- PASS: `node --test tests/reactionDiscovery.test.mjs` (`8/8`, includes the
+  new material-property-backed memory and persisted reaction-record cache test).
+- PASS: `node --test tests/contract-fixtures.test.mjs tests/sphPhaseRenderer.test.mjs tests/chemistryReactionCandidates.test.mjs`
+  (`16/16`).
+- PASS: focused HTTPS Chromium SPH browser coverage against the live
+  `https://127.0.0.1:5173` server:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+  (`3/3`).
+- PASS: `npm test` (`336/336`).
+- PASS: `npm run build`; Vite emitted the existing large-chunk warning.
+- PASS: `npm run build:pages`; `docs/` was regenerated and Vite emitted the
+  existing large-chunk warning.
+
+Failures / fixes:
+
+- First focused Playwright run failed because the e2e still assumed the old
+  main-thread driver status rows after startup. The implementation now uses a
+  worker-backed view-state by default, so the test was updated to accept
+  `peercompute-worker-packed-state` and validate cold-cache diagnostics.
+- A second focused Playwright run failed because the test clicked Play before
+  the worker/cache state fully transitioned to ready. The tests were changed to
+  wait for cold-cache write/hit readiness before using the cached interactive
+  Step path.
+- No push was attempted; local-only commit policy remains in effect.
+
+Open questions / next work:
+
+- Persist/reuse deterministic thermal graph, phase-response, optical/PBR,
+  static material-id/table rows, and GPU warmup artifacts.
+- Add stale-record browser probes and measured cold/warm/clear/repopulate
+  timing deltas.
+- Move large cache parsing/serialization and remaining resolver families toward
+  worker/WebGPU/PeerCompute state so the UI thread does not own expensive cache
+  work.
+
+## 2026-06-11 15:31:37 AKDT - ULG Triad PDF Current-Status Addendum
+
+Prompt:
+
+> sounds good. now get to work and wjen youre done update the ulg triad pdf to represent current status.
+
+Actions:
+
+- Added `plan/ULG_Triad_v0.5_Current_Status_Addendum_2026-06-11.md` as the
+  reproducible source for the PDF status update because the original Triad PDF
+  source is not present in the repository.
+- Preserved the original 68 pages of
+  `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf` and appended a 2-page current
+  status addendum covering worker-first SPH startup, cold-start cache first
+  slice status, validation, active risks, and immediate next work.
+- Rebuilt the final PDF to 70 pages.
+
+Files touched:
+
+- `plan/ULG_Triad_v0.5_Current_Status_Addendum_2026-06-11.md`
+- `plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`
+- `plan/log.md`
+
+Commands run:
+
+- `pandoc plan/ULG_Triad_v0.5_Current_Status_Addendum_2026-06-11.md --pdf-engine=lualatex -o /tmp/ulg-triad-current-status-addendum-2026-06-11.pdf`
+- `pandoc plan/ULG_Triad_v0.5_Current_Status_Addendum_2026-06-11.md --pdf-engine=pdflatex -o /tmp/ulg-triad-current-status-addendum-2026-06-11.pdf`
+- `pdfunite plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf /tmp/ulg-triad-current-status-addendum-2026-06-11.pdf /tmp/ULG_Triad_v0.5_Pretty_Diagrams.updated.pdf`
+- `pdftk plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf cat 1-68 output /tmp/ulg-triad-original-68.pdf`
+- `pdfunite /tmp/ulg-triad-original-68.pdf /tmp/ulg-triad-current-status-addendum-2026-06-11.pdf /tmp/ULG_Triad_v0.5_Pretty_Diagrams.updated.pdf`
+- `pdfinfo plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf | sed -n '1,24p'`
+- `pdftotext -f 69 -l 70 -layout plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf - | rg -n "Current Validation|Focused contract|npm test|Immediate Next" -C 1`
+
+Validation:
+
+- PASS: `pdfinfo` reports `Pages: 70` for the updated Triad PDF.
+- PASS: text extraction from pages 69-70 shows the expected current-status
+  addendum headings and validation bullets.
+
+Failures / fixes:
+
+- `pandoc --pdf-engine=lualatex` failed because the local Latin Modern font
+  metric was not loadable. Rebuilt the addendum successfully with
+  `--pdf-engine=pdflatex`.
+- The first appended addendum had one overlong validation command that wrapped
+  poorly in extracted text. Rewrote that validation bullet, extracted pages
+  1-68 with `pdftk`, and rebuilt the final 70-page PDF with the revised
+  addendum only.
+
+## 2026-06-11 16:34:42 AKDT - SPH Cold-Start, Reaction, And Gas-Pressure Continuation
+
+Prompts:
+
+> FYI physics fps is down to 0.1 fps. for a very long time before it starts.
+
+> don't stop after the next slice just keep going until the whole todo is completed
+
+Actions:
+
+- Removed the ultra-low-FPS cache-prepopulation auto-pause behavior while
+  preserving the low-FPS CPU derivation warning banner.
+- Added worker rebuild timing (`createSphPhaseDemo`, view state, preflight),
+  resident MLS-MPM stage timing (device, P2G, grid, G2P, thermal, reaction,
+  compact summary), and scene `setParticles()` timing (surface batching,
+  thermal table/graph/response, reaction table, optical table, surface apply).
+- Sent Hypatia a read-only sidecar audit of the cold-start path. The audit
+  identified main-thread scene/table rebuilds, lazy `ulg-runtime` startup,
+  partial cache hit discard, and main-thread interactive-driver rebuilds as
+  key remaining bottlenecks.
+- Fixed partial material-closure cache consumption: cached closures are now
+  passed when any current record exists, and `buildSphPhaseDemoState()` derives
+  only missing required runtime materials instead of forcing a full default
+  closure rebuild.
+- Persisted deterministic static table artifacts into the cold-start cache:
+  thermal material tables, thermal closure graph banks, thermal phase-response
+  tables, optical/PBR tables, reaction tables, and GPU warmup signatures.
+- Pre-spawned the `ulg-runtime` worker during demo runtime creation.
+- Preserved balanced reaction `reactants[]` and `products[]` terms in
+  `reactionDiscovery()` and reject stale persistent reaction records that lack
+  them.
+- Added CPU reference multi-product reaction conversion. Na + liquid H2O now
+  produces NaOH plus H2 by allocating product mass from stoichiometric
+  coefficients and molar masses.
+- Added a sealed-box gas-pressure diagnostic that combines baseline scenario
+  air with gas-phase SPH particles/vapor and reports per-species partial
+  pressures in the overlay.
+- Updated `plan/tests.md`, `plan/implementation-status.md`,
+  `plan/todo/cold-start-cache-performance-plan.md`,
+  `plan/todo/reaction-stoichiometry-energetics-plan.md`, and
+  `plan/todo/overarching-completion-plan.md`.
+
+Files touched in this slice:
+
+- `src/runtime/demoRuntime.js`
+- `src/runtime/sph/reactiveChemistry.js`
+- `src/runtime/sph/reactionDiscovery.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/runtime/sphPhaseViewState.js`
+- `src/services/ulgRuntime.worker.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/demo.e2e.mjs`
+- `tests/reactionDiscovery.test.mjs`
+- `tests/reactiveChemistry.test.mjs`
+- `tests/sphPhaseDemo.test.mjs`
+- plan/status files listed above
+
+Commands run:
+
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check src/services/ulgRuntime.worker.js`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check src/runtime/demoRuntime.js`
+- `node --check src/runtime/sph/reactiveChemistry.js`
+- `node --check src/runtime/sph/reactionDiscovery.js`
+- `node --test tests/sphPhaseDemo.test.mjs`
+- `node --test tests/reactiveChemistry.test.mjs`
+- `node --test tests/reactionDiscovery.test.mjs`
+- `node --test tests/contract-fixtures.test.mjs tests/sphPhaseRenderer.test.mjs tests/chemistryReactionCandidates.test.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "Na \\+ H2O"`
+
+Validation:
+
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` (`7/7`).
+- PASS: `node --test tests/reactiveChemistry.test.mjs` (`7/7`).
+- PASS: `node --test tests/reactionDiscovery.test.mjs` (`8/8`).
+- PASS: focused renderer/chemistry/contract suite (`16/16`).
+- PASS: focused HTTPS Chromium SPH browser group (`3/3`) after the
+  cold-start/table-cache/scene-timing slice.
+- PASS: focused HTTPS Chromium Na/H2O browser test (`1/1`) after the
+  multi-product and gas-pressure slice.
+
+Failures / fixes:
+
+- The first Na/H2O browser assertion for H2 failed because
+  `reactionDiscovery()` was preserving the balanced equation string but not the
+  product term array. The fix added `stoichiometry.reactants[]` and
+  `stoichiometry.products[]`, rejected stale persistent records that lack term
+  arrays, and then the browser test passed with H2 present.
+
+Open questions / next work:
+
+- Static table cache records are written but not yet rehydrated into scene
+  tables/WebGPU uploads across reloads.
+- Browser cache serialization and table writes still happen on the UI thread.
+- The resident WebGPU reaction kernel still consumes the older single-product
+  table shape.
+- Strict validated energetics/free-energy refinement and full reaction extent
+  inventory remain open.
+- Gas pressure is diagnostic only; it does not yet feed resident gas forces or
+  wall/gas ledgers.
+
+## 2026-06-11 16:46:06 AKDT - Continuation Checkpoint And PDF/Test Baseline
+
+Prompt:
+
+> don't stop after the next slice just keep going until the whole todo is completed
+
+Actions:
+
+- Re-read the parent `AGENTS.md` instructions and confirmed the active rules:
+  vanilla Vite/three/WebGPU, plan/log/tests upkeep, local-only work, and
+  addressing the user as big dog.
+- Spawned Galileo as a read-only sidecar explorer for the remaining todo stack.
+  Galileo recommended the same immediate order as the plan logs: cold-cache
+  parsing/table rehydration off the main thread first, then balanced WebGPU
+  reaction term tables, then reaction extent/inventory, then phase-resolved H2O
+  optics, with resolver-manifest scaffolding as an additive slice.
+- Checked Infinite Context Coder directly from
+  `/home/cos/projects/infinite_context_coder`. ICC already has `ulg`
+  registered with existing index/manifest/architecture/context artifacts.
+  Planned refresh after the next verified code checkpoint instead of in the
+  middle of active edits.
+- Finished rebuilding the ULG Triad PDF current-status addendum. The final PDF
+  now reports 71 pages; pages 69-71 include the cold-start, reaction,
+  gas-pressure, validation, risk, and immediate-next-work update.
+- Confirmed the HTTPS Vite server on `0.0.0.0:5173` responds with HTTP 200 and
+  ran focused browser validation against `https://127.0.0.1:5173`.
+- Regenerated the GitHub Pages build in `docs/`.
+- Updated `plan/tests.md` and `plan/implementation-status.md` with the new
+  checkpoint.
+
+Commands run:
+
+- `git status --short --branch`
+- `find .. -name AGENTS.md -print`
+- `sed -n '1,220p' ../AGENTS.md`
+- `tail -n 180 plan/plan.md`
+- `tail -n 220 plan/log.md`
+- `tail -n 180 plan/tests.md`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py list`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py status --repo ulg`
+- `pdfunite /tmp/ulg-triad-original-68.pdf /tmp/ulg-triad-current-status-addendum-2026-06-11.pdf /tmp/ULG_Triad_v0.5_Pretty_Diagrams.updated.pdf`
+- `mv /tmp/ULG_Triad_v0.5_Pretty_Diagrams.updated.pdf plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`
+- `pdfinfo plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf`
+- `pdftotext -f 69 -l 70 -layout plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf -`
+- `pdftotext -f 71 -l 71 -layout plan/ULG_Triad_v0.5_Pretty_Diagrams.pdf -`
+- `git diff --check`
+- `curl -k -I https://127.0.0.1:5173/`
+- `ps -eo pid,ppid,stat,cmd | rg -i "vite|npm run dev|5173|playwright"`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+- `npm run build`
+- `npm run build:pages`
+- `npm test`
+
+Validation:
+
+- PASS: HTTPS Vite server on `0.0.0.0:5173` responded with HTTP 200.
+- PASS: focused HTTPS Chromium SPH browser group (`3/3`), including the
+  room-temperature Na + H2O path.
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` with the existing Vite large-chunk warning.
+- PASS: full `npm test` (`339/339`).
+- PASS: `git diff --check`.
+- PASS: `pdfinfo` reports the rebuilt ULG Triad PDF has 71 pages, and text
+  extraction from pages 69-71 shows the current-status addendum content.
+
+Failures / open questions:
+
+- The combined PDF now has 71 pages, not the earlier expected 70, because the
+  expanded current-status addendum spans three generated pages.
+- A broad `rg` search for ICC text hit Codex session history and produced noisy
+  output, so subsequent ICC checks used the actual ICC CLI directly.
+- Next implementation slice remains the cold-cache rehydration/off-main-thread
+  work: static table records are currently written but not consumed on warm
+  reload, and serialization/parsing is still too UI-thread-heavy.
+
+## 2026-06-11 17:02:00 AKDT - SPH Static Table Cache Worker Slice
+
+Prompt:
+
+> don't stop after the next slice just keep going until the whole todo is completed
+
+Actions:
+
+- Added `src/runtime/sph/sphColdStartCache.js` as the shared runtime
+  coordinator for SPH cold-start/static table cache schemas, static table record
+  construction, typed-array payload hashing, warm unchanged-record detection,
+  generator invalidation, and rehydration helpers.
+- Added `ULG_TASK_KINDS.sphStaticTableCache` (`sph.static-table-cache`) and the
+  `ulg.sph.static-table-cache` service capability to the ULG runtime contract.
+- Added `createSphStaticTableCacheTask()` and
+  `runtime.runSphStaticTableCacheUpdate()` so static table cache work is a
+  first-class supervised PeerCompute/ULG runtime task.
+- Added `runSphStaticTableCacheTask()` in `src/services/ulgRuntime.worker.js`.
+  The worker now receives the previous static-cache snapshot string and scene
+  table inputs, computes table/GPU-warmup records, returns a compact artifact,
+  and sends the large cache snapshot as task result data instead of embedding it
+  in the cached artifact.
+- Updated `src/visualization/sphPhaseDemoMount.js` to remove the inline
+  synchronous table-cache serializer, store static table records under
+  `peercompute.ulg.sph-static-table-cache.v1`, schedule the worker-backed cache
+  update after `scene.setParticles()`, persist the returned snapshot string,
+  and expose compact static-cache status/timing in `overlay.__sphPeerClosureCache`.
+- Kept reaction cold-cache records separate from static table payloads so
+  reaction cache lookups do not parse the large thermal/optical/reaction table
+  arrays on every rebuild.
+- Added `tests/sphColdStartCache.test.mjs` and updated contract/browser tests.
+- Refreshed ICC for ULG after the verified checkpoint. ICC indexed 228 files,
+  106336 lines, and rebuilt 911 memory chunks.
+
+Files touched in this slice:
+
+- `src/runtime/sph/sphColdStartCache.js`
+- `src/runtime/demoRuntime.js`
+- `src/services/ulgRuntime.worker.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `ulg-gpu-abi/src/serviceContract.js`
+- `tests/sphColdStartCache.test.mjs`
+- `tests/contract-fixtures.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/todo/cold-start-cache-performance-plan.md`
+- `plan/todo/overarching-completion-plan.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphColdStartCache.js`
+- `node --check src/services/ulgRuntime.worker.js`
+- `node --check src/runtime/demoRuntime.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check ulg-gpu-abi/src/serviceContract.js`
+- `node --check tests/sphColdStartCache.test.mjs`
+- `node --check tests/contract-fixtures.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/sphColdStartCache.test.mjs tests/contract-fixtures.test.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+- `npm run build`
+- `git diff --check`
+- `npm run build:pages`
+- `npm test`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py index --repo ulg`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py build-memory --repo ulg`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py status --repo ulg`
+
+Validation:
+
+- PASS: syntax checks for touched runtime, worker, mount, ABI, and test files.
+- PASS: focused cache/contract unit tests (`7/7`).
+- PASS: focused HTTPS Chromium SPH browser group (`3/3`) against the live
+  `https://127.0.0.1:5173` server, including the worker-backed static table
+  cache update.
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`342/342`).
+- PASS: ICC ULG index/memory refresh completed (`228` files, `911` chunks).
+
+Failures / open questions:
+
+- This slice moves static table serialization/rehydration logic into the worker
+  and avoids parsing static table payloads during reaction cold-cache lookup,
+  but the scene still rebuilds its deterministic tables before scheduling the
+  cache write. The next cache/performance slice should let
+  `sphPhaseScene.setParticles()` consume matching rehydrated records directly
+  for warm reloads.
+- Material-closure and reaction-record cache parsing are still browser-local
+  JSON paths and should be moved to the same split-storage/worker-owned pattern.
+
+## 2026-06-11 17:19:40 AKDT - Warm Static Table Cache Consumption
+
+Prompt:
+
+> don't stop after the next slice just keep going until the whole todo is completed
+
+Actions:
+
+- Extended `src/runtime/sph/sphColdStartCache.js` with
+  `rehydrateSphStaticTableBundle()`, which converts validated static table cache
+  records into scene-consumable thermal material tables, thermal closure graph
+  sets, thermal phase-response tables, optical/PBR tables, and reaction tables.
+- Reconstructed per-graph CPU closure-law graph objects from packed thermal
+  graph-bank rows. The reconstructor normalizes global graph-bank sample,
+  edge, and status offsets back to per-graph local offsets so CPU graph
+  evaluation still works.
+- Added schema defaults for restored graph/phase-response table metadata so
+  cached rows preserve the same observable schema fields as freshly built rows.
+- Updated `src/visualization/sphPhaseScene.js` so `setParticles()` accepts
+  `staticTableCache`, uses cached table families when available, and records
+  `staticTableCacheStatus`/`staticTableCacheFamilies` in the scene sync timing
+  row.
+- Updated `src/visualization/sphPhaseDemoMount.js` to rehydrate the split static
+  table cache before scene sync, expose `staticTableRead` in
+  `overlay.__sphPeerClosureCache`, and record a `static table cache rehydrate`
+  performance span on hits.
+- Extended `tests/sphColdStartCache.test.mjs` to verify scene-consumable bundle
+  restoration and updated the SPH browser test to write static cache records,
+  reset/rebuild, and assert a warm `static-table-cache-bundle-hit`.
+
+Files touched in this slice:
+
+- `src/runtime/sph/sphColdStartCache.js`
+- `src/visualization/sphPhaseScene.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/sphColdStartCache.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/todo/cold-start-cache-performance-plan.md`
+- `plan/todo/overarching-completion-plan.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphColdStartCache.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check tests/sphColdStartCache.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/sphColdStartCache.test.mjs tests/sphPhaseRenderer.test.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+- `npm run build`
+- `git diff --check`
+- `npm run build:pages`
+- `npm test`
+
+Validation:
+
+- PASS: syntax checks for touched cache, scene, mount, and test files.
+- PASS: focused cache/renderer tests (`12/12`).
+- PASS: focused HTTPS Chromium SPH browser group (`3/3`) after adding a
+  reset/rebuild cache-consumption assertion.
+- PASS: `npm run build` with the existing Vite large-chunk warning.
+- PASS: `npm run build:pages` with the existing Vite large-chunk warning.
+- PASS: `git diff --check`.
+- PASS: full `npm test` (`343/343`).
+
+Failures / fixes:
+
+- First cache-consumption browser run failed because restored thermal
+  phase-response tables did not preserve `graphBankSchema`; the restorer now
+  stores/restores `sourceSchema`, `graphSetSchema`, and `graphBankSchema`, with
+  safe schema defaults for older cache records.
+
+Open questions / next work:
+
+- Static bundle rehydration is now consumed by the scene, but it still happens
+  synchronously immediately before `setParticles()`. Preload/rehydrate it in the
+  worker ahead of scene sync.
+- WebGPU upload paths still recreate GPU buffers from restored CPU table rows;
+  the next step is GPU warmup/upload reuse or worker-prepared upload manifests.
+
+## 2026-06-11 21:08:37 AKDT - Resident reaction term-table extent slice
+
+Prompt:
+
+> don't stop after the next slice just keep going until the whole todo is completed
+
+Actions:
+
+- Closed the completed Raman subagent after capturing its read-only cache-stall
+  audit. Spawned Herschel as a read-only explorer for the resident reaction
+  execution gap and used its findings to confirm the same blocking issues:
+  resident CPU/WGSL ignored reactant term rows, could not preserve leftover
+  reactant mass, and uploaded no gas-product section to the shader.
+- Updated `src/runtime/sph/sphReactionGpuKernel.js` so the packed reaction
+  table's `combinedRecords` now includes reaction rows, product phase rows,
+  headers, reactant term rows, product term rows, and gas-product rows.
+- Added resident CPU reference term-table helpers for reactant terms,
+  product terms, stoichiometric extent, fixed-particle-buffer product planning,
+  leftover reactant preservation, visible/unplaced product mass, and a
+  `peercompute.ulg.sph-gpu-reaction-ledger.v0` ledger.
+- Replaced the resident CPU reaction step's old pair conversion with
+  coefficient/molar-mass extent solving. Fully consumed source slots become
+  products; partially consumed slots keep their original material with reduced
+  mass/rest volume; product heat is assigned from the event extent; gas and
+  unplaced product mass are recorded in the ledger.
+- Updated `ulg-gpu-abi/src/wgsl.js` so the reaction shader uniform carries
+  reactant/product/gas term counts, product row offsets account for reactant
+  rows, and `resolve()` reads reactant terms to compute extent, preserve
+  leftover reactants, and emit product slots from packed product terms.
+- Updated `src/runtime/sph/sphColdStartCache.js` static table restoration so
+  cached reaction tables rebuild the same combined record order with reactant
+  and gas-product rows.
+- Added tests for conserved event energy, reaction ledgers, gas byproduct mass,
+  unplaced gas product mass when the fixed particle buffer cannot emit every
+  product term, and the updated static-cache combined record length.
+- Tightened ABI tests so the WGSL reaction shader must keep the new term-count
+  uniform fields, reactant-term reader, and product-base offset through
+  `params.reactant_term_count`.
+
+Files touched in this slice:
+
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/runtime/sph/sphColdStartCache.js`
+- `ulg-gpu-abi/src/wgsl.js`
+- `tests/sphReactionGpuKernel.test.mjs`
+- `tests/sphColdStartCache.test.mjs`
+- `tests/abi.test.mjs`
+- `plan/log.md`
+- `plan/tests.md`
+- `plan/todo/reaction-stoichiometry-energetics-plan.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphReactionGpuKernel.js && node --check src/runtime/sph/sphColdStartCache.js && node --check ulg-gpu-abi/src/wgsl.js`
+- `node --test tests/sphReactionGpuKernel.test.mjs tests/sphColdStartCache.test.mjs tests/abi.test.mjs`
+- `git diff --check`
+- `node --test tests/reactiveChemistry.test.mjs tests/reactionDiscovery.test.mjs tests/chemistryReactionCandidates.test.mjs tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphColdStartCache.test.mjs`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py index --repo ulg`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py build-memory --repo ulg`
+- `PATH=/home/cos/projects/infinite_context_coder/.venv/bin:$PATH python3 scripts/codebase_tool.py status --repo ulg`
+- `npm run build:pages`
+- `npm run build`
+- `npm test`
+- `node --check tests/demo.e2e.mjs`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npx playwright test --config tests/playwright.config.mjs -g "SPH phase demo"`
+
+Validation:
+
+- PASS: syntax checks for reaction kernel, static cache, and WGSL module source.
+- PASS: focused reaction/static-cache/ABI suite (`30/30`).
+- PASS: `git diff --check`.
+- PASS: expanded chemistry/discovery/SPH/resident suite (`54/54`), including
+  slow general reaction discovery cases.
+- PASS: ICC index, memory build, and status refresh for repo `ulg`.
+- PASS: `npm run build:pages`; generated
+  `docs/assets/pages-LrVu5lFx.js` and updated `docs/index.html`, with the
+  existing Vite large-chunk warning.
+- PASS: `npm run build`, with the existing Vite large-chunk warning.
+- PASS: full `npm test` (`361/361`).
+- PASS: focused HTTPS Chromium SPH browser group (`4/4`) against the live Vite
+  server on `https://127.0.0.1:5173`.
+
+Failures / fixes:
+
+- First focused run failed because the static-cache expected combined record
+  length still excluded reactant/gas rows (`56` expected, `88` actual). The test
+  was updated to the new packed table order.
+- First focused run failed old per-particle reaction heat assertions (`1100` and
+  `1200` J/kg). The resident CPU reference now conserves event energy across
+  product mass, so both visible product slots resolve to about `1166.6667` J/kg
+  for the fixture.
+- First focused SPH browser run failed the derived-material test because the
+  preceding clear-cache test forced a cold worker rebuild and the default
+  Playwright expect timeout saw `preflight : submitted`. The test now waits up
+  to 60 seconds for either the worker-produced derived preflight or the
+  first-principles error before asserting the derived preflight.
+
+Open questions / next work:
+
+- The WebGPU shader now consumes reactant/product term rows and preserves
+  leftover reactant mass, but it still uses the fixed particle buffer. Extra
+  product/gas mass that cannot fit in existing slots is visible in the CPU
+  ledger; the next GPU slice needs resident gas/product ledger buffers and a
+  compact no-full-readback summary.
+- Dynamic product particle append remains out of scope for this fixed-buffer
+  slice. The current honest compromise is visible products plus explicit
+  unplaced inventory, not silent mass loss.
+
+## 2026-06-11 21:40 AKDT - Resident Reaction Compact Ledger And Pressure
+
+What changed:
+
+- Added `src/runtime/sph/sphReactionGpuSummary.js` coverage and expanded its
+  ABI from a 16-float visual summary to a 32-float, 128-byte compact ledger
+  summary.
+- Extended `sphReactionSummaryPartialsWgsl` to bind resident reaction proposals
+  plus packed reactant/product/gas term rows. The summary now computes canonical
+  mutual-pair event count, consumed mass, expected/raw product mass, visible and
+  unplaced product mass, visible and unplaced gas mass, sealed-box gas moles,
+  reaction heat, mass residuals, and ready/problem event counts without full
+  particle readback.
+- Wired `runSphReactionStepWebGpu()` so no-full-readback reaction steps pass the
+  proposal buffer into the compact summary before destroying stage buffers.
+- Threaded compact reaction ledger fields through resident diagnostics,
+  repeated-step summaries, and overlay status.
+- Added `gasPressureSummaryFromResidentReaction()` so the sealed-box pressure
+  diagnostic can consume resident reaction gas moles without scanning stale CPU
+  particles. It only computes a GPU-resident pressure when the reaction table
+  identifies a single gas species; multi-gas aggregate summaries are explicitly
+  marked insufficient species resolution.
+- Expanded the SPH phase scene reaction-table signature to include reaction
+  headers, reactant terms, product terms, and gas-product rows so stale resident
+  artifacts cannot survive reaction table changes.
+
+Files touched in this slice:
+
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+- `src/runtime/sph/sphReactionGpuSummary.js`
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/sphReactionGpuSummary.test.mjs`
+- `tests/sphReactionGpuKernel.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/sphPhaseDemo.test.mjs`
+- `plan/tests.md`
+- `plan/plan.md`
+- `plan/todo/reaction-stoichiometry-energetics-plan.md`
+- `plan/todo/overarching-completion-plan.md`
+- `plan/implementation-status.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphReactionGpuSummary.js`
+- `node --check src/runtime/sph/sphReactionGpuKernel.js`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+
+Validation:
+
+- PASS: syntax checks for the reaction summary, reaction kernel, resident step,
+  phase demo, mount, and scene modules.
+- PASS: focused resident-step suite (`10/10`).
+- PASS: focused ABI/reaction/phase/resident suite (`47/47`).
+
+Failures / fixes:
+
+- Initial resident-step sequence test failed because the fake reaction-input
+  capture array was declared in the wrong test scope. Moved it into the unread
+  repeated-step fixture.
+- The unread repeated-step fixture initially expected too few destroyed buffers.
+  The correct count is nine destroyed buffers per completed reaction step:
+  P2G, grid update, reaction output state/thermo/mechanics, retained G2P
+  state/mechanics, and retained thermal state/thermo.
+
+Open questions / next work:
+
+- The compact summary is still an aggregate ledger. Multiple simultaneous gas
+  products need per-species resident ledger buffers, not a single gas mass/moles
+  row.
+- Extra products still need dynamic append or inventory-backed storage that
+  downstream pressure/EOS kernels consume directly.
+- Pressure is now resident-readable for guarded single-gas reactions, but force
+  feedback and wall ledgers still need to consume the pressure in the resident
+  physics loop.
+
+## 2026-06-11 21:55 AKDT - Resident Per-Gas Species Ledger
+
+Prompt context:
+
+- User asked to keep going until the whole todo is completed. The active plan
+  order still has reaction/gas resident correctness before broader steam,
+  pressure-feedback, and WebGPU material-resolver migration.
+
+What changed:
+
+- Added a first-class
+  `peercompute.ulg.sph-gpu-reaction-gas-species-summary.v0` ABI row layout for
+  compact per-gas-product resident ledger readback.
+- Added `sphReactionGasSpeciesSummaryWgsl`, a separate resident WebGPU pass that
+  scans canonical mutual reaction proposals and emits one 32-byte f32x4 row per
+  gas product: material id, mass, moles, visible mass, unplaced mass, event
+  count, gas-product index, and status.
+- Added `decodeSphReactionGasSpeciesSummaryValues()` and threaded the decoded
+  ledger through `runSphReactionSummaryWebGpu()`, resident reaction summaries,
+  resident MLS-MPM diagnostics, and repeated-step summaries.
+- Updated `gasPressureSummaryFromResidentReaction()` so resident sealed-box
+  pressure prefers material-keyed per-species GPU ledger rows over the older
+  aggregate single-gas fallback.
+- Added tests for duplicate gas row aggregation, WebGPU gas species readback
+  copy sizing, and multi-species resident pressure contribution.
+
+Files touched in this slice:
+
+- `ulg-gpu-abi/src/index.js`
+- `ulg-gpu-abi/src/wgsl.js`
+- `src/runtime/sph/sphReactionGpuSummary.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/sphPhaseDemo.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/abi.test.mjs`
+- `tests/sphReactionGpuSummary.test.mjs`
+- `tests/sphPhaseDemo.test.mjs`
+- `plan/tests.md`
+- `plan/plan.md`
+- `plan/todo/reaction-stoichiometry-energetics-plan.md`
+- `plan/todo/overarching-completion-plan.md`
+- `plan/implementation-status.md`
+
+Commands run:
+
+- `node --check tests/abi.test.mjs`
+- `node --check tests/sphReactionGpuSummary.test.mjs`
+- `node --check src/runtime/sph/sphReactionGpuSummary.js`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check tests/sphPhaseDemo.test.mjs`
+- `node --check tests/sphReactionGpuKernel.test.mjs`
+- `node --test tests/abi.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphPhaseDemo.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/opticalClosure.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphPhaseDemo.test.mjs`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks for the ABI/reaction summary/phase demo focused files.
+- PASS: focused ABI/reaction/phase/resident suite (`49/49`).
+- PASS: focused optical/render/phase suite (`53/53`).
+- PASS: `git diff --check`.
+
+Failures / fixes:
+
+- The first focused run failed one strict equality against an f32 accumulated
+  value (`0.30000000447034836` vs `0.3`). The test now uses a tolerance check.
+- The partial test patch had expected the old aggregate-copy size first. The
+  actual command order is the 32-byte gas-species copy followed by the 128-byte
+  aggregate summary copy, so the expectation now matches the resident command
+  stream.
+
+Open questions / next work:
+
+- Extra products still need dynamic append or an inventory-backed product
+  buffer; the current fixed-buffer path can honestly ledger unplaced mass but
+  cannot yet make that inventory a downstream participant.
+- The resident reaction summaries still need atom/charge residual rows, not
+  only mass and species rows.
+- Pressure now has resident per-species inputs, but force and wall ledgers do
+  not yet consume it.
+
+## 2026-06-12 00:14 AKDT - SPH rendered-blob flicker stabilization
+
+Prompt context:
+
+- User asked to address the flicker in the rendered blob before continuing to
+  the next todo item.
+- This was treated as a renderer stability bug, not a physics/material shortcut.
+
+What changed:
+
+- Added deterministic per-surface intra-layer render ordering so transparent
+  and transmissive marching-cubes surfaces keep stable ordering within their
+  render layer.
+- Added resident render-field isosurface hysteresis. If a previously visible
+  field jitters slightly below the show isolation threshold, the renderer uses a
+  narrow lower isolation threshold for that frame instead of producing an empty
+  mesh.
+- Added a short inactive-surface grace period before clearing marching-cubes
+  geometry when a surface is absent from one render update. This avoids one-frame
+  drops during resident/CPU render-source transitions.
+- Stopped recreating surfaces from transient material-property object identity;
+  surface recreation now follows the optical/config signature.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo opens collapsed"`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+- PASS: browser visual probe against live HTTPS Vite server. The probe sampled
+  24 frames and saw visible surface counts remain stable at `2/2`; screenshot:
+  `test-results/sph-blob-flicker-check.png`.
+- PASS: `npm test` (`384/384`).
+- PASS: `git diff --check`.
+
+Notes:
+
+- Headless Chromium used the CPU-particle render path for the direct browser
+  probe, while the new hysteresis helper is covered in unit tests for the
+  resident render-field path.
+- The live HTTPS Vite server remained available at `0.0.0.0:5173`.
+
+## 2026-06-12 00:22 AKDT - Resident product-event merge coverage
+
+Prompt context:
+
+- Returned to the interrupted resident product-event/product-mass merge slice
+  after the rendered-blob flicker fix.
+- Goal remains general resident product inventory transport into downstream
+  EOS/gas/render/field kernels, not a one-off material patch.
+
+What changed:
+
+- Added cumulative resident product-event merge metadata. A carried handle that
+  already represents prior merged generations now preserves its row-count and
+  byte-length history when merged with newly emitted product events.
+- Added explicit input-handle ownership control for cleanup. Single-step
+  destruction preserves caller-supplied input resident product mass by default;
+  repeated-step execution can destroy old input generations after the next
+  merged buffer has been created.
+- Added direct resident-step test coverage for GPU copy command generation,
+  merged handle metadata, carry-forward through `nextParticleUploads`, and
+  resident product-mass buffer destruction ownership.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` (`11/11`)
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs` (`58/58`)
+- PASS: `git diff --check`
+
+Next work:
+
+- Continue binding the merged resident product-event/product-mass handle into
+  the remaining resident EOS/gas-cell/field consumers and force/pressure paths.
+
+## 2026-06-12 00:30 AKDT - Resident gas-species pressure continuity
+
+What changed:
+
+- Added a compact resident gas-species ledger to
+  `peercompute.ulg.sph-resident-product-mass.v0` handles when reaction summaries
+  include gas species rows.
+- Resident product-mass merges now combine gas species by material across
+  carried and newly emitted generations, preserving moles, mass, unplaced mass,
+  event counts, and gas product indices.
+- `gasPressureSummaryFromResidentReaction()` now accepts the merged resident
+  product-mass handle and prefers its gas-species ledger over the current
+  reaction summary. This prevents pressure from dropping to the current-step
+  ledger while product events stay GPU resident.
+- The live overlay now treats any `gpu-resident-*` pressure source as the
+  resident pressure summary, including the new
+  `gpu-resident-product-mass-gas-species-ledger` source.
+
+Validation:
+
+- PASS: syntax checks for `sphReactionGpuSummary.js`, `sphMlsMpmGpuStep.js`,
+  `sphPhaseDemo.js`, `sphPhaseDemoMount.js`, and focused tests.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphReactionGpuSummary.test.mjs` (`33/33`)
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuSummary.test.mjs` (`67/67`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"` (`1/1`)
+- PASS: `git diff --check`
+
+Remaining work:
+
+- The pressure ledger is still a guarded diagnostic/feedback ledger; force
+  coupling remains blocked until pressure gradients/normals or gas-cell fields
+  are derived.
+
+## 2026-06-12 00:34 AKDT - Sealed-gas pressure-cell field contract
+
+What changed:
+
+- Added `peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0` as a compact
+  gas pressure field artifact derived from the sealed-box gas EOS.
+- The field currently represents the sealed box as one uniform gas cell with
+  pressure gradient `[0, 0, 0]`, which is the correct gradient for a uniform
+  ideal-gas box state.
+- `peercompute.ulg.sph-sealed-gas-pressure-feedback.v0` now carries that
+  gas-cell field and explicit force-coupling prerequisites:
+  strict reaction gate pass, gas-cell pressure field ready, and material surface
+  normals/areas.
+- Force coupling remains blocked with
+  `blocked-material-surface-normals-not-resolved`; no pressure force is applied
+  to particles without a derived material surface coupling.
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` (`14/14`)
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuSummary.test.mjs` (`67/67`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"` (`1/1`)
+- PASS: `git diff --check`
+
+Remaining work:
+
+- Derive material surface normals/areas or a gas/material interface field so the
+  pressure-cell field can feed guarded particle/grid force coupling.
+
+## 2026-06-12 00:55 AKDT - Phase-resolved H2O vapor optics state and ABI diagnostics
+
+What changed:
+
+- Added a normalized H2O vapor optical-state helper that derives a bucketed
+  gas-phase state from the sealed-box gas pressure summary. The state includes
+  formula, phase, temperature, total pressure, H2O partial pressure, droplet
+  radius, saturation pressure, supersaturation ratio, condensed mass fraction,
+  vapor/condensed densities, droplet number density, scattering coefficient,
+  and the condensation microphysics status.
+- Kept the renderer from faking visible steam: pure/subsaturated vapor keeps
+  zero droplet scattering and only tiny O-H absorption; supersaturated vapor
+  reaches the existing Clausius-Clapeyron plus droplet Mie/Rayleigh scattering
+  closure and selects the condensed-droplet PBR model.
+- Fixed the CPU optical-render cache key so nonnumeric and nested optical-state
+  fields such as model/generator strings do not collapse into `NaN`-like cache
+  aliases.
+- Extended `peercompute.ulg.optical-gpu-lookup.v0` output rows from 12 to 16
+  floats by appending optical depth, scattering coefficient, absorption
+  coefficient, and optical-state id. CPU reference, WGSL lookup, decoder, ABI
+  tests, renderer state, and browser e2e expectations now use the wider row.
+- Updated the GitHub Pages build in `docs/` after the ABI and optics changes.
+
+Validation:
+
+- PASS: syntax checks for optical closure, optical GPU buffers, SPH phase demo,
+  SPH phase scene, and optical ABI/WGSL modules.
+- PASS: `node --test tests/opticalClosure.test.mjs` (`10/10`)
+- PASS: `node --test tests/opticalGpuBuffers.test.mjs` (`16/16`)
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` (`15/15`)
+- PASS: `node --test tests/abi.test.mjs tests/sphPhaseRenderer.test.mjs`
+  (`29/29`)
+- PASS: `node --test tests/opticalClosure.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  (`62/62`)
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphPhaseDemo.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphPhaseRenderer.test.mjs`
+  (`84/84`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`387/387`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `npm run build:pages`
+
+Remaining work:
+
+- Move the same vapor/condensed-droplet microphysics into resident per-cell or
+  per-particle state so optical rows update without CPU descriptor rebuilding.
+- Gate vapor surface visibility from derived optical depth/scattering in the
+  render-field path, then move continuous surface extraction to GPU-resident
+  marching cubes.
+
+## 2026-06-12 01:09 AKDT - Material-interface field and pressure/interface coupling checkpoint
+
+What changed:
+
+- Added `peercompute.ulg.sph-material-interface-field.v0` as a render-field
+  derived material interface artifact. The CPU reference extractor uses the
+  same scalar density fields that drive continuous surfaces, finds isosurface
+  threshold crossings, and reports per-surface area, crossing-face count,
+  area centroid, and mean outward normal.
+- Added `peercompute.ulg.sph-pressure-interface-coupling.v0` as a metadata-only
+  join between the sealed gas pressure feedback and the material-interface
+  field. When gas pressure is ready, strict reaction gate passes, and interface
+  geometry exists, the coupling reports
+  `pressure-interface-coupling-ready-for-solver` while keeping
+  `forceCouplingStatus = blocked-pressure-force-solver-not-implemented`.
+- Wired the interface and pressure/interface coupling summaries into the
+  resident render-state diagnostics surfaced by the live demo. No particle,
+  grid-node, or MLS-MPM momentum update consumes these fields yet.
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphRenderGpuKernel.js`,
+  `src/runtime/sphPhaseDemo.js`, `src/visualization/sphPhaseScene.js`,
+  `tests/sphRenderGpuKernel.test.mjs`, `tests/sphPhaseDemo.test.mjs`,
+  `tests/demo.e2e.mjs`, and `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`27/27`)
+- PASS: `node --test tests/sphPhaseDemo.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/abi.test.mjs`
+  (`55/55`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`389/389`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+
+Remaining work:
+
+- Promote aggregate interface summaries into local interface elements or a
+  GPU-resident interface buffer suitable for distributing pressure over
+  material surfaces.
+- Implement a guarded pressure-force solver that consumes gas pressure plus
+  local normal/area elements, then add conservation/parity tests before
+  applying forces in the hot loop.
+
+## 2026-06-12 01:18 AKDT - Local interface elements and pressure-force preview
+
+What changed:
+
+- Extended the material-interface ABI with a 16-float
+  `SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT` for f32x4-aligned local surface
+  elements. Each row carries surface/material/phase ids, crossing axis, centroid,
+  area, unit normal, normal-area vector, crossing sign, and status.
+- `deriveSphMaterialInterfaceField()` now emits both aggregate surface summaries
+  and local interface element rows/objects from render-field threshold
+  crossings. Surface summaries carry element offsets/counts, so a later GPU
+  solver can distribute pressure over local elements rather than aggregate mean
+  normals.
+- Added `peercompute.ulg.sph-pressure-interface-force-preview.v0`, a
+  non-applied diagnostic preview that multiplies uniform gas pressure by each
+  interface normal-area vector and reports per-surface/net forces. It explicitly
+  reports `forceApplicationStatus = not-applied-diagnostic-preview` and keeps
+  validation flags false.
+- The live resident render-state diagnostics now expose pressure/interface
+  coupling and pressure-force preview status, previewed element count, and total
+  absolute interface force.
+
+Validation:
+
+- PASS: syntax checks for `sphRenderGpuKernel.js`, `sphPhaseDemo.js`,
+  `sphPhaseScene.js`, `sphRenderGpuKernel.test.mjs`,
+  `sphPhaseDemo.test.mjs`, `demo.e2e.mjs`, and `abi.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs tests/abi.test.mjs`
+  (`56/56`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`390/390`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+
+Remaining work:
+
+- Move local interface element generation to a GPU-resident pass and avoid
+  readback during normal rendering.
+- Convert the preview into a real, conservative pressure-force solver only
+  after solver parity/conservation tests are in place.
+
+## 2026-06-12 01:28 AKDT - Rendered blob flicker guard
+
+What changed:
+
+- Tightened the resident render-field visibility path so a surface that drops
+  below the hysteresis threshold for a transient frame retains its last valid
+  marching-cubes mesh through the existing inactive-frame grace window instead
+  of immediately resetting to an empty field.
+- New `MarchingCubes` surfaces now start hidden, so an under-threshold first
+  frame cannot leave an initialized surface visible before real field data
+  crosses the isosurface threshold.
+- `resolveRenderFieldSurfaceVisibility()` now reports
+  `retainPreviousSurface` for diagnostics/tests when a visible surface should be
+  held by grace rather than discarded immediately.
+
+Validation:
+
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  (`22/22`)
+- PASS: `git diff --check`
+- PASS: `npm test` (`390/390`)
+- PARTIAL: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- tests/demo.e2e.mjs`
+  passed all five SPH/runtime-relevant browser tests, including derived
+  material SPH, Na + H2O, clear cache, URL-param startup, and cached closure
+  oscillator. The legacy supervised service smoke timed out waiting for
+  `window.__ulgDemo.telemetry.services` and is tracked as unrelated to the SPH
+  blob renderer path.
+
+Remaining work:
+
+- Continue with the GPU-shaped material-interface candidate buffer and
+  resident pressure-force solver path.
+
+## 2026-06-12 01:45 AKDT - GPU-shaped material-interface candidate buffer
+
+What changed:
+
+- Added `peercompute.ulg.sph-material-interface-candidate-field.v0` and
+  `peercompute.ulg.sph-material-interface-candidate-field-execution.v0` to the
+  GPU ABI. Candidate rows use a fixed f32x4-aligned cell-axis layout: one row
+  for each render-field cell times the three positive axes, with inactive rows
+  retained rather than CPU-compacted away.
+- `deriveSphMaterialInterfaceCandidateField()` now builds a deterministic CPU
+  reference candidate buffer from the render-field density grid. The existing
+  `deriveSphMaterialInterfaceField()` compacts from that candidate buffer, so
+  the live pressure-preview path now carries candidate provenance while keeping
+  the same public compact interface artifact.
+- Added `sphMaterialInterfaceCandidatesWgsl` plus
+  `buildSphMaterialInterfaceCandidateFieldWebGpu()` for the matching WebGPU
+  candidate-row pass. The optional WebGPU execution path is parity-gated and
+  still readbacks candidate rows for verification; it does not yet feed a
+  resident pressure-force solver.
+
+Validation:
+
+- PASS: syntax checks for `ulg-gpu-abi/src/wgsl.js`,
+  `src/runtime/sph/sphRenderGpuKernel.js`, `tests/abi.test.mjs`, and
+  `tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`30/30`)
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs tests/abi.test.mjs`
+  (`59/59`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `git diff --check`
+- PASS: `npm test` (`393/393`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+
+Remaining work:
+
+- Feed the candidate buffer into a conservative pressure-force solver and keep
+  force application disabled until parity/conservation tests pass.
+- Keep WebGPU-Ocean / GPU marching-cubes work after this pressure-interface
+  solver contract stabilizes.
+
+## 2026-06-12 01:55 AKDT - Conservative pressure-interface force solver artifact
+
+What changed:
+
+- Added `peercompute.ulg.sph-pressure-interface-force-solver.v0` and a
+  16-float `SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT` to the ABI. Each force row
+  carries local interface identity, centroid, area, material force, equal and
+  opposite gas reaction force, pressure, and status.
+- Added `gasPressureInterfaceForceSolver()` beside the existing diagnostic
+  preview. The solver computes pressure tractions from interface normal-area
+  vectors, records equal/opposite gas reaction forces, and reports pairwise
+  conservation residuals. It still sets
+  `forceApplicationStatus = solver-ready-not-applied` and targets the pending
+  MLS-MPM grid-force consumer rather than mutating particles or grid momentum.
+- The live resident render-state diagnostics now expose the force solver schema,
+  status, force-row count, application status, conservation status, and
+  conservation residual magnitude.
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sphPhaseDemo.js`,
+  `src/visualization/sphPhaseScene.js`, `tests/sphPhaseDemo.test.mjs`,
+  `tests/demo.e2e.mjs`, and `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs tests/abi.test.mjs`
+  (`34/34`)
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs tests/abi.test.mjs`
+  (`59/59`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`393/393`)
+- PASS: `git diff --check`
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+
+Remaining work:
+
+- Add the MLS-MPM/WebGPU grid-force consumer that applies solver rows to grid
+  momentum with parity and conservation checks.
+- Only after that consumer is validated should force application move from
+  `solver-ready-not-applied` to an applied coupling status.
+
+## 2026-06-12 02:12 AKDT - Pressure-interface grid-force consumer and flicker path coverage
+
+What changed:
+
+- Extracted the rendered-blob grace-window hide path into
+  `hideRenderFieldSurfaceAfterGrace()` and added a direct focused test. The
+  test verifies a previously visible mesh is retained without `reset()` or
+  `update()` during the inactive grace window, then hidden/reset only after the
+  grace counter expires.
+- Completed the MLS-MPM pressure-interface grid-force consumer. Grid update now
+  accepts `peercompute.ulg.sph-pressure-interface-force-solver.v0` rows and
+  scatters `dt * materialForce` into grid momentum with the same quadratic
+  MPM weights used by P2G. CPU and WGSL paths both skip inactive/massless grid
+  nodes; this fixed an inflated applied-impulse diagnostic caused by default
+  zero-position inactive rows.
+- Extended the grid-update execution envelope with pressure solver schema,
+  solver/coupling/application statuses, force-row count, applied impulse, and
+  consumer status. The optional WebGPU path forwards retained pressure-force
+  row buffers to the runner and carries the same diagnostics through parity.
+- Added ABI assertions for the grid-update pressure-force row count, fourth
+  storage binding, quadratic weight helper, and impulse scatter expression.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `tests/sphPhaseRenderer.test.mjs`,
+  `src/runtime/sph/sphGridUpdateGpuKernel.js`, `ulg-gpu-abi/src/wgsl.js`,
+  `tests/sphMlsMpmGpuStep.test.mjs`, and `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/abi.test.mjs`
+  (`43/43`)
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuKernel.test.mjs tests/abi.test.mjs`
+  (`95/95`)
+- PASS: `npm test` (`396/396`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+
+Remaining work:
+
+- Feed the pressure-interface solver rows produced by the resident render-field
+  pressure path into the live resident MLS-MPM step so the grid-force consumer
+  affects particle motion in the demo.
+- Keep GPU marching cubes/WebGPU-Ocean lessons next in the hot-loop
+  performance order once the pressure-force wiring is live.
+
+## 2026-06-12 02:23 AKDT - Resident pressure-interface force routing
+
+What changed:
+
+- Threaded `pressureInterfaceForceSolver` and optional retained force-row
+  buffers through `runMlsMpmResidentStepWithOptionalWebGpu()` into
+  `runMlsMpmGridUpdateWithOptionalWebGpu()`. The grid update remains the only
+  stage that applies the pressure impulse; resident orchestration now supplies
+  the solver rows.
+- Added pressure-interface grid-force diagnostics to resident step envelopes,
+  compact diagnostics, and repeated-step summaries. This exposes solver schema,
+  solver status, force application status, force-row count, applied impulse,
+  applied impulse magnitude, and consumer status beside the existing stage
+  status fields.
+- Updated scene orchestration so the latest `sphResidentRenderState`
+  pressure-interface solver is used as a one-frame-delayed input to standalone
+  grid update, single resident steps, and repeated resident steps. Resident and
+  grid-update signatures now include the pressure force-row payload, preventing
+  stale resident step reuse when pressure/interface geometry changes.
+- Added a focused resident-step test proving that a pressure-interface solver
+  reaches grid update and is surfaced through resident diagnostics.
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `src/visualization/sphPhaseScene.js`, and
+  `tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` (`14/14`)
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuKernel.test.mjs tests/abi.test.mjs`
+  (`96/96`)
+- PASS: `npm test` (`397/397`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`409/409`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `git diff --check`
+- PASS: Infinite Context Coder `index --repo ulg` (`237` files) and
+  `build-memory --repo ulg` (`1104` chunks)
+
+Remaining work:
+
+- Observe the one-frame-delayed pressure force in the live demo and tune the
+  coupling only with derived pressure/interface data, not hand-authored material
+  behavior.
+- Move next to the hot-loop rendering/performance phase: WebGPU marching cubes,
+  WebGPU-Ocean lessons, and readback reduction.
+
+## 2026-06-12 02:45 AKDT - Flicker guard confirmed and GPU-resident marching-cube classification
+
+What changed:
+
+- Confirmed the rendered-blob flicker guard before continuing the next todo.
+  The scene keeps the last valid continuous-surface mesh visible during the
+  inactive grace frames and only hides/resets it after expiry; focused renderer
+  coverage for hysteresis and grace-window behavior passed.
+- Fixed the partially staged render-field hot-loop edit by moving
+  `readbackMode`, `retainFieldRowsBuffer`, and `retainSurfaceBuffer` onto the
+  WebGPU render-field builder where they are consumed. This prevents a runtime
+  undefined-variable failure when the no-full-readback path is used.
+- Added the first WebGPU marching-cube classification ABI and runtime wrapper.
+  `sphRenderMarchingCubeCellsWgsl` reads retained render-surface and
+  render-field buffers, classifies fixed voxel cubes by corner mask/edge
+  crossings, and writes f32x4 cell rows. The CPU reference, optional WebGPU
+  parity wrapper, and resident no-readback wrapper are now covered by tests.
+- Rebuilt the Pages docs and refreshed Infinite Context Coder index/memory for
+  the current working tree.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`
+- PASS: `node --check tests/abi.test.mjs`
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "hysteresis|grace"`
+  (`13/13` matched file run)
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`34/34`)
+- PASS: `npm test -- --test-name-pattern "SPH|sph|material|reaction|optical|thermal|MLS-MPM|render"`
+  (`401/401`)
+- PASS: `npm test` (`401/401`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Remaining work:
+
+- Add GPU prefix/compaction and triangle emission after the marching-cube cell
+  classification pass.
+- Route emitted GPU surface buffers into the renderer so the live surface path
+  no longer requires CPU MarchingCubes object updates.
+- Profile the live hot loop after triangle emission lands, then decide whether
+  to pull in WebGPU-Ocean-style tiled/fixed-point scatter earlier than planned.
+
+## 2026-06-12 03:06 AKDT - Deterministic surface-vertex emission contract
+
+What changed:
+
+- Added the surface-vertex ABI:
+  `peercompute.ulg.sph-gpu-render-surface-vertices.v0` and
+  `peercompute.ulg.sph-gpu-render-surface-vertices-execution.v0`.
+  Each f32x4 row carries surface/material/phase identity, triangle and vertex
+  ids, position, normal, optical-state id, density/isolation, source voxel, and
+  status.
+- Added `deriveSphRenderSurfaceVerticesCpu()`, a CPU reference that
+  tetrahedralizes each active render-field voxel cube and emits compact
+  triangle vertices from the scalar field. This remains evidence-only and all
+  validation flags stay false.
+- Added `sphRenderSurfaceVerticesWgsl` and
+  `buildSphRenderSurfaceVerticesWebGpu()`. The WebGPU path writes deterministic
+  fixed slots (`totalFieldCells * 36` vertex rows) rather than using atomic
+  append, so debug readback can compact slots into CPU-reference order and
+  no-full-readback mode can retain the GPU vertex buffer. Prefix/compaction and
+  draw-indirect metadata are still pending.
+- Fixed two issues caught by the read-only subagent pass: CPU and WGSL
+  classification now both reserve `12/36` tetrahedralized triangle/vertex
+  capacity, and emitted surface coordinates now use field-sample coordinates
+  instead of an extra half-cell shifted center helper.
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphRenderGpuKernel.js`,
+  `ulg-gpu-abi/src/wgsl.js`, `tests/sphRenderGpuKernel.test.mjs`, and
+  `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`36/36`)
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuKernel.test.mjs tests/abi.test.mjs`
+  (`102/102`)
+- PASS: `npm test` (`403/403`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: Infinite Context Coder `index --repo ulg` and `build-memory --repo ulg`
+  refreshed.
+
+Remaining work:
+
+- Add deterministic prefix/compaction for active vertex slots.
+- Add per-surface draw metadata/indirect rows with vertex offsets, counts,
+  material/phase/optical-state buckets, transparency ordering, and overflow
+  diagnostics.
+- Wire the emitted vertex/draw buffers into a WebGPU or Three-compatible draw
+  path; keep the current CPU `MarchingCubes` path as fallback until that draw
+  bridge is validated.
+
+## 2026-06-12 03:15 AKDT - Surface draw metadata rows
+
+What changed:
+
+- Added `peercompute.ulg.sph-gpu-render-surface-draw.v0` and execution schema
+  ids plus a f32x4 draw row layout. Each draw row carries surface/material/
+  phase/optical ids, vertex and triangle offsets/counts, render ordering,
+  transparency/depth-write flags, status, and bounds.
+- Added `deriveSphRenderSurfaceDrawMetadataCpu()` to bucket compact emitted
+  surface vertices by surface id and produce stable per-surface draw metadata.
+  Empty surfaces remain represented with status `0`, so renderer buckets can
+  remain stable across transient visibility changes.
+- Added `deriveSphRenderSurfaceDrawMetadataWithOptionalWebGpu()` as the parity
+  and fallback envelope for the future WebGPU prefix/draw metadata kernel. The
+  actual GPU prefix/indirect kernel is still pending and is not overclaimed.
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphRenderGpuKernel.js`,
+  `tests/sphRenderGpuKernel.test.mjs`, and `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`38/38`)
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuKernel.test.mjs tests/abi.test.mjs`
+  (`104/104`)
+- PASS: `npm test` (`405/405`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: Infinite Context Coder `index --repo ulg` and `build-memory --repo ulg`
+  refreshed.
+
+Remaining work:
+
+- Implement the WebGPU prefix/compaction kernel that converts fixed vertex
+  slots into compact vertex ranges without CPU readback.
+- Add draw-indirect metadata/buffer rows suitable for WebGPU or Three-compatible
+  renderer consumption.
+- Wire draw metadata into the live renderer, preserving transparent-depth
+  ordering and keeping CPU `MarchingCubes` as fallback.
+
+## 2026-06-12 03:28 AKDT - GPU surface draw compaction pass
+
+What changed:
+
+- Added `sphRenderSurfaceDrawWgsl`, a deterministic GPU-resident compaction
+  pass for emitted render-field surface vertices. Each surface invocation scans
+  the source vertex rows, computes a prefix from lower-index surfaces, writes a
+  compact vertex range, and emits the matching f32x4 surface draw row.
+- Replaced the throwing `buildSphRenderSurfaceDrawMetadataWebGpu()` stub with a
+  real builder. Full-readback mode decodes draw rows plus compacted vertex rows
+  for parity/debug; no-full-readback mode retains `drawRowsBuffer` and
+  `compactedVertexRowsBuffer` as the intended draw source for the future
+  renderer bridge.
+- Added direct builder coverage with a fake WebGPU device so the runtime path
+  creates the shader, bind group, compacted vertex buffer, draw metadata buffer,
+  dispatch, and readback contract rather than only testing an injected runner.
+- Kept the current limitation explicit: draw offsets/counts are still f32 row
+  fields, so a future u32 draw-indirect ABI is needed before very large
+  generated meshes are safe.
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphRenderGpuKernel.js`,
+  `ulg-gpu-abi/src/wgsl.js`, `tests/sphRenderGpuKernel.test.mjs`, and
+  `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`40/40`)
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/sphReactionGpuKernel.test.mjs tests/abi.test.mjs`
+  (`106/106`)
+- PASS: `npm test` (`407/407`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: live HTTPS server check: `curl -k -I --max-time 10 https://127.0.0.1:5173/`
+  returned HTTP `200`, and `ss -ltnp | rg ':5173'` shows `0.0.0.0:5173`.
+- PASS: Infinite Context Coder `index --repo ulg` (`237` files) and
+  `build-memory --repo ulg` (`236` files / `1028` chunks), using `python3`
+  because `python` is not installed on this host.
+- PASS: `git diff --check`
+
+Remaining work:
+
+- Browser-compile and execute `sphRenderSurfaceDrawWgsl` in an actual WebGPU
+  path.
+- Wire compact vertex/draw buffers into the live renderer while retaining CPU
+  `MarchingCubes` fallback.
+- Add u32 draw-indirect metadata and transparent-depth ordering tests for
+  water, steam, glass, and embedded surfaces.
+
+## 2026-06-12 03:49 AKDT - Browser WebGPU surface draw smoke
+
+What changed:
+
+- Added an opt-in Playwright launch flag,
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1`, so focused browser shader tests can get a
+  headless Chromium WebGPU adapter without changing the normal demo e2e path.
+- Added a browser e2e smoke that imports the Vite-served render kernel module,
+  requests a real WebGPU device, dispatches
+  `buildSphRenderSurfaceDrawMetadataWebGpu()`, and compares the compacted
+  vertex rows plus surface draw rows against a tiny CPU fixture.
+- Fixed a real browser WGSL parse issue found by that smoke: `active` is a
+  reserved WGSL keyword in Chromium, so the marching-cube classifier and surface
+  draw shader locals now use `cell_is_active` and `surface_is_active`.
+- Tightened the post-reset demo e2e readiness gate so the normal SPH smoke
+  waits for optical/particle/resident stage schemas before sampling summaries.
+
+Validation:
+
+- PASS: syntax checks for `ulg-gpu-abi/src/wgsl.js`, `tests/abi.test.mjs`,
+  `tests/demo.e2e.mjs`, and `tests/playwright.config.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`40/40`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH surface draw WebGPU shader"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`407/407`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: Infinite Context Coder `index --repo ulg` (`237` files) and
+  `build-memory --repo ulg` (`237` files / `1088` chunks), using `python3`
+  because `python` is not installed on this host.
+
+Remaining work:
+
+- Bridge compact surface vertex/draw buffers into visible rendering.
+- Add u32 draw-indirect rows and high-count offset precision tests.
+
+## 2026-06-12 07:30 AKDT - Resident surface draw sidecar
+
+What changed:
+
+- Wired the live SPH resident render refresh through the WebGPU surface
+  extraction chain: render field buffer -> fixed-slot surface vertices -> compact
+  draw metadata plus compacted vertex buffers.
+- Retained only the final `drawRowsBuffer` and `compactedVertexRowsBuffer` in a
+  `peercompute.ulg.sph-resident-surface-draw.v0` sidecar, while releasing the
+  transient render-field and fixed-slot vertex buffers after the draw pass
+  consumes them.
+- Exposed scalar sidecar fields through `sphResidentRenderState`,
+  `getSphResidentSurfaceDraw()`, Playwright snapshots, and the live status
+  overlay. The visible renderer is still explicitly marked as
+  `three-marching-cubes-fallback` with `pending-three-webgpu-binding`.
+- Kept stale GPU draw artifacts cleared on particle resets, scene recreation,
+  and disposal.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`
+- PASS: `node --check tests/demo.e2e.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs tests/sphPhaseRenderer.test.mjs`
+  (`53/53`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH surface draw WebGPU shader"`
+  (`1/1`)
+- PASS: `npm test` (`407/407`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: Infinite Context Coder `index --repo ulg` (`237` files) and
+  `build-memory --repo ulg` (`237` files / `1096` chunks), using
+  `/home/cos/projects/infinite_context_coder/scripts/codebase_tool.py`.
+
+Remaining work:
+
+- Bind the retained compacted vertex and draw metadata buffers into the visible
+  WebGPU renderer.
+- Replace f32 draw metadata fields with a u32 draw-indirect ABI.
+- Add transparent-depth ordering coverage once the WebGPU renderer bridge is
+  visible.
+
+## 2026-06-12 08:02 AKDT - Surface draw indirect and WebGPU overlay bridge
+
+What changed:
+
+- Added `peercompute.ulg.sph-gpu-render-surface-draw-indirect.v0` with a u32
+  WebGPU/Three-compatible indirect row:
+  `vertexCount`, `instanceCount`, `firstVertex`, `firstInstance`.
+- Extended CPU surface-draw metadata and the WebGPU surface-draw compaction
+  kernel to emit retained indirect rows beside the existing f32 draw diagnostic
+  rows and compacted vertex rows.
+- Retained `drawIndirectRowsBuffer` in the resident surface-draw sidecar and
+  surfaced it through `sphResidentRenderState`, the live status overlay, and
+  Playwright snapshots.
+- Added a small raw-WebGPU overlay bridge in `sphPhaseScene`: it creates a
+  transparent canvas, reads the compacted vertex storage buffer in the vertex
+  shader, updates the Three camera view-projection matrix as a uniform, and
+  issues `drawIndirect()` for each retained surface. The existing WebGL
+  `MarchingCubes` path remains the fallback and still supplies the current PBR
+  material presentation.
+- Added focused browser coverage that compiles/submits the overlay shader and
+  indirect draw path to an offscreen WebGPU render target. This avoids headless
+  Chromium canvas-presentation lifetime quirks while still proving the shader
+  and `drawIndirect` command path.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`, `tests/demo.e2e.mjs`,
+  `src/runtime/sph/sphRenderGpuKernel.js`, `ulg-gpu-abi/src/wgsl.js`,
+  `tests/sphRenderGpuKernel.test.mjs`, and `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`40/40`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH surface draw WebGPU shader"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm test` (`407/407`)
+- PASS: `npm run build`
+- PASS: `npm run build:pages`
+- PASS: `git diff --check`
+
+Notes:
+
+- A full SPH e2e run with `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1` timed out before
+  resident readback status in this headless profile, so it was not useful as
+  overlay evidence. The focused offscreen render-target smoke now covers the
+  overlay shader and `drawIndirect()` path without full demo cold-start cost.
+- The overlay is a debug/geometry bridge. It does not yet sample the derived
+  optical/PBR table, does not own depth ordering, and should not replace the
+  WebGL fallback until transparent material ordering is tested.
+
+Remaining work:
+
+- Feed closure-derived optical/PBR rows into the WebGPU overlay.
+- Add depth/z-buffer ordering for transparent and nested surfaces.
+- Profile raw overlay versus WebGL `MarchingCubes` after the overlay becomes
+  visually authoritative.
+
+## 2026-06-12 08:12 AKDT - Vapor visibility from derived optics
+
+What changed:
+
+- Added `resolveOpticalSurfaceVisibility()` to classify vapor geometry from
+  derived optical depth and droplet scattering instead of the `steam` render
+  label.
+- Applied the gate to both CPU particle-batch MarchingCubes rendering and
+  resident render-field rendering. Pure optically thin H2O vapor now hides as a
+  surface, while supersaturated droplet steam remains visible from the
+  microphysics-derived scattering coefficient.
+- Kept liquid water and ice geometrically visible even when their PBR closure is
+  transmissive, and reused the existing inactive grace-frame path so vapor does
+  not flicker across the visibility threshold.
+- Spawned read-only subagent Halley to audit transparent material/z-buffer
+  ordering for the next renderer slice.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js && node --check tests/sphPhaseRenderer.test.mjs`
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "vapor|steam|hysteresis|grace|transparent"`
+  (`14/14` renderer file tests executed)
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/opticalClosure.test.mjs tests/opticalGpuBuffers.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs`
+  (`80/80`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Remaining work:
+
+- Move vapor/droplet microphysics state into resident per-cell/per-particle GPU
+  rows.
+- Add an explicit pure-vapor versus condensed-steam UI diagnostic.
+- Use Halley's audit to add transparent-depth/z-buffer coverage and the next
+  ordering fix.
+
+## 2026-06-12 08:23 AKDT - Resident draw transparency policy
+
+What changed:
+
+- Used Halley's read-only audit to target the resident WebGPU draw policy gap:
+  the Three/WebGL fallback already disables depth writes and applies stable
+  transparent ordering, while the resident draw metadata was still phase-only.
+- Scene render-field surface descriptors now include `renderLayer`,
+  `renderOrder`, `transparencyClassId`, and `depthWriteFlag` from the
+  optical/PBR response.
+- `buildSphRenderFieldSurfaceTable()` preserves explicit transparency class and
+  depth-write policy in the existing reserved row slots, keeping the 16-float
+  ABI row length unchanged.
+- CPU draw metadata and `sphRenderSurfaceDrawWgsl` now prefer explicit policy
+  values and fall back to phase-derived policy only when the reserved slots carry
+  the `-1` sentinel.
+- Added renderer/runtime tests for a glass-like solid/transmissive surface, the
+  case phase-only draw policy would incorrectly classify as opaque.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `src/runtime/sph/sphRenderGpuKernel.js`, `ulg-gpu-abi/src/wgsl.js`,
+  `tests/sphPhaseRenderer.test.mjs`, `tests/sphRenderGpuKernel.test.mjs`, and
+  `tests/abi.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`55/55`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH surface draw WebGPU shader"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Remaining work:
+
+- Make the raw WebGPU overlay consume resident draw order/depth policy.
+- Feed optical/PBR table values into the overlay shader instead of fixed debug
+  colors.
+- Add browser coverage for transparent/nested surfaces after the overlay owns
+  visible ordering.
+
+## 2026-06-12 08:33 AKDT - Resident overlay draw order
+
+What changed:
+
+- Added `residentSurfaceDrawOrder()` to sort resident draw surfaces by render
+  order, depth-write flag, transparency class, and surface index.
+- The raw WebGPU overlay bridge now stores ordered surface indices and
+  indirect-buffer offsets, and the render loop issues `drawIndirect()` in that
+  metadata order instead of raw surface-index order.
+- Resident render-state and Playwright snapshots expose the bridge draw-order
+  policy, ordered surface indices, and ordered indirect offsets.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `tests/sphPhaseRenderer.test.mjs`, and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|transparent|vapor|steam"`
+  (`15/15` renderer file tests executed)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH surface draw WebGPU shader"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Notes:
+
+- Full SPH e2e with `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1` still timed out before
+  resident readback status in headless Chromium, matching the prior full
+  unsafe-WebGPU limitation. It did not reach the new bridge draw-order
+  assertions.
+
+Remaining work:
+
+- Feed closure-derived PBR optical values into the overlay shader.
+- Add browser coverage for transparent/nested surfaces after overlay PBR rows
+  are bound.
+
+## 2026-06-12 08:44 AKDT - Resident overlay optical/PBR rows
+
+What changed:
+
+- Replaced the raw WebGPU resident overlay's phase-debug fragment color path
+  with a WGSL lookup over the closure-derived optical GPU table.
+- The overlay bridge now uploads `peercompute.ulg.optical-gpu-table.v0` records
+  as a resident storage buffer and binds them with the compact surface vertices
+  and camera uniform.
+- The overlay shader resolves material id, phase id, and optical state id from
+  each compact surface vertex, then derives base color, opacity, metalness,
+  roughness, transmission alpha behavior, and blocked-status diagnostics from
+  the optical row.
+- Resident render-state, surface-draw sidecar state, bridge state, Playwright
+  snapshots, and the visible status line now expose the closure-derived optical
+  source and record count.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`, `tests/sphPhaseRenderer.test.mjs`,
+  and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|optical"`
+  (`16/16` renderer file tests executed)
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs tests/abi.test.mjs`
+  (`57/57`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH surface draw WebGPU shader"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Notes:
+
+- The overlay now consumes the same derived optical records as the Three
+  material path, but it remains a compact real-time shader. It does not yet
+  implement environment-refraction parity, order-independent transparency, or a
+  depth attachment for nested transparent objects.
+
+Remaining work:
+
+- Add transparent/nested-surface browser coverage.
+- Choose and implement the next transparency/depth strategy for the overlay.
+- Continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 08:55 AKDT - Resident overlay depth attachment
+
+What changed:
+
+- Added a `depth24plus` depth attachment for the raw WebGPU resident surface
+  overlay.
+- Split the overlay into compatible opaque and transparent pipelines created
+  from an explicit WebGPU bind-group/pipeline layout.
+- Opaque resident surfaces now write depth; transparent/vapor surfaces depth
+  test against the opaque pass but do not write depth.
+- The overlay render pass creates/resizes/clears the depth texture each frame
+  and switches pipelines using resident draw metadata.
+- Exposed depth policy, depth format, and attachment readiness through the
+  bridge object, resident surface-draw sidecar, resident render-state snapshot,
+  Playwright summary, and visible status text.
+- Added a browser WebGPU pixel-readback test proving a far transparent draw and
+  a far opaque draw are both occluded behind a near opaque depth write.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`, `tests/sphPhaseRenderer.test.mjs`,
+  and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|optical|draw order"`
+  (`16/16` renderer file tests executed)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH resident overlay depth attachment|SPH surface draw WebGPU shader"`
+  (`2/2`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Notes:
+
+- This is not full transparent/nested material correctness. It fixes opaque
+  depth occlusion in the overlay; transparent-vs-transparent ordering remains
+  surface-order based.
+
+Remaining work:
+
+- Implement weighted blended OIT or an equivalent transparent pass.
+- Add attenuation/IOR/optical-depth use to the overlay shader.
+- Continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 09:05 AKDT - Resident overlay weighted blended OIT
+
+What changed:
+
+- Added a weighted blended OIT fragment path to the raw WebGPU resident overlay
+  shader. It uses the same closure-derived optical material lookup as the direct
+  fragment path.
+- Added OIT accumulation and revealage render targets:
+  `rgba16float` for accumulated premultiplied color and `rgba8unorm` for
+  revealage.
+- The overlay now renders opaque surfaces directly into the canvas with depth
+  writes, renders transparent/vapor surfaces into OIT targets with depth testing
+  but no depth writes, then composites the OIT result over the canvas.
+- Exposed transparency composite mode, OIT formats, target readiness, and last
+  opaque/transparent draw counts through the bridge, sidecar, resident
+  render-state, status text, and Playwright snapshots.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`, `tests/sphPhaseRenderer.test.mjs`,
+  and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|optical|draw order"`
+  (`16/16` renderer file tests executed)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH resident overlay depth attachment|SPH surface draw WebGPU shader"`
+  (`2/2`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Notes:
+
+- Weighted blended OIT is an approximate order-independent transparency pass,
+  not full physical refraction/transmission. It is the right fast resident step
+  before deeper PBR/refraction work.
+
+Remaining work:
+
+- Use attenuation, IOR/refraction, spectral rows, and optical depth in the
+  overlay shader.
+- Continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 09:10 AKDT - Resident overlay optical attenuation and IOR
+
+What changed:
+
+- Expanded the raw WebGPU overlay optical material struct to carry IOR,
+  attenuation RGB, attenuation distance, absorption coefficient, scattering
+  coefficient, and optical depth from the packed optical record.
+- The resident overlay shader now uses IOR-derived Fresnel, Beer-Lambert-style
+  attenuation from optical depth/absorption, and scattering-driven rim haze.
+- Transmissive overlay alpha now comes from derived transmission and optical
+  depth instead of treating every non-vapor transmissive material as fully
+  opaque in the raw overlay approximation.
+- Vapor alpha still follows derived opacity/optical depth so the earlier vapor
+  visibility gating remains consistent.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `tests/sphPhaseRenderer.test.mjs`, and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|optical"`
+  (`16/16` renderer file tests executed)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH resident overlay depth attachment|SPH surface draw WebGPU shader"`
+  (`2/2`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Notes:
+
+- This consumes the compact PBR/optical row derived from lower-level optical
+  closure work; it is not direct spectral ray tracing or physical refraction
+  through geometry.
+
+Remaining work:
+
+- Sample spectral rows or preintegrated bands in the overlay shader.
+- Move more optical/material resolution onto resident WebGPU buffers.
+- Continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 09:16 AKDT - Resident overlay spectral rows
+
+What changed:
+
+- Bound the optical spectral sample storage buffer into the raw WebGPU resident
+  overlay shader.
+- Added WGSL helpers for bounded spectral sample traversal and wavelength to
+  approximate linear-RGB tinting.
+- The overlay now uses each optical record's spectral offset/count to blend a
+  spectral tint with the compact optical base color.
+- Exposed resident spectral sample count and stride through the bridge,
+  surface-draw sidecar, render-state snapshot, status text, and Playwright
+  summary.
+
+Validation:
+
+- PASS: syntax checks for `src/visualization/sphPhaseScene.js`,
+  `src/visualization/sphPhaseDemoMount.js`, `tests/sphPhaseRenderer.test.mjs`,
+  and `tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|optical"`
+  (`16/16` renderer file tests executed)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH resident overlay depth attachment|SPH surface draw WebGPU shader"`
+  (`2/2`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+
+Notes:
+
+- Spectral tinting is now generalized and GPU-resident, but the current
+  wavelength-to-RGB mapping is still a compact real-time approximation rather
+  than a full CIE integration.
+
+Remaining work:
+
+- Replace wavelength mapping with preintegrated spectral weights or a small LUT.
+- Move more optical/material row generation onto resident WebGPU resolvers.
+- Continue reducing CPU hot-loop work in material and render resolution.
+
+## 2026-06-12 10:20 AKDT - Manual SPH browser watch and WebGPU validation cleanup
+
+What changed:
+
+- Manually drove headed Chromium against `https://127.0.0.1:5173/?sph=1`,
+  waited through material/reaction derivation, clicked Play, and watched the
+  resident loop for 90 seconds.
+- Fixed WebGPU validation errors from zero-length storage bindings by uploading
+  one full zeroed ABI row for empty resident product events, pressure-interface
+  force rows, and optical spectral sample rows while preserving zero event/sample
+  counts in telemetry.
+- Serialized resident GPU scheduling in the UI and scene API so a new resident
+  chain cannot destroy buffers still owned by an in-flight chain.
+- Awaited resident product-event merge-copy completion before handing the merged
+  buffer to the next resident step.
+
+Validation:
+
+- PASS: syntax checks for changed runtime, scene, mount, and focused test files.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident|overlay|retains|ping-pong|product|render"`
+  (`31/31`).
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/opticalGpuBuffers.test.mjs --test-name-pattern "product-event row|pressure-force|spectral|upload"`
+  (`40/40`).
+- PASS: headed browser watch saved under
+  `test-results/manual-sph-watch-running-serialized/`: zero WebGPU warnings, no
+  crash, resident backend `webgpu`, readback `actual=no-full-readback`, surface
+  draw bridge `webgpu-storage-indirect-overlay`, render fps about 38, resident
+  fps about 3.9.
+
+Notes:
+
+- The top-left normal physics fps remains `0.0` in this route because Play is
+  driving the resident GPU loop rather than the CPU driver.
+- The status still warns that render-field readback is active because
+  MarchingCubes consumes CPU arrays; the resident overlay is active, but the CPU
+  render-field bridge has not been removed from the hot loop.
+- The visual remains stable, but the demo does not yet show convincing melting
+  over the watched interval.
+
+## 2026-06-12 10:45 AKDT - Resident pressure-force buffer and physics FPS cleanup
+
+Prompt: "sounds good proceed with implementation. you may want to fix the broken
+sim first its up to you."
+
+What changed:
+
+- Confirmed the existing pressure-interface force solver and MLS-MPM grid
+  consumer were implemented and covered by focused tests, but the live scene was
+  still passing CPU force-row values into each resident WebGPU grid update.
+- Added a retained WebGPU storage-buffer upload for
+  `peercompute.ulg.sph-pressure-interface-force-rows-upload.v0` in
+  `src/visualization/sphPhaseScene.js`. The upload is keyed by the force solver
+  signature, reused across resident steps, destroyed on scene reset/dispose, and
+  surfaced through `scene.userData.sphPressureInterfaceForceRowsUpload`.
+- Routed the retained pressure-force row buffer into standalone grid update,
+  single resident step, and repeated resident step execution so WebGPU grid
+  update no longer needs to rebuild that storage buffer every step when the
+  solver rows are unchanged.
+- Corrected resident render-state diagnostics so the live status distinguishes
+  pre-solver coupling readiness from the actual solver status. The render state
+  now reports `pressure-force-solver-ready-not-applied` before grid consumption
+  and exposes retained pressure-force row buffer status/bytes.
+- Counted accepted resident WebGPU steps as physics frames when the demo is
+  running from the worker/view-state path without a CPU `driver.step()`. This
+  fixes the misleading `physics fps 0.0` readout while preserving separate
+  resident FPS.
+- Updated resident product-mass diagnostics so retained product-event buffers
+  report `resident-product-mass-p2g-eos-sidecar-ready` instead of the stale
+  `blocked-field-kernel-not-consuming-resident-product-mass`. Summary-only
+  product handles still report that no EOS buffer is available.
+
+Files touched in this slice:
+
+- `src/visualization/sphPhaseScene.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/runtime/sph/sphReactionGpuSummary.js`
+- `tests/demo.e2e.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/sphGridGpuKernel.test.mjs`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js && node --check src/visualization/sphPhaseScene.js && node --check tests/demo.e2e.mjs`
+- PASS: `node --check src/runtime/sph/sphReactionGpuSummary.js && node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --check tests/sphGridGpuKernel.test.mjs`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure-interface|resident step routes|grid update"`
+  (`14/14`)
+- PASS: `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "pressure interface|force preview|pressure feedback"`
+  (`17/17`)
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident|overlay|pressure|interface|render"`
+  (`17/17`)
+- PASS: `node --test tests/sphGridGpuKernel.test.mjs --test-name-pattern "resident product|P2G|product-event row"`
+  (`14/14`)
+- PASS: `node --test tests/sphReactionGpuSummary.test.mjs --test-name-pattern "product|summary|strict|gas|atom"`
+  (`8/8`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH resident overlay depth attachment|SPH surface draw WebGPU shader"`
+  (`2/2`)
+- PASS: `git diff --check`
+- PASS: `npm run build`
+
+Notes:
+
+- This is still not full gas-cell/local pressure-gradient physics. The pressure
+  force rows come from the current uniform sealed-gas/interface solver and are
+  consumed as grid impulses.
+- Render-field readback and CPU MarchingCubes remain the next major hot-loop
+  bottleneck.
+
+## 2026-06-12 11:58 AKDT - Resident render publish without CPU row readback
+
+Prompt: "physics fps are moving but i dont see any movement in the output of the
+simulstion"
+
+What changed:
+
+- Diagnosed the immediate mismatch as a resident render bridge issue, not a
+  physics counter issue: the resident MLS-MPM/WebGPU path could advance while
+  `refreshSphResidentRenderState()` still waited for CPU-visible render rows
+  before publishing a visible resident render source.
+- Added `readbackMode` support to `extractSphRenderRowsWebGpu()`. In
+  `no-full-readback` mode it submits the render-row kernel, retains the GPU
+  row buffer, returns an empty CPU `Float32Array`, and marks
+  `compactRenderReadback=false`, `fullReadbackPerformed=false`, and
+  `normalHotLoopReadbackFree=true`.
+- Added a retained resident surface-state/table in `sphPhaseScene`. The scene
+  now builds reusable render-field surface metadata from the current material
+  batches plus known phases/products, so the render graph can publish
+  `resident-gpu-render-field` from GPU buffers without decoding particle rows
+  on the CPU.
+- Updated resident render diagnostics and browser test summaries to report
+  render-row readback mode/bytes, hot-loop no-full-readback status, and resident
+  surface-table readiness instead of claiming compact CPU row readback.
+- Confirmed the focused browser path now passes against the live HTTPS Vite
+  server on `0.0.0.0:5173`. Two ad-hoc inline headless Playwright probes hung
+  inside Chromium/SwiftShader before producing samples; both probe processes
+  were stopped and no leftover inline probe processes remained.
+
+Files touched in this slice:
+
+- `src/runtime/sph/sphRenderGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/sphRenderGpuKernel.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/log.md`
+- `plan/tests.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`
+- PASS: `node --check tests/demo.e2e.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "render row|render field|surface draw|no-full-readback|resident"`
+  (`26/26`)
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident|overlay|render|pressure|interface|surface"`
+  (`17/17`)
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`)
+- PASS: `npm run build`
+  (existing Vite large-chunk warning)
+
+Notes:
+
+- If the status still reports `resident motion: motion-below-visible-threshold`,
+  the solver is moving but the displacement is too small to see at the current
+  camera/particle/grid scale. That is a separate physics/parameter issue from
+  the previous stale-render-source bug.
+- The normal resident render path is now no-full-readback for render rows and
+  render fields. Material-interface pressure coupling remains blocked until
+  GPU-resident material-interface summaries replace the skipped CPU field
+  readback.
+
+## 2026-06-12 13:26 AKDT - Resident playback motion and Three fallback cadence
+
+Prompt: "rendering looks good again. still no motion though."
+
+What changed:
+
+- Manually sampled the live HTTPS SPH demo on `https://127.0.0.1:5173/?sph=1`
+  with headless Chromium/WebGPU. The resident solver was advancing only a short
+  continuation burst, and the visible Three fallback was either spending an
+  expensive readback on sub-visible displacement or skipping the later
+  motion-proven frame on cadence.
+- Updated `scheduleMlsMpmResidentSteps()` so active view-state playback keeps
+  scheduling from `previous-gpu-resident-output` instead of falling back to the
+  stale CPU-packed state after the short continuation budget.
+- Forced scene-level resident execution refreshes for continuation steps because
+  their CPU-visible particle arrays are intentionally stale while the actual
+  source buffers are GPU-resident.
+- Kept the initial render-field pass when pressure-interface force rows have
+  not been derived yet; this pass is currently needed to build the interface
+  normals/force rows consumed by the next resident MLS-MPM step.
+- Added a motion-aware render cadence: sub-visible resident motion can be
+  suppressed only after pressure rows already exist, while `motion-proven`
+  resident diagnostics force a Three/MarchingCubes visual refresh even when the
+  ordinary cadence would skip.
+- Updated the focused browser test expectations for the current Three fallback:
+  render-field input may include product-event buffers, material-interface
+  fields may be fully ready, render-state hot-loop readback is false because
+  Three still consumes a field readback, and generated/product surfaces may not
+  expose optical lookup row telemetry.
+
+Files touched in this slice:
+
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/demo.e2e.mjs`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs`
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "surface vertices orient|surface vertices compact|surface draw metadata buckets"`
+  (`27/27`)
+- PASS: `git diff --check`
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`, 1.6 minutes)
+- PASS: `npm run build`
+  (existing Vite large-chunk warning)
+- PASS: `npm run build:pages`
+  (existing Vite large-chunk warning; regenerated `docs/`)
+- Cleanup: stopped a stray plain Vite process on `0.0.0.0:5174`; kept the
+  intended HTTPS Vite server running on `0.0.0.0:5173`.
+- PASS: live Chromium/WebGPU probe after the final cadence fix:
+  - `t20`: initial resident render derived `pressureRows=152`.
+  - `t60`: continued from `previous-gpu-resident-output`, `nextStep=4`,
+    `nextTime=0.002`, `maxDx=0.09532373398542404`,
+    `motionStatus=motion-proven`, render cadence
+    `reason=resident-motion-proven-visual-refresh`.
+  - `t90`: continued from `previous-gpu-resident-output`, `nextStep=6`,
+    `nextTime=0.003`, `maxDx=0.13504351675510406`,
+    `motionStatus=motion-proven`, visible surface source remained
+    `resident-gpu-render-field`.
+
+Failures and pivots:
+
+- A first attempt suppressed the initial sub-visible render unconditionally.
+  That let resident steps advance but prevented pressure-interface force rows
+  from being derived, so motion remained gravity-scale and below the visible
+  threshold. The final policy allows the first pressure/interface render, then
+  suppresses only later sub-visible renders when pressure rows already exist.
+- Several focused e2e failures were stale expectations from the raw overlay and
+  no-readback renderer path. The test now matches the current Three fallback
+  without claiming the visible renderer is hot-loop readback-free.
+
+Remaining work:
+
+- The visible Three/MarchingCubes fallback is still slow and CPU/readback-heavy.
+  Proper Three/WebGPU surface integration or WebGPU marching cubes remains the
+  next rendering-performance target.
+
+## 2026-06-12 15:18 AKDT - Resident MLS-MPM Reset-Path Physics Continuity
+
+Prompt: "I believe that there's an actual bug in the physics. it should not be displacement below viible threshold perpetually"
+
+What changed:
+
+- Traced the reset-path resident MLS-MPM failure to a real physics handoff bug,
+  not a visibility-threshold issue. Browser diagnostics showed substep 0 moving
+  strongly while substeps 1-3 collapsed to zero active grid nodes.
+- Added generic no-op reaction output detection in
+  `src/runtime/sph/sphMlsMpmGpuStep.js` so reaction output buffers are used as
+  the next particle source only when compact reaction summaries prove particle
+  mutation. No-op reactions now leave G2P/thermal outputs authoritative.
+- Changed thermo-only resident handoff so G2P remains the authoritative
+  mechanical state buffer and thermal contributes the thermo buffer. Thermal
+  state pass-through is skipped unless no G2P state buffer exists.
+- Fixed scene-level pressure-interface force row ownership in
+  `src/visualization/sphPhaseScene.js`. Resident grid-update, single-step, and
+  multi-step compute submissions now use transient per-submission force-row GPU
+  buffers and destroy them only after the awaited compute path completes, so UI
+  render-state refreshes cannot destroy a buffer still borrowed by resident
+  physics.
+- Updated resident-step tests for the no-op reaction handoff and thermal/G2P
+  state ownership.
+
+Files touched in this slice:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  (`15/15`)
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphGridUpdateGpuKernel.test.mjs`
+  (`25/25`)
+- PASS: custom Chromium/WebGPU reset-path probe against
+  `https://127.0.0.1:5173/`: after Reset, the continued resident sequence
+  reported active grid nodes `[257, 264, 273, 262]`, max displacement
+  `[0.1292028725, 0.1061157286, 0.1003902778, 0.1079893708]` meters, and no
+  destroyed WebGPU pressure-force-buffer warnings. Only expected WebGL
+  `ReadPixels` stall warnings remained.
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  (`1/1`, 2.2 minutes)
+
+Failures and pivots:
+
+- The first fix, skipping no-op reaction output buffers, was necessary but not
+  sufficient: the browser reset probe still showed substeps 1-3 at zero active
+  grid nodes.
+- The decisive browser warning was
+  `Buffer "ulg-sph-pressure-interface-force-rows" used in submit while destroyed`.
+  That proved the shared scene upload was being destroyed while stale or current
+  resident work still referenced it.
+
+Remaining work:
+
+- Rendering remains CPU/readback-heavy through the Three/MarchingCubes fallback.
+  This fix restores physical motion continuity; it does not address the larger
+  WebGPU marching-cubes/performance work.
+
+## 2026-06-12 15:24 AKDT - ULG Repo-Local ICC Configuration
+
+Prompt: "take a look at the .icc folder in projects/eshkol. we should probably copy that style of configuration here so it just stays updated"
+
+What changed:
+
+- Inspected `/home/cos/projects/eshkol/.icc` and mirrored its repo-local ICC
+  policy shape for ULG.
+- Added `.icc/README.md`, `.icc/assistant-goals.yaml`,
+  `.icc/completion-oracles.yaml`, `.icc/production-audit.yaml`,
+  `.icc/modularity-justifications.json`, and `.icc/ulg_doc_intel.md`.
+- Added ULG-specific oracle targets for SPH phase demo readiness, resident
+  WebGPU hot-loop readiness, material closure readiness, reaction closure
+  readiness, triad handoff readiness, and no-regression checks.
+- Added `scripts/update-icc.mjs` and the `npm run icc:update` package script.
+  The script registers ULG with generated/staged output skipped, refreshes ICC
+  `index`, `build-memory`, `status --check-staleness`, and
+  `architecture-summary --bundle --include-cheatsheet`, then writes
+  `.icc/ulg_status.json` and `.icc/ulg_arch_summary.md`.
+- Documented that the currently available ICC checkout lacks Eshkol's newer
+  `completion-oracle` and `production-audit` commands, so the YAML files are
+  forward-compatible policy while the update script uses the commands available
+  today.
+
+Files touched in this slice:
+
+- `.icc/README.md`
+- `.icc/assistant-goals.yaml`
+- `.icc/completion-oracles.yaml`
+- `.icc/production-audit.yaml`
+- `.icc/modularity-justifications.json`
+- `.icc/ulg_doc_intel.md`
+- `.icc/ulg_arch_summary.md`
+- `.icc/ulg_status.json`
+- `scripts/update-icc.mjs`
+- `package.json`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+
+Validation:
+
+- PASS: `npm run icc:update`
+  - Registered ULG with skip dirs `.git`, `coverage`, `dist`, `docs`,
+    `node_modules`, `playwright-report`, `public`, and `test-results`.
+  - Indexed `207` files.
+  - Built `878` memory chunks.
+  - Wrote `.icc/ulg_status.json`.
+  - Wrote `.icc/ulg_arch_summary.md`.
+- PASS: `node --check scripts/update-icc.mjs`
+- PASS: JSON parse check for `.icc/ulg_status.json` and
+  `.icc/modularity-justifications.json`.
+- PASS: ICC direct status check reported `is_stale: false` for the current
+  ULG `HEAD`.
+- PASS: `git diff --check`
+
+## 2026-06-12 15:31 AKDT - Infinite Context Coder documentation audit
+
+Prompt: "can you also read the projects/infinite-context-coder documentation and verify if we have been using it correctly or not?"
+
+What changed:
+
+- Read the local ICC documentation from
+  `/home/cos/projects/infinite_context_coder/README.md` and
+  `/home/cos/projects/infinite_context_coder/docs/codebase-tool/`.
+- Confirmed the documented active surface is the `codebase_tool.py`
+  CLI/MCP artifact pipeline: register/onboard, index, build-memory,
+  `status --check-staleness`, `architecture-summary`, `pack-symbols`,
+  dependency tracing, and impact analysis.
+- Confirmed `.icc/` YAML policy files are not consumed by this local ICC
+  checkout's documented CLI. They are forward-compatible repo policy, while
+  `npm run icc:update` is the active refresh path.
+- Corrected ULG registration to skip generated/staged output (`docs`,
+  `public`, `dist`, reports, coverage, dependencies, and `.git`) so ICC memory
+  is centered on source files.
+
+Usage verdict:
+
+- Mostly correct: we have been refreshing ULG's ICC index and memory, checking
+  status/staleness, using architecture summaries, and using direct file/symbol
+  lookup commands for context.
+- Incomplete: we were not consistently running `status --check-staleness`
+  before relying on cached artifacts, were not consistently using
+  task-specific `pack-symbols`, and were not using the documented MCP server.
+- Not active in this checkout: Eshkol-style `completion-oracle`,
+  `production-audit`, `assistant-status`, and `next-action` commands are not
+  exposed by this ICC CLI, so the copied YAMLs cannot be treated as executable
+  ICC checks here.
+- Current limitation: `pack-symbols` returned no symbols for a representative
+  ULG JavaScript MLS-MPM task, so for this repo we should prefer
+  `architecture-summary`, `search-chunks`, `find-file`, and `read-lines` until
+  ICC's JavaScript symbol extraction improves.
+
+Validation:
+
+- PASS: `npm run icc:update`
+  - Registered repo `ulg` with source-focused skip dirs.
+  - Indexed `207` files and built `878` memory chunks.
+- PASS: `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+  - Reported `is_stale: false`.
+- PASS: `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py list`
+  - Reported ULG registered with the corrected skip dirs.
+- PASS: `rg -n "public/service-assets|docs/assets|docs/service-assets|public/workers" .icc/ulg_arch_summary.md`
+  - No generated asset entries found in the architecture summary.
+- LIMITATION: `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py pack-symbols --repo ulg --task "resident MLS-MPM pressure force rows GPU buffer lifetime reset path" --top-k 5 --format markdown`
+  - Returned `{"ok": false, "error": "No symbols matched the task"}`.
+
+## 2026-06-12 15:39 AKDT - ULG-native `.icc` policy rewrite
+
+Prompt: "ya what I mean is we should rewrite what's in our .icc folder to reflect what is in ulg"
+
+What changed:
+
+- Rewrote `.icc/README.md` so it describes ULG-owned ICC policy and generated
+  snapshots, not a copied sibling-repo configuration.
+- Reworded `.icc/completion-oracles.yaml` around ULG browser, resident WebGPU,
+  material closure, reaction, and handoff evidence.
+- Reworded `.icc/production-audit.yaml` around ULG readiness gates.
+- Reworded `.icc/assistant-goals.yaml` so goals and tags are ULG-native.
+- Rewrote `.icc/ulg_doc_intel.md` as a ULG-owned placeholder for a future ICC
+  `doc-intelligence` artifact.
+- Left generated `.icc/ulg_status.json` and `.icc/ulg_arch_summary.md` as ICC
+  outputs. Remaining MoonLab text in the architecture summary reflects the
+  actual ULG `tools/moonlab-microphysics` source tree, not stale policy config.
+
+Files touched:
+
+- `.icc/README.md`
+- `.icc/assistant-goals.yaml`
+- `.icc/completion-oracles.yaml`
+- `.icc/production-audit.yaml`
+- `.icc/ulg_doc_intel.md`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+
+Validation:
+
+- PASS: `rg -n "eshkol|Eshkol|/home/cos/projects/eshkol|peercompute|PeerCompute|moonlab|MoonLab" .icc/README.md .icc/assistant-goals.yaml .icc/completion-oracles.yaml .icc/production-audit.yaml .icc/ulg_doc_intel.md .icc/modularity-justifications.json`
+  - No matches in editable policy files.
+- PASS: Python JSON parse check for `.icc/modularity-justifications.json` and
+  `.icc/ulg_status.json`.
+- PASS: Python YAML parse check for `.icc/assistant-goals.yaml`,
+  `.icc/completion-oracles.yaml`, and `.icc/production-audit.yaml`.
+- PASS: Ruby YAML parse check for `.icc/assistant-goals.yaml`,
+  `.icc/completion-oracles.yaml`, and `.icc/production-audit.yaml`.
+- PASS: `npm run icc:update`
+  - Indexed `207` files and built `878` memory chunks from the updated ULG
+    policy docs.
+- PASS: ICC direct status check reported `is_stale: false`.
+- PASS: `git diff --check`.
+
+## 2026-06-12 15:42 AKDT - ICC ULG artifact reinitialization and JS parser audit
+
+Prompt: "maybe we shuold reinitialize it?"
+
+What changed:
+
+- Reinitialized ULG's generated ICC artifact root non-destructively by moving
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/ulg` to
+  `/home/cos/projects/infinite_context_coder/artifacts/repos/ulg.reinit-20260612-154227`.
+- Re-ran `npm run icc:update`, which re-registered ULG and rebuilt the index,
+  memory, status snapshot, and architecture summary from scratch.
+- Audited the fresh index for JavaScript symbol extraction behavior.
+
+Findings:
+
+- Fresh reinit did not improve parser capability. The rebuilt index still
+  reports `207` indexed files and `878` memory chunks.
+- ICC parses many `.js` files as JavaScript and records some symbol names. For
+  example, `src/runtime/sph/sphMlsMpmGpuStep.js` has `34` raw symbols in
+  `codebase_index.json`.
+- ICC still classifies `.mjs` files as `text`; `68` `.mjs` scripts/tests have
+  zero symbols in the fresh index.
+- ICC still has JavaScript symbol tooling gaps: `find-symbol --exact` could not
+  find `runMlsMpmResidentStepWithOptionalWebGpu`, `function-map` reported no
+  symbol records for `src/runtime/sph/sphMlsMpmGpuStep.js`, and `pack-symbols`
+  still returned `No symbols matched the task`.
+- Chunk search remains useful: `search-chunks --query
+  runMlsMpmResidentStepWithOptionalWebGpu --include-content` found the exported
+  function and callers by line-window chunks.
+
+Validation:
+
+- PASS: `npm run icc:update`
+  - Re-created artifacts after the backup move.
+  - Indexed `207` files and built `878` memory chunks.
+- PASS: ICC `status --repo ulg --check-staleness`
+  - Reported `is_stale: false`.
+- PASS: ICC `index-quality --repo ulg --min-lines 200 --limit 30`
+  - Completed and exposed the same `.mjs`/WGSL blind spots.
+- PASS: raw `jq` inspection of the fresh `codebase_index.json`.
+- LIMITATION: ICC `find-symbol --repo ulg --symbol runMlsMpmResidentStepWithOptionalWebGpu --exact --limit 5`
+  - Returned `0` matches.
+- LIMITATION: ICC `pack-symbols --repo ulg --task "resident MLS-MPM pressure force rows GPU buffer lifetime reset path" --top-k 5 --format markdown`
+  - Returned `No symbols matched the task`.
+
+## 2026-06-12 15:47 AKDT - User Codex ICC skill
+
+Prompt: "ok write that skill file please"
+
+What changed:
+
+- Created `/home/cos/.codex/skills/icc/SKILL.md`.
+- The skill frontmatter uses `name: icc` and describes using Infinite Context
+  Coder for repo indexing, codebase memory, architecture summaries, staleness
+  checks, symbol/chunk lookup, and local repo context gathering.
+- The skill body records the active ICC CLI path, default status/refresh
+  workflow, source-focused registration guidance, ULG's `npm run icc:update`
+  path, and the currently verified ULG JavaScript parser caveats.
+
+Files touched:
+
+- `/home/cos/.codex/skills/icc/SKILL.md`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+
+Validation:
+
+- PASS: Python frontmatter/body validation for
+  `/home/cos/.codex/skills/icc/SKILL.md`.
+- PASS: `find /home/cos/.codex/skills/icc -maxdepth 2 -type f -printf '%p\n'`
+  confirmed the skill file exists.
+- PASS: `npm run icc:update`
+  - Indexed `207` files and built `879` memory chunks after the plan/log/test
+    updates.
+- PASS: ICC direct status check reported `is_stale: false`.
+- PASS: `git diff --check`.
+- NOTE: A repo-scoped `git status` command failed when it included the
+  out-of-repo `/home/cos/.codex/skills/icc/SKILL.md` path. Corrected status was
+  rerun separately for ULG paths and the skill file path.
+
+## 2026-06-12 15:53 AKDT - Repo-root todo handoff
+
+Prompt: "please write a handoff file stating where you are at with your todo tasks and what problems we are having. put it in todo-handoff-6-12.md"
+
+What changed:
+
+- Added `todo-handoff-6-12.md` at the repo root.
+- The handoff records the current branch/commit, local-only/no-push policy,
+  Vite listener status, ICC status, recent completed work, remaining gaps,
+  active todo order, known problems, useful commands, validation notes, and the
+  next recommended implementation slice.
+- The handoff calls out the key current blockers: performance, partial WebGPU
+  marching-cubes integration, incomplete product/gas dynamics, CPU-heavy
+  material derivation, reduced/provisional validation status, and ICC's partial
+  JavaScript symbol extraction.
+
+Files touched:
+
+- `todo-handoff-6-12.md`
+- `plan/plan.md`
+- `plan/log.md`
+- `plan/tests.md`
+
+Commands run:
+
+- `date '+%Y-%m-%d %H:%M:%S %Z'`
+- `sed -n '430,470p' plan/plan.md`
+- `tail -220 plan/log.md`
+- `find plan/todo -maxdepth 1 -type f -printf '%f\n' | sort`
+- `git status --short --branch`
+- `sed -n '1,240p' plan/todo/overarching-completion-plan.md`
+- `sed -n '1,220p' plan/todo/reprioritize.md`
+- `sed -n '1,220p' plan/todo/perf-upgrade.md`
+- `sed -n '1,180p' plan/implementation-status.md`
+- `sed -n '180,380p' plan/implementation-status.md`
+- `sed -n '240,520p' plan/todo/overarching-completion-plan.md`
+- `sed -n '1,220p' plan/todo/webgpu-material-property-resolvers-plan.md`
+- `sed -n '1,220p' plan/todo/phase-resolved-steam-optics-plan.md`
+- `ss -ltnp 'sport = :5173'`
+- `git rev-parse --abbrev-ref HEAD`
+- `git rev-parse HEAD`
+- `cat package.json`
+- `sed -n '1,260p' todo-handoff-6-12.md`
+- `wc -l todo-handoff-6-12.md`
+
+Validation:
+
+- PASS: `todo-handoff-6-12.md` exists and is readable.
+- PASS: `wc -l todo-handoff-6-12.md` reported `300` lines.
+- PASS: `ss -ltnp 'sport = :5173'` confirmed the demo listener on
+  `0.0.0.0:5173`.
+- PASS: `npm run icc:update`
+  - Indexed `208` files and built `882` memory chunks after adding the handoff.
+- PASS: ICC direct status check reported `is_stale: false`.
+- PASS: `git diff --check`.

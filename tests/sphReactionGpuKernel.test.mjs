@@ -40,6 +40,11 @@ const materialProperties = {
     molarMassKgPerMol: 0.03,
     phases: [{ name: 'liquid', temperatureRange: [0, 3000], cpJPerKgK: 1500, densityKgPerM3: 500, bulkModulusPa: 5e5, shearModulusPa: 0 }],
     transitions: []
+  },
+  c2: {
+    molarMassKgPerMol: 0.004,
+    phases: [{ name: 'gas', temperatureRange: [0, 3000], cpJPerKgK: 14000, densityKgPerM3: 0.1, bulkModulusPa: 1e5, shearModulusPa: 0 }],
+    transitions: []
   }
 };
 
@@ -105,13 +110,39 @@ function reactionTable() {
   });
 }
 
+function multiProductReactionTable() {
+  return buildSphReactionTable([{
+    a: 'a',
+    b: 'b',
+    product: 'ab',
+    activationTemperatureK: 0,
+    phaseRequirements: { b: ['liquid'] },
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: '2 A + 2 B -> 2 AB + C2',
+      atomBalance: { balanced: true },
+      reactants: [
+        { coefficient: 2, formula: 'A', material: 'a' },
+        { coefficient: 2, formula: 'B', material: 'b' }
+      ],
+      products: [
+        { coefficient: 2, formula: 'AB', material: 'ab' },
+        { coefficient: 1, formula: 'C2', material: 'c2' }
+      ]
+    }
+  }], {
+    materialProperties,
+    contactRadiusM: 0.1
+  });
+}
+
 test('SPH reaction table packs derived reaction and product phase mechanics rows', () => {
   const table = reactionTable();
   assert.equal(table.schema, ULG_SPH_GPU_REACTION_TABLE_SCHEMA);
   assert.equal(table.status, 'derived-reaction-table-ready');
   assert.equal(table.reactionCount, 1);
   assert.equal(table.productPhaseCount, 1);
-  assert.equal(table.combinedRecordCount, 2);
+  assert.equal(table.combinedRecordCount, table.combinedRecords.length / 4);
   assert.equal(table.records[0], stableOpticalMaterialId('a'));
   assert.equal(table.records[1], stableOpticalMaterialId('b'));
   assert.equal(table.records[2], stableOpticalMaterialId('ab'));
@@ -126,6 +157,113 @@ test('SPH reaction table packs derived reaction and product phase mechanics rows
   );
   assert.equal(table.scientificValidation, false);
   assert.equal(table.chemistryValidation, false);
+});
+
+test('SPH reaction table packs balanced reactant/product/gas term rows', () => {
+  const table = buildSphReactionTable([{
+    a: 'a',
+    b: 'b',
+    product: 'ab',
+    activationTemperatureK: 0,
+    phaseRequirements: { b: ['liquid'] },
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: '2 A + 2 B -> 2 AB + C2',
+      atomBalance: { balanced: true },
+      reactants: [
+        { coefficient: 2, formula: 'A', material: 'a' },
+        { coefficient: 2, formula: 'B', material: 'b' }
+      ],
+      products: [
+        { coefficient: 2, formula: 'AB', material: 'ab' },
+        { coefficient: 1, formula: 'C2', material: 'c2' }
+      ]
+    }
+  }], {
+    materialProperties,
+    contactRadiusM: 0.1
+  });
+
+  assert.equal(table.reactionClosureSchema, 'peercompute.ulg.reaction-closure.v0');
+  assert.equal(table.reactionHeaderCount, 1);
+  assert.equal(table.reactantTermCount, 2);
+  assert.equal(table.productTermCount, 2);
+  assert.equal(table.gasProductCount, 1);
+  assert.equal(table.productPhaseCount, 2);
+  assert.equal(table.reactionHeaders[2], 2);
+  assert.equal(table.reactionHeaders[4], 2);
+  assert.equal(table.reactionHeaders[6], 1);
+  assert.equal(table.reactionHeaders[10], 1);
+  assert.equal(table.reactantTermRecords[1], stableOpticalMaterialId('a'));
+  assert.equal(table.reactantTermRecords[2], 2);
+  assert.equal(table.productTermRecords[1], stableOpticalMaterialId('ab'));
+  assert.equal(table.productTermRecords[2], 2);
+  assert.ok(Math.abs(table.productTermRecords[4] - (0.06 / 0.064)) < 1e-6);
+  assert.equal(table.productTermRecords[16 + 1], stableOpticalMaterialId('c2'));
+  assert.equal(table.productTermRecords[16 + 5], 1);
+  assert.equal(table.productTermRecords[16 + 13], stableOpticalMaterialId('c2'));
+  assert.equal(table.gasProductRecords[2], stableOpticalMaterialId('c2'));
+  assert.equal(table.gasProductRecords[3], 1);
+  assert.equal(table.metadata[0].productTerms.map((term) => term.material).join(','), 'ab,c2');
+  assert.equal(table.metadata[0].gasProductTerms[0].material, 'c2');
+});
+
+test('SPH reaction table routes only gas-only or explicitly gas product terms to gas ledger', () => {
+  const mixedPhaseProperties = {
+    fe: {
+      molarMassKgPerMol: 0.055845,
+      phases: [{ name: 'solid', densityKgPerM3: 7800, bulkModulusPa: 1e11, shearModulusPa: 8e10 }],
+      transitions: []
+    },
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [{ name: 'liquid', densityKgPerM3: 1000, bulkModulusPa: 2e9, shearModulusPa: 0 }],
+      transitions: []
+    },
+    feoh2: {
+      molarMassKgPerMol: 0.089859,
+      phases: [
+        { name: 'solid', densityKgPerM3: 3400, bulkModulusPa: 2e10, shearModulusPa: 1e10 },
+        { name: 'liquid', densityKgPerM3: 3000, bulkModulusPa: 1e9, shearModulusPa: 0 },
+        { name: 'gas', densityKgPerM3: 1, bulkModulusPa: 1e5, shearModulusPa: 0 }
+      ],
+      transitions: []
+    },
+    h2: {
+      molarMassKgPerMol: 0.002016,
+      phases: [{ name: 'gas', densityKgPerM3: 0.09, bulkModulusPa: 1e5, shearModulusPa: 0 }],
+      transitions: []
+    }
+  };
+  const table = buildSphReactionTable([{
+    a: 'fe',
+    b: 'h2o',
+    product: 'feoh2',
+    activationTemperatureK: 0,
+    specificEnthalpyJPerKg: -1000,
+    stoichiometry: {
+      equation: 'Fe + 2 H2O -> Fe(OH)2 + H2',
+      atomBalance: { balanced: true },
+      reactants: [
+        { coefficient: 1, formula: 'Fe', material: 'fe' },
+        { coefficient: 2, formula: 'H2O', material: 'h2o' }
+      ],
+      products: [
+        { coefficient: 1, formula: 'Fe(OH)2', material: 'feoh2' },
+        { coefficient: 1, formula: 'H2', material: 'h2' }
+      ]
+    }
+  }], {
+    materialProperties: mixedPhaseProperties,
+    contactRadiusM: 0.1
+  });
+
+  assert.equal(table.productTermMetadata[0].material, 'feoh2');
+  assert.equal(table.productTermMetadata[0].routing, 'condensed');
+  assert.equal(table.productTermMetadata[1].material, 'h2');
+  assert.equal(table.productTermMetadata[1].routing, 'gas');
+  assert.equal(table.gasProductCount, 1);
+  assert.equal(table.gasProductMetadata[0].material, 'h2');
 });
 
 test('SPH reaction CPU step converts only mutual nearest contact pairs and resets product mechanics', () => {
@@ -144,8 +282,12 @@ test('SPH reaction CPU step converts only mutual nearest contact pairs and reset
   assert.equal(result.thermo[0], stableOpticalMaterialId('ab'));
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS], stableOpticalMaterialId('ab'));
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS * 2], stableOpticalMaterialId('b'));
-  assert.equal(result.state[7], 1100);
-  assert.equal(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7], 1200);
+  assert.ok(Math.abs(result.state[7] - 1166.6667) < 1e-3);
+  assert.ok(Math.abs(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7] - 1166.6667) < 1e-3);
+  assert.equal(result.reactionLedger.schema, 'peercompute.ulg.sph-gpu-reaction-ledger.v0');
+  assert.equal(result.reactionLedger.eventCount, 1);
+  assert.equal(result.reactionLedger.unplacedProductMassKg, 0);
+  assert.equal(result.reactionLedger.productMassKgByMaterial.ab, 6);
   assert.equal(result.mechanics[18], 1);
   assert.ok(Math.abs(result.mechanics[19] - (2 / 500)) < 1e-8);
   assert.equal(result.mechanics[20], 0);
@@ -153,6 +295,51 @@ test('SPH reaction CPU step converts only mutual nearest contact pairs and reset
   assert.equal(result.proposals[0], 1);
   assert.equal(result.proposals[4], 0);
   assert.equal(result.proposals[8], -1);
+});
+
+test('SPH reaction CPU reference consumes balanced product term rows for gas byproducts', () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const result = runSphReactionStepCpu({
+    ...packed,
+    reactionTable: multiProductReactionTable(),
+    thermalMaterialTable
+  });
+
+  assert.equal(result.eventCount, 1);
+  assert.equal(result.conversionCount, 2);
+  assert.equal(result.thermo[0], stableOpticalMaterialId('ab'));
+  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS], stableOpticalMaterialId('c2'));
+  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1], GPU_PHASE_IDS.gas);
+  assert.ok(Math.abs(result.state[3] - 5.625) < 1e-6);
+  assert.ok(Math.abs(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3] - 0.375) < 1e-6);
+  assert.equal(result.mechanics[20], 0);
+  assert.ok(Math.abs(result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19] - 3.75) < 1e-6);
+  assert.ok(Math.abs(result.reactionLedger.gasMassKgByMaterial.c2 - 0.375) < 1e-6);
+  assert.equal(result.reactionLedger.unplacedProductMassKg, 0);
+});
+
+test('SPH reaction CPU reference preserves excess reactant and ledgers unplaced gas products', () => {
+  const packed = packedThreeParticles();
+  packed.sphParticleState.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3] = 8;
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const result = runSphReactionStepCpu({
+    ...packed,
+    reactionTable: multiProductReactionTable(),
+    thermalMaterialTable
+  });
+
+  assert.equal(result.eventCount, 1);
+  assert.equal(result.conversionCount, 1);
+  assert.equal(result.thermo[0], stableOpticalMaterialId('ab'));
+  assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS], stableOpticalMaterialId('b'));
+  assert.ok(Math.abs(result.state[3] - 5.625) < 1e-6);
+  assert.ok(Math.abs(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 3] - 4) < 1e-6);
+  assert.ok(Math.abs(result.mechanics[MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS + 19] - (4 / 800)) < 1e-8);
+  assert.ok(Math.abs(result.reactionLedger.productMassKgByMaterial.ab - 5.625) < 1e-6);
+  assert.ok(Math.abs(result.reactionLedger.gasMassKgByMaterial.c2 - 0.375) < 1e-6);
+  assert.ok(Math.abs(result.reactionLedger.unplacedProductMassKgByMaterial.c2 - 0.375) < 1e-6);
+  assert.ok(Math.abs(result.reactionLedger.visibleProductMassKgByMaterial.ab - 5.625) < 1e-6);
 });
 
 test('SPH reaction CPU step resolves product phase state from thermal graph response artifacts', () => {

@@ -5,7 +5,7 @@
 // state emerges from the thermodynamics rather than being scripted. CPU reference, evidence-only:
 // the produced simulation artifact carries sphValidation/phaseChangeValidation = false.
 
-import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
+import { stablePhaseFromSpecificEnergy } from '../material/phaseEquilibrium.js';
 import { cloneSphState } from './sphState.js';
 import { computeAccelerationsAndEnergyRates } from './sphOperators.js';
 import { sphConservationReport, sphTotals } from './sphConservation.js';
@@ -20,7 +20,7 @@ export function summarizePhases(state, materialProperties = {}) {
     const properties = materialProperties[p.material];
     let phase = 'unknown';
     if (properties) {
-      phase = equilibriumFromSpecificEnergy(properties, p.specificInternalEnergyJPerKg).stablePhase || 'unknown';
+      phase = stablePhaseFromSpecificEnergy(properties, p.specificInternalEnergyJPerKg) || 'unknown';
     }
     byMaterialPhase[p.material] = byMaterialPhase[p.material] || {};
     const bucket = byMaterialPhase[p.material][phase] || { count: 0, massKg: 0 };

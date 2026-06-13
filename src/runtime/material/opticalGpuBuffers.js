@@ -30,6 +30,7 @@ export const OPTICAL_GPU_SPECTRAL_SAMPLE_LAYOUT = OPTICAL_GPU_SPECTRAL_SAMPLE_RO
 export const OPTICAL_GPU_LOOKUP_QUERY_LAYOUT = OPTICAL_GPU_LOOKUP_QUERY_ROW_LAYOUT;
 export const OPTICAL_GPU_LOOKUP_OUTPUT_LAYOUT = OPTICAL_GPU_LOOKUP_OUTPUT_ROW_LAYOUT;
 export { opticalLookupWgsl };
+const EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS = new Float32Array(OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS);
 
 export const OPTICAL_GPU_WGSL_STRUCTS = `
 struct OpticalMaterialRecord {
@@ -52,7 +53,7 @@ struct OpticalMaterialRecord {
   optical_depth: f32,
   blocked: f32,
   status: f32,
-  pad0: f32,
+  optical_state_id: f32,
 };
 
 struct OpticalSpectralSample {
@@ -100,6 +101,7 @@ const RENDER_MODEL_IDS = Object.freeze({
   'molecular-gap-pbr': 4,
   'rayleigh-gas-transparent-spectrum': 5,
   'conductor-drude-free-electron': 6,
+  'molecular-condensed-droplet-scattering-pbr': 7,
   'blocked-missing-optical-closure': 255
 });
 
@@ -152,6 +154,29 @@ function stableHashId(text) {
   return 1000 + (hash % 8_000_000);
 }
 
+function stableNumberKey(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toPrecision(10) : String(value ?? 'null');
+}
+
+export function stableOpticalStateKey(value) {
+  if (!value || typeof value !== 'object') return 'default';
+  const entries = Object.keys(value)
+    .filter((key) => value[key] != null)
+    .sort()
+    .map((key) => {
+      const item = value[key];
+      if (item && typeof item === 'object') return `${key}:{${stableOpticalStateKey(item)}}`;
+      return `${key}:${stableNumberKey(item)}`;
+    });
+  return entries.length > 0 ? entries.join('|') : 'default';
+}
+
+export function stableOpticalStateId(value) {
+  const key = stableOpticalStateKey(value);
+  return key === 'default' ? 0 : stableHashId(`optical-state:${key}`);
+}
+
 export function stableOpticalMaterialId(material) {
   const symbol = normalizeElementSymbol(material);
   const Z = symbol ? zForSymbol(symbol) : null;
@@ -162,6 +187,10 @@ export function stableOpticalMaterialId(material) {
 function descriptorPhase(descriptor) {
   if (typeof descriptor === 'string') return 'unknown';
   return descriptor?.phase || 'unknown';
+}
+
+function descriptorOpticalState(descriptor) {
+  return typeof descriptor === 'object' && descriptor ? descriptor.opticalState || null : null;
 }
 
 function spectralSampleFloats(sample) {
@@ -206,14 +235,17 @@ export function buildOpticalGpuTable(descriptors, {
     const material = materialKey(descriptor);
     if (!material) continue;
     const phase = descriptorPhase(descriptor);
-    const key = `${material}|${phase}`;
+    const opticalState = descriptorOpticalState(descriptor);
+    const opticalStateKey = stableOpticalStateKey(opticalState);
+    const opticalStateId = stableOpticalStateId(opticalState);
+    const key = `${material}|${phase}|${opticalStateKey}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
     const properties = typeof descriptor === 'object' && descriptor?.properties
       ? descriptor.properties
       : materialProperties[material];
-    const params = opticalRenderParams({ material, phase, properties, pathLengthM });
+    const params = opticalRenderParams({ material, phase, properties, pathLengthM, opticalState });
     const materialId = materialIdFor(material);
     const spectralOffset = sampleValues.length / OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS;
     for (const sample of params.spectralSamples || []) {
@@ -251,11 +283,14 @@ export function buildOpticalGpuTable(descriptors, {
       finiteNumber(params.opticalDepth),
       params.blocked ? 1 : 0,
       params.provenance?.status === 'blocked' ? 255 : 1,
-      0
+      opticalStateId
     ]);
     records.push({
       material,
       phase,
+      opticalState: opticalState ? { ...opticalState } : null,
+      opticalStateKey,
+      opticalStateId,
       materialId,
       phaseId: gpuPhaseId(phase),
       recordIndex: records.length,
@@ -298,9 +333,13 @@ function recordFloats(table, recordIndex) {
 }
 
 function queryDescriptorKey(descriptor) {
+  const opticalState = descriptorOpticalState(descriptor);
   return {
     material: materialKey(descriptor),
-    phase: descriptorPhase(descriptor)
+    phase: descriptorPhase(descriptor),
+    opticalState,
+    opticalStateKey: stableOpticalStateKey(opticalState),
+    opticalStateId: stableOpticalStateId(opticalState)
   };
 }
 
@@ -315,11 +354,11 @@ export function buildOpticalGpuLookupQueries(table, descriptors) {
   const values = [];
   const metadata = [];
   for (const descriptor of descriptors) {
-    const { material, phase } = queryDescriptorKey(descriptor);
+    const { material, phase, opticalState, opticalStateKey, opticalStateId } = queryDescriptorKey(descriptor);
     const materialId = materialIds.get(material) ?? 0;
     const id = gpuPhaseId(phase);
-    values.push(materialId, id, 0, 0);
-    metadata.push({ material, phase, materialId, phaseId: id });
+    values.push(materialId, id, opticalStateId, 0);
+    metadata.push({ material, phase, opticalState, opticalStateKey, opticalStateId, materialId, phaseId: id });
   }
   return {
     schema: ULG_OPTICAL_GPU_LOOKUP_SCHEMA,
@@ -347,10 +386,11 @@ export function sampleOpticalGpuTableCpu(table, lookup) {
     const queryOffset = queryIndex * OPTICAL_GPU_LOOKUP_QUERY_FLOATS;
     const materialId = lookup.queries[queryOffset];
     const id = lookup.queries[queryOffset + 1];
+    const opticalStateId = lookup.queries[queryOffset + 2];
     let matched = -1;
     for (let recordIndex = 0; recordIndex < table.recordCount; recordIndex += 1) {
       const record = recordFloats(table, recordIndex);
-      if (record[0] === materialId && record[1] === id) {
+      if (record[0] === materialId && record[1] === id && record[23] === opticalStateId) {
         matched = recordIndex;
         const outputOffset = queryIndex * OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS;
         outputs.set([
@@ -365,13 +405,17 @@ export function sampleOpticalGpuTableCpu(table, lookup) {
           record[18],
           record[19],
           record[22],
-          recordIndex
+          recordIndex,
+          record[20],
+          record[17],
+          record[16],
+          record[23]
         ], outputOffset);
         break;
       }
     }
     if (matched < 0) {
-      outputs.set([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 255, -1], queryIndex * OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS);
+      outputs.set([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 255, -1, 0, 0, 0, opticalStateId], queryIndex * OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS);
     }
   }
   return {
@@ -437,6 +481,9 @@ export function decodeOpticalGpuLookupOutputRows(result, lookup = null) {
       queryIndex,
       material: lookup?.metadata?.[queryIndex]?.material ?? null,
       phase: lookup?.metadata?.[queryIndex]?.phase ?? null,
+      opticalState: lookup?.metadata?.[queryIndex]?.opticalState ?? null,
+      opticalStateKey: lookup?.metadata?.[queryIndex]?.opticalStateKey ?? null,
+      opticalStateId: lookup?.metadata?.[queryIndex]?.opticalStateId ?? null,
       materialId: lookup?.metadata?.[queryIndex]?.materialId ?? null,
       phaseId: lookup?.metadata?.[queryIndex]?.phaseId ?? null,
       baseColorLinear: [outputs[offset], outputs[offset + 1], outputs[offset + 2]],
@@ -448,7 +495,11 @@ export function decodeOpticalGpuLookupOutputRows(result, lookup = null) {
       renderModelId: outputs[offset + 8],
       vertexColorPolicyId: outputs[offset + 9],
       status: outputs[offset + 10],
-      recordIndex: outputs[offset + 11]
+      recordIndex: outputs[offset + 11],
+      opticalDepth: outputs[offset + 12],
+      scatteringCoefficientPerM: outputs[offset + 13],
+      absorptionCoefficientPerM: outputs[offset + 14],
+      outputOpticalStateId: outputs[offset + 15]
     });
   }
   return rows;
@@ -553,7 +604,13 @@ export function uploadOpticalGpuTable(device, table) {
     recordStrideBytes: table.recordStrideBytes,
     spectralSampleStrideBytes: table.spectralSampleStrideBytes,
     recordsBuffer: writeStorageBuffer(device, 'ulg-optical-material-records', table.records),
-    spectralSamplesBuffer: writeStorageBuffer(device, 'ulg-optical-spectral-samples', table.spectralSamples),
+    spectralSamplesBuffer: writeStorageBuffer(
+      device,
+      'ulg-optical-spectral-samples',
+      table.spectralSamples.length >= OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS
+        ? table.spectralSamples
+        : EMPTY_OPTICAL_SPECTRAL_SAMPLE_ROWS
+    ),
     scientificValidation: false,
     fullPhysicsValidation: false
   };

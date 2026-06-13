@@ -2,15 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mlsMpmGridUpdateWgsl } from '../ulg-gpu-abi/src/wgsl.js';
 import {
+  SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
-  ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA
+  ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA
 } from '../ulg-gpu-abi/src/index.js';
 import {
   MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
+  SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
   createMlsMpmGridUpdateParityReport,
+  runMlsMpmGridUpdateWebGpu,
   runMlsMpmGridUpdateWithOptionalWebGpu,
   updateMlsMpmGridCpu
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
@@ -41,6 +45,32 @@ function manualP2gProjection({ mass = 2, momentum = [4, 0, 0], nodePosition = [1
   };
 }
 
+function pressureInterfaceForceSolverFixture({
+  centroid = [1, 1, 1],
+  force = [8, 0, 0],
+  reactionForce = [-8, 0, 0],
+  pressurePa = 100000,
+  status = 1
+} = {}) {
+  const forceRowValues = new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
+  forceRowValues.set([
+    0, 1, 2, 0,
+    centroid[0], centroid[1], centroid[2], 1,
+    force[0], force[1], force[2],
+    reactionForce[0], reactionForce[1], reactionForce[2],
+    pressurePa, status
+  ]);
+  return {
+    schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
+    status: 'pressure-interface-force-solver-ready',
+    forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
+    forceApplicationStatus: 'solver-ready-not-applied',
+    forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
+    forceRowCount: 1,
+    forceRowValues
+  };
+}
+
 function webGpuNavigator() {
   return {
     gpu: {
@@ -53,6 +83,72 @@ function webGpuNavigator() {
       }
     }
   };
+}
+
+function fakeGridUpdateDevice() {
+  const createdBuffers = [];
+  const dispatches = [];
+  const device = {
+    createdBuffers,
+    dispatches,
+    queue: {
+      writeBuffer() {},
+      submit() {},
+      async onSubmittedWorkDone() {}
+    },
+    createBuffer(desc) {
+      const buffer = {
+        label: desc.label,
+        size: desc.size,
+        usage: desc.usage,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+      createdBuffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule(desc) {
+      return { code: desc.code };
+    },
+    createBindGroupLayout(desc) {
+      return { entries: desc.entries };
+    },
+    createPipelineLayout(desc) {
+      return { bindGroupLayouts: desc.bindGroupLayouts };
+    },
+    createComputePipeline(desc) {
+      return {
+        desc,
+        getBindGroupLayout() {
+          return { entries: [] };
+        }
+      };
+    },
+    createBindGroup(desc) {
+      return { entries: desc.entries };
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline() {},
+            setBindGroup() {},
+            dispatchWorkgroups(x, y = 1, z = 1) {
+              dispatches.push([x, y, z]);
+            },
+            end() {}
+          };
+        },
+        copyBufferToBuffer() {},
+        finish() {
+          return {};
+        }
+      };
+    }
+  };
+  return device;
 }
 
 test('MLS-MPM grid update WGSL declares grid update bindings', () => {
@@ -136,6 +232,49 @@ test('optional MLS-MPM grid update falls back when WebGPU is unavailable', async
   assert.equal(execution.backend, 'cpu-reference');
   assert.equal(execution.webgpuStatus.status, 'blocked-webgpu-unavailable');
   assert.equal(execution.webgpuStatus.fallback, 'cpu-reference');
+});
+
+test('WebGPU MLS-MPM grid update binds a full pressure-force row for zero-force runs', async () => {
+  const device = fakeGridUpdateDevice();
+  const update = await runMlsMpmGridUpdateWebGpu({
+    device,
+    p2gGridProjection: manualP2gProjection(),
+    readbackMode: 'no-full-readback'
+  });
+  const pressureForceBuffer = device.createdBuffers.find(
+    (buffer) => buffer.label === 'ulg-mls-mpm-grid-update-pressure-force-rows'
+  );
+
+  assert.equal(update.backend, 'webgpu');
+  assert.equal(update.readbackMode, 'no-full-readback');
+  assert.equal(update.pressureInterfaceForceRowCount, 0);
+  assert.ok(pressureForceBuffer);
+  assert.equal(
+    pressureForceBuffer.size,
+    SPH_PRESSURE_INTERFACE_FORCE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+});
+
+test('WebGPU MLS-MPM grid update marks no-readback pressure impulse as submitted but unverified', async () => {
+  const device = fakeGridUpdateDevice();
+  const update = await runMlsMpmGridUpdateWebGpu({
+    device,
+    p2gGridProjection: manualP2gProjection(),
+    pressureInterfaceForceSolver: pressureInterfaceForceSolverFixture(),
+    dt: 0.25,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(update.backend, 'webgpu');
+  assert.equal(update.readbackMode, 'no-full-readback');
+  assert.equal(update.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(update.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-submitted-unverified');
+  assert.equal(update.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-submitted-unverified-no-full-readback');
+  assert.equal(update.pressureInterfaceAppliedImpulseSource, 'pressure-force-row-sum-unverified-no-full-readback');
+  assert.equal(update.pressureInterfaceImpulseProofStatus, 'submitted-to-gpu-grid-update-no-full-readback');
+  assert.equal(update.pressureInterfaceForceRowCount, 1);
+  nearlyEqual(update.pressureInterfaceAppliedImpulseNSeconds[0], 2, 1e-5);
+  nearlyEqual(update.pressureInterfaceAppliedImpulseMagnitudeNSeconds, 2, 1e-5);
 });
 
 test('optional MLS-MPM grid update accepts a parity-passing WebGPU result', async () => {

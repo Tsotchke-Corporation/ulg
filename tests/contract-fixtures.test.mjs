@@ -10,6 +10,7 @@ import {
   createUlgTaskCapsule,
   getUlgServiceContract
 } from '../ulg-gpu-abi/src/serviceContract.js';
+import { createSphPhaseRebuildTask, createSphStaticTableCacheTask } from '../src/runtime/demoRuntime.js';
 
 const ajv = new Ajv2020({ strict: false });
 const fixtureDir = resolve('ulg-gpu-abi/examples');
@@ -81,10 +82,14 @@ test('ULG runtime service contract emits simulation-step capsules', () => {
   const runtimeContract = getUlgServiceContract(ULG_SERVICE_IDS.ulgRuntime);
   assert.deepEqual(runtimeContract.taskKinds, [
     ULG_TASK_KINDS.simulationStep,
+    ULG_TASK_KINDS.sphPhaseRebuild,
+    ULG_TASK_KINDS.sphStaticTableCache,
     ULG_TASK_KINDS.closureConsume
   ]);
   assert.deepEqual(runtimeContract.capabilities, [
     'ulg.simulation.step',
+    'ulg.sph.phase.rebuild',
+    'ulg.sph.static-table-cache',
     'ulg.closure.consume',
     'ulg.invariants.reference'
   ]);
@@ -128,6 +133,63 @@ test('ULG runtime service contract emits simulation-step capsules', () => {
   assert.deepEqual(capsule.method.backendPreference, ['webgpu', 'cpu-reference']);
   assert.equal(capsule.validation.mode, 'cpu-webgpu');
   assertValid('task_capsule.schema.json', capsule);
+
+  const sphTask = createSphPhaseRebuildTask({
+    dropMaterial: 'Li',
+    baseMaterial: 'h2o',
+    dropParticleEdge: 2,
+    baseParticleEdge: 2
+  });
+  assert.equal(sphTask.serviceId, ULG_SERVICE_IDS.ulgRuntime);
+  assert.equal(sphTask.taskKind, ULG_TASK_KINDS.sphPhaseRebuild);
+  assert.deepEqual(sphTask.outputs, [{ artifactKind: 'sph-phase-rebuild-view-state' }]);
+  assert.equal(sphTask.method.backend, 'supervised-cpu-worker');
+  assert.equal(sphTask.resources.priority, 'background');
+  assert.equal(sphTask.input.options.dropMaterial, 'Li');
+  assert.equal(sphTask.input.options.baseMaterial, 'h2o');
+  assertValid('task_capsule.schema.json', sphTask);
+
+  const sphCachedTask = createSphPhaseRebuildTask({
+    dropMaterial: 'Na',
+    baseMaterial: 'h2o',
+    __cacheLookup: { materialCacheSnapshot: '{"schema":"material"}' },
+    __cachePersistence: { coldStartCacheSnapshot: '{"schema":"cold"}' },
+    __staticTableCache: { cacheSnapshot: '{"schema":"static"}' }
+  });
+  assert.equal(sphCachedTask.input.options.dropMaterial, 'Na');
+  assert.equal(sphCachedTask.input.options.__cacheLookup, undefined);
+  assert.equal(sphCachedTask.input.cacheLookup.materialCacheSnapshot, '{"schema":"material"}');
+  assert.equal(sphCachedTask.input.cachePersistence.coldStartCacheSnapshot, '{"schema":"cold"}');
+  assert.equal(sphCachedTask.input.staticTableCache.cacheSnapshot, '{"schema":"static"}');
+  assertValid('task_capsule.schema.json', sphCachedTask);
+
+  const staticCacheTask = createSphStaticTableCacheTask({
+    cacheSnapshot: null,
+    tableInputs: {},
+    generatorFingerprint: 'contract-generator'
+  });
+  assert.equal(staticCacheTask.serviceId, ULG_SERVICE_IDS.ulgRuntime);
+  assert.equal(staticCacheTask.taskKind, ULG_TASK_KINDS.sphStaticTableCache);
+  assert.deepEqual(staticCacheTask.outputs, [{ artifactKind: 'sph-static-table-cache' }]);
+  assert.equal(staticCacheTask.method.backend, 'supervised-cpu-worker');
+  assert.equal(staticCacheTask.resources.priority, 'background');
+  assert.equal(staticCacheTask.resources.gpu, 'none');
+  assert.equal(staticCacheTask.input.mode, 'update');
+  assert.equal(staticCacheTask.input.generatorFingerprint, 'contract-generator');
+  assertValid('task_capsule.schema.json', staticCacheTask);
+
+  const staticReadTask = createSphStaticTableCacheTask({
+    mode: 'rehydrate',
+    cacheSnapshot: '{"schema":"example"}',
+    tableInputs: { ignored: true },
+    generatorFingerprint: 'contract-generator'
+  });
+  assert.equal(staticReadTask.taskKind, ULG_TASK_KINDS.sphStaticTableCache);
+  assert.equal(staticReadTask.input.mode, 'rehydrate');
+  assert.equal(staticReadTask.input.cacheSnapshot, '{"schema":"example"}');
+  assert.deepEqual(staticReadTask.input.tableInputs, {});
+  assert.ok(staticReadTask.provenance.notes.includes('static-table-cache-rehydration-offloaded-from-ui-thread'));
+  assertValid('task_capsule.schema.json', staticReadTask);
 });
 
 function assertFixture(schemaFile, fixtureFile) {

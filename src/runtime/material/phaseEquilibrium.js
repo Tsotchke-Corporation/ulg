@@ -24,6 +24,53 @@ export function stablePhaseAt(properties, temperatureK) {
 }
 
 /**
+ * Fast phase-only inverse of the closure energy ladder. This follows the same ordered phase and
+ * latent-heat segments as `equilibriumFromSpecificEnergy`, but deliberately avoids inverting a
+ * Debye internal-energy curve unless a caller needs temperature. Mechanics and pressure usually
+ * need the phase and phase material constants, not the exact temperature.
+ */
+export function stablePhaseFromSpecificEnergy(properties, specificEnergyJPerKg) {
+  const e = Number(specificEnergyJPerKg);
+  if (!Number.isFinite(e)) throw new TypeError('specificEnergyJPerKg must be finite');
+  const segments = orderedSegments(properties);
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  if (e <= first.eStart) return first.phase || first.from || first.to || null;
+  if (e >= last.eEnd) return last.type === 'phase' ? last.phase : last.to;
+  for (const segment of segments) {
+    if (e < segment.eStart || e > segment.eEnd) continue;
+    if (segment.type === 'phase') return segment.phase;
+    const toFraction = segment.latentHeatJPerKg > 0
+      ? (e - segment.eStart) / segment.latentHeatJPerKg
+      : 0;
+    return toFraction >= 0.5 ? segment.to : segment.from;
+  }
+  return last.type === 'phase' ? last.phase : last.to;
+}
+
+const particleEquilibriumCache = new WeakMap();
+
+/**
+ * Full energy→temperature/phase inverse with a per-particle exact cache. The cache is keyed by the
+ * material properties object and exact specific energy, so it reuses first-principles inversions
+ * inside repeated mechanics substeps without reusing stale values after heat or reaction updates.
+ */
+export function cachedParticleEquilibriumFromSpecificEnergy(properties, particle, specificEnergyJPerKg) {
+  if (!particle || (typeof particle !== 'object' && typeof particle !== 'function')) {
+    return equilibriumFromSpecificEnergy(properties, specificEnergyJPerKg);
+  }
+  const e = Number(specificEnergyJPerKg);
+  if (!Number.isFinite(e)) throw new TypeError('specificEnergyJPerKg must be finite');
+  const cached = particleEquilibriumCache.get(particle);
+  if (cached && cached.properties === properties && cached.specificEnergyJPerKg === e) {
+    return cached.equilibrium;
+  }
+  const equilibrium = equilibriumFromSpecificEnergy(properties, e);
+  particleEquilibriumCache.set(particle, { properties, specificEnergyJPerKg: e, equilibrium });
+  return equilibrium;
+}
+
+/**
  * Invert specific internal energy to a thermodynamic state: temperature, the stable (dominant)
  * phase, and phase fractions. On a latent plateau the temperature is the transition temperature
  * and the fractions follow the lever rule; within a phase the state is pure.

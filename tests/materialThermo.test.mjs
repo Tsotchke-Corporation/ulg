@@ -5,7 +5,11 @@ import { ClosureRegistry } from '../src/runtime/ClosureRegistry.js';
 import { MaterialRegistry } from '../src/runtime/material/MaterialRegistry.js';
 import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from '../src/runtime/material/materialClosures.js';
 import { heatCapacityJPerKgK, specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
-import { equilibriumFromSpecificEnergy, stablePhaseAt } from '../src/runtime/material/phaseEquilibrium.js';
+import {
+  equilibriumFromSpecificEnergy,
+  stablePhaseAt,
+  stablePhaseFromSpecificEnergy
+} from '../src/runtime/material/phaseEquilibrium.js';
 import { computeClosureBackedPreflight } from '../src/runtime/material/thermodynamicPreflight.js';
 import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
 import { specificEnergyJPerKg } from '../src/runtime/materials/referenceMaterials.js';
@@ -64,9 +68,15 @@ test('phase equilibrium: stable phase by temperature and lever rule by energy', 
   const eSolidTop = specificInternalEnergyJPerKg(h2o.properties, 273.15);
   const eMidFusion = eSolidTop + h2o.properties.transitions[0].latentHeatJPerKg / 2;
   const state = equilibriumFromSpecificEnergy(h2o.properties, eMidFusion);
+  assert.equal(stablePhaseFromSpecificEnergy(h2o.properties, eMidFusion), state.stablePhase);
   assert.ok(Math.abs(state.temperatureK - 273.15) < 1e-9);
   assert.ok(Math.abs(state.phaseFractions.solid - 0.5) < 1e-6);
   assert.ok(Math.abs(state.phaseFractions.liquid - 0.5) < 1e-6);
+
+  for (const t of [250, 300, 400]) {
+    const e = specificInternalEnergyJPerKg(h2o.properties, t);
+    assert.equal(stablePhaseFromSpecificEnergy(h2o.properties, e), equilibriumFromSpecificEnergy(h2o.properties, e).stablePhase);
+  }
 });
 
 test('MaterialRegistry samples closure-backed properties with phase and density', async () => {

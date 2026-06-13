@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "build:pages": "vite build --config vite.pages.config.mjs && mv docs/pages.html docs/index.html && touch docs/.nojekyll",
+    "icc:update": "node scripts/update-icc.mjs",
     "stage:service-assets": "node scripts/stage-service-assets.mjs",
     "status:live": "node scripts/live-status.mjs",
     "test": "node --test tests/*.test.mjs",

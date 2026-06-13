@@ -27,7 +27,7 @@ const childWorkerModule = new URL('../services/dummyChild.worker.js', import.met
 const eshkolClosureBundleName = 'magnetar-closure';
 const eshkolSmokeBundleName = 'hello';
 
-export async function createDemoRuntime() {
+export async function createDemoRuntime({ deferTriadServices = false, deferGpuProbe = false } = {}) {
   const registry = new ComputeServiceRegistry();
   const leaseManager = new ChildWorkerLeaseManager();
   const gpuBroker = new GpuBroker();
@@ -42,7 +42,25 @@ export async function createDemoRuntime() {
     }
   });
 
-  await gpuBroker.probe();
+  const emitRuntimeEvent = (event) => {
+    for (const listener of listeners) {
+      listener(event, supervisor.getTreeTelemetry());
+    }
+  };
+  const gpuProbePromise = gpuBroker.probe().then((capabilities) => {
+    emitRuntimeEvent({ type: 'gpu-probe-complete', capabilities });
+    return capabilities;
+  }).catch((error) => {
+    emitRuntimeEvent({
+      type: 'gpu-probe-error',
+      error: error instanceof Error ? error.message : String(error)
+    });
+    if (!deferGpuProbe) throw error;
+    return gpuBroker.capabilities;
+  });
+  if (!deferGpuProbe) {
+    await gpuProbePromise;
+  }
   await registry.register(createUlgServiceManifest({
     serviceId: 'eshkol',
     workerModule: serviceWorkerModule,
@@ -80,8 +98,11 @@ export async function createDemoRuntime() {
       parityModes: ['cpu-reference', 'cpu-webgpu']
     }
   }));
-  await supervisor.spawnService('eshkol');
-  await supervisor.spawnService('moonlab');
+  await supervisor.spawnService(ULG_SERVICE_IDS.ulgRuntime);
+  if (!deferTriadServices) {
+    await supervisor.spawnService('eshkol');
+    await supervisor.spawnService('moonlab');
+  }
 
   let activeRootTasks = [];
   let autoCancelTimer = null;
@@ -157,6 +178,21 @@ export async function createDemoRuntime() {
         closureValidity: resolved.validity,
         closureRefresh
       };
+    },
+    async runSphPhaseRebuild(options = {}) {
+      const task = createSphPhaseRebuildTask(options);
+      return supervisor.submitTask(task);
+    },
+    async runSphStaticTableCacheUpdate(options = {}) {
+      const task = createSphStaticTableCacheTask(options);
+      return supervisor.submitTask(task);
+    },
+    async runSphStaticTableCacheRehydrate(options = {}) {
+      const task = createSphStaticTableCacheTask({ ...options, mode: 'rehydrate' });
+      return supervisor.submitTask(task);
+    },
+    async awaitGpuProbe() {
+      return gpuProbePromise;
     },
     async cancelActive() {
       if (autoCancelTimer) {
@@ -442,6 +478,93 @@ function createOscillatorTask({
     provenanceNotes: [
       'ulg-carrier-runtime-phase-1',
       requestsWebGpu ? 'ulg-carrier-runtime-webgpu-phase-2-requested' : 'ulg-carrier-runtime-cpu-reference'
+    ]
+  });
+}
+
+export function createSphPhaseRebuildTask(options = {}) {
+  const taskId = createId('task-ulg-sph-phase');
+  const {
+    __cacheLookup: cacheLookup = null,
+    __cachePersistence: cachePersistence = null,
+    __staticTableCache: staticTableCache = null,
+    ...demoOptions
+  } = options || {};
+  return createUlgTaskCapsule({
+    taskId,
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    taskKind: ULG_TASK_KINDS.sphPhaseRebuild,
+    outputs: [{ artifactKind: 'sph-phase-rebuild-view-state' }],
+    input: {
+      options: demoOptions,
+      cacheLookup,
+      cachePersistence,
+      staticTableCache,
+      closureRef: { uri: 'artifact://sph-phase-derived-runtime-state' }
+    },
+    method: {
+      serviceId: ULG_SERVICE_IDS.ulgRuntime,
+      taskKind: ULG_TASK_KINDS.sphPhaseRebuild,
+      backend: 'supervised-cpu-worker',
+      version: '0.5-demo'
+    },
+    resources: {
+      childWorkers: 0,
+      gpu: 'optional',
+      wasmMemoryBytes: 0,
+      gpuMemoryBytes: 1024 * 1024,
+      priority: 'background'
+    },
+    validation: {
+      mode: 'self',
+      toleranceProfile: 'sph-phase-derived-view-state'
+    },
+    provenanceNotes: [
+      'ulg-sph-phase-rebuild-worker',
+      'material-reaction-particle-view-state-offloaded-from-ui-thread',
+      'evidence-only-not-scientific-validation'
+    ]
+  });
+}
+
+export function createSphStaticTableCacheTask(options = {}) {
+  const taskId = createId('task-ulg-sph-static-cache');
+  const mode = options.mode === 'rehydrate' ? 'rehydrate' : 'update';
+  return createUlgTaskCapsule({
+    taskId,
+    serviceId: ULG_SERVICE_IDS.ulgRuntime,
+    taskKind: ULG_TASK_KINDS.sphStaticTableCache,
+    outputs: [{ artifactKind: 'sph-static-table-cache' }],
+    input: {
+      mode,
+      cacheSnapshot: options.cacheSnapshot || null,
+      tableInputs: mode === 'update' ? options.tableInputs || {} : {},
+      generatorFingerprint: options.generatorFingerprint || null,
+      closureRef: { uri: 'artifact://sph-static-table-cache-state' }
+    },
+    method: {
+      serviceId: ULG_SERVICE_IDS.ulgRuntime,
+      taskKind: ULG_TASK_KINDS.sphStaticTableCache,
+      backend: 'supervised-cpu-worker',
+      version: '0.5-demo'
+    },
+    resources: {
+      childWorkers: 0,
+      gpu: 'none',
+      wasmMemoryBytes: 0,
+      gpuMemoryBytes: 0,
+      priority: 'background'
+    },
+    validation: {
+      mode: 'self',
+      toleranceProfile: 'sph-static-cache-integrity'
+    },
+    provenanceNotes: [
+      'ulg-sph-static-table-cache-worker',
+      mode === 'rehydrate'
+        ? 'static-table-cache-rehydration-offloaded-from-ui-thread'
+        : 'static-table-cache-serialization-offloaded-from-ui-thread',
+      'evidence-only-not-scientific-validation'
     ]
   });
 }

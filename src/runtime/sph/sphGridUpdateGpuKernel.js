@@ -1,6 +1,7 @@
 import {
   MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT,
   MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT,
+  SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -20,6 +21,7 @@ export {
 };
 
 export const MLS_MPM_GPU_GRID_VELOCITY_FLOATS = MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT.length;
+export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -39,6 +41,7 @@ const DEFAULT_CFL_FACTOR = 0.6;
 const GRID_UPDATE_SCOPE = 'mls-mpm-grid-velocity-update-gravity-cfl-walls';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const EMPTY_PRESSURE_INTERFACE_FORCE_ROWS = new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS);
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -52,6 +55,13 @@ function finiteVector3(value, fallback) {
     finiteNumber(source?.[1], fallback[1]),
     finiteNumber(source?.[2], fallback[2])
   ];
+}
+
+function quadraticWeights(fx) {
+  const a = 1.5 - fx;
+  const b = fx - 1;
+  const c = fx - 0.5;
+  return [0.5 * a * a, 0.75 - b * b, 0.5 * c * c];
 }
 
 function assertP2gGridProjection(p2gGridProjection, { requireGridNodes = true } = {}) {
@@ -79,6 +89,8 @@ function outputEnvelope({
   gravityMPerS2,
   boxDimsM,
   cflFactor,
+  pressureInterfaceForceSolver = null,
+  pressureInterfaceForceApplication = null,
   readbackMode = FULL_READBACK_MODE
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
@@ -99,6 +111,16 @@ function outputEnvelope({
     gravityMPerS2: [...gravityMPerS2],
     boxDimsM: [...boxDimsM],
     cflFactor,
+    pressureInterfaceForceSolverSchema: pressureInterfaceForceSolver?.schema ?? null,
+    pressureInterfaceForceSolverStatus: pressureInterfaceForceSolver?.status ?? null,
+    pressureInterfaceForceCouplingStatus: pressureInterfaceForceSolver?.forceCouplingStatus ?? null,
+    pressureInterfaceForceApplicationStatus: pressureInterfaceForceApplication?.status ?? 'not-applied',
+    pressureInterfaceForceRowCount: pressureInterfaceForceApplication?.forceRowCount ?? 0,
+    pressureInterfaceAppliedImpulseNSeconds: pressureInterfaceForceApplication?.appliedImpulseNSeconds ?? [0, 0, 0],
+    pressureInterfaceAppliedImpulseMagnitudeNSeconds: pressureInterfaceForceApplication?.appliedImpulseMagnitudeNSeconds ?? 0,
+    pressureInterfaceAppliedImpulseSource: pressureInterfaceForceApplication?.appliedImpulseSource ?? null,
+    pressureInterfaceImpulseProofStatus: pressureInterfaceForceApplication?.impulseProofStatus ?? null,
+    pressureInterfaceForceConsumerStatus: pressureInterfaceForceApplication?.consumerStatus ?? null,
     sourceGridNodeLayout: [...MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT],
     gridNodeLayout: [...MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT],
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
@@ -119,12 +141,107 @@ function outputEnvelope({
   };
 }
 
+function pressureForceRowsFromSolver(pressureInterfaceForceSolver) {
+  if (pressureInterfaceForceSolver?.forceRowValues instanceof Float32Array) {
+    return pressureInterfaceForceSolver.forceRowValues;
+  }
+  if (pressureInterfaceForceSolver?.forceRows instanceof Float32Array) {
+    return pressureInterfaceForceSolver.forceRows;
+  }
+  return null;
+}
+
+function pressureForceRowCountFromSolver(pressureInterfaceForceSolver, rows) {
+  const explicit = Math.max(0, Math.round(finiteNumber(pressureInterfaceForceSolver?.forceRowCount, 0)));
+  if (rows instanceof Float32Array) {
+    const fromRows = Math.floor(rows.length / SPH_PRESSURE_INTERFACE_FORCE_FLOATS);
+    return explicit > 0 ? Math.min(explicit, fromRows) : fromRows;
+  }
+  return explicit;
+}
+
+function pressureInterfaceForceApplicationSummary({
+  pressureInterfaceForceSolver = null,
+  forceRowCount = 0,
+  appliedImpulseNSeconds = [0, 0, 0],
+  appliedImpulseSource = 'grid-node-distributed-impulse',
+  impulseProofStatus = 'actual-grid-node-impulse'
+} = {}) {
+  const ready = pressureInterfaceForceSolver?.status === 'pressure-interface-force-solver-ready'
+    && forceRowCount > 0;
+  const proven = ready && impulseProofStatus === 'actual-grid-node-impulse';
+  return {
+    schema: 'peercompute.ulg.mls-mpm-pressure-interface-grid-force-consumer.v0',
+    status: ready
+      ? (proven ? 'pressure-interface-grid-force-consumer-applied' : 'pressure-interface-grid-force-consumer-submitted-unverified')
+      : 'pressure-interface-grid-force-consumer-blocked',
+    consumerStatus: ready
+      ? (proven ? 'grid-momentum-impulse-consumed' : 'grid-momentum-impulse-submitted-unverified-no-full-readback')
+      : 'blocked-pressure-force-rows-unavailable',
+    forceSolverSchema: pressureInterfaceForceSolver?.schema ?? null,
+    forceSolverStatus: pressureInterfaceForceSolver?.status ?? null,
+    forceRowCount,
+    appliedImpulseNSeconds: [...appliedImpulseNSeconds],
+    appliedImpulseMagnitudeNSeconds: Math.hypot(
+      appliedImpulseNSeconds[0],
+      appliedImpulseNSeconds[1],
+      appliedImpulseNSeconds[2]
+    ),
+    appliedImpulseSource,
+    impulseProofStatus,
+    forceApplicationValidation: false,
+    scientificValidation: false,
+    sphValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function pressureInterfaceImpulseForNode({
+  nodePosition,
+  gridSpacingM,
+  dtSeconds,
+  forceRows,
+  forceRowCount
+}) {
+  if (!(forceRows instanceof Float32Array) || !(forceRowCount > 0) || !(gridSpacingM > 0) || !(dtSeconds !== 0)) {
+    return [0, 0, 0];
+  }
+  const nodeI = Math.round(nodePosition[0] / gridSpacingM);
+  const nodeJ = Math.round(nodePosition[1] / gridSpacingM);
+  const nodeK = Math.round(nodePosition[2] / gridSpacingM);
+  const impulse = [0, 0, 0];
+  for (let rowIndex = 0; rowIndex < forceRowCount; rowIndex += 1) {
+    const offset = rowIndex * SPH_PRESSURE_INTERFACE_FORCE_FLOATS;
+    const status = forceRows[offset + 15];
+    if (!(status > 0)) continue;
+    const pGrid = [
+      forceRows[offset + 4] / gridSpacingM,
+      forceRows[offset + 5] / gridSpacingM,
+      forceRows[offset + 6] / gridSpacingM
+    ];
+    const base = pGrid.map((value) => Math.floor(value - 0.5));
+    const ox = nodeI - base[0];
+    const oy = nodeJ - base[1];
+    const oz = nodeK - base[2];
+    if (ox < 0 || ox > 2 || oy < 0 || oy > 2 || oz < 0 || oz > 2) continue;
+    const wx = quadraticWeights(pGrid[0] - base[0]);
+    const wy = quadraticWeights(pGrid[1] - base[1]);
+    const wz = quadraticWeights(pGrid[2] - base[2]);
+    const weight = wx[ox] * wy[oy] * wz[oz];
+    impulse[0] += dtSeconds * weight * forceRows[offset + 8];
+    impulse[1] += dtSeconds * weight * forceRows[offset + 9];
+    impulse[2] += dtSeconds * weight * forceRows[offset + 10];
+  }
+  return impulse;
+}
+
 export function updateMlsMpmGridCpu({
   p2gGridProjection,
   dt = p2gGridProjection?.dt ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
-  cflFactor = DEFAULT_CFL_FACTOR
+  cflFactor = DEFAULT_CFL_FACTOR,
+  pressureInterfaceForceSolver = null
 } = {}) {
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -135,18 +252,35 @@ export function updateMlsMpmGridCpu({
   const vmax2 = vmax * vmax;
   const source = p2gGridProjection.gridNodes;
   const updatedGridNodes = new Float32Array(p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS);
+  const pressureForceRows = pressureForceRowsFromSolver(pressureInterfaceForceSolver);
+  const pressureForceRowCount = pressureForceRowCountFromSolver(pressureInterfaceForceSolver, pressureForceRows);
+  const appliedImpulseNSeconds = [0, 0, 0];
 
   for (let offset = 0; offset < source.length; offset += MLS_MPM_GPU_GRID_NODE_FLOATS) {
     const mass = source[offset];
     const out = offset;
     const nodePosition = [source[offset + 4], source[offset + 5], source[offset + 6]];
+    const pressureImpulse = mass > 0
+      ? pressureInterfaceImpulseForNode({
+        nodePosition,
+        gridSpacingM,
+        dtSeconds,
+        forceRows: pressureForceRows,
+        forceRowCount: pressureForceRowCount
+      })
+      : [0, 0, 0];
+    if (mass > 0) {
+      appliedImpulseNSeconds[0] += pressureImpulse[0];
+      appliedImpulseNSeconds[1] += pressureImpulse[1];
+      appliedImpulseNSeconds[2] += pressureImpulse[2];
+    }
     let velocity = [0, 0, 0];
     let status = 0;
     if (mass > 0) {
       velocity = [
-        source[offset + 1] / mass + dtSeconds * gravity[0],
-        source[offset + 2] / mass + dtSeconds * gravity[1],
-        source[offset + 3] / mass + dtSeconds * gravity[2]
+        (source[offset + 1] + pressureImpulse[0]) / mass + dtSeconds * gravity[0],
+        (source[offset + 2] + pressureImpulse[1]) / mass + dtSeconds * gravity[1],
+        (source[offset + 3] + pressureImpulse[2]) / mass + dtSeconds * gravity[2]
       ];
       const speed2 = velocity[0] ** 2 + velocity[1] ** 2 + velocity[2] ** 2;
       if (speed2 > vmax2) {
@@ -177,9 +311,17 @@ export function updateMlsMpmGridCpu({
     dt: dtSeconds,
     gravityMPerS2: gravity,
     boxDimsM: dims,
-    cflFactor: cfl
-  });
-}
+    cflFactor: cfl,
+    pressureInterfaceForceSolver,
+      pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
+        pressureInterfaceForceSolver,
+        forceRowCount: pressureForceRowCount,
+        appliedImpulseNSeconds,
+        appliedImpulseSource: 'grid-node-distributed-impulse',
+        impulseProofStatus: 'actual-grid-node-impulse'
+      })
+    });
+  }
 
 function writeStorageBuffer(device, label, data) {
   const byteLength = Math.max(4, data.byteLength);
@@ -192,7 +334,14 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function createGridUpdateParamsArray({ p2gGridProjection, dt, gravityMPerS2, boxDimsM, cflFactor }) {
+function createGridUpdateParamsArray({
+  p2gGridProjection,
+  dt,
+  gravityMPerS2,
+  boxDimsM,
+  cflFactor,
+  pressureInterfaceForceRowCount = 0
+}) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
   const gridDims = p2gGridProjection.gridDims ?? [1, 1, 1];
@@ -201,6 +350,7 @@ function createGridUpdateParamsArray({ p2gGridProjection, dt, gravityMPerS2, box
   view.setUint32(8, gridDims[1] ?? 1, true);
   view.setUint32(12, gridDims[2] ?? 1, true);
   view.setUint32(16, p2gGridProjection.gridShift ?? 1, true);
+  view.setUint32(20, pressureInterfaceForceRowCount, true);
   view.setFloat32(32, finiteNumber(p2gGridProjection.gridSpacingM, 0), true);
   view.setFloat32(36, dt, true);
   view.setFloat32(40, gravityMPerS2[0], true);
@@ -213,10 +363,25 @@ function createGridUpdateParamsArray({ p2gGridProjection, dt, gravityMPerS2, box
   return buffer;
 }
 
+function pressureInterfaceAppliedImpulseFromRows(forceRows, forceRowCount, dtSeconds) {
+  const impulse = [0, 0, 0];
+  if (!(forceRows instanceof Float32Array) || !(forceRowCount > 0) || !(dtSeconds !== 0)) return impulse;
+  for (let rowIndex = 0; rowIndex < forceRowCount; rowIndex += 1) {
+    const offset = rowIndex * SPH_PRESSURE_INTERFACE_FORCE_FLOATS;
+    if (!(forceRows[offset + 15] > 0)) continue;
+    impulse[0] += forceRows[offset + 8] * dtSeconds;
+    impulse[1] += forceRows[offset + 9] * dtSeconds;
+    impulse[2] += forceRows[offset + 10] * dtSeconds;
+  }
+  return impulse;
+}
+
 export async function runMlsMpmGridUpdateWebGpu({
   device,
   p2gGridProjection,
   p2gGridBuffer = null,
+  pressureInterfaceForceRowsBuffer = null,
+  pressureInterfaceForceSolver = null,
   dt = p2gGridProjection?.dt ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -235,7 +400,17 @@ export async function runMlsMpmGridUpdateWebGpu({
   const outputByteLength = p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const borrowedGridBuffer = p2gGridBuffer || p2gGridProjection.gridBuffer || p2gGridProjection.gpuResult?.gridBuffer || null;
   assertP2gGridProjection(p2gGridProjection, { requireGridNodes: !borrowedGridBuffer });
+  const pressureForceRows = pressureForceRowsFromSolver(pressureInterfaceForceSolver);
+  const pressureForceRowCount = pressureForceRowCountFromSolver(pressureInterfaceForceSolver, pressureForceRows);
+  const borrowedPressureForceRowsBuffer = pressureInterfaceForceRowsBuffer || null;
   const sourceGridBuffer = borrowedGridBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-grid-update-p2g-in', p2gGridProjection.gridNodes);
+  const sourcePressureForceRowsBuffer = borrowedPressureForceRowsBuffer || writeStorageBuffer(
+    device,
+    'ulg-mls-mpm-grid-update-pressure-force-rows',
+    pressureForceRows instanceof Float32Array && pressureForceRows.length >= SPH_PRESSURE_INTERFACE_FORCE_FLOATS
+      ? pressureForceRows
+      : EMPTY_PRESSURE_INTERFACE_FORCE_ROWS
+  );
   const updatedGridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-grid-update-out',
     size: Math.max(4, outputByteLength),
@@ -262,7 +437,8 @@ export async function runMlsMpmGridUpdateWebGpu({
       dt: dtSeconds,
       gravityMPerS2: gravity,
       boxDimsM: dims,
-      cflFactor: cfl
+      cflFactor: cfl,
+      pressureInterfaceForceRowCount: pressureForceRowCount
     }));
     const module = device.createShaderModule({ code: mlsMpmGridUpdateWgsl });
     const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
@@ -272,7 +448,8 @@ export async function runMlsMpmGridUpdateWebGpu({
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
-        computeBufferBinding(2, 'uniform')
+        computeBufferBinding(2, 'uniform'),
+        computeBufferBinding(3, 'read-only-storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -280,7 +457,8 @@ export async function runMlsMpmGridUpdateWebGpu({
       entries: [
         { binding: 0, resource: { buffer: sourceGridBuffer } },
         { binding: 1, resource: { buffer: updatedGridBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        { binding: 3, resource: { buffer: sourcePressureForceRowsBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -309,6 +487,18 @@ export async function runMlsMpmGridUpdateWebGpu({
       gravityMPerS2: gravity,
       boxDimsM: dims,
       cflFactor: cfl,
+      pressureInterfaceForceSolver,
+      pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
+        pressureInterfaceForceSolver,
+        forceRowCount: pressureForceRowCount,
+        appliedImpulseNSeconds: pressureInterfaceAppliedImpulseFromRows(pressureForceRows, pressureForceRowCount, dtSeconds),
+        appliedImpulseSource: noFullReadback
+          ? 'pressure-force-row-sum-unverified-no-full-readback'
+          : 'pressure-force-row-sum-unverified',
+        impulseProofStatus: noFullReadback
+          ? 'submitted-to-gpu-grid-update-no-full-readback'
+          : 'submitted-to-gpu-grid-update'
+      }),
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });
     if (retainUpdatedGridBuffer) {
@@ -320,6 +510,7 @@ export async function runMlsMpmGridUpdateWebGpu({
     return update;
   } finally {
     if (!borrowedGridBuffer) sourceGridBuffer.destroy?.();
+    if (!borrowedPressureForceRowsBuffer) sourcePressureForceRowsBuffer.destroy?.();
     if (!retainUpdatedGridBuffer || !returnedRetainedUpdatedGridBuffer) updatedGridBuffer.destroy?.();
     paramsBuffer.destroy?.();
     readBuffer?.destroy?.();
@@ -401,6 +592,16 @@ function executionFromUpdate(update, {
     gravityMPerS2: update?.gravityMPerS2 ?? [],
     boxDimsM: update?.boxDimsM ?? [],
     cflFactor: update?.cflFactor ?? 0,
+    pressureInterfaceForceSolverSchema: update?.pressureInterfaceForceSolverSchema ?? null,
+    pressureInterfaceForceSolverStatus: update?.pressureInterfaceForceSolverStatus ?? null,
+    pressureInterfaceForceCouplingStatus: update?.pressureInterfaceForceCouplingStatus ?? null,
+    pressureInterfaceForceApplicationStatus: update?.pressureInterfaceForceApplicationStatus ?? null,
+    pressureInterfaceForceRowCount: update?.pressureInterfaceForceRowCount ?? 0,
+    pressureInterfaceAppliedImpulseNSeconds: update?.pressureInterfaceAppliedImpulseNSeconds ?? [0, 0, 0],
+    pressureInterfaceAppliedImpulseMagnitudeNSeconds: update?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? 0,
+    pressureInterfaceAppliedImpulseSource: update?.pressureInterfaceAppliedImpulseSource ?? null,
+    pressureInterfaceImpulseProofStatus: update?.pressureInterfaceImpulseProofStatus ?? null,
+    pressureInterfaceForceConsumerStatus: update?.pressureInterfaceForceConsumerStatus ?? null,
     updatedGridNodes: update?.updatedGridNodes ?? new Float32Array(),
     readbackMode: update?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: update?.fullReadbackPerformed ?? true,
@@ -433,6 +634,8 @@ function watchDeviceLost(device, onDeviceLost) {
 export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   p2gGridProjection,
   p2gGridBuffer = null,
+  pressureInterfaceForceRowsBuffer = null,
+  pressureInterfaceForceSolver = null,
   dt = p2gGridProjection?.dt ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -456,7 +659,8 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         dt,
         gravityMPerS2,
         boxDimsM,
-        cflFactor
+        cflFactor,
+        pressureInterfaceForceSolver
       });
     }
     return cpuReference;
@@ -514,6 +718,8 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       device: resolvedDeviceResult.device,
       p2gGridProjection,
       p2gGridBuffer,
+      pressureInterfaceForceRowsBuffer,
+      pressureInterfaceForceSolver,
       dt,
       gravityMPerS2,
       boxDimsM,

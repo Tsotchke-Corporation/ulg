@@ -1,0 +1,183 @@
+# ICC completion oracles for ULG.
+#
+# These targets describe ULG-specific browser, resident WebGPU, material
+# closure, reaction, and handoff evidence. The current local ICC checkout may
+# not expose `completion-oracle`; this file is still the durable ULG policy
+# surface for newer ICC builds and handoff readers.
+
+oracles:
+  - name: sph-phase-demo-ready
+    aliases: [sph-demo, phase-demo, demo]
+    requires:
+      - test_evidence: true
+        severity: high
+        label: Focused SPH browser e2e is indexed and runnable
+        action: 'PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"'
+
+      - runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [resident_reset_active_grid_nodes_nonzero]
+          event_values: [PASS]
+        severity: high
+        label: Resident reset continuation keeps all substeps physically active
+        action: run_custom_browser_resident_reset_probe
+
+      - runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [h2o_visible_rendering]
+          event_values: [PASS]
+        severity: high
+        label: H2O surfaces render through the current material/optics path
+        action: verify_browser_render_state
+
+      - no_stubbed_paths:
+          - scripted_material_reaction
+          - synthetic_phase_change_only
+          - full_physics_claim_without_lower_level_evidence
+        severity: high
+        label: Demo behavior is not a one-off scripted material patch
+        action: replace_stub_or_mark_non_physics
+
+  - name: resident-hot-loop-ready
+    aliases: [hot-loop, resident-webgpu, webgpu-loop]
+    requires:
+      - runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [normal_hot_loop_readback_free]
+          event_values: [PASS]
+        severity: high
+        label: Normal resident physics/render loop avoids full state readback
+        action: move_readback_path_to_gpu
+
+      - runtime_event:
+          event_kinds: [ulg_sph_probe]
+          event_names: [webgpu_marching_cubes_active]
+          event_values: [PASS]
+        severity: high
+        label: Continuous surface generation runs through WebGPU/Three integration
+        action: implement_webgpu_marching_cubes_renderer
+
+      - runtime_event:
+          event_kinds: [ulg_perf_probe]
+          event_names: [physics_fps_above_30_on_cached_run]
+          event_values: [PASS]
+        severity: high
+        label: Cached resident physics reaches the minimum interactive performance target
+        action: profile_and_move_hot_calls_off_main_thread
+
+      - no_stubbed_paths:
+          - cpu_closure_hot_loop
+          - cpu_surface_extraction_hot_loop
+          - main_thread_long_task
+        severity: high
+        label: Expensive hot-loop tasks are not blocking UI/rendering
+        action: move_to_webgpu_or_worker
+
+  - name: material-closure-ready
+    aliases: [materials, closures, optics, eos]
+    requires:
+      - runtime_event:
+          event_kinds: [ulg_material_probe]
+          event_names: [gold_relativistic_optics_gold_colored]
+          event_values: [PASS]
+        severity: high
+        label: Gold optical response is derived and renders as gold under PBR
+        action: validate_relativistic_interband_optics
+
+      - runtime_event:
+          event_kinds: [ulg_material_probe]
+          event_names: [phase_keyed_h2o_liquid_vapor_optics]
+          event_values: [PASS]
+        severity: high
+        label: H2O liquid/ice/steam optics are phase-state keyed and not identical
+        action: implement_phase_resolved_steam_optics
+
+      - no_contract_gap:
+          - material_property_without_provenance
+          - closure_cache_without_generator_hash
+          - compound_without_lower_level_derivation
+        severity: high
+        label: Material properties resolve from lower-level derivations or valid cached closures
+        action: wire_material_resolver_manifest
+
+      - no_stubbed_paths:
+          - reference_constant_as_physics
+          - opacity_patch
+          - one_off_element_color
+        severity: high
+        label: No one-off material property patches stand in for first-principles closures
+        action: derive_or_block
+
+  - name: reaction-closure-ready
+    aliases: [reactions, chemistry]
+    requires:
+      - runtime_event:
+          event_kinds: [ulg_reaction_probe]
+          event_names: [alkali_water_family_balanced]
+          event_values: [PASS]
+        severity: high
+        label: Li/Na/K/Rb/Cs water reactions are discovered generally, not scripted one-offs
+        action: audit_reaction_discovery_against_periodic_rules
+
+      - runtime_event:
+          event_kinds: [ulg_reaction_probe]
+          event_names: [multi_product_stoichiometry_gpu]
+          event_values: [PASS]
+        severity: high
+        label: Runtime chemistry produces balanced multi-product outputs with gas byproducts
+        action: implement_gpu_multi_product_reaction_execution
+
+      - runtime_event:
+          event_kinds: [ulg_reaction_probe]
+          event_names: [gas_byproducts_increase_sealed_box_pressure]
+          event_values: [PASS]
+        severity: high
+        label: Gas products couple into sealed-box pressure and force feedback
+        action: implement_gas_cell_or_pressure_gradient_coupling
+
+      - no_stubbed_paths:
+          - scripted_reaction_pair
+          - provisional_energetics_used_as_strict_physics
+          - single_product_contact_conversion
+        severity: high
+        label: Reaction execution is general, balanced, and energetically grounded
+        action: replace_runtime_reaction_shortcuts
+
+  - name: triad-handoff-ready
+    aliases: [triad, handoff, integration]
+    requires:
+      - test_evidence: true
+        severity: high
+        label: Browser handoff and artifact summary tests are indexed and runnable
+        action: npm test
+
+      - no_contract_gap:
+          - artifact_without_test_or_trace
+          - missing_expected_contract_kind
+          - handoff_claim_without_source_artifact
+        severity: high
+        label: ULG handoff artifacts keep explicit source, contract, and test evidence
+        action: update_abi_and_handoff_summaries
+
+      - no_stubbed_paths:
+          - full_physics_validation_claim_without_evidence
+          - descriptor_only_claimed_scientific
+        severity: high
+        label: Reduced-scope handoffs remain labeled as reduced scope
+        action: preserve_validation_flags
+
+  - name: no-regression
+    aliases: [smoke, sanity]
+    requires:
+      - test_evidence: true
+        severity: high
+        label: Node unit tests are indexed and runnable
+        action: npm test
+
+      - runtime_event:
+          event_kinds: [ulg_icc]
+          event_names: [icc_index_memory_refreshed]
+          event_values: [PASS]
+        severity: low
+        label: ICC index and memory were refreshed after the latest slice
+        action: npm run icc:update

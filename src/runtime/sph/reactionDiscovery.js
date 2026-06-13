@@ -19,15 +19,23 @@
 import { rhf, _uhf as uhf } from '../electronicStructure/molecularHartreeFock.js';
 import { allElementBondLengthMeters, allElementSpeciesEnergyHa } from '../electronicStructure/allElementMolecularSolver.js';
 import { atomicMassKg, zForSymbol, symbolForZ } from '../electronicStructure/periodicTable.js';
+import { describeChemicalFormula } from '../chemistry/formula.js';
+import {
+  PROVISIONAL_ENERGETICS_STATUS,
+  commonAnionChargeMagnitude,
+  commonCationCharge,
+  discoverReactionCandidates
+} from '../chemistry/reactionCandidates.js';
 import { deriveElementProperties } from '../material/elementClosures.js';
 import { deriveCompoundClosure } from '../material/compoundClosure.js';
-import { deriveMaterialProperties } from '../material/materialDerivation.js';
+import { deriveMaterialProperties, formulaMolarMassKgPerMol, formulaUnitGeometry } from '../material/materialDerivation.js';
 import { createFirstPrinciplesMaterialClosures, createReferenceMaterialClosures } from '../material/materialClosures.js';
 import {
   MaterialFirstPrinciplesResolutionError,
   materialDerivationSummary,
   requireFirstPrinciplesMaterialProperties
 } from '../material/propertyProvenance.js';
+import { hashPayload } from '../../../ulg-gpu-abi/src/index.js';
 
 const A = 1.8897259886; // Ångström → Bohr
 const BOHR_TO_M = 5.29177210903e-11;
@@ -36,6 +44,8 @@ const AVOGADRO = 6.02214076e23;
 const BASIS_MAX_Z = 18;
 const ENERGY_MODEL_HF = 'sto-3g-rhf-uhf';
 const ENERGY_MODEL_ALL_ELEMENT = 'atomic-kohn-sham-tight-binding-v0';
+export const REACTION_DISCOVERY_CACHE_RECORD_SCHEMA = 'peercompute.ulg.reaction-discovery-cache-record.v0';
+export const REACTION_DISCOVERY_CACHE_KEY_SCHEMA = 'peercompute.ulg.reaction-discovery-cache-key.v0';
 
 const atom = (Z, x, y, z) => ({ Z, position: [x, y, z] });
 const speciesInBasis = (species) => species.atoms.every((a) => a.Z <= BASIS_MAX_Z);
@@ -66,6 +76,8 @@ const H2O = { atoms: [atom(8, 0, 0, 0), atom(1, 0.757 * A, 0, 0.587 * A), atom(1
 // the notable triplet exception handled where it matters (O2 is set explicitly above).
 const multiplicityForElectrons = (nElectrons) => (nElectrons % 2 === 1 ? 2 : 1);
 const atomMultiplicity = (Z) => multiplicityForElectrons(Z);
+const electronCountForAtomCounts = (atomCounts) => Object.entries(atomCounts)
+  .reduce((sum, [Z, count]) => sum + Number(Z) * Number(count), 0);
 
 const REFERENCE_SPECIES = {
   h2o: { elements: { 1: 2, 8: 1 }, species: H2O, role: 'water' },
@@ -76,6 +88,89 @@ const REFERENCE_SPECIES = {
 let defaultFirstPrinciplesClosureProperties = null;
 let defaultFixtureClosureProperties = null;
 const derivedMaterialPropertyCache = new Map();
+
+function normalizeMaterialKeyForCache(key) {
+  return String(key || '').trim().toLowerCase();
+}
+
+function materialPropertyCacheDigest(properties) {
+  if (!properties) return null;
+  return hashPayload({
+    formula: properties.formula || null,
+    label: properties.label || null,
+    molarMassKgPerMol: properties.molarMassKgPerMol ?? null,
+    atomsPerFormula: properties.atomsPerFormula ?? null,
+    derivation: properties.derivation || null,
+    phases: (properties.phases || []).map((phase) => ({
+      name: phase.name,
+      densityKgPerM3: phase.densityKgPerM3 ?? null,
+      bulkModulusPa: phase.bulkModulusPa ?? phase.eos?.bulkModulusPa ?? null,
+      shearModulusPa: phase.shearModulusPa ?? null,
+      cpJPerKgK: phase.cpJPerKgK ?? null,
+      debyeTemperatureK: phase.debyeTemperatureK ?? null,
+      temperatureRange: phase.temperatureRange || null
+    })),
+    transitions: (properties.transitions || []).map((transition) => ({
+      from: transition.from,
+      to: transition.to,
+      temperatureK: transition.temperatureK ?? null,
+      latentHeatJPerKg: transition.latentHeatJPerKg ?? null
+    })),
+    materialDerivation: materialDerivationSummary(properties),
+    propertyProvenance: properties.propertyProvenance || null,
+    validation: properties.validation || null
+  });
+}
+
+function materialPropertiesCacheDigest(materialProperties = {}) {
+  const entries = Object.entries(materialProperties || {})
+    .map(([material, properties]) => [
+      normalizeMaterialKeyForCache(material),
+      materialPropertyCacheDigest(properties)
+    ])
+    .sort(([a], [b]) => a.localeCompare(b));
+  return hashPayload({
+    schema: 'peercompute.ulg.material-property-provenance-digest.v0',
+    entries
+  });
+}
+
+export function createReactionDiscoveryCacheKey(keyA, keyB, options = {}) {
+  const materialPropertiesHash = options.materialProperties
+    ? materialPropertiesCacheDigest(options.materialProperties)
+    : null;
+  const pair = [normalizeMaterialKeyForCache(keyA), normalizeMaterialKeyForCache(keyB)]
+    .sort();
+  return hashPayload({
+    schema: REACTION_DISCOVERY_CACHE_KEY_SCHEMA,
+    pair,
+    materialPropertiesHash,
+    allowFixtureMaterialProperties: options.allowFixtureMaterialProperties === true,
+    allowReducedProductProperties: options.allowReducedProductProperties === true,
+    deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
+    strictEnergetics: options.strictEnergetics === true
+  });
+}
+
+function cloneDiscoveryResult(result) {
+  if (!result) return result;
+  return {
+    ...result,
+    reactions: (result.reactions || []).map((reaction) => ({ ...reaction })),
+    productClosures: { ...(result.productClosures || {}) },
+    cache: result.cache ? { ...result.cache } : null
+  };
+}
+
+function discoveryRecordHasCurrentStoichiometry(record) {
+  return (record?.result?.reactions || []).every((reaction) => (
+    !reaction?.stoichiometry
+    || (
+      Array.isArray(reaction.stoichiometry.reactants)
+      && Array.isArray(reaction.stoichiometry.products)
+    )
+  ));
+}
 
 function canonicalElementSymbol(key) {
   if (typeof key !== 'string' || key.length === 0) return null;
@@ -150,6 +245,50 @@ function reactiveWaterPhases(properties) {
   return phases.filter((phase) => phase === 'liquid' || phase === 'gas');
 }
 
+function roleForElementZ(Z, props) {
+  const anionCharge = commonAnionChargeMagnitude(Z);
+  const cationCharge = commonCationCharge(Z);
+  if (anionCharge && !cationCharge) return 'nonmetal';
+  if (cationCharge && !anionCharge) return 'metal';
+  return props?.metallicModelApplicable === true ? 'metal' : 'nonmetal';
+}
+
+function formulaSpecies(atomCounts) {
+  const geometry = formulaUnitGeometry(atomCounts);
+  return {
+    atoms: geometry,
+    multiplicity: multiplicityForElectrons(electronCountForAtomCounts(atomCounts))
+  };
+}
+
+function parsedFormulaComposition(key, properties) {
+  let formula;
+  try {
+    formula = describeChemicalFormula(key);
+  } catch {
+    return null;
+  }
+  const single = formula.elementCount === 1 ? formula.elements[0] : null;
+  if (single && single.count === 1) return null;
+  const phaseNames = properties?.phases?.map((phase) => phase.name) || [];
+  const role = single ? roleForElementZ(single.Z, deriveElementProperties(single.Z)) : 'compound';
+  const mechanical = properties ? closureMechanicalInputs(properties, role) : {
+    densityKgPerM3: 0,
+    bulkModulusPa: 0
+  };
+  return {
+    formula: formula.formula,
+    elements: formula.atomCounts,
+    species: formulaSpecies(formula.atomCounts),
+    molarMassKgPerMol: properties?.molarMassKgPerMol ?? formula.molarMassKgPerMol,
+    meltingPointK: firstTransitionTemperature(properties, 'solid', 'liquid') ?? 0,
+    reactivePhases: phaseNames,
+    role,
+    ...mechanical,
+    materialDerivation: properties ? materialDerivationSummary(properties) : null
+  };
+}
+
 /**
  * Describe a demo material as a chemical species: its element formula, the molecular species used for
  * its reactant energy, molar mass, phase boundaries used for reactant availability, and role.
@@ -161,6 +300,7 @@ export function materialComposition(key, options = {}) {
   if (ref) {
     const mechanical = closureMechanicalInputs(properties, ref.role);
     return {
+      formula: key,
       elements: ref.elements,
       species: ref.species,
       molarMassKgPerMol: properties?.molarMassKgPerMol ?? Object.entries(ref.elements).reduce((sum, [Z, count]) => sum + Number(count) * atomicMassKg(Number(Z)) * AVOGADRO, 0),
@@ -172,18 +312,22 @@ export function materialComposition(key, options = {}) {
     };
   }
 
+  const parsed = parsedFormulaComposition(key, properties);
+  if (parsed) return parsed;
+
   const symbol = canonicalElementSymbol(key);
   const Z = symbol ? zForSymbol(symbol) : null;
   if (Z == null) return null;
   const props = deriveElementProperties(Z);
   const elementProperties = properties || null;
-  const metalLike = props.condensedModelApplicable === true && (props.conductionElectronDensityPerM3 ?? 0) > 0;
-  const role = metalLike ? 'metal' : 'nonmetal';
+  const role = roleForElementZ(Z, props);
+  const metalLike = role === 'metal';
   const mechanical = properties ? closureMechanicalInputs(properties, role) : {
     densityKgPerM3: props.densityKgPerM3 ?? 0,
     bulkModulusPa: props.bulkModulusPa ?? 0
   };
   return {
+    formula: symbol,
     elements: { [Z]: 1 },
     species: { atoms: [atom(Z, 0, 0, 0)], multiplicity: atomMultiplicity(Z) },
     molarMassKgPerMol: elementProperties?.molarMassKgPerMol ?? atomicMassKg(Z) * AVOGADRO,
@@ -247,6 +391,172 @@ function reactantsFor(comps) {
   return comps.map((c) => ({ densityKgPerM3: c.densityKgPerM3 ?? 0, bulkModulusPa: c.bulkModulusPa ?? 0, molarMassKgPerMol: c.molarMassKgPerMol }));
 }
 
+function cachedProductClosureFor(productKey, options = {}) {
+  const key = normalizeMaterialKeyForCache(productKey);
+  const candidates = [
+    options.productClosures?.[productKey],
+    options.productClosures?.[key],
+    options.cachedProductClosures?.[productKey],
+    options.cachedProductClosures?.[key],
+    options.closures?.[productKey],
+    options.closures?.[key]
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => candidate?.properties);
+  if (!found) return null;
+  return {
+    ...found,
+    cacheReuse: {
+      status: 'reused-product-closure',
+      productKey,
+      source: found.provenance?.source || found.cacheStatus || 'provided-product-closure'
+    }
+  };
+}
+
+function sameAtomCounts(a, b) {
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const key of keys) {
+    if (Number(a?.[key] || 0) !== Number(b?.[key] || 0)) return false;
+  }
+  return true;
+}
+
+function speciesForReactionTerm(termSpec, ca, cb) {
+  if (sameAtomCounts(termSpec.atomCounts, ca.elements)) return ca.species;
+  if (sameAtomCounts(termSpec.atomCounts, cb.elements)) return cb.species;
+  if (sameAtomCounts(termSpec.atomCounts, { 1: 2 })) return H2;
+  if (sameAtomCounts(termSpec.atomCounts, { 8: 2 })) return O2;
+  if (sameAtomCounts(termSpec.atomCounts, { 1: 2, 8: 1 })) return H2O;
+  return formulaSpecies(termSpec.atomCounts);
+}
+
+function termEnergySumHa(terms, ca, cb, model) {
+  return terms.reduce((sum, termSpec) => (
+    sum + termSpec.coefficient * speciesEnergyHa(speciesForReactionTerm(termSpec, ca, cb), model)
+  ), 0);
+}
+
+function waterKeyForCandidate(candidate, keyA, ca, keyB, cb) {
+  if (sameAtomCounts(ca.elements, { 1: 2, 8: 1 })) return keyA;
+  if (sameAtomCounts(cb.elements, { 1: 2, 8: 1 })) return keyB;
+  return candidate.reactants.find((reactant) => sameAtomCounts(reactant.atomCounts, { 1: 2, 8: 1 }))?.formula?.toLowerCase() || 'h2o';
+}
+
+function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
+  const discovery = discoverReactionCandidates(keyA, keyB, options);
+  const candidate = discovery.candidates.find((item) => item.atomBalance?.balanced === true) || null;
+  if (!candidate) return null;
+  const primaryProduct = candidate.products.find((product) => sameAtomCounts(product.atomCounts, candidate.productAtomCounts))
+    || candidate.products[0];
+  const species = [
+    ...candidate.reactants.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb)),
+    ...candidate.products.map((termSpec) => speciesForReactionTerm(termSpec, ca, cb))
+  ];
+  const model = energyModelForSpecies(...species);
+  const largestSpeciesAtomCount = Math.max(...species.map((item) => item.atoms?.length || 0));
+  const deriveCandidateEnergy = options.deriveCandidateEnergies !== false
+    && !(model === ENERGY_MODEL_HF && largestSpeciesAtomCount > 4);
+  let dHHa;
+  try {
+    if (!deriveCandidateEnergy) throw new Error('candidate energy derivation skipped for large light-element formula');
+    dHHa = termEnergySumHa(candidate.products, ca, cb, model)
+      - termEnergySumHa(candidate.reactants, ca, cb, model);
+  } catch {
+    dHHa = null;
+  }
+  const productMolarMass = formulaMolarMassKgPerMol(candidate.productAtomCounts);
+  const derivedSpecificEnthalpyJPerKg = Number.isFinite(dHHa)
+    ? (dHHa * HARTREE_J * AVOGADRO) / (Math.max(1, primaryProduct.coefficient || 1) * productMolarMass)
+    : null;
+  const candidateSpecificEnthalpyJPerKg = candidate.energetics.specificEnthalpyJPerKgProduct;
+  const useDerivedEnergy = Number.isFinite(derivedSpecificEnthalpyJPerKg)
+    && (derivedSpecificEnthalpyJPerKg < 0 || !(candidateSpecificEnthalpyJPerKg < 0));
+  const provisionalEnergeticsStatus = useDerivedEnergy ? null : PROVISIONAL_ENERGETICS_STATUS;
+  const specificEnthalpyJPerKg = useDerivedEnergy
+    ? derivedSpecificEnthalpyJPerKg
+    : candidateSpecificEnthalpyJPerKg;
+  if (options.strictEnergetics === true && provisionalEnergeticsStatus) {
+    return {
+      dHHa: Number.isFinite(dHHa)
+        ? dHHa
+        : null,
+      productKey: candidate.productKey,
+      closure: null,
+      energyModel: useDerivedEnergy ? model : candidate.energetics.model,
+      specificEnthalpyJPerKg,
+      reactant: keyA,
+      partner: keyB,
+      blockedEnergeticsStatus: 'needs-refined-thermochemistry',
+      blockedReason: 'strict energetics rejects provisional heuristic reaction energy',
+      stoichiometry: {
+        familyId: candidate.familyId,
+        equation: candidate.equation,
+        reactants: candidate.reactants,
+        products: candidate.products,
+        atomBalance: candidate.atomBalance,
+        provisionalEnergeticsStatus,
+        rejectedDerivedEnergyHa: Number.isFinite(dHHa) && !useDerivedEnergy ? dHHa : null,
+        scientificValidation: false
+      }
+    };
+  }
+  const geometry = formulaUnitGeometry(candidate.productAtomCounts);
+  const closure = cachedProductClosureFor(candidate.productKey, options)
+    || deriveCompoundClosure({
+      key: candidate.productKey,
+      label: candidate.productFormula,
+      atomCounts: candidate.productAtomCounts,
+      geometry,
+      reactants: reactantsFor([ca, cb]),
+      allowReducedEstimates: options.allowReducedProductProperties === true
+    });
+  const waterProperties = sameAtomCounts(ca.elements, { 1: 2, 8: 1 })
+    ? propertiesForMaterial(keyA, options)
+    : propertiesForMaterial(keyB, options);
+  const waterPhases = reactiveWaterPhases(waterProperties);
+  const phaseRequirements = candidate.familyId === 'active-metal-water-hydroxide'
+    ? { [waterKeyForCandidate(candidate, keyA, ca, keyB, cb)]: waterPhases.length ? waterPhases : ['liquid', 'gas'] }
+    : null;
+  return {
+    dHHa: useDerivedEnergy
+      ? dHHa
+      : specificEnthalpyJPerKg * Math.max(1, primaryProduct.coefficient || 1) * productMolarMass / (HARTREE_J * AVOGADRO),
+    productKey: candidate.productKey,
+    closure,
+    energyModel: useDerivedEnergy ? model : candidate.energetics.model,
+    specificEnthalpyJPerKg,
+    reactant: keyA,
+    partner: keyB,
+    activationTemperatureK: candidate.familyId === 'active-metal-water-hydroxide' ? 0 : undefined,
+    activationModel: candidate.familyId === 'active-metal-water-hydroxide'
+      ? 'barrier-not-yet-derived-reacts-on-exothermic-contact-with-liquid-water'
+      : 'stoichiometric-reaction-candidate-derived-energy-pending-derived-barrier',
+    phaseRequirements,
+    stoichiometry: {
+      familyId: candidate.familyId,
+      equation: candidate.equation,
+      reactants: candidate.reactants,
+      products: candidate.products,
+      atomBalance: candidate.atomBalance,
+      provisionalEnergeticsStatus,
+      rejectedDerivedEnergyHa: Number.isFinite(dHHa) && !useDerivedEnergy ? dHHa : null,
+      scientificValidation: false
+    }
+  };
+}
+
+function derivedStoichiometryFromStrictBlocker(blocker) {
+  if (!blocker?.stoichiometry) return null;
+  return {
+    ...blocker.stoichiometry,
+    provisionalEnergeticsStatus: null,
+    replacedProvisionalEnergeticsStatus: blocker.stoichiometry.provisionalEnergeticsStatus || null,
+    energeticsStatus: 'derived-family-energy-replaced-provisional-candidate',
+    rejectedDerivedEnergyHa: blocker.stoichiometry.rejectedDerivedEnergyHa ?? null,
+    scientificValidation: false
+  };
+}
+
 // --- families ------------------------------------------------------------------------------------
 // Active metal + water → metal hydroxide + hydrogen:  M + H2O → MOH + ½ H2 (monohydroxide unit).
 function metalWaterReaction(metalKey, metalComp, waterComp, options = {}) {
@@ -263,14 +573,15 @@ function metalWaterReaction(metalKey, metalComp, waterComp, options = {}) {
   const specificEnthalpyJPerKg = (dHHa * HARTREE_J * AVOGADRO) / productMolarMass;
   const sym = symbolForZ(Z);
   const productKey = `${sym.toLowerCase()}oh`;
-  const closure = deriveCompoundClosure({
-    key: productKey,
-    label: `${sym}OH`,
-    atomCounts: { [Z]: 1, 8: 1, 1: 1 },
-    geometry,
-    reactants: reactantsFor([metalComp, waterComp]),
-    allowReducedEstimates: options.allowReducedProductProperties === true
-  });
+  const closure = cachedProductClosureFor(productKey, options)
+    || deriveCompoundClosure({
+      key: productKey,
+      label: `${sym}OH`,
+      atomCounts: { [Z]: 1, 8: 1, 1: 1 },
+      geometry,
+      reactants: reactantsFor([metalComp, waterComp]),
+      allowReducedEstimates: options.allowReducedProductProperties === true
+    });
   return {
     dHHa,
     productKey,
@@ -299,14 +610,15 @@ function metalOxygenReaction(metalKey, metalComp, oxComp, options = {}) {
   const specificEnthalpyJPerKg = (dHHa * HARTREE_J * AVOGADRO) / productMolarMass;
   const sym = symbolForZ(Z);
   const productKey = `${sym.toLowerCase()}o`;
-  const closure = deriveCompoundClosure({
-    key: productKey,
-    label: `${sym}O`,
-    atomCounts: { [Z]: 1, 8: 1 },
-    geometry,
-    reactants: reactantsFor([metalComp, oxComp]),
-    allowReducedEstimates: options.allowReducedProductProperties === true
-  });
+  const closure = cachedProductClosureFor(productKey, options)
+    || deriveCompoundClosure({
+      key: productKey,
+      label: `${sym}O`,
+      atomCounts: { [Z]: 1, 8: 1 },
+      geometry,
+      reactants: reactantsFor([metalComp, oxComp]),
+      allowReducedEstimates: options.allowReducedProductProperties === true
+    });
   return {
     dHHa,
     productKey,
@@ -344,15 +656,65 @@ function hydrogenOxygenReaction() {
  */
 const discoveryCache = new Map();
 
+export function clearReactionDiscoveryCache() {
+  discoveryCache.clear();
+}
+
+export function reactionDiscoveryCacheInfo() {
+  return {
+    schema: 'peercompute.ulg.reaction-discovery-cache-info.v0',
+    size: discoveryCache.size
+  };
+}
+
 export function discoverReactions(keyA, keyB, options = {}) {
-  // Cache per unordered pair: the HF solves are the demo's most expensive synchronous step, and the
-  // network only depends on the two material keys (run once per pair, ever).
-  const cacheKey = (options.materialProperties || options.allowFixtureMaterialProperties || options.allowReducedProductProperties)
-    ? null
-    : [keyA, keyB].sort().join('+');
-  if (discoveryCache.has(cacheKey)) return discoveryCache.get(cacheKey);
+  // Cache per unordered pair plus material/provenance digest. The HF/all-element solves are the
+  // demo's most expensive synchronous step, and the normal demo path always supplies material
+  // properties. Supplying those properties must strengthen the cache key, not disable caching.
+  const cacheKey = createReactionDiscoveryCacheKey(keyA, keyB, options);
+  const providedRecord = options.reactionDiscoveryCacheRecord || options.cachedReactionDiscoveryRecord || null;
+  if (
+    providedRecord?.schema === REACTION_DISCOVERY_CACHE_RECORD_SCHEMA
+    && providedRecord.cacheKey === cacheKey
+    && discoveryRecordHasCurrentStoichiometry(providedRecord)
+    && providedRecord.result
+  ) {
+    const fromRecord = cloneDiscoveryResult(providedRecord.result);
+    fromRecord.cache = {
+      ...(fromRecord.cache || {}),
+      schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+      cacheKey,
+      cacheStatus: 'persistent-cache-hit',
+      source: providedRecord.provenance?.source || 'provided-reaction-discovery-cache-record',
+      updatedAt: providedRecord.updatedAt || null
+    };
+    discoveryCache.set(cacheKey, cloneDiscoveryResult(fromRecord));
+    return fromRecord;
+  }
+  if (discoveryCache.has(cacheKey)) {
+    const cached = cloneDiscoveryResult(discoveryCache.get(cacheKey));
+    cached.cache = {
+      ...(cached.cache || {}),
+      cacheKey,
+      cacheStatus: 'memory-cache-hit'
+    };
+    return cached;
+  }
   const result = discoverReactionsUncached(keyA, keyB, options);
-  if (cacheKey) discoveryCache.set(cacheKey, result);
+  result.cache = {
+    schema: REACTION_DISCOVERY_CACHE_RECORD_SCHEMA,
+    cacheKey,
+    cacheStatus: 'derived-cache-miss',
+    materialPropertiesHash: options.materialProperties
+      ? materialPropertiesCacheDigest(options.materialProperties)
+      : null,
+    pair: [normalizeMaterialKeyForCache(keyA), normalizeMaterialKeyForCache(keyB)].sort(),
+    allowFixtureMaterialProperties: options.allowFixtureMaterialProperties === true,
+    allowReducedProductProperties: options.allowReducedProductProperties === true,
+    deriveCandidateEnergies: options.deriveCandidateEnergies !== false,
+    strictEnergetics: options.strictEnergetics === true
+  };
+  discoveryCache.set(cacheKey, cloneDiscoveryResult(result));
   return result;
 }
 
@@ -368,9 +730,19 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
   const pairs = [[keyA, ca, keyB, cb], [keyB, cb, keyA, ca]];
   let rx = null;
 
+  // General candidate layer: formula parsing + atom-balanced stoichiometric families. This handles
+  // arbitrary element/formula pairs such as Li/H2O, Cs/H2O, Na/Cl2, and Al/O2 without relying on the
+  // old three-compound recognizer or monoxides-only fallback. Product properties remain derived
+  // through the same material closure path; validation flags stay false until benchmarked.
+  const stoichiometricRx = stoichiometricCandidateReaction(keyA, ca, keyB, cb, options);
+  const strictEnergeticsBlocker = stoichiometricRx?.blockedEnergeticsStatus ? stoichiometricRx : null;
+  rx = strictEnergeticsBlocker ? null : stoichiometricRx;
+
   // Family 1: active metal + water.
-  for (const [kx, cx, ky, cy] of pairs) {
-    if (cx.role === 'metal' && cy.role === 'water') { rx = metalWaterReaction(kx, cx, cy, options); break; }
+  if (!rx) {
+    for (const [kx, cx, ky, cy] of pairs) {
+      if (cx.role === 'metal' && cy.role === 'water') { rx = metalWaterReaction(kx, cx, cy, options); break; }
+    }
   }
   // Family 2: fuel/metal + oxygen.
   if (!rx) {
@@ -380,9 +752,41 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     }
   }
   // Fallback: simplest combined binary molecule from the two element sets (conservative).
-  if (!rx) rx = combinatorialReaction(keyA, ca, keyB, cb, options);
+  if (!rx && !strictEnergeticsBlocker) rx = combinatorialReaction(keyA, ca, keyB, cb, options);
 
-  if (!rx) { result.note = `no reaction family or candidate found for ${keyA}+${keyB}`; return result; }
+  if (
+    rx
+    && strictEnergeticsBlocker
+    && !rx.stoichiometry
+    && rx.productKey === strictEnergeticsBlocker.productKey
+  ) {
+    rx.stoichiometry = derivedStoichiometryFromStrictBlocker(strictEnergeticsBlocker);
+  }
+
+  if (!rx) {
+    result.note = strictEnergeticsBlocker
+      ? `${keyA}+${keyB} blocked: ${strictEnergeticsBlocker.blockedReason}; ${strictEnergeticsBlocker.blockedEnergeticsStatus}`
+      : `no reaction family or candidate found for ${keyA}+${keyB}`;
+    result.blockers = strictEnergeticsBlocker ? [strictEnergeticsBlocker.blockedEnergeticsStatus] : [];
+    result.blockedReactionCandidate = strictEnergeticsBlocker ? {
+      product: strictEnergeticsBlocker.productKey,
+      energyModel: strictEnergeticsBlocker.energyModel,
+      stoichiometry: strictEnergeticsBlocker.stoichiometry,
+      reason: strictEnergeticsBlocker.blockedReason
+    } : null;
+    return result;
+  }
+  if (options.strictEnergetics === true && rx.stoichiometry?.provisionalEnergeticsStatus) {
+    result.note = `${keyA}+${keyB} blocked: strict energetics rejects provisional heuristic reaction energy; needs-refined-thermochemistry`;
+    result.blockers = ['needs-refined-thermochemistry'];
+    result.blockedReactionCandidate = {
+      product: rx.productKey,
+      energyModel: rx.energyModel,
+      stoichiometry: rx.stoichiometry,
+      reason: 'strict energetics rejects provisional heuristic reaction energy'
+    };
+    return result;
+  }
   if (!(rx.specificEnthalpyJPerKg < 0)) {
     result.note = `${keyA}+${keyB} is endothermic (ΔH=${rx.dHHa.toFixed(3)} Ha): no spontaneous reaction`;
     return result;
@@ -420,9 +824,13 @@ function discoverReactionsUncached(keyA, keyB, options = {}) {
     activationModel: rx.activationModel ?? 'reduced-thermal-mobility-proxy-pending-derived-barrier',
     phaseRequirements: rx.phaseRequirements ?? null,
     energyModel: rx.energyModel ?? ENERGY_MODEL_HF,
-    specificEnthalpyJPerKg: rx.specificEnthalpyJPerKg
+    specificEnthalpyJPerKg: rx.specificEnthalpyJPerKg,
+    stoichiometry: rx.stoichiometry ?? null
   });
-  result.note = `${keyA}+${keyB} → ${rx.productKey} (ΔH=${(rx.specificEnthalpyJPerKg / 1e6).toFixed(2)} MJ/kg, derived)`;
+  const energySource = rx.stoichiometry?.provisionalEnergeticsStatus
+    ? 'provisional candidate energy'
+    : 'derived';
+  result.note = `${keyA}+${keyB} → ${rx.productKey} (ΔH=${(rx.specificEnthalpyJPerKg / 1e6).toFixed(2)} MJ/kg, ${energySource})`;
   return result;
 }
 
@@ -450,14 +858,15 @@ function combinatorialReaction(keyA, ca, keyB, cb, options = {}) {
   const specificEnthalpyJPerKg = (dHHa * HARTREE_J * AVOGADRO) / productMolarMass;
   const label = Object.entries(counts).map(([Z, n]) => `${symbolForZ(Number(Z))}${n > 1 ? n : ''}`).join('');
   const productKey = `cmpd-${label.toLowerCase()}`;
-  const closure = deriveCompoundClosure({
-    key: productKey,
-    label,
-    atomCounts: counts,
-    geometry,
-    reactants: reactantsFor([ca, cb]),
-    allowReducedEstimates: options.allowReducedProductProperties === true
-  });
+  const closure = cachedProductClosureFor(productKey, options)
+    || deriveCompoundClosure({
+      key: productKey,
+      label,
+      atomCounts: counts,
+      geometry,
+      reactants: reactantsFor([ca, cb]),
+      allowReducedEstimates: options.allowReducedProductProperties === true
+    });
   return { dHHa, productKey, closure, energyModel: model, specificEnthalpyJPerKg, reactant: keyA, partner: keyB };
 }
 

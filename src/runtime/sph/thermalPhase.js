@@ -10,7 +10,10 @@
 // visualization (labelled), but the structure — conduction, wall flux, latent-heat plateaus — is
 // physical.
 
-import { equilibriumFromSpecificEnergy } from '../material/phaseEquilibrium.js';
+import {
+  cachedParticleEquilibriumFromSpecificEnergy,
+  stablePhaseFromSpecificEnergy
+} from '../material/phaseEquilibrium.js';
 
 const FACE_AXES = [
   { id: 'xMin', axis: 0, atMax: false },
@@ -24,7 +27,11 @@ const FACE_AXES = [
 /** Per-particle temperature + phase from current specific internal energy via the closures. */
 export function thermalState(state, materialProperties) {
   return state.particles.map((p) => {
-    const eq = equilibriumFromSpecificEnergy(materialProperties[p.material], p.specificInternalEnergyJPerKg);
+    const eq = cachedParticleEquilibriumFromSpecificEnergy(
+      materialProperties[p.material],
+      p,
+      p.specificInternalEnergyJPerKg
+    );
     return { material: p.material, temperatureK: eq.temperatureK, phase: eq.stablePhase, phaseFractions: eq.phaseFractions };
   });
 }
@@ -116,7 +123,7 @@ export function phaseMassWithSteam(state, materialProperties) {
   let waterLiquidMassKg = 0;
   let waterIceMassKg = 0;
   for (const p of state.particles) {
-    const phase = equilibriumFromSpecificEnergy(materialProperties[p.material], p.specificInternalEnergyJPerKg).stablePhase;
+    const phase = stablePhaseFromSpecificEnergy(materialProperties[p.material], p.specificInternalEnergyJPerKg);
     byMaterialPhase[p.material] = byMaterialPhase[p.material] || {};
     byMaterialPhase[p.material][phase] = (byMaterialPhase[p.material][phase] || 0) + p.massKg;
     if (p.material === 'h2o') {

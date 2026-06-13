@@ -21,6 +21,7 @@ import {
   runOpticalGpuLookupWithOptionalWebGpu,
   sampleOpticalGpuTableCpu,
   stableOpticalMaterialId,
+  stableOpticalStateId,
   uploadOpticalGpuTable
 } from '../src/runtime/material/opticalGpuBuffers.js';
 
@@ -150,6 +151,33 @@ test('optical GPU table upload writes records and spectral samples to storage bu
   assert.equal(writes[1].byteLength, table.spectralSamples.byteLength);
 });
 
+test('optical GPU table upload binds a full spectral row when descriptors have no samples', () => {
+  const table = buildOpticalGpuTable([{ material: 'unknown-material', phase: 'solid' }]);
+  const writes = [];
+  const device = {
+    createBuffer(descriptor) {
+      return { ...descriptor };
+    },
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
+      }
+    }
+  };
+
+  const buffers = uploadOpticalGpuTable(device, table);
+  assert.equal(table.spectralSampleCount, 0);
+  assert.equal(buffers.spectralSampleCount, 0);
+  assert.equal(
+    buffers.spectralSamplesBuffer.size,
+    OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+  assert.equal(
+    writes.find((write) => write.label === 'ulg-optical-spectral-samples')?.byteLength,
+    OPTICAL_GPU_SPECTRAL_SAMPLE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+  );
+});
+
 test('optical GPU lookup queries sample packed records by material and phase ids', () => {
   const table = buildOpticalGpuTable([
     { material: 'h2o', phase: 'liquid' },
@@ -171,6 +199,56 @@ test('optical GPU lookup queries sample packed records by material and phase ids
   assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS + 11], 1, 'second query should match record index 1');
   assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 10], 255, 'unknown query should return blocked status');
   assert.equal(result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 11], -1, 'unknown query should return no record index');
+  assert.equal(
+    result.outputs[OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * 2 + 15],
+    lookup.queries[OPTICAL_GPU_LOOKUP_QUERY_FLOATS * 2 + 2],
+    'unknown query should preserve requested optical state id'
+  );
+});
+
+test('optical GPU table and lookup distinguish phase-resolved optical state', () => {
+  const clearVaporState = {
+    temperatureK: 450,
+    h2oPartialPressurePa: 100,
+    pressurePa: 101325
+  };
+  const supersaturatedState = {
+    temperatureK: 300,
+    h2oPartialPressurePa: 1e6,
+    pressurePa: 1e6
+  };
+  const table = buildOpticalGpuTable([
+    { material: 'h2o', phase: 'gas', opticalState: clearVaporState },
+    { material: 'h2o', phase: 'gas', opticalState: supersaturatedState }
+  ]);
+  const lookup = buildOpticalGpuLookupQueries(table, [
+    { material: 'h2o', phase: 'gas', opticalState: supersaturatedState },
+    { material: 'h2o', phase: 'gas', opticalState: clearVaporState },
+    { material: 'h2o', phase: 'gas' }
+  ]);
+  const result = sampleOpticalGpuTableCpu(table, lookup);
+  const rows = decodeOpticalGpuLookupOutputRows(result, lookup);
+
+  assert.equal(table.recordCount, 2);
+  assert.deepEqual(
+    table.recordMetadata.map((record) => record.opticalStateId),
+    [stableOpticalStateId(clearVaporState), stableOpticalStateId(supersaturatedState)]
+  );
+  assert.notEqual(table.recordMetadata[0].opticalStateId, table.recordMetadata[1].opticalStateId);
+  assert.equal(table.recordMetadata[0].renderModel, 'molecular-vapor-transparent-spectrum');
+  assert.equal(table.recordMetadata[1].renderModel, 'molecular-condensed-droplet-scattering-pbr');
+  assert.match(table.recordMetadata[1].opticalStateKey, /h2oPartialPressurePa/);
+  assert.match(table.recordMetadata[1].opticalStateKey, /temperatureK/);
+  assert.ok(table.records[(table.recordMetadata[1].recordIndex * OPTICAL_GPU_RECORD_FLOATS) + 17] > 0);
+  assert.ok(table.records[(table.recordMetadata[1].recordIndex * OPTICAL_GPU_RECORD_FLOATS) + 20] > 0);
+  assert.equal(rows[0].recordIndex, 1);
+  assert.equal(rows[1].recordIndex, 0);
+  assert.equal(rows[2].status, 255);
+  assert.equal(rows[2].recordIndex, -1);
+  assert.ok(rows[0].scatteringCoefficientPerM > rows[1].scatteringCoefficientPerM);
+  assert.ok(rows[0].opticalDepth > rows[1].opticalDepth);
+  assert.equal(rows[0].outputOpticalStateId, stableOpticalStateId(supersaturatedState));
+  assert.equal(lookup.queries[2], stableOpticalStateId(supersaturatedState));
 });
 
 test('optical GPU lookup output rows decode draw-state fields with query metadata', () => {
@@ -183,6 +261,10 @@ test('optical GPU lookup output rows decode draw-state fields with query metadat
   assert.deepEqual(rows[0].baseColorLinear.map((value) => Number.isFinite(value)), [true, true, true]);
   assert.ok(rows[0].opacity > 0);
   assert.equal(rows[0].recordIndex, 0);
+  assert.ok(Number.isFinite(rows[0].opticalDepth));
+  assert.ok(Number.isFinite(rows[0].scatteringCoefficientPerM));
+  assert.ok(Number.isFinite(rows[0].absorptionCoefficientPerM));
+  assert.equal(rows[0].outputOpticalStateId, rows[0].opticalStateId);
   assert.equal(rows[1].phase, 'gas');
 });
 
@@ -192,8 +274,10 @@ test('optical GPU lookup output decoder rejects missing output buffers', () => {
 
 test('optical GPU lookup WGSL consumes packed vec4 rows without struct alignment drift', () => {
   assert.match(opticalLookupWgsl, /record_index \* 6u/);
-  assert.match(opticalLookupWgsl, /optical_outputs\[query_index \* 3u\]/);
+  assert.match(opticalLookupWgsl, /optical_outputs\[query_index \* 4u\]/);
   assert.match(opticalLookupWgsl, /row1\.x, row1\.y, row1\.z, row2\.z/);
+  assert.match(opticalLookupWgsl, /row5\.w == query\.z/);
+  assert.match(opticalLookupWgsl, /row5\.x, row4\.y, row4\.x, row5\.w/);
 });
 
 test('optional optical GPU lookup returns CPU reference when WebGPU is not requested', async () => {

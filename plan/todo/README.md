@@ -35,6 +35,29 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 06:09 AKDT: the first spatial gas-cell EOS
+producer contract is complete. Aggregate resident gas-species ledgers remain
+uniform sealed-box pressure only and cannot unlock local gradients. True
+spatial gas-species ledgers, including positioned product-event rows with
+support volume, can now derive local per-cell ideal-gas pressure and pressure
+gradients for pressureInterface oracle rows while StateManager/NodeKernel
+admission still blocks distributed consumption unless retained refs and the
+gas-cell import/admission contract are present. Next priority: make this
+spatial gas-cell ledger/field a retained ComputeManager/GPUHub output admitted
+through StateManager, then publish the existing gas-cell field import from that
+authoritative retained source. Keep the z-buffer/draw-order and focus-resume
+visual-trust blocker queued separately before treating captures as final
+physics evidence.
+
+Renderer blocker update, 2026-06-15 05:58 AKDT: user reports major z-buffer
+issues with draw order are still present. Keep this queued as a renderer
+visual-trust blocker independent from the current resident gas-cell pressure
+producer slice. Before visual captures are accepted as physics evidence again,
+the renderer pass must reproduce/clear transparent surface sorting,
+opaque-depth writes, container/grid overlay order, nested surface identity,
+and focus/context-resume flash/disappear behavior with close-spaced frame
+sequences plus explicit draw/depth metadata.
+
 Current routing note, 2026-06-15 05:47 AKDT: retained gas-cell buffer refs are
 now separated from pressure force-row refs in the pressureInterface worker
 publication path. `createSphPressureInterfaceStageComputeTask()` and the

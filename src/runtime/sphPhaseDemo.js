@@ -71,6 +71,7 @@ const UNIFORM_GAS_PRESSURE_FIELD_MODE = 'uniform-single-cell-sealed-gas';
 const UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION = 'lumped-sealed-box';
 const LOCAL_GAS_CELL_PRESSURE_FIELD_MODE = 'local-gas-cell-pressure-gradient';
 const LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION = 'structured-gas-cell-grid';
+const RESIDENT_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA = 'peercompute.ulg.sph-spatial-gas-species-ledger.v0';
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -672,6 +673,22 @@ function vector3From(value, fallback = [0, 0, 0]) {
   });
 }
 
+function cellDimsFrom(value, fallback = [0, 0, 0]) {
+  if (!Array.isArray(value)) return [...fallback];
+  return [0, 1, 2].map((index) => {
+    const number = Math.round(Number(value[index]) || 0);
+    return number > 0 ? number : fallback[index];
+  });
+}
+
+function gridIndexFrom(value, fallback = [0, 0, 0]) {
+  if (!Array.isArray(value)) return [...fallback];
+  return [0, 1, 2].map((index) => {
+    const number = Math.round(Number(value[index]));
+    return Number.isFinite(number) && number >= 0 ? number : fallback[index];
+  });
+}
+
 function normalizeLocalGasPressureCells(field = null) {
   if (!Array.isArray(field?.cells)) return [];
   const cells = [];
@@ -691,6 +708,200 @@ function normalizeLocalGasPressureCells(field = null) {
     });
   }
   return cells;
+}
+
+function gasCellSpeciesRows(cell = null) {
+  if (Array.isArray(cell?.species)) return cell.species;
+  if (Array.isArray(cell?.records)) return cell.records;
+  if (Array.isArray(cell?.gasSpecies)) return cell.gasSpecies;
+  if (cell?.bySpecies && typeof cell.bySpecies === 'object') return Object.values(cell.bySpecies);
+  return [];
+}
+
+function spatialGasSpeciesLedgerFromPressureSummary(pressureSummary = null) {
+  return pressureSummary?.spatialGasSpeciesLedger
+    || pressureSummary?.residentSpatialGasSpeciesLedger
+    || pressureSummary?.gasSpeciesCellLedger
+    || pressureSummary?.residentGasSpeciesCellLedger
+    || null;
+}
+
+function inferSpatialGasCellDims(ledger = null) {
+  const supplied = cellDimsFrom(ledger?.cellDims || ledger?.gridDims || ledger?.dimensions, [0, 0, 0]);
+  if (supplied.every((value) => value > 0)) return supplied;
+  const cells = Array.isArray(ledger?.cells) ? ledger.cells : [];
+  const inferred = [0, 0, 0];
+  for (const cell of cells) {
+    const gridIndex = Array.isArray(cell?.gridIndex) ? cell.gridIndex : null;
+    if (!gridIndex) continue;
+    for (let axis = 0; axis < 3; axis += 1) {
+      inferred[axis] = Math.max(inferred[axis], Math.round(Number(gridIndex[axis]) || 0) + 1);
+    }
+  }
+  return inferred.map((value) => Math.max(value, 1));
+}
+
+function deriveSpatialGasCellCenterM(cell, gridIndex, cellDims, boxDimsM) {
+  if (Array.isArray(cell?.centerM) || Array.isArray(cell?.centroidM)) {
+    return vector3From(cell.centerM || cell.centroidM);
+  }
+  return [0, 1, 2].map((axis) => {
+    const dim = Math.max(cellDims[axis], 1);
+    return ((gridIndex[axis] + 0.5) / dim) * boxDimsM[axis];
+  });
+}
+
+function deriveSpatialGasCellVolumeM3(cell, cellDims, boxDimsM) {
+  const explicit = finitePositive(cell?.volumeM3, 0);
+  if (explicit > 0) return explicit;
+  return [0, 1, 2].reduce((volume, axis) => {
+    const dim = Math.max(cellDims[axis], 1);
+    return volume * (boxDimsM[axis] / dim);
+  }, 1);
+}
+
+function pressureFromSpatialGasCellSpecies(cell, fallbackTemperatureK = 293.15) {
+  const rows = gasCellSpeciesRows(cell);
+  let moleTemperatureK = 0;
+  let moles = 0;
+  let massKg = 0;
+  for (const row of rows) {
+    const rowMoles = Number(row?.moles) || 0;
+    if (!(rowMoles > 0)) continue;
+    const temperatureK = Number.isFinite(Number(row?.temperatureK))
+      ? Number(row.temperatureK)
+      : (Number.isFinite(Number(cell?.temperatureK)) ? Number(cell.temperatureK) : fallbackTemperatureK);
+    moles += rowMoles;
+    massKg += Number(row?.massKg) || 0;
+    moleTemperatureK += rowMoles * temperatureK;
+  }
+  return { moles, massKg, moleTemperatureK, speciesCount: rows.length };
+}
+
+function gridKey(gridIndex) {
+  return gridIndex.map((value) => Math.round(Number(value) || 0)).join(',');
+}
+
+function spatialNeighborKey(gridIndex, axis, delta) {
+  const next = [...gridIndex];
+  next[axis] += delta;
+  return gridKey(next);
+}
+
+export function deriveLocalGasCellPressureFieldFromSpatialGasLedger({
+  pressureSummary = null,
+  spatialGasSpeciesLedger = null,
+  boxDimsM = null,
+  fallbackTemperatureK = 293.15,
+  source = null
+} = {}) {
+  const ledger = spatialGasSpeciesLedger || spatialGasSpeciesLedgerFromPressureSummary(pressureSummary);
+  const rawCells = Array.isArray(ledger?.cells) ? ledger.cells : [];
+  const dims = pressureBoxDimensionsM(boxDimsM || pressureSummary?.boxDimsM, pressureSummary?.boxVolumeM3);
+  if (!ledger || rawCells.length === 0 || !dims.every((value) => value > 0)) {
+    return {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+      status: 'gas-cell-pressure-field-unavailable',
+      source: source || pressureSummary?.source || 'resident-spatial-gas-species-ledger-eos',
+      spatialGasSpeciesLedgerSchema: ledger?.schema ?? null,
+      spatialGasSpeciesLedgerStatus: ledger?.status ?? null,
+      residentSpatialGasSpeciesLedgerStatus: ledger
+        ? 'blocked-spatial-gas-species-ledger-empty-or-invalid'
+        : 'blocked-resident-spatial-gas-species-ledger-required',
+      localPressureGradientReady: false,
+      localPressureGradientStatus: 'blocked-resident-spatial-gas-species-ledger-required',
+      localPressureGradientBlockers: ['resident-spatial-gas-species-ledger-required'],
+      cells: []
+    };
+  }
+  const cellDims = inferSpatialGasCellDims(ledger);
+  const cells = [];
+  for (const [index, cell] of rawCells.entries()) {
+    const gridIndex = Array.isArray(cell?.gridIndex)
+      ? gridIndexFrom(cell.gridIndex, [index, 0, 0])
+      : [index, 0, 0];
+    const volumeM3 = deriveSpatialGasCellVolumeM3(cell, cellDims, dims);
+    const species = pressureFromSpatialGasCellSpecies(cell, fallbackTemperatureK);
+    if (!(species.moles > 0) || !(volumeM3 > 0)) continue;
+    const pressurePa = species.moleTemperatureK * PHYSICAL_CONSTANTS.gasConstantJPerMolK / volumeM3;
+    if (!Number.isFinite(pressurePa) || pressurePa < 0) continue;
+    cells.push({
+      index: Number.isFinite(Number(cell?.index)) ? Number(cell.index) : index,
+      gridIndex,
+      centerM: deriveSpatialGasCellCenterM(cell, gridIndex, cellDims, dims),
+      pressurePa,
+      pressureGradientPaPerM: [0, 0, 0],
+      volumeM3,
+      moles: species.moles,
+      massKg: species.massKg,
+      speciesCount: species.speciesCount,
+      status: 'local-gas-pressure-cell-ready'
+    });
+  }
+  if (cells.length === 0) {
+    return {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+      status: 'gas-cell-pressure-field-unavailable',
+      source: source || pressureSummary?.source || 'resident-spatial-gas-species-ledger-eos',
+      spatialGasSpeciesLedgerSchema: ledger?.schema ?? RESIDENT_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+      spatialGasSpeciesLedgerStatus: ledger?.status ?? null,
+      residentSpatialGasSpeciesLedgerStatus: 'blocked-spatial-gas-species-ledger-has-no-eos-ready-cells',
+      localPressureGradientReady: false,
+      localPressureGradientStatus: 'blocked-spatial-gas-species-ledger-has-no-eos-ready-cells',
+      localPressureGradientBlockers: ['spatial-gas-species-ledger-has-no-eos-ready-cells'],
+      cells: []
+    };
+  }
+  const byGrid = new Map(cells.map((cell) => [gridKey(cell.gridIndex), cell]));
+  for (const cell of cells) {
+    const gradient = [0, 0, 0];
+    for (let axis = 0; axis < 3; axis += 1) {
+      const plus = byGrid.get(spatialNeighborKey(cell.gridIndex, axis, 1));
+      const minus = byGrid.get(spatialNeighborKey(cell.gridIndex, axis, -1));
+      if (plus && minus) {
+        const distanceM = plus.centerM[axis] - minus.centerM[axis];
+        gradient[axis] = distanceM !== 0 ? (plus.pressurePa - minus.pressurePa) / distanceM : 0;
+      } else if (plus) {
+        const distanceM = plus.centerM[axis] - cell.centerM[axis];
+        gradient[axis] = distanceM !== 0 ? (plus.pressurePa - cell.pressurePa) / distanceM : 0;
+      } else if (minus) {
+        const distanceM = cell.centerM[axis] - minus.centerM[axis];
+        gradient[axis] = distanceM !== 0 ? (cell.pressurePa - minus.pressurePa) / distanceM : 0;
+      }
+    }
+    cell.pressureGradientPaPerM = gradient;
+  }
+  const fieldGradient = cells.reduce((sum, cell) => [
+    sum[0] + cell.pressureGradientPaPerM[0],
+    sum[1] + cell.pressureGradientPaPerM[1],
+    sum[2] + cell.pressureGradientPaPerM[2]
+  ], [0, 0, 0]).map((value) => value / cells.length);
+  return {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+    status: 'gas-cell-pressure-field-ready',
+    source: source || 'resident-spatial-gas-species-ledger-eos',
+    spatialGasSpeciesLedgerSchema: ledger.schema || RESIDENT_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+    spatialGasSpeciesLedgerStatus: ledger.status || 'spatial-gas-species-ledger-ready',
+    residentSpatialGasSpeciesLedgerStatus: 'resident-spatial-gas-species-ledger-eos-ready',
+    eosPressureClosure: 'ideal-gas-law-per-cell',
+    pressureFieldMode: LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
+    pressureFieldResolution: LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
+    cellDims,
+    cellCount: cells.length,
+    cells,
+    pressureGradientPaPerM: fieldGradient,
+    gradientStatus: 'local-pressure-gradient-field-ready',
+    localPressureGradientSchema: ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
+    localPressureGradientReady: true,
+    localPressureGradientStatus: 'local-pressure-gradient-field-ready',
+    localPressureGradientBlockers: [],
+    localPressureGradientForceCouplingStatus: 'local-pressure-gradient-force-coupling-ready',
+    localPressureGradientValidation: true,
+    pressureFieldValidation: true,
+    gasValidation: ledger.gasValidation === true,
+    scientificValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 function pressureAtInterfaceCentroid({
@@ -774,22 +985,34 @@ export function gasPressureCellFieldSummary({
 } = {}) {
   const totalPressurePa = Number(pressureSummary?.totalPressurePa);
   const suppliedField = pressureSummary?.gasCellField || pressureSummary?.localGasCellField || null;
-  const localCells = normalizeLocalGasPressureCells(suppliedField);
+  const suppliedLocalReady = suppliedField?.localPressureGradientReady === true;
+  const spatialField = suppliedLocalReady
+    ? null
+    : deriveLocalGasCellPressureFieldFromSpatialGasLedger({
+        pressureSummary,
+        boxDimsM: boxDimsM || pressureSummary?.boxDimsM,
+        source: 'resident-spatial-gas-species-ledger-eos'
+      });
+  const effectiveField = suppliedLocalReady ? suppliedField : (
+    spatialField?.localPressureGradientReady === true ? spatialField : suppliedField
+  );
+  const localCells = normalizeLocalGasPressureCells(effectiveField);
   const dims = pressureBoxDimensionsM(boxDimsM || pressureSummary?.boxDimsM, pressureSummary?.boxVolumeM3);
   const usable = Number.isFinite(totalPressurePa) && dims.every((value) => value > 0);
   const localGradientReady = usable
     && localCells.length > 0
-    && suppliedField?.localPressureGradientReady === true;
+    && effectiveField?.localPressureGradientReady === true;
   const pressureGaugePa = usable ? totalPressurePa - finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
+  const spatialLedger = spatialGasSpeciesLedgerFromPressureSummary(pressureSummary);
   return {
     schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
     status: usable ? 'gas-cell-pressure-field-ready' : 'gas-cell-pressure-field-unavailable',
-    source: source || pressureSummary?.source || 'gas-pressure-summary',
+    source: source || (localGradientReady && spatialField?.source) || pressureSummary?.source || 'gas-pressure-summary',
     totalPressurePa: Number.isFinite(totalPressurePa) ? totalPressurePa : null,
     pressureGaugePa,
     boxDimsM: dims,
-    cellDims: localGradientReady && Array.isArray(suppliedField?.cellDims)
-      ? suppliedField.cellDims.map((value) => Math.max(0, Math.round(Number(value) || 0))).slice(0, 3)
+    cellDims: localGradientReady && Array.isArray(effectiveField?.cellDims)
+      ? effectiveField.cellDims.map((value) => Math.max(0, Math.round(Number(value) || 0))).slice(0, 3)
       : (usable ? [1, 1, 1] : [0, 0, 0]),
     cellCount: localGradientReady ? localCells.length : (usable ? 1 : 0),
     cells: localGradientReady ? localCells : [],
@@ -803,7 +1026,7 @@ export function gasPressureCellFieldSummary({
     uniformPressurePa: Number.isFinite(totalPressurePa) ? totalPressurePa : null,
     uniformPressureGaugePa: pressureGaugePa,
     pressureGradientPaPerM: localGradientReady
-      ? vector3From(suppliedField?.pressureGradientPaPerM)
+      ? vector3From(effectiveField?.pressureGradientPaPerM)
       : [0, 0, 0],
     gradientStatus: localGradientReady
       ? 'local-pressure-gradient-field-ready'
@@ -828,6 +1051,16 @@ export function gasPressureCellFieldSummary({
       ? 'blocked-material-surface-normals-not-resolved'
       : 'blocked-gas-pressure-field-unavailable',
     localPressureGradientValidation: localGradientReady,
+    spatialGasSpeciesLedgerSchema: spatialLedger?.schema ?? null,
+    spatialGasSpeciesLedgerStatus: spatialLedger?.status ?? null,
+    residentSpatialGasSpeciesLedgerStatus: localGradientReady && spatialField?.residentSpatialGasSpeciesLedgerStatus
+      ? spatialField.residentSpatialGasSpeciesLedgerStatus
+      : (spatialLedger
+          ? (spatialField?.residentSpatialGasSpeciesLedgerStatus || 'blocked-spatial-gas-species-ledger-empty-or-invalid')
+          : 'blocked-resident-spatial-gas-species-ledger-required'),
+    eosPressureClosure: localGradientReady && spatialField?.eosPressureClosure
+      ? spatialField.eosPressureClosure
+      : null,
     residentGasCellGradientCouplingValidation: false,
     pressureFieldValidation: localGradientReady,
     forceCouplingValidation: false,
@@ -1282,6 +1515,7 @@ function finalizeGasPressureSummary({
   fullParticleReadbackPerformed = true,
   baselineSummary = null,
   residentLedger = null,
+  spatialGasSpeciesLedger = null,
   externalPressurePa = PHYSICAL_CONSTANTS.standardAtmospherePa
 }) {
   let totalPressurePa = 0;
@@ -1310,6 +1544,12 @@ function finalizeGasPressureSummary({
     boxVolumeM3,
     boxDimsM: pressureBoxDimensionsM(boxDimsM, boxVolumeM3),
     bySpecies,
+    spatialGasSpeciesLedger: spatialGasSpeciesLedger || null,
+    spatialGasSpeciesLedgerSchema: spatialGasSpeciesLedger?.schema ?? null,
+    spatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger?.status ?? null,
+    residentSpatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger?.status
+      ? 'resident-spatial-gas-species-ledger-available'
+      : 'blocked-resident-spatial-gas-species-ledger-required',
     baselineSummaryStatus: baselineSummary?.status ?? null,
     residentLedgerStatus: residentLedger?.status ?? null,
     strictReactionGate: residentLedger?.strictReactionGate ?? null,
@@ -1369,6 +1609,8 @@ function residentGasRowsFromProductEvents(reactionSummary, reactionTable) {
       visibleMassKg: Number(record.visibleMassKg) || 0,
       unplacedMassKg: Number(record.unplacedMassKg) || 0,
       temperatureK: Number(record.temperatureK) || null,
+      positionM: Array.isArray(record.positionM) ? vector3From(record.positionM) : null,
+      supportVolumeM3: finitePositive(record.supportVolumeM3, 0),
       productTermIndex: record.productTermIndex,
       source: 'product-events'
     }));
@@ -1398,6 +1640,97 @@ function residentGasRowsFromProductInventory(reactionSummary, reactionTable) {
       productTermIndex: record.productTermIndex,
       source: 'product-inventory'
     }));
+}
+
+function spatialGasSpeciesLedgerFromProductEventRows(productEventGasRows = [], {
+  boxDimsM = null,
+  source = 'gpu-resident-reaction-product-events'
+} = {}) {
+  const dims = pressureBoxDimensionsM(boxDimsM, null);
+  if (!dims.every((value) => value > 0)) return null;
+  const rows = productEventGasRows.filter((row) => (
+    Array.isArray(row.positionM)
+    && row.positionM.length === 3
+    && row.positionM.every((value) => Number.isFinite(Number(value)))
+    && finitePositive(row.supportVolumeM3, 0) > 0
+    && (Number(row.moles) || 0) > 0
+  ));
+  if (!rows.length) return null;
+  const meanSupportVolumeM3 = rows.reduce((sum, row) => sum + finitePositive(row.supportVolumeM3, 0), 0) / rows.length;
+  const supportEdgeM = Math.cbrt(Math.max(meanSupportVolumeM3, 1e-12));
+  const cellDims = dims.map((dim) => Math.max(1, Math.ceil(dim / supportEdgeM)));
+  const buckets = new Map();
+  for (const row of rows) {
+    const position = vector3From(row.positionM);
+    const gridIndex = [0, 1, 2].map((axis) => {
+      const normalized = dims[axis] > 0 ? position[axis] / dims[axis] : 0;
+      return Math.max(0, Math.min(cellDims[axis] - 1, Math.floor(normalized * cellDims[axis])));
+    });
+    const key = gridKey(gridIndex);
+    const bucket = buckets.get(key) || {
+      index: buckets.size,
+      gridIndex,
+      weightedPositionM: [0, 0, 0],
+      weightMoles: 0,
+      volumeM3: 0,
+      bySpecies: {},
+      sourceEventCount: 0
+    };
+    const moles = Number(row.moles) || 0;
+    bucket.weightMoles += moles;
+    bucket.volumeM3 += finitePositive(row.supportVolumeM3, 0);
+    bucket.weightedPositionM = bucket.weightedPositionM.map((value, axis) => value + position[axis] * moles);
+    const material = String(row.material || Math.round(row.materialId || 0)).toLowerCase();
+    const species = bucket.bySpecies[material] || (bucket.bySpecies[material] = {
+      material,
+      materialId: row.materialId ?? null,
+      massKg: 0,
+      moles: 0,
+      temperatureMoleK: 0,
+      eventCount: 0
+    });
+    species.massKg += Number(row.massKg) || 0;
+    species.moles += moles;
+    species.temperatureMoleK += moles * (Number(row.temperatureK) || 293.15);
+    species.eventCount += 1;
+    bucket.sourceEventCount += 1;
+    buckets.set(key, bucket);
+  }
+  const cells = [...buckets.values()].map((bucket) => ({
+    index: bucket.index,
+    gridIndex: bucket.gridIndex,
+    centerM: bucket.weightMoles > 0
+      ? bucket.weightedPositionM.map((value) => value / bucket.weightMoles)
+      : deriveSpatialGasCellCenterM({}, bucket.gridIndex, cellDims, dims),
+    volumeM3: bucket.volumeM3,
+    sourceEventCount: bucket.sourceEventCount,
+    bySpecies: Object.fromEntries(Object.entries(bucket.bySpecies).map(([material, row]) => [
+      material,
+      {
+        material,
+        materialId: row.materialId,
+        massKg: row.massKg,
+        moles: row.moles,
+        temperatureK: row.moles > 0 ? row.temperatureMoleK / row.moles : 293.15,
+        eventCount: row.eventCount
+      }
+    ]))
+  }));
+  if (!cells.length) return null;
+  return {
+    schema: RESIDENT_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+    status: 'spatial-gas-species-ledger-ready',
+    source,
+    cellDims,
+    cellCount: cells.length,
+    cells,
+    sourceEventRowCount: rows.length,
+    pressureClosure: 'ideal-gas-law-per-cell',
+    spatialGasSpeciesLedgerValidation: false,
+    scientificValidation: false,
+    gasValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export function gasPressureSummaryFromResidentReaction({
@@ -1514,6 +1847,12 @@ export function gasPressureSummaryFromResidentReaction({
     const source = productEventGasRows.length > 0
       ? 'gpu-resident-reaction-product-events'
       : 'gpu-resident-reaction-product-inventory';
+    const spatialGasSpeciesLedger = productEventGasRows.length > 0
+      ? spatialGasSpeciesLedgerFromProductEventRows(productEventGasRows, {
+          boxDimsM: baselineSummary?.boxDimsM || null,
+          source: 'gpu-resident-reaction-product-event-spatial-ledger'
+        })
+      : null;
     return {
       ...finalizeGasPressureSummary({
         species,
@@ -1525,7 +1864,8 @@ export function gasPressureSummaryFromResidentReaction({
         source,
         fullParticleReadbackPerformed: false,
         baselineSummary,
-        residentLedger: reactionSummary
+        residentLedger: reactionSummary,
+        spatialGasSpeciesLedger
       }),
       residentProductGasSource: source,
       residentProductGasRowCount: productGasRows.length,
@@ -1536,9 +1876,12 @@ export function gasPressureSummaryFromResidentReaction({
         moles: row.moles,
         visibleMassKg: row.visibleMassKg,
         unplacedMassKg: row.unplacedMassKg,
+        positionM: row.positionM,
+        supportVolumeM3: row.supportVolumeM3,
         productTermIndex: row.productTermIndex,
         source: row.source
       })),
+      residentSpatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger?.status ?? 'blocked-resident-spatial-gas-species-ledger-required',
       residentLedgerStatus: reactionSummary.status,
       residentLedgerGasProductMassKg: reactionSummary.ledgerGasProductMassKg ?? null,
       residentLedgerUnplacedGasProductMassKg: reactionSummary.ledgerUnplacedGasProductMassKg ?? null

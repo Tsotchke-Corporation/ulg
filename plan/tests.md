@@ -1,5 +1,43 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Spatial Gas-Cell EOS Producer
+
+The current slice prevents aggregate resident gas ledgers from being mistaken
+for local pressure-gradient data and adds the first real spatial gas-cell EOS
+producer contract. Spatial gas-species ledgers can derive per-cell ideal-gas
+pressure and nearest-neighbor pressure gradients; positioned gas product-event
+rows with actual support volume can produce that spatial ledger. Distributed
+consumption remains behind the existing gas-cell field admission/import and
+retained-ref gates.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js` and
+  `node --check tests/sphPhaseDemo.test.mjs` passed.
+- Gas/pressure coverage:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "gas pressure|spatial gas|sealed gas|positioned gas"`
+  passed `29/29`.
+- Pressure stage coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|local gas-cell|pressure interface stage compute task can produce force rows"`
+  passed `43/43`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface|resident pass-DAG task runs through real PeerCompute GPU lane authority"`
+  passed `14/14`.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-spatial-gas-cell-eos-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-spatial-gas-cell-eos-producer-20260615`.
+  Manual inspection found the frames nonblank and bounded. MLS-MPM remains
+  fragmented, and CPU SPH liquid/solid still show the known stacked/blob shape.
+
 ## Current Focused Result - 2026-06-15 Pressure Gas-Cell Retained Ref Wiring
 
 The current slice fixes retained-buffer evidence for local gas-cell pressure

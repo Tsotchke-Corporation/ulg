@@ -56,6 +56,14 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Current Diagnosis
 
+- 2026-06-15 05:58 AKDT update: user reports major z-buffer issues with draw
+  order are still present. Keep this as an open renderer visual-trust blocker,
+  separate from the active pressure/gas-cell residency work. Visual acceptance
+  must reproduce or clear transparent sorting, opaque depth writes,
+  container/grid overlay ordering, nested surface identity, and
+  focus/context-resume flashing/disappearing through close-spaced frame
+  sequences plus explicit draw/depth metadata before screenshots or GIFs are
+  treated as reliable physics evidence.
 - 2026-06-15 01:57 AKDT update: user again reports major z-buffer/draw-order
   issues in the live renderer. Keep this ordered after the current
   pressure/residency copy-reduction slice, but before treating visual captures

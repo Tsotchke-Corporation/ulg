@@ -23189,3 +23189,121 @@ Open:
   behavior blockers.
 - Phone focus flash/disappear and remaining z-buffer/draw-order problems remain
   open renderer visual-correctness blockers.
+
+## 2026-06-15 05:58 AKDT - Todo status and renderer draw-order note
+
+Prompt context:
+
+- User reported that there are still major z-buffer issues with draw order and
+  asked that it be noted for later, then asked for current todo status.
+
+Actions:
+
+- Reviewed `../AGENTS.md`, `plan/plan.md`, `plan/todo/README.md`,
+  `plan/implementation-status.md`, and
+  `plan/todo/physics-behavior-regression-plan.md`.
+- Added a fresh 2026-06-15 05:58 AKDT renderer blocker note to the active todo
+  index and physics behavior regression plan.
+
+Status:
+
+- Current top implementation priority remains the resident local gas-cell
+  pressure-gradient producer from EOS/species/material state, published and
+  admitted through NodeKernel/StateManager/GPUHub.
+- Open visual trust blocker: z-buffer/draw-order, nested surface identity, and
+  focus/context-resume flash/disappear must be reproduced or cleared before
+  visual captures are treated as final physics evidence.
+- Open physics blockers remain long-horizon liquid settling/free-surface
+  quality, CPU SPH liquid stacked/blob behavior, ice/solid rigidity in mounted
+  routes, volume pulsation/blinking, and MLS-MPM fragmentation.
+
+## 2026-06-15 06:09 AKDT - Spatial gas-cell EOS producer contract
+
+Prompt context:
+
+- Continued the active goal after the user asked to stabilize ULG physics,
+  keep dense visual validation, and keep the ComputeManager/NodeKernel
+  architecture aligned. The fresh z-buffer/draw-order note from 05:58 AKDT
+  remained in the docs as a queued visual-trust blocker while this slice stayed
+  on the pressure/gas-cell residency path.
+
+Implemented:
+
+- Added `deriveLocalGasCellPressureFieldFromSpatialGasLedger()` in
+  `src/runtime/sphPhaseDemo.js`.
+- Kept aggregate resident gas-species ledgers on the uniform sealed-box
+  pressure path. They now expose
+  `blocked-resident-spatial-gas-species-ledger-required` rather than
+  fabricating local pressure gradients.
+- Added spatial gas-species ledger normalization for true per-cell gas state.
+  The EOS path derives per-cell ideal-gas pressure from moles, temperature, and
+  cell volume, then computes nearest-neighbor pressure gradients by grid
+  adjacency.
+- Added a first resident producer source from positioned gas product-event
+  rows. Product events only produce a
+  `peercompute.ulg.sph-spatial-gas-species-ledger.v0` when gas rows carry
+  finite `positionM`, positive `supportVolumeM3`, and positive moles.
+- Preserved the existing pressureInterface authority gates: local-gradient
+  pressure rows can be computed as oracle/stage evidence, but Worker
+  publication/grid consumption remain blocked without the admitted gas-cell
+  field/import descriptor and retained refs.
+- Added focused tests for aggregate-vs-spatial gas ledgers, direct spatial EOS
+  derivation, gas pressure feedback consumption of spatial gradients, and
+  positioned product-event spatial ledger production.
+- Added `plan/done/spatial-gas-cell-eos-producer-2026-06-15.md` and updated
+  `plan/plan.md`, `plan/todo/README.md`, `plan/implementation-status.md`, and
+  `plan/tests.md`.
+
+Files touched:
+
+- `src/runtime/sphPhaseDemo.js`
+- `tests/sphPhaseDemo.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/spatial-gas-cell-eos-producer-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "gas pressure|spatial gas|sealed gas|positioned gas"`
+  reported `29/29`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|local gas-cell|pressure interface stage compute task can produce force rows"`
+  reported `43/43`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface|resident pass-DAG task runs through real PeerCompute GPU lane authority"`
+  reported `14/14`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-spatial-gas-cell-eos-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-spatial-gas-cell-eos-producer-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` final frame was nonblank and bounded but still
+    visibly fragmented.
+  - `liquid-liquid-h2o-cpu-sph` final frame was nonblank and bounded but still
+    showed the known stacked/blob shape.
+  - `solid-h2o-cpu-sph` final frame was nonblank and bounded but still showed
+    the known stacked/blob shape.
+
+Open:
+
+- The spatial gas-cell ledger and derived pressure field still need to become
+  retained ComputeManager/GPUHub state admitted through NodeKernel/
+  StateManager before distributed consumption.
+- The existing host-published gas-cell import path needs to consume that
+  admitted retained source rather than caller-provided snapshots.
+- Long-horizon liquid settling, CPU SPH liquid quality, ice/solid rigidity in
+  mounted routes, volume pulsation/blinking, MLS-MPM fragmentation, phone
+  focus flash/disappear, and z-buffer/draw-order remain open blockers.

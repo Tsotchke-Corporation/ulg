@@ -2,6 +2,28 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 06:09 AKDT: the first spatial gas-cell EOS
+producer contract is in place. Aggregate resident gas-species ledgers still
+update only the uniform sealed-box pressure and explicitly report
+`blocked-resident-spatial-gas-species-ledger-required`; they cannot fabricate
+local pressure gradients. A new
+`deriveLocalGasCellPressureFieldFromSpatialGasLedger()` path derives per-cell
+ideal-gas pressure and nearest-neighbor gradients from a true spatial
+gas-species ledger, and positioned gas product-event rows with actual
+`positionM` plus `supportVolumeM3` now produce a
+`peercompute.ulg.sph-spatial-gas-species-ledger.v0` source for that EOS path.
+PressureInterface admission gates remain intact: local-gradient oracle rows
+can be computed, but Worker publication/grid consumption still require the
+admitted gas-cell field/import path and retained refs. Validation passed
+focused gas/pressure coverage, pressure stage coverage, PeerCompute
+integration, physics atomics, the browser authority-host gate, and visual
+matrix `codex-spatial-gas-cell-eos-producer-20260615` `3/3` with inspected
+frames. The frames are nonblank and bounded, but MLS-MPM fragmentation and CPU
+SPH stacked/blob behavior remain open physics-quality blockers. Next target:
+publish/admit the spatial gas-cell ledger/field as retained ComputeManager/
+GPUHub state through NodeKernel/StateManager, then feed it through the existing
+host-published gas-cell import path without caller fabrication.
+
 Current checkpoint, 2026-06-15 05:47 AKDT: pressureInterface retained gas-cell
 buffer refs are now classified and declared separately from pressure force-row
 refs. The pressureInterface stage task adds

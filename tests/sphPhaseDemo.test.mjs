@@ -4,6 +4,7 @@ import {
   buildSphPhaseDemoState,
   createSphPhaseDemo,
   gasPressureFeedbackSummary,
+  deriveLocalGasCellPressureFieldFromSpatialGasLedger,
   gasPressureInterfaceForcePreview,
   gasPressureInterfaceForceSolver,
   gasPressureInterfaceCouplingSummary,
@@ -20,6 +21,13 @@ import { createSphPhaseViewState } from '../src/runtime/sphPhaseViewState.js';
 import { createDerivedMaterialClosure } from '../src/runtime/material/materialDerivation.js';
 import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
+
+function near(actual, expected, tolerance = 1e-6) {
+  assert.ok(
+    Math.abs(actual - expected) <= tolerance,
+    `expected ${actual} to be within ${tolerance} of ${expected}`
+  );
+}
 
 test('demo default builds with fully derived material closures', () => {
   const demo = buildSphPhaseDemoState();
@@ -469,6 +477,144 @@ test('resident reaction gas pressure prefers merged resident product-mass gas le
   assert.equal(pressure.bySpecies.h2.moles, 3);
   assert.equal(pressure.bySpecies.o2.moles, 1);
   assert.ok(pressure.totalPressurePa > baseline.totalPressurePa);
+  assert.equal(pressure.pressureFeedback.gasCellField.localPressureGradientReady, false);
+  assert.equal(
+    pressure.pressureFeedback.gasCellField.residentSpatialGasSpeciesLedgerStatus,
+    'blocked-resident-spatial-gas-species-ledger-required'
+  );
+  assert.ok(
+    pressure.pressureFeedback.gasCellField.localPressureGradientBlockers.includes(
+      'resident-gas-cell-eos-gradient-not-derived'
+    )
+  );
+});
+
+test('spatial gas species ledger derives local EOS gas-cell pressure gradients', () => {
+  const gasR = 8.314462618;
+  const volumeM3 = 4;
+  const temperatureK = 300;
+  const molesForPressure = (pressurePa) => pressurePa * volumeM3 / (gasR * temperatureK);
+  const field = deriveLocalGasCellPressureFieldFromSpatialGasLedger({
+    pressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'synthetic-pressure',
+      totalPressurePa: 150000,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      spatialGasSpeciesLedger: {
+        schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+        status: 'spatial-gas-species-ledger-ready',
+        cellDims: [2, 1, 1],
+        cells: [
+          {
+            gridIndex: [0, 0, 0],
+            centerM: [0.5, 1, 1],
+            volumeM3,
+            species: [
+              { material: 'h2', materialId: 1, moles: molesForPressure(100000), temperatureK }
+            ]
+          },
+          {
+            gridIndex: [1, 0, 0],
+            centerM: [1.5, 1, 1],
+            volumeM3,
+            species: [
+              { material: 'h2', materialId: 1, moles: molesForPressure(200000), temperatureK }
+            ]
+          }
+        ]
+      }
+    }
+  });
+
+  assert.equal(field.status, 'gas-cell-pressure-field-ready');
+  assert.equal(field.source, 'resident-spatial-gas-species-ledger-eos');
+  assert.equal(field.eosPressureClosure, 'ideal-gas-law-per-cell');
+  assert.equal(field.localPressureGradientReady, true);
+  assert.equal(field.residentSpatialGasSpeciesLedgerStatus, 'resident-spatial-gas-species-ledger-eos-ready');
+  assert.deepEqual(field.cellDims, [2, 1, 1]);
+  assert.equal(field.cellCount, 2);
+  near(field.cells[0].pressurePa, 100000, 1e-6);
+  near(field.cells[1].pressurePa, 200000, 1e-6);
+  near(field.cells[0].pressureGradientPaPerM[0], 100000, 1e-6);
+  near(field.cells[1].pressureGradientPaPerM[0], 100000, 1e-6);
+  near(field.pressureGradientPaPerM[0], 100000, 1e-6);
+});
+
+test('gas pressure feedback consumes spatial gas-cell EOS gradients without aggregate fabrication', () => {
+  const gasR = 8.314462618;
+  const volumeM3 = 4;
+  const temperatureK = 300;
+  const molesForPressure = (pressurePa) => pressurePa * volumeM3 / (gasR * temperatureK);
+  const pressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'synthetic-pressure',
+    totalPressurePa: 150000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {
+      h2: {
+        material: 'h2',
+        moles: molesForPressure(300000),
+        temperatureK,
+        partialPressurePa: 150000
+      }
+    },
+    spatialGasSpeciesLedger: {
+      schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+      status: 'spatial-gas-species-ledger-ready',
+      cellDims: [2, 1, 1],
+      cells: [
+        {
+          gridIndex: [0, 0, 0],
+          centerM: [0.5, 1, 1],
+          volumeM3,
+          species: [{ material: 'h2', moles: molesForPressure(100000), temperatureK }]
+        },
+        {
+          gridIndex: [1, 0, 0],
+          centerM: [1.5, 1, 1],
+          volumeM3,
+          species: [{ material: 'h2', moles: molesForPressure(200000), temperatureK }]
+        }
+      ]
+    }
+  };
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 1,
+    elementCount: 1,
+    elements: [
+      {
+        surfaceIndex: 0,
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        centroidM: [0.6, 1, 1],
+        areaM2: 1,
+        normal: [1, 0, 0],
+        normalAreaVectorM2: [1, 0, 0],
+        status: 'interface-element-ready'
+      }
+    ]
+  };
+  const feedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const solver = gasPressureInterfaceForceSolver({
+    pressureFeedback: feedback,
+    materialInterfaceField,
+    pressureInterfaceCoupling: feedback.pressureInterfaceCoupling
+  });
+
+  assert.equal(feedback.gasCellField.localPressureGradientReady, true);
+  assert.equal(feedback.gasCellField.source, 'resident-spatial-gas-species-ledger-eos');
+  assert.equal(feedback.gasCellField.residentSpatialGasSpeciesLedgerStatus, 'resident-spatial-gas-species-ledger-eos-ready');
+  assert.equal(solver.forceResolution, 'local-gradient-interface-traction');
+  assert.equal(solver.forceRows[0].pressureSource, 'local-gas-cell-nearest-gradient-reconstruction');
+  near(solver.forceRows[0].pressurePa, 110000, 1e-6);
 });
 
 test('resident reaction gas pressure can derive gas from product-event rows', () => {
@@ -528,6 +674,87 @@ test('resident reaction gas pressure can derive gas from product-event rows', ()
   assert.equal(pressure.bySpecies.naoh, undefined);
   assert.ok(pressure.bySpecies.h2.partialPressurePa > 0);
   assert.ok(pressure.totalPressurePa > baseline.totalPressurePa);
+  assert.equal(pressure.residentSpatialGasSpeciesLedgerStatus, 'blocked-resident-spatial-gas-species-ledger-required');
+  assert.equal(pressure.pressureFeedback.gasCellField.localPressureGradientReady, false);
+});
+
+test('resident positioned gas product events produce spatial gas-cell EOS pressure field', () => {
+  const gasR = 8.314462618;
+  const supportVolumeM3 = 4;
+  const temperatureK = 300;
+  const molesForPressure = (pressurePa) => pressurePa * supportVolumeM3 / (gasR * temperatureK);
+  const pressure = gasPressureSummaryFromResidentReaction({
+    baselineSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'synthetic-baseline',
+      totalPressurePa: 0,
+      gasVolumeM3: 8,
+      condensedVolumeM3: 0,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      bySpecies: {}
+    },
+    reactionSummary: {
+      status: 'reaction-compact-summary-ready',
+      compactLedgerAvailable: true,
+      productEvents: {
+        status: 'product-event-sparse-storage-ready',
+        records: [
+          {
+            status: 'ready',
+            material: 'h2',
+            materialId: 1,
+            routing: 'gas',
+            productTermIndex: 1,
+            massKg: 0.001,
+            moles: molesForPressure(100000),
+            visibleMassKg: 0,
+            unplacedMassKg: 0.001,
+            temperatureK,
+            positionM: [0.5, 1, 1],
+            supportVolumeM3
+          },
+          {
+            status: 'ready',
+            material: 'h2',
+            materialId: 1,
+            routing: 'gas',
+            productTermIndex: 1,
+            massKg: 0.002,
+            moles: molesForPressure(200000),
+            visibleMassKg: 0,
+            unplacedMassKg: 0.002,
+            temperatureK,
+            positionM: [1.5, 1, 1],
+            supportVolumeM3
+          }
+        ]
+      },
+      fullParticleReadbackPerformed: false
+    },
+    reactionTable: {
+      productTermMetadata: [
+        { productTermIndex: 1, material: 'h2', routing: 'gas' }
+      ]
+    },
+    materialProperties: {},
+    fallbackTemperatureK: temperatureK
+  });
+
+  assert.equal(pressure.status, 'gpu-resident-reaction-pressure-summary');
+  assert.equal(pressure.source, 'gpu-resident-reaction-product-events');
+  assert.equal(pressure.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
+  assert.equal(pressure.spatialGasSpeciesLedger.source, 'gpu-resident-reaction-product-event-spatial-ledger');
+  assert.equal(pressure.residentSpatialGasSpeciesLedgerStatus, 'spatial-gas-species-ledger-ready');
+  assert.equal(pressure.pressureFeedback.gasCellField.localPressureGradientReady, true);
+  assert.equal(
+    pressure.pressureFeedback.gasCellField.residentSpatialGasSpeciesLedgerStatus,
+    'resident-spatial-gas-species-ledger-eos-ready'
+  );
+  assert.equal(pressure.pressureFeedback.gasCellField.cellCount, 2);
+  near(pressure.pressureFeedback.gasCellField.cells[0].pressurePa, 100000, 1e-6);
+  near(pressure.pressureFeedback.gasCellField.cells[1].pressurePa, 200000, 1e-6);
+  near(pressure.pressureFeedback.gasCellField.cells[0].pressureGradientPaPerM[0], 100000, 1e-6);
 });
 
 test('resident reaction gas pressure falls back to compact product inventory when events stay resident', () => {

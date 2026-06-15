@@ -103,6 +103,8 @@ test('ULG mechanics resident stage worker runs P2G, grid update, and G2P through
   assert.equal(p2g.summary.status, 'worker-stage-completed');
   assert.equal(p2g.value.workerResidentStage.stageId, 'p2g');
   assert.equal(p2g.value.workerResidentStage.retainedWithinWorker, true);
+  assert.equal(p2g.value.workerResidentStage.workerWebGpuRequested, false);
+  assert.equal(p2g.value.workerResidentStage.workerDeviceCached, false);
   assert.equal(p2g.value.computeTaskId, 'ulg:test:mechanics-worker:p2g');
 
   const gridUpdate = await runUlgMechanicsResidentStageWorkerPayload(payload(

@@ -3,6 +3,7 @@ import {
   runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmMechanicsP2gStageComputeTask
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
+import { requestOpticalGpuDevice } from '../runtime/material/opticalGpuBuffers.js';
 
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker.v0';
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
@@ -14,6 +15,7 @@ const STAGE_RUNNERS = {
 };
 
 const retainedLanes = new Map();
+let workerDeviceResultPromise = null;
 
 function normalizeString(value, fallback = null) {
   const text = String(value ?? '').trim();
@@ -130,6 +132,18 @@ function workerContext(payload = {}) {
     || {};
 }
 
+async function getWorkerDeviceResult(preferWebGpu) {
+  if (preferWebGpu !== true) return null;
+  if (!workerDeviceResultPromise) {
+    workerDeviceResultPromise = requestOpticalGpuDevice(globalThis.navigator, {
+      onDeviceLost() {
+        workerDeviceResultPromise = null;
+      }
+    });
+  }
+  return workerDeviceResultPromise;
+}
+
 function baseStageData(payload = {}) {
   const context = workerContext(payload);
   const common = context.common || {};
@@ -203,7 +217,13 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     throw new Error(`Unsupported ULG mechanics resident worker stage: ${stageId || 'missing-stage'}`);
   }
   const record = getLaneRecord(payload);
-  const rawResult = await runner(stageDataForPayload(payload, record));
+  const data = stageDataForPayload(payload, record);
+  const workerDeviceResult = await getWorkerDeviceResult(data.preferWebGpu === true);
+  if (workerDeviceResult) {
+    data.deviceResult = workerDeviceResult;
+    data.navigatorRef = globalThis.navigator;
+  }
+  const rawResult = await runner(data);
   record.stageResults[stageId] = rawResult;
   const cloneableResult = cloneableValue(rawResult, record, stageId);
   const workerRetainedBufferRefs = [...new Set(retainedWorkerRefs(cloneableResult))];
@@ -218,6 +238,10 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     laneId: payload.lease?.laneId || payload.lane?.laneId || null,
     stateKey: payload.lease?.stateKey || payload.lane?.stateKey || null,
     retainedWithinWorker: true,
+    workerWebGpuRequested: data.preferWebGpu === true,
+    workerWebGpuStatus: rawResult?.webgpuStatus?.status || workerDeviceResult?.status || null,
+    workerWebGpuFallback: rawResult?.webgpuStatus?.fallback || null,
+    workerDeviceCached: Boolean(workerDeviceResult?.device),
     workerRetainedBufferRefs,
     cloneableResultReturned: true
   };
@@ -230,6 +254,7 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
       status: 'worker-stage-completed',
       stageId,
       backend: cloneableResult.backend || null,
+      workerWebGpuStatus: cloneableResult.workerResidentStage.workerWebGpuStatus,
       retainedBufferRefCount: retainedBufferRefs.length,
       workerRetainedBufferRefCount: workerRetainedBufferRefs.length
     }

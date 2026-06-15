@@ -13,6 +13,9 @@ all three stages. The module stores raw stage outputs in a worker-local lane
 record and sends clone-safe values/summaries back to the main thread. This is
 not yet the final WebGPU-resident hot path; the next promotion is worker-owned
 WebGPU device/buffer retention with compact/authorized state publication.
+Follow-up 2026-06-14 21:29 AKDT: the Worker now caches a Worker-local WebGPU
+device result when `preferWebGpu=true`, but acceptance still needs to prove
+in-worker WebGPU execution and retained GPU buffers between stages.
 
 Current checkpoint, 2026-06-14 21:01 AKDT: ULG mechanics stage-chain
 execution can now attach a supplied GPUHub resident-stage worker runner to

@@ -21266,3 +21266,34 @@ Open:
   but it is not yet the final copy-free WebGPU hot path. The next promotion is
   worker-owned WebGPU device/buffer retention, compact summaries, and
   StateManager/NodeKernel-authorized hot-state publication.
+
+## 2026-06-14 21:29 AKDT - Worker WebGPU device-result cache
+
+Implemented:
+
+- Added a Worker-local WebGPU device-result cache to
+  `src/services/ulgMechanicsResidentStage.worker.js`.
+- When the supplied stage context requests `preferWebGpu=true`, the Worker
+  requests one local device result and reuses it across P2G, grid-update, and
+  G2P stage messages.
+- Worker results now report `workerWebGpuRequested`, `workerWebGpuStatus`,
+  `workerWebGpuFallback`, and `workerDeviceCached` on
+  `workerResidentStage`.
+- The CPU/reference worker unit asserts the path does not overclaim a cached
+  Worker device when WebGPU was not requested.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check tests/ulgMechanicsResidentStageWorker.test.mjs`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `1/1`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+
+Open:
+
+- Still need a WebGPU-requested Worker acceptance gate that proves in-worker
+  WebGPU execution, retained GPU buffers between stages, compact summaries,
+  and authorized hot-state publication.

@@ -47,6 +47,11 @@ priority: promote the worker path to worker-owned WebGPU device/buffer
 retention so the hot mechanics lane no longer round-trips through main-thread
 arrays.
 
+Follow-up note, 2026-06-14 21:29 AKDT: the Worker now caches a Worker-local
+WebGPU device result when `preferWebGpu=true`, but the acceptance gate still
+needs to prove in-worker WebGPU execution and retained GPU buffers between
+stages.
+
 Current routing note, 2026-06-14 21:01 AKDT: ULG mechanics stage-chain
 registration can now consume a supplied GPUHub resident-stage worker runner.
 When a backend is supplied, P2G, grid-update, and G2P report `worker-ready`,

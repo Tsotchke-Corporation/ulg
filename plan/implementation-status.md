@@ -1,9 +1,24 @@
 # Implementation Status
 
-Updated: 2026-06-14 worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-14 worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Promoted the real browser Worker WebGPU mechanics stage-chain gate to
+  `no-full-readback`. The Worker now waits on its own WebGPU queue for no-full
+  stage messages before returning, so P2G, grid-update, and G2P report
+  satisfied per-stage fences without full particle arrays. The stage-chain
+  summary now publishes
+  `peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`,
+  including worker-retained refs, no-full readback modes, WebGPU backends, and
+  worker-ready residency. Actual hot-state publication remains fail-closed as
+  `blocked-authorized-worker-publication-required` until the worker-to-
+  NodeKernel/StateManager compact publication protocol exists. Validation
+  passed syntax checks, Worker unit `1/1`, focused PeerCompute/ULG integration
+  `11/11`, `git diff --check`, focused browser authority-host Playwright
+  `1/1`, physics atomics `7` with `1` expected skip, and visual matrix
+  `codex-worker-no-full-retained-candidate-20260614` `3/3` with two captured
+  frames per scenario.
 - Validated real browser Worker WebGPU mechanics stage execution. The focused
   authority-host Playwright gate now creates
   `host.createUlgMechanicsResidentStageWorkerRunner()`, requests

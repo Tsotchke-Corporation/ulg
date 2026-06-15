@@ -35,16 +35,27 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 21:50 AKDT: the Worker WebGPU mechanics
+stage-chain gate now runs `no-full-readback` instead of full parity readback.
+The Worker explicitly waits on its own `queue.onSubmittedWorkDone()` for each
+no-full WebGPU stage message, so P2G, grid-update, and G2P report satisfied
+stage fences while keeping stage buffers worker-local. ULG now surfaces
+`peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`
+on the stage-chain summary: it records worker-retained refs, no-full readback
+mode, WebGPU backends, worker-ready residency, and the deliberate publication
+blocker `blocked-authorized-worker-publication-required`. Next priority:
+implement the worker-to-NodeKernel/StateManager publication protocol that
+admits compact summaries and retained-ref descriptors without transferring
+Worker `GPUBuffer` handles to the main thread.
+
 Current routing note, 2026-06-14 21:36 AKDT: the focused browser authority
 gate now proves real browser Worker WebGPU mechanics stage execution. The
 test creates `host.createUlgMechanicsResidentStageWorkerRunner()`, requests
 `preferWebGpu=true`, runs P2G, grid-update, and G2P through the checked-in
 Worker module, and asserts all three worker stage backends report `webgpu`
 with `worker-ready` residency. This closes the first in-worker WebGPU
-acceptance gate, but not the final copy-free path. Next priority: emit compact
-summaries and StateManager/NodeKernel-authorized hot-state publications from
-the worker-retained lane so main-thread physics does not need cloned full
-arrays between stages.
+acceptance gate, but not the final copy-free path. Superseded by the 21:50
+no-full Worker gate above.
 
 Renderer blocker note, 2026-06-14 21:36 AKDT: user reports major z-buffer and
 draw-order failures in the live visualization. Keep this queued as renderer

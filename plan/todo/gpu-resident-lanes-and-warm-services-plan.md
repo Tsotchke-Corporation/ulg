@@ -144,6 +144,15 @@ and make StateManager hot storage the discoverable owner of local GPU handles.
 Renderer depth/order issues remain a separate P0/P1 visual correctness blocker
 before visual gates are trusted.
 
+Status update, 2026-06-14 Worker no-full retained-ref candidate: the same
+Worker mechanics stage-chain gate now runs with `no-full-readback`, waits for
+the Worker-local WebGPU queue fence on each stage, and surfaces a formal
+compact-publication candidate with worker-retained refs. This avoids validating
+the Worker gate through full particle-array cloneback. The candidate remains
+publication-blocked until a Worker-to-NodeKernel/StateManager protocol can
+admit compact summaries and retained-ref descriptors without moving Worker
+`GPUBuffer` handles to the main thread.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

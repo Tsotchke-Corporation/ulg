@@ -2,17 +2,26 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 21:50 AKDT: the browser Worker mechanics stage
+chain now runs WebGPU with `no-full-readback`. The Worker drains its own queue
+with `queue.onSubmittedWorkDone()` for each no-full WebGPU stage message before
+returning the result, so P2G, grid-update, and G2P report satisfied per-stage
+fences without full particle arrays. `mechanicsStageTaskChain` now exposes
+`peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`,
+including worker-retained refs, no-full stage readback modes, WebGPU backends,
+worker-ready residency, and a fail-closed publication status:
+`blocked-authorized-worker-publication-required`. The next target is the
+actual worker-to-NodeKernel/StateManager publication protocol for compact
+summaries and retained-ref descriptors.
+
 Current checkpoint, 2026-06-14 21:36 AKDT: the focused browser authority-host
 gate now validates Worker-local WebGPU mechanics stage execution. The test
 creates `host.createUlgMechanicsResidentStageWorkerRunner()`, runs the
 mechanics stage chain with `preferWebGpu=true`, and asserts P2G, grid-update,
 and G2P all report `worker-ready` plus `webgpu` stage backends through the
-real browser Worker module. This proves Worker WebGPU availability and stage
-execution, but it is not yet final copy-free state publication. The next
-target is compact worker summaries plus StateManager/NodeKernel-authorized
-hot-state publication out of the retained worker lane. Renderer note: major
-z-buffer/draw-order failures are queued as a P0/P1 visual correctness blocker
-before any visual gate is treated as authoritative.
+real browser Worker module. Superseded by the 21:50 no-full Worker gate above.
+Renderer note: major z-buffer/draw-order failures are queued as a P0/P1 visual
+correctness blocker before any visual gate is treated as authoritative.
 
 Current checkpoint, 2026-06-14 21:24 AKDT: ULG now includes
 `src/services/ulgMechanicsResidentStage.worker.js`, a mechanics resident-stage

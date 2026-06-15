@@ -1,5 +1,52 @@
 # ULG Implementation Log
 
+## 2026-06-14 21:50 AKDT - Worker WebGPU no-full retained-ref publication candidate
+
+Implemented:
+
+- Changed the browser Worker mechanics stage-chain gate to run
+  `readbackMode="no-full-readback"` instead of full parity readback.
+- Added Worker-local no-full queue-fence completion. When a Worker WebGPU
+  stage runs without full readback, the Worker awaits
+  `device.queue.onSubmittedWorkDone()` and patches the returned GPU fence
+  evidence before sending the stage result back.
+- Added
+  `peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`
+  to `mechanicsStageTaskChain`. The candidate records worker-retained refs,
+  no-full stage readback modes, WebGPU backends, worker-ready residency, and
+  the deliberate publication blocker
+  `blocked-authorized-worker-publication-required`.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `1/1`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `git diff --check`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-worker-no-full-retained-candidate-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured frames
+  each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- The retained worker GPU handles are intentionally not transferred to main.
+  Next step is an authorized Worker publication protocol that sends compact
+  summaries and retained-ref descriptors through NodeKernel/StateManager
+  admission.
+- Renderer z-buffer/draw-order regressions remain queued separately before
+  visual evidence can be considered authoritative.
+
 ## 2026-06-14 21:36 AKDT - Worker WebGPU mechanics stage-chain browser gate
 
 Implemented:

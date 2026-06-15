@@ -107,6 +107,7 @@ export const ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.
 export const ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-g2p-stage-compute-task-result.v0';
 export const ULG_MLS_MPM_MECHANICS_G2P_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.mechanics-g2p-stage-task-evidence.v0';
 export const ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0';
+export const ULG_MLS_MPM_MECHANICS_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0';
 const ULG_MLS_MPM_MECHANICS_STAGE_LANE_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0';
 export const ULG_MLS_MPM_MECHANICS_CHILD_STAGE_KERNEL_EVIDENCE_SCHEMA = 'peercompute.ulg.mechanics-child-stage-kernel-evidence.v0';
 export const ULG_MLS_MPM_MECHANICS_CHILD_P2G_STAGE_EVIDENCE_SCHEMA = 'peercompute.ulg.mechanics-child-p2g-stage-evidence.v0';
@@ -127,6 +128,7 @@ const GPU_BUFFER_USAGE = {
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
 const DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS = 3;
+const MECHANICS_STAGE_ORDER = Object.freeze(['p2g', 'gridUpdate', 'g2p']);
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -137,6 +139,12 @@ function nowMs() {
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function uniqueNonEmptyStrings(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean))];
 }
 
 function finiteVector3(value, fallback) {
@@ -3947,9 +3955,145 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     residency: gpuResidentLaneRequirement ? 'gpu-lane' : 'cpu-oracle',
     laneId: gpuResidentLaneRequirement?.laneId || gpuResidentLaneExecution?.lease?.laneId || null,
     stateKey: gpuResidentLaneRequirement?.stateKey || gpuResidentLaneExecution?.lease?.stateKey || null,
+    readbackMode: result?.readbackMode || null,
+    fullReadbackPerformed: result?.fullReadbackPerformed === true,
+    normalHotLoopReadbackFree: result?.normalHotLoopReadbackFree === true,
     fenceRequired: gpuFence?.required === true,
     fenceSatisfied: gpuFence?.fenceSatisfied === true,
-    fenceStatus: gpuFence?.status || null
+    fenceStatus: gpuFence?.status || null,
+    workerResidentStageSchema: result?.workerResidentStage?.schema || null,
+    workerResidentStageStatus: result?.workerResidentStage?.status || null,
+    workerWebGpuRequested: result?.workerResidentStage?.workerWebGpuRequested === true,
+    workerWebGpuStatus: result?.workerResidentStage?.workerWebGpuStatus || null,
+    workerDeviceCached: result?.workerResidentStage?.workerDeviceCached === true,
+    workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || [])
+  };
+}
+
+function workerRetainedRefsFromStageExecution(stageExecution = null) {
+  return uniqueNonEmptyStrings(
+    (stageExecution?.stageResults || [])
+      .flatMap((entry) => entry?.retainedBufferRefs || [])
+      .filter((ref) => String(ref || '').startsWith('ulg-worker:'))
+  );
+}
+
+function stageExecutionSummariesByStage(stageExecution = null) {
+  return Object.fromEntries(
+    (stageExecution?.stageResults || [])
+      .map((entry) => [entry.stageId, entry.summary || null])
+      .filter(([stageId]) => Boolean(stageId))
+  );
+}
+
+function firstMechanicsWorkerPublicationBlocker({
+  workerRunnerSupplied,
+  stageExecutionCompleted,
+  allWorkerReady,
+  allWebGpuBackends,
+  hasWorkerRetainedRefs,
+  noFullReadback
+} = {}) {
+  if (!workerRunnerSupplied) return 'worker-runner-not-supplied';
+  if (!stageExecutionCompleted) return 'worker-stage-execution-not-completed';
+  if (!allWorkerReady) return 'worker-residency-not-ready';
+  if (!allWebGpuBackends) return 'worker-webgpu-backends-not-proven';
+  if (!hasWorkerRetainedRefs) return 'worker-retained-buffer-refs-missing';
+  if (!noFullReadback) return 'compact-summary-no-full-readback-required';
+  return null;
+}
+
+function buildMechanicsWorkerCompactPublicationCandidate({
+  stageExecution = null,
+  stageLaneSummaries = {},
+  stageWorkerResidencyStatuses = {},
+  workerRunnerSupplied = false,
+  workerModuleUrl = null,
+  laneId = null,
+  stateKey = null
+} = {}) {
+  const workerRetainedBufferRefs = workerRetainedRefsFromStageExecution(stageExecution);
+  const hasWorkerSignals = workerRunnerSupplied || workerRetainedBufferRefs.length > 0;
+  if (!hasWorkerSignals) return null;
+  const stageSummaries = stageExecutionSummariesByStage(stageExecution);
+  const stageBackends = Object.fromEntries(
+    MECHANICS_STAGE_ORDER.map((stageId) => [stageId, stageLaneSummaries[stageId]?.backend || null])
+  );
+  const stageReadbackModes = Object.fromEntries(
+    MECHANICS_STAGE_ORDER.map((stageId) => [stageId, stageLaneSummaries[stageId]?.readbackMode || null])
+  );
+  const stageWorkerWebGpuStatuses = Object.fromEntries(
+    MECHANICS_STAGE_ORDER.map((stageId) => [
+      stageId,
+      stageLaneSummaries[stageId]?.workerWebGpuStatus || stageSummaries[stageId]?.workerWebGpuStatus || null
+    ])
+  );
+  const stageWorkerRetainedBufferRefCounts = Object.fromEntries(
+    MECHANICS_STAGE_ORDER.map((stageId) => [
+      stageId,
+      Math.max(
+        0,
+        stageLaneSummaries[stageId]?.workerRetainedBufferRefs?.length
+          ?? stageSummaries[stageId]?.workerRetainedBufferRefCount
+          ?? 0
+      )
+    ])
+  );
+  const stageExecutionCompleted = stageExecution?.status === 'completed'
+    && stageExecution?.completedStageCount === MECHANICS_STAGE_ORDER.length;
+  const allWorkerReady = MECHANICS_STAGE_ORDER.every((stageId) => (
+    stageWorkerResidencyStatuses[stageId] === 'worker-ready'
+  ));
+  const allWebGpuBackends = MECHANICS_STAGE_ORDER.every((stageId) => stageBackends[stageId] === 'webgpu');
+  const noFullReadback = MECHANICS_STAGE_ORDER.every((stageId) => (
+    stageReadbackModes[stageId] === NO_FULL_READBACK_MODE
+      && stageLaneSummaries[stageId]?.normalHotLoopReadbackFree === true
+  ));
+  const blocker = firstMechanicsWorkerPublicationBlocker({
+    workerRunnerSupplied,
+    stageExecutionCompleted,
+    allWorkerReady,
+    allWebGpuBackends,
+    hasWorkerRetainedRefs: workerRetainedBufferRefs.length > 0,
+    noFullReadback
+  });
+  const candidateReady = !blocker;
+  return {
+    schema: ULG_MLS_MPM_MECHANICS_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
+    candidateStatus: candidateReady
+      ? 'worker-retained-compact-publication-candidate-ready'
+      : 'worker-retained-compact-publication-candidate-blocked',
+    blocker,
+    authority: 'compute-manager-gpuhub-worker-stage-output',
+    publicationAuthority: 'nodekernel-state-manager-admission-required',
+    publicationStatus: candidateReady
+      ? 'blocked-authorized-worker-publication-required'
+      : 'blocked-candidate-not-ready',
+    publicationReason: candidateReady
+      ? 'worker-retained-gpu-handles-are-not-main-thread-transferable'
+      : blocker,
+    sameDeviceMainThreadHandlesAvailable: false,
+    workerLocalRetainedRefsOnly: true,
+    compactSummaryStatus: noFullReadback
+      ? 'worker-compact-summary-required'
+      : 'blocked-full-readback-mode',
+    compactSummaryRequired: true,
+    stateManagerAdmissionRequired: true,
+    laneId,
+    stateKey,
+    workerModuleUrl,
+    stageOrder: [...MECHANICS_STAGE_ORDER],
+    stageBackends,
+    stageReadbackModes,
+    stageWorkerWebGpuStatuses,
+    stageWorkerResidencyStatuses: { ...stageWorkerResidencyStatuses },
+    stageWorkerRetainedBufferRefCounts,
+    workerRetainedBufferRefs,
+    workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
+    retainedBufferRefs: uniqueNonEmptyStrings(stageExecution?.retainedBufferRefs || []),
+    outputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    requiredPublicationProtocol: 'worker-posts-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
+    nextRequiredImplementation: 'authorized-worker-compact-output-publication'
   };
 }
 
@@ -4588,6 +4732,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const stageTaskFenceSatisfied = Object.fromEntries(
     Object.entries(stageLaneSummaries).map(([stageId, summary]) => [stageId, summary.fenceSatisfied])
   );
+  const stageTaskReadbackModes = Object.fromEntries(
+    Object.entries(stageLaneSummaries).map(([stageId, summary]) => [stageId, summary.readbackMode])
+  );
+  const stageTaskNormalHotLoopReadbackFree = Object.fromEntries(
+    Object.entries(stageLaneSummaries).map(([stageId, summary]) => [stageId, summary.normalHotLoopReadbackFree])
+  );
   const stageExecutionExecutorSources = Object.fromEntries(
     (gpuResidentLaneStagePlanExecution?.stageResults || [])
       .map((entry) => [entry.stageId, entry.executorSource || null])
@@ -4604,6 +4754,15 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const allStageTaskLaneIdsMatchPlan = laneTaskSummaries.length > 0
     ? laneTaskSummaries.every((summary) => summary.laneId === laneStagePlanId && summary.stateKey === laneStagePlanStateKey)
     : null;
+  const workerCompactPublicationCandidate = buildMechanicsWorkerCompactPublicationCandidate({
+    stageExecution: gpuResidentLaneStagePlanExecution,
+    stageLaneSummaries,
+    stageWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
+    workerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
+    workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+    laneId: laneStagePlanId,
+    stateKey: laneStagePlanStateKey
+  });
   const stageTaskChain = {
     schema: ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA,
     status: 'compute-manager-stage-task-chain-executed',
@@ -4677,11 +4836,19 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageTaskBackends: stageTaskBackends,
     gpuResidentLaneStageTaskResidencies: stageTaskResidencies,
     gpuResidentLaneStageTaskFenceSatisfied: stageTaskFenceSatisfied,
+    gpuResidentLaneStageTaskReadbackModes: stageTaskReadbackModes,
+    gpuResidentLaneStageTaskNormalHotLoopReadbackFree: stageTaskNormalHotLoopReadbackFree,
     gpuResidentLaneStageTaskLaneAligned: allStageTaskLaneIdsMatchPlan,
     gpuResidentLaneStageLeaseId: gpuResidentLaneStagePlanLease?.leaseId || null,
     gpuResidentLaneStageLeaseFenceStatus: gpuResidentLaneStagePlanLeaseExecution?.gpuFence?.status || null,
     gpuResidentLaneStageLeaseFenceSatisfied: gpuResidentLaneStagePlanLeaseExecution?.gpuFence?.fenceSatisfied === true,
     gpuResidentLaneStageRejectedStatus: gpuResidentLaneStagePlanRejected?.status || null,
+    workerCompactPublicationCandidate,
+    workerCompactPublicationCandidateStatus: workerCompactPublicationCandidate?.candidateStatus || null,
+    workerCompactPublicationStatus: workerCompactPublicationCandidate?.publicationStatus || null,
+    workerCompactSummaryStatus: workerCompactPublicationCandidate?.compactSummaryStatus || null,
+    workerRetainedBufferRefs: workerCompactPublicationCandidate?.workerRetainedBufferRefs || [],
+    workerRetainedBufferRefCount: workerCompactPublicationCandidate?.workerRetainedBufferRefCount ?? 0,
     computeManagerOwned: true,
     nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
     authoritativeStateMutation: false,

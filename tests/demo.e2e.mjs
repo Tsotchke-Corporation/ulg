@@ -5539,7 +5539,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
           stageTaskIdPrefix: 'ulg:browser:mechanics-stage-worker-bridge-chain',
           preferWebGpu: true,
           useNativeTaskGraph: false,
-          readbackMode: 'full-parity-readback',
+          readbackMode: 'no-full-readback',
           compactSummaryScope: 'particle-visual',
           gpuResidentLaneId: 'ulg:browser:mechanics-stage-worker-bridge-chain-lane',
           gpuResidentLaneStateKey: 'ulg:browser:mechanics-stage-worker-bridge-chain-state',
@@ -5561,8 +5561,15 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         stageExecutionWorkerRunnerSupplied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerRunnerSupplied ?? null,
         stageExecutionWorkerModuleUrl: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerModuleUrl ?? null,
         stageTaskBackends: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskBackends ?? {},
+        stageTaskReadbackModes: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskReadbackModes ?? {},
+        stageTaskNormalHotLoopReadbackFree: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskNormalHotLoopReadbackFree ?? {},
         stageTaskFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskFenceSatisfied ?? {},
-        stageLeaseFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageLeaseFenceSatisfied ?? null
+        stageLeaseFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageLeaseFenceSatisfied ?? null,
+        workerCompactPublicationCandidate: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCandidate ?? null,
+        workerCompactPublicationCandidateStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCandidateStatus ?? null,
+        workerCompactPublicationStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationStatus ?? null,
+        workerCompactSummaryStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactSummaryStatus ?? null,
+        workerRetainedBufferRefCount: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerRetainedBufferRefCount ?? null
       };
       const registeredSolvers = host.computeManager.listSolvers?.() || [];
       const residentSolver = registeredSolvers.find((solver) => solver.id === 'ulg-mls-mpm-sph-resident-steps') || null;
@@ -6159,12 +6166,33 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     gridUpdate: 'webgpu',
     g2p: 'webgpu'
   });
+  expect(result.mechanicsStageTaskChainWorker.stageTaskReadbackModes).toEqual({
+    p2g: 'no-full-readback',
+    gridUpdate: 'no-full-readback',
+    g2p: 'no-full-readback'
+  });
+  expect(result.mechanicsStageTaskChainWorker.stageTaskNormalHotLoopReadbackFree).toEqual({
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
   expect(result.mechanicsStageTaskChainWorker.stageTaskFenceSatisfied).toEqual({
     p2g: true,
     gridUpdate: true,
     g2p: true
   });
   expect(result.mechanicsStageTaskChainWorker.stageLeaseFenceSatisfied).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidateStatus).toBe('worker-retained-compact-publication-candidate-ready');
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationStatus).toBe('blocked-authorized-worker-publication-required');
+  expect(result.mechanicsStageTaskChainWorker.workerCompactSummaryStatus).toBe('worker-compact-summary-required');
+  expect(result.mechanicsStageTaskChainWorker.workerRetainedBufferRefCount).toBeGreaterThan(0);
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidate).toMatchObject({
+    schema: 'peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0',
+    sameDeviceMainThreadHandlesAvailable: false,
+    workerLocalRetainedRefsOnly: true,
+    stateManagerAdmissionRequired: true,
+    requiredPublicationProtocol: 'worker-posts-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager'
+  });
   expect(result.mechanicsChildDryRunTask.schema).toBe('peercompute.ulg.mechanics-child-dry-run-evidence.v0');
   expect(result.mechanicsChildDryRunTask.taskWrapped).toBe(true);
   expect(result.mechanicsChildDryRunTask.accepted).toBe(true);

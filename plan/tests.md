@@ -1,11 +1,12 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Worker WebGPU Mechanics Stage Chain
+## Current Focused Result - 2026-06-14 Worker WebGPU No-Full Mechanics Stage Chain
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
 worker residency. The latest focused browser gate now also proves real browser
-Worker WebGPU execution for the mechanics stage chain. Focused checks:
+Worker WebGPU execution for the mechanics stage chain without full readback.
+Focused checks:
 
 - ULG mechanics resident-stage Worker module:
   `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `1/1`.
@@ -43,11 +44,16 @@ Worker WebGPU execution for the mechanics stage chain. Focused checks:
   `host.createUlgMechanicsResidentStageWorkerRunner()`, runs the CPU/reference
   mechanics chain through the real browser Worker module, and asserts
   `worker-ready` for P2G, grid-update, and G2P through PeerCompute's Worker
-  bridge. The Worker-bridge path now requests `preferWebGpu=true` and asserts
+  bridge. The Worker-bridge path now requests `preferWebGpu=true` plus
+  `readbackMode="no-full-readback"` and asserts
   `mechanicsStageTaskChainWorker.stageTaskBackends` is `{ p2g: "webgpu",
-  gridUpdate: "webgpu", g2p: "webgpu" }`, proving in-worker WebGPU stage
-  execution in the browser. Worker-owned compact hot-state publication remains
-  open.
+  gridUpdate: "webgpu", g2p: "webgpu" }`,
+  `stageTaskReadbackModes` is all `no-full-readback`, and per-stage fences are
+  satisfied after the Worker drains its own WebGPU queue. The same gate now
+  asserts
+  `peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`
+  is ready as a worker-local retained-ref candidate while publication remains
+  fail-closed with `blocked-authorized-worker-publication-required`.
 - Renderer visual correctness debt:
   major z-buffer/draw-order issues are reported in the live visualization,
   including flicker/vanish behavior around visible fluid/solid volumes. Treat
@@ -87,6 +93,8 @@ Worker WebGPU execution for the mechanics stage chain. Focused checks:
   `codex-gpuhub-worker-ready-runner-seam-20260614` passed `3/3`.
   The mechanics resident-stage Worker module matrix
   `codex-ulg-mechanics-resident-stage-worker-module-20260614` passed `3/3`.
+  The Worker no-full retained-ref candidate matrix
+  `codex-worker-no-full-retained-candidate-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

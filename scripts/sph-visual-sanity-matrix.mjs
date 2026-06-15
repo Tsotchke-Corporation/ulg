@@ -170,6 +170,7 @@ function compactVisualSurfaceIssue(issue) {
     maxOverflowM: finiteOrNull(issue?.maxOverflowM),
     particleBoundsToleranceM: finiteOrNull(issue?.particleBoundsToleranceM),
     particleSupportRadiusM: finiteOrNull(issue?.particleSupportRadiusM),
+    marchingCubesCellSizeM: finiteOrNull(issue?.marchingCubesCellSizeM),
     allowedParticleBoundsOverflowM: finiteOrNull(issue?.allowedParticleBoundsOverflowM)
   };
 }

@@ -1,5 +1,33 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 CPU Liquid Surface Merge
+
+The current slice fixes CPU MarchingCubes surface identity for same-material
+liquid domains. CPU-rendered liquids merge base/drop render domains into one
+visible material/phase surface; same-material solids stay separate so static
+support/contact scenarios can still show distinct blocks.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Renderer coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `35/35`, including the
+  new CPU liquid-domain merge regression and MarchingCubes cell-size metadata
+  assertion.
+- Targeted CPU-SPH H2O visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-liquid-merge-surface-short-cellslack-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, H2O visible surface count
+  `1 -> 1`, and three frame artifacts.
+- Public/default Na/H2O visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-default-na-h2o-plain-sph-blob1-20260615 ULG_VISUAL_MATRIX_SCENARIOS=reaction-product-na-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, `mechanicsIntegrator=sph`, both blocks at
+  `293.15 K`, `blob=1`, empty visual issues, and three frame artifacts.
+- Pages build:
+  `npm run build:pages` passed and regenerated `docs/`.
+
 ## Current Focused Result - 2026-06-15 Full Visual Matrix Baseline
 
 After the plain-SPH pressure partition and stale CPU-surface invalidation

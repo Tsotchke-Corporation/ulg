@@ -16,6 +16,7 @@ import {
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   createContinuousSurfaceBatches,
+  cpuMarchingCubesCellSizeM,
   cpuMarchingCubesRadiusFloorM,
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
@@ -251,6 +252,55 @@ test('SPH resident render fields merge same-material domains into one visible ma
   );
 });
 
+test('SPH CPU render fields merge liquid domains but preserve solid domains', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 0.4, 2.6,
+      2.4, 1.1, 2.4,
+      2.6, 1.1, 2.6,
+      1.4, 0.4, 1.4,
+      1.6, 0.4, 1.6,
+      1.4, 1.1, 1.4,
+      1.6, 1.1, 1.6
+    ]),
+    colorsRgb: new Float32Array([
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.75, 0.9, 1,
+      0.75, 0.9, 1,
+      0.75, 0.9, 1,
+      0.75, 0.9, 1
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' },
+      { material: 'h2o', phase: 'solid', renderKey: 'ice', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'solid', renderKey: 'ice', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'solid', renderKey: 'ice', renderDomainId: 2, renderDomainKey: 'drop' },
+      { material: 'h2o', phase: 'solid', renderKey: 'ice', renderDomainId: 2, renderDomainKey: 'drop' }
+    ]
+  });
+
+  const merged = mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches, {
+    phasePredicate: (phase) => phase === 'liquid'
+  });
+
+  assert.deepEqual(
+    merged.map((batch) => [batch.surfaceKey, batch.phase, batch.renderDomainId, batch.count]).sort(),
+    [
+      ['h2o|h2o|liquid', 'liquid', 0, 4],
+      ['ice|h2o|solid|domain:base', 'solid', 1, 2],
+      ['ice|h2o|solid|domain:drop', 'solid', 2, 2]
+    ]
+  );
+});
+
 test('SPH phase renderer creates event-only product surfaces from reaction inventory', () => {
   const baseBatches = createContinuousSurfaceBatches({
     boxEdgeM: 5,
@@ -383,6 +433,10 @@ test('SPH renderer defaults to a bounded isosurface radius scale', () => {
   assert.equal(surfaceRadiusScaleForRenderBatch({ count: 27 }, SPH_SURFACE_RADIUS_SCALE_DEFAULT), 0.2);
   assert.equal(surfaceRadiusScaleForRenderBatch({ count: 28 }, SPH_SURFACE_RADIUS_SCALE_DEFAULT), 0.15);
   assert.equal(surfaceRadiusScaleForRenderBatch({ count: 27 }, 0.3), 0.3);
+  assert.equal(
+    cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN),
+    cpuMarchingCubesCellSizeM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN) * SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS
+  );
   assert.ok(cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN) < 0.15);
   assert.ok(cpuMarchingCubesRadiusFloorM(5, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN) < cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN));
 });

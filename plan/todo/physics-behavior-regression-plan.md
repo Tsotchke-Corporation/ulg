@@ -12,6 +12,22 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 13:07 AKDT update: the short-horizon CPU-SPH same-material
+  visible surface identity bug is fixed. The CPU particle surface path now
+  merges same-material liquid render domains before MarchingCubes, while
+  preserving solid render domains as separate surfaces. The visual probe now
+  adds runtime-reported CPU MarchingCubes cell size to the particle-bound
+  support envelope, avoiding a centimeter-scale false failure from grid
+  sampling after the merge. Evidence
+  `codex-cpu-liquid-merge-surface-short-cellslack-20260615` passed with H2O
+  visible surface count `1 -> 1`, empty issue counts, and three frames.
+  Public/default Na/H2O evidence
+  `codex-default-na-h2o-plain-sph-blob1-20260615` also passed with `mech=sph`,
+  both blocks at `293.15 K`, `blob=1`, and empty visual issues. Keep
+  long-horizon liquid settling/free-surface quality open: the latest long
+  CPU-SPH H2O/H2O probe before this fix still had residual drop speed and
+  overlapping shells, so it needs a rerun and likely more physics work before
+  acceptance.
 - 2026-06-15 12:32 AKDT update: the full short-horizon visual matrix now
   passes after the pressure-participant and stale CPU-surface fixes. Run
   `codex-full-after-sph-partition-and-stale-surface-20260615` covered all 12

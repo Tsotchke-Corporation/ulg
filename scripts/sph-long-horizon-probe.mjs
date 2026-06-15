@@ -814,6 +814,7 @@ async function runBrowserProbe({
             surfaceRadiusM: finiteOrNull(node.userData.surfaceRadiusM),
             requestedSurfaceRadiusM: finiteOrNull(node.userData.requestedSurfaceRadiusM),
             cpuMarchingCubesRadiusFloorM: finiteOrNull(node.userData.cpuMarchingCubesRadiusFloorM),
+            cpuMarchingCubesCellSizeM: finiteOrNull(node.userData.cpuMarchingCubesCellSizeM),
             cpuMarchingCubesRadiusFloorApplied: node.userData.cpuMarchingCubesRadiusFloorApplied ?? null,
             surfaceInactiveFrameCount: node.userData.surfaceInactiveFrameCount ?? null,
             opticalSurfaceVisibility: node.userData.opticalSurfaceVisibility ?? null,
@@ -2712,7 +2713,10 @@ function analyzeTimeline(timeline, {
             finiteMetric(surface.requestedSurfaceRadiusM),
             finiteMetric(surface.cpuMarchingCubesRadiusFloorM)
           );
-          const allowedParticleBoundsOverflowM = particleBoundsToleranceM + particleSupportRadiusM;
+          const marchingCubesCellSizeM = Math.max(0, finiteMetric(surface.cpuMarchingCubesCellSizeM));
+          const allowedParticleBoundsOverflowM = particleBoundsToleranceM
+            + particleSupportRadiusM
+            + marchingCubesCellSizeM;
           for (let axis = 0; axis < 3; axis += 1) {
             const minOverflow = Math.max(
               0,
@@ -2740,6 +2744,7 @@ function analyzeTimeline(timeline, {
               maxOverflowM: Math.max(...overflows),
               particleBoundsToleranceM,
               particleSupportRadiusM,
+              marchingCubesCellSizeM,
               allowedParticleBoundsOverflowM,
               particleBounds,
               bounds

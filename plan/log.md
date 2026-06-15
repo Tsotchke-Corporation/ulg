@@ -1,5 +1,52 @@
 # ULG Implementation Log
 
+## 2026-06-15 13:07 AKDT - CPU liquid render-domain merge and Pages build
+
+Summary:
+
+- Finished the CPU-SPH liquid surface identity fix. CPU-rendered same-material
+  liquid domains are merged before MarchingCubes, so base/drop H2O renders as
+  one visible liquid surface instead of nested shells.
+- Preserved same-material solid render domains as separate surfaces for static
+  support/contact validation.
+- Added CPU MarchingCubes cell-size metadata and updated the visual probe to
+  include that runtime cell size in particle-bound surface-envelope checks.
+- Verified the public/default UI constants are plain SPH, sodium over H2O,
+  both `293.15 K`, and blob scale `1`; rebuilt the GitHub Pages artifact.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-visual-sanity-matrix.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` (`35/35`).
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-liquid-merge-surface-short-cellslack-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, H2O visible surface count
+  `1 -> 1`, and three frame artifacts.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-default-na-h2o-plain-sph-blob1-20260615 ULG_VISUAL_MATRIX_SCENARIOS=reaction-product-na-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `mechanicsIntegrator=sph`, empty visual issues,
+  H2O visible surface count `1 -> 1`, and three frame artifacts.
+- PASS: `npm run build:pages`.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `docs/index.html`
+- `docs/assets/pages-CEFxqfKL.js`
+- `docs/assets/pages-Exxs08yF.js`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/cpu-liquid-render-domain-merge-2026-06-15.md`
+
 ## 2026-06-15 12:32 AKDT - Full visual matrix clean baseline
 
 Summary:

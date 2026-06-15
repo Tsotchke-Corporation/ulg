@@ -1477,22 +1477,26 @@ export function surfaceRadiusMetersFromRenderFieldRadius(radiusNorm, refEdgeM, f
   return norm * refEdge / span;
 }
 
+export function cpuMarchingCubesCellSizeM(refEdgeM, resolution, fieldPadding = FIELD_PADDING) {
+  const refEdge = Math.max(Number.isFinite(refEdgeM) && refEdgeM > 0 ? refEdgeM : 1, 1e-12);
+  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+  const res = Math.max(2, Math.round(Number(resolution) || 2));
+  return (1 / (res - 1)) * (refEdge / span);
+}
+
 export function cpuMarchingCubesRadiusFloorM(
   refEdgeM,
   resolution,
   fieldPadding = FIELD_PADDING,
   floorCells = SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS
 ) {
-  const refEdge = Math.max(Number.isFinite(refEdgeM) && refEdgeM > 0 ? refEdgeM : 1, 1e-12);
-  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
-  const res = Math.max(2, Math.round(Number(resolution) || 2));
   const cells = Math.max(
     1e-6,
     Number.isFinite(floorCells) && floorCells > 0
       ? floorCells
       : SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS
   );
-  return (cells / (res - 1)) * (refEdge / span);
+  return cells * cpuMarchingCubesCellSizeM(refEdgeM, resolution, fieldPadding);
 }
 
 function materialKeyOf(value) {
@@ -2153,10 +2157,12 @@ export function createContinuousSurfaceBatches({
   }));
 }
 
-export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = []) {
+export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = [], options = {}) {
   if (!Array.isArray(batches) || batches.length === 0) return [];
+  const phasePredicate = typeof options.phasePredicate === 'function' ? options.phasePredicate : null;
   const groupKeyForBatch = (batch) => {
     if (!batch?.material || !batch?.phase || !batch?.renderKey) return null;
+    if (phasePredicate && !phasePredicate(batch.phase, batch)) return null;
     if (!(Math.max(0, Math.round(Number(batch.renderDomainId) || 0)) > 0)) return null;
     const positionCount = Math.floor(Math.max(
       Number(batch.positionsM?.length) || 0,
@@ -6499,6 +6505,7 @@ export function createSphPhaseScene(container, {
         mesh.userData.opticalSurfaceRetainedByGrace = !hidden && opticalVisibility.retainPreviousSurface;
         mesh.userData.particleCount = batch.count;
         mesh.userData.surfaceRadiusM = 0;
+        mesh.userData.cpuMarchingCubesCellSizeM = null;
         mesh.userData.surfaceResolution = mesh.resolution || config.resolution;
         mesh.userData.surfaceMaxPolyCount = config.maxPolyCount;
         activeKeys.add(batch.surfaceKey);
@@ -6557,6 +6564,7 @@ export function createSphPhaseScene(container, {
       mesh.userData.surfaceRadiusM = radiusM;
       mesh.userData.requestedSurfaceRadiusM = radiusInfo.requestedRadiusM;
       mesh.userData.cpuMarchingCubesRadiusFloorM = radiusInfo.floorRadiusM;
+      mesh.userData.cpuMarchingCubesCellSizeM = radiusInfo.cellSizeM;
       mesh.userData.cpuMarchingCubesRadiusFloorApplied = radiusInfo.floorApplied;
       mesh.userData.surfaceResolution = mesh.resolution || config.resolution;
       mesh.userData.surfaceMaxPolyCount = config.maxPolyCount;
@@ -6579,6 +6587,7 @@ export function createSphPhaseScene(container, {
         updateMs,
         requestedSurfaceRadiusM: radiusInfo.requestedRadiusM,
         cpuMarchingCubesRadiusFloorM: radiusInfo.floorRadiusM,
+        cpuMarchingCubesCellSizeM: radiusInfo.cellSizeM,
         cpuMarchingCubesRadiusFloorApplied: radiusInfo.floorApplied,
         surfaceBoxClipStatus: surfaceClip.status,
         surfaceBoxClipVertexCount: surfaceClip.clampedVertexCount
@@ -6640,11 +6649,14 @@ export function createSphPhaseScene(container, {
 
   function cpuSurfaceRadiusForBatch(batch, config) {
     const requestedRadiusM = surfaceRadiusMForBatch(batch);
-    const floorRadiusM = cpuMarchingCubesRadiusFloorM(refEdgeM, config?.resolution ?? SURFACE_CONFIG.default.resolution);
+    const resolution = config?.resolution ?? SURFACE_CONFIG.default.resolution;
+    const floorRadiusM = cpuMarchingCubesRadiusFloorM(refEdgeM, resolution);
+    const cellSizeM = cpuMarchingCubesCellSizeM(refEdgeM, resolution);
     const radiusM = Math.max(requestedRadiusM, floorRadiusM);
     return {
       requestedRadiusM,
       floorRadiusM,
+      cellSizeM,
       radiusM,
       floorApplied: radiusM > requestedRadiusM + 1e-12
     };
@@ -7173,6 +7185,11 @@ export function createSphPhaseScene(container, {
       boxDimsM: dims,
       smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
     }));
+    const cpuSurfaceBatches = measure('cpuSurfaceMerge', () => (
+      mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches, {
+        phasePredicate: (phase) => String(phase || '').toLowerCase() === 'liquid'
+      })
+    ));
     currentMaterialProperties = materialProperties || null;
     currentRenderDomainCounts = normalizeRenderDomainCounts(renderDomainCounts);
     currentPhysicalLawGroups = normalizePhysicalLawGroups(physicalLawGroups);
@@ -7301,7 +7318,7 @@ export function createSphPhaseScene(container, {
     mlsMpmMechanicsPredictionSignature = null;
     scene.userData.mlsMpmMechanicsPrediction = null;
     clearMlsMpmResidentExecutionArtifacts();
-    measure('surfaceApply', () => applySurfaceBatches(batches, {
+    measure('surfaceApply', () => applySurfaceBatches(cpuSurfaceBatches, {
       emissiveByMaterial,
       materialProperties,
       renderSource: 'cpu-particles'
@@ -7316,6 +7333,7 @@ export function createSphPhaseScene(container, {
       stageMs,
       particleCount: positionsM?.length ? positionsM.length / 3 : 0,
       surfaceBatchCount: batches.length,
+      cpuSurfaceBatchCount: cpuSurfaceBatches.length,
       residentSurfaceBatchCount: residentFieldBatches.length,
       residentSurfaceTableCellCount: residentSurfaceState.surfaceTableTotalFieldCells,
       materialCount: materialProperties ? Object.keys(materialProperties).length : 0,

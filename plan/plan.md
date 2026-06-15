@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 13:07 AKDT: the CPU-SPH same-material liquid
+surface identity bug is fixed for the mounted/browser render path. The CPU
+particle surface path now merges same-material liquid render domains before
+MarchingCubes, so base/drop H2O no longer produce nested visible water shells,
+while solid same-material domains remain separate. The scene publishes the
+actual CPU MarchingCubes cell size in mesh metadata, and the visual probe uses
+that cell size as sampling slack for particle-bound surface-envelope checks.
+Validation passed syntax checks, renderer tests (`35/35`), targeted H2O CPU-SPH
+visual matrix `codex-cpu-liquid-merge-surface-short-cellslack-20260615` with
+H2O visible surface count `1 -> 1` and empty issues, and targeted public/default
+Na/H2O plain-SPH visual matrix
+`codex-default-na-h2o-plain-sph-blob1-20260615` with `failedCount=0`, `mech=sph`,
+`293.15 K`, `blob=1`, and empty visual issues. `npm run build:pages` regenerated
+`docs/` for GitHub Pages. Long-horizon liquid settling/free-surface quality,
+z-buffer/draw-order, and focus-resume visual trust remain open P0 work.
+
 Current checkpoint, 2026-06-15 12:32 AKDT: after the plain-SPH pressure
 partition and CPU-surface invalidation fixes, the full 12-row visual sanity
 matrix is green. Run

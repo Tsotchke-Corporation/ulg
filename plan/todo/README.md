@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 13:07 AKDT: the immediate CPU-SPH
+same-material liquid render-domain bug is fixed for the browser path. CPU
+MarchingCubes rendering now merges same-material liquid domains into one
+visible surface, while preserving same-material solid domains as separate
+support/contact surfaces. The visual probe also accounts for one actual
+MarchingCubes grid cell of sampling slack in particle-bound checks, using
+runtime metadata from the rendered mesh rather than a blind tolerance.
+Focused evidence: `codex-cpu-liquid-merge-surface-short-cellslack-20260615`
+passed with H2O visible surface count `1 -> 1`, empty issue counts, and three
+frames. The public/default Na/H2O row
+`codex-default-na-h2o-plain-sph-blob1-20260615` also passed with `mech=sph`,
+`293.15 K`, `blob=1`, empty issues, and three frames. This does not close
+long-horizon liquid settling/free-surface quality or renderer z-buffer/focus
+trust; keep those next in the P0 behavior lane.
+
 Current routing note, 2026-06-15 12:32 AKDT: the current full short-horizon
 visual matrix baseline is clean. `codex-full-after-sph-partition-and-stale-surface-20260615`
 passed all 12 scenarios with empty issue counts and three frame artifacts per

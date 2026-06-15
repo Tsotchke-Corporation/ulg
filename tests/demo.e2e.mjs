@@ -5562,6 +5562,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
             gpuHubResidentStageWorkerRunner: mechanicsStageWorkerRunner,
             gpuHubResidentStageWorkerModuleUrl: host.ulgMechanicsResidentStageWorkerModulePath,
             gpuHubResidentStageWorkerOutputPublisher: (payload) => host.publishWorkerRetainedMechanicsStageOutput(payload),
+            gpuHubResidentThermalStageWorkerOutputPublisher: (payload) => host.publishWorkerRetainedThermalPhaseStageOutput(payload),
             gpuHubResidentStageWorkerUseRetainedInput: true,
             includeThermalPhaseStage: true,
             thermalMaterialTable: scene.getSphThermalMaterialTable?.(),
@@ -5586,6 +5587,13 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
       const workerPublicationWarmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-mechanics-publications') || {};
       const workerPublicationWarmDelta = Object.values(workerPublicationWarmDeltas)
         .find((entry) => entry?.payload?.hotBufferKey === workerPublicationHotBufferKey) || null;
+      const thermalPublicationHotBufferKey = mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublicationHotBufferKey || null;
+      const thermalPublicationRecord = thermalPublicationHotBufferKey
+        ? host.stateManager.getHotBuffer(thermalPublicationHotBufferKey)
+        : null;
+      const thermalPublicationWarmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-thermal-phase-publications') || {};
+      const thermalPublicationWarmDelta = Object.values(thermalPublicationWarmDeltas)
+        .find((entry) => entry?.payload?.hotBufferKey === thermalPublicationHotBufferKey) || null;
       const workerThermalLaneSummary = mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.thermalPhase || {};
       const mechanicsStageTaskChainWorkerSummary = {
         schema: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.schema ?? null,
@@ -5639,7 +5647,21 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         workerThermalStageThermoInputStatus: workerThermalLaneSummary.workerRetainedThermoInputStatus ?? null,
         workerThermalStageThermoOutputStatus: workerThermalLaneSummary.workerRetainedThermoOutputStatus ?? null,
         workerThermalStageEvidencePassed: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.stageTaskEvidencePassed?.thermalPhase ?? null,
-        workerThermalStageAuthoritativeMutation: workerThermalLaneSummary.thermalPhaseAuthoritativeMutation ?? null
+        workerThermalStageAuthoritativeMutation: workerThermalLaneSummary.thermalPhaseAuthoritativeMutation ?? null,
+        thermalWorkerCompactPublicationCandidate: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublicationCandidate ?? null,
+        thermalWorkerCompactPublicationCandidateStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublicationCandidateStatus ?? null,
+        thermalWorkerCompactPublication: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublication ?? null,
+        thermalWorkerCompactPublicationStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublicationStatus ?? null,
+        thermalWorkerCompactPublicationCommitted: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublicationCommitted ?? null,
+        thermalWorkerCompactPublicationHotBufferKey: thermalPublicationHotBufferKey,
+        thermalWorkerCompactPublicationCommitDeltaTaskId: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerCompactPublicationCommitDeltaTaskId ?? null,
+        thermalWorkerCompactPublicationHotBufferStored: Boolean(thermalPublicationRecord),
+        thermalWorkerCompactPublicationRecordStatus: thermalPublicationRecord?.status ?? null,
+        thermalWorkerCompactPublicationRecordHasWorkerRunner: Boolean(thermalPublicationRecord?.workerRunner),
+        thermalWorkerCompactPublicationWarmDeltaFound: Boolean(thermalPublicationWarmDelta),
+        thermalWorkerCompactPublicationWarmDeltaStatus: thermalPublicationWarmDelta?.payload?.status ?? null,
+        thermalWorkerCompactPublicationWarmDeltaOutputFamilies: thermalPublicationWarmDelta?.payload?.outputFamilies ?? [],
+        thermalWorkerRetainedThermoBufferRefCount: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.thermalWorkerRetainedThermoBufferRefCount ?? null
       };
       const registeredSolvers = host.computeManager.listSolvers?.() || [];
       const residentSolver = registeredSolvers.find((solver) => solver.id === 'ulg-mls-mpm-sph-resident-steps') || null;
@@ -6284,27 +6306,27 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     }
   });
   expect(result.mechanicsStageTaskChainWorker.workerContinuationStatus).toBe('compute-manager-stage-task-chain-executed');
-	  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskBackends).toEqual({
-	    p2g: 'webgpu',
-	    gridUpdate: 'webgpu',
-	    g2p: 'webgpu',
-	    thermalPhase: 'webgpu'
-	  });
-	  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskFenceSatisfied).toEqual({
-	    p2g: true,
-	    gridUpdate: true,
-	    g2p: true,
-	    thermalPhase: true
-	  });
+  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskBackends).toEqual({
+    p2g: 'webgpu',
+    gridUpdate: 'webgpu',
+    g2p: 'webgpu',
+    thermalPhase: 'webgpu'
+  });
+  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskFenceSatisfied).toEqual({
+    p2g: true,
+    gridUpdate: true,
+    g2p: true,
+    thermalPhase: true
+  });
   expect(result.mechanicsStageTaskChainWorker.workerContinuationP2gRetainedInputStatus).toBe('applied-worker-retained-g2p-input');
   expect(result.mechanicsStageTaskChainWorker.workerContinuationP2gRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
   expect(result.mechanicsStageTaskChainWorker.workerContinuationG2pRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
-	  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationStatus).toBe('worker-retained-mechanics-output-published');
-	  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationCommitted).toBe(true);
-	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageInFormalDag).toBe(true);
-	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageExecutorSource).toBe('gpu-hub-resident-stage-executor');
-	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageWorkerResidencyStatus).toBe('worker-ready');
-	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageStatus).toBe('worker-stage-completed');
+  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationStatus).toBe('worker-retained-mechanics-output-published');
+  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationCommitted).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerThermalStageInFormalDag).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerThermalStageExecutorSource).toBe('gpu-hub-resident-stage-executor');
+  expect(result.mechanicsStageTaskChainWorker.workerThermalStageWorkerResidencyStatus).toBe('worker-ready');
+  expect(result.mechanicsStageTaskChainWorker.workerThermalStageStatus).toBe('worker-stage-completed');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageBackend).toBe('webgpu');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageExecutionStatus).toBe('webgpu-accepted-no-full-readback');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageReadbackMode).toBe('no-full-readback');
@@ -6314,6 +6336,28 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageThermoOutputStatus).toBe('adopted-worker-retained-thermo-output');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageEvidencePassed).toBe(true);
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageAuthoritativeMutation).toBe(false);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationCandidateStatus).toBe('worker-retained-thermal-phase-publication-candidate-ready');
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationCandidate.publicationStatus).toBe('blocked-authorized-thermal-phase-publication-required');
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationStatus).toBe('worker-retained-thermal-phase-output-published');
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationCommitted).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationHotBufferStored).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationRecordStatus).toBe('worker-retained-thermal-phase-hot-buffer-source-stored');
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationRecordHasWorkerRunner).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationWarmDeltaFound).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationWarmDeltaStatus).toBe('worker-retained-thermal-phase-output-admitted');
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublicationWarmDeltaOutputFamilies).toEqual(['sph-thermo-phase']);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerRetainedThermoBufferRefCount).toBeGreaterThan(0);
+  expect(result.mechanicsStageTaskChainWorker.thermalWorkerCompactPublication).toMatchObject({
+    schema: 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0',
+    authority: 'nodekernel-state-manager',
+    workerLocal: true,
+    sameDevice: false,
+    workerRetainedBufferImport: {
+      schema: 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0',
+      workerLocal: true,
+      copyMode: 'zero-copy-worker-retained-ref-descriptor'
+    }
+  });
   expect(result.mechanicsChildDryRunTask.schema).toBe('peercompute.ulg.mechanics-child-dry-run-evidence.v0');
   expect(result.mechanicsChildDryRunTask.taskWrapped).toBe(true);
   expect(result.mechanicsChildDryRunTask.accepted).toBe(true);

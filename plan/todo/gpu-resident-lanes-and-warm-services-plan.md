@@ -221,6 +221,14 @@ thermal output publication/admission through NodeKernel/StateManager, followed
 by pressure/interface and reaction/product stage promotion behind the same
 authority path.
 
+Status update, 2026-06-14 thermal/phase Worker publication admission:
+thermal/phase now publishes a dedicated Worker-retained hot-buffer source and
+warm StateManager delta for `sph-thermo-phase`. Mechanics publication no longer
+acts as the thermal family carrier. Downstream pressure/interface and
+reaction/product stages should consume this admitted retained-ref descriptor
+through ComputeManager/GPUHub/NodeKernel authority rather than reading an
+implicit scene or same-Worker side channel.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

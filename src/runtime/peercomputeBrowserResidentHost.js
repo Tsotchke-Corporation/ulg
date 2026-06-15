@@ -62,6 +62,8 @@ export const ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA = '
 export const ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA = 'peercompute.ulg.sph-mls-mpm-same-device-hot-buffer-source-publication.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
+export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
+export const ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0';
 export const ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_POST_STAGE_SEED_NODE_SCHEMA = 'peercompute.ulg.remote-task-graph-sph-mls-mpm-post-stage-seed-node.v0';
 export const ULG_RESIDENT_LAW_GRAPH_ID = 'peercompute.ulg.local-sph-law-closure-graph';
 export const ULG_RESIDENT_PASS_DAG_SOLVER_ID = 'ulg-mls-mpm-sph-resident-steps';
@@ -1853,6 +1855,140 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   return {
     ...payload,
     status: 'worker-retained-mechanics-output-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  candidate = null,
+  workerRunner = null,
+  workerModuleUrl = null,
+  sourceTaskId = null,
+  sourceNodeId = 'ulg-thermal-phase-law',
+  sourceStage = 'thermalPhase',
+  scope = 'ulg-worker-retained-thermal-phase-publications',
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgThermalPhaseWorkerRetainedHotBufferSource requires StateManager hot storage and commitDelta');
+  }
+  if (!candidate || typeof candidate !== 'object') {
+    throw new TypeError('thermal phase worker retained publication requires a compact publication candidate');
+  }
+  const workerRetainedBufferRefs = uniqueStringList(
+    candidate.workerRetainedThermoBufferRefs
+      || candidate.workerRetainedBufferRefs
+      || candidate.retainedBufferRefs
+      || []
+  );
+  if (workerRetainedBufferRefs.length === 0) {
+    throw new TypeError('thermal phase worker retained publication requires worker-retained thermal buffer refs');
+  }
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
+  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:thermal-phase-worker-retained-hot-buffer-source',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const committedAt = Date.now();
+  const workerRetainedBufferImport = {
+    schema: ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
+    status: 'thermal-phase-worker-retained-buffer-source-ready',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sameDevice: false,
+    workerLocal: true,
+    sourceMode: 'worker-retained-thermal-phase-buffer-refs',
+    sourceSchema: candidate.schema || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerModuleUrl || candidate.workerModuleUrl || null,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    localBufferRefs: [],
+    copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    stateManagerAdmissionRequired: true
+  };
+  const hotBufferRecord = {
+    schema: ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'worker-retained-thermal-phase-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceSchema: candidate.schema || null,
+    sourceMode: 'worker-retained-thermal-phase-buffer-refs',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    sameDevice: false,
+    workerLocal: true,
+    copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerRunner,
+    workerBackend: workerRunner,
+    workerRetainedBufferRefs,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    localBufferRefs: [],
+    thermalPhasePublicationCandidate: cloneSerializableValue(candidate),
+    workerRetainedBufferImport
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, 'ulg-worker-retained-thermal-phase-publications');
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-worker-retained-thermal-phase-publication:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'worker-retained-thermal-phase-output-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sameDevice: false,
+    workerLocal: true,
+    sourceMode: 'worker-retained-thermal-phase-buffer-refs',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    outputFamilies: uniqueStringList(candidate.outputFamilies || ['sph-thermo-phase']),
+    thermalPhasePublicationCandidate: cloneSerializableValue(candidate),
+    workerRetainedBufferImport
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'worker-retained-thermal-phase-output-published',
     committed: true,
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
@@ -3899,6 +4035,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishWorkerRetainedThermalPhaseStageOutput(options = {}) {
+      return publishUlgThermalPhaseWorkerRetainedHotBufferSource({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     async refreshRemoteSeedHotBuffers(cacheKeyOrOptions, options = {}) {
       const source = cacheKeyOrOptions && typeof cacheKeyOrOptions === 'object'
         ? cacheKeyOrOptions
@@ -4564,6 +4707,7 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
+    residentWorkerRetainedThermalPhasePublicationReady: typeof host?.publishWorkerRetainedThermalPhaseStageOutput === 'function',
     residentRemoteSeedHotBufferRefreshReady: typeof host?.refreshRemoteSeedHotBuffers === 'function',
     residentRemoteSeedHotBufferRefreshExecutorReady: typeof host?.createRemoteSeedHotBufferRefreshExecutor === 'function',
     residentTaskGraphSubmitRefreshReady: typeof host?.submitTaskGraphWithRemoteSeedHotBufferRefresh === 'function'

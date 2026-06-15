@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Formal GPUHub Thermal/Phase Stage DAG
+## Current Focused Result - 2026-06-14 Thermal/Phase Worker Publication Admission
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -16,8 +16,23 @@ The Worker module now also accepts a `thermalPhase` stage id and can adopt
 retained thermo output into the Worker lane. The focused browser gate now runs
 that `thermalPhase` stage through the formal ComputeManager/GPUHub stage-plan
 DAG on the same warm Worker/lane after mechanics continuation.
+Thermal retained output now also has a NodeKernel/StateManager publication
+path with its own schema and `sph-thermo-phase` output family admission.
 Focused checks:
 
+- Thermal/phase Worker publication admission:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`. The focused browser gate now supplies
+  `host.publishWorkerRetainedThermalPhaseStageOutput()` to the formal stage
+  chain and asserts thermal candidate readiness, hot-buffer storage, live
+  Worker backend retention, warm-delta admission under
+  `ulg-worker-retained-thermal-phase-publications`, retained thermo refs, and
+  admitted `outputFamilies=["sph-thermo-phase"]`.
+- PeerCompute thermal publication candidate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`. The injected Worker-runner case now also injects a
+  thermal publisher and asserts the candidate carries only
+  `sph-thermo-phase`, one retained thermo ref, and `sourceStage="thermalPhase"`.
 - Formal GPUHub thermal/phase stage DAG:
   `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
   passed `1/1`. The retained continuation now requests

@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 23:36 AKDT: Worker-retained thermal/phase
+output now has a NodeKernel/StateManager publication path. ULG splits
+mechanics and thermal publication candidates by stage family, publishes
+`thermalPhase` retained thermo refs under
+`peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0`, and
+commits a warm delta in `ulg-worker-retained-thermal-phase-publications` with
+`outputFamilies=["sph-thermo-phase"]`. The focused browser authority gate
+asserts the hot record, live Worker backend, warm delta, retained thermo refs,
+and admitted output family. Next target: promote pressure/interface and
+reaction/product stages behind the same ComputeManager/GPUHub Worker authority,
+with downstream consumers using the admitted thermal retained-ref descriptor.
+
 Current checkpoint, 2026-06-14 23:23 AKDT: `thermalPhase` is now part of the
 formal ComputeManager/GPUHub stage-plan DAG when
 `includeThermalPhaseStage=true`. The browser authority-host gate no longer
@@ -12,7 +24,8 @@ sources, Worker-ready residency, no-full WebGPU execution, queue-fence
 evidence, retained thermo input/output summaries, and non-authoritative
 thermal task evidence. Next target: publish/admit Worker-retained thermal
 outputs through NodeKernel/StateManager instead of only carrying the
-`thermoBuffer` inside the Worker lane.
+`thermoBuffer` inside the Worker lane. Superseded by the 23:36 thermal
+publication admission above.
 
 Current checkpoint, 2026-06-14 23:01 AKDT: the browser Worker path now executes
 a real `thermalPhase` stage after the same-Worker mechanics continuation. The

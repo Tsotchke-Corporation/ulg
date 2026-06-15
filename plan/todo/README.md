@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 23:36 AKDT: Worker-retained thermal/phase
+output now has its own publication/admission path. Mechanics publication stays
+mechanics-only, while `thermalPhase` publishes retained thermo refs under
+`peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0` and
+commits a warm StateManager delta with `outputFamilies=["sph-thermo-phase"]`.
+The browser authority gate proves hot record storage, live Worker backend,
+warm delta admission, and retained thermo refs. Next priority: promote
+pressure/interface and reaction/product stages behind the same
+ComputeManager/GPUHub Worker authority and make them consume the admitted
+thermal retained-ref descriptor.
+
 Current routing note, 2026-06-14 23:23 AKDT: `thermalPhase` now runs as an
 opt-in fourth node in the formal ComputeManager/GPUHub stage-plan DAG. The
 browser authority-host gate requests `includeThermalPhaseStage=true` on the
@@ -46,6 +57,7 @@ physics atomics, and the representative visual matrix. Next priority: publish
 and admit Worker-retained thermal outputs through NodeKernel/StateManager so
 downstream pressure/interface and reaction/product stages consume an admitted
 thermal retained-ref descriptor rather than only a Worker-local lane record.
+Superseded by the 23:36 thermal publication admission note above.
 
 Current routing note, 2026-06-14 23:01 AKDT: the focused browser authority
 gate now runs `thermalPhase` on the same warm Worker/lane after the mechanics

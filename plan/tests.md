@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Pressure/Interface Retained-Buffer Admission Evidence
+## Current Focused Result - 2026-06-15 Transparent Renderer Depth Order
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -55,7 +55,32 @@ buffer handoff: the WebGPU grid-update wrapper now requires the admitted
 grid-force descriptor, records buffer-only pressure rows as retained GPU
 submissions with unverified no-full impulse evidence, and publishes
 stride/byte-length/residency metadata through the StateManager descriptor.
+The current renderer slice fixes the first queued z-buffer/draw-order failure:
+transparent Three/MarchingCubes surfaces no longer receive per-surface
+hash-offset render orders, so Three.js can depth-sort overlapping water/vapor
+surfaces within each transparent layer. The diagnostic floor grid also no
+longer writes depth.
 Focused checks:
+
+- Renderer depth-order unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render order|transparent|overlay draw order"`
+  passed `26/26`. The new test proves transparent same-layer surfaces share
+  the base order while opaque surfaces retain stable hash ordering.
+- Browser render-state gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1` and now asserts visible transparent surfaces use the
+  `three-transparent-depth-sort-within-layer` policy and the container grid
+  does not write depth.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-transparent-depth-order-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, two captured frames per scenario, and
+  inspected PNG frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-render-transparent-depth-order-20260615`.
+
+Prior pressure/interface retained-buffer checks:
 
 - Grid-update pressure retained-buffer evidence:
   `node --test tests/sphGridUpdateGpuKernel.test.mjs` passed `14/14`. The new

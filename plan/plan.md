@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 02:20 AKDT: the queued Three.js renderer
+z-buffer/draw-order blocker has its first concrete fix. Transparent
+MarchingCubes surfaces now share their layer render order so Three.js can sort
+overlapping transmissive/vapor/alpha meshes by camera depth; only opaque
+surfaces keep the hash-stabilized intra-layer order. The floor grid now renders
+as a diagnostic overlay without writing to the depth buffer, and the browser
+authority gate asserts visible transparent surfaces report the
+`three-transparent-depth-sort-within-layer` policy plus grid depth-write
+disabled. Validation passed renderer units, the browser authority-host gate,
+physics atomics, and the three-scenario visual matrix with inspected PNG
+frames. This reduces one real draw-order failure mode, but the phone
+focus-change flash/disappear symptom remains a separate live-device regression
+to reproduce if the user still sees it.
+
 Current checkpoint, 2026-06-15 02:05 AKDT: pressure/interface grid
 consumption now distinguishes retained GPU force-row buffers from CPU-readable
 force-row arrays. The WebGPU grid-update wrapper now requires the same

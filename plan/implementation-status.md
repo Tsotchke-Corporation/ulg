@@ -1,9 +1,22 @@
 # Implementation Status
 
-Updated: 2026-06-15 pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-15 transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
 ## Done
 
+- Added the first transparent renderer depth-order pass. Transparent
+  MarchingCubes surfaces now share their layer render order so Three.js can
+  depth-sort overlapping transmissive/vapor/alpha meshes by camera position;
+  opaque surfaces keep stable hash ordering. The diagnostic floor grid no
+  longer writes depth, preventing it from contaminating later transparent
+  draws. Browser authority-host coverage now checks visible transparent
+  surfaces report `three-transparent-depth-sort-within-layer` and that the grid
+  material has depth writes disabled. Validation passed syntax checks,
+  renderer unit coverage `26/26`, focused browser authority-host Playwright
+  `1/1`, physics atomics `7` with `1` expected skip, and visual matrix
+  `codex-render-transparent-depth-order-20260615` `3/3` with two captured
+  frames per scenario. Remaining renderer risk: reproduce the user's
+  phone/focus flash-disappear path if it still occurs after this pass.
 - Added retained-buffer pressure/interface admission evidence. The WebGPU grid
   update now requires the admitted
   `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`

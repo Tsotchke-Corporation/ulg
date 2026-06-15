@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 02:20 AKDT: first renderer depth-order pass is
+complete. The immediate Three.js bug was per-surface hash offsets on
+transparent MarchingCubes meshes: those offsets prevented Three's transparent
+object sorter from ordering overlapping water/vapor/alpha surfaces by camera
+depth. Transparent meshes now share their layer order, opaque meshes keep
+stable hash ordering, and the diagnostic floor grid no longer writes depth.
+Keep the live-device focus-change flash/disappear symptom queued as a follow-up
+if it still reproduces; otherwise return to pressure/readback surface reduction
+and GPU-resident law graph promotion.
+
 Current routing note, 2026-06-15 02:05 AKDT: grid-update pressure/interface
 consumption now treats retained GPU force-row buffers as first-class submitted
 work instead of collapsing missing CPU rows into zero impulse evidence. The
@@ -62,6 +72,9 @@ P0/P1 after the current pressure/residency copy-reduction slice and before any
 claim that visual captures are authoritative. The pass must verify depth-test,
 depth-write, transparent sorting, container/grid overlays, nested surfaces, and
 the focus-change flash/disappear symptom against close-spaced frame captures.
+Partially addressed by the 2026-06-15 02:20 transparent-depth-sort pass; keep
+focus-change flashing/disappearing and any remaining nested-surface artifact
+open until reproduced against the live device/browser path.
 
 Current routing note, 2026-06-15 01:33 AKDT: same-frame intra-DAG
 pressure/interface publication and grid-update admission are complete for the

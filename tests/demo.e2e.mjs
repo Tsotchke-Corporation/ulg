@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
+import { SPH_PHASE_RENDER_ORDER } from '../src/visualization/sphPhaseScene.js';
 
 const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
 const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69';
@@ -3540,12 +3541,16 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           materialOpacity: node.material?.opacity ?? null,
           materialTransmission: node.material?.transmission ?? null,
           renderLayer: node.userData.renderLayer ?? null,
+          renderOrderPolicy: node.userData.renderOrderPolicy ?? null,
           renderOrder: node.renderOrder ?? null,
-          materialDepthWrite: node.material?.depthWrite ?? null
+          materialDepthWrite: node.material?.depthWrite ?? null,
+          materialDepthTest: node.material?.depthTest ?? null
         });
       }
     });
     const containerWire = scene?.scene?.children?.find((node) => node.userData?.renderLayer === 'container-wire');
+    const containerGrid = scene?.scene?.children?.find((node) => node.userData?.renderLayer === 'container-grid');
+    const materialList = (material) => Array.isArray(material) ? material : [material];
     return {
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
@@ -4048,6 +4053,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         renderLayer: containerWire.userData.renderLayer,
         renderOrder: containerWire.renderOrder,
         materialDepthWrite: containerWire.material?.depthWrite ?? null
+      } : null,
+      containerGrid: containerGrid ? {
+        renderLayer: containerGrid.userData.renderLayer,
+        renderOrder: containerGrid.renderOrder,
+        materialDepthWrite: materialList(containerGrid.material).every((material) => material?.depthWrite === false),
+        materialDepthTest: materialList(containerGrid.material).every((material) => material?.depthTest !== false)
       } : null
     };
   });
@@ -4122,6 +4133,18 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.containerWire.renderOrder).toBeGreaterThan(
     Math.max(...derivedSummary.visibleSurfaces.map((surface) => surface.renderOrder))
   );
+  expect(derivedSummary.containerGrid.renderLayer).toBe('container-grid');
+  expect(derivedSummary.containerGrid.materialDepthWrite).toBe(true);
+  expect(derivedSummary.containerGrid.materialDepthTest).toBe(true);
+  expect(derivedSummary.containerGrid.renderOrder).toBeLessThan(derivedSummary.containerWire.renderOrder);
+  expect(derivedSummary.visibleSurfaces
+    .filter((surface) => surface.materialDepthWrite === false)
+    .every((surface) => surface.renderOrder === SPH_PHASE_RENDER_ORDER.transmissiveSurface
+      || surface.renderOrder === SPH_PHASE_RENDER_ORDER.vaporSurface
+      || surface.renderOrder === SPH_PHASE_RENDER_ORDER.alphaSurface)).toBe(true);
+  expect(derivedSummary.visibleSurfaces
+    .filter((surface) => surface.materialDepthWrite === false)
+    .every((surface) => surface.renderOrderPolicy === 'three-transparent-depth-sort-within-layer')).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => Number.isFinite(surface.renderOrder))).toBe(true);
   expect(derivedSummary.visibleSurfaces.every((surface) => typeof surface.renderLayer === 'string')).toBe(true);
   expect(derivedSummary.opticalGpuTable.schema).toBe('peercompute.ulg.optical-gpu-table.v0');

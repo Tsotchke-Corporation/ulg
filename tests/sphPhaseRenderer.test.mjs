@@ -40,6 +40,7 @@ import {
   SPH_SURFACE_INACTIVE_GRACE_FRAMES,
   surfaceRadiusScaleForRenderBatch,
   surfaceRadiusMetersFromRenderFieldRadius,
+  surfaceObjectRenderOrder,
   stableSurfaceRenderOrder
 } from '../src/visualization/sphPhaseScene.js';
 import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
@@ -682,6 +683,35 @@ test('SPH renderer gives surfaces stable intra-layer render order', () => {
   assert.notEqual(waterOrder, steamOrder);
   assert.ok(waterOrder >= baseOrder);
   assert.ok(waterOrder < baseOrder + 0.01);
+});
+
+test('SPH renderer leaves transparent same-layer meshes depth-sortable', () => {
+  const baseOrder = SPH_PHASE_RENDER_ORDER.transmissiveSurface;
+
+  assert.equal(
+    surfaceObjectRenderOrder(baseOrder, 'front-water', {
+      renderLayer: 'transmissive-surface',
+      depthWrite: false
+    }),
+    baseOrder
+  );
+  assert.equal(
+    surfaceObjectRenderOrder(baseOrder, 'back-water', {
+      renderLayer: 'transmissive-surface',
+      depthWrite: false
+    }),
+    baseOrder
+  );
+  assert.notEqual(
+    surfaceObjectRenderOrder(SPH_PHASE_RENDER_ORDER.opaqueSurface, 'iron-a', {
+      renderLayer: 'opaque-surface',
+      depthWrite: true
+    }),
+    surfaceObjectRenderOrder(SPH_PHASE_RENDER_ORDER.opaqueSurface, 'iron-b', {
+      renderLayer: 'opaque-surface',
+      depthWrite: true
+    })
+  );
 });
 
 test('SPH resident overlay draw order follows render policy metadata', () => {

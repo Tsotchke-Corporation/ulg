@@ -1,5 +1,59 @@
 # ULG Implementation Log
 
+## 2026-06-15 02:20 AKDT - Transparent renderer depth-order pass
+
+Implemented:
+
+- Added `surfaceObjectRenderOrder()` and changed Three/MarchingCubes surface
+  ordering so transparent/transmissive/vapor/alpha surfaces share their layer
+  order. This lets Three.js depth-sort overlapping transparent surfaces within
+  the layer instead of being pinned by hash offsets.
+- Kept stable hash ordering for opaque surfaces where deterministic intra-layer
+  ordering is harmless.
+- Set the diagnostic floor grid materials to `depthWrite=false` while keeping
+  `depthTest=true`, so the grid no longer writes z-buffer values that can
+  contaminate later transparent draws.
+- Extended the browser authority-host test to report surface render-order
+  policy and container-grid depth state, then assert visible transparent
+  surfaces use `three-transparent-depth-sort-within-layer`.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `tests/sphPhaseRenderer.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/transparent-renderer-depth-order-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`
+- PASS: `node --check tests/demo.e2e.mjs`
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render order|transparent|overlay draw order"`
+  reported `26/26`
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-transparent-depth-order-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; inspected PNG frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-render-transparent-depth-order-20260615`.
+
+Open:
+
+- If the user's phone/browser still flashes or loses volumes after app focus
+  changes, reproduce that as a live-device lifecycle/render-context regression.
+  This pass fixes a concrete transparent sort and grid depth-write issue, not
+  every possible context-loss/preserveDrawingBuffer path.
+
 ## 2026-06-15 02:05 AKDT - Pressure/interface retained-buffer admission evidence
 
 Implemented:

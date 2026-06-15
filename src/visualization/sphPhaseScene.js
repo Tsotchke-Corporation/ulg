@@ -1038,6 +1038,19 @@ export function stableSurfaceRenderOrder(baseOrder, surfaceKey = '') {
   return base + ((hash >>> 0) % 1000) / 100000;
 }
 
+export function surfaceObjectRenderOrder(baseOrder, surfaceKey = '', {
+  renderLayer = null,
+  depthWrite = true
+} = {}) {
+  const base = Number.isFinite(baseOrder) ? baseOrder : 0;
+  const transparentLayer = renderLayer === 'transmissive-surface'
+    || renderLayer === 'vapor-surface'
+    || renderLayer === 'alpha-surface'
+    || depthWrite === false;
+  if (transparentLayer) return base;
+  return stableSurfaceRenderOrder(base, surfaceKey);
+}
+
 export function resolveRenderFieldSurfaceVisibility({
   maxDensity = 0,
   isolation = 0,
@@ -1274,17 +1287,25 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
 function applySurfaceRenderOrdering(mesh, optics = {}, descriptorOrRow = {}) {
   const layer = renderLayerFromOpticalResponse(optics, descriptorOrRow);
   const order = renderOrderFromOpticalResponse(optics, descriptorOrRow);
-  const stableOrder = stableSurfaceRenderOrder(order, surfaceRenderOrderKey(descriptorOrRow));
-  mesh.renderOrder = stableOrder;
+  const depthWrite = renderDepthWriteFromOpticalResponse(optics, descriptorOrRow);
+  const objectOrder = surfaceObjectRenderOrder(order, surfaceRenderOrderKey(descriptorOrRow), {
+    renderLayer: layer,
+    depthWrite
+  });
+  mesh.renderOrder = objectOrder;
   mesh.userData.renderLayer = layer;
   mesh.userData.renderOrderBase = order;
+  mesh.userData.renderOrderPolicy = depthWrite
+    ? 'stable-opaque-layer-order'
+    : 'three-transparent-depth-sort-within-layer';
   if (mesh.material) {
-    mesh.material.depthWrite = renderDepthWriteFromOpticalResponse(optics, descriptorOrRow);
+    mesh.material.depthWrite = depthWrite;
     mesh.material.userData.renderLayer = layer;
-    mesh.material.userData.renderOrder = stableOrder;
+    mesh.material.userData.renderOrder = objectOrder;
     mesh.material.userData.renderOrderBase = order;
+    mesh.material.userData.renderOrderPolicy = mesh.userData.renderOrderPolicy;
   }
-  return { layer, order: stableOrder, baseOrder: order };
+  return { layer, order: objectOrder, baseOrder: order, depthWrite };
 }
 
 function emptyBounds() {
@@ -1803,6 +1824,15 @@ export function createSphPhaseScene(container, {
   const gridFootprint = Math.max(dims[0], dims[2]);
   const grid = new THREE.GridHelper(gridFootprint, 20, 0x1d8b6d, 0x0d332b);
   grid.position.set(dims[0] / 2, 0, dims[2] / 2);
+  const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
+  for (const material of gridMaterials) {
+    if (!material) continue;
+    material.transparent = true;
+    material.depthWrite = false;
+    material.depthTest = true;
+  }
+  grid.renderOrder = SPH_PHASE_RENDER_ORDER.containerWire - 1;
+  grid.userData.renderLayer = 'container-grid';
   scene.add(grid);
 
   const surfaces = new Map();

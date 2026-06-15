@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 00:13 AKDT: Worker-retained
+reaction/product output now has a NodeKernel/StateManager publication path.
+`reactionProduct` builds a dedicated compact publication candidate, requires
+Worker-ready WebGPU no-full execution plus retained product refs, calls a
+reaction/product-specific publisher, stores the Worker retained-ref descriptor
+as a StateManager hot record, and commits an admitted warm delta under
+`ulg-worker-retained-reaction-product-publications`. This completes the
+reaction/product admission slice as evidence/non-authoritative state
+publication. Next priority is pressure/interface force-row promotion behind
+the same ComputeManager/GPUHub Worker authority, then wiring downstream stages
+to consume admitted retained-ref descriptors rather than private lane records.
+
 Current routing note, 2026-06-15 00:01 AKDT: the first reaction/product
 ComputeManager stage boundary and Worker/GPUHub DAG slot now exist. ULG
 exposes `createSphReactionProductStageComputeTask()` and

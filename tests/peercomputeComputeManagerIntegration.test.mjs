@@ -71,6 +71,8 @@ import {
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
+  ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
+  ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_PROMOTION_ADMISSION_SCHEMA,
   ULG_RESIDENT_LAW_GRAPH_MANIFEST_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_METADATA_SCOPE,
@@ -1429,6 +1431,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
 
   const thermalStageWorkerBridgeCalls = [];
   const thermalStagePublicationPayloads = [];
+  const reactionProductStagePublicationPayloads = [];
   const gpuHubWorkerThermalStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
     ...mechanicsStageParticle,
     computeManager,
@@ -1457,6 +1460,16 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
         committed: true,
         hotBufferKey: 'ulg:test:thermal-phase-publication-hot-buffer',
         commitDeltaTaskId: 'ulg:test:thermal-phase-publication-delta'
+      };
+    },
+    gpuHubResidentReactionProductStageWorkerOutputPublisher(payload) {
+      reactionProductStagePublicationPayloads.push(payload);
+      return {
+        schema: 'peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0',
+        status: 'worker-retained-reaction-product-output-published',
+        committed: true,
+        hotBufferKey: 'ulg:test:reaction-product-publication-hot-buffer',
+        commitDeltaTaskId: 'ulg:test:reaction-product-publication-delta'
       };
     },
     gpuHubResidentStageWorkerRunner: {
@@ -1662,6 +1675,23 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(thermalStagePublicationPayloads[0].sourceStage, 'thermalPhase');
   assert.deepEqual(thermalStagePublicationPayloads[0].candidate.outputFamilies, ['sph-thermo-phase']);
   assert.equal(thermalStagePublicationPayloads[0].candidate.workerRetainedThermoBufferRefCount, 1);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationCandidateStatus, 'worker-retained-reaction-product-publication-candidate-ready');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationStatus, 'worker-retained-reaction-product-output-published');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationCommitted, true);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerCompactPublicationHotBufferKey,
+    'ulg:test:reaction-product-publication-hot-buffer'
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.reactionProductWorkerRetainedProductBufferRefCount, 1);
+  assert.equal(reactionProductStagePublicationPayloads.length, 1);
+  assert.equal(reactionProductStagePublicationPayloads[0].sourceStage, 'reactionProduct');
+  assert.deepEqual(reactionProductStagePublicationPayloads[0].candidate.outputFamilies, [
+    'sph-particle-state',
+    'sph-thermo-phase',
+    'mls-mpm-mechanics',
+    'resident-product-mass'
+  ]);
+  assert.equal(reactionProductStagePublicationPayloads[0].candidate.workerRetainedProductBufferRefCount, 1);
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.thermalPhase.workerRetainedThermoInputStatus,
     'applied-worker-retained-thermo-input'
@@ -2871,6 +2901,89 @@ test('ULG resident authority host refreshes admitted remote seeds into local SPH
   assert.equal(hotBufferRecord.sphUpload.stateBuffer.label, 'ulg-sph-particle-state');
   assert.equal(hotBufferRecord.mlsMpmUpload.mechanicsBuffer.label, 'ulg-mls-mpm-particle-mechanics');
 
+});
+
+test('ULG resident authority host admits worker-retained reaction/product output descriptors', async (t) => {
+  const computeMod = await importPeerComputeManager(t);
+  const nodeMod = await importPeerComputeNodeKernel(t);
+  const stateMod = await importPeerComputeStateManager(t);
+  if (!computeMod || !nodeMod || !stateMod) return;
+  const host = await createPeerComputeResidentAuthorityHost({
+    nodeKernelModuleUrl: PEERCOMPUTE_NODE_KERNEL_URL.href,
+    computeManagerModuleUrl: PEERCOMPUTE_COMPUTE_MANAGER_URL.href,
+    stateManagerModuleUrl: PEERCOMPUTE_STATE_MANAGER_URL.href,
+    remoteResultQuorumModuleUrl: PEERCOMPUTE_REMOTE_QUORUM_URL.href,
+    computeTaskModulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    enableWorkers: false,
+    enablePersistence: false,
+    disableNetworkProvider: true,
+    disableBroadcast: true,
+    nodeKernelConfig: {
+      pubsubPeerDiscovery: false,
+      maxConnections: 0,
+      maxIncomingPendingConnections: 0,
+      enableNetVizDebugTelemetry: false,
+      enableNetVizSessionBroadcast: false,
+      enableNetVizSessionDiscovery: false
+    }
+  });
+  t.after(() => host.destroy?.());
+
+  const summary = summarizePeerComputeResidentAuthorityHost(host);
+  assert.equal(summary.residentWorkerRetainedReactionProductPublicationReady, true);
+
+  const candidate = {
+    schema: 'peercompute.ulg.sph-reaction-product-worker-compact-publication-candidate.v0',
+    candidateStatus: 'worker-retained-reaction-product-publication-candidate-ready',
+    cacheKey: 'ulg:test:reaction-product-publication-cache',
+    stateKey: 'ulg:test:reaction-product-publication-state',
+    workerRetainedBufferRefs: [
+      'ulg-worker:test:reactionProduct:state',
+      'ulg-worker:test:reactionProduct:thermo',
+      'ulg-worker:test:reactionProduct:mechanics',
+      'ulg-worker:test:reactionProduct:product'
+    ],
+    workerRetainedProductBufferRefs: ['ulg-worker:test:reactionProduct:product'],
+    workerRetainedProductBufferRefCount: 1,
+    outputFamilies: [
+      'sph-particle-state',
+      'sph-thermo-phase',
+      'mls-mpm-mechanics',
+      'resident-product-mass'
+    ]
+  };
+  const workerRunner = { id: 'test-reaction-product-worker-runner' };
+  const publication = host.publishWorkerRetainedReactionProductStageOutput({
+    candidate,
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:reaction-product-stage-plan',
+    sourceStage: 'reactionProduct'
+  });
+
+  assert.equal(publication.schema, ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(publication.status, 'worker-retained-reaction-product-output-published');
+  assert.equal(publication.committed, true);
+  assert.equal(publication.sourceStage, 'reactionProduct');
+  assert.deepEqual(publication.outputFamilies, candidate.outputFamilies);
+  assert.deepEqual(publication.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
+  assert.equal(publication.workerRetainedBufferImport.schema, ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA);
+  assert.equal(publication.workerRetainedBufferImport.copyMode, 'zero-copy-worker-retained-ref-descriptor');
+
+  const hotRecord = host.stateManager.getHotBuffer(publication.hotBufferKey);
+  assert.equal(hotRecord.schema, ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(hotRecord.status, 'worker-retained-reaction-product-hot-buffer-source-stored');
+  assert.equal(hotRecord.workerRunner, workerRunner);
+  assert.equal(hotRecord.sourceStage, 'reactionProduct');
+  assert.deepEqual(hotRecord.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
+
+  const warmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-reaction-product-publications');
+  const warmDelta = warmDeltas[publication.commitDeltaTaskId];
+  assert.equal(warmDelta.payload.schema, ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(warmDelta.payload.status, 'worker-retained-reaction-product-output-admitted');
+  assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
+  assert.equal(warmDelta.payload.workerLocal, true);
+  assert.deepEqual(warmDelta.payload.outputFamilies, candidate.outputFamilies);
 });
 
 test('ULG resident authority host auto-refreshes local hot buffers after admitted remote task graph import', async (t) => {

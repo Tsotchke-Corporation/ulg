@@ -1,5 +1,80 @@
 # ULG Implementation Log
 
+## 2026-06-15 00:13 AKDT - Reaction/product Worker publication admission
+
+Prompt context:
+
+- Continued the ComputeManager/GPUHub Worker authority refactor after the
+  user reported renderer z-buffer/draw-order problems. The renderer issue
+  remains queued as a separate P0/P1 visual correctness blocker; this slice
+  stayed on the active reaction/product authority path.
+
+Implemented:
+
+- Added reaction/product Worker-retained publication schemas and host support:
+  `peercompute.ulg.reaction-product-worker-retained-buffer-import.v0` and
+  `peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0`.
+- Added `publishUlgReactionProductWorkerRetainedHotBufferSource()` and
+  `host.publishWorkerRetainedReactionProductStageOutput()`. The host stores a
+  hot Worker-retained descriptor with the live Worker backend and commits an
+  admitted warm delta under
+  `ulg-worker-retained-reaction-product-publications`.
+- Added
+  `peercompute.ulg.sph-reaction-product-worker-compact-publication-candidate.v0`
+  candidate construction. It requires Worker-ready `reactionProduct` execution,
+  WebGPU backend, `no-full-readback`, a readback-free hot loop, Worker-retained
+  refs, and a retained product/resident-product-mass signal.
+- Wired `gpuHubResidentReactionProductStageWorkerOutputPublisher` into
+  `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` and
+  exposed candidate/publication status, hot-buffer key, commit task id, and
+  retained product-buffer ref counts on `mechanicsStageTaskChain`.
+- Extended PeerCompute integration coverage so the injected Worker runner now
+  proves a ready reaction/product candidate and injected publisher result, and
+  added a direct authority-host test for hot-record storage plus warm-delta
+  admission.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/reaction-product-worker-publication-admission-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `git diff --check`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `12/12`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident authority host admits worker-retained reaction/product output descriptors"`
+  reported `12/12`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `3/3`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-reaction-product-publication-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; artifacts are under
+  `/tmp/ulg-visual-sanity-matrix/codex-reaction-product-publication-admission-20260615`.
+
+Open:
+
+- Next implementation slice after commit: pressure/interface force-row
+  production and consumption under the same ComputeManager/GPUHub Worker
+  authority.
+
 ## 2026-06-15 00:01 AKDT - Reaction/product Worker stage DAG boundary
 
 Implemented:

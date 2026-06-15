@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 00:13 AKDT: Worker-retained
+reaction/product output now has a NodeKernel/StateManager publication path.
+ULG builds a dedicated
+`peercompute.ulg.sph-reaction-product-worker-compact-publication-candidate.v0`
+from the `reactionProduct` stage, requires Worker-ready WebGPU no-full
+execution plus retained product refs, and publishes admitted descriptors under
+`peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0`.
+The host stores the live Worker retained-ref descriptor as a hot record and
+commits a warm delta in
+`ulg-worker-retained-reaction-product-publications` with
+`outputFamilies=["sph-particle-state","sph-thermo-phase","mls-mpm-mechanics","resident-product-mass"]`.
+Next target: promote pressure/interface force-row production and consumption
+behind the same ComputeManager/GPUHub Worker authority, then make downstream
+consumers use admitted retained-ref descriptors instead of private lane
+records.
+
 Current checkpoint, 2026-06-14 23:36 AKDT: Worker-retained thermal/phase
 output now has a NodeKernel/StateManager publication path. ULG splits
 mechanics and thermal publication candidates by stage family, publishes

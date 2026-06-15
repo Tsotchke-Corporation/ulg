@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Reaction/Product Worker Stage DAG Boundary
+## Current Focused Result - 2026-06-15 Reaction/Product Worker Publication Admission
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -22,8 +22,37 @@ The current unit/integration slice adds the first reaction/product child stage
 boundary after thermal. It is non-authoritative and evidence-only, but the
 Worker and injected PeerCompute DAG now know how to execute `reactionProduct`
 and retain state/thermo/mechanics/product refs without full readback.
+Reaction/product Worker-retained output now also has a NodeKernel/StateManager
+publication path with a dedicated schema and admitted output families for SPH
+state, thermo phase, MLS-MPM mechanics, and resident product mass.
 Focused checks:
 
+- Reaction/product Worker publication admission:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  and
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident authority host admits worker-retained reaction/product output descriptors"`
+  both passed; Node executed the full integration file in both runs and
+  reported `12/12` each time. The first path asserts the five-stage Worker DAG
+  builds a ready reaction/product publication candidate, calls the injected
+  publisher, admits the reaction/product hot-buffer key, and carries exactly
+  `["sph-particle-state","sph-thermo-phase","mls-mpm-mechanics","resident-product-mass"]`.
+  The second path asserts the actual authority host stores
+  `peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0`
+  as a hot record, commits
+  `worker-retained-reaction-product-output-admitted` in
+  `ulg-worker-retained-reaction-product-publications`, and uses
+  `peercompute.ulg.reaction-product-worker-retained-buffer-import.v0` as the
+  zero-copy Worker-retained descriptor.
+- Browser authority-host regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-reaction-product-publication-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0` with artifacts under
+  `/tmp/ulg-visual-sanity-matrix/codex-reaction-product-publication-admission-20260615`.
 - Reaction/product Worker stage DAG boundary:
   `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
   reported `11/11`. The injected Worker-runner case now proves

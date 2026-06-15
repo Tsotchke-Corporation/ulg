@@ -111,6 +111,7 @@ export const ULG_MLS_MPM_MECHANICS_G2P_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute
 export const ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0';
 export const ULG_MLS_MPM_MECHANICS_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0';
 export const ULG_SPH_THERMAL_PHASE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-thermal-phase-worker-compact-publication-candidate.v0';
+export const ULG_SPH_REACTION_PRODUCT_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-reaction-product-worker-compact-publication-candidate.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-thermal-phase-stage-compute-task.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-thermal-phase-stage-compute-task-result.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.thermal-phase-stage-task-evidence.v0';
@@ -4820,6 +4821,99 @@ function buildThermalPhaseWorkerCompactPublicationCandidate({
   };
 }
 
+function buildReactionProductWorkerCompactPublicationCandidate({
+  stageExecution = null,
+  stageLaneSummaries = {},
+  stageWorkerResidencyStatuses = {},
+  workerRunnerSupplied = false,
+  workerModuleUrl = null,
+  laneId = null,
+  stateKey = null
+} = {}) {
+  const stageResults = stageExecution?.stageResults || [];
+  const reactionStageCompleted = stageExecution?.status === 'completed'
+    && stageResults.some((entry) => entry?.stageId === REACTION_PRODUCT_STAGE_ID && entry.status === 'completed');
+  const reactionSummary = stageLaneSummaries[REACTION_PRODUCT_STAGE_ID] || {};
+  const retainedBufferRefs = retainedRefsFromStageExecution(stageExecution, [REACTION_PRODUCT_STAGE_ID]);
+  const workerRetainedBufferRefs = workerRetainedRefsFromStageExecution(stageExecution, [REACTION_PRODUCT_STAGE_ID]);
+  const workerRetainedProductBufferRefs = uniqueNonEmptyStrings(
+    workerRetainedBufferRefs.filter((ref) => {
+      const text = String(ref || '').toLowerCase();
+      return text.includes('product') || text.includes('residentproductmass') || text.includes('producteventbuffer');
+    })
+  );
+  const retainedProductBufferRefs = uniqueNonEmptyStrings(
+    retainedBufferRefs.filter((ref) => String(ref || '').includes('resident-product-mass'))
+  );
+  const hasWorkerRetainedRefs = workerRetainedBufferRefs.length > 0;
+  const hasProductRef = workerRetainedProductBufferRefs.length > 0 || retainedProductBufferRefs.length > 0;
+  const backend = reactionSummary.backend || null;
+  const readbackMode = reactionSummary.readbackMode || null;
+  const workerResidencyStatus = stageWorkerResidencyStatuses[REACTION_PRODUCT_STAGE_ID] || null;
+  const blocker = !workerRunnerSupplied
+    ? 'worker-runner-not-supplied'
+    : (!reactionStageCompleted
+      ? 'reaction-product-stage-execution-not-completed'
+      : (workerResidencyStatus !== 'worker-ready'
+        ? 'reaction-product-worker-residency-not-ready'
+        : (backend !== 'webgpu'
+          ? 'reaction-product-webgpu-backend-not-proven'
+          : (readbackMode !== NO_FULL_READBACK_MODE || reactionSummary.normalHotLoopReadbackFree !== true
+            ? 'reaction-product-no-full-readback-required'
+            : (!hasWorkerRetainedRefs
+              ? 'worker-retained-reaction-product-buffer-refs-missing'
+              : (!hasProductRef
+                ? 'worker-retained-resident-product-mass-ref-missing'
+                : null))))));
+  const candidateReady = !blocker;
+  return {
+    schema: ULG_SPH_REACTION_PRODUCT_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
+    candidateStatus: candidateReady
+      ? 'worker-retained-reaction-product-publication-candidate-ready'
+      : 'worker-retained-reaction-product-publication-candidate-blocked',
+    blocker,
+    authority: 'compute-manager-gpuhub-worker-stage-output',
+    publicationAuthority: 'nodekernel-state-manager-admission-required',
+    publicationStatus: candidateReady
+      ? 'blocked-authorized-reaction-product-publication-required'
+      : 'blocked-candidate-not-ready',
+    publicationReason: candidateReady
+      ? 'worker-retained-reaction-product-gpu-handles-are-not-main-thread-transferable'
+      : blocker,
+    sameDeviceMainThreadHandlesAvailable: false,
+    workerLocalRetainedRefsOnly: true,
+    compactSummaryStatus: readbackMode === NO_FULL_READBACK_MODE && reactionSummary.normalHotLoopReadbackFree === true
+      ? 'worker-reaction-product-compact-summary-required'
+      : 'blocked-full-readback-mode',
+    compactSummaryRequired: true,
+    stateManagerAdmissionRequired: true,
+    laneId,
+    stateKey,
+    workerModuleUrl,
+    stageOrder: [REACTION_PRODUCT_STAGE_ID],
+    observedStageOrder: stageResults.map((entry) => entry.stageId).filter(Boolean),
+    stageBackends: { [REACTION_PRODUCT_STAGE_ID]: backend },
+    stageReadbackModes: { [REACTION_PRODUCT_STAGE_ID]: readbackMode },
+    stageWorkerResidencyStatuses: { [REACTION_PRODUCT_STAGE_ID]: workerResidencyStatus },
+    reactionProductEvidencePassed: reactionSummary.reactionProductEvidencePassed === true,
+    reactionProductAuthoritativeMutation: reactionSummary.reactionProductAuthoritativeMutation ?? null,
+    reactionProductOutputMutatesParticles: reactionSummary.reactionProductOutputMutatesParticles ?? null,
+    reactionProductResidentProductMassStatus: reactionSummary.reactionProductResidentProductMassStatus || null,
+    reactionProductResidentProductMassBufferRetained: reactionSummary.reactionProductResidentProductMassBufferRetained === true,
+    workerRetainedThermoInputStatus: reactionSummary.workerRetainedThermoInputStatus || null,
+    workerRetainedThermoOutputStatus: reactionSummary.workerRetainedThermoOutputStatus || null,
+    retainedBufferRefs,
+    retainedProductBufferRefs,
+    workerRetainedBufferRefs,
+    workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
+    workerRetainedProductBufferRefs,
+    workerRetainedProductBufferRefCount: workerRetainedProductBufferRefs.length,
+    outputFamilies: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'],
+    requiredPublicationProtocol: 'worker-posts-reaction-product-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
+    nextRequiredImplementation: 'authorized-worker-reaction-product-output-publication'
+  };
+}
+
 export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
   computeManager,
   nodeKernel = null,
@@ -4834,6 +4928,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerModuleUrl = null,
   gpuHubResidentStageWorkerOutputPublisher = null,
   gpuHubResidentThermalStageWorkerOutputPublisher = null,
+  gpuHubResidentReactionProductStageWorkerOutputPublisher = null,
   gpuHubResidentStageWorkerUseRetainedInput = false,
   includeThermalPhaseStage = false,
   includeReactionProductStage = false,
@@ -5672,6 +5767,42 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       };
     }
   }
+  const reactionProductWorkerCompactPublicationCandidate = includeReactionProductStage
+    ? buildReactionProductWorkerCompactPublicationCandidate({
+        stageExecution: gpuResidentLaneStagePlanExecution,
+        stageLaneSummaries,
+        stageWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
+        workerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
+        workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey
+      })
+    : null;
+  let reactionProductWorkerCompactPublication = null;
+  if (
+    reactionProductWorkerCompactPublicationCandidate?.candidateStatus === 'worker-retained-reaction-product-publication-candidate-ready'
+    && typeof gpuHubResidentReactionProductStageWorkerOutputPublisher === 'function'
+  ) {
+    try {
+      reactionProductWorkerCompactPublication = await gpuHubResidentReactionProductStageWorkerOutputPublisher({
+        candidate: reactionProductWorkerCompactPublicationCandidate,
+        workerRunner: gpuHubResidentStageWorkerRunner,
+        workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        sourceTaskId: `${taskIdPrefix}:mechanics-stage-plan`,
+        sourceNodeId: 'ulg-reaction-product-gas-law',
+        sourceStage: REACTION_PRODUCT_STAGE_ID,
+        stageExecution: gpuResidentLaneStagePlanExecution
+      });
+    } catch (error) {
+      reactionProductWorkerCompactPublication = {
+        schema: 'peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0',
+        status: 'worker-retained-reaction-product-output-publication-failed',
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
   const stageTaskChain = {
     schema: ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA,
     status: 'compute-manager-stage-task-chain-executed',
@@ -5777,6 +5908,20 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     thermalWorkerRetainedBufferRefCount: thermalWorkerCompactPublicationCandidate?.workerRetainedBufferRefCount ?? 0,
     thermalWorkerRetainedThermoBufferRefs: thermalWorkerCompactPublicationCandidate?.workerRetainedThermoBufferRefs || [],
     thermalWorkerRetainedThermoBufferRefCount: thermalWorkerCompactPublicationCandidate?.workerRetainedThermoBufferRefCount ?? 0,
+    reactionProductWorkerCompactPublicationCandidate,
+    reactionProductWorkerCompactPublicationCandidateStatus: reactionProductWorkerCompactPublicationCandidate?.candidateStatus || null,
+    reactionProductWorkerCompactPublication,
+    reactionProductWorkerCompactPublicationStatus: reactionProductWorkerCompactPublication?.status
+      || reactionProductWorkerCompactPublicationCandidate?.publicationStatus
+      || null,
+    reactionProductWorkerCompactPublicationCommitted: reactionProductWorkerCompactPublication?.committed === true,
+    reactionProductWorkerCompactPublicationHotBufferKey: reactionProductWorkerCompactPublication?.hotBufferKey || null,
+    reactionProductWorkerCompactPublicationCommitDeltaTaskId: reactionProductWorkerCompactPublication?.commitDeltaTaskId || null,
+    reactionProductWorkerCompactSummaryStatus: reactionProductWorkerCompactPublicationCandidate?.compactSummaryStatus || null,
+    reactionProductWorkerRetainedBufferRefs: reactionProductWorkerCompactPublicationCandidate?.workerRetainedBufferRefs || [],
+    reactionProductWorkerRetainedBufferRefCount: reactionProductWorkerCompactPublicationCandidate?.workerRetainedBufferRefCount ?? 0,
+    reactionProductWorkerRetainedProductBufferRefs: reactionProductWorkerCompactPublicationCandidate?.workerRetainedProductBufferRefs || [],
+    reactionProductWorkerRetainedProductBufferRefCount: reactionProductWorkerCompactPublicationCandidate?.workerRetainedProductBufferRefCount ?? 0,
     workerRetainedBufferRefs: workerCompactPublicationCandidate?.workerRetainedBufferRefs || [],
     workerRetainedBufferRefCount: workerCompactPublicationCandidate?.workerRetainedBufferRefCount ?? 0,
     computeManagerOwned: true,
@@ -5859,6 +6004,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       thermalWorkerCompactPublicationCommitted: stageTaskChain.thermalWorkerCompactPublicationCommitted,
       thermalWorkerCompactPublicationHotBufferKey: stageTaskChain.thermalWorkerCompactPublicationHotBufferKey,
       thermalWorkerCompactSummaryStatus: stageTaskChain.thermalWorkerCompactSummaryStatus,
+      reactionProductWorkerCompactPublicationStatus: stageTaskChain.reactionProductWorkerCompactPublicationStatus,
+      reactionProductWorkerCompactPublicationCommitted: stageTaskChain.reactionProductWorkerCompactPublicationCommitted,
+      reactionProductWorkerCompactPublicationHotBufferKey: stageTaskChain.reactionProductWorkerCompactPublicationHotBufferKey,
+      reactionProductWorkerCompactSummaryStatus: stageTaskChain.reactionProductWorkerCompactSummaryStatus,
       nodeKernelOwned: stageTaskChain.nodeKernelOwned,
       stageTaskResultSchemas: { ...stageTaskChain.stageTaskResultSchemas },
       stageTaskEvidenceSchemas: { ...stageTaskChain.stageTaskEvidenceSchemas },

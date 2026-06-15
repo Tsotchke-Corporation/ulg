@@ -1,5 +1,35 @@
 # ULG Implementation Log
 
+## 2026-06-15 12:32 AKDT - Full visual matrix clean baseline
+
+Summary:
+
+- Ran the full visual sanity matrix after the plain-SPH pressure partition and
+  stale CPU-surface invalidation fixes.
+- The full 12-row short-horizon matrix now passes with no issue counts and
+  frame artifacts for every scenario.
+- Inspected representative frames. Na/H2O is bounded and no stale Na surface
+  remains. CPU-SPH H2O/H2O remains visually stacked at this short horizon, so
+  longer liquid merge/free-surface quality stays open.
+
+Validation:
+
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-full-after-sph-partition-and-stale-surface-20260615 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `scenarioCount=12`, `failedCount=0`, empty `issueCounts`, empty
+  `visualSurfaceIssueCounts`, matching mechanics integrators, and three frames
+  per row.
+
+Files touched:
+
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/full-visual-matrix-clean-baseline-2026-06-15.md`
+
 ## 2026-06-15 12:16 AKDT - CPU surface invalidation for consumed reactants
 
 Summary:

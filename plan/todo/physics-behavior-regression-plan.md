@@ -12,6 +12,15 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 12:32 AKDT update: the full short-horizon visual matrix now
+  passes after the pressure-participant and stale CPU-surface fixes. Run
+  `codex-full-after-sph-partition-and-stale-surface-20260615` covered all 12
+  matrix scenarios with `failedCount=0`, empty issue counts, empty visual
+  surface issue counts, correct mechanics integrators, and three captured
+  frames per row. Representative frame inspection still shows the CPU-SPH
+  liquid/liquid row as two stacked H2O surfaces at this short horizon, so the
+  next P0 behavior work is not another short-matrix fix; it is a longer liquid
+  merge/free-surface acceptance gate plus renderer depth/focus trust.
 - 2026-06-15 12:16 AKDT update: the targeted Na/H2O stale-surface visual
   failure is fixed. CPU-particle surface batches now hide absent material/phase
   surfaces immediately, so a consumed reactant cannot leave its previous

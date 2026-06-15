@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 12:32 AKDT: the current full short-horizon
+visual matrix baseline is clean. `codex-full-after-sph-partition-and-stale-surface-20260615`
+passed all 12 scenarios with empty issue counts and three frame artifacts per
+row. This clears the immediate P0 regressions from pressure/gas products,
+no-force SPH projection, solid/liquid contact, Na/H2O stale reactant surfaces,
+and law-toggle mode drift. Do not over-promote this to final liquid quality:
+short CPU-SPH H2O/H2O still visually shows stacked separate H2O surfaces, so
+the next P0 behavior item is a longer liquid merge/free-surface acceptance
+gate, followed by z-buffer/depth-order and focus-resume visual trust.
+
 Current routing note, 2026-06-15 12:16 AKDT: the public-default Na/H2O
 plain-SPH visual row now passes. The remaining visual issue after the pressure
 partition fix was stale CPU MarchingCubes retention: the Na solid surface stayed

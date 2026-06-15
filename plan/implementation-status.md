@@ -4,6 +4,10 @@ Updated: 2026-06-15 plain-SPH no-force law isolation, product-event spatial ledg
 
 ## Done
 
+- The full short-horizon visual sanity matrix is green after the plain-SPH
+  pressure partition and CPU stale-surface fixes. Run
+  `codex-full-after-sph-partition-and-stale-surface-20260615` passed all
+  12 scenarios with empty issue counts and three captured frames per row.
 - CPU-particle MarchingCubes surfaces now hide immediately when their
   material/phase batch is absent. This prevents consumed reactants from leaving
   stale meshes visible during reaction updates while preserving inactive grace

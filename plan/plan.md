@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 12:32 AKDT: after the plain-SPH pressure
+partition and CPU-surface invalidation fixes, the full 12-row visual sanity
+matrix is green. Run
+`codex-full-after-sph-partition-and-stale-surface-20260615` reported
+`failedCount=0`, empty `issueCounts`, empty `visualSurfaceIssueCounts`,
+matching mechanics integrators for every row, and three captured frames per
+scenario. Representative frame inspection confirms the Na/H2O row is bounded
+and no stale Na mesh remains. The short CPU-SPH H2O/H2O row is numerically
+clean but still shows two stacked H2O surfaces at the sampled horizon, so
+long-horizon liquid merge/free-surface quality remains open despite the green
+short matrix. Next priorities: strengthen the liquid-quality acceptance
+horizon, audit renderer z-buffer/depth-order and focus-resume trust, then
+continue moving accepted law stages behind PeerCompute/GPUHub/WebGPU workers.
+
 Current checkpoint, 2026-06-15 12:16 AKDT: the targeted Na/H2O stale-surface
 visual failure is fixed. CPU-particle surfaces now hide immediately when their
 material/phase batch is absent; the inactive-surface grace window remains for

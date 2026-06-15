@@ -1,5 +1,24 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Full Visual Matrix Baseline
+
+After the plain-SPH pressure partition and stale CPU-surface invalidation
+fixes, the full short-horizon visual matrix is clean.
+
+Evidence:
+
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-full-after-sph-partition-and-stale-surface-20260615 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `scenarioCount=12`, `failedCount=0`, empty `issueCounts`, empty
+  `visualSurfaceIssueCounts`, and three captured frames for every scenario.
+- Representative values: MLS-MPM H2O/H2O `J=0.999682..1.036141`, CPU-SPH
+  H2O/H2O max speed about `0.282 m/s`, solid H2O max displacement about
+  `1.19e-7 m`, Na/H2O reaction max speed about `0.541 m/s`, and all pressure
+  impulse summaries `0`.
+- Manual frame inspection: Na/H2O is bounded with no stale Na surface; CPU-SPH
+  H2O/H2O is bounded but still shows two stacked H2O surfaces at the sampled
+  horizon, so long-horizon liquid merge/free-surface quality remains open.
+
 ## Current Focused Result - 2026-06-15 CPU Surface Invalidation
 
 The current slice fixes stale CPU MarchingCubes surfaces after reaction-driven

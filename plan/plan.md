@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 00:53 AKDT: pressure/interface force-row output
+now has a Worker-retained publication/admission path through the
+NodeKernel/StateManager authority surface. ULG builds
+`peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0`
+from the `pressureInterface` stage, exposes
+`publishWorkerRetainedPressureInterfaceStageOutput()` on the resident authority
+host, stores pressure force-row retained-ref descriptors as hot records under
+`peercompute.ulg.pressure-interface-worker-retained-hot-buffer-publication.v0`,
+and commits admitted warm deltas in
+`ulg-worker-retained-pressure-interface-publications`. The publication remains
+non-mutating and carries `gridForceApplicationApproved=false`; the next target
+is explicitly approved grid-update consumption of admitted pressure rows with
+impulse/conservation evidence.
+
 Current checkpoint, 2026-06-15 00:34 AKDT: the first pressure/interface
 force-row producer stage now exists under the ComputeManager/GPUHub stage DAG.
 ULG exposes `createSphPressureInterfaceStageComputeTask()` and

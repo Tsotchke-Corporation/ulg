@@ -22,6 +22,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA
@@ -72,6 +73,8 @@ import {
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
+  ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
+  ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
   ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_PROMOTION_ADMISSION_SCHEMA,
@@ -1431,6 +1434,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   });
 
   const thermalStageWorkerBridgeCalls = [];
+  const pressureInterfaceStagePublicationPayloads = [];
   const thermalStagePublicationPayloads = [];
   const reactionProductStagePublicationPayloads = [];
   const gpuHubWorkerThermalStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
@@ -1499,6 +1503,16 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuResidentLaneId: 'ulg:test:mechanics-stage-gpuhub-worker-thermal',
     gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-gpuhub-worker-thermal-state',
     gpuHubResidentStageWorkerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    gpuHubResidentPressureInterfaceStageWorkerOutputPublisher(payload) {
+      pressureInterfaceStagePublicationPayloads.push(payload);
+      return {
+        schema: 'peercompute.ulg.pressure-interface-worker-retained-hot-buffer-publication.v0',
+        status: 'worker-retained-pressure-interface-output-published',
+        committed: true,
+        hotBufferKey: 'ulg:test:pressure-interface-publication-hot-buffer',
+        commitDeltaTaskId: 'ulg:test:pressure-interface-publication-delta'
+      };
+    },
     gpuHubResidentThermalStageWorkerOutputPublisher(payload) {
       thermalStagePublicationPayloads.push(payload);
       return {
@@ -1759,6 +1773,27 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.pressureInterface, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.thermalPhase, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.reactionProduct, true);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate?.schema,
+    ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidateStatus, 'worker-retained-pressure-interface-publication-candidate-ready');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationStatus, 'worker-retained-pressure-interface-output-published');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCommitted, true);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationHotBufferKey,
+    'ulg:test:pressure-interface-publication-hot-buffer'
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfacePublishedForceRowCount, 2);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceRetainedPressureBufferRefCount, 1);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerRetainedPressureBufferRefCount, 1);
+  assert.equal(pressureInterfaceStagePublicationPayloads.length, 1);
+  assert.equal(pressureInterfaceStagePublicationPayloads[0].sourceStage, 'pressureInterface');
+  assert.deepEqual(pressureInterfaceStagePublicationPayloads[0].candidate.outputFamilies, ['pressure-interface-force-rows']);
+  assert.equal(pressureInterfaceStagePublicationPayloads[0].candidate.publicationAuthority, 'nodekernel-state-manager-admission-required');
+  assert.equal(pressureInterfaceStagePublicationPayloads[0].candidate.pressureInterfaceForceRowCount, 2);
+  assert.deepEqual(pressureInterfaceStagePublicationPayloads[0].candidate.retainedPressureBufferRefs, ['pressure-interface-force-rows-buffer']);
+  assert.deepEqual(pressureInterfaceStagePublicationPayloads[0].candidate.workerRetainedPressureBufferRefs, ['ulg-worker:test:pressureInterface:forceRows']);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCandidateStatus, 'worker-retained-thermal-phase-publication-candidate-ready');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationStatus, 'worker-retained-thermal-phase-output-published');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCommitted, true);
@@ -3092,6 +3127,88 @@ test('ULG resident authority host admits worker-retained reaction/product output
   assert.equal(warmDelta.payload.status, 'worker-retained-reaction-product-output-admitted');
   assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
   assert.equal(warmDelta.payload.workerLocal, true);
+  assert.deepEqual(warmDelta.payload.outputFamilies, candidate.outputFamilies);
+});
+
+test('ULG resident authority host admits worker-retained pressure/interface force-row descriptors', async (t) => {
+  const computeMod = await importPeerComputeManager(t);
+  const nodeMod = await importPeerComputeNodeKernel(t);
+  const stateMod = await importPeerComputeStateManager(t);
+  if (!computeMod || !nodeMod || !stateMod) return;
+  const host = await createPeerComputeResidentAuthorityHost({
+    nodeKernelModuleUrl: PEERCOMPUTE_NODE_KERNEL_URL.href,
+    computeManagerModuleUrl: PEERCOMPUTE_COMPUTE_MANAGER_URL.href,
+    stateManagerModuleUrl: PEERCOMPUTE_STATE_MANAGER_URL.href,
+    remoteResultQuorumModuleUrl: PEERCOMPUTE_REMOTE_QUORUM_URL.href,
+    computeTaskModulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    enableWorkers: false,
+    enablePersistence: false,
+    disableNetworkProvider: true,
+    disableBroadcast: true,
+    nodeKernelConfig: {
+      pubsubPeerDiscovery: false,
+      maxConnections: 0,
+      maxIncomingPendingConnections: 0,
+      enableNetVizDebugTelemetry: false,
+      enableNetVizSessionBroadcast: false,
+      enableNetVizSessionDiscovery: false
+    }
+  });
+  t.after(() => host.destroy?.());
+
+  const summary = summarizePeerComputeResidentAuthorityHost(host);
+  assert.equal(summary.residentWorkerRetainedPressureInterfacePublicationReady, true);
+
+  const candidate = {
+    schema: ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
+    candidateStatus: 'worker-retained-pressure-interface-publication-candidate-ready',
+    cacheKey: 'ulg:test:pressure-interface-publication-cache',
+    stateKey: 'ulg:test:pressure-interface-publication-state',
+    workerRetainedBufferRefs: ['ulg-worker:test:pressureInterface:forceRows'],
+    workerRetainedPressureBufferRefs: ['ulg-worker:test:pressureInterface:forceRows'],
+    workerRetainedPressureBufferRefCount: 1,
+    retainedPressureBufferRefs: ['pressure-interface-force-rows-buffer'],
+    pressureInterfaceForceRowCount: 2,
+    outputFamilies: ['pressure-interface-force-rows']
+  };
+  const workerRunner = { id: 'test-pressure-interface-worker-runner' };
+  const publication = host.publishWorkerRetainedPressureInterfaceStageOutput({
+    candidate,
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:pressure-interface-stage-plan',
+    sourceStage: 'pressureInterface'
+  });
+
+  assert.equal(publication.schema, ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(publication.status, 'worker-retained-pressure-interface-output-published');
+  assert.equal(publication.committed, true);
+  assert.equal(publication.sourceStage, 'pressureInterface');
+  assert.deepEqual(publication.outputFamilies, candidate.outputFamilies);
+  assert.equal(publication.pressureInterfaceForceRowCount, 2);
+  assert.equal(publication.gridForceApplicationApproved, false);
+  assert.deepEqual(publication.workerRetainedPressureBufferRefs, candidate.workerRetainedPressureBufferRefs);
+  assert.deepEqual(publication.retainedPressureBufferRefs, candidate.retainedPressureBufferRefs);
+  assert.equal(publication.workerRetainedBufferImport.schema, ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA);
+  assert.equal(publication.workerRetainedBufferImport.copyMode, 'zero-copy-worker-retained-ref-descriptor');
+  assert.equal(publication.workerRetainedBufferImport.gridForceApplicationApproved, false);
+
+  const hotRecord = host.stateManager.getHotBuffer(publication.hotBufferKey);
+  assert.equal(hotRecord.schema, ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(hotRecord.status, 'worker-retained-pressure-interface-hot-buffer-source-stored');
+  assert.equal(hotRecord.workerRunner, workerRunner);
+  assert.equal(hotRecord.sourceStage, 'pressureInterface');
+  assert.deepEqual(hotRecord.workerRetainedPressureBufferRefs, candidate.workerRetainedPressureBufferRefs);
+  assert.deepEqual(hotRecord.retainedPressureBufferRefs, candidate.retainedPressureBufferRefs);
+
+  const warmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-pressure-interface-publications');
+  const warmDelta = warmDeltas[publication.commitDeltaTaskId];
+  assert.equal(warmDelta.payload.schema, ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(warmDelta.payload.status, 'worker-retained-pressure-interface-output-admitted');
+  assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
+  assert.equal(warmDelta.payload.workerLocal, true);
+  assert.equal(warmDelta.payload.pressureInterfaceForceRowCount, 2);
+  assert.equal(warmDelta.payload.gridForceApplicationApproved, false);
   assert.deepEqual(warmDelta.payload.outputFamilies, candidate.outputFamilies);
 });
 

@@ -121,6 +121,7 @@ export const ULG_MLS_MPM_MECHANICS_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA =
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-pressure-interface-stage-compute-task.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-pressure-interface-stage-compute-task-result.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.pressure-interface-stage-task-evidence.v0';
+export const ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0';
 export const ULG_SPH_THERMAL_PHASE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-thermal-phase-worker-compact-publication-candidate.v0';
 export const ULG_SPH_REACTION_PRODUCT_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-reaction-product-worker-compact-publication-candidate.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-thermal-phase-stage-compute-task.v0';
@@ -5076,6 +5077,106 @@ function buildMechanicsWorkerCompactPublicationCandidate({
   };
 }
 
+function buildPressureInterfaceWorkerCompactPublicationCandidate({
+  stageExecution = null,
+  stageLaneSummaries = {},
+  stageWorkerResidencyStatuses = {},
+  workerRunnerSupplied = false,
+  workerModuleUrl = null,
+  laneId = null,
+  stateKey = null
+} = {}) {
+  const stageResults = stageExecution?.stageResults || [];
+  const pressureStageCompleted = stageExecution?.status === 'completed'
+    && stageResults.some((entry) => entry?.stageId === PRESSURE_INTERFACE_STAGE_ID && entry.status === 'completed');
+  const pressureSummary = stageLaneSummaries[PRESSURE_INTERFACE_STAGE_ID] || {};
+  const retainedBufferRefs = retainedRefsFromStageExecution(stageExecution, [PRESSURE_INTERFACE_STAGE_ID]);
+  const workerRetainedBufferRefs = workerRetainedRefsFromStageExecution(stageExecution, [PRESSURE_INTERFACE_STAGE_ID]);
+  const workerRetainedPressureBufferRefs = uniqueNonEmptyStrings(
+    workerRetainedBufferRefs.filter((ref) => {
+      const text = String(ref || '').toLowerCase();
+      return text.includes('pressure') || text.includes('forcerows') || text.includes('force-rows');
+    })
+  );
+  const retainedPressureBufferRefs = uniqueNonEmptyStrings(
+    retainedBufferRefs.filter((ref) => String(ref || '').includes('pressure-interface-force-rows'))
+  );
+  const hasPressureRef = workerRetainedPressureBufferRefs.length > 0 || retainedPressureBufferRefs.length > 0;
+  const forceRowCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowCount, 0));
+  const forceRowsRetainedOrEmpty = hasPressureRef || forceRowCount === 0;
+  const backend = pressureSummary.backend || null;
+  const readbackMode = pressureSummary.readbackMode || null;
+  const workerResidencyStatus = stageWorkerResidencyStatuses[PRESSURE_INTERFACE_STAGE_ID] || null;
+  const solverStatus = pressureSummary.pressureInterfaceForceSolverStatus || null;
+  const evidencePassed = pressureSummary.pressureInterfaceEvidencePassed === true;
+  const mutationSuppressed = pressureSummary.pressureInterfaceAuthoritativeMutation === false;
+  const backendAllowed = backend === 'webgpu' || backend === 'cpu-reference';
+  const blocker = !workerRunnerSupplied
+    ? 'worker-runner-not-supplied'
+    : (!pressureStageCompleted
+      ? 'pressure-interface-stage-execution-not-completed'
+      : (workerResidencyStatus !== 'worker-ready'
+        ? 'pressure-interface-worker-residency-not-ready'
+        : (!backendAllowed
+          ? 'pressure-interface-worker-backend-not-proven'
+          : (readbackMode !== NO_FULL_READBACK_MODE || pressureSummary.normalHotLoopReadbackFree !== true
+            ? 'pressure-interface-no-full-readback-required'
+            : (!evidencePassed
+              ? 'pressure-interface-force-row-evidence-not-passed'
+              : (solverStatus !== 'pressure-interface-force-solver-ready'
+                ? 'pressure-interface-force-solver-not-ready'
+                : (!mutationSuppressed
+                  ? 'pressure-interface-authority-must-remain-non-mutating'
+                  : (!forceRowsRetainedOrEmpty
+                    ? 'pressure-interface-force-row-ref-missing'
+                    : null))))))));
+  const candidateReady = !blocker;
+  return {
+    schema: ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
+    candidateStatus: candidateReady
+      ? 'worker-retained-pressure-interface-publication-candidate-ready'
+      : 'worker-retained-pressure-interface-publication-candidate-blocked',
+    blocker,
+    authority: 'compute-manager-gpuhub-worker-stage-output',
+    publicationAuthority: 'nodekernel-state-manager-admission-required',
+    publicationStatus: candidateReady
+      ? 'blocked-authorized-pressure-interface-publication-required'
+      : 'blocked-candidate-not-ready',
+    publicationReason: candidateReady
+      ? 'worker-retained-pressure-interface-force-rows-require-state-manager-admission-before-grid-consumption'
+      : blocker,
+    sameDeviceMainThreadHandlesAvailable: backend === 'cpu-reference',
+    workerLocalRetainedRefsOnly: backend !== 'cpu-reference',
+    compactSummaryStatus: readbackMode === NO_FULL_READBACK_MODE && pressureSummary.normalHotLoopReadbackFree === true
+      ? 'worker-pressure-interface-compact-summary-required'
+      : 'blocked-full-readback-mode',
+    compactSummaryRequired: true,
+    stateManagerAdmissionRequired: true,
+    laneId,
+    stateKey,
+    workerModuleUrl,
+    stageOrder: [PRESSURE_INTERFACE_STAGE_ID],
+    observedStageOrder: stageResults.map((entry) => entry.stageId).filter(Boolean),
+    stageBackends: { [PRESSURE_INTERFACE_STAGE_ID]: backend },
+    stageReadbackModes: { [PRESSURE_INTERFACE_STAGE_ID]: readbackMode },
+    stageWorkerResidencyStatuses: { [PRESSURE_INTERFACE_STAGE_ID]: workerResidencyStatus },
+    pressureInterfaceEvidencePassed: evidencePassed,
+    pressureInterfaceAuthoritativeMutation: pressureSummary.pressureInterfaceAuthoritativeMutation ?? null,
+    pressureInterfaceForceSolverStatus: solverStatus,
+    pressureInterfaceForceRowCount: forceRowCount,
+    pressureInterfaceForceRowsRetained: pressureSummary.pressureInterfaceForceRowsRetained === true,
+    retainedBufferRefs,
+    retainedPressureBufferRefs,
+    workerRetainedBufferRefs,
+    workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
+    workerRetainedPressureBufferRefs,
+    workerRetainedPressureBufferRefCount: workerRetainedPressureBufferRefs.length,
+    outputFamilies: ['pressure-interface-force-rows'],
+    requiredPublicationProtocol: 'worker-posts-pressure-interface-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
+    nextRequiredImplementation: 'authorized-pressure-interface-grid-force-consumption'
+  };
+}
+
 function buildThermalPhaseWorkerCompactPublicationCandidate({
   stageExecution = null,
   stageLaneSummaries = {},
@@ -5266,6 +5367,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerPolicy = null,
   gpuHubResidentStageWorkerModuleUrl = null,
   gpuHubResidentStageWorkerOutputPublisher = null,
+  gpuHubResidentPressureInterfaceStageWorkerOutputPublisher = null,
   gpuHubResidentThermalStageWorkerOutputPublisher = null,
   gpuHubResidentReactionProductStageWorkerOutputPublisher = null,
   gpuHubResidentStageWorkerUseRetainedInput = false,
@@ -6112,6 +6214,42 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       };
     }
   }
+  const pressureInterfaceWorkerCompactPublicationCandidate = includePressureInterfaceStage
+    ? buildPressureInterfaceWorkerCompactPublicationCandidate({
+        stageExecution: gpuResidentLaneStagePlanExecution,
+        stageLaneSummaries,
+        stageWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
+        workerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
+        workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey
+      })
+    : null;
+  let pressureInterfaceWorkerCompactPublication = null;
+  if (
+    pressureInterfaceWorkerCompactPublicationCandidate?.candidateStatus === 'worker-retained-pressure-interface-publication-candidate-ready'
+    && typeof gpuHubResidentPressureInterfaceStageWorkerOutputPublisher === 'function'
+  ) {
+    try {
+      pressureInterfaceWorkerCompactPublication = await gpuHubResidentPressureInterfaceStageWorkerOutputPublisher({
+        candidate: pressureInterfaceWorkerCompactPublicationCandidate,
+        workerRunner: gpuHubResidentStageWorkerRunner,
+        workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        sourceTaskId: `${taskIdPrefix}:mechanics-stage-plan`,
+        sourceNodeId: 'ulg-pressure-interface-force-law',
+        sourceStage: PRESSURE_INTERFACE_STAGE_ID,
+        stageExecution: gpuResidentLaneStagePlanExecution
+      });
+    } catch (error) {
+      pressureInterfaceWorkerCompactPublication = {
+        schema: 'peercompute.ulg.pressure-interface-worker-retained-hot-buffer-publication.v0',
+        status: 'worker-retained-pressure-interface-output-publication-failed',
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
   const thermalWorkerCompactPublicationCandidate = includeThermalPhaseStage
     ? buildThermalPhaseWorkerCompactPublicationCandidate({
         stageExecution: gpuResidentLaneStagePlanExecution,
@@ -6275,6 +6413,24 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     workerCompactPublicationHotBufferKey: workerCompactPublication?.hotBufferKey || null,
     workerCompactPublicationCommitDeltaTaskId: workerCompactPublication?.commitDeltaTaskId || null,
     workerCompactSummaryStatus: workerCompactPublicationCandidate?.compactSummaryStatus || null,
+    pressureInterfaceWorkerCompactPublicationCandidate,
+    pressureInterfaceWorkerCompactPublicationCandidateStatus: pressureInterfaceWorkerCompactPublicationCandidate?.candidateStatus || null,
+    pressureInterfaceWorkerCompactPublication,
+    pressureInterfaceWorkerCompactPublicationStatus: pressureInterfaceWorkerCompactPublication?.status
+      || pressureInterfaceWorkerCompactPublicationCandidate?.publicationStatus
+      || null,
+    pressureInterfaceWorkerCompactPublicationCommitted: pressureInterfaceWorkerCompactPublication?.committed === true,
+    pressureInterfaceWorkerCompactPublicationHotBufferKey: pressureInterfaceWorkerCompactPublication?.hotBufferKey || null,
+    pressureInterfaceWorkerCompactPublicationCommitDeltaTaskId: pressureInterfaceWorkerCompactPublication?.commitDeltaTaskId || null,
+    pressureInterfaceWorkerCompactSummaryStatus: pressureInterfaceWorkerCompactPublicationCandidate?.compactSummaryStatus || null,
+    pressureInterfaceWorkerRetainedBufferRefs: pressureInterfaceWorkerCompactPublicationCandidate?.workerRetainedBufferRefs || [],
+    pressureInterfaceWorkerRetainedBufferRefCount: pressureInterfaceWorkerCompactPublicationCandidate?.workerRetainedBufferRefCount ?? 0,
+    pressureInterfaceWorkerRetainedPressureBufferRefs: pressureInterfaceWorkerCompactPublicationCandidate?.workerRetainedPressureBufferRefs || [],
+    pressureInterfaceWorkerRetainedPressureBufferRefCount: pressureInterfaceWorkerCompactPublicationCandidate?.workerRetainedPressureBufferRefCount ?? 0,
+    pressureInterfaceRetainedPressureBufferRefs: pressureInterfaceWorkerCompactPublicationCandidate?.retainedPressureBufferRefs || [],
+    pressureInterfaceRetainedPressureBufferRefCount: pressureInterfaceWorkerCompactPublicationCandidate?.retainedPressureBufferRefs?.length ?? 0,
+    pressureInterfacePublishedForceRowCount: pressureInterfaceWorkerCompactPublicationCandidate?.pressureInterfaceForceRowCount ?? 0,
+    pressureInterfacePublicationAuthority: pressureInterfaceWorkerCompactPublicationCandidate?.publicationAuthority || null,
     thermalWorkerCompactPublicationCandidate,
     thermalWorkerCompactPublicationCandidateStatus: thermalWorkerCompactPublicationCandidate?.candidateStatus || null,
     thermalWorkerCompactPublication,
@@ -6381,6 +6537,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       gpuResidentLaneStageTaskLaneAligned: stageTaskChain.gpuResidentLaneStageTaskLaneAligned,
       gpuResidentLaneStageLeaseFenceStatus: stageTaskChain.gpuResidentLaneStageLeaseFenceStatus,
       gpuResidentLaneStageLeaseFenceSatisfied: stageTaskChain.gpuResidentLaneStageLeaseFenceSatisfied,
+      pressureInterfaceWorkerCompactPublicationStatus: stageTaskChain.pressureInterfaceWorkerCompactPublicationStatus,
+      pressureInterfaceWorkerCompactPublicationCommitted: stageTaskChain.pressureInterfaceWorkerCompactPublicationCommitted,
+      pressureInterfaceWorkerCompactPublicationHotBufferKey: stageTaskChain.pressureInterfaceWorkerCompactPublicationHotBufferKey,
+      pressureInterfaceWorkerCompactSummaryStatus: stageTaskChain.pressureInterfaceWorkerCompactSummaryStatus,
+      pressureInterfacePublishedForceRowCount: stageTaskChain.pressureInterfacePublishedForceRowCount,
       thermalWorkerCompactPublicationStatus: stageTaskChain.thermalWorkerCompactPublicationStatus,
       thermalWorkerCompactPublicationCommitted: stageTaskChain.thermalWorkerCompactPublicationCommitted,
       thermalWorkerCompactPublicationHotBufferKey: stageTaskChain.thermalWorkerCompactPublicationHotBufferKey,

@@ -64,6 +64,8 @@ export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.u
 export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0';
+export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-buffer-import.v0';
+export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-hot-buffer-publication.v0';
 export const ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.reaction-product-worker-retained-buffer-import.v0';
 export const ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0';
 export const ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_POST_STAGE_SEED_NODE_SCHEMA = 'peercompute.ulg.remote-task-graph-sph-mls-mpm-post-stage-seed-node.v0';
@@ -1991,6 +1993,159 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
   return {
     ...payload,
     status: 'worker-retained-thermal-phase-output-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  candidate = null,
+  workerRunner = null,
+  workerModuleUrl = null,
+  sourceTaskId = null,
+  sourceNodeId = 'ulg-pressure-interface-force-law',
+  sourceStage = 'pressureInterface',
+  scope = 'ulg-worker-retained-pressure-interface-publications',
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgPressureInterfaceWorkerRetainedHotBufferSource requires StateManager hot storage and commitDelta');
+  }
+  if (!candidate || typeof candidate !== 'object') {
+    throw new TypeError('pressure/interface worker retained publication requires a compact publication candidate');
+  }
+  const workerRetainedBufferRefs = uniqueStringList(
+    candidate.workerRetainedPressureBufferRefs
+      || candidate.workerRetainedBufferRefs
+      || candidate.retainedPressureBufferRefs
+      || candidate.retainedBufferRefs
+      || []
+  );
+  const retainedPressureBufferRefs = uniqueStringList(
+    candidate.retainedPressureBufferRefs
+      || candidate.workerRetainedPressureBufferRefs
+      || candidate.workerRetainedBufferRefs
+      || workerRetainedBufferRefs
+  );
+  if (workerRetainedBufferRefs.length === 0 && retainedPressureBufferRefs.length === 0) {
+    throw new TypeError('pressure/interface worker retained publication requires pressure force-row refs');
+  }
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
+  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:pressure-interface-worker-retained-hot-buffer-source',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const forceRowCount = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceForceRowCount, 0)));
+  const committedAt = Date.now();
+  const workerRetainedBufferImport = {
+    schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
+    status: 'pressure-interface-worker-retained-buffer-source-ready',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sameDevice: candidate.sameDeviceMainThreadHandlesAvailable === true,
+    workerLocal: candidate.workerLocalRetainedRefsOnly !== false,
+    sourceMode: 'worker-retained-pressure-interface-force-row-refs',
+    sourceSchema: candidate.schema || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerModuleUrl || candidate.workerModuleUrl || null,
+    retainedBufferRefs: retainedPressureBufferRefs.length > 0 ? retainedPressureBufferRefs : workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    workerRetainedPressureBufferRefs: uniqueStringList(candidate.workerRetainedPressureBufferRefs || []),
+    retainedPressureBufferRefs,
+    localBufferRefs: [],
+    copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    pressureInterfaceForceRowCount: forceRowCount,
+    stateManagerAdmissionRequired: true,
+    gridForceApplicationApproved: false
+  };
+  const hotBufferRecord = {
+    schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'worker-retained-pressure-interface-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceSchema: candidate.schema || null,
+    sourceMode: 'worker-retained-pressure-interface-force-row-refs',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    sameDevice: workerRetainedBufferImport.sameDevice,
+    workerLocal: workerRetainedBufferImport.workerLocal,
+    copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerRunner,
+    workerBackend: workerRunner,
+    workerRetainedBufferRefs,
+    workerRetainedPressureBufferRefs: workerRetainedBufferImport.workerRetainedPressureBufferRefs,
+    retainedPressureBufferRefs,
+    retainedBufferRefs: workerRetainedBufferImport.retainedBufferRefs,
+    localBufferRefs: [],
+    pressureInterfaceForceRowCount: forceRowCount,
+    pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
+    workerRetainedBufferImport
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, 'ulg-worker-retained-pressure-interface-publications');
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-worker-retained-pressure-interface-publication:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'worker-retained-pressure-interface-output-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sameDevice: workerRetainedBufferImport.sameDevice,
+    workerLocal: workerRetainedBufferImport.workerLocal,
+    sourceMode: 'worker-retained-pressure-interface-force-row-refs',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferImport.retainedBufferRefs,
+    workerRetainedBufferRefs,
+    workerRetainedPressureBufferRefs: workerRetainedBufferImport.workerRetainedPressureBufferRefs,
+    retainedPressureBufferRefs,
+    pressureInterfaceForceRowCount: forceRowCount,
+    outputFamilies: uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']),
+    gridForceApplicationApproved: false,
+    pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
+    workerRetainedBufferImport
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'worker-retained-pressure-interface-output-published',
     committed: true,
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
@@ -4182,6 +4337,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishWorkerRetainedPressureInterfaceStageOutput(options = {}) {
+      return publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     publishWorkerRetainedReactionProductStageOutput(options = {}) {
       return publishUlgReactionProductWorkerRetainedHotBufferSource({
         stateManager,
@@ -4855,6 +5017,7 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
     residentWorkerRetainedThermalPhasePublicationReady: typeof host?.publishWorkerRetainedThermalPhaseStageOutput === 'function',
+    residentWorkerRetainedPressureInterfacePublicationReady: typeof host?.publishWorkerRetainedPressureInterfaceStageOutput === 'function',
     residentWorkerRetainedReactionProductPublicationReady: typeof host?.publishWorkerRetainedReactionProductStageOutput === 'function',
     residentRemoteSeedHotBufferRefreshReady: typeof host?.refreshRemoteSeedHotBuffers === 'function',
     residentRemoteSeedHotBufferRefreshExecutorReady: typeof host?.createRemoteSeedHotBufferRefreshExecutor === 'function',

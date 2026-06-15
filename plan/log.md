@@ -1,5 +1,70 @@
 # ULG Implementation Log
 
+## 2026-06-15 00:53 AKDT - Pressure/interface Worker publication admission
+
+Implemented:
+
+- Added pressure/interface Worker-retained publication schemas and host support:
+  `peercompute.ulg.pressure-interface-worker-retained-buffer-import.v0` and
+  `peercompute.ulg.pressure-interface-worker-retained-hot-buffer-publication.v0`.
+- Added `publishUlgPressureInterfaceWorkerRetainedHotBufferSource()` and
+  `host.publishWorkerRetainedPressureInterfaceStageOutput()`. The host stores a
+  hot Worker-retained descriptor for pressure force-row refs and commits an
+  admitted warm delta under
+  `ulg-worker-retained-pressure-interface-publications`.
+- Added
+  `peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0`
+  candidate construction in the stage-chain. It requires Worker execution,
+  Worker-ready residency, no-full-readback discipline, pressure evidence,
+  solver readiness, non-mutating authority, and retained/empty force-row
+  descriptors.
+- Wired `gpuHubResidentPressureInterfaceStageWorkerOutputPublisher` into
+  `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` and
+  exposed publication status, hot-buffer key, row count, authority, and
+  retained pressure-buffer refs on `mechanicsStageTaskChain`.
+- Kept `gridForceApplicationApproved=false`; this slice admits force-row
+  descriptors only. Grid-update consumption remains the next explicit
+  authority/evidence slice.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-interface-worker-publication-admission-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `git diff --check`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs` reported
+  `13/13`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-publication-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; artifacts are under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-publication-admission-20260615`.
+
+Open:
+
+- Next implementation slice: grid update consumes pressure/interface rows only
+  from an admitted descriptor and reports force-row count, impulse,
+  conservation residuals, and explicit grid-force application authority.
+- Renderer z-buffer/draw-order failures remain queued as a separate P0/P1
+  visual correctness blocker.
+
 ## 2026-06-15 00:34 AKDT - Pressure/interface Worker stage DAG boundary
 
 Implemented:

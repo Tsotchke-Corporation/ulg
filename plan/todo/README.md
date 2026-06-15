@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 00:53 AKDT: pressure/interface force-row
+output now has a Worker-retained publication/admission path. The
+`pressureInterface` stage builds a dedicated compact publication candidate,
+the authority host exposes `publishWorkerRetainedPressureInterfaceStageOutput()`,
+and admitted descriptors are stored as StateManager hot records plus warm
+deltas under `ulg-worker-retained-pressure-interface-publications`. This is
+still non-mutating; the admitted payload explicitly carries
+`gridForceApplicationApproved=false`. The next priority is the approved
+grid-update consumer slice: grid update may consume pressure/interface rows
+only from an admitted descriptor and must report force-row count, impulse,
+pairwise conservation residuals, and authority status.
+
 Current routing note, 2026-06-15 00:34 AKDT: the first
 pressure/interface force-row producer stage now exists under the formal
 ComputeManager/GPUHub stage DAG. `pressureInterface` runs after `p2g` and

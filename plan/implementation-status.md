@@ -1,9 +1,28 @@
 # Implementation Status
 
-Updated: 2026-06-14 live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added an opt-in fused no-full resident mechanics path that records P2G,
+  grid-update, and G2P into one WebGPU command submission for a single
+  substep. The first browser probe found and fixed the crash
+  (`stateBufferByteLength`/`mechanicsBufferByteLength` local-name mismatch),
+  then `/tmp/ulg-history-probes/current-fused-mechanics-64-20260614.json`
+  classified `good` for the mechanics-only `64`-substep H2O/H2O direct-
+  resident sanity gate. However, it did not improve the real bottleneck:
+  the final compact-summary `mapAsync` still waited about `13.93 s`, while the
+  fused mechanics CPU submission stage was only about `0.3 ms`. The fused path
+  is therefore gated behind `fuseNoFullResidentMechanics` instead of becoming
+  default. The default path was rechecked with
+  `/tmp/ulg-history-probes/current-default-mechanics-64-after-fused-gate-20260614.json`
+  and stayed `good`, with `fusedMechanics=0`, no issues, J about
+  `0.99999..1.0214`, max speed about `0.299 m/s`, and compact-summary
+  `mapAsync` about `13.52 s`. Current interpretation: reducing three stage
+  submits to one submit per substep is not enough; the P0 performance path is a
+  ComputeManager/GPU-lane multi-substep resident pass DAG that keeps hot
+  buffers resident across a sequence and only fences at validation/render
+  boundaries.
 - Added compact-summary fence attribution telemetry and probe browser launch
   controls. Resident summary execution now reports internal setup/encode/
   submit/`mapAsync`/decode timings and the probe analysis reports
@@ -12,9 +31,10 @@ Updated: 2026-06-14 live same-device source auto-publication, CPU-SPH solid H2O 
   `mapAsync` wait for a `336` byte summary row; system Chrome/Vulkan stays
   about the same; thermal/reaction-off mechanics-only stays about `13.50 s`.
   Current interpretation: the summary readback fence is draining queued
-  resident mechanics command buffers. Remaining P0: implement a fused/sparse
-  resident mechanics lane under ComputeManager/GPU authority so validation does
-  not require hundreds of tiny stage command submissions.
+  resident mechanics command buffers. The tested single-substep fused path is
+  not enough, so remaining P0 is a multi-substep fused/sparse resident
+  mechanics lane under ComputeManager/GPU authority so validation does not
+  require hundreds of tiny stage command submissions.
 - Promoted the long-horizon H2O/H2O settle evidence from CPU/reference-only to
   direct-resident no-full telemetry. The
   `/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json`

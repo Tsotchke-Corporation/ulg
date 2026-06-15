@@ -37,6 +37,19 @@ simulation. Readback should be limited to diagnostics such as pressure,
 conservation residuals, phase mass totals, wall heat ledgers, closure status,
 and readiness blockers.
 
+Throughput correction, 2026-06-14 AKDT:
+
+- A single-substep fused P2G/grid-update/G2P command submission was tested in
+  the browser and kept the H2O/H2O mechanics-only sanity probe `good`, but it
+  did not materially reduce the compact-summary queue fence. The bottleneck is
+  not just three command submissions inside one substep.
+- The next credible performance target is a ComputeManager-owned resident lane
+  that batches multiple substeps in one pass DAG, ping-pongs resident particle
+  and grid buffers inside the lane, and exposes compact summaries only at
+  explicit validation/render cadence boundaries.
+- Keep the one-substep fused path opt-in until it becomes part of that larger
+  multi-substep lane or has independent throughput evidence.
+
 Architecture correction, 2026-06-12 AKDT:
 
 - The GPU-resident hot loop should be packaged as ComputeManager-compatible law

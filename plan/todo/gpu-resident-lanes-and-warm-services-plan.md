@@ -108,6 +108,18 @@ propagate that source descriptor as their local materialization path, instead
 of falling back to snapshots or full readback. Cross-device retained refs
 remain metadata-only.
 
+Status update, 2026-06-14 fused mechanics evidence: a single-substep fused
+P2G/grid-update/G2P WebGPU path now exists behind the explicit
+`fuseNoFullResidentMechanics` option and has unit coverage. A direct-resident
+browser probe proved the path is behaviorally acceptable for the `64`-substep
+H2O/H2O mechanics-only sanity gate, but it did not reduce the real queue-fence
+cost: compact-summary `mapAsync` still drained about `13.93 s` of queued work.
+Do not promote this as the default lane. Use it as evidence that the next
+performance slice must batch multiple resident substeps under one
+ComputeManager/GPU-lane pass DAG, with hot particle/grid buffers ping-ponged
+inside the lane and compact summaries emitted only at validation/render
+boundaries.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs
@@ -310,6 +322,9 @@ state directly outside PeerCompute admission.
    - reason for any full readback.
 4. Route ULG resident physics passes through one lane per active state key
    before trying to split work across child GPU workers.
+   - 2026-06-14 evidence: fusing P2G/grid-update/G2P within one substep is
+     insufficient by itself. The next lane implementation must own a
+     multi-substep sequence, not just a per-substep command encoder.
 5. Add domain partitioning later:
    - tile/domain ownership;
    - halo or boundary exchange;

@@ -20389,3 +20389,56 @@ Open:
   ComputeManager/GPUHub lane authority.
 - Do not move the active architecture todo files to `plan/done/` yet; this is
   a completed slice inside still-open plans.
+
+## 2026-06-14 22:18 AKDT - Opt-in fused resident mechanics evidence
+
+Implemented:
+
+- Added an explicit `fuseNoFullResidentMechanics` option to the MLS-MPM/SPH
+  resident step. When enabled, the no-full WebGPU path records P2G,
+  grid-update, and G2P for one resident substep into a single command
+  submission and returns normal retained-buffer envelopes.
+- Kept that fused path default-off. Browser evidence showed it is behaviorally
+  acceptable for the mechanics-only H2O/H2O `64`-substep direct-resident sanity
+  gate, but it does not improve the real compact-summary queue fence enough to
+  justify replacing the known default path.
+- Updated the active performance and GPU-resident lane plans to steer the next
+  P0 toward a multi-substep ComputeManager/GPU-lane pass DAG rather than
+  per-substep command fusion alone.
+
+Evidence:
+
+- First fused probe fixed the local-name crash for
+  `stateBufferByteLength`/`mechanicsBufferByteLength`.
+- PASS:
+  `/tmp/ulg-history-probes/current-fused-mechanics-64-20260614.json`
+  classified `good`; J stayed around `0.99999..1.0214`; max speed was about
+  `0.299 m/s`; fused mechanics CPU submission was about `0.3 ms`; compact
+  summary `mapAsync` still waited about `13.93 s`.
+- PASS:
+  `/tmp/ulg-history-probes/current-default-mechanics-64-after-fused-gate-20260614.json`
+  classified `good` on the default path after gating; `fusedMechanics=0`;
+  compact summary `mapAsync` waited about `13.52 s`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "retain buffers without full readback|fused no-full mechanics|resident step can attach|ping-pong unread|resident steps ping-pong|compact GPU summary|shares retained"`
+  reported `30/30` because Node evaluated the whole file.
+- VISUAL PARTIAL PASS:
+  `node scripts/sph-visual-sanity-matrix.mjs --help` was accepted by the
+  script as a normal matrix run. It produced
+  `/tmp/ulg-visual-sanity-matrix/2026-06-15T01-24-53-265Z` with `11/12`
+  scenarios good. Passing scenarios included H2O/H2O MLS-MPM, H2O/H2O CPU-SPH,
+  solid H2O CPU-SPH, Fe/H2O contact, hot H2O phase change, all five
+  law-isolation scenarios, and reactions-off Na/H2O. The only failure was the
+  existing open `reaction-product-na-h2o` timeout with
+  `visual-matrix-scenario-timeout`.
+
+Open:
+
+- Implement the actual multi-substep resident pass DAG under
+  ComputeManager/GPU-lane authority so hot particle/grid buffers stay resident
+  across a sequence and compact summaries fence only at validation/render
+  boundaries.
+- Keep the Na/H2O all-reactions visual timeout in the reaction/product/gas
+  pressure backlog; it did not regress in this resident-mechanics slice.

@@ -2404,7 +2404,7 @@ export function createSphPhaseDemo(options = {}) {
   const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
   const sphLiquidVelocityDiffusionAlpha = options.sphLiquidVelocityDiffusionAlpha ?? 0.04;
   const sphLiquidVelocityDiffusionRadiusM = options.sphLiquidVelocityDiffusionRadiusM ?? (2 * demo.state.smoothingLengthM);
-  const sphLiquidWallDampingAlpha = options.sphLiquidWallDampingAlpha ?? 0.25;
+  const sphLiquidWallDampingAlpha = options.sphLiquidWallDampingAlpha ?? 0.3;
   const sphLiquidWallDampingDistanceM = options.sphLiquidWallDampingDistanceM ?? (1.5 * demo.state.smoothingLengthM);
   const requestedGravityMPerS2 = options.gravity ?? [0, -9.80665, 0];
   const gravityMPerS2 = physicalLawGroups.gravity ? requestedGravityMPerS2 : [0, 0, 0];
@@ -2429,6 +2429,22 @@ export function createSphPhaseDemo(options = {}) {
   const sphDensityProjectionRelaxation = mechanics === 'sph'
     ? Math.min(Math.max(Number(options.sphDensityProjectionRelaxation ?? 0.5) || 0, 0), 1)
     : 0;
+  const sphFluidHydrostaticPressure = mechanics === 'sph'
+    && physicalLawGroups.gravity
+    && physicalLawGroups.pressure
+    && physicalLawGroups.eos
+    && options.sphFluidHydrostaticPressure === true;
+  const sphFluidHydrostaticPressureScale = options.sphFluidHydrostaticPressureScale ?? 1;
+  const sphFluidHydrostaticPressureDensityFloorRatio = options.sphFluidHydrostaticPressureDensityFloorRatio ?? 0.85;
+  const sphFluidHydrostaticPressureDensityFullRatio = options.sphFluidHydrostaticPressureDensityFullRatio ?? 1;
+  const sphLiquidFreeSurfaceRelaxationAlpha = mechanics === 'sph'
+    && physicalLawGroups.gravity
+    && physicalLawGroups.pressure
+    && physicalLawGroups.eos
+    ? Math.min(Math.max(Number(options.sphLiquidFreeSurfaceRelaxationAlpha ?? 5e-5) || 0, 0), 1)
+    : 0;
+  const sphLiquidFreeSurfaceTargetDepthM = options.sphLiquidFreeSurfaceTargetDepthM ?? null;
+  const sphLiquidFreeSurfaceContactDepthM = options.sphLiquidFreeSurfaceContactDepthM ?? null;
   const gpuMechanics = {
     integrator: mechanics,
     gridSpacingM,
@@ -2452,6 +2468,13 @@ export function createSphPhaseDemo(options = {}) {
     sphCavitationPressureFloorPa,
     sphDensityProjectionIterations,
     sphDensityProjectionRelaxation,
+    sphFluidHydrostaticPressure,
+    sphFluidHydrostaticPressureScale,
+    sphFluidHydrostaticPressureDensityFloorRatio,
+    sphFluidHydrostaticPressureDensityFullRatio,
+    sphLiquidFreeSurfaceRelaxationAlpha,
+    sphLiquidFreeSurfaceTargetDepthM,
+    sphLiquidFreeSurfaceContactDepthM,
     sphLiquidVelocityDiffusionAlpha,
     sphLiquidVelocityDiffusionRadiusM,
     sphLiquidWallDampingAlpha,
@@ -2534,9 +2557,12 @@ export function createSphPhaseDemo(options = {}) {
         ? stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg)
         : null;
       if (phase && phase !== 'gas' && Number.isFinite(sphCavitationPressureFloorPa)) {
+        const hydrostaticPressurePa = sphFluidHydrostaticPressure
+          ? Math.max(Number(particle?.sphHydrostaticPressurePa ?? particle?.hydrostaticPressurePa) || 0, 0)
+          : 0;
         return {
           ...result,
-          pressurePa: Math.max(result.pressurePa, sphCavitationPressureFloorPa),
+          pressurePa: Math.max(result.pressurePa, sphCavitationPressureFloorPa) + hydrostaticPressurePa,
           cavitationPressureFloorPa: sphCavitationPressureFloorPa
         };
       }
@@ -2554,6 +2580,13 @@ export function createSphPhaseDemo(options = {}) {
       densityProjectionIterations: sphDensityProjectionIterations,
       densityProjectionRelaxation: sphDensityProjectionRelaxation,
       densityProjectionEpsilon: options.sphDensityProjectionEpsilon ?? 1e-5,
+      fluidHydrostaticPressure: sphFluidHydrostaticPressure,
+      fluidHydrostaticPressureScale: sphFluidHydrostaticPressureScale,
+      fluidHydrostaticPressureDensityFloorRatio: sphFluidHydrostaticPressureDensityFloorRatio,
+      fluidHydrostaticPressureDensityFullRatio: sphFluidHydrostaticPressureDensityFullRatio,
+      liquidFreeSurfaceRelaxationAlpha: sphLiquidFreeSurfaceRelaxationAlpha,
+      liquidFreeSurfaceTargetDepthM: sphLiquidFreeSurfaceTargetDepthM,
+      liquidFreeSurfaceContactDepthM: sphLiquidFreeSurfaceContactDepthM,
       liquidVelocityDiffusionAlpha: physicalLawGroups.viscosity ? sphLiquidVelocityDiffusionAlpha : 0,
       liquidVelocityDiffusionRadiusM: sphLiquidVelocityDiffusionRadiusM,
       liquidWallDampingAlpha: physicalLawGroups.viscosity ? sphLiquidWallDampingAlpha : 0,

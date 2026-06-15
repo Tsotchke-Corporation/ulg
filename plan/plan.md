@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 AKDT: the CPU-SPH liquid/free-surface behavior
+has a first reduced mechanics remediation. The SPH carrier now includes a
+small volume-derived free-surface relaxation closure for floor-supported liquid
+groups, plus a density-gated hydrostatic pressure hook that remains opt-in
+after testing showed uncapped hydrostatic pressure sprays the low-res liquid.
+The default CPU-SPH liquid wall damping is `0.30`, and the free-surface
+relaxation alpha is `5e-5` per carrier substep. Opt-in long atomics pass with
+the new particle-space tallness and footprint assertions, and browser visual
+matrix run `codex-cpu-sph-free-surface-fix-long-20260615` passed the H2O/H2O
+CPU-SPH free-surface gate at `1.0368 s`: one connected H2O surface, no visual
+issues, last tallness `0.582`, last footprint fill `0.296`, and eight frame
+artifacts. This is not final multiscale fluid physics; keep MLS-MPM liquid
+free-surface behavior and WebGPU/PeerCompute law migration open.
+
 Current checkpoint, 2026-06-15 AKDT: the visual probe now has an opt-in
 free-surface shape gate for same-material H2O liquid rows. Long-horizon
 analysis records H2O liquid surface height, tallness ratio, and footprint fill

@@ -12,6 +12,18 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 AKDT update: CPU-SPH H2O/H2O no longer fails the long browser
+  free-surface shape gate. The SPH reference lane now applies a small
+  volume-derived free-surface relaxation closure to floor-supported liquid
+  groups and slightly stronger liquid wall damping. The closure is explicitly a
+  reduced low-resolution mechanics law, not renderer state and not the final
+  WebGPU/PeerCompute answer. Validation: opt-in long atomics passed with
+  particle-space tallness/footprint assertions, and visual matrix
+  `codex-cpu-sph-free-surface-fix-long-20260615` passed the CPU-SPH H2O row at
+  `1.0368 s` with one connected surface, no visual issues, last tallness about
+  `0.582`, and footprint fill about `0.296`. Keep MLS-MPM liquid behavior,
+  resident/WebGPU free-surface constraints, and the high-speed intermediate
+  motion budget open.
 - 2026-06-15 AKDT update: free-surface shape/levelness metrics are now
   available and can be used as an opt-in acceptance gate. The probe records H2O
   liquid surface height, tallness ratio, and footprint fill ratio, and

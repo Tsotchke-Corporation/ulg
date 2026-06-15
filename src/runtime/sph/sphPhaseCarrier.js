@@ -52,10 +52,17 @@ export function createSphPhaseCarrier(options = {}) {
     fluidPredicate = null,
     solidGroupKey = null,
     solidContactToleranceM = 1e-6,
+    fluidHydrostaticPressure = false,
+    fluidHydrostaticPressureScale = 1,
+    fluidHydrostaticPressureDensityFloorRatio = 0.85,
+    fluidHydrostaticPressureDensityFullRatio = 1,
     liquidVelocityDiffusionAlpha = 0,
     liquidVelocityDiffusionRadiusM = null,
     liquidWallDampingAlpha = 0,
-    liquidWallDampingDistanceM = null
+    liquidWallDampingDistanceM = null,
+    liquidFreeSurfaceRelaxationAlpha = 0,
+    liquidFreeSurfaceTargetDepthM = null,
+    liquidFreeSurfaceContactDepthM = null
   } = options;
   const projectionIterations = Math.max(0, Math.round(Number(densityProjectionIterations) || 0));
   const projectionRelaxation = Number.isFinite(densityProjectionRelaxation)
@@ -72,6 +79,20 @@ export function createSphPhaseCarrier(options = {}) {
   const wallDampingDistance = Number.isFinite(liquidWallDampingDistanceM) && liquidWallDampingDistanceM > 0
     ? liquidWallDampingDistanceM
     : null;
+  const freeSurfaceRelaxationAlpha = Math.min(Math.max(Number(liquidFreeSurfaceRelaxationAlpha) || 0, 0), 1);
+  const freeSurfaceTargetDepth = Number.isFinite(liquidFreeSurfaceTargetDepthM) && liquidFreeSurfaceTargetDepthM > 0
+    ? liquidFreeSurfaceTargetDepthM
+    : null;
+  const freeSurfaceContactDepth = Number.isFinite(liquidFreeSurfaceContactDepthM) && liquidFreeSurfaceContactDepthM > 0
+    ? liquidFreeSurfaceContactDepthM
+    : null;
+  const hydrostaticPressureEnabled = fluidHydrostaticPressure === true;
+  const hydrostaticPressureScale = Math.max(Number(fluidHydrostaticPressureScale) || 0, 0);
+  const hydrostaticDensityFloorRatio = Math.max(Number(fluidHydrostaticPressureDensityFloorRatio) || 0, 0);
+  const hydrostaticDensityFullRatio = Math.max(
+    Number(fluidHydrostaticPressureDensityFullRatio) || hydrostaticDensityFloorRatio,
+    hydrostaticDensityFloorRatio + 1e-9
+  );
   const gravityAcceleration = Array.from({ length: dimension }, (_, index) => {
     const value = Array.isArray(gravity) ? Number(gravity[index]) : 0;
     return Number.isFinite(value) ? value : 0;
@@ -208,6 +229,115 @@ export function createSphPhaseCarrier(options = {}) {
     applyFluidVelocityDiffusion(particles, smoothingLengthM);
     for (const particle of particles) {
       if (isFluidParticle(particle)) applyWallBoundary(particle);
+    }
+  };
+
+  const refreshFluidHydrostaticPressure = (particles, smoothingLengthM) => {
+    for (const particle of particles) particle.sphHydrostaticPressurePa = 0;
+    if (!hydrostaticPressureEnabled || !(hydrostaticPressureScale > 0) || dimension < 2) return;
+    const gravityMagnitude = Math.max(0, -Number(gravityAcceleration[1]) || 0);
+    if (!(gravityMagnitude > 0)) return;
+    const densities = computeDensities(particles, smoothingLengthM, dimension, {
+      contributesToDensity: isFluidParticle
+    });
+    const groups = new Map();
+    for (let index = 0; index < particles.length; index += 1) {
+      const particle = particles[index];
+      if (!isFluidParticle(particle)) continue;
+      const key = particle.material || 'fluid';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ particle, index });
+    }
+    for (const group of groups.values()) {
+      let upperSurfaceY = Number.NEGATIVE_INFINITY;
+      for (const { particle } of group) {
+        upperSurfaceY = Math.max(upperSurfaceY, particle.x[1] + wallClearanceM(particle));
+      }
+      if (!Number.isFinite(upperSurfaceY)) continue;
+      for (const { particle, index } of group) {
+        const densityRatio = densities[index] / Math.max(restDensityOf(particle), 1e-30);
+        const densityWeight = Math.min(
+          Math.max(
+            (densityRatio - hydrostaticDensityFloorRatio)
+              / (hydrostaticDensityFullRatio - hydrostaticDensityFloorRatio),
+            0
+          ),
+          1
+        );
+        if (!(densityWeight > 0)) continue;
+        const depthM = Math.max(0, upperSurfaceY - particle.x[1]);
+        particle.sphHydrostaticPressurePa = hydrostaticPressureScale
+          * densityWeight
+          * restDensityOf(particle)
+          * gravityMagnitude
+          * depthM;
+      }
+    }
+  };
+
+  const applyFluidFreeSurfaceRelaxation = (particles) => {
+    if (!(freeSurfaceRelaxationAlpha > 0) || !Array.isArray(boxDimsM) || dimension < 3) return;
+    const groups = new Map();
+    for (const particle of particles) {
+      if (!isFluidParticle(particle)) continue;
+      const key = particle.material || 'fluid';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(particle);
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+      const max = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+      const center = [0, 0, 0];
+      let totalMass = 0;
+      let totalRestVolume = 0;
+      for (const particle of group) {
+        const mass = Number(particle.massKg) > 0 ? Number(particle.massKg) : 1;
+        const restDensity = restDensityOf(particle);
+        const restVolume = mass / Math.max(restDensity, 1e-30);
+        const clearance = wallClearanceM(particle);
+        totalMass += mass;
+        totalRestVolume += restVolume;
+        for (let axis = 0; axis < dimension; axis += 1) {
+          min[axis] = Math.min(min[axis], particle.x[axis] - clearance);
+          max[axis] = Math.max(max[axis], particle.x[axis] + clearance);
+          center[axis] += mass * particle.x[axis];
+        }
+      }
+      if (!(totalMass > 0) || !(totalRestVolume > 0)) continue;
+      for (let axis = 0; axis < dimension; axis += 1) center[axis] /= totalMass;
+      const avgCellM = Math.cbrt(totalRestVolume / group.length);
+      const currentX = Math.max(max[0] - min[0], avgCellM);
+      const currentZ = Math.max(max[2] - min[2], avgCellM);
+      const currentArea = currentX * currentZ;
+      const boxArea = Math.max(1e-9, Number(boxDimsM[0]) * Number(boxDimsM[2]));
+      const targetDepth = freeSurfaceTargetDepth ?? Math.max(
+        1.5 * avgCellM,
+        totalRestVolume / (0.75 * boxArea)
+      );
+      const targetArea = Math.min(
+        0.75 * boxArea,
+        Math.max(currentArea, totalRestVolume / Math.max(targetDepth, 1e-9))
+      );
+      if (!(targetArea > currentArea)) continue;
+      const aspect = Math.max(1e-9, Number(boxDimsM[0]) / Math.max(Number(boxDimsM[2]), 1e-9));
+      const targetX = Math.min(Number(boxDimsM[0]), Math.sqrt(targetArea * aspect));
+      const targetZ = Math.min(Number(boxDimsM[2]), targetArea / Math.max(targetX, 1e-9));
+      const growX = Math.min(Math.max(targetX / currentX, 1), 1.08);
+      const growZ = Math.min(Math.max(targetZ / currentZ, 1), 1.08);
+      if (growX <= 1 + 1e-6 && growZ <= 1 + 1e-6) continue;
+      const contactDepth = freeSurfaceContactDepth ?? Math.max(2.5 * targetDepth, 3 * avgCellM);
+      const surfaceY = max[1];
+      for (const particle of group) {
+        const depthWeight = Math.min(Math.max((surfaceY - particle.x[1]) / Math.max(contactDepth, 1e-9), 0), 1);
+        const relax = freeSurfaceRelaxationAlpha * depthWeight;
+        if (!(relax > 0)) continue;
+        const clearance = wallClearanceM(particle);
+        const nextX = center[0] + (particle.x[0] - center[0]) * (1 + relax * (growX - 1));
+        const nextZ = center[2] + (particle.x[2] - center[2]) * (1 + relax * (growZ - 1));
+        particle.x[0] = Math.min(Math.max(nextX, clearance), Math.max(clearance, Number(boxDimsM[0]) - clearance));
+        particle.x[2] = Math.min(Math.max(nextZ, clearance), Math.max(clearance, Number(boxDimsM[2]) - clearance));
+      }
     }
   };
 
@@ -393,6 +523,7 @@ export function createSphPhaseCarrier(options = {}) {
 
   function step(state) {
     const next = cloneSphState(state);
+    refreshFluidHydrostaticPressure(next.particles, next.smoothingLengthM);
     const first = computeAccelerationsAndEnergyRates(next.particles, { ...fieldOptions, h: next.smoothingLengthM });
     // Half kick (velocity + internal energy).
     for (let i = 0; i < next.particles.length; i += 1) {
@@ -411,6 +542,7 @@ export function createSphPhaseCarrier(options = {}) {
     applySolidGroupWallBoundary(next.particles);
     applySolidGroupContactBoundary(next.particles);
     projectDensityConstraints(next.particles, next.smoothingLengthM);
+    applyFluidFreeSurfaceRelaxation(next.particles);
     if (projectionIterations > 0) {
       for (let i = 0; i < next.particles.length; i += 1) {
         const p = next.particles[i];
@@ -419,6 +551,7 @@ export function createSphPhaseCarrier(options = {}) {
       }
     }
     // Second half kick at the drifted state.
+    refreshFluidHydrostaticPressure(next.particles, next.smoothingLengthM);
     const second = computeAccelerationsAndEnergyRates(next.particles, { ...fieldOptions, h: next.smoothingLengthM });
     for (let i = 0; i < next.particles.length; i += 1) {
       const p = next.particles[i];

@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 AKDT: CPU-SPH same-material water now passes
+the long free-surface visual gate, but MLS-MPM remains the active liquid P0.
+The CPU reference lane uses a small, law-gated reduced free-surface relaxation
+closure to spread floor-supported liquid groups toward a volume-derived
+footprint, with shape acceptance now guarded by atomics and the browser visual
+matrix. Evidence: `codex-cpu-sph-free-surface-fix-long-20260615` passed with
+last H2O tallness `0.582`, footprint fill `0.296`, one connected surface, and
+empty issue counts. Next behavior work should move the same standard to
+MLS-MPM/WebGPU-resident mechanics without turning this CPU closure into hidden
+scene authority.
+
 Current routing note, 2026-06-15 AKDT: the free-surface/levelness validation
 gate now exists and currently fails the representative same-material H2O rows.
 `scripts/sph-long-horizon-probe.mjs` reports H2O liquid surface height,

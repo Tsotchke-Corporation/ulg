@@ -1,5 +1,34 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 CPU-SPH Free-Surface Remediation
+
+The CPU-SPH reference lane now has a reduced free-surface mechanics closure for
+floor-supported liquid groups. This is a low-resolution pressure/free-surface
+projection, not renderer deformation: it mutates particle positions through the
+SPH carrier and is guarded by particle-space and browser visual metrics.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPhaseCarrier.js`,
+  `node --check src/runtime/sphPhaseDemo.js`, and
+  `node --check tests/physicsBehaviorInvariants.test.mjs` passed.
+- Diff whitespace:
+  `git diff --check` passed.
+- Fast physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `2` expected opt-in
+  skips before the long gate.
+- Opt-in long liquid atomics:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` passed
+  `13/13`. The plain-SPH long gate now asserts particle-space tallness
+  `<=0.75` and footprint fill `>=0.15` in the 5m visual fixture.
+- Long browser visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-free-surface-fix-long-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=144 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=8 ULG_VISUAL_MATRIX_FRAME_EVERY=18 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, one connected H2O surface,
+  last H2O tallness `0.5821`, last footprint fill `0.2960`, and eight frame
+  artifacts under
+  `/tmp/ulg-visual-sanity-matrix/codex-cpu-sph-free-surface-fix-long-20260615/liquid-liquid-h2o-cpu-sph-frames`.
+
 ## Current Focused Result - 2026-06-15 Free-Surface Shape Gate
 
 The visual probe now records same-material H2O liquid free-surface shape

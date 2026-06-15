@@ -24255,6 +24255,82 @@ Open:
 - Next work should use the new gate on longer H2O rows while fixing the
   law-governed liquid mechanics/free-surface constraints.
 
+## 2026-06-15 15:52 AKDT - CPU-SPH Free-Surface Remediation
+
+Prompt time/date: 2026-06-15 15:52 AKDT, continuing the active goal after the
+free-surface shape gate checkpoint.
+
+Actions:
+
+- Diagnosed the CPU-SPH particle state directly, separate from rendering. The
+  baseline 5m/10m H2O liquid particle bounds showed the same problem as the
+  browser surface: the liquid stayed as a tall, low-footprint connected body
+  even after long settling.
+- Tested a dynamic hydrostatic pressure term. Uncapped hydrostatic pressure
+  spread the surface but produced spray-like speeds and severe underdensity;
+  density-gated hydrostatic pressure was stable but did not materially improve
+  shape. Kept the hook opt-in/default-off for future law work.
+- Tested smoothing-length sensitivity and wall/velocity-diffusion sweeps.
+  Wider kernels worsened density support, and velocity diffusion damped motion
+  while making the blob more block-like.
+- Added a reduced free-surface relaxation closure to
+  `src/runtime/sph/sphPhaseCarrier.js`. It computes liquid group rest volume,
+  current footprint, and a volume-derived footprint target, then gently spreads
+  lower/deeper floor-supported liquid particles in X/Z.
+- Wired the closure through `src/runtime/sphPhaseDemo.js` for CPU-SPH when
+  gravity, EOS, and pressure laws are active. Default alpha is `5e-5` per
+  carrier substep; CPU-SPH liquid wall damping is `0.30`.
+- Extended the opt-in long liquid atomic with particle-space free-surface shape
+  metrics in the same 5m fixture as the browser visual row.
+- Ran the long browser CPU-SPH visual matrix with the free-surface gate enabled
+  for a `1.0368 s` horizon and inspected the final frame.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added `plan/done/cpu-sph-free-surface-remediation-2026-06-15.md`.
+
+Files touched:
+
+- `src/runtime/sph/sphPhaseCarrier.js`
+- `src/runtime/sphPhaseDemo.js`
+- `tests/physicsBehaviorInvariants.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/cpu-sph-free-surface-remediation-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPhaseCarrier.js`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/physicsBehaviorInvariants.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `npm run test:physics-atomics` reported `11` passing checks and `2`
+  expected opt-in long skips.
+- PASS:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` reported
+  `13/13`, including the new particle-space tallness and footprint assertions.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-free-surface-fix-long-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=144 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=8 ULG_VISUAL_MATRIX_FRAME_EVERY=18 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, one connected visible H2O
+  surface, last tallness `0.5820953535603322`, last footprint fill
+  `0.29598324011183247`, and eight frames.
+- Manual frame inspection:
+  `/tmp/ulg-visual-sanity-matrix/codex-cpu-sph-free-surface-fix-long-20260615/liquid-liquid-h2o-cpu-sph-frames/0007-b126-plain-sph-cpu-reference-batch.png`
+  showed a connected flatter water body on the floor rather than a tall block.
+
+Open:
+
+- This is a reduced CPU-SPH reference closure, not final first-principles
+  multiscale fluid mechanics.
+- MLS-MPM/WebGPU-resident liquid free-surface behavior remains open and should
+  be the next liquid mechanics target.
+- The long visual row is expensive because the visual matrix does not yet have
+  a global render-every override; add that before making this a frequent gate.
+
 ## 2026-06-15 06:57 AKDT - Retained Gas-Cell Field Source Descriptor
 
 Prompt time/date: 2026-06-15 06:57:26 AKDT, continuing the active goal after

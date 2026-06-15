@@ -119,6 +119,32 @@ function supportBoundsY(particles) {
   return { min, max };
 }
 
+function supportBounds3D(particles) {
+  const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  const max = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  for (const particle of particles) {
+    const radius = supportRadiusM(particle);
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = Number(particle.x?.[axis]);
+      if (!Number.isFinite(value)) continue;
+      min[axis] = Math.min(min[axis], value - radius);
+      max[axis] = Math.max(max[axis], value + radius);
+    }
+  }
+  return { min, max, size: max.map((value, axis) => value - min[axis]) };
+}
+
+function liquidFreeSurfaceShapeMetrics(particles, boxDimsM) {
+  const bounds = supportBounds3D(particles);
+  const horizontalExtentM = Math.max(bounds.size[0], bounds.size[2], 1e-9);
+  return {
+    bounds,
+    tallnessRatio: bounds.size[1] / horizontalExtentM,
+    footprintFillRatio: (bounds.size[0] * bounds.size[2])
+      / Math.max(Number(boxDimsM?.[0]) * Number(boxDimsM?.[2]), 1e-9)
+  };
+}
+
 function dropBaseSupportGapY(particles) {
   const drop = supportBoundsY(particlesForRole(particles, 'drop'));
   const base = supportBoundsY(particlesForRole(particles, 'base'));
@@ -675,6 +701,9 @@ test('plain SPH/PBF long-horizon liquid acceptance remains merged and damps bulk
     : 'Set ULG_RUN_LONG_LIQUID_ATOMIC=1 to run the opt-in liquid-settling acceptance gate.'
 }, () => {
   const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({
+      boxDimensionsM: [5, 5, 5]
+    }),
     dropMaterial: 'h2o',
     baseMaterial: 'h2o',
     dropTemperatureK: 300,
@@ -703,12 +732,23 @@ test('plain SPH/PBF long-horizon liquid acceptance remains merged and damps bulk
   const particles = driver.demo.state.particles;
   const finalGap = dropBaseSupportGapY(particles);
   const finalDropSpeedMPerS = maxParticleSpeedForRole(particles, 'drop');
+  const freeSurfaceShape = liquidFreeSurfaceShapeMetrics(particles, driver.demo.box.dimensionsM);
   assertFiniteParticleState(particles);
   nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
   assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
+  assert.equal(driver.demo.gpuMechanics.sphFluidHydrostaticPressure, false);
+  assert.equal(driver.demo.gpuMechanics.sphLiquidFreeSurfaceRelaxationAlpha, 5e-5);
   assert.ok(driver.demo.state.time >= 1, `plain SPH liquid gate did not reach 1 s: ${driver.demo.state.time}s`);
   assert.ok(finalGap <= Math.min(0, initialGap), `plain SPH same-material liquid did not remain merged: ${initialGap} -> ${finalGap}`);
   assert.ok(finalDropSpeedMPerS < 0.25, `plain SPH liquid retained excessive bulk motion after ${driver.demo.state.time}s: ${finalDropSpeedMPerS} m/s`);
+  assert.ok(
+    freeSurfaceShape.tallnessRatio <= 0.75,
+    `plain SPH liquid stayed too tall/blocky: ${freeSurfaceShape.tallnessRatio}`
+  );
+  assert.ok(
+    freeSurfaceShape.footprintFillRatio >= 0.15,
+    `plain SPH liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio}`
+  );
 });
 
 test('H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop motion', {

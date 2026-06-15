@@ -45,6 +45,13 @@ same-frame admitted descriptor remains required before grid consumption. Next
 priority: reduce remaining pressure publication/consumption copies and
 readback surfaces, then schedule the queued renderer z-buffer/draw-order pass.
 
+Renderer blocker update, 2026-06-15 01:57 AKDT: user again reports major
+z-buffer/draw-order issues in the live view. Keep this queued as a renderer
+P0/P1 after the current pressure/residency copy-reduction slice and before any
+claim that visual captures are authoritative. The pass must verify depth-test,
+depth-write, transparent sorting, container/grid overlays, nested surfaces, and
+the focus-change flash/disappear symptom against close-spaced frame captures.
+
 Current routing note, 2026-06-15 01:33 AKDT: same-frame intra-DAG
 pressure/interface publication and grid-update admission are complete for the
 ComputeManager/GPUHub stage-plan path. With

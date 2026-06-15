@@ -56,6 +56,13 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Current Diagnosis
 
+- 2026-06-15 01:57 AKDT update: user again reports major z-buffer/draw-order
+  issues in the live renderer. Keep this ordered after the current
+  pressure/residency copy-reduction slice, but before treating visual captures
+  as final evidence. The renderer pass must explicitly test depth-write,
+  depth-test, transparent sorting, container/grid overlay ordering, nested
+  surface ordering, and the focus-change flash/disappear symptom using
+  close-spaced frame captures.
 - 2026-06-14 20:24 AKDT update: user reports major z-buffer/draw-order issues
   in the live visualization. Treat this as a deferred renderer blocker after
   the current GPUHub stage-executor clean point. The fix should audit

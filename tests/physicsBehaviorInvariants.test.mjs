@@ -161,6 +161,22 @@ function maxParticleSpeedForRole(particles, role) {
   return maxParticleSpeed(role ? particlesForRole(particles, role) : particles);
 }
 
+function maxParticleDisplacement(initialParticles, finalParticles) {
+  assert.equal(finalParticles.length, initialParticles.length, 'particle count changed');
+  let maxDisplacement = 0;
+  for (let i = 0; i < initialParticles.length; i += 1) {
+    maxDisplacement = Math.max(
+      maxDisplacement,
+      Math.hypot(
+        finalParticles[i].x[0] - initialParticles[i].x[0],
+        finalParticles[i].x[1] - initialParticles[i].x[1],
+        finalParticles[i].x[2] - initialParticles[i].x[2]
+      )
+    );
+  }
+  return maxDisplacement;
+}
+
 function assertFiniteParticleState(particles) {
   for (const particle of particles) {
     for (let axis = 0; axis < 3; axis += 1) {
@@ -399,6 +415,51 @@ test('plain SPH/PBF reference lane remains bounded for same-material liquid cont
   assert.ok(maxParticleSpeed(particles) < 5, 'plain SPH/PBF reference developed an implausible short-horizon speed spike');
   assert.equal(driver.demo.lastStepTiming.physicalLawGroups.eos, true);
   assert.equal(driver.demo.lastStepTiming.reactionEvents, 0);
+});
+
+test('plain SPH/PBF reference stays static when gravity and EOS laws are disabled', () => {
+  const driver = createSphPhaseDemo({
+    dropMaterial: 'fe',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.5,
+    dropParticleEdge: 2,
+    baseParticleEdge: 5,
+    mechanics: 'sph',
+    physicalLawGroups: {
+      mechanics: true,
+      gravity: false,
+      eos: false,
+      pressure: false,
+      thermal: false,
+      reactions: false,
+      viscosity: false,
+      surfaceTension: false
+    }
+  });
+  const initialParticles = driver.demo.state.particles.map((particle) => ({
+    ...particle,
+    x: [...particle.x],
+    v: [...particle.v]
+  }));
+
+  for (let stepIndex = 0; stepIndex < 16; stepIndex += 1) driver.step();
+
+  const particles = driver.demo.state.particles;
+  assertFiniteParticleState(particles);
+  assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
+  assert.equal(driver.demo.gpuMechanics.sphDensityProjectionIterations, 0);
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.gravity, false);
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.eos, false);
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.pressure, false);
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.viscosity, false);
+  assert.ok(maxParticleSpeed(particles) < 1e-9, 'no-force plain SPH generated velocity');
+  assert.ok(
+    maxParticleDisplacement(initialParticles, particles) < 1e-9,
+    'no-force plain SPH moved particles'
+  );
 });
 
 test('plain SPH/PBF reference keeps solid H2O from flowing like liquid water', () => {

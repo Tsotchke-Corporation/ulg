@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 11:22 AKDT: the plain SPH/PBF no-force law
+isolation bug is fixed. The visual matrix's `law-static-gravity-off-fe-h2o`
+scenario is now a true no-force case (`gravity/eos/pressure/viscosity` off),
+and the runtime no longer runs SPH density projection when the EOS law group is
+disabled. Density projection is an incompressibility/EOS-family constraint, so
+leaving it active made the H2O base creep and expand even with every force law
+off. Added an atomic regression,
+`plain SPH/PBF reference stays static when gravity and EOS laws are disabled`,
+which asserts zero projection iterations, zero speed, and zero displacement.
+Validation passed Node 24 syntax checks, `npm run test:physics-atomics` (`8`
+pass, `1` expected opt-in skip), and focused browser visual matrix
+`codex-gravity-off-static-no-force-after-eos-gate-20260615` with
+`failedCount=0`, `maxSpeedObservedMPerS=0`, `maxDisplacementObservedM=0`,
+empty issue counts, and five captured frames. This clears the no-force SPH
+isolation failure only; full liquid settling, Na/H2O reaction motion, other
+matrix failures, and renderer visual-trust blockers remain open.
+
 Current checkpoint, 2026-06-15 11:03 AKDT: the visual surface bounds gate now
 compares rendered MarchingCubes meshes against particle bounds inflated by the
 actual rendered support radius. The previous

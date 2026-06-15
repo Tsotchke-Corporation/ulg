@@ -49,7 +49,7 @@ const SCENARIOS = [
   },
   {
     label: 'law-static-gravity-off-fe-h2o',
-    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.5&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=0&laweos=1&lawp=1&lawt=0&lawr=0&lawv=1&lawst=0',
+    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.5&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=0&laweos=0&lawp=0&lawt=0&lawr=0&lawv=0&lawst=0',
     expectStatic: true,
     staticMaxDisplacementM: 1e-5,
     staticMaxCenterOfMassDeltaM: 1e-6

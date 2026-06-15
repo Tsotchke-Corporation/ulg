@@ -1,5 +1,82 @@
 # ULG Implementation Log
 
+## 2026-06-15 11:22 AKDT - Plain SPH no-force law isolation
+
+Prompt time/date: 2026-06-15 11:22 AKDT, continuing the active physics bug
+work and then applying the requested public defaults/GitHub Pages build.
+
+Actions:
+
+- Rechecked the prior no-force visual matrix failure. The Fe drop stayed fixed,
+  but the H2O base drifted with only mechanics enabled and gravity/EOS/pressure
+  disabled, proving a hidden SPH reference constraint was still active.
+- Identified `sphDensityProjectionIterations` as the source: PBF density
+  projection was enabled for all plain-SPH runs, independent of the EOS law
+  group.
+- Gated plain-SPH density projection behind `physicalLawGroups.eos`, so the
+  projection solver acts as an EOS/incompressibility constraint instead of an
+  unlabelled force in no-force law-isolation cases.
+- Updated the visual matrix `law-static-gravity-off-fe-h2o` URL so the scenario
+  disables EOS, pressure, viscosity, thermal, reactions, and surface tension in
+  addition to gravity.
+- Added a physics atomic invariant proving the no-force plain-SPH case has zero
+  projection iterations, zero speed, and zero displacement.
+- Verified the requested public UI defaults were already present in
+  `src/visualization/sphPhaseDemoMount.js`: plain SPH CPU reference, sodium
+  drop over H2O base, both `293.15 K`, and blob scale `1`.
+- Rebuilt the GitHub Pages artifact. The build rotated the hashed JS asset from
+  `docs/assets/pages-vPnFh9Yy.js` to `docs/assets/pages-CYXeYmig.js` and
+  updated `docs/index.html`.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added
+  `plan/done/sph-density-projection-law-isolation-2026-06-15.md`.
+
+Files touched:
+
+- `src/runtime/sphPhaseDemo.js`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `tests/physicsBehaviorInvariants.test.mjs`
+- `docs/index.html`
+- `docs/assets/pages-CYXeYmig.js`
+- `docs/assets/pages-vPnFh9Yy.js`
+- `.icc/ulg_status.json`
+- `.icc/ulg_arch_summary.md`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/sph-density-projection-law-isolation-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --version` reported `v24.16.0`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/physicsBehaviorInvariants.test.mjs`.
+- PASS: `node --check scripts/sph-visual-sanity-matrix.mjs`.
+- PASS: `npm run test:physics-atomics` reported `8` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gravity-off-static-no-force-after-eos-gate-20260615 ULG_VISUAL_MATRIX_SCENARIOS=law-static-gravity-off-fe-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, `maxSpeedObservedMPerS=0`,
+  `maxDisplacementObservedM=0`, and five captured frames.
+- PASS: `git diff --check`.
+- PASS: `npm run build:pages` completed in `956 ms`; Vite reported the existing
+  large-chunk warning for the generated Pages JS bundle.
+- PASS: `npm run icc:update` refreshed `298` indexed files and `1538` memory
+  chunks.
+
+Open:
+
+- This is not a liquid-settling or free-surface acceptance. Full behavior debt
+  remains in the visual matrix: solid/liquid contact surface overflow, Na/H2O
+  reaction motion, thermal-off hot-water speed, same-material liquid merge and
+  free-surface quality, mounted ice/solid rigidity, volume pulsing/blinking,
+  and renderer z-buffer/focus visual trust.
+
 ## 2026-06-15 11:03 AKDT - Surface-radius-aware visual bounds gate
 
 Implemented:

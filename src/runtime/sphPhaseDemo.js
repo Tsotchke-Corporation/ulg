@@ -2419,7 +2419,7 @@ export function createSphPhaseDemo(options = {}) {
   const sphCavitationPressureFloorPa = mechanics === 'sph'
     ? (options.sphCavitationPressureFloorPa ?? 0)
     : null;
-  const sphDensityProjectionIterations = mechanics === 'sph'
+  const sphDensityProjectionIterations = mechanics === 'sph' && physicalLawGroups.eos
     ? Math.max(0, Math.round(Number(options.sphDensityProjectionIterations ?? 3) || 0))
     : 0;
   const sphDensityProjectionRelaxation = mechanics === 'sph'

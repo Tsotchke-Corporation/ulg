@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 11:22 AKDT: the no-force plain-SPH
+law-isolation failure is closed. The `law-static-gravity-off-fe-h2o` matrix
+scenario now disables EOS, pressure, and viscosity as well as gravity, and SPH
+density projection is gated by the EOS law group. Focused visual matrix
+`codex-gravity-off-static-no-force-after-eos-gate-20260615` passed with zero
+motion and five frame artifacts, and physics atomics now include a no-force
+plain-SPH invariant. Next priority remains the real behavior debt in the full
+matrix: solid/liquid contact surface overflow, Na/H2O reaction motion,
+thermal-off hot-water speed, same-material liquid merge/free-surface quality,
+ice/solid rigidity in mounted paths, and renderer z-buffer/focus visual trust.
+
 Current routing note, 2026-06-15 11:03 AKDT: the H2O visual surface bounds
 failure is narrowed. The matrix no longer treats normal MarchingCubes support
 radius as geometry escaping particle bounds; `particleBoundsToleranceM` is now

@@ -1,5 +1,32 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Plain SPH No-force Law Isolation
+
+The current slice fixes the plain SPH/PBF law-toggle contract. Density
+projection is an incompressibility/EOS-family constraint, so the reference SPH
+lane must not run it when the EOS law group is disabled. The matrix
+`law-static-gravity-off-fe-h2o` scenario now disables gravity, EOS, pressure,
+viscosity, thermal, reactions, and surface tension so it is a true no-force
+isolation test.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check tests/physicsBehaviorInvariants.test.mjs`, and Node version
+  `v24.16.0` passed.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `8` checks with `1` expected opt-in
+  long-horizon liquid skip. The new invariant is
+  `plain SPH/PBF reference stays static when gravity and EOS laws are disabled`;
+  it asserts `sphDensityProjectionIterations === 0`, zero speed, and zero
+  displacement after 16 steps.
+- Focused browser visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gravity-off-static-no-force-after-eos-gate-20260615 ULG_VISUAL_MATRIX_SCENARIOS=law-static-gravity-off-fe-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, `maxSpeedObservedMPerS=0`,
+  `maxDisplacementObservedM=0`, and five PNG frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-gravity-off-static-no-force-after-eos-gate-20260615/law-static-gravity-off-fe-h2o-frames`.
+
 ## Current Focused Result - 2026-06-15 Surface Radius Bounds Gate
 
 The current slice fixes the visual probe's surface bounds acceptance rule. A

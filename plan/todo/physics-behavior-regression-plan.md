@@ -12,6 +12,17 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 11:22 AKDT update: the no-force plain-SPH law-isolation failure is
+  fixed and guarded. The bug was that PBF density projection continued to run
+  even when EOS/pressure laws were disabled, so the H2O base moved under a
+  supposed no-force configuration. `src/runtime/sphPhaseDemo.js` now sets
+  `sphDensityProjectionIterations=0` unless the EOS law group is enabled, and
+  `scripts/sph-visual-sanity-matrix.mjs` makes
+  `law-static-gravity-off-fe-h2o` a true no-force case. Validation:
+  `npm run test:physics-atomics` now includes a no-force plain-SPH invariant
+  and passed; visual matrix run
+  `codex-gravity-off-static-no-force-after-eos-gate-20260615` passed with zero
+  speed, zero displacement, no issues, and five captured frames.
 - 2026-06-15 11:03 AKDT update: the repeated
   `visible-surface-expanded-beyond-particle-bounds` finding was a harness
   false positive for normal MarchingCubes support radius. The probe now inflates

@@ -49,10 +49,10 @@ export function createSphPhaseCarrier(options = {}) {
     densityProjectionRelaxation = 0.5,
     densityProjectionEpsilon = 1e-5,
     solidPredicate = null,
+    fluidPredicate = null,
     solidGroupKey = null,
     solidContactToleranceM = 1e-6
   } = options;
-  const fieldOptions = { dimension, gamma, gravity, alpha, beta, eos };
   const projectionIterations = Math.max(0, Math.round(Number(densityProjectionIterations) || 0));
   const projectionRelaxation = Number.isFinite(densityProjectionRelaxation)
     ? Math.min(Math.max(densityProjectionRelaxation, 0), 1)
@@ -71,6 +71,25 @@ export function createSphPhaseCarrier(options = {}) {
     } catch {
       return false;
     }
+  };
+  const isFluidParticle = (particle) => {
+    if (isSolidParticle(particle)) return false;
+    if (typeof fluidPredicate !== 'function') return true;
+    try {
+      return fluidPredicate(particle) === true;
+    } catch {
+      return false;
+    }
+  };
+  const fieldOptions = {
+    dimension,
+    gamma,
+    gravity,
+    alpha,
+    beta,
+    eos,
+    contributesToDensity: isFluidParticle,
+    participatesInPressure: isFluidParticle
   };
   const groupKeyForSolidParticle = (particle) => {
     if (typeof solidGroupKey === 'function') {
@@ -227,11 +246,11 @@ export function createSphPhaseCarrier(options = {}) {
     if (!(kernelH > 0)) return;
     const twoH2 = (2 * kernelH) ** 2;
     for (let iteration = 0; iteration < projectionIterations; iteration += 1) {
-      const solidMask = particles.map(isSolidParticle);
-      const densities = computeDensities(particles, kernelH, dimension);
+      const fluidMask = particles.map(isFluidParticle);
+      const densities = computeDensities(particles, kernelH, dimension, { contributesToDensity: isFluidParticle });
       const lambdas = new Array(particles.length).fill(0);
       for (let i = 0; i < particles.length; i += 1) {
-        if (solidMask[i]) continue;
+        if (!fluidMask[i]) continue;
         const rho0 = restDensityOf(particles[i]);
         const constraint = Math.max(0, densities[i] / Math.max(rho0, 1e-30) - 1);
         if (constraint <= 0) continue;
@@ -240,6 +259,7 @@ export function createSphPhaseCarrier(options = {}) {
         const xi = particles[i].x;
         for (let j = 0; j < particles.length; j += 1) {
           if (i === j) continue;
+          if (!fluidMask[j]) continue;
           const xj = particles[j].x;
           let r2 = 0;
           for (let axis = 0; axis < dimension; axis += 1) {
@@ -262,11 +282,12 @@ export function createSphPhaseCarrier(options = {}) {
       }
       const corrections = particles.map(() => new Array(dimension).fill(0));
       for (let i = 0; i < particles.length; i += 1) {
-        if (solidMask[i]) continue;
+        if (!fluidMask[i]) continue;
         const xi = particles[i].x;
         const rho0 = restDensityOf(particles[i]);
         for (let j = 0; j < particles.length; j += 1) {
           if (i === j) continue;
+          if (!fluidMask[j]) continue;
           const xj = particles[j].x;
           let r2 = 0;
           for (let axis = 0; axis < dimension; axis += 1) {
@@ -283,7 +304,7 @@ export function createSphPhaseCarrier(options = {}) {
         }
       }
       for (let i = 0; i < particles.length; i += 1) {
-        if (solidMask[i]) continue;
+        if (!fluidMask[i]) continue;
         const particle = particles[i];
         for (let axis = 0; axis < dimension; axis += 1) {
           particle.x[axis] += projectionRelaxation * corrections[i][axis];

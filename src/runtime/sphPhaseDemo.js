@@ -2553,6 +2553,14 @@ export function createSphPhaseDemo(options = {}) {
             && particle
             && stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg) === 'solid'
         );
+      },
+      fluidPredicate: (particle) => {
+        const props = demo.materialProperties[particle?.material];
+        return Boolean(
+          props
+            && particle
+            && stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg) === 'liquid'
+        );
       }
     });
   }

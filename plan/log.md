@@ -1,5 +1,45 @@
 # ULG Implementation Log
 
+## 2026-06-15 12:08 AKDT - Plain SPH condensed pressure partition
+
+Summary:
+
+- Split plain SPH pressure/density/PBF participation from "not solid" status.
+  `createSphPhaseCarrier()` now accepts `fluidPredicate`; the demo wires it to
+  thermodynamic phase so only liquid particles enter condensed SPH pressure.
+- Kept solids and gas reaction products present as particles/ledger evidence
+  without letting them act as liquid pressure mass.
+- Added atomic guards for Fe/H2O solid-liquid contact and room-temperature
+  Na/H2O reaction products.
+- Updated the visual matrix Na/H2O rows to use room temperature `293.15 K` and
+  explicit `blob=1`, matching the public default.
+
+Validation:
+
+- PASS: syntax checks for `sphPhaseCarrier`, `sphPhaseDemo`, the visual matrix,
+  and `physicsBehaviorInvariants`.
+- PASS: `npm run test:physics-atomics` (`10` pass, `1` expected skip).
+- PARTIAL VISUAL PASS:
+  `codex-sph-reaction-roomtemp-blob1-20260615` no longer shows the old Na/H2O
+  reaction speed blow-up (`maxSpeedObservedMPerS ~= 0.541`, pressure impulse
+  `0`, H2O surface count `1 -> 1`). The remaining issue is a Na solid
+  MarchingCubes surface-envelope residual of about `0.102 m`, tracked under
+  renderer/probe visual-trust work.
+
+Files touched:
+
+- `src/runtime/sph/sphPhaseCarrier.js`
+- `src/runtime/sph/sphPhaseDemo.js`
+- `tests/physicsBehaviorInvariants.test.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/plain-sph-condensed-pressure-partition-2026-06-15.md`
+
 ## 2026-06-15 11:22 AKDT - Plain SPH no-force law isolation
 
 Prompt time/date: 2026-06-15 11:22 AKDT, continuing the active physics bug

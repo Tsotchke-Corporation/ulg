@@ -12,6 +12,22 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 12:08 AKDT update: the Na/H2O high-speed reaction motion is
+  fixed at the condensed-pressure participant boundary. The root cause was
+  that plain SPH treated every non-solid particle as a liquid pressure/density
+  participant, so product gases created by reactions could enter PBF/pressure
+  as condensed fluid mass. `src/runtime/sph/sphPhaseCarrier.js` now supports
+  an explicit `fluidPredicate`, and `src/runtime/sphPhaseDemo.js` wires it to
+  phase identity so only liquids participate in condensed SPH pressure. Atomic
+  validation now includes room-temperature Na/H2O reaction products and
+  Fe/H2O solid-liquid contact. Targeted visual evidence
+  `codex-sph-reaction-roomtemp-blob1-20260615` shows calm dynamics for
+  `Na + h2o`, `293.15 K`, `mech=sph`, `blob=1` (`maxSpeedObservedMPerS`
+  about `0.541`, pressure impulse `0`, H2O visible surface count `1 -> 1`).
+  The row remains visually red only because the Na solid MarchingCubes surface
+  exceeds particle bounds by about `0.102 m` after support-radius tolerance;
+  track that as renderer/probe surface-envelope debt, not as the resolved
+  reaction pressure bug.
 - 2026-06-15 11:22 AKDT update: the no-force plain-SPH law-isolation failure is
   fixed and guarded. The bug was that PBF density projection continued to run
   even when EOS/pressure laws were disabled, so the H2O base moved under a

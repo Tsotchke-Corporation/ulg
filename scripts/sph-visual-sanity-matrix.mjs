@@ -12,17 +12,20 @@ const DEFAULT_FRAME_MAX = 16;
 const SCENARIOS = [
   {
     label: 'liquid-liquid-h2o-mlsmpm',
-    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm',
+    expectedMechanics: 'mlsmpm',
     expectedH2oVisibleSurfaceCount: 1
   },
   {
     label: 'liquid-liquid-h2o-cpu-sph',
     url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
+    expectedMechanics: 'sph',
     expectedH2oVisibleSurfaceCount: 1
   },
   {
     label: 'solid-h2o-cpu-sph',
     url: '/?drop=h2o&base=h2o&dropt=250&baset=250&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
+    expectedMechanics: 'sph',
     expectedH2oVisibleSurfaceCount: 2,
     expectStatic: true,
     staticMaxDisplacementM: 1e-5,
@@ -30,33 +33,39 @@ const SCENARIOS = [
   },
   {
     label: 'solid-liquid-contact-fe-h2o',
-    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5'
+    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
+    expectedMechanics: 'sph'
   },
   {
     label: 'phase-change-hot-h2o-water',
-    url: '/?drop=h2o&base=h2o&dropt=450&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5'
+    url: '/?drop=h2o&base=h2o&dropt=450&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
+    expectedMechanics: 'sph'
   },
   {
     label: 'reaction-product-na-h2o',
-    url: '/?drop=na&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5'
+    url: '/?drop=na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&blob=1',
+    expectedMechanics: 'sph'
   },
   {
     label: 'law-static-mechanics-off-fe-h2o',
-    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&lawmech=0&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0&lawv=1&lawst=0',
+    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&lawmech=0&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0&lawv=1&lawst=0',
+    expectedMechanics: 'sph',
     expectStatic: true,
     staticMaxDisplacementM: 1e-7,
     staticMaxCenterOfMassDeltaM: 1e-7
   },
   {
     label: 'law-static-gravity-off-fe-h2o',
-    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.5&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=0&laweos=0&lawp=0&lawt=0&lawr=0&lawv=0&lawst=0',
+    url: '/?drop=fe&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.5&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&lawmech=1&lawg=0&laweos=0&lawp=0&lawt=0&lawr=0&lawv=0&lawst=0',
+    expectedMechanics: 'sph',
     expectStatic: true,
     staticMaxDisplacementM: 1e-5,
     staticMaxCenterOfMassDeltaM: 1e-6
   },
   {
     label: 'law-pressure-off-h2o-mlsmpm',
-    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=1&laweos=1&lawp=0&lawt=0&lawr=0&lawv=1&lawst=0',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=0&lawt=0&lawr=0&lawv=1&lawst=0',
+    expectedMechanics: 'mlsmpm',
     expectedH2oVisibleSurfaceCount: 1,
     maxSpeedMPerS: 10,
     minVolumeRatioJ: 0.9,
@@ -64,7 +73,8 @@ const SCENARIOS = [
   },
   {
     label: 'law-eos-off-h2o-mlsmpm',
-    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=1&laweos=0&lawp=0&lawt=0&lawr=0&lawv=1&lawst=0',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=0&lawp=0&lawt=0&lawr=0&lawv=1&lawst=0',
+    expectedMechanics: 'mlsmpm',
     expectedH2oVisibleSurfaceCount: 1,
     maxSpeedMPerS: 10,
     minVolumeRatioJ: 0.9,
@@ -72,7 +82,8 @@ const SCENARIOS = [
   },
   {
     label: 'law-thermal-off-hot-h2o',
-    url: '/?drop=h2o&base=h2o&dropt=450&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0&lawv=1&lawst=0',
+    url: '/?drop=h2o&base=h2o&dropt=450&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0&lawv=1&lawst=0',
+    expectedMechanics: 'mlsmpm',
     expectedH2oVisibleSurfaceCount: 1,
     maxSpeedMPerS: 10,
     minVolumeRatioJ: 0.9,
@@ -80,7 +91,8 @@ const SCENARIOS = [
   },
   {
     label: 'law-reactions-off-na-h2o',
-    url: '/?drop=na&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=0&lawv=1&lawst=0',
+    url: '/?drop=na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=0&lawv=1&lawst=0&blob=1',
+    expectedMechanics: 'sph',
     maxSpeedMPerS: 25
   }
 ];
@@ -119,6 +131,21 @@ function uniqueStrings(...sources) {
 function finiteOrNull(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function inferMechanicsIntegrator(probe) {
+  const direct = String(probe?.timeline?.mechanicsIntegrator || probe?.analysis?.mechanicsIntegrator || '').trim();
+  if (direct) return direct;
+  const metrics = Array.isArray(probe?.timeline?.metrics) ? probe.timeline.metrics : [];
+  const lastMetric = metrics.length ? metrics[metrics.length - 1] : null;
+  const schemaText = [
+    lastMetric?.residentStep?.schema,
+    lastMetric?.residentSteps?.schema,
+    probe?.timeline?.schema
+  ].filter(Boolean).join(' ');
+  if (schemaText.includes('plain-sph')) return 'sph';
+  if (schemaText.includes('mls-mpm')) return 'mlsmpm';
+  return null;
 }
 
 function visualSurfaceIssueKey(issue) {
@@ -377,16 +404,24 @@ async function main() {
       };
       await writeFile(outputPath, `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
     }
-    const issues = uniqueStrings(probe?.issues, probe?.analysis?.issues);
+    const analysis = probe?.analysis || {};
+    const mechanicsIntegrator = inferMechanicsIntegrator(probe);
+    const mechanicsMismatchIssues = scenario.expectedMechanics
+      && mechanicsIntegrator
+      && mechanicsIntegrator !== scenario.expectedMechanics
+      ? ['mechanics-integrator-mismatch']
+      : [];
+    const issues = uniqueStrings(probe?.issues, probe?.analysis?.issues, mechanicsMismatchIssues);
     const visualSurfaceIssues = uniqueVisualSurfaceIssues(
       probe?.visualSurfaceIssues,
       probe?.analysis?.visualSurfaceIssues
     );
-    const analysis = probe?.analysis || {};
     const failed = run.code !== 0 || probe?.status === 'bad' || issues.length > 0;
     results.push({
       label: scenario.label,
       url: scenario.url,
+      expectedMechanics: scenario.expectedMechanics || null,
+      mechanicsIntegrator,
       code: run.code,
       timedOut: run.timedOut,
       status: probe?.status || null,

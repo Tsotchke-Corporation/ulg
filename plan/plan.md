@@ -2,6 +2,27 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 12:08 AKDT: the plain SPH/PBF condensed
+pressure-participant bug is fixed for solids and reaction gases. The SPH
+carrier now distinguishes "not solid" from "participates in condensed-liquid
+SPH density/pressure/PBF"; `createSphPhaseDemo()` passes a phase-derived
+`fluidPredicate` so only liquid particles enter the SPH pressure solve. This
+keeps solid Fe/Na/H2O and gas reaction products such as H2 out of liquid
+pressure mass while preserving them as particles/ledger evidence. Added atomic
+coverage for Fe/H2O solid-liquid contact and room-temperature Na/H2O reaction
+products. Validation passed syntax checks and `npm run test:physics-atomics`
+(`10` pass, `1` expected opt-in skip). The targeted browser visual row
+`codex-sph-reaction-roomtemp-blob1-20260615` now uses the public default shape
+(`mech=sph`, Na/H2O, `293.15 K`, `blob=1`) and no longer shows the old
+reaction speed blow-up (`maxSpeedObservedMPerS ~= 0.541`, pressure impulse
+`0`, H2O surface count `1 -> 1`). It still reports a Na solid
+`visible-surface-expanded-beyond-particle-bounds` residual of about `0.102 m`
+after support-radius tolerance, so the remaining failure is tracked as
+renderer/probe surface-envelope work rather than the resolved gas-as-liquid
+pressure bug. Next priority after the Pages rebuild is the renderer visual
+trust/surface-envelope lane, then the broader liquid free-surface/settling
+quality gate.
+
 Current checkpoint, 2026-06-15 11:22 AKDT: the plain SPH/PBF no-force law
 isolation bug is fixed. The visual matrix's `law-static-gravity-off-fe-h2o`
 scenario is now a true no-force case (`gravity/eos/pressure/viscosity` off),

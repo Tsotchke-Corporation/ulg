@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 12:08 AKDT: the Na/H2O plain-SPH reaction
+motion failure is narrowed and the pressure-side bug is fixed. Plain SPH now
+keeps only liquid particles in the condensed density/pressure/PBF solve;
+solids and reaction gases remain particles/ledger evidence but no longer
+inflate liquid pressure mass. Atomic physics coverage passes for solid-liquid
+Fe/H2O and room-temperature Na/H2O reaction products. The targeted visual row
+now proves calm dynamics for public defaults (`Na + h2o`, `293.15 K`,
+`mech=sph`, `blob=1`) with max speed about `0.541 m/s`; the only remaining
+targeted failure is a Na solid MarchingCubes surface-envelope overflow of
+about `0.102 m` after the allowed support-radius/tolerance expansion. Keep
+that under renderer/probe visual-trust priority, alongside the reported
+z-buffer/focus issues. Do not reopen the resolved gas-as-liquid pressure bug
+unless a sequence again shows speed clamp, pressure impulse, or product gases
+participating in liquid pressure.
+
 Current routing note, 2026-06-15 11:22 AKDT: the no-force plain-SPH
 law-isolation failure is closed. The `law-static-gravity-off-fe-h2o` matrix
 scenario now disables EOS, pressure, and viscosity as well as gravity, and SPH

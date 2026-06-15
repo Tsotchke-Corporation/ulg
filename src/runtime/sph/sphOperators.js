@@ -60,7 +60,10 @@ export function kernelGradient(xi, xj, h, dimension) {
  * Density by summation: rho_i = sum_j m_j W(r_ij, h) (includes self). Inlined scalar distance (no
  * per-pair array allocation) — this is an O(N^2) hot loop.
  */
-export function computeDensities(particles, h, dimension) {
+export function computeDensities(particles, h, dimension, options = {}) {
+  const contributesToDensity = typeof options.contributesToDensity === 'function'
+    ? options.contributesToDensity
+    : null;
   const n = particles.length;
   const twoH = 2 * h;
   const rho = new Array(n);
@@ -68,6 +71,7 @@ export function computeDensities(particles, h, dimension) {
     const xi = particles[i].x;
     let s = 0;
     for (let j = 0; j < n; j += 1) {
+      if (contributesToDensity && !contributesToDensity(particles[j], j)) continue;
       const xj = particles[j].x;
       let r2 = 0;
       for (let d = 0; d < dimension; d += 1) { const dd = xi[d] - xj[d]; r2 += dd * dd; }
@@ -107,9 +111,13 @@ export function computeAccelerationsAndEnergyRates(particles, options = {}) {
     alpha = 0,
     beta = 0,
     epsilon = 0.01,
-    eos = null
+    eos = null,
+    contributesToDensity = null,
+    participatesInPressure = null
   } = options;
-  const densities = computeDensities(particles, h, dimension);
+  const densityPredicate = typeof contributesToDensity === 'function' ? contributesToDensity : null;
+  const pressurePredicate = typeof participatesInPressure === 'function' ? participatesInPressure : null;
+  const densities = computeDensities(particles, h, dimension, { contributesToDensity: densityPredicate });
   const pressures = [];
   const soundSpeeds = [];
   for (let i = 0; i < particles.length; i += 1) {
@@ -128,14 +136,17 @@ export function computeAccelerationsAndEnergyRates(particles, options = {}) {
   // Inlined O(N^2) symmetric momentum + energy loop: scalar component math, no per-pair allocation.
   for (let i = 0; i < n; i += 1) {
     const pi = particles[i];
+    const pressureActiveI = !pressurePredicate || pressurePredicate(pi, i);
     const xi = pi.x;
     const vi = pi.v;
     const acci = accelerations[i];
-    const termI = pressures[i] / (densities[i] * densities[i]);
+    const densityI2 = densities[i] * densities[i];
+    const termI = pressureActiveI && densityI2 > 0 ? pressures[i] / densityI2 : 0;
     let eRate = 0;
     for (let j = 0; j < n; j += 1) {
       if (j === i) continue;
       const pj = particles[j];
+      if (!pressureActiveI || (pressurePredicate && !pressurePredicate(pj, j))) continue;
       const xj = pj.x;
       let r2 = 0;
       for (let d = 0; d < dimension; d += 1) { const dd = xi[d] - xj[d]; r2 += dd * dd; }
@@ -143,7 +154,8 @@ export function computeAccelerationsAndEnergyRates(particles, options = {}) {
       const r = Math.sqrt(r2);
       const dWdr = cubicSplineKernelGradientMagnitude(r, h, dimension);
       const gradCoef = dWdr / r; // gradW[d] = gradCoef * (xi[d]-xj[d])
-      const termJ = pressures[j] / (densities[j] * densities[j]);
+      const densityJ2 = densities[j] * densities[j];
+      const termJ = densityJ2 > 0 ? pressures[j] / densityJ2 : 0;
       // Monaghan artificial viscosity (only for approaching pairs).
       let visc = 0;
       let vr = 0;

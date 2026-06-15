@@ -462,6 +462,88 @@ test('plain SPH/PBF reference stays static when gravity and EOS laws are disable
   );
 });
 
+test('plain SPH/PBF solid-liquid contact does not treat solid mass as fluid pressure mass', () => {
+  const driver = createSphPhaseDemo({
+    dropMaterial: 'fe',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 2,
+    baseParticleEdge: 5,
+    mechanics: 'sph',
+    physicalLawGroups: {
+      mechanics: true,
+      gravity: true,
+      eos: true,
+      pressure: true,
+      thermal: false,
+      reactions: false,
+      viscosity: true,
+      surfaceTension: false
+    }
+  });
+  const initialMass = driver.totals().massKg;
+
+  for (let stepIndex = 0; stepIndex < 24; stepIndex += 1) driver.step();
+
+  const particles = driver.demo.state.particles;
+  assertFiniteParticleState(particles);
+  nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
+  assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.eos, true);
+  assert.equal(driver.demo.lastStepTiming.reactionEvents, 0);
+  assert.ok(
+    maxParticleSpeedForRole(particles, 'base') < 5,
+    'plain SPH liquid base exploded under solid contact'
+  );
+});
+
+test('plain SPH/PBF reaction gas products do not enter the condensed-liquid pressure solve', () => {
+  const driver = createSphPhaseDemo({
+    dropMaterial: 'Na',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 293.15,
+    baseTemperatureK: 293.15,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 2,
+    baseParticleEdge: 4,
+    mechanics: 'sph',
+    physicalLawGroups: {
+      mechanics: true,
+      gravity: true,
+      eos: true,
+      pressure: true,
+      thermal: false,
+      reactions: true,
+      viscosity: true,
+      surfaceTension: false
+    }
+  });
+  const initialMass = driver.totals().massKg;
+  let reactionEvents = 0;
+
+  for (let stepIndex = 0; stepIndex < 64; stepIndex += 1) {
+    driver.step();
+    reactionEvents += driver.demo.lastStepTiming.reactionEvents || 0;
+  }
+
+  const particles = driver.demo.state.particles;
+  const materials = new Set(particles.map((particle) => particle.material));
+  assertFiniteParticleState(particles);
+  nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
+  assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
+  assert.ok(reactionEvents > 0, 'Na/H2O fixture did not produce reaction products');
+  assert.ok(materials.has('naoh'), 'Na/H2O fixture did not produce NaOH');
+  assert.ok(materials.has('h2'), 'Na/H2O fixture did not produce H2 gas');
+  assert.ok(
+    maxParticleSpeed(particles) < 5,
+    'plain SPH reaction products drove particles into the display speed clamp'
+  );
+});
+
 test('plain SPH/PBF reference keeps solid H2O from flowing like liquid water', () => {
   const driver = createSphPhaseDemo({
     dropMaterial: 'h2o',

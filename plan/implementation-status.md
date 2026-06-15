@@ -4,6 +4,13 @@ Updated: 2026-06-15 plain-SPH no-force law isolation, product-event spatial ledg
 
 ## Done
 
+- Plain SPH/PBF now has an explicit condensed-liquid pressure participant
+  predicate. Solids and gas products no longer enter density, pressure, or PBF
+  projection as liquid mass. The new Fe/H2O solid-liquid and room-temperature
+  Na/H2O reaction-product atomics pass, and the public-default Na/H2O visual
+  row no longer hits the reaction speed clamp. The remaining targeted failure
+  is a Na solid MarchingCubes surface-envelope residual, tracked under
+  renderer/probe visual trust.
 - Plain SPH/PBF law isolation now treats density projection as part of the
   EOS/incompressibility law family. When the EOS law group is disabled, the
   reference SPH lane sets `sphDensityProjectionIterations=0`, so no-force

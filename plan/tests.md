@@ -1,5 +1,32 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Plain SPH Condensed Pressure Partition
+
+The current slice fixes the plain SPH/PBF participant contract. Only
+thermodynamic liquid particles should enter condensed SPH density, pressure,
+and PBF projection; solids and reaction gases must remain represented without
+acting as liquid pressure mass.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPhaseCarrier.js`,
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check tests/physicsBehaviorInvariants.test.mjs`, and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `10` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Targeted browser visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-sph-reaction-roomtemp-blob1-20260615 ULG_VISUAL_MATRIX_SCENARIOS=reaction-product-na-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  completed and captured five frames. The old physics failure is gone:
+  `maxSpeedObservedMPerS=0.5410316601618764`,
+  `maxPressureImpulseNSeconds=0`, H2O visible surface count `1 -> 1`, and
+  mechanics integrator `sph`. The run still classified bad only because the Na
+  solid surface exceeded particle bounds by about `0.102 m` after
+  support-radius/tolerance expansion; keep that under renderer/probe
+  surface-envelope work.
+
 ## Current Focused Result - 2026-06-15 Plain SPH No-force Law Isolation
 
 The current slice fixes the plain SPH/PBF law-toggle contract. Density

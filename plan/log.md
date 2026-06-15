@@ -20482,3 +20482,84 @@ Conclusion:
   ComputeManager GPU resident lane. Multi-substep command batching remains
   useful as the wrapper once the kernels stop doing full-grid gather work every
   substep.
+
+## 2026-06-14 18:21 AKDT - Opt-in active-grid fused mechanics sequence
+
+Prompt context:
+
+- User asked to keep making periodic local commits at coherent clean points,
+  and the existing `Agents.md`/parent `AGENTS.md` rule already contained that
+  instruction. I confirmed the only dirty pre-work state was ICC status from
+  the prior refresh.
+- Continued the P0 resident performance/physics slice after fused sequence
+  evidence showed command submission was not the dominant bottleneck.
+
+Implemented:
+
+- Added an opt-in active-grid variant inside the already gated
+  `fuseNoFullResidentMechanicsSequence` path:
+  `fuseNoFullResidentMechanicsActiveGrid` and probe env
+  `ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`.
+- Built local active-grid WGSL variants in `src/runtime/sph/sphMlsMpmGpuStep.js`
+  without changing the canonical ABI shaders. The variants map active local
+  node indices back to full grid row indices so downstream G2P keeps using the
+  existing full-grid layout.
+- Added active-grid dispatch metadata, conservative position-bound expansion,
+  stale-CPU fallback behavior, and propagation of compact resident bounds/max
+  speed through no-full resident SPH state clones.
+- Added `clearBuffer` support to the fake summary device and unit coverage
+  proving the active path dispatches fewer P2G/grid-update workgroups for a
+  one-particle fixture.
+- Added direct-probe env wiring and timeline metadata for active-grid sequence
+  runs.
+
+Important failure and fix:
+
+- First browser active-grid run compiled but classified `bad`: output mass/J
+  were zero. Diagnosis: inactive grid rows were being cleared with
+  `GPUCommandEncoder.clearBuffer`, but the sequence grid buffers lacked
+  `COPY_DST` usage. That invalidated the command buffer and left outputs
+  zeroed. Fixed by adding `COPY_DST` to sequence grid/update buffers only when
+  active-grid clearing is requested, and by correcting the null safety-cell
+  default so unset probe env uses the runtime default `3` cells rather than
+  collapsing to `1`.
+
+Evidence:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "active-grid dispatch|fused mechanics sequence|fused no-full mechanics|compact GPU summary"`
+  reported `32/32` because Node evaluated the full resident test file.
+- PASS:
+  `/tmp/ulg-history-probes/current-fused-sequence-active-grid-mechanics-64-20260614.json`
+  classified `good`; active dispatch used `2352/13824` grid nodes, J stayed
+  about `0.99999..1.0214`, max speed was about `0.299 m/s`, compact-summary
+  `mapAsync` was about `3.02 s`, and pressure impulse stayed `0`.
+- PASS matched baseline:
+  `/tmp/ulg-history-probes/current-fused-sequence-full-grid-mechanics-64-20260614.json`
+  classified `good` with the same motion/J envelope but full-grid
+  compact-summary `mapAsync` was about `13.44 s`.
+- PASS:
+  `/tmp/ulg-history-probes/current-fused-sequence-active-grid-mechanics-2x64-20260614.json`
+  classified `good`; batch two used `boundsSource=resident-position-bounds`,
+  proving active scoping does not rely on stale CPU mirrors after the first
+  no-full resident batch.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: targeted visual matrix `2026-06-15T02-16-21-304Z` reported
+  `failedCount=0` for H2O/H2O MLS-MPM, solid H2O CPU-SPH, and pressure-off
+  H2O MLS-MPM.
+- PASS: captured-frame visual matrix `2026-06-15T02-19-48-541Z` reported
+  `failedCount=0` and `3` frames each for H2O/H2O MLS-MPM and solid H2O
+  CPU-SPH.
+
+Open:
+
+- Keep active-grid fused sequence opt-in until it is promoted into a
+  ComputeManager/GPU-lane law DAG and scene-paired validation covers pressure,
+  thermal, reaction/product, and same-material long-horizon settling.
+- Next performance slice should replace the coarse active AABB with tiled or
+  neighbor-indexed P2G/grid update while preserving the StateManager/
+  ComputeManager authority boundary.

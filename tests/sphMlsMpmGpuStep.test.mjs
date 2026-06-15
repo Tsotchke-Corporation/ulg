@@ -472,6 +472,7 @@ function fakeSummaryDevice(summaryValues) {
   const dispatches = [];
   const shaderModules = [];
   const copies = [];
+  const clears = [];
   const submissions = [];
   const writes = [];
   return {
@@ -480,6 +481,7 @@ function fakeSummaryDevice(summaryValues) {
     dispatches,
     shaderModules,
     copies,
+    clears,
     submissions,
     writes,
     queue: {
@@ -552,8 +554,11 @@ function fakeSummaryDevice(summaryValues) {
         copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
           copies.push({ source, sourceOffset, destination, destinationOffset, size });
         },
+        clearBuffer(buffer, offset, size) {
+          clears.push({ buffer, offset, size });
+        },
         finish() {
-          return { dispatches: [...dispatches], copies: [...copies] };
+          return { dispatches: [...dispatches], copies: [...copies], clears: [...clears] };
         }
       };
     }
@@ -3400,6 +3405,93 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 7);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
+});
+
+test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatch', async () => {
+  const buffers = manualBuffers({ velocity: [0, 0, 0] });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 1,
+    summaryRunner({ gridUpdate }) {
+      assert.equal(gridUpdate.fusedResidentSequence, true);
+      assert.equal(gridUpdate.activeGridDispatch.useActiveGrid, true);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-resident-summary-execution.v0',
+        backend: 'webgpu',
+        status: 'compact-summary-ready',
+        compactGpuSummaryAvailable: true,
+        readbackMode: 'no-full-readback',
+        summaryScope: 'full',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: gridUpdate.gridNodeCount,
+        activeGridNodeCount: null,
+        activeGridNodeCountAvailable: false,
+        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-requested',
+        gridNodeScanCount: 0,
+        gridNodeScanSkipped: true,
+        sourceMassKg: 8,
+        nextMassKg: 8,
+        massDeltaKg: 0,
+        maxSpeedMPerS: 0,
+        maxDisplacementM: 0,
+        minVolumeRatioJ: 1,
+        maxVolumeRatioJ: 1,
+        phaseMassKg: { solid: 0, liquid: 8, gas: 0, plasma: 0 },
+        phaseMassTotalKg: 8,
+        thermalPhaseSummaryAvailable: true,
+        compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
+        timing: {
+          schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
+          totalMs: 0,
+          setupMs: 0,
+          encodeMs: 0,
+          submitMs: 0,
+          mapAsyncWaitMs: 0,
+          decodeMs: 0,
+          queueFenceAttribution: 'unit-summary-runner',
+          summaryKernelDispatchCount: 0,
+          summaryWorkgroupCount: 0,
+          compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+        },
+        mapAsyncWaitMs: 0,
+        queueFenceAttribution: 'unit-summary-runner'
+      };
+    }
+  });
+
+  const activeGridDispatch = execution.fusedResidentSequence.activeGridDispatch;
+  assert.equal(activeGridDispatch.status, 'active-grid-dispatch-ready');
+  assert.equal(activeGridDispatch.useActiveGrid, true);
+  assert.equal(activeGridDispatch.fullGridNodeCount, 512);
+  assert.ok(activeGridDispatch.activeNodeCount < activeGridDispatch.fullGridNodeCount);
+  assert.equal(execution.finalStep.p2gGridProjection.activeGridDispatch.useActiveGrid, true);
+  assert.equal(execution.finalStep.gridUpdate.activeGridDispatch.useActiveGrid, true);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
+  assert.equal(device.clears.length, 2);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [4, 4, 1, 4, 4, 1]);
+  destroyMlsMpmResidentStepsBuffers(execution);
 });
 
 test('MLS-MPM resident steps ping-pong unread retained buffers across repeated steps', async () => {

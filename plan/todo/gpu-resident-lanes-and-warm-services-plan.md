@@ -131,6 +131,20 @@ sparse/tiled/active-grid P2G and grid update. The current gather-style P2G
 still scans particles from every grid node every substep, so a GPU lane that
 keeps buffers resident still needs a better active-grid/neighbor structure.
 
+Status update, 2026-06-14 active-grid sequence evidence: the first
+`fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
+grid-update shader variants inside the already gated fused sequence. The
+variant preserves full-grid row layout for downstream G2P, zeroes inactive
+rows with `clearBuffer`, and records active-box metadata in stage timing. In a
+matched browser A/B, full-grid fused sequence stayed `good` but waited about
+`13.44 s` in compact-summary `mapAsync`; active-grid fused sequence stayed
+`good` with `2352/13824` active nodes and waited about `3.02 s`. A `2x64`
+active-grid probe also stayed `good` and used resident compact-summary bounds
+for batch two. Treat this as evidence to promote active-grid/tiled mechanics
+into the ComputeManager GPU resident lane, not as permission to build a
+scene-local scheduler or make active-grid default before pressure/thermal/
+reaction interactions and scene-paired visual gates pass.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

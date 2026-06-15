@@ -627,6 +627,15 @@ still hard-times out before writing a full result.
      is not the real cost. The first readback is draining queued resident
      mechanics command buffers. Prioritize fused/sparse P2G -> grid update ->
      G2P execution under ComputeManager/GPU lane authority.
+     2026-06-14 active-grid status: the opt-in
+     `fuseNoFullResidentMechanicsActiveGrid` path now dispatches only an
+     active full-grid row window inside the fused sequence and keeps inactive
+     rows zeroed for G2P. Matched `64`-substep browser probes stayed `good` in
+     full-grid and active-grid modes; active-grid reduced compact-summary
+     `mapAsync` from about `13.44 s` to about `3.02 s` with `2352/13824`
+     active nodes. A `2x64` active run stayed `good` and used resident compact
+     bounds for the second batch. Keep this opt-in until scene-paired visual
+     validation and ComputeManager/GPU-lane promotion are complete.
    - Rule: architecture plumbing is not done if the demo still behaves
      severely wrong.
 - Recurring evidence gate: after each major todo item, run the visual
@@ -649,8 +658,9 @@ still hard-times out before writing a full result.
        full or admitted cohort readback at sparse checkpoints, so "drop
        descends and merges" is measured from live state rather than stale CPU
        mirrors or short-window render surfaces;
-     - optimize compact/admitted cohort summaries so long settling probes do
-       not assign most queue wait to the diagnostic summary stage;
+     - promote the active-grid mechanics sequence into a ComputeManager-owned
+       GPU resident lane and replace the simple AABB active window with tiled/
+       neighbor indexing before making it default;
      - make `ULG_PROBE_EXPECT_LIQUID_SETTLE=1` pass for same-material H2O/H2O
        without disabling laws or relaxing the declared physics thresholds;
      - audit P2G/grid-update/G2P for momentum, volume, wall clearance, and

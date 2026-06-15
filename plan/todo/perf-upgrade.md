@@ -64,6 +64,30 @@ Follow-up correction, 2026-06-14 AKDT:
   update, then keep that sparse sequence resident under the ComputeManager GPU
   lane.
 
+Active-grid correction, 2026-06-14 AKDT:
+
+- The first opt-in active-grid resident sequence slice is now implemented
+  behind `fuseNoFullResidentMechanicsActiveGrid` and
+  `ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`.
+- The active path keeps full-grid row layout for G2P, maps active node-local
+  dispatch ids back to full grid indices, and clears inactive grid rows before
+  G2P samples them. A first failed browser run exposed an important WebGPU
+  invariant: `clearBuffer` requires `COPY_DST` buffer usage. Without that,
+  the command buffer effectively produced zero mass/J. The grid buffers now
+  include `COPY_DST` only when active-grid clearing is requested.
+- Current browser A/B evidence on the same `64`-substep mechanics-only
+  H2O/H2O direct-resident probe: full-grid fused sequence stayed `good` but
+  compact-summary `mapAsync` waited about `13.44 s`; active-grid fused
+  sequence stayed `good` with `2352/13824` active nodes and waited about
+  `3.02 s`.
+- A `2x64` active-grid probe stayed `good` and used
+  `boundsSource=resident-position-bounds` for the second batch, proving active
+  scoping can continue after the CPU mirror is stale.
+- Keep active-grid dispatch opt-in until scene-paired validation, pressure/
+  thermal/reaction interactions, and ComputeManager/GPU-lane authority are
+  wired. The next performance work should promote this into a lane-owned law
+  DAG and then replace the simple active AABB with tiled/neighbor indexing.
+
 Architecture correction, 2026-06-12 AKDT:
 
 - The GPU-resident hot loop should be packaged as ComputeManager-compatible law

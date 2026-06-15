@@ -1328,7 +1328,9 @@ async function runDirectResidentProbe({
   readbackMode,
   compactSummaryScope,
   thermalWallRate,
-  fuseResidentMechanicsSequence = false
+  fuseResidentMechanicsSequence = false,
+  fuseResidentMechanicsActiveGrid = false,
+  fusedActiveGridSafetyCells = null
 }) {
   const browser = await launchProbeBrowser();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
@@ -1343,6 +1345,8 @@ async function runDirectResidentProbe({
       compactSummaryScope: requestedCompactSummaryScope,
       thermalWallRate: requestedThermalWallRate,
       fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
+      fuseResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
+      fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells,
       defaults
     }) => {
       const finiteOrNull = (value) => {
@@ -1779,6 +1783,9 @@ async function runDirectResidentProbe({
           requestedReadbackMode: step.stageTiming.requestedReadbackMode ?? null,
           compactSummaryRequested: step.stageTiming.compactSummaryRequested ?? null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null,
+          activeGridDispatch: step.stageTiming.activeGridDispatch
+            ? { ...step.stageTiming.activeGridDispatch }
+            : null,
           thermalRequested: step.stageTiming.thermalRequested ?? null,
           mechanicsRefreshRequested: step.stageTiming.mechanicsRefreshRequested ?? null,
           reactionRequested: step.stageTiming.reactionRequested ?? null
@@ -2154,7 +2161,9 @@ async function runDirectResidentProbe({
               stepCount: requestedBatchSteps,
               compactSummaryMode: 'final-only',
               retainIntermediateSteps: false,
-              fuseNoFullResidentMechanicsSequence: requestedFuseResidentMechanicsSequence
+              fuseNoFullResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
+              fuseNoFullResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
+              activeGridSafetyCells: requestedFusedActiveGridSafetyCells
             });
             metrics.push(sample({
               batchIndex,
@@ -2216,6 +2225,8 @@ async function runDirectResidentProbe({
         readbackMode: requestedReadbackMode,
         compactSummaryScope: requestedCompactSummaryScope,
         fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
+        fuseResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
+        fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells ?? null,
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
         renderEveryBatches: 0,
         errors,
@@ -2237,6 +2248,8 @@ async function runDirectResidentProbe({
       compactSummaryScope,
       thermalWallRate,
       fuseResidentMechanicsSequence,
+      fuseResidentMechanicsActiveGrid,
+      fusedActiveGridSafetyCells,
       defaults: {
         wallTemperatureK: DEFAULT_WALL_TEMPERATURE_K,
         dropTemperatureK: DEFAULT_DROP_TEMPERATURE_K,
@@ -2864,6 +2877,12 @@ async function main() {
   );
   const fuseResidentMechanicsSequence = process.env.ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE === '1'
     || process.env.ULG_PROBE_FUSE_NO_FULL_RESIDENT_MECHANICS_SEQUENCE === '1';
+  const fuseResidentMechanicsActiveGrid = process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID === '1'
+    || process.env.ULG_PROBE_FUSE_NO_FULL_RESIDENT_ACTIVE_GRID === '1'
+    || process.env.ULG_PROBE_FUSE_RESIDENT_MECHANICS_ACTIVE_GRID === '1';
+  const fusedActiveGridSafetyCells = process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS == null
+    ? null
+    : positiveInteger(process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS, null);
   const renderReadbackMode = process.env.ULG_PROBE_RENDER_READBACK_MODE === 'no-full-readback'
     ? 'no-full-readback'
     : 'full-parity-readback';
@@ -2959,7 +2978,9 @@ async function main() {
         readbackMode,
         compactSummaryScope,
         thermalWallRate,
-        fuseResidentMechanicsSequence
+        fuseResidentMechanicsSequence,
+        fuseResidentMechanicsActiveGrid,
+        fusedActiveGridSafetyCells
       })
       : await runBrowserProbe({
         baseUrl: server.baseUrl,

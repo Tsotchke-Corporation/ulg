@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 18:21 AKDT: the first opt-in
+active-grid slice for the fused resident mechanics sequence is implemented and
+validated. The path is gated by `fuseNoFullResidentMechanicsActiveGrid` /
+`ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`, keeps full-grid buffer layout for
+G2P compatibility, clears inactive grid rows with `COPY_DST` grid buffers, and
+falls back to full-grid dispatch when no trustworthy resident/CPU bounds exist.
+Browser A/B evidence on the same `64`-substep H2O/H2O mechanics-only
+direct-resident probe shows full-grid fused sequence `mapAsync` around
+`13.44 s` versus active-grid around `3.02 s` with matching mass, J, and motion.
+A `2x64` active-grid run stayed `good`; batch two used
+`boundsSource=resident-position-bounds`, proving stale CPU mirrors do not drive
+the active box after WebGPU owns the state. Keep this path opt-in until it has
+scene-paired validation and ComputeManager/GPU-lane ownership, but treat
+sparse/tiled/neighbor P2G as the confirmed next performance lever.
+
 Current checkpoint, 2026-06-14 17:42 AKDT: compact-summary attribution is now
 instrumented. A `64`-substep direct-resident no-full H2O/H2O probe spends
 about `14.49 s` waiting on the final summary `mapAsync` fence for a `336` byte

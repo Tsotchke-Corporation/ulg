@@ -1,5 +1,29 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-14 Active-Grid Fused Resident Mechanics
+
+The opt-in active-grid mechanics sequence is validated behind
+`fuseNoFullResidentMechanicsActiveGrid` and
+`ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`. Use it with direct-resident probes
+only while it remains gated:
+
+`ULG_PROBE_MODE=direct-resident ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 node scripts/sph-long-horizon-probe.mjs`
+
+Current required active-grid checks:
+
+- Focused resident unit coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "active-grid dispatch|fused mechanics sequence|fused no-full mechanics|compact GPU summary"`.
+- Browser A/B: active-grid and full-grid fused sequence must both classify
+  `good`; active-grid should report `activeGridDispatch.useActiveGrid=true`,
+  active node count below full grid count, conserved mass, bounded J, and no
+  pressure impulse.
+- Multi-batch direct resident probe must show later batches use
+  `boundsSource=resident-position-bounds` once CPU mirrors are stale.
+- Keep pairing with `npm run test:physics-atomics` and a targeted
+  `scripts/sph-visual-sanity-matrix.mjs` run. Use
+  `ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1` after major todo slices so at least a
+  small representative visual sequence is captured.
+
 ## Current Focused Result - 2026-06-14 Live Same-Device Auto-Publication + Solid H2O + Law-Isolation Visual Gates
 
 ULG now has a concrete NodeKernel-compatible refresh executor for admitted

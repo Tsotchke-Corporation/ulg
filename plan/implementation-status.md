@@ -1,9 +1,34 @@
 # Implementation Status
 
-Updated: 2026-06-14 resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added an opt-in active-grid variant for the fused no-full resident mechanics
+  sequence. The path is gated by `fuseNoFullResidentMechanicsActiveGrid` and
+  `ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`; it keeps the canonical full-grid
+  buffer layout, maps active local node indices back to full grid rows, clears
+  inactive grid rows before G2P can sample them, and falls back to full-grid
+  dispatch when no trustworthy position bounds exist. Focused resident tests
+  now cover the active path and prove it dispatches fewer P2G/grid-update
+  workgroups for a one-particle fixture. Browser evidence:
+  `/tmp/ulg-history-probes/current-fused-sequence-active-grid-mechanics-64-20260614.json`
+  classified `good` with `activeNodeCount=2352/13824`, J about
+  `0.99999..1.0214`, max speed about `0.299 m/s`, and compact-summary
+  `mapAsync` about `3.02 s`. The matched full-grid fused sequence probe
+  `/tmp/ulg-history-probes/current-fused-sequence-full-grid-mechanics-64-20260614.json`
+  stayed `good` but waited about `13.44 s`, so active-grid dispatch is the
+  confirmed hot-loop performance lever. A `2x64` active-grid probe
+  `/tmp/ulg-history-probes/current-fused-sequence-active-grid-mechanics-2x64-20260614.json`
+  stayed `good`; batch two used `boundsSource=resident-position-bounds`, so
+  stale CPU mirrors do not drive active scoping after WebGPU owns the state.
+  Validation also passed focused resident tests, `npm run test:physics-atomics`
+  with `7` pass and `1` expected skip, targeted visual matrix
+  `2026-06-15T02-16-21-304Z` with `failedCount=0`, and captured-frame visual
+  matrix `2026-06-15T02-19-48-541Z` with `failedCount=0` and `3` frames each
+  for H2O/H2O MLS-MPM and solid H2O CPU-SPH. Remaining work: keep the path
+  opt-in until scene-paired resident validation, ComputeManager/GPU-lane
+  ownership, and broader law-family interactions are wired.
 - Added an opt-in fused no-full resident mechanics path that records P2G,
   grid-update, and G2P into one WebGPU command submission for a single
   substep. The first browser probe found and fixed the crash

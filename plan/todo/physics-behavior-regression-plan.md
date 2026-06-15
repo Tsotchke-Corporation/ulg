@@ -586,6 +586,16 @@ state that moves on screen is the state the laws actually mutated.
      Treat this as queued mechanics pass cost hidden behind the first readback
      fence. The next implementation item is fused/sparse resident mechanics,
      not smaller summary metadata.
+   - active-grid update: the first sparse resident mechanics slice is now
+     implemented behind `fuseNoFullResidentMechanicsActiveGrid` /
+     `ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`. It keeps full-grid buffer layout
+     for G2P, clears inactive rows, and falls back to full-grid dispatch when
+     bounds are unavailable. A matched `64`-substep direct-resident A/B stayed
+     `good` in both modes, but active-grid reduced compact-summary `mapAsync`
+     from about `13.44 s` to about `3.02 s` by dispatching `2352/13824` grid
+     nodes. A `2x64` active-grid run used resident compact-summary bounds for
+     batch two and stayed `good`. This makes longer visual validation cheaper,
+     but it does not close the visible same-material settling gate by itself.
 
 ## Immediate Work
 

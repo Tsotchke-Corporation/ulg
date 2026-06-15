@@ -1235,6 +1235,50 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-grid-update-stage'].completed, 6);
   assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-g2p-stage'].completed, 5);
 
+  const laneExecutedWebGpuRequestedStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...mechanicsStageParticle,
+    computeManager,
+    modulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    stageTaskIdPrefix: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-chain',
+    useNativeTaskGraph: false,
+    preferWebGpu: true,
+    readbackMode: 'full-parity-readback',
+    gpuResidentLaneId: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested',
+    gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state'
+  });
+  assert.equal(
+    laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneAligned,
+    true
+  );
+  assert.deepEqual(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneIds, {
+    p2g: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested',
+    gridUpdate: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested',
+    g2p: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested'
+  });
+  assert.deepEqual(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskStateKeys, {
+    p2g: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state',
+    gridUpdate: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state',
+    g2p: 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state'
+  });
+  assert.deepEqual(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskResidencies, {
+    p2g: 'gpu-lane',
+    gridUpdate: 'gpu-lane',
+    g2p: 'gpu-lane'
+  });
+  assert.deepEqual(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskFenceSatisfied, {
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
+  assert.ok(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.submittedStageTasks.every((task) => (
+    task.gpuResidentLaneLaneId === 'ulg:test:mechanics-stage-lane-executor-webgpu-requested'
+    && task.gpuResidentLaneStateKey === 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state'
+    && task.gpuFenceRequired === true
+  )));
+  assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-p2g-stage'].completed, 8);
+  assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-grid-update-stage'].completed, 7);
+  assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-g2p-stage'].completed, 6);
+
   const mechanicsChildDryRun = await runUlgMechanicsChildDryRunTask({
     referenceEvidence: measuredMechanicsEvidence,
     mechanicsOnlyChildTaskEvidence: mechanicsOnlyResidentTaskResult

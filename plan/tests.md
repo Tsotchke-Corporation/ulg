@@ -10,8 +10,11 @@ covered. Focused checks:
   passed `11/11`, including assertions that the mechanics P2G -> grid-update
   -> G2P native stage graph outputs are consumed through
   `ComputeManager.executeGpuResidentLaneStagePlan()` and that the non-native
-  graph path lets the lane executor submit the actual three stage tasks. Both
-  paths report completed three-stage lane execution with `defaultEnabled=false`.
+  graph path lets the lane executor submit the actual three stage tasks. The
+  same focused gate now also requests WebGPU for the non-native child stage
+  tasks and proves P2G, grid-update, and G2P are all `gpu-lane` tasks aligned
+  to the parent lane id/state key with satisfied fences. The browser/GPUHub
+  same-device worker path still needs a dedicated validation slice.
 - PeerCompute lane manager:
   `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
   from `/home/cos/projects/peercompute` passed `6/6`.
@@ -32,6 +35,8 @@ covered. Focused checks:
   `codex-mechanics-stage-lane-plan-20260614` also passed `3/3`. The latest
   lane-executed stage-task matrix
   `codex-mechanics-stage-task-lane-executor-20260614` passed `3/3` as well.
+  The same-lane WebGPU-request invariant matrix
+  `codex-same-lane-stage-webgpu-request-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

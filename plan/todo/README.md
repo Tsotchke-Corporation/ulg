@@ -35,16 +35,24 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 19:48 AKDT: WebGPU-requested mechanics
+stage tasks now inherit the parent lane executor identity instead of creating
+three unrelated stage-specific GPU lane descriptors. The non-native lane
+executor path stamps P2G, grid-update, and G2P child tasks with the same lane
+id/state key, keeps them inline for WebGPU object safety, and records
+per-stage lane/backend/residency/fence summaries. This completes the
+same-lane authority invariant for the WebGPU-requested path in Node/fallback
+validation. Next priority is real browser/WebGPU same-device retained-buffer
+validation under that lane, then GPUHub/worker execution, and only then
+pressure/interface, thermal/phase, and reaction/product stage promotion.
+
 Current routing note, 2026-06-14 19:36 AKDT: the mechanics stage-plan executor
 now drives actual ComputeManager stage-task submissions in the non-native
 graph path. With `useNativeTaskGraph=false`, the lane executor submits P2G,
 grid-update, and G2P stage tasks, records completed stage count/order and
 fence evidence, and the mechanics-only step consumes the lane-produced stage
 results without duplicate execution. This remains non-authoritative and CPU/
-inline in the focused test; next priority is to run the WebGPU-backed stage
-tasks under the same lane executor with same-device retained buffers, then
-promote pressure/interface, thermal/phase, and reaction/product stages behind
-the same boundary.
+inline in the focused test.
 
 Current routing note, 2026-06-14 19:28 AKDT: the first ULG mechanics consumer
 of the PeerCompute lane stage-plan boundary is in place. The existing

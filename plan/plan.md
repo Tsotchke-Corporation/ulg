@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 19:48 AKDT: WebGPU-requested mechanics stage
+tasks now stay aligned to the parent ComputeManager lane executor. When
+`runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` submits
+P2G, grid-update, and G2P child tasks with `preferWebGpu=true`, the helper
+stamps each child descriptor with the parent lane id/state key, keeps the
+task inline for GPU object safety, preserves supplied device context, and
+publishes per-stage lane id, state key, backend, residency, and fence
+evidence on `mechanicsStageTaskChain`. The focused Node integration proves
+all three child tasks are `gpu-lane` tasks aligned to the same parent lane and
+that their fences satisfy. This is still not proof of real browser GPUHub
+worker execution; the next slice is browser/WebGPU same-device retained-buffer
+validation under this lane executor, then pressure/interface, thermal/phase,
+and reaction/product stage promotion.
+
 Current checkpoint, 2026-06-14 19:36 AKDT: the mechanics stage-plan executor
 can now drive actual ComputeManager stage-task submissions when the native
 task graph is disabled. `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()`

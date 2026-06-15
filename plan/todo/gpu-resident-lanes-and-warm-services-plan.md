@@ -217,6 +217,16 @@ execution. This is still non-authoritative and defaults to CPU/inline in the
 focused validation; the next promotion is to run WebGPU-backed stage tasks
 there with same-device retained buffers.
 
+Status update, 2026-06-14 same-lane WebGPU-request stage tasks: WebGPU-
+requested P2G, grid-update, and G2P child stage tasks now inherit the parent
+lane executor id/state key instead of declaring separate stage-local lanes.
+The submit helper keeps those tasks inline for WebGPU object safety, preserves
+provided device context, and records child-task lane/backend/residency/fence
+summaries on `mechanicsStageTaskChain`. Focused Node validation proves the
+authority invariant even when WebGPU falls back to CPU in Node. The remaining
+promotion is real browser/GPUHub same-device retained-buffer execution under
+that aligned lane, then worker execution and broader law-family promotion.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

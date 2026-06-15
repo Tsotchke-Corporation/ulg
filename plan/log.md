@@ -20880,3 +20880,58 @@ Open:
   next promotion is browser/WebGPU same-device execution under this same lane
   executor and then pressure/interface, thermal/phase, and reaction/product
   stage promotion.
+
+## 2026-06-14 19:48 AKDT - Same-lane WebGPU-requested stage tasks
+
+Prompt context:
+
+- Continued after committing the mechanics stage-task lane executor. The next
+  architecture bug was that WebGPU-requested child mechanics tasks could still
+  declare separate stage-local GPU lane descriptors, which undermined the
+  parent lane executor identity even though the stage plan existed.
+
+Implemented:
+
+- Added a compact mechanics stage lane-result summarizer for backend,
+  residency, lane id, state key, and fence status.
+- Updated the stage-task submit helper so `preferWebGpu=true` child tasks
+  inherit the parent lane id/state key, domain key, queue-fence policy, and
+  inline execution mode.
+- Preserved provided `device`, `deviceResult`, and `navigatorRef` for inline
+  WebGPU lane tasks so GPU objects do not get stripped before child task
+  execution.
+- Recorded per-stage lane summaries, lane ids, state keys, backends,
+  residencies, and fence satisfaction on `mechanicsStageTaskChain` and the
+  compact split-path summary.
+- Extended the focused PeerCompute/ULG integration test to request WebGPU for
+  the non-native stage-task lane executor path and prove P2G, grid-update, and
+  G2P are all `gpu-lane` tasks aligned to the same parent lane/state key with
+  satisfied fences.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG plan/status/todo/test/log/done documentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-same-lane-stage-webgpu-request-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured
+  frames each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- This proves the lane identity and fence invariant in Node/fallback
+  validation. It is not yet a browser GPUHub worker execution gate. The next
+  slice should validate real browser/WebGPU same-device retained buffers under
+  this parent lane executor, then move pressure/interface, thermal/phase, and
+  reaction/product stages behind the same boundary.

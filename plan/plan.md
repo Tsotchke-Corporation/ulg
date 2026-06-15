@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 18:50 AKDT: mounted scene opt-in wiring for
+the active-grid fused resident mechanics sequence is in place. Browser URLs
+can now request `residentFuseSequence=1`, `residentActiveGrid=1`, and optional
+`residentActiveGridSafety=<cells>`; active-grid implies the fused sequence in
+the mounted scheduler, the resident signature includes the policy, and the
+scene forwards the same options through direct WebGPU execution and
+ComputeManager resident-step tasks. The status overlay now reports
+`resident policy` and active-grid stage timing. The scene probe sampler also
+preserves fused sequence stage timing so analysis can report
+`minActiveGridNodeCount`. Validation artifact
+`/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+classified `good`: `16` no-full mounted scene substeps used active-grid
+dispatch `2744/13824` nodes, compact-summary `mapAsync` was about `2.57 s`,
+J stayed `0.99999..1.00299`, max speed was about `0.107 m/s`, pressure
+impulse stayed `0`, and two frames were captured under
+`/tmp/ulg-history-probes/scene-active-grid-frames-20260614`. This is a wiring
+and performance gate only; the intentionally tiny `27/125` particle visual
+probe is not liquid-quality acceptance.
+
 Current checkpoint, 2026-06-14 18:21 AKDT: the first opt-in
 active-grid slice for the fused resident mechanics sequence is implemented and
 validated. The path is gated by `fuseNoFullResidentMechanicsActiveGrid` /

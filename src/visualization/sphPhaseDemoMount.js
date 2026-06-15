@@ -1499,6 +1499,34 @@ export function mountSphPhaseDemoOverlay({
       ?? '1'
   ).toLowerCase();
   const initialResidentAutoEnabled = !['0', 'false', 'off', 'no', 'manual'].includes(initialResidentAutoParam);
+  function booleanUrlParam(value, fallback = false) {
+    if (value == null || value === '') return fallback;
+    return !['0', 'false', 'off', 'no', 'manual'].includes(String(value).toLowerCase());
+  }
+  function positiveIntegerUrlParam(value) {
+    if (value == null || value === '') return null;
+    const number = Math.round(Number(value));
+    return Number.isFinite(number) && number > 0 ? number : null;
+  }
+  const initialResidentActiveGridEnabled = booleanUrlParam(
+    initialHash.get('residentActiveGrid') ?? initialQuery.get('residentActiveGrid'),
+    false
+  );
+  const initialResidentFuseSequenceEnabled = initialResidentActiveGridEnabled || booleanUrlParam(
+    initialHash.get('residentFuseSequence') ?? initialQuery.get('residentFuseSequence'),
+    false
+  );
+  const initialResidentActiveGridSafetyCells = positiveIntegerUrlParam(
+    initialHash.get('residentActiveGridSafety') ?? initialQuery.get('residentActiveGridSafety')
+  );
+  function residentExecutionPolicyFromUrl() {
+    return {
+      schema: 'peercompute.ulg.sph-demo-resident-execution-policy.v0',
+      fuseNoFullResidentMechanicsSequence: initialResidentFuseSequenceEnabled,
+      fuseNoFullResidentMechanicsActiveGrid: initialResidentActiveGridEnabled,
+      activeGridSafetyCells: initialResidentActiveGridSafetyCells
+    };
+  }
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
     initialHash.get('surfaceOverlay')
       ?? initialQuery.get('surfaceOverlay')
@@ -1508,6 +1536,9 @@ export function mountSphPhaseDemoOverlay({
   function syncUrlFromControls() {
     const q = new URLSearchParams();
     for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(el));
+    if (initialResidentFuseSequenceEnabled) q.set('residentFuseSequence', '1');
+    if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
+    if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
     window.history.replaceState(null, '', `#${q.toString()}`);
   }
   applyUrlToControls(); // restore from the URL before the first build
@@ -1689,8 +1720,16 @@ export function mountSphPhaseDemoOverlay({
   function residentStageTimingStatusText(stageTiming) {
     const stageMs = stageTiming?.stageMs || {};
     if (!stageTiming?.schema) return 'pending';
+    const activeGrid = stageTiming.activeGridDispatch || null;
+    const activeGridText = activeGrid
+      ? activeGrid.useActiveGrid
+        ? `${activeGrid.activeNodeCount ?? 'unknown'}/${activeGrid.fullGridNodeCount ?? 'unknown'}`
+        : (activeGrid.status || 'inactive')
+      : 'n/a';
     return [
       `total=${fmt(stageTiming.totalMs, 1)}ms`,
+      `fused-seq=${stageTiming.fusedResidentSequence ? stageTiming.fusedResidentSequenceStepCount ?? 'yes' : 'off'}`,
+      `active-grid=${activeGridText}`,
       `device=${fmt(stageMs.deviceAcquire, 1)}ms`,
       `p2g=${fmt(stageMs.p2gGridProjection, 1)}ms`,
       `grid=${fmt(stageMs.gridUpdate, 1)}ms`,
@@ -1698,6 +1737,15 @@ export function mountSphPhaseDemoOverlay({
       `therm=${fmt(stageMs.thermalStep, 1)}ms`,
       `react=${fmt(stageMs.reactionStep, 1)}ms`,
       `summary=${fmt(stageMs.compactSummary, 1)}ms`
+    ].join(' ');
+  }
+
+  function residentExecutionPolicyStatusText(policy = null) {
+    const effective = policy || residentExecutionPolicyFromUrl();
+    return [
+      `fuse-seq=${effective?.fuseNoFullResidentMechanicsSequence ? 'on' : 'off'}`,
+      `active-grid=${effective?.fuseNoFullResidentMechanicsActiveGrid ? 'on' : 'off'}`,
+      `safety=${effective?.activeGridSafetyCells ?? 'default'}`
     ].join(' ');
   }
 
@@ -2947,11 +2995,13 @@ export function mountSphPhaseDemoOverlay({
   }
 
   function scheduleInitialMlsMpmResidentSteps({ generation = particleSyncGeneration } = {}) {
+    const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     if (!initialResidentAutoEnabled) {
       overlay.__mlsMpmResidentAutoSchedule = {
         schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
         status: 'disabled-by-url-residentAuto',
         residentAuto: false,
+        residentExecutionPolicy,
         generation,
         updatedAtMs: performance.now()
       };
@@ -2965,6 +3015,7 @@ export function mountSphPhaseDemoOverlay({
       schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
       status: 'resident-auto-schedule-enabled',
       residentAuto: true,
+      residentExecutionPolicy,
       generation,
       updatedAtMs: performance.now()
     };
@@ -3095,7 +3146,10 @@ export function mountSphPhaseDemoOverlay({
 
   function mlsMpmResidentStepsSignature({
     stepCount = currentResidentStepsPerSchedule(),
-    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+    fuseNoFullResidentMechanicsSequence = false,
+    fuseNoFullResidentMechanicsActiveGrid = false,
+    activeGridSafetyCells = null
   } = {}) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
@@ -3111,7 +3165,10 @@ export function mountSphPhaseDemoOverlay({
       mls?.gridCflFactor ?? 0.6,
       Math.max(1, Math.round(Number(stepCount) || 1)),
       readbackMode,
-      Object.entries(physicalLawGroupsFromControls()).map(([key, enabled]) => `${key}:${enabled ? 1 : 0}`).join(',')
+      Object.entries(physicalLawGroupsFromControls()).map(([key, enabled]) => `${key}:${enabled ? 1 : 0}`).join(','),
+      `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
+      `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid) ? 1 : 0}`,
+      `activeGridSafety=${activeGridSafetyCells ?? 'default'}`
     ].join('|');
   }
 
@@ -3205,15 +3262,18 @@ export function mountSphPhaseDemoOverlay({
     force = false
   } = {}) {
     const normalizedStepCount = Math.max(1, Math.round(Number(stepCount) || 1));
+    const residentExecutionPolicy = residentExecutionPolicyFromUrl();
     const baseSignature = mlsMpmResidentStepsSignature({
       stepCount: normalizedStepCount,
-      readbackMode
+      readbackMode,
+      ...residentExecutionPolicy
     });
     const signature = baseSignature
       ? `${baseSignature}|sync=${generation}|continue=${Boolean(continueFromResidentState)}`
       : null;
     if (!signature || (pendingMlsMpmResidentStepsSignature && !force)) return;
     overlay.__mlsMpmResidentRequestedReadbackMode = readbackMode;
+    overlay.__mlsMpmResidentExecutionPolicy = residentExecutionPolicy;
     const scheduleToken = pendingMlsMpmResidentStepsToken + 1;
     pendingMlsMpmResidentStepsToken = scheduleToken;
     pendingMlsMpmResidentStepsSignature = signature;
@@ -3225,6 +3285,7 @@ export function mountSphPhaseDemoOverlay({
       stepCount: normalizedStepCount,
       readbackMode,
       continueFromResidentState: Boolean(continueFromResidentState),
+      residentExecutionPolicy,
       generation,
       startedAtMs: performance.now()
     };
@@ -3252,6 +3313,7 @@ export function mountSphPhaseDemoOverlay({
         stepCount: normalizedStepCount,
         readbackMode,
         continueFromResidentState: Boolean(continueFromResidentState),
+        residentExecutionPolicy,
         generation,
         elapsedMs,
         noticedAtMs: performance.now(),
@@ -3327,6 +3389,7 @@ export function mountSphPhaseDemoOverlay({
         stepCount: normalizedStepCount,
         readbackMode,
         continueFromResidentState: Boolean(continueFromResidentState),
+        residentExecutionPolicy,
         generation
       });
       remoteRefreshPreludePromise = runRemoteResidentTaskGraphRefreshPrelude({
@@ -3347,6 +3410,7 @@ export function mountSphPhaseDemoOverlay({
           continuationBudget,
           generation,
           force: Boolean(force || continueFromResidentState),
+          residentExecutionPolicy,
           computeManager: residentComputeManagerForSchedule,
           residentStateManager: residentStateManagerForSchedule,
           computeTaskModulePath: computeTaskModulePathForSchedule
@@ -3375,6 +3439,7 @@ export function mountSphPhaseDemoOverlay({
       stepCount: normalizedStepCount,
       readbackMode,
       continueFromResidentState,
+      ...residentExecutionPolicy,
       force: Boolean(force || continueFromResidentState)
     })).then(async (execution) => {
       const residentMs = performance.now() - residentStartMs;
@@ -4215,6 +4280,12 @@ export function mountSphPhaseDemoOverlay({
       const gridSpacingM = gridUpdate?.gridSpacingM || p2gProjection?.gridSpacingM || activeViewState.gpuMechanics?.gridSpacingM || null;
       const residentPerfSummary = overlay.__sphResidentPerf || residentPerf;
       const residentAutoSchedule = overlay.__mlsMpmResidentAutoSchedule || null;
+      const residentExecutionPolicyStatus = residentExecutionPolicyStatusText(
+        residentSteps?.residentExecutionPolicy
+          || overlay.__mlsMpmResidentExecutionPolicy
+          || residentAutoSchedule?.residentExecutionPolicy
+          || null
+      );
       const residentStageTiming = residentStep?.stageTiming
         || residentSteps?.finalStep?.stageTiming
         || residentPerfSummary?.lastResidentStageTiming
@@ -4251,6 +4322,7 @@ export function mountSphPhaseDemoOverlay({
         `view state       : ${activeViewStateSource}`,
         `law groups       : ${lawGroupStatusText()}`,
         `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
+        `resident policy  : ${residentExecutionPolicyStatus}`,
         `resident backend : ${residentBackend}`,
         `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
         `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
@@ -4433,6 +4505,12 @@ export function mountSphPhaseDemoOverlay({
     const renderAuthoritative = Boolean(residentRenderState?.gpuAuthoritativeState);
     const residentPerfSummary = overlay.__sphResidentPerf || residentPerf;
     const residentAutoSchedule = overlay.__mlsMpmResidentAutoSchedule || null;
+    const residentExecutionPolicyStatus = residentExecutionPolicyStatusText(
+      residentSteps?.residentExecutionPolicy
+        || overlay.__mlsMpmResidentExecutionPolicy
+        || residentAutoSchedule?.residentExecutionPolicy
+        || null
+    );
     const residentStageTiming = residentStep?.stageTiming
       || residentSteps?.finalStep?.stageTiming
       || residentPerfSummary?.lastResidentStageTiming
@@ -4460,6 +4538,7 @@ export function mountSphPhaseDemoOverlay({
       `momentum |p|     : ${fmt(totals.momentumMagnitudeKgMPerS)} kg·m/s`,
       `law groups       : ${lawGroupStatusText()}`,
       `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
+      `resident policy  : ${residentExecutionPolicyStatus}`,
       `resident backend : ${residentBackend}`,
       `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,

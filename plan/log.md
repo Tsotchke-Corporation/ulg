@@ -20595,3 +20595,67 @@ Open:
 - This is descriptor/authority plumbing only. The runtime path remains opt-in
   and still needs promotion into the actual ComputeManager/GPU-lane execution
   DAG with scene-paired validation before default use.
+
+## 2026-06-14 18:50 AKDT - Mounted scene active-grid opt-in wiring
+
+Prompt context:
+
+- User asked to make periodic local commits at coherent clean points and to
+  ensure the rule is in the agent files. Verified that both the repo-local
+  `Agents.md` and parent `/home/cos/projects/AGENTS.md` already contain that
+  instruction, so no agent-file patch was needed.
+- Continued the active-grid resident mechanics slice by wiring the opt-in path
+  into the mounted browser scene instead of leaving it direct-probe-only.
+
+Implemented:
+
+- Added URL-driven resident execution policy in `sphPhaseDemoMount`:
+  `residentFuseSequence=1`, `residentActiveGrid=1`, and optional
+  `residentActiveGridSafety=<cells>`. Active-grid implies the fused resident
+  sequence for the mounted scheduler.
+- Threaded the resident policy into mounted resident signatures, pending/
+  auto-schedule telemetry, status text, scene direct WebGPU options, and
+  ComputeManager resident task options.
+- Added scene-side signature/staleness coverage for fused sequence and
+  active-grid policy, and normalized unset active-grid safety to `undefined`
+  so runtime defaults stay in force.
+- Updated the browser probe scene mode to pass the mounted URL policy into its
+  explicit `scene.refreshMlsMpmResidentSteps()` calls. The sampler now records
+  fused sequence stage timing and analysis can report active-grid node counts
+  from `stageTiming.activeGridDispatch`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps compute task|active-grid dispatch"`
+  reported `32/32` because Node evaluated the full resident test file.
+- PASS: `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs` reported
+  `4/4`.
+- PASS:
+  `/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+  classified `good` for a mounted scene URL with pressure/thermal/reactions
+  disabled, `residentAuto=0`, and active-grid policy enabled. The run used
+  active dispatch `2744/13824`, J stayed about `0.999991..1.002991`, max speed
+  was about `0.107 m/s`, pressure impulse stayed `0`, compact-summary
+  `mapAsync` was about `2.568 s`, and two frames were persisted under
+  `/tmp/ulg-history-probes/scene-active-grid-frames-20260614`.
+
+Failure/caveat:
+
+- The first scene probe after policy wiring classified `good`, and overlay
+  status proved `fused-seq=16 active-grid=2744/13824`, but probe analysis
+  still reported `minActiveGridNodeCount=null` because scene-mode sampling did
+  not preserve fused sequence stage timing. Fixed the sampler and reran with
+  persisted frames.
+- The visual frames are intentionally sparse because this is a fast `27/125`
+  particle wiring/performance gate. They are not evidence that same-material
+  liquid settling or free-surface quality is fixed.
+
+Open:
+
+- Keep active-grid default-off until it is promoted into a ComputeManager/
+  GPUHub resident lane contract and validated against pressure, thermal,
+  reaction/product, and long-horizon liquid behavior gates.

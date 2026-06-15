@@ -4,10 +4,14 @@
 
 The opt-in active-grid mechanics sequence is validated behind
 `fuseNoFullResidentMechanicsActiveGrid` and
-`ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`. Use it with direct-resident probes
-only while it remains gated:
+`ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`. Direct-resident probes remain the
+fastest performance gate:
 
 `ULG_PROBE_MODE=direct-resident ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 node scripts/sph-long-horizon-probe.mjs`
+
+The mounted scene can now exercise the same opt-in path through URL policy:
+
+`ULG_PROBE_MODE=scene ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_DIR=/tmp/ulg-history-probes/scene-active-grid-frames-20260614 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.5&boxx=5&boxy=5&boxz=5&dropn=3&basen=5&mech=mlsmpm&lawp=0&lawt=0&lawr=0&residentAuto=0&residentActiveGrid=1&residentFuseSequence=1&visualCapture=1' node scripts/sph-long-horizon-probe.mjs`
 
 Current required active-grid checks:
 
@@ -23,6 +27,9 @@ Current required active-grid checks:
   `scripts/sph-visual-sanity-matrix.mjs` run. Use
   `ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1` after major todo slices so at least a
   small representative visual sequence is captured.
+- Treat the mounted active-grid probe as a wiring/performance check. Its
+  reduced `27/125` particle visual frames are intentionally sparse and do not
+  replace the same-material liquid long-horizon/free-surface acceptance gate.
 
 ## Current Focused Result - 2026-06-14 Live Same-Device Auto-Publication + Solid H2O + Law-Isolation Visual Gates
 

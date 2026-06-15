@@ -51,6 +51,16 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Current Diagnosis
 
+- 2026-06-14 18:50 AKDT update: the mounted active-grid scene opt-in probe
+  now proves the browser scene can request and report the fused active-grid
+  resident mechanics path. The evidence artifact
+  `/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+  classified `good` with active dispatch `2744/13824`, bounded J
+  `0.99999..1.00299`, max speed about `0.107 m/s`, zero pressure impulse, and
+  two captured frames. This is deliberately a sparse wiring/performance gate
+  using a tiny `27/125` particle scene. Do not count it as liquid-quality
+  acceptance; same-material H2O/H2O long-horizon settling and free-surface
+  coherence remain P0.
 - 2026-06-14 15:57 AKDT update: the recurring visual matrix now includes
   browser-mounted law-isolation scenarios for mechanics-off static,
   gravity-off static, pressure-off H2O, EOS-off H2O, thermal-off hot H2O, and

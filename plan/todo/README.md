@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 18:50 AKDT: mounted scene opt-in wiring for
+the active-grid fused resident mechanics sequence has landed. Browser URLs can
+set `residentActiveGrid=1` and `residentFuseSequence=1`; the scene signature,
+status overlay, explicit scene probe refresh path, and ComputeManager resident
+task options all carry the same policy. The validation artifact
+`/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+is `good` with active dispatch `2744/13824` and two persisted frames. Keep
+active-grid default-off. The next priority remains promoting this into a
+ComputeManager/GPUHub lane contract and then expanding validation beyond
+mechanics-only sparse probes to pressure, thermal, reaction/product, and real
+liquid settling gates.
+
 Current routing note, 2026-06-14 08:43 AKDT: yes, architecture authority is now
 the active implementation priority because the CPU/reference path, fast
 physics atomics, and short visual sanity matrix are strong enough to serve as

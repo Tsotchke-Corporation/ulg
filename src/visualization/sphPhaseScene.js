@@ -2771,12 +2771,21 @@ export function createSphPhaseScene(container, {
     pressureInterfaceForceSolver = null,
     wallTemperaturesK = currentWallTemperaturesK,
     physicalLawGroups = currentPhysicalLawGroups,
-    internalPressureScale = normalizePhysicalLawGroups(physicalLawGroups).eos ? 1 : 0
+    internalPressureScale = normalizePhysicalLawGroups(physicalLawGroups).eos ? 1 : 0,
+    fuseNoFullResidentMechanicsSequence = false,
+    fuseNoFullResidentMechanicsActiveGrid = false,
+    fuseNoFullResidentActiveGrid = false,
+    activeGridSafetyCells = undefined,
+    fusedActiveGridSafetyCells = undefined
   } = {}) {
     const sphSignature = sphGpuParticleSignature(sphParticleState);
     const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
     if (!sphSignature || !mlsSignature) return null;
     const normalizedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+    const activeGridSafetyValue = fusedActiveGridSafetyCells ?? activeGridSafetyCells;
+    const normalizedActiveGridSafetyCells = Number.isFinite(Number(activeGridSafetyValue)) && Number(activeGridSafetyValue) > 0
+      ? Math.max(1, Math.round(Number(activeGridSafetyValue)))
+      : 'default';
     return [
       sphSignature,
       mlsSignature,
@@ -2790,7 +2799,10 @@ export function createSphPhaseScene(container, {
       physicalLawGroupsSignature(physicalLawGroups),
       sphReactionTableSignature(),
       pressureInterfaceForceSolverSignature(pressureInterfaceForceSolver),
-      dims.join(',')
+      dims.join(','),
+      `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
+      `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid) ? 1 : 0}`,
+      `activeGridSafety=${normalizedActiveGridSafetyCells}`
     ].join('|');
   }
 
@@ -4461,6 +4473,11 @@ export function createSphPhaseScene(container, {
     retainIntermediateSteps = false,
     continueFromResidentState = false,
     compactSummaryScope = null,
+    fuseNoFullResidentMechanicsSequence = false,
+    fuseNoFullResidentMechanicsActiveGrid = false,
+    fuseNoFullResidentActiveGrid = false,
+    activeGridSafetyCells = undefined,
+    fusedActiveGridSafetyCells = undefined,
     thermalStepOptions: thermalStepOptionOverrides = null,
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver)
@@ -4486,6 +4503,20 @@ export function createSphPhaseScene(container, {
           : MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL
       )
     );
+    const requestedFuseNoFullResidentMechanicsSequence = Boolean(fuseNoFullResidentMechanicsSequence);
+    const requestedFuseNoFullResidentMechanicsActiveGrid = Boolean(
+      fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
+    );
+    const activeGridSafetyValue = fusedActiveGridSafetyCells ?? activeGridSafetyCells;
+    const normalizedActiveGridSafetyCells = Number.isFinite(Number(activeGridSafetyValue)) && Number(activeGridSafetyValue) > 0
+      ? Math.max(1, Math.round(Number(activeGridSafetyValue)))
+      : undefined;
+    const residentExecutionPolicy = {
+      schema: 'peercompute.ulg.sph-scene-resident-execution-policy.v0',
+      fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
+      fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+      activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null
+    };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     const continuationUploads = mlsMpmResidentSteps?.nextParticleUploads ?? null;
     const continuationAvailable = Boolean(
@@ -4519,7 +4550,10 @@ export function createSphPhaseScene(container, {
       residentSourceMode,
       pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
       internalPressureScale: effectiveInternalPressureScale,
-      physicalLawGroups: lawGroups
+      physicalLawGroups: lawGroups,
+      fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
+      fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+      activeGridSafetyCells: normalizedActiveGridSafetyCells
     });
     const markResidentStepsProgress = (status, extra = {}) => {
       scene.userData.mlsMpmResidentStepsProgress = {
@@ -4531,6 +4565,7 @@ export function createSphPhaseScene(container, {
         compactSummaryScope: requestedCompactSummaryScope,
         residentSourceMode,
         continueFromResidentState: Boolean(continueFromResidentState),
+        residentExecutionPolicy,
         updatedAtMs: nowMs(),
         ...extra
       };
@@ -4681,7 +4716,10 @@ export function createSphPhaseScene(container, {
           },
           onDeviceLost() {
             opticalGpuDeviceResultPromise = null;
-          }
+          },
+          fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
+          fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+          activeGridSafetyCells: normalizedActiveGridSafetyCells
         };
         let execution = null;
         if (computeManager && typeof computeManager.submitTask === 'function') {
@@ -4788,6 +4826,7 @@ export function createSphPhaseScene(container, {
         execution.continuedFromResidentState = continuationAvailable;
         execution.continuationAvailable = Boolean(execution.nextParticleUploads);
         execution.physicalLawGroups = { ...lawGroups };
+        execution.residentExecutionPolicy = residentExecutionPolicy;
         if (execution.finalStep) execution.finalStep.requestedReadbackMode = requestedReadbackMode;
         for (const summary of execution.stepSummaries ?? []) {
           summary.requestedReadbackMode = requestedReadbackMode;
@@ -4824,7 +4863,10 @@ export function createSphPhaseScene(container, {
             residentSourceMode,
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
             internalPressureScale: effectiveInternalPressureScale,
-            physicalLawGroups: lawGroups
+            physicalLawGroups: lawGroups,
+            fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
+            fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+            activeGridSafetyCells: normalizedActiveGridSafetyCells
           }) !== signature
         ) {
           return {

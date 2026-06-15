@@ -525,10 +525,63 @@ async function runBrowserProbe({
         residentAuthorityMechanicsOwner: diagnostics.residentAuthorityMechanicsOwner ?? null,
         residentAuthorityThermoOwner: diagnostics.residentAuthorityThermoOwner ?? null
       } : null;
+      const compactStageTiming = (stageTiming) => stageTiming ? {
+        totalMs: finiteOrNull(stageTiming.totalMs),
+        stageMs: { ...(stageTiming.stageMs || {}) },
+        queueFenceMs: { ...(stageTiming.queueFenceMs || {}) },
+        compactSummaryTiming: stageTiming.compactSummaryTiming ? {
+          ...stageTiming.compactSummaryTiming,
+          totalMs: finiteOrNull(stageTiming.compactSummaryTiming.totalMs),
+          setupMs: finiteOrNull(stageTiming.compactSummaryTiming.setupMs),
+          encodeMs: finiteOrNull(stageTiming.compactSummaryTiming.encodeMs),
+          submitMs: finiteOrNull(stageTiming.compactSummaryTiming.submitMs),
+          mapAsyncWaitMs: finiteOrNull(stageTiming.compactSummaryTiming.mapAsyncWaitMs),
+          decodeMs: finiteOrNull(stageTiming.compactSummaryTiming.decodeMs)
+        } : null,
+        requestedReadbackMode: stageTiming.requestedReadbackMode ?? null,
+        compactSummaryRequested: stageTiming.compactSummaryRequested ?? null,
+        compactSummaryScope: stageTiming.compactSummaryScope ?? null,
+        fusedResidentSequence: stageTiming.fusedResidentSequence ?? null,
+        fusedResidentSequenceStepCount: stageTiming.fusedResidentSequenceStepCount ?? null,
+        activeGridDispatch: stageTiming.activeGridDispatch
+          ? { ...stageTiming.activeGridDispatch }
+          : null,
+        thermalRequested: stageTiming.thermalRequested ?? null,
+        mechanicsRefreshRequested: stageTiming.mechanicsRefreshRequested ?? null,
+        reactionRequested: stageTiming.reactionRequested ?? null
+      } : null;
       const finiteNumber = (value, fallback = 0) => {
         const number = Number(value);
         return Number.isFinite(number) ? number : fallback;
       };
+      const booleanUrlParam = (value, fallback = false) => {
+        if (value == null || value === '') return fallback;
+        return !['0', 'false', 'off', 'no', 'manual'].includes(String(value).toLowerCase());
+      };
+      const positiveIntegerUrlParam = (value) => {
+        if (value == null || value === '') return null;
+        const number = Math.round(Number(value));
+        return Number.isFinite(number) && number > 0 ? number : null;
+      };
+      const residentExecutionPolicyFromLocation = () => {
+        const url = new URL(window.location.href);
+        const query = new URLSearchParams(url.search);
+        const hash = new URLSearchParams(url.hash.replace(/^#/, ''));
+        const activeGrid = booleanUrlParam(hash.get('residentActiveGrid') ?? query.get('residentActiveGrid'), false);
+        const fuseSequence = activeGrid || booleanUrlParam(hash.get('residentFuseSequence') ?? query.get('residentFuseSequence'), false);
+        return {
+          schema: 'peercompute.ulg.sph-probe-resident-execution-policy.v0',
+          fuseNoFullResidentMechanicsSequence: fuseSequence,
+          fuseNoFullResidentMechanicsActiveGrid: activeGrid,
+          activeGridSafetyCells: positiveIntegerUrlParam(
+            hash.get('residentActiveGridSafety') ?? query.get('residentActiveGridSafety')
+          )
+        };
+      };
+      const residentExecutionPolicy = overlay?.__mlsMpmResidentExecutionPolicy
+        || overlay?.__mlsMpmResidentAutoSchedule?.residentExecutionPolicy
+        || residentExecutionPolicyFromLocation();
+      if (overlay) overlay.__mlsMpmResidentExecutionPolicy = residentExecutionPolicy;
       const cohortRangesFromCounts = (counts = {}) => {
         const baseCount = Math.max(0, Math.round(Number(counts?.base) || 0));
         const dropCount = Math.max(0, Math.round(Number(counts?.drop) || 0));
@@ -883,6 +936,8 @@ async function runBrowserProbe({
             compactSummaryScope: steps.compactSummaryScope ?? null,
             continuedFromResidentState: steps.continuedFromResidentState ?? null,
             continuationAvailable: steps.continuationAvailable ?? null,
+            residentExecutionPolicy: steps.residentExecutionPolicy || overlay?.__mlsMpmResidentExecutionPolicy || null,
+            finalStepStageTiming: compactStageTiming(steps.finalStep?.stageTiming),
             residentSourceMode: steps.residentSourceMode ?? null,
             nextStep: steps.nextSphParticleState?.step ?? null,
             nextTime: finiteOrNull(steps.nextSphParticleState?.time)
@@ -899,6 +954,7 @@ async function runBrowserProbe({
               sourceTime: finiteOrNull(residentStep.particlePingPong.sourceTime),
               nextTime: finiteOrNull(residentStep.particlePingPong.nextTime)
             } : null,
+            stageTiming: compactStageTiming(residentStep.stageTiming || steps?.finalStep?.stageTiming),
             diagnostics: compactDiagnostics(residentStep.diagnostics)
           } : null,
             renderState: renderState ? {
@@ -1135,7 +1191,8 @@ async function runBrowserProbe({
             pressureInterfaceForceRowsBuffer: requestedDisablePressureInterface ? null : undefined,
             thermalStepOptions: Number.isFinite(requestedThermalWallRate)
               ? { wallRate: requestedThermalWallRate }
-              : undefined
+              : undefined,
+            ...residentExecutionPolicy
           });
           markProbeProgress('resident-batch-completed', {
             batchIndex,
@@ -2379,6 +2436,11 @@ function analyzeTimeline(timeline, {
     : [];
   const activeNodeSeries = diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.activeGridNodeCount))
+    .concat(metrics.map((metric) => finiteMetric(
+      metric?.residentStep?.stageTiming?.activeGridDispatch?.activeNodeCount
+        ?? metric?.residentSteps?.finalStepStageTiming?.activeGridDispatch?.activeNodeCount
+        ?? metric?.residentSteps?.fusedResidentSequence?.activeGridDispatch?.activeNodeCount
+    )))
     .filter(Number.isFinite);
   const maxSpeedObservedMPerS = maxSpeedSeries.length ? Math.max(...maxSpeedSeries) : null;
   const maxDisplacementObservedM = maxDisplacementSeries.length ? Math.max(...maxDisplacementSeries) : null;

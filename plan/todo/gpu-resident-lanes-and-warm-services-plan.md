@@ -156,6 +156,19 @@ requested status. This gives ComputeManager/NodeKernel placement and review
 surfaces a stable declaration of the active-grid constraints before the
 runtime path is promoted to default lane execution.
 
+Status update, 2026-06-14 mounted active-grid scene opt-in: the browser scene
+can now request the active-grid fused resident mechanics sequence with
+`residentActiveGrid=1` and `residentFuseSequence=1`. The policy is part of the
+mounted resident signature, status overlay, scene direct WebGPU options, and
+ComputeManager resident task options. The scene probe also carries this URL
+policy into explicit `scene.refreshMlsMpmResidentSteps()` calls and preserves
+fused sequence stage timing in sampled metrics. Evidence:
+`/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+classified `good` with `activeGridDispatch=2744/13824`, compact-summary
+`mapAsync` about `2.57 s`, and two captured frames. Keep this as opt-in
+evidence for promoting active-grid/tiled mechanics into a ComputeManager GPU
+resident lane; it is not a liquid behavior acceptance gate.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

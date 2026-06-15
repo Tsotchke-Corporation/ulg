@@ -83,10 +83,16 @@ Active-grid correction, 2026-06-14 AKDT:
 - A `2x64` active-grid probe stayed `good` and used
   `boundsSource=resident-position-bounds` for the second batch, proving active
   scoping can continue after the CPU mirror is stale.
-- Keep active-grid dispatch opt-in until scene-paired validation, pressure/
-  thermal/reaction interactions, and ComputeManager/GPU-lane authority are
-  wired. The next performance work should promote this into a lane-owned law
-  DAG and then replace the simple active AABB with tiled/neighbor indexing.
+- A mounted scene opt-in probe now also exercises the same active-grid fused
+  sequence through URL policy and explicit `scene.refreshMlsMpmResidentSteps()`
+  calls:
+  `/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+  classified `good` with `2744/13824` active nodes and two captured frames.
+- Keep active-grid dispatch opt-in until pressure/thermal/reaction
+  interactions, liquid long-horizon behavior, and ComputeManager/GPU-lane
+  authority are wired. The next performance work should promote this into a
+  lane-owned law DAG and then replace the simple active AABB with tiled/
+  neighbor indexing.
 
 Architecture correction, 2026-06-12 AKDT:
 

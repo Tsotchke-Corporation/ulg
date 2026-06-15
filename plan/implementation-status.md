@@ -1,9 +1,25 @@
 # Implementation Status
 
-Updated: 2026-06-14 active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Wired the mounted scene and browser probe to exercise the opt-in active-grid
+  fused resident mechanics sequence. URLs can request
+  `residentFuseSequence=1`, `residentActiveGrid=1`, and optional
+  `residentActiveGridSafety=<cells>`; active-grid implies the fused sequence
+  in the mounted scheduler. The scene resident signature, direct WebGPU path,
+  and ComputeManager resident task options all carry the policy, and overlay
+  status now reports both the requested policy and active-grid stage timing.
+  The scene probe now preserves fused sequence stage timing in sampled metrics
+  so analysis reports active-grid node counts. Evidence:
+  `/tmp/ulg-history-probes/current-scene-active-grid-optin-frames-20260614.json`
+  classified `good` with `16` no-full mounted scene substeps,
+  `activeGridDispatch=2744/13824`, compact-summary `mapAsync` about
+  `2.57 s`, J about `0.99999..1.00299`, max speed about `0.107 m/s`, pressure
+  impulse `0`, and two captured frames in
+  `/tmp/ulg-history-probes/scene-active-grid-frames-20260614`. This is a
+  scene wiring/performance gate, not liquid-quality acceptance.
 - Added an opt-in active-grid variant for the fused no-full resident mechanics
   sequence. The path is gated by `fuseNoFullResidentMechanicsActiveGrid` and
   `ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`; it keeps the canonical full-grid

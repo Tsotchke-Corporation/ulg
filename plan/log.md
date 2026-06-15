@@ -1,5 +1,51 @@
 # ULG Implementation Log
 
+## 2026-06-14 22:18 AKDT - Worker-retained mechanics continuation input
+
+Implemented:
+
+- Added a Worker-side continuation input for the mechanics stage chain. When
+  the caller sets `gpuHubResidentStageWorkerUseRetainedInput=true`, the next
+  P2G stage reuses the prior same-lane G2P `stateBuffer` and
+  `mechanicsBuffer` from the Worker-local lane record.
+- Added continuation evidence on Worker stage summaries:
+  `workerRetainedContinuationInput` and
+  `workerRetainedContinuationInputStatus`.
+- Extended the focused browser authority-host gate to keep the Worker runner
+  warm, run a second no-full WebGPU mechanics stage chain on the same lane,
+  assert `applied-worker-retained-g2p-input`, and republish the Worker-retained
+  mechanics descriptor.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `1/1`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-worker-retained-continuation-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Thermo is still uploaded from the CPU mirror into a Worker-retained buffer
+  for the continuation. Next slice: retain thermo/thermal/phase outputs in the
+  Worker lane so mechanics, thermal, and phase laws can compose without broad
+  CPU mirror traffic.
+- Renderer z-buffer/draw-order regressions remain queued as a P0/P1 visual
+  blocker before visual captures are treated as authoritative.
+
 ## 2026-06-14 22:06 AKDT - Admitted worker-retained mechanics publication path
 
 Implemented:

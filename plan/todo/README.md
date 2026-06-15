@@ -35,6 +35,24 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 22:18 AKDT: the Worker-retained mechanics
+stage output can now be consumed by a second mechanics stage-chain run on the
+same warm Worker/lane. When the caller sets
+`gpuHubResidentStageWorkerUseRetainedInput=true`, P2G uses the prior retained
+G2P state/mechanics buffers through the Worker-local lane record instead of
+requiring those hot arrays to return through main. This is still only partial
+copy avoidance: thermo is currently uploaded into a Worker-retained storage
+buffer from the CPU mirror, so the next copy-avoidance slice is to carry
+thermo/thermal/phase outputs in the Worker lane too.
+
+Renderer blocker note, 2026-06-14 22:18 AKDT: user again reports major
+z-buffer/draw-order problems. Keep this as an explicit renderer P0/P1 before
+claiming visual correctness. Audit transparent fluid depth-write/test policy,
+opaque/transparent pass separation, surface sorting for nested fluids/solids,
+container/grid overlay ordering, and the flash/disappear/focus-change symptom.
+Add a close-spaced browser visual regression that catches draw-order flicker
+and vanished volumes independently from physics-state acceptance.
+
 Current routing note, 2026-06-14 22:06 AKDT: the Worker-retained mechanics
 stage output now has an admitted publication path. The browser authority host
 exposes `publishWorkerRetainedMechanicsStageOutput()`, which stores a

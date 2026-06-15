@@ -3966,6 +3966,8 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     workerWebGpuRequested: result?.workerResidentStage?.workerWebGpuRequested === true,
     workerWebGpuStatus: result?.workerResidentStage?.workerWebGpuStatus || null,
     workerDeviceCached: result?.workerResidentStage?.workerDeviceCached === true,
+    workerRetainedContinuationInputStatus: result?.workerResidentStage?.workerRetainedContinuationInputStatus || null,
+    workerRetainedContinuationInput: result?.workerResidentStage?.workerRetainedContinuationInput || null,
     workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || [])
   };
 }
@@ -4110,6 +4112,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerPolicy = null,
   gpuHubResidentStageWorkerModuleUrl = null,
   gpuHubResidentStageWorkerOutputPublisher = null,
+  gpuHubResidentStageWorkerUseRetainedInput = false,
   gpuResidentLaneId = null,
   gpuResidentLaneStateKey = null,
   gpuResidentLaneDomainKey = null,
@@ -4621,6 +4624,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             taskIdPrefix,
             preferWebGpu: stepOptions.preferWebGpu === true,
             readbackMode,
+            useWorkerRetainedG2pInput: gpuHubResidentStageWorkerUseRetainedInput === true,
             common: {
               sphParticleState,
               mlsMpmParticleState,

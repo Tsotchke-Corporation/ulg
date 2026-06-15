@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 22:18 AKDT: the admitted Worker-retained
+mechanics publication path now has its first same-Worker continuation consumer.
+The focused browser authority-host gate keeps the Worker runner warm after the
+first no-full WebGPU stage-chain publication, then runs a second mechanics
+stage chain on the same lane with
+`gpuHubResidentStageWorkerUseRetainedInput=true`. P2G consumes the previous
+Worker-retained G2P state/mechanics buffers through the Worker lane record,
+and the test asserts the continuation remains WebGPU/no-full/fence-satisfied
+and republishes a retained mechanics descriptor. Thermo still uploads into a
+Worker-retained storage buffer from the CPU mirror, so the next target is
+Worker-retained thermo/thermal/phase outputs before pressure/interface and
+reaction/product stages follow the same authority pattern. Renderer note:
+major z-buffer/draw-order failures remain queued as a P0/P1 visual correctness
+blocker separate from physics-law acceptance.
+
 Current checkpoint, 2026-06-14 22:06 AKDT: ULG now has an admitted
 worker-retained mechanics publication path. The browser authority host exposes
 `publishWorkerRetainedMechanicsStageOutput()`, which writes a StateManager hot

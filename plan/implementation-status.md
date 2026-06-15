@@ -1,9 +1,23 @@
 # Implementation Status
 
-Updated: 2026-06-14 admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-14 worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added the first Worker-retained mechanics continuation input path. After an
+  admitted no-full WebGPU Worker mechanics publication, the focused browser
+  gate keeps the Worker runner warm and runs a second same-lane mechanics stage
+  chain with `gpuHubResidentStageWorkerUseRetainedInput=true`. The Worker-side
+  P2G stage reuses the prior G2P state/mechanics buffers from its lane record,
+  reports `applied-worker-retained-g2p-input`, keeps P2G/grid-update/G2P on
+  WebGPU with satisfied fences, and republishes a retained mechanics
+  descriptor. Thermo is still uploaded from the CPU mirror into a retained
+  Worker buffer, so thermo/thermal/phase residency is the next copy-avoidance
+  target. Validation passed syntax checks, `git diff --check`, Worker unit
+  `1/1`, focused PeerCompute/ULG integration `11/11`, and focused browser
+  authority-host Playwright `1/1`, physics atomics `7` with `1` expected skip,
+  and visual matrix `codex-worker-retained-continuation-20260614` `3/3` with
+  two captured frames per scenario.
 - Added the first admitted worker-retained mechanics publication path. The
   browser authority host now exposes
   `publishWorkerRetainedMechanicsStageOutput()`, which stores a StateManager

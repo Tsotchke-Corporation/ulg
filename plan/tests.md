@@ -1,11 +1,13 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Worker WebGPU No-Full Mechanics Stage Chain
+## Current Focused Result - 2026-06-14 Worker-Retained Continuation Input
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
-worker residency. The latest focused browser gate now also proves real browser
-Worker WebGPU execution for the mechanics stage chain without full readback.
+worker residency. The latest focused browser gate now proves real browser
+Worker WebGPU execution without full readback, publishes the Worker-retained
+mechanics output through StateManager, and runs a second same-Worker/same-lane
+continuation where P2G consumes the prior retained G2P state/mechanics buffers.
 Focused checks:
 
 - ULG mechanics resident-stage Worker module:
@@ -58,7 +60,13 @@ Focused checks:
   `worker-retained-mechanics-output-published`, the StateManager hot record is
   stored with the live Worker runner, the warm admission delta is present, and
   the descriptor schema is
-  `peercompute.ulg.mechanics-worker-retained-buffer-import.v0`.
+  `peercompute.ulg.mechanics-worker-retained-buffer-import.v0`. It then runs a
+  second stage chain on the same warm Worker/lane with
+  `gpuHubResidentStageWorkerUseRetainedInput=true` and asserts the continuation
+  status is `compute-manager-stage-task-chain-executed`, P2G/grid-update/G2P
+  remain `webgpu`, all continuation fences are satisfied, P2G reports
+  `applied-worker-retained-g2p-input`, and the continuation publishes another
+  retained mechanics descriptor.
 - Renderer visual correctness debt:
   major z-buffer/draw-order issues are reported in the live visualization,
   including flicker/vanish behavior around visible fluid/solid volumes. Treat
@@ -102,6 +110,8 @@ Focused checks:
   `codex-worker-no-full-retained-candidate-20260614` passed `3/3`.
   The Worker retained publication matrix
   `codex-worker-retained-publication-20260614` passed `3/3`.
+  The Worker retained continuation matrix
+  `codex-worker-retained-continuation-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

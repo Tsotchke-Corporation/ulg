@@ -162,6 +162,19 @@ the buffers live, expose descriptors through StateManager/NodeKernel authority,
 and consume those descriptors by scheduling continuation stages on the same
 Worker rather than copying handles back to main.
 
+Status update, 2026-06-14 Worker-retained continuation input: ULG now has the
+first consumer of that admitted Worker-retained mechanics descriptor. A second
+mechanics stage-chain run can target the same warm Worker/lane with
+`gpuHubResidentStageWorkerUseRetainedInput=true`; P2G consumes the prior G2P
+state/mechanics buffers from the Worker-local lane record and republishes a
+retained mechanics output after the continuation. This proves the immediate
+direction: do not create a separate GPUComputeManager scheduler yet. Keep
+authority in ComputeManager/GPUHub/NodeKernel, keep the Worker alive where the
+buffers live, and add law-stage continuations that operate on retained refs.
+Thermo still uploads from CPU for this slice, so the next residency target is
+Worker-retained thermo/thermal/phase output before pressure/interface and
+reaction/product laws are promoted.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

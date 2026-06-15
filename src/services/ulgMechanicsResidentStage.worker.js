@@ -9,6 +9,10 @@ export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_PROTOCOL_SCHEMA = 'peercompute.
 export const ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA = 'peercompute.ulg.mechanics-resident-stage-worker-result.v0';
 
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const GPU_BUFFER_USAGE = {
+  COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
+};
 
 const STAGE_RUNNERS = {
   p2g: runMlsMpmMechanicsP2gStageComputeTask,
@@ -39,6 +43,7 @@ function getLaneRecord(payload = {}) {
       key,
       stageResults: {},
       retainedBuffers: new Map(),
+      retainedThermoBuffer: null,
       nextBufferOrdinal: 1
     };
     retainedLanes.set(key, record);
@@ -146,6 +151,78 @@ async function getWorkerDeviceResult(preferWebGpu) {
   return workerDeviceResultPromise;
 }
 
+function writeWorkerStorageBuffer(device, label, data) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer || !ArrayBuffer.isView(data)) return null;
+  const byteLength = Math.max(4, data.byteLength);
+  const buffer = device.createBuffer({
+    label,
+    size: byteLength,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  });
+  if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
+  return buffer;
+}
+
+function retainedG2pOutput(record) {
+  const g2p = record?.stageResults?.g2p || null;
+  const source = g2p?.gpuResult || g2p;
+  if (!source?.stateBuffer || !source?.mechanicsBuffer) return null;
+  return source;
+}
+
+function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDeviceResult }) {
+  const requested = data?.useWorkerRetainedG2pInput === true;
+  if (!requested || stageId !== 'p2g') return null;
+  const source = retainedG2pOutput(record);
+  if (!source) {
+    return {
+      status: 'blocked-worker-retained-g2p-input-missing',
+      requested: true,
+      sourceStage: 'g2p'
+    };
+  }
+  const device = workerDeviceResult?.device || data?.deviceResult?.device || null;
+  if (!record.retainedThermoBuffer) {
+    record.retainedThermoBuffer = writeWorkerStorageBuffer(
+      device,
+      'ulg-worker-retained-sph-thermo-continuation',
+      data?.sphParticleState?.thermo
+    );
+  }
+  if (!record.retainedThermoBuffer) {
+    return {
+      status: 'blocked-worker-retained-thermo-upload-missing',
+      requested: true,
+      sourceStage: 'g2p'
+    };
+  }
+  data.sphParticleUpload = {
+    schema: 'peercompute.ulg.worker-retained-sph-particle-upload.v0',
+    status: 'webgpu-uploaded',
+    workerRetained: true,
+    sourceStage: 'g2p',
+    particleCount: data?.sphParticleState?.particleCount ?? source.particleCount ?? null,
+    stateBuffer: source.stateBuffer,
+    thermoBuffer: record.retainedThermoBuffer
+  };
+  data.mlsMpmParticleUpload = {
+    schema: 'peercompute.ulg.worker-retained-mls-mpm-particle-upload.v0',
+    status: 'webgpu-uploaded',
+    workerRetained: true,
+    sourceStage: 'g2p',
+    particleCount: data?.mlsMpmParticleState?.particleCount ?? data?.sphParticleState?.particleCount ?? null,
+    mechanicsBuffer: source.mechanicsBuffer
+  };
+  return {
+    status: 'applied-worker-retained-g2p-input',
+    requested: true,
+    sourceStage: 'g2p',
+    stateBufferByteLength: source.stateBufferByteLength ?? null,
+    mechanicsBufferByteLength: source.mechanicsBufferByteLength ?? null,
+    thermoBufferRetained: true
+  };
+}
+
 async function completeWorkerQueueFence({ stageId, data, rawResult, workerDeviceResult }) {
   const shouldFence = data?.preferWebGpu === true
     && data?.readbackMode === NO_FULL_READBACK_MODE
@@ -201,6 +278,9 @@ function baseStageData(payload = {}) {
     ...(context.stageOptions?.[stageId] || {}),
     preferWebGpu: context.preferWebGpu === true || common.preferWebGpu === true,
     readbackMode: context.readbackMode || common.readbackMode || 'full-parity-readback',
+    useWorkerRetainedG2pInput: context.useWorkerRetainedG2pInput === true
+      || context.useRetainedG2pAsInput === true
+      || common.useWorkerRetainedG2pInput === true,
     computeTaskId: `${context.taskIdPrefix || 'ulg-worker:mechanics-stage'}:${stageId}`,
     lawGraphNode: {
       schema: 'peercompute.ulg.law-graph-node-task-ref.v0',
@@ -263,6 +343,12 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     data.deviceResult = workerDeviceResult;
     data.navigatorRef = globalThis.navigator;
   }
+  const workerRetainedContinuationInput = applyWorkerRetainedContinuationInput({
+    stageId,
+    data,
+    record,
+    workerDeviceResult
+  });
   const rawResult = await runner(data);
   const workerQueueFence = await completeWorkerQueueFence({
     stageId,
@@ -290,6 +376,8 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerDeviceCached: Boolean(workerDeviceResult?.device),
     workerQueueFence,
     workerQueueFenceSatisfied: workerQueueFence?.fenceSatisfied === true,
+    workerRetainedContinuationInput,
+    workerRetainedContinuationInputStatus: workerRetainedContinuationInput?.status || null,
     workerRetainedBufferRefs,
     cloneableResultReturned: true
   };
@@ -304,6 +392,7 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
       backend: cloneableResult.backend || null,
       workerWebGpuStatus: cloneableResult.workerResidentStage.workerWebGpuStatus,
       workerQueueFenceSatisfied: cloneableResult.workerResidentStage.workerQueueFenceSatisfied,
+      workerRetainedContinuationInputStatus: cloneableResult.workerResidentStage.workerRetainedContinuationInputStatus,
       retainedBufferRefCount: retainedBufferRefs.length,
       workerRetainedBufferRefCount: workerRetainedBufferRefs.length
     }

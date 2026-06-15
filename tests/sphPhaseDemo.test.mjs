@@ -629,8 +629,16 @@ test('sealed gas pressure feedback derives per-wall gauge loads from box dimensi
   assert.ok(Math.abs(boosted.pressureFeedback.netForceN[0]) < 1e-6);
   assert.equal(boosted.pressureFeedback.gasCellField.status, 'gas-cell-pressure-field-ready');
   assert.equal(boosted.pressureFeedback.gasCellField.gradientStatus, 'uniform-sealed-gas-pressure-zero-gradient');
+  assert.equal(boosted.pressureFeedback.gasCellField.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(boosted.pressureFeedback.gasCellField.pressureFieldResolution, 'lumped-sealed-box');
+  assert.equal(boosted.pressureFeedback.gasCellField.localPressureGradientReady, false);
+  assert.equal(boosted.pressureFeedback.gasCellField.localPressureGradientStatus, 'blocked-uniform-single-cell-field-has-no-local-gradient');
+  assert.equal(boosted.pressureFeedback.gasCellField.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
+  assert.ok(boosted.pressureFeedback.gasCellField.localPressureGradientBlockers.includes('resident-gas-cell-eos-gradient-not-derived'));
   assert.deepEqual(boosted.pressureFeedback.gasCellField.cellDims, [1, 1, 1]);
   assert.equal(boosted.pressureFeedback.gasCellField.uniformPressurePa, boosted.totalPressurePa);
+  assert.equal(boosted.pressureFeedback.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(boosted.pressureFeedback.localPressureGradientReady, false);
   assert.ok(boosted.pressureFeedback.forceCouplingPrerequisites.includes('material-surface-normals-and-areas'));
   assert.equal(boosted.pressureFeedback.forceCouplingStatus, 'blocked-material-surface-normals-not-resolved');
   assert.equal(boosted.pressureFeedback.forceCouplingValidation, false);
@@ -684,6 +692,11 @@ test('gas pressure interface coupling requires material surfaces but does not ap
   assert.equal(feedback.pressureInterfaceCoupling.status, 'pressure-interface-coupling-ready-for-solver');
   assert.equal(feedback.pressureInterfaceCoupling.materialInterfaceReadySurfaceCount, 2);
   assert.equal(feedback.pressureInterfaceCoupling.materialInterfaceTotalSurfaceAreaM2, 4.25);
+  assert.equal(feedback.pressureInterfaceCoupling.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(feedback.pressureInterfaceCoupling.pressureFieldResolution, 'lumped-sealed-box');
+  assert.equal(feedback.pressureInterfaceCoupling.localPressureGradientReady, false);
+  assert.equal(feedback.pressureInterfaceCoupling.localPressureGradientStatus, 'blocked-uniform-single-cell-field-has-no-local-gradient');
+  assert.equal(feedback.pressureInterfaceCoupling.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
   assert.equal(feedback.pressureInterfaceCoupling.forceCouplingStatus, 'blocked-pressure-force-solver-not-implemented');
   assert.equal(feedback.forceCouplingStatus, 'blocked-pressure-force-solver-not-implemented');
   assert.equal(feedback.forceCouplingValidation, false);
@@ -773,6 +786,12 @@ test('gas pressure interface force preview computes tractions without applying t
   assert.equal(preview.status, 'pressure-interface-force-preview-ready');
   assert.equal(preview.forceApplicationStatus, 'not-applied-diagnostic-preview');
   assert.equal(preview.gasInterfacePressurePa, 100000);
+  assert.equal(preview.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(preview.pressureFieldResolution, 'lumped-sealed-box');
+  assert.equal(preview.pressureGradientStatus, 'uniform-sealed-gas-pressure-zero-gradient');
+  assert.equal(preview.localPressureGradientReady, false);
+  assert.equal(preview.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
+  assert.equal(preview.forceResolution, 'uniform-interface-traction');
   assert.equal(preview.previewedElementCount, 2);
   assert.equal(preview.surfaceForceCount, 1);
   assert.equal(preview.totalAbsInterfaceForceN, 200000);
@@ -790,6 +809,17 @@ test('gas pressure interface force preview computes tractions without applying t
   assert.equal(solver.status, 'pressure-interface-force-solver-ready');
   assert.equal(solver.forceApplicationStatus, 'solver-ready-not-applied');
   assert.equal(solver.forceCouplingStatus, 'pressure-force-solver-ready-not-applied');
+  assert.equal(solver.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(solver.pressureFieldResolution, 'lumped-sealed-box');
+  assert.equal(solver.pressureGradientStatus, 'uniform-sealed-gas-pressure-zero-gradient');
+  assert.equal(solver.localPressureGradientReady, false);
+  assert.equal(solver.localPressureGradientStatus, 'blocked-uniform-single-cell-field-has-no-local-gradient');
+  assert.deepEqual(solver.localPressureGradientBlockers, [
+    'single-cell-uniform-pressure-field',
+    'resident-gas-cell-eos-gradient-not-derived'
+  ]);
+  assert.equal(solver.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
+  assert.equal(solver.forceResolution, 'uniform-interface-traction');
   assert.equal(solver.forceRowCount, 2);
   assert.equal(solver.forceRowStrideFloats, 16);
   assert.equal(solver.forceRowValues.length, 32);

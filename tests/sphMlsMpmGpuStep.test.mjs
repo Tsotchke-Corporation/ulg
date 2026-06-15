@@ -1888,6 +1888,9 @@ test('SPH pressure interface stage compute task declares retained force-row outp
   assert.equal(result.pressureInterfaceForcePreview.schema, 'peercompute.ulg.sph-pressure-interface-force-preview.v0');
   assert.equal(result.pressureInterfaceForceSolver.schema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
   assert.equal(result.pressureInterfaceForceSolver.status, 'pressure-interface-force-solver-ready');
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, false);
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
   assert.equal(result.forceRowCount, 2);
   assert.equal(result.forceRowValues.length, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
   assert.equal(result.pressureInterfaceForceRowsRetained, true);
@@ -1896,6 +1899,9 @@ test('SPH pressure interface stage compute task declares retained force-row outp
   assert.equal(result.gpuFence.fenceSatisfied, true);
   assert.equal(result.pressureInterfaceStageTaskEvidence.schema, 'peercompute.ulg.pressure-interface-stage-task-evidence.v0');
   assert.equal(result.pressureInterfaceStageTaskEvidence.passed, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(result.pressureInterfaceStageTaskEvidence.localPressureGradientReady, false);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
   assert.deepEqual(result.pressureInterfaceStageTaskEvidence.candidateWriteFamilies, ['pressure-interface-force-rows']);
   assert.ok(result.pressureInterfaceStageTaskEvidence.mustNotWriteFamilies.includes('resident-product-mass'));
   assert.equal(result.pressureInterfaceStageTaskAuthority.status, 'compute-manager-owned-non-mutating-pressure-interface-stage-task');
@@ -1988,7 +1994,12 @@ test('SPH pressure interface stage compute task can produce force rows with WebG
   assert.equal(result.pressureInterfaceForceRowsBufferRetained, true);
   assert.equal(result.pressureInterfaceForceSolver.backend, 'webgpu');
   assert.equal(result.pressureInterfaceForceSolver.status, 'pressure-interface-force-solver-ready');
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, false);
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
   assert.equal(result.pressureInterfaceStageTaskEvidence.passed, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(result.pressureInterfaceStageTaskEvidence.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
   assert.equal(result.pressureInterfaceStageTaskEvidence.executionSource, 'sphPressureInterfaceForceRowsWebGpu');
   assert.equal(result.gpuFence.required, true);
   assert.equal(result.gpuFence.fenceSatisfied, true);

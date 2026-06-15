@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 03:52 AKDT: pressure/interface force rows now
+carry an explicit pressure-field resolution contract. The sealed-gas pressure
+field still uses a conservative one-cell uniform pressure law, but
+`gasPressureCellFieldSummary()`, pressure/interface coupling, CPU solver,
+WebGPU force-row producer, ComputeManager stage evidence, and lane summaries
+now report `pressureFieldMode="uniform-single-cell-sealed-gas"` plus
+`localPressureGradientStatus="blocked-uniform-single-cell-field-has-no-local-gradient"`
+and
+`localPressureGradientForceCouplingStatus="blocked-local-pressure-gradient-field-required"`.
+This keeps the existing pressure law while making it impossible to confuse
+uniform interface tractions with validated local gas-cell/pressure-gradient
+coupling. Focused demo, WebGPU producer, resident-step pressure tests,
+physics atomics, browser authority-host, and the three-scenario visual matrix
+passed. Next target: implement/admit a resident local gas-cell pressure field
+and gradient-coupling producer, while keeping the renderer z-buffer/focus
+follow-up separate.
+
 Current checkpoint, 2026-06-15 03:39 AKDT: pressure/interface Worker
 publication now fail-closes on WebGPU-retained force-row descriptors. The
 Worker compact publication candidate no longer treats CPU-reference or

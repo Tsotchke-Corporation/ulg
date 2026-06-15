@@ -165,7 +165,13 @@ test('pressure/interface WebGPU producer dispatches no-full retained force-row b
       schema: 'peercompute.ulg.sph-sealed-gas-pressure-feedback.v0',
       status: 'wall-pressure-ledger-ready',
       totalPressurePa: 120000,
-      gasCellField: { uniformPressurePa: 120000 }
+      gasCellField: {
+        status: 'gas-cell-pressure-field-ready',
+        uniformPressurePa: 120000,
+        pressureFieldMode: 'uniform-single-cell-sealed-gas',
+        pressureFieldResolution: 'lumped-sealed-box',
+        gradientStatus: 'uniform-sealed-gas-pressure-zero-gradient'
+      }
     },
     pressureInterfaceCoupling: {
       schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
@@ -184,6 +190,13 @@ test('pressure/interface WebGPU producer dispatches no-full retained force-row b
   assert.equal(result.queueCompletionStatus, 'queue-submitted-cleanup-deferred');
   assert.equal(result.pressureInterfaceForceSolver.forceRowCount, 2);
   assert.equal(result.pressureInterfaceForceSolver.forceRowValues.length, 0);
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldResolution, 'lumped-sealed-box');
+  assert.equal(result.pressureInterfaceForceSolver.pressureGradientStatus, 'uniform-sealed-gas-pressure-zero-gradient');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, false);
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientStatus, 'blocked-uniform-single-cell-field-has-no-local-gradient');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientForceCouplingStatus, 'blocked-local-pressure-gradient-field-required');
+  assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'uniform-interface-traction');
   assert.equal(result.forceRowByteLength, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(result.forceRowsBuffer?.label, 'ulg-sph-pressure-interface-force-rows-out');
   assert.equal(device.dispatches[0], 1);

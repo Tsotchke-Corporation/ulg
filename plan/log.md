@@ -1,5 +1,122 @@
 # ULG Implementation Log
 
+## 2026-06-15 03:52 AKDT - Pressure local-gradient contract metadata
+
+Prompt:
+
+- User reported additional z-buffer/draw-order issues and asked to note them
+  for later while continuing the pressure/architecture refactor.
+- Continued the active pressure/readback reduction direction after confirming
+  the current pressure-interface force rows are still driven by uniform
+  one-cell sealed-gas pressure.
+
+Implemented:
+
+- Added explicit pressure-field resolution metadata to
+  `gasPressureCellFieldSummary()`: the current field now reports
+  `uniform-single-cell-sealed-gas` / `lumped-sealed-box` plus
+  `localPressureGradientStatus="blocked-uniform-single-cell-field-has-no-local-gradient"`.
+- Threaded local pressure-gradient blocker fields through pressure/interface
+  coupling, CPU force preview, CPU force solver, WebGPU pressure force-row
+  producer, ComputeManager pressure stage evidence, and lane summaries.
+- Kept the uniform pressure interface traction law active. This slice does not
+  remove pressure laws; it prevents the runtime from treating uniform pressure
+  tractions as validated local gas-cell pressure-gradient physics.
+- Added tests for CPU/reference pressure feedback, WebGPU pressure producer
+  metadata, and ComputeManager pressure stage evidence.
+- Added a fresh todo/log note for the user's live z-buffer/draw-order report,
+  keeping it separate from pressure acceptance.
+
+Files touched:
+
+- `src/runtime/sphPhaseDemo.js`
+- `src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/sphPhaseDemo.test.mjs`
+- `tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-local-gradient-contract-metadata-2026-06-15.md`
+
+Commands run:
+
+- `date '+%Y-%m-%d %H:%M %Z'`
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py search-chunks --repo ulg --query "sealed gas pressure feedback gas cell local pressure gradient force rows pressure interface uniformPressurePa"`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check tests/sphPhaseDemo.test.mjs`
+- `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "sealed gas pressure feedback|gas pressure interface"`
+- `node --test tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage|pressure interface|grid admission|grid force"`
+- `npm run test:physics-atomics`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-local-gradient-contract-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/test modules.
+- PASS: demo pressure/gas contract coverage reported `25/25`.
+- PASS: WebGPU pressure producer coverage reported `2/2`.
+- PASS: resident pressure/stage coverage reported `38/38`.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon liquid skip.
+- PASS: focused browser authority-host Playwright reported `1/1`.
+- PASS: visual matrix
+  `codex-pressure-local-gradient-contract-20260615` reported `failedCount=0`,
+  `issues=[]`, `visualSurfaceIssues=[]`, and two frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-local-gradient-contract-20260615`.
+- PASS: manually inspected final frames for MLS-MPM H2O/H2O, CPU-SPH
+  H2O/H2O, and solid H2O CPU-SPH. All were nonblank and bounded. MLS-MPM still
+  showed the known short-horizon fragmentation.
+
+Open:
+
+- Implement resident local gas-cell pressure-gradient fields and a
+  gradient-coupled pressure force-row producer under ComputeManager/GPUHub
+  Worker authority.
+- Keep the live z-buffer/draw-order and focus-change flash/disappear issues as
+  separate renderer visual-correctness blockers before browser captures are
+  considered final visual truth.
+
+## 2026-06-15 03:46 AKDT - Live z-buffer/draw-order report
+
+Prompt:
+
+- User reported that there are still major z-buffer issues with draw order and
+  asked to note it for later.
+
+Actions:
+
+- Confirmed the renderer depth/draw-order issue is already queued in
+  `plan/todo/README.md` as a visual-correctness blocker separate from physics
+  acceptance.
+- Added a fresh 03:46 AKDT routing note so the latest live report is tied to
+  the current pressure/local-gas-cell work.
+
+Files touched:
+
+- `plan/todo/README.md`
+- `plan/log.md`
+
+Validation:
+
+- Documentation-only note; no runtime validation run.
+
+Open:
+
+- Follow-up renderer pass must reproduce and validate transparent sorting,
+  opaque depth writes, nested surface identity, container/grid overlay policy,
+  and focus-change/context-resume behavior with close-spaced visual sequences
+  before browser captures are treated as trusted physics evidence.
+
 ## 2026-06-15 02:20 AKDT - Transparent renderer depth-order pass
 
 Implemented:

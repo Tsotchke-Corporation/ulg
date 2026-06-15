@@ -35,6 +35,15 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 03:52 AKDT: the pressure/interface stage now
+labels its current gas pressure law as uniform single-cell sealed-gas pressure
+and explicitly blocks local pressure-gradient coupling until a resident gas
+cell/EOS gradient field exists. Keep the uniform interface traction law; it is
+still a valid first-principles pressure force row producer. The next pressure
+slice should add the resident local gas-cell pressure-gradient field contract
+and then move pressure-gradient force coupling into WebGPU/Worker execution
+under ComputeManager/GPUHub authority.
+
 Current routing note, 2026-06-15 03:39 AKDT: pressure/interface Worker
 publication is now WebGPU-retained-only. Candidate readiness and NodeKernel/
 StateManager publication reject CPU-reference or cloneable pressure force-row
@@ -42,6 +51,15 @@ arrays for the worker-retained pressure path. Continue pressure/readback
 copy-reduction toward resident gas-cell/local pressure-gradient fields and
 eventual GPU-resident surface extraction; do not treat cloneable pressure
 arrays as an accepted distributed hot-buffer format.
+
+Renderer blocker update, 2026-06-15 03:46 AKDT: user reports major z-buffer
+issues with draw order are still visible. Keep this as a queued renderer
+visual-correctness blocker independent from the pressure/local-gas-cell physics
+slice. The follow-up pass must use close-spaced visual sequences and explicit
+depth/draw metadata to prove transparent sorting, opaque depth writes,
+container/grid overlay policy, nested water/solid surface identity, and
+focus-change/context-resume behavior before visual captures are treated as
+trusted physics evidence.
 
 Current routing note, 2026-06-15 03:25 AKDT: scene pressure-row upload
 admission is complete. The browser scene can surface pressure/interface

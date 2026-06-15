@@ -1,6 +1,45 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Pressure WebGPU-Retained Publication
+## Current Focused Result - 2026-06-15 Pressure Local-Gradient Contract Metadata
+
+The current slice keeps the existing pressure/interface law but labels it
+honestly. Uniform sealed-gas pressure still produces interface traction rows,
+including WebGPU-retained rows, but CPU, WebGPU, ComputeManager stage evidence,
+and lane summaries now report that local pressure-gradient gas-cell coupling
+is blocked until a resident gas-cell/EOS gradient field exists.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check tests/sphPhaseDemo.test.mjs`,
+  `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`, and
+  `node --check tests/sphMlsMpmGpuStep.test.mjs` passed.
+- Demo pressure/gas contract coverage:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "sealed gas pressure feedback|gas pressure interface"`
+  passed `25/25`.
+- WebGPU pressure producer coverage:
+  `node --test tests/sphPressureInterfaceGpuKernel.test.mjs` passed `2/2`.
+- Resident pressure/stage coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage|pressure interface|grid admission|grid force"`
+  passed `38/38`.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-local-gradient-contract-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-local-gradient-contract-20260615`.
+  Manual inspection found all final frames nonblank and bounded; MLS-MPM still
+  shows the known short-horizon fragmentation.
+
+## Prior Focused Result - 2026-06-15 Pressure WebGPU-Retained Publication
 
 The current slice makes the pressure/interface Worker publication path
 WebGPU-retained-only. A pressure compact publication candidate is ready only

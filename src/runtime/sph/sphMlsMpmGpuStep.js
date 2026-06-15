@@ -3905,6 +3905,16 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     pressureInterfaceForcePreviewStatus: preview?.status || null,
     pressureInterfaceForceSolverSchema: solver?.schema || null,
     pressureInterfaceForceSolverStatus: solver?.status || null,
+    pressureFieldMode: solver?.pressureFieldMode || pressureResult?.pressureFeedback?.pressureFieldMode || null,
+    pressureFieldResolution: solver?.pressureFieldResolution || pressureResult?.pressureFeedback?.pressureFieldResolution || null,
+    pressureGradientStatus: solver?.pressureGradientStatus || pressureResult?.pressureFeedback?.pressureGradientStatus || null,
+    localPressureGradientReady: solver?.localPressureGradientReady === true,
+    localPressureGradientStatus: solver?.localPressureGradientStatus
+      || pressureResult?.pressureFeedback?.localPressureGradientStatus
+      || null,
+    localPressureGradientForceCouplingStatus: solver?.localPressureGradientForceCouplingStatus
+      || pressureResult?.pressureFeedback?.localPressureGradientForceCouplingStatus
+      || null,
     pressureInterfaceForceRowCount: finiteNumber(solver?.forceRowCount ?? pressureResult?.forceRowCount, 0),
     pressureInterfaceForceRowsPresent: forceRowsPresent,
     pressureInterfaceConservationStatus: solver?.conservationStatus || null,
@@ -4988,6 +4998,23 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     pressureInterfaceEvidencePassed: result?.pressureInterfaceStageTaskEvidence?.passed === true,
     pressureInterfaceAuthoritativeMutation: result?.pressureInterfaceStageTaskAuthority?.authoritativeStateMutation ?? null,
     pressureInterfaceForceSolverStatus: result?.pressureInterfaceForceSolver?.status || result?.pressureInterfaceForceSolverStatus || null,
+    pressureFieldMode: result?.pressureInterfaceForceSolver?.pressureFieldMode
+      || result?.pressureFeedback?.pressureFieldMode
+      || null,
+    pressureFieldResolution: result?.pressureInterfaceForceSolver?.pressureFieldResolution
+      || result?.pressureFeedback?.pressureFieldResolution
+      || null,
+    pressureGradientStatus: result?.pressureInterfaceForceSolver?.pressureGradientStatus
+      || result?.pressureFeedback?.pressureGradientStatus
+      || null,
+    localPressureGradientReady: result?.pressureInterfaceForceSolver?.localPressureGradientReady === true
+      || result?.pressureFeedback?.localPressureGradientReady === true,
+    localPressureGradientStatus: result?.pressureInterfaceForceSolver?.localPressureGradientStatus
+      || result?.pressureFeedback?.localPressureGradientStatus
+      || null,
+    localPressureGradientForceCouplingStatus: result?.pressureInterfaceForceSolver?.localPressureGradientForceCouplingStatus
+      || result?.pressureFeedback?.localPressureGradientForceCouplingStatus
+      || null,
     pressureInterfaceForceRowCount: finiteNumber(result?.forceRowCount ?? result?.pressureInterfaceForceSolver?.forceRowCount, 0),
     pressureInterfaceForceRowStrideFloats: finiteNumber(result?.forceRowStrideFloats ?? result?.pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     pressureInterfaceForceRowByteLength: finiteNumber(result?.forceRowByteLength ?? result?.pressureInterfaceForceSolver?.forceRowByteLength, 0),

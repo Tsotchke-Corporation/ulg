@@ -11,6 +11,13 @@ export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA = 'peercompute.ulg.sph-local-pressure-gradient-field.v0';
+const UNIFORM_GAS_PRESSURE_FIELD_MODE = 'uniform-single-cell-sealed-gas';
+const UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION = 'lumped-sealed-box';
+const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
+  'single-cell-uniform-pressure-field',
+  'resident-gas-cell-eos-gradient-not-derived'
+]);
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -51,6 +58,33 @@ function addVector3(a = [0, 0, 0], b = [0, 0, 0]) {
     finiteNumber(a[1], 0) + finiteNumber(b[1], 0),
     finiteNumber(a[2], 0) + finiteNumber(b[2], 0)
   ];
+}
+
+function gasPressureFieldResolutionDiagnostics(gasCellField = null) {
+  const unavailable = !gasCellField || gasCellField.status === 'gas-cell-pressure-field-unavailable';
+  const localPressureGradientReady = gasCellField?.localPressureGradientReady === true;
+  const blockers = Array.isArray(gasCellField?.localPressureGradientBlockers)
+    ? [...gasCellField.localPressureGradientBlockers]
+    : (localPressureGradientReady ? [] : [...LOCAL_PRESSURE_GRADIENT_BLOCKERS]);
+  return {
+    pressureFieldMode: gasCellField?.pressureFieldMode || (unavailable ? 'pressure-field-unavailable' : UNIFORM_GAS_PRESSURE_FIELD_MODE),
+    pressureFieldResolution: gasCellField?.pressureFieldResolution || (unavailable ? 'pressure-field-unavailable' : UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION),
+    pressureGradientStatus: gasCellField?.gradientStatus || (unavailable ? 'pressure-field-unavailable' : 'uniform-sealed-gas-pressure-zero-gradient'),
+    localPressureGradientSchema: gasCellField?.localPressureGradientSchema || ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
+    localPressureGradientReady,
+    localPressureGradientStatus: gasCellField?.localPressureGradientStatus || (
+      localPressureGradientReady
+        ? 'local-pressure-gradient-field-ready'
+        : (unavailable
+            ? 'blocked-pressure-field-unavailable'
+            : 'blocked-uniform-single-cell-field-has-no-local-gradient')
+    ),
+    localPressureGradientBlockers: blockers,
+    localPressureGradientForceCouplingStatus: localPressureGradientReady
+      ? 'local-pressure-gradient-force-coupling-ready'
+      : 'blocked-local-pressure-gradient-field-required',
+    localPressureGradientValidation: gasCellField?.localPressureGradientValidation === true
+  };
 }
 
 function normalAreaVectorForElement(element = {}) {
@@ -224,6 +258,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
     pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa,
     Number.NaN
   );
+  const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const packed = packMaterialInterfaceElementRows(materialInterfaceField);
   const canSolve = pressureInterfaceCoupling?.status === 'pressure-interface-coupling-ready-for-solver'
     && Number.isFinite(pressurePa)
@@ -248,11 +283,21 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
         forceCouplingStatus: pressureInterfaceCoupling?.forceCouplingStatus || null,
         gasInterfacePressurePa: Number.isFinite(pressurePa) ? pressurePa : null,
+        pressureFieldMode: pressureFieldResolution.pressureFieldMode,
+        pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
+        pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
+        localPressureGradientSchema: pressureFieldResolution.localPressureGradientSchema,
+        localPressureGradientReady: pressureFieldResolution.localPressureGradientReady,
+        localPressureGradientStatus: pressureFieldResolution.localPressureGradientStatus,
+        localPressureGradientBlockers: pressureFieldResolution.localPressureGradientBlockers,
+        localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
         forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
         forceRowValues: new Float32Array(0),
+        forceResolution: 'uniform-interface-traction',
+        localPressureGradientValidation: false,
         conservationStatus: 'not-evaluated'
       }
     };
@@ -344,6 +389,14 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
       forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
       gasInterfacePressurePa: pressurePa,
+      pressureFieldMode: pressureFieldResolution.pressureFieldMode,
+      pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
+      pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
+      localPressureGradientSchema: pressureFieldResolution.localPressureGradientSchema,
+      localPressureGradientReady: pressureFieldResolution.localPressureGradientReady,
+      localPressureGradientStatus: pressureFieldResolution.localPressureGradientStatus,
+      localPressureGradientBlockers: pressureFieldResolution.localPressureGradientBlockers,
+      localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -364,7 +417,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         ? 'pairwise-equal-opposite-force-conservative'
         : 'pairwise-force-residual-nonzero',
       forceDerivation: 'webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
+      forceResolution: 'uniform-interface-traction',
       forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
+      localPressureGradientValidation: false,
       forceCouplingValidation: false,
       scientificValidation: false,
       gasValidation: false,

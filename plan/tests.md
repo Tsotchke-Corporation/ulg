@@ -17,6 +17,11 @@ Current required active-grid checks:
 
 - Focused resident unit coverage:
   `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "active-grid dispatch|fused mechanics sequence|fused no-full mechanics|compact GPU summary"`.
+- Focused ComputeManager task-surface coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps compute task|active-grid dispatch"`.
+  This now verifies the metadata-only resident sequence lane contract is
+  present on the task, solver input, result, and commit-delta surfaces while
+  `defaultEnabled=false`.
 - Browser A/B: active-grid and full-grid fused sequence must both classify
   `good`; active-grid should report `activeGridDispatch.useActiveGrid=true`,
   active node count below full grid count, conserved mass, bounded J, and no

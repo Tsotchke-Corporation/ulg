@@ -20659,3 +20659,51 @@ Open:
 - Keep active-grid default-off until it is promoted into a ComputeManager/
   GPUHub resident lane contract and validated against pressure, thermal,
   reaction/product, and long-horizon liquid behavior gates.
+
+## 2026-06-14 18:58 AKDT - Resident sequence lane contract
+
+Prompt context:
+
+- Continued from the mounted active-grid opt-in slice. The next todo priority
+  was to move active-grid/fused sequence evidence toward a
+  ComputeManager/GPUHub lane contract without making it default or bypassing
+  StateManager admission.
+
+Implemented:
+
+- Added metadata-only
+  `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0`.
+- The contract declares the same-device lane-owned mechanics P2G -> grid
+  update -> G2P -> compact-summary DAG, queue-fence policy, retained buffers,
+  read/write families, active-grid policy, and single-owner rules.
+- Threaded the contract through resident steps task descriptors:
+  law graph node, WebGPU descriptor, GPU resident lane descriptor, task data,
+  solver-registry input, compute-task result, and StateManager commit-delta
+  payload.
+- The contract reports runnable fused-sequence mode only when the no-full/
+  final-only fused sequence requirements are present. It keeps
+  `defaultEnabled=false` so active-grid and fused sequence remain opt-in.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps compute task|active-grid dispatch"`
+  reported `32/32` because Node evaluated the full resident test file.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "resident pass-DAG|GPU resident lane|law graph"`
+  reported `11/11`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-resident-sequence-lane-contract-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured
+  frames each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- The contract is still metadata. The next implementation step is a real
+  lane-owned worker/stage executor boundary that consumes this contract, keeps
+  hot buffers on one GPU lane, and admits only compact deltas/retained refs
+  through StateManager.

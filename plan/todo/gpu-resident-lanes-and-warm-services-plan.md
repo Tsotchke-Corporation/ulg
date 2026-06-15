@@ -169,6 +169,19 @@ classified `good` with `activeGridDispatch=2744/13824`, compact-summary
 evidence for promoting active-grid/tiled mechanics into a ComputeManager GPU
 resident lane; it is not a liquid behavior acceptance gate.
 
+Status update, 2026-06-14 resident sequence lane contract: resident steps
+tasks now publish
+`peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0` through the law
+graph node, WebGPU descriptor, GPU resident lane descriptor, task data,
+solver-registry input, compute-task result, and commit-delta payload. The
+contract declares the same-device lane-owned mechanics P2G -> grid update ->
+G2P -> compact-summary pass DAG, retained buffers, read/write families,
+single-owner rules, queue-fence policy, and the active-grid dispatch policy.
+It reports runnable fused-sequence mode only when no-full/final-only fused
+sequence requirements are present, and always keeps `defaultEnabled=false`.
+This is the review surface a future `GpuResidentLaneManager`/GPUHub worker
+executor should consume before the lane claims authoritative mutation.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

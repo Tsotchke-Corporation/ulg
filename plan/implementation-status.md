@@ -1,9 +1,24 @@
 # Implementation Status
 
-Updated: 2026-06-14 mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added a metadata-only resident sequence lane contract for ComputeManager/
+  GPUHub promotion review. Resident steps tasks now carry
+  `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0` through the law
+  graph node, WebGPU descriptor, GPU resident lane descriptor, task data,
+  solver-registry input, compute-task result, and StateManager commit-delta
+  payload. The contract declares the lane-owned mechanics P2G -> grid update
+  -> G2P -> compact-summary pass DAG, retained buffers, read/write families,
+  queue-fence policy, single-owner rules, and active-grid dispatch policy.
+  It reports a runnable fused sequence only when the no-full/final-only fused
+  sequence requirements are met, and it keeps `defaultEnabled=false` so no
+  default behavior changes. Focused resident task tests passed `32/32`,
+  focused PeerCompute/ULG GPU-lane integration passed `11/11`, physics
+  atomics passed `7` with `1` expected skip, and visual matrix
+  `codex-resident-sequence-lane-contract-20260614` passed `3/3` with two
+  captured frames per scenario.
 - Wired the mounted scene and browser probe to exercise the opt-in active-grid
   fused resident mechanics sequence. URLs can request
   `residentFuseSequence=1`, `residentActiveGrid=1`, and optional

@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 18:58 AKDT: resident steps tasks now carry a
+metadata-only `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0`.
+The contract is attached to the law graph node, WebGPU descriptor, GPU
+resident lane descriptor, task data, solver-registry input, compute-task
+result, and StateManager commit-delta payload. It declares the lane-owned
+P2G -> grid update -> G2P -> compact-summary pass DAG, retained buffers,
+read/write families, single-owner rules, queue-fence policy, and active-grid
+policy. When `residentFuseSequence=1`/`fuseNoFullResidentMechanicsSequence`
+and no-full/final-only requirements are present, it reports a runnable fused
+sequence; otherwise it remains a per-step metadata contract. `defaultEnabled`
+is false, so this does not promote active-grid or fused sequence to default
+execution.
+
 Current checkpoint, 2026-06-14 18:50 AKDT: mounted scene opt-in wiring for
 the active-grid fused resident mechanics sequence is in place. Browser URLs
 can now request `residentFuseSequence=1`, `residentActiveGrid=1`, and optional

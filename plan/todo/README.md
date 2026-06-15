@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 18:58 AKDT: resident steps tasks now publish
+`peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0` across the task,
+solver-registry input, result, and commit-delta surfaces. This is the first
+ComputeManager/GPUHub lane contract for the active-grid fused sequence: it
+declares the lane-owned P2G -> grid update -> G2P -> compact-summary DAG,
+single-owner rules, retained buffers, queue-fence policy, and active-grid
+constraints. `defaultEnabled=false` remains mandatory. Next work is still to
+move execution behind a real lane-owned worker/stage boundary and then extend
+validation to pressure, thermal, reaction/product, and long-horizon liquid
+gates.
+
 Current routing note, 2026-06-14 18:50 AKDT: mounted scene opt-in wiring for
 the active-grid fused resident mechanics sequence has landed. Browser URLs can
 set `residentActiveGrid=1` and `residentFuseSequence=1`; the scene signature,

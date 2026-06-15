@@ -93,6 +93,12 @@ Active-grid correction, 2026-06-14 AKDT:
   authority are wired. The next performance work should promote this into a
   lane-owned law DAG and then replace the simple active AABB with tiled/
   neighbor indexing.
+- Resident steps tasks now publish a metadata-only resident sequence lane
+  contract for that promotion path. The contract declares the lane-owned
+  mechanics P2G -> grid update -> G2P -> compact-summary DAG, active-grid
+  policy, retained buffers, and single-owner rules while keeping
+  `defaultEnabled=false`. A future lane executor should consume this contract
+  before claiming authoritative mutation.
 
 Architecture correction, 2026-06-12 AKDT:
 

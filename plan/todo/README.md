@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 19:59 AKDT: browser authority-host
+validation now proves the same-lane mechanics stage chain can run P2G,
+grid-update, and G2P as actual `webgpu` child stage tasks under one parent
+ComputeManager lane id/state key. The focused Playwright gate uses
+`preferWebGpu=true`, `useNativeTaskGraph=false`, and a shared scene
+`deviceResult`, and it asserts WebGPU backends, GPU-lane residencies,
+same-lane task summaries, completed stage-plan execution, and satisfied
+fences. Next priority is supervised GPUHub/ComputeManager worker residency for
+that same stage chain; after that, promote pressure/interface, thermal/phase,
+and reaction/product stages behind the same pattern.
+
 Current routing note, 2026-06-14 19:48 AKDT: WebGPU-requested mechanics
 stage tasks now inherit the parent lane executor identity instead of creating
 three unrelated stage-specific GPU lane descriptors. The non-native lane
@@ -42,9 +53,7 @@ executor path stamps P2G, grid-update, and G2P child tasks with the same lane
 id/state key, keeps them inline for WebGPU object safety, and records
 per-stage lane/backend/residency/fence summaries. This completes the
 same-lane authority invariant for the WebGPU-requested path in Node/fallback
-validation. Next priority is real browser/WebGPU same-device retained-buffer
-validation under that lane, then GPUHub/worker execution, and only then
-pressure/interface, thermal/phase, and reaction/product stage promotion.
+validation.
 
 Current routing note, 2026-06-14 19:36 AKDT: the mechanics stage-plan executor
 now drives actual ComputeManager stage-task submissions in the non-native

@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 19:59 AKDT: the browser authority-host test
+now validates the same-lane WebGPU mechanics stage chain with real browser
+WebGPU backends. The test runs `host.runMechanicsStageTaskChain()` with
+`preferWebGpu=true`, `useNativeTaskGraph=false`, an explicit shared scene
+`deviceResult`, and a parent lane id/state key. It proves the P2G,
+grid-update, and G2P child tasks report `webgpu` backend, `gpu-lane`
+residency, shared lane/state keys, completed stage-plan execution, and
+satisfied fences. This is still inline browser authority-host execution, not
+separate GPUHub worker execution; the next promotion is to move this same
+stage chain into supervised GPUHub/ComputeManager worker residency and then
+repeat the pattern for pressure/interface, thermal/phase, and reaction/product
+stages.
+
 Current checkpoint, 2026-06-14 19:48 AKDT: WebGPU-requested mechanics stage
 tasks now stay aligned to the parent ComputeManager lane executor. When
 `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` submits

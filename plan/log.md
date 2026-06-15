@@ -20935,3 +20935,57 @@ Open:
   slice should validate real browser/WebGPU same-device retained buffers under
   this parent lane executor, then move pressure/interface, thermal/phase, and
   reaction/product stages behind the same boundary.
+
+## 2026-06-14 19:59 AKDT - Browser same-lane WebGPU stage-chain validation
+
+Prompt context:
+
+- Continued from the same-lane WebGPU-requested stage-task invariant. The next
+  required evidence was a browser authority-host gate proving the aligned
+  mechanics stage-chain path reaches actual WebGPU backends with a shared
+  device context.
+
+Implemented:
+
+- Extended the existing browser PeerCompute resident authority-host Playwright
+  test with a second compact `host.runMechanicsStageTaskChain()` call.
+- The new call uses `preferWebGpu=true`, `useNativeTaskGraph=false`, an
+  explicit parent lane id/state key, and `scene.requestOpticalGpuDevice()` as
+  the shared scene `deviceResult`.
+- Returned only a serializable compact summary from the page so raw
+  `GPUBuffer` handles stay local to the browser.
+- Added assertions that P2G, grid-update, and G2P report `webgpu` backend,
+  `gpu-lane` residency, same parent lane/state key, completed stage-plan
+  execution, and satisfied fences.
+- Adjusted the existing stage-task family count assertions from `2` to `3`
+  because the new WebGPU stage-chain validation legitimately submits one more
+  P2G/grid-update/G2P child task.
+
+Files touched:
+
+- `tests/demo.e2e.mjs`
+- ULG plan/status/todo/test/log/done documentation.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- Initial focused Playwright run reached the final assertions and failed only
+  on the expected task-family count increase: P2G completed `3` instead of
+  the old expected `2`.
+- PASS after updating counts:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-browser-same-lane-webgpu-stage-chain-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured
+  frames each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- The browser gate proves inline authority-host WebGPU stage execution under
+  the same lane identity. It still does not spawn a dedicated GPUHub/worker
+  resident lane. The next architecture slice is supervised GPUHub/
+  ComputeManager worker residency for the same stage handlers, then
+  pressure/interface, thermal/phase, and reaction/product promotion.

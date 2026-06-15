@@ -15,6 +15,15 @@ covered. Focused checks:
   tasks and proves P2G, grid-update, and G2P are all `gpu-lane` tasks aligned
   to the parent lane id/state key with satisfied fences. The browser/GPUHub
   same-device worker path still needs a dedicated validation slice.
+- Browser same-lane WebGPU stage-chain validation:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`. The gate now runs `host.runMechanicsStageTaskChain()` with
+  `preferWebGpu=true`, `useNativeTaskGraph=false`, a shared scene
+  `deviceResult`, and explicit parent lane id/state key. It asserts P2G,
+  grid-update, and G2P all report `webgpu` backend, `gpu-lane` residency,
+  same parent lane/state key, completed stage-plan execution, and satisfied
+  fences. This is inline browser authority-host execution; separate GPUHub
+  worker residency remains open.
 - PeerCompute lane manager:
   `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
   from `/home/cos/projects/peercompute` passed `6/6`.
@@ -36,7 +45,9 @@ covered. Focused checks:
   lane-executed stage-task matrix
   `codex-mechanics-stage-task-lane-executor-20260614` passed `3/3` as well.
   The same-lane WebGPU-request invariant matrix
-  `codex-same-lane-stage-webgpu-request-20260614` passed `3/3`.
+  `codex-same-lane-stage-webgpu-request-20260614` passed `3/3`. The browser
+  same-lane WebGPU stage-chain matrix
+  `codex-browser-same-lane-webgpu-stage-chain-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

@@ -5486,6 +5486,44 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         readbackMode: 'full-parity-readback',
         compactSummaryScope: 'particle-visual'
       });
+      const mechanicsStageTaskDeviceResult = await scene.requestOpticalGpuDevice();
+      const mechanicsStageTaskChainWebGpu = await host.runMechanicsStageTaskChain({
+        ...mechanicsOnlyChildTaskInput,
+        stageTaskIdPrefix: 'ulg:browser:mechanics-stage-webgpu-task-chain',
+        preferWebGpu: true,
+        useNativeTaskGraph: false,
+        deviceResult: mechanicsStageTaskDeviceResult,
+        readbackMode: 'full-parity-readback',
+        compactSummaryScope: 'particle-visual',
+        gpuResidentLaneId: 'ulg:browser:mechanics-stage-webgpu-task-chain-lane',
+        gpuResidentLaneStateKey: 'ulg:browser:mechanics-stage-webgpu-task-chain-state'
+      });
+      const mechanicsStageTaskChainWebGpuSummary = {
+        schema: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.schema ?? null,
+        status: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.status ?? null,
+        schedulerStatus: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.schedulerStatus ?? null,
+        stagePlanSchema: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStagePlanSchema ?? null,
+        stagePlanContractSchema: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStagePlanContractSchema ?? null,
+        stageExecutionStatus: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStatus ?? null,
+        stageExecutionCompletedStageCount: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionCompletedStageCount ?? null,
+        stageExecutionStageOrder: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStageOrder ?? [],
+        stageLeaseFenceSatisfied: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageLeaseFenceSatisfied ?? null,
+        stageTaskLaneAligned: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneAligned ?? null,
+        stageTaskLaneIds: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneIds ?? {},
+        stageTaskStateKeys: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskStateKeys ?? {},
+        stageTaskBackends: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskBackends ?? {},
+        stageTaskResidencies: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskResidencies ?? {},
+        stageTaskFenceSatisfied: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskFenceSatisfied ?? {},
+        submittedStageTasks: (mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.submittedStageTasks ?? []).map((task) => ({
+          stageId: task.stageId,
+          residency: task.residency,
+          gpuResidentLaneLaneId: task.gpuResidentLaneLaneId,
+          gpuResidentLaneStateKey: task.gpuResidentLaneStateKey,
+          gpuFenceRequired: task.gpuFenceRequired
+        })),
+        allStageTaskEvidencePassed: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.allStageTaskEvidencePassed ?? null,
+        splitStageTaskBoundaries: mechanicsStageTaskChainWebGpu?.mechanicsOnlySplitPath?.stageTaskBoundaries ?? null
+      };
       const registeredSolvers = host.computeManager.listSolvers?.() || [];
       const residentSolver = registeredSolvers.find((solver) => solver.id === 'ulg-mls-mpm-sph-resident-steps') || null;
       const residentLawFamilySolvers = registeredSolvers
@@ -5696,6 +5734,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         mechanicsGridUpdateStageTask,
         mechanicsG2pStageTask,
         mechanicsStageTaskChain,
+        mechanicsStageTaskChainWebGpu: mechanicsStageTaskChainWebGpuSummary,
         mechanicsChildDryRunTask,
         mechanicsPromotionEvidenceTask,
         admittedMechanicsPromotionTask,
@@ -5990,6 +6029,54 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     gridUpdate: true,
     g2p: true
   });
+  expect(result.mechanicsStageTaskChainWebGpu.schema).toBe('peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0');
+  expect(result.mechanicsStageTaskChainWebGpu.status).toBe('compute-manager-stage-task-chain-executed');
+  expect(result.mechanicsStageTaskChainWebGpu.schedulerStatus).toBe('ulg-helper-stage-runners-used-awaiting-gpu-graph-semantics');
+  expect(result.mechanicsStageTaskChainWebGpu.stagePlanSchema).toBe('peercompute.compute.gpu-resident-lane-stage-plan.v0');
+  expect(result.mechanicsStageTaskChainWebGpu.stagePlanContractSchema).toBe('peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0');
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionStatus).toBe('completed');
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionCompletedStageCount).toBe(3);
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionStageOrder).toEqual(['p2g', 'gridUpdate', 'g2p']);
+  expect(result.mechanicsStageTaskChainWebGpu.stageLeaseFenceSatisfied).toBe(true);
+  expect(result.mechanicsStageTaskChainWebGpu.stageTaskLaneAligned).toBe(true);
+  expect(result.mechanicsStageTaskChainWebGpu.stageTaskLaneIds).toEqual({
+    p2g: 'ulg:browser:mechanics-stage-webgpu-task-chain-lane',
+    gridUpdate: 'ulg:browser:mechanics-stage-webgpu-task-chain-lane',
+    g2p: 'ulg:browser:mechanics-stage-webgpu-task-chain-lane'
+  });
+  expect(result.mechanicsStageTaskChainWebGpu.stageTaskStateKeys).toEqual({
+    p2g: 'ulg:browser:mechanics-stage-webgpu-task-chain-state',
+    gridUpdate: 'ulg:browser:mechanics-stage-webgpu-task-chain-state',
+    g2p: 'ulg:browser:mechanics-stage-webgpu-task-chain-state'
+  });
+  expect(result.mechanicsStageTaskChainWebGpu.stageTaskBackends).toEqual({
+    p2g: 'webgpu',
+    gridUpdate: 'webgpu',
+    g2p: 'webgpu'
+  });
+  expect(result.mechanicsStageTaskChainWebGpu.stageTaskResidencies).toEqual({
+    p2g: 'gpu-lane',
+    gridUpdate: 'gpu-lane',
+    g2p: 'gpu-lane'
+  });
+  expect(result.mechanicsStageTaskChainWebGpu.stageTaskFenceSatisfied).toEqual({
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
+  expect(result.mechanicsStageTaskChainWebGpu.submittedStageTasks).toHaveLength(3);
+  for (const task of result.mechanicsStageTaskChainWebGpu.submittedStageTasks) {
+    expect(task.residency).toBe('gpu-lane');
+    expect(task.gpuResidentLaneLaneId).toBe('ulg:browser:mechanics-stage-webgpu-task-chain-lane');
+    expect(task.gpuResidentLaneStateKey).toBe('ulg:browser:mechanics-stage-webgpu-task-chain-state');
+    expect(task.gpuFenceRequired).toBe(true);
+  }
+  expect(result.mechanicsStageTaskChainWebGpu.allStageTaskEvidencePassed).toBe(true);
+  expect(result.mechanicsStageTaskChainWebGpu.splitStageTaskBoundaries).toEqual({
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
   expect(result.mechanicsChildDryRunTask.schema).toBe('peercompute.ulg.mechanics-child-dry-run-evidence.v0');
   expect(result.mechanicsChildDryRunTask.taskWrapped).toBe(true);
   expect(result.mechanicsChildDryRunTask.accepted).toBe(true);
@@ -6028,9 +6115,9 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   expect(result.admittedMechanicsPromotionTask.admittedFamilies).toEqual(['particle-kinematics', 'mechanics']);
   expect(result.promotionAdmissionTaskFamilyCompleted).toBe(2);
   expect(result.mechanicsOnlyChildTaskFamilyCompleted).toBe(1);
-  expect(result.mechanicsP2gStageTaskFamilyCompleted).toBe(2);
-  expect(result.mechanicsGridUpdateStageTaskFamilyCompleted).toBe(2);
-  expect(result.mechanicsG2pStageTaskFamilyCompleted).toBe(2);
+  expect(result.mechanicsP2gStageTaskFamilyCompleted).toBe(3);
+  expect(result.mechanicsGridUpdateStageTaskFamilyCompleted).toBe(3);
+  expect(result.mechanicsG2pStageTaskFamilyCompleted).toBe(3);
   expect(result.mechanicsChildDryRunTaskFamilyCompleted).toBe(1);
   expect(result.mechanicsPromotionEvidenceTaskFamilyCompleted).toBe(1);
 });

@@ -1,9 +1,21 @@
 # Implementation Status
 
-Updated: 2026-06-14 same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added browser authority-host validation for the same-lane WebGPU mechanics
+  stage chain. The focused Playwright test now calls
+  `host.runMechanicsStageTaskChain()` with `preferWebGpu=true`,
+  `useNativeTaskGraph=false`, a shared scene `deviceResult`, and explicit
+  parent lane id/state key. It proves P2G, grid-update, and G2P report
+  `webgpu` backend, `gpu-lane` residency, the same parent lane/state key,
+  completed stage-plan execution, and satisfied fences. This validates
+  browser inline ComputeManager authority, not yet separate GPUHub worker
+  residency. Validation passed syntax, the focused browser authority-host
+  test, physics atomics `7` with `1` expected skip, and visual matrix
+  `codex-browser-same-lane-webgpu-stage-chain-20260614` `3/3` with two
+  captured frames per scenario.
 - Aligned WebGPU-requested mechanics child stage tasks to the parent
   ComputeManager lane executor. When the lane executor submits P2G,
   grid-update, and G2P with `preferWebGpu=true`, all three child task

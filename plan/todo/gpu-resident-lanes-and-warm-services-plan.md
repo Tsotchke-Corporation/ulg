@@ -227,6 +227,16 @@ authority invariant even when WebGPU falls back to CPU in Node. The remaining
 promotion is real browser/GPUHub same-device retained-buffer execution under
 that aligned lane, then worker execution and broader law-family promotion.
 
+Status update, 2026-06-14 browser same-lane WebGPU stage chain: the browser
+authority-host gate now proves the aligned lane path reaches real WebGPU
+stage backends. With a shared scene `deviceResult`, `preferWebGpu=true`, and
+`useNativeTaskGraph=false`, `host.runMechanicsStageTaskChain()` reports P2G,
+grid-update, and G2P as `webgpu`/`gpu-lane` child tasks under one parent lane
+id/state key with completed stage-plan execution and satisfied fences. This
+validates the browser inline authority host. The remaining step is to put
+those same stage handlers behind supervised GPUHub/ComputeManager worker
+residency without broad readback/reupload loops.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

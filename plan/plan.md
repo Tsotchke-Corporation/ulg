@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 21:36 AKDT: the focused browser authority-host
+gate now validates Worker-local WebGPU mechanics stage execution. The test
+creates `host.createUlgMechanicsResidentStageWorkerRunner()`, runs the
+mechanics stage chain with `preferWebGpu=true`, and asserts P2G, grid-update,
+and G2P all report `worker-ready` plus `webgpu` stage backends through the
+real browser Worker module. This proves Worker WebGPU availability and stage
+execution, but it is not yet final copy-free state publication. The next
+target is compact worker summaries plus StateManager/NodeKernel-authorized
+hot-state publication out of the retained worker lane. Renderer note: major
+z-buffer/draw-order failures are queued as a P0/P1 visual correctness blocker
+before any visual gate is treated as authoritative.
+
 Current checkpoint, 2026-06-14 21:24 AKDT: ULG now includes
 `src/services/ulgMechanicsResidentStage.worker.js`, a mechanics resident-stage
 Worker module for the P2G -> grid-update -> G2P chain. The browser authority

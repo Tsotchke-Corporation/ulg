@@ -35,6 +35,27 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 21:36 AKDT: the focused browser authority
+gate now proves real browser Worker WebGPU mechanics stage execution. The
+test creates `host.createUlgMechanicsResidentStageWorkerRunner()`, requests
+`preferWebGpu=true`, runs P2G, grid-update, and G2P through the checked-in
+Worker module, and asserts all three worker stage backends report `webgpu`
+with `worker-ready` residency. This closes the first in-worker WebGPU
+acceptance gate, but not the final copy-free path. Next priority: emit compact
+summaries and StateManager/NodeKernel-authorized hot-state publications from
+the worker-retained lane so main-thread physics does not need cloned full
+arrays between stages.
+
+Renderer blocker note, 2026-06-14 21:36 AKDT: user reports major z-buffer and
+draw-order failures in the live visualization. Keep this queued as renderer
+correctness debt before claiming visual correctness: audit depth write/test
+policy, transparent fluid sorting, opaque/transparent pass separation,
+container/grid overlay ordering, nested fluid/solid surfaces, and the
+reported flash/disappear behavior where volumes briefly render and then vanish
+until a browser/app focus change. Add a visual/browser regression that samples
+multi-frame render state and catches depth-order flicker, not just physics
+state.
+
 Current routing note, 2026-06-14 21:24 AKDT: ULG now has a checked-in
 mechanics resident-stage Worker module and the browser authority-host gate
 creates a PeerCompute `createResidentStageWorkerBackend()` runner for it. The
@@ -90,7 +111,7 @@ queued as a renderer P0/P1 before claiming visual correctness. The fix should
 audit transparent/opaque surface ordering, depth-write/depth-test policy,
 nested fluid/solid surfaces, container/grid overlay ordering, and add browser
 coverage that catches wrong draw order rather than relying on static
-screenshots.
+screenshots. Superseded by the 21:36 renderer blocker note above.
 
 Current routing note, 2026-06-14 19:59 AKDT: browser authority-host
 validation now proves the same-lane mechanics stage chain can run P2G,

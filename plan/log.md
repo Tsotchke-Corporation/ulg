@@ -1,5 +1,35 @@
 # ULG Implementation Log
 
+## 2026-06-14 21:36 AKDT - Worker WebGPU mechanics stage-chain browser gate
+
+Implemented:
+
+- Promoted the focused browser Worker bridge gate to request Worker-local
+  WebGPU execution with `preferWebGpu=true`.
+- Added an assertion that the worker-backed mechanics stage chain reports
+  `webgpu` backends for P2G, grid-update, and G2P while retaining the
+  `worker-ready` residency evidence from PeerCompute's Worker bridge.
+- Recorded the latest renderer blocker separately: major z-buffer/draw-order
+  failures and flash/disappear behavior are visual correctness debt, not a
+  physics-law acceptance signal.
+
+Validation:
+
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+
+Open:
+
+- Worker WebGPU execution is now proven for the mechanics stage chain, but the
+  hot path still needs compact summaries and StateManager/NodeKernel-authorized
+  hot-state publication from worker-retained lane state so main-thread physics
+  does not consume cloned full arrays between stages.
+- Add a renderer-depth/order browser regression before treating captured visual
+  sequences as authoritative again.
+
 ## 2026-06-14 17:42 AKDT - Compact Summary Fence Attribution
 
 - Added internal timing telemetry to

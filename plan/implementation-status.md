@@ -1,9 +1,20 @@
 # Implementation Status
 
-Updated: 2026-06-14 mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Validated real browser Worker WebGPU mechanics stage execution. The focused
+  authority-host Playwright gate now creates
+  `host.createUlgMechanicsResidentStageWorkerRunner()`, requests
+  `preferWebGpu=true`, and asserts the Worker path reports `worker-ready`
+  with `webgpu` backends for P2G, grid-update, and G2P. This proves browser
+  Worker WebGPU availability for the mechanics stage chain, but it is still
+  not final copy-free publication: compact summaries and StateManager/
+  NodeKernel-authorized hot-state publication out of the worker-retained lane
+  remain next. Validation passed syntax checks for `tests/demo.e2e.mjs` and
+  `src/services/ulgMechanicsResidentStage.worker.js`, plus the focused browser
+  authority-host Playwright gate `1/1`.
 - Added the checked-in ULG mechanics resident-stage Worker module. The browser
   authority host now exposes `createUlgMechanicsResidentStageWorkerRunner()`
   using PeerCompute's resident-stage Worker bridge, and the focused browser

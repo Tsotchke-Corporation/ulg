@@ -51,6 +51,10 @@ we will need to extend eshkol and moonlab to improve wasm to webgpu support to m
   liquid/liquid settling, solid/liquid contact, phase-change steam/water, and a
   reaction/product case so the simulation does not silently drift into broken
   visible behavior while unit tests still pass.
+- Visual sequence sanity checks must also inspect renderer correctness, not
+  just physics metrics. Include depth/order coverage for transparent fluids,
+  solid/fluid nesting, container and grid overlays, z-buffer flicker, and
+  flash/disappear behavior before treating a visual pass as trustworthy.
 - Physics behavior edits must start with atomic scientific invariants before
   visual tuning. For SPH/MLS-MPM changes, run or extend tests that pin simple
   closed-form or conservation expectations such as zero-force rest, gravity-only

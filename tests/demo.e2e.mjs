@@ -5537,7 +5537,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         mechanicsStageTaskChainWorker = await host.runMechanicsStageTaskChain({
           ...mechanicsOnlyChildTaskInput,
           stageTaskIdPrefix: 'ulg:browser:mechanics-stage-worker-bridge-chain',
-          preferWebGpu: false,
+          preferWebGpu: true,
           useNativeTaskGraph: false,
           readbackMode: 'full-parity-readback',
           compactSummaryScope: 'particle-visual',
@@ -6154,6 +6154,11 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   });
   expect(result.mechanicsStageTaskChainWorker.stageExecutionWorkerRunnerSupplied).toBe(true);
   expect(result.mechanicsStageTaskChainWorker.stageExecutionWorkerModuleUrl).toBe('/src/services/ulgMechanicsResidentStage.worker.js');
+  expect(result.mechanicsStageTaskChainWorker.stageTaskBackends).toEqual({
+    p2g: 'webgpu',
+    gridUpdate: 'webgpu',
+    g2p: 'webgpu'
+  });
   expect(result.mechanicsStageTaskChainWorker.stageTaskFenceSatisfied).toEqual({
     p2g: true,
     gridUpdate: true,

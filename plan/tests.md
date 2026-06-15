@@ -1,10 +1,11 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Mechanics Resident-Stage Worker Module
+## Current Focused Result - 2026-06-14 Worker WebGPU Mechanics Stage Chain
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
-worker residency without overclaiming live worker execution. Focused checks:
+worker residency. The latest focused browser gate now also proves real browser
+Worker WebGPU execution for the mechanics stage chain. Focused checks:
 
 - ULG mechanics resident-stage Worker module:
   `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `1/1`.
@@ -42,7 +43,18 @@ worker residency without overclaiming live worker execution. Focused checks:
   `host.createUlgMechanicsResidentStageWorkerRunner()`, runs the CPU/reference
   mechanics chain through the real browser Worker module, and asserts
   `worker-ready` for P2G, grid-update, and G2P through PeerCompute's Worker
-  bridge. Worker-owned WebGPU buffer retention remains open.
+  bridge. The Worker-bridge path now requests `preferWebGpu=true` and asserts
+  `mechanicsStageTaskChainWorker.stageTaskBackends` is `{ p2g: "webgpu",
+  gridUpdate: "webgpu", g2p: "webgpu" }`, proving in-worker WebGPU stage
+  execution in the browser. Worker-owned compact hot-state publication remains
+  open.
+- Renderer visual correctness debt:
+  major z-buffer/draw-order issues are reported in the live visualization,
+  including flicker/vanish behavior around visible fluid/solid volumes. Treat
+  future visual sequence sanity checks as incomplete until they include a
+  render-depth/order regression that samples multiple close-spaced frames and
+  checks visible surface identity/extent, transparent/opaque ordering, and
+  overlay/container ordering.
 - PeerCompute lane manager:
   `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
   from `/home/cos/projects/peercompute` passed `6/6`.

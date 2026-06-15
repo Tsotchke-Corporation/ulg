@@ -131,6 +131,19 @@ sparse/tiled/active-grid P2G and grid update. The current gather-style P2G
 still scans particles from every grid node every substep, so a GPU lane that
 keeps buffers resident still needs a better active-grid/neighbor structure.
 
+Status update, 2026-06-14 Worker WebGPU stage chain: the checked-in ULG
+mechanics resident-stage Worker now has browser evidence for Worker-local
+WebGPU execution. The focused authority-host gate creates the PeerCompute
+resident-stage Worker backend, requests `preferWebGpu=true`, and asserts P2G,
+grid-update, and G2P all report `webgpu` backends plus `worker-ready`
+residency. This is the right direction for a future GPUComputeManager-like
+resident lane, but the next copy-avoidance slice is not another broad
+scheduler. Keep the authority in ComputeManager/GPUHub/NodeKernel, have the
+Worker publish compact summaries and admitted same-device retained-buffer refs,
+and make StateManager hot storage the discoverable owner of local GPU handles.
+Renderer depth/order issues remain a separate P0/P1 visual correctness blocker
+before visual gates are trusted.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

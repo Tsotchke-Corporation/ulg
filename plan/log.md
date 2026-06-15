@@ -1,5 +1,62 @@
 # ULG Implementation Log
 
+## 2026-06-15 AKDT - Plain SPH liquid settling acceptance
+
+Summary:
+
+- Fixed the remaining long-horizon CPU-SPH same-material liquid settling
+  failure in the mounted/browser reference lane.
+- Added wall-contact velocity cancellation so a particle resting at finite-
+  volume floor/ceiling clearance does not regain into-wall velocity from a
+  gravity half-kick.
+- Added explicit plain-SPH liquid viscosity behavior behind the viscosity law
+  group: near-floor wall damping and same-material velocity diffusion.
+- Added atomic coverage for floor-contact cancellation and an opt-in
+  long-horizon plain-SPH liquid merge/settle gate.
+- Updated `plan/plan.md`, `plan/todo/README.md`, `plan/tests.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and
+  `plan/done/plain-sph-liquid-settling-2026-06-15.md`.
+
+Files touched:
+
+- `src/runtime/sph/sphPhaseCarrier.js`
+- `src/runtime/sphPhaseDemo.js`
+- `tests/physicsBehaviorInvariants.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/tests.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/done/plain-sph-liquid-settling-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPhaseCarrier.js`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/physicsBehaviorInvariants.test.mjs`.
+- PASS: `npm run test:physics-atomics` reported `11` pass and `2` expected
+  opt-in long-horizon skips.
+- PASS: `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic`
+  reported `13/13`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-liquid-viscosity-short-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, one visible H2O surface, and
+  three frames.
+- PASS:
+  `codex-cpu-sph-h2o-long-after-sph-viscosity-20260615` reported status
+  `good`, no analysis issues, no visual-surface issues, H2O visible surface
+  count `1 -> 1`, final drop speed about `0.246 m/s`, and ten frames under
+  `/tmp/ulg-frame-check/cpu-sph-h2o-long-after-sph-viscosity-20260615`.
+
+Open:
+
+- This closes the CPU-SPH reference-lane settling regression only.
+- MLS-MPM fragmentation, broader free-surface quality, mounted ice/solid
+  visual trust, z-buffer/draw-order, focus-resume flashing, and
+  ComputeManager/GPUHub WebGPU law-stage migration remain open.
+
 ## 2026-06-15 13:07 AKDT - CPU liquid render-domain merge and Pages build
 
 Summary:

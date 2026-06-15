@@ -12,6 +12,20 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 AKDT update: the long-horizon CPU-SPH H2O/H2O settling regression
+  is now fixed for the mounted/browser reference lane. The root issue was not
+  only render identity; the carrier also allowed a residual gravity half-kick
+  at finite-volume wall contact and had no explicit plain-SPH liquid viscosity
+  damping law. Contact now cancels into-wall velocity at the floor/ceiling
+  clearance, and viscosity-gated liquid wall damping plus same-material
+  velocity diffusion damps bulk liquid motion. Evidence:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` passed
+  `13/13`; `codex-cpu-sph-liquid-viscosity-short-20260615` passed; long
+  browser probe `codex-cpu-sph-h2o-long-after-sph-viscosity-20260615` passed
+  with status `good`, final drop speed about `0.246 m/s`, one visible H2O
+  surface throughout, no visual issues, and ten captured frames. Keep this as
+  CPU-SPH reference-lane acceptance, not as closure of MLS-MPM fragmentation,
+  z-buffer/focus visual trust, or full WebGPU residency.
 - 2026-06-15 13:07 AKDT update: the short-horizon CPU-SPH same-material
   visible surface identity bug is fixed. The CPU particle surface path now
   merges same-material liquid render domains before MarchingCubes, while

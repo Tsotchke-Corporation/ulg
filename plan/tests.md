@@ -1,5 +1,35 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Plain SPH Liquid Settling
+
+The current slice fixes the long-horizon CPU-SPH same-material liquid settling
+failure that produced delayed falling, stacked/nested water, and residual bulk
+motion. The fix is physics-side: finite-volume wall contact cancels gravity
+half-kicks, and explicit liquid viscosity/wall damping is law-gated by the
+viscosity group.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphPhaseCarrier.js`,
+  `node --check src/runtime/sphPhaseDemo.js`, and
+  `node --check tests/physicsBehaviorInvariants.test.mjs` passed.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `2` expected opt-in
+  long-horizon skips.
+- Opt-in long liquid atomics:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` passed
+  `13/13`, including the new plain-SPH long-horizon merge/settle gate.
+- Short visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-liquid-viscosity-short-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, one H2O visible surface, and
+  three frames.
+- Long mounted browser probe:
+  `codex-cpu-sph-h2o-long-after-sph-viscosity-20260615` passed with status
+  `good`, no analysis or visual-surface issues, H2O visible surface count
+  `1 -> 1`, final drop speed about `0.246 m/s`, and ten frames under
+  `/tmp/ulg-frame-check/cpu-sph-h2o-long-after-sph-viscosity-20260615`.
+
 ## Current Focused Result - 2026-06-15 CPU Liquid Surface Merge
 
 The current slice fixes CPU MarchingCubes surface identity for same-material

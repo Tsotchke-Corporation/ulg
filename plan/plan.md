@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 AKDT: the plain CPU-SPH same-material liquid
+settling slice is fixed for the long browser probe that reproduced the delayed
+drop/stacked-water behavior. The SPH carrier now cancels gravity half-kicks at
+finite-volume wall contact, applies explicit liquid viscosity as a law-gated
+post-velocity constraint, and adds liquid wall damping/velocity diffusion only
+when the viscosity law group is enabled. Validation passed `npm run
+test:physics-atomics` (`11` pass, `2` expected long skips), the opt-in
+`ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` (`13/13`),
+short visual matrix `codex-cpu-sph-liquid-viscosity-short-20260615`, and the
+long mounted browser probe
+`codex-cpu-sph-h2o-long-after-sph-viscosity-20260615` with status `good`, one
+visible H2O surface throughout, no visual issues, and final drop speed about
+`0.246 m/s` under the `0.25 m/s` settle gate. Remaining P0 behavior work:
+MLS-MPM fragmentation, broader free-surface quality, ice/solid mounted visual
+trust, z-buffer/draw-order, focus-resume flashing, and the PeerCompute/WebGPU
+law-stage migration.
+
 Current checkpoint, 2026-06-15 13:07 AKDT: the CPU-SPH same-material liquid
 surface identity bug is fixed for the mounted/browser render path. The CPU
 particle surface path now merges same-material liquid render domains before

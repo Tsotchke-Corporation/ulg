@@ -35,6 +35,20 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 AKDT: the immediate long-horizon CPU-SPH
+same-material liquid settling regression is closed for the mounted/browser
+reference lane. Contact-at-wall now removes the residual gravity half-kick,
+and explicit SPH liquid viscosity/wall damping runs through the viscosity law
+group instead of hidden renderer or scheduler behavior. Evidence:
+`ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` passed
+`13/13`; visual matrix `codex-cpu-sph-liquid-viscosity-short-20260615` passed;
+long browser probe `codex-cpu-sph-h2o-long-after-sph-viscosity-20260615`
+passed with H2O visible surface count `1 -> 1`, no visual issues, final drop
+speed about `0.246 m/s`, and ten captured frames. Next P0 remains behavior
+before architecture: MLS-MPM fragmentation, broader liquid free-surface
+quality, mounted ice/solid visual trust, z-buffer/draw-order, and
+focus-resume flashing. Then continue the ComputeManager/GPUHub law-stage move.
+
 Current routing note, 2026-06-15 13:07 AKDT: the immediate CPU-SPH
 same-material liquid render-domain bug is fixed for the browser path. CPU
 MarchingCubes rendering now merges same-material liquid domains into one

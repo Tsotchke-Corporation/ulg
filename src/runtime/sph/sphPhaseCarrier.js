@@ -51,7 +51,11 @@ export function createSphPhaseCarrier(options = {}) {
     solidPredicate = null,
     fluidPredicate = null,
     solidGroupKey = null,
-    solidContactToleranceM = 1e-6
+    solidContactToleranceM = 1e-6,
+    liquidVelocityDiffusionAlpha = 0,
+    liquidVelocityDiffusionRadiusM = null,
+    liquidWallDampingAlpha = 0,
+    liquidWallDampingDistanceM = null
   } = options;
   const projectionIterations = Math.max(0, Math.round(Number(densityProjectionIterations) || 0));
   const projectionRelaxation = Number.isFinite(densityProjectionRelaxation)
@@ -60,6 +64,14 @@ export function createSphPhaseCarrier(options = {}) {
   const solidContactTolerance = Number.isFinite(solidContactToleranceM) && solidContactToleranceM >= 0
     ? solidContactToleranceM
     : 1e-6;
+  const velocityDiffusionAlpha = Math.min(Math.max(Number(liquidVelocityDiffusionAlpha) || 0, 0), 1);
+  const velocityDiffusionRadius = Number.isFinite(liquidVelocityDiffusionRadiusM) && liquidVelocityDiffusionRadiusM > 0
+    ? liquidVelocityDiffusionRadiusM
+    : null;
+  const wallDampingAlpha = Math.min(Math.max(Number(liquidWallDampingAlpha) || 0, 0), 1);
+  const wallDampingDistance = Number.isFinite(liquidWallDampingDistanceM) && liquidWallDampingDistanceM > 0
+    ? liquidWallDampingDistanceM
+    : null;
   const gravityAcceleration = Array.from({ length: dimension }, (_, index) => {
     const value = Array.isArray(gravity) ? Number(gravity[index]) : 0;
     return Number.isFinite(value) ? value : 0;
@@ -124,13 +136,78 @@ export function createSphPhaseCarrier(options = {}) {
       if (!(upperBound > 0)) continue;
       const lower = clearance;
       const upper = Math.max(lower, upperBound - clearance);
+      const contactEpsilon = Math.max(1e-12, clearance * 1e-6);
       if (particle.x[axis] < lower) {
         particle.x[axis] = lower;
+        if (particle.v[axis] < 0) particle.v[axis] = 0;
+      } else if (particle.x[axis] <= lower + contactEpsilon) {
         if (particle.v[axis] < 0) particle.v[axis] = 0;
       } else if (particle.x[axis] > upper) {
         particle.x[axis] = upper;
         if (particle.v[axis] > 0) particle.v[axis] = 0;
+      } else if (particle.x[axis] >= upper - contactEpsilon) {
+        if (particle.v[axis] > 0) particle.v[axis] = 0;
       }
+    }
+  };
+
+  const applyFluidWallDamping = (particles) => {
+    if (!(wallDampingAlpha > 0) || dimension < 2) return;
+    for (const particle of particles) {
+      if (!isFluidParticle(particle)) continue;
+      const clearance = wallClearanceM(particle);
+      const dampingDistance = Math.max(wallDampingDistance ?? (3 * clearance), 1e-9);
+      const floorDistance = Math.max(0, particle.x[1] - clearance);
+      if (floorDistance >= dampingDistance) continue;
+      const q = 1 - (floorDistance / dampingDistance);
+      const keep = Math.min(Math.max(1 - wallDampingAlpha * q * q, 0), 1);
+      for (let axis = 0; axis < dimension; axis += 1) particle.v[axis] *= keep;
+    }
+  };
+
+  const applyFluidVelocityDiffusion = (particles, smoothingLengthM) => {
+    if (!(velocityDiffusionAlpha > 0) || particles.length < 2) return;
+    const radius = Math.max(velocityDiffusionRadius ?? (2 * smoothingLengthM), 1e-9);
+    const radius2 = radius * radius;
+    const dv = particles.map(() => new Array(dimension).fill(0));
+    for (let i = 0; i < particles.length - 1; i += 1) {
+      const a = particles[i];
+      if (!isFluidParticle(a)) continue;
+      const ma = Number(a.massKg);
+      if (!(ma > 0)) continue;
+      for (let j = i + 1; j < particles.length; j += 1) {
+        const b = particles[j];
+        if (!isFluidParticle(b) || a.material !== b.material) continue;
+        const mb = Number(b.massKg);
+        if (!(mb > 0)) continue;
+        let r2 = 0;
+        for (let axis = 0; axis < dimension; axis += 1) {
+          const delta = b.x[axis] - a.x[axis];
+          r2 += delta * delta;
+        }
+        if (!(r2 > 0) || r2 > radius2) continue;
+        const q = 1 - (Math.sqrt(r2) / radius);
+        const mix = velocityDiffusionAlpha * q * q;
+        const invMass = 1 / (ma + mb);
+        const wa = mb * invMass;
+        const wb = ma * invMass;
+        for (let axis = 0; axis < dimension; axis += 1) {
+          const rel = b.v[axis] - a.v[axis];
+          dv[i][axis] += mix * wa * rel;
+          dv[j][axis] -= mix * wb * rel;
+        }
+      }
+    }
+    for (let i = 0; i < particles.length; i += 1) {
+      for (let axis = 0; axis < dimension; axis += 1) particles[i].v[axis] += dv[i][axis];
+    }
+  };
+
+  const applyFluidPostVelocityConstraints = (particles, smoothingLengthM) => {
+    applyFluidWallDamping(particles);
+    applyFluidVelocityDiffusion(particles, smoothingLengthM);
+    for (const particle of particles) {
+      if (isFluidParticle(particle)) applyWallBoundary(particle);
     }
   };
 
@@ -353,6 +430,7 @@ export function createSphPhaseCarrier(options = {}) {
     }
     applySolidGroupWallBoundary(next.particles);
     applySolidGroupContactBoundary(next.particles);
+    applyFluidPostVelocityConstraints(next.particles, next.smoothingLengthM);
     next.step = (state.step ?? 0) + 1;
     next.time = (state.time ?? 0) + dt;
     return {

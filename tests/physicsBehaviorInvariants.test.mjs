@@ -7,6 +7,7 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
 import { createSphPhaseDemo } from '../src/runtime/sphPhaseDemo.js';
+import { createSphPhaseCarrier } from '../src/runtime/sph/sphPhaseCarrier.js';
 import {
   destroyMlsMpmResidentStepsBuffers,
   runMlsMpmResidentStepsWithOptionalWebGpu
@@ -462,6 +463,42 @@ test('plain SPH/PBF reference stays static when gravity and EOS laws are disable
   );
 });
 
+test('plain SPH wall contact cancels gravity half-kick at finite-volume floor', () => {
+  const massKg = 8;
+  const restDensityKgPerM3 = 1000;
+  const clearance = 0.5 * Math.cbrt(massKg / restDensityKgPerM3);
+  const carrier = createSphPhaseCarrier({
+    dimension: 3,
+    gravity: [0, -9.80665, 0],
+    dt: 0.01,
+    boxDimsM: [5, 5, 5],
+    alpha: 0,
+    beta: 0,
+    eos: () => ({ pressurePa: 0, soundSpeedMPerS: 0 })
+  });
+  const state = {
+    schema: 'test.sph-state.v0',
+    dimension: 3,
+    smoothingLengthM: 1,
+    step: 0,
+    time: 0,
+    particles: [{
+      material: 'h2o',
+      role: 'base',
+      x: [2.5, clearance, 2.5],
+      v: [0, 0, 0],
+      massKg,
+      restDensityKgPerM3,
+      specificInternalEnergyJPerKg: 0
+    }]
+  };
+
+  const next = carrier.step(state).state.particles[0];
+
+  nearlyEqual(next.x[1], clearance, 1e-12);
+  nearlyEqual(next.v[1], 0, 1e-12);
+});
+
 test('plain SPH/PBF solid-liquid contact does not treat solid mass as fluid pressure mass', () => {
   const driver = createSphPhaseDemo({
     dropMaterial: 'fe',
@@ -630,6 +667,48 @@ test('plain SPH/PBF reference keeps solid H2O supported under gravity', () => {
     'solid H2O drop deformed internally while supported'
   );
   assert.ok(maxParticleSpeedForRole(particles, 'drop') < 0.05, 'solid H2O drop retained unsupported falling speed at contact');
+});
+
+test('plain SPH/PBF long-horizon liquid acceptance remains merged and damps bulk drop motion', {
+  skip: process.env.ULG_RUN_LONG_LIQUID_ATOMIC === '1'
+    ? false
+    : 'Set ULG_RUN_LONG_LIQUID_ATOMIC=1 to run the opt-in liquid-settling acceptance gate.'
+}, () => {
+  const driver = createSphPhaseDemo({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.01,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    mechanics: 'sph',
+    physicalLawGroups: {
+      mechanics: true,
+      gravity: true,
+      eos: true,
+      pressure: true,
+      thermal: false,
+      reactions: false,
+      viscosity: true,
+      surfaceTension: false
+    }
+  });
+  const initialMass = driver.totals().massKg;
+  const initialGap = dropBaseSupportGapY(driver.demo.state.particles);
+
+  for (let stepIndex = 0; stepIndex < 144; stepIndex += 1) driver.step();
+
+  const particles = driver.demo.state.particles;
+  const finalGap = dropBaseSupportGapY(particles);
+  const finalDropSpeedMPerS = maxParticleSpeedForRole(particles, 'drop');
+  assertFiniteParticleState(particles);
+  nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
+  assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
+  assert.ok(driver.demo.state.time >= 1, `plain SPH liquid gate did not reach 1 s: ${driver.demo.state.time}s`);
+  assert.ok(finalGap <= Math.min(0, initialGap), `plain SPH same-material liquid did not remain merged: ${initialGap} -> ${finalGap}`);
+  assert.ok(finalDropSpeedMPerS < 0.25, `plain SPH liquid retained excessive bulk motion after ${driver.demo.state.time}s: ${finalDropSpeedMPerS} m/s`);
 });
 
 test('H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop motion', {

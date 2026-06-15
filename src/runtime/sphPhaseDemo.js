@@ -2402,6 +2402,10 @@ export function createSphPhaseDemo(options = {}) {
   const mlsMpmLiquidVelocityDiffusionRadiusM = options.mlsMpmLiquidVelocityDiffusionRadiusM ?? (2 * gridSpacingM);
   const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0.2;
   const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
+  const sphLiquidVelocityDiffusionAlpha = options.sphLiquidVelocityDiffusionAlpha ?? 0.04;
+  const sphLiquidVelocityDiffusionRadiusM = options.sphLiquidVelocityDiffusionRadiusM ?? (2 * demo.state.smoothingLengthM);
+  const sphLiquidWallDampingAlpha = options.sphLiquidWallDampingAlpha ?? 0.25;
+  const sphLiquidWallDampingDistanceM = options.sphLiquidWallDampingDistanceM ?? (1.5 * demo.state.smoothingLengthM);
   const requestedGravityMPerS2 = options.gravity ?? [0, -9.80665, 0];
   const gravityMPerS2 = physicalLawGroups.gravity ? requestedGravityMPerS2 : [0, 0, 0];
   const cflMaxSoundSpeedMPerS = (cflSafety * mechLengthM) / carrierDt;
@@ -2448,6 +2452,10 @@ export function createSphPhaseDemo(options = {}) {
     sphCavitationPressureFloorPa,
     sphDensityProjectionIterations,
     sphDensityProjectionRelaxation,
+    sphLiquidVelocityDiffusionAlpha,
+    sphLiquidVelocityDiffusionRadiusM,
+    sphLiquidWallDampingAlpha,
+    sphLiquidWallDampingDistanceM,
     physicalLawGroups,
     pendingPhysicalLawGroups
   };
@@ -2546,6 +2554,10 @@ export function createSphPhaseDemo(options = {}) {
       densityProjectionIterations: sphDensityProjectionIterations,
       densityProjectionRelaxation: sphDensityProjectionRelaxation,
       densityProjectionEpsilon: options.sphDensityProjectionEpsilon ?? 1e-5,
+      liquidVelocityDiffusionAlpha: physicalLawGroups.viscosity ? sphLiquidVelocityDiffusionAlpha : 0,
+      liquidVelocityDiffusionRadiusM: sphLiquidVelocityDiffusionRadiusM,
+      liquidWallDampingAlpha: physicalLawGroups.viscosity ? sphLiquidWallDampingAlpha : 0,
+      liquidWallDampingDistanceM: sphLiquidWallDampingDistanceM,
       solidPredicate: (particle) => {
         const props = demo.materialProperties[particle?.material];
         return Boolean(

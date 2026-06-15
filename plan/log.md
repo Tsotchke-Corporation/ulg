@@ -1,5 +1,68 @@
 # ULG Implementation Log
 
+## 2026-06-15 02:05 AKDT - Pressure/interface retained-buffer admission evidence
+
+Implemented:
+
+- Changed `runMlsMpmGridUpdateWebGpu()` so WebGPU pressure force-row
+  consumption requires the same admitted grid-force descriptor as the CPU path.
+  A solver with `gridForceApplicationApproved=true` is still blocked unless a
+  `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+  object admits the force-row publication.
+- Fixed buffer-only force-row handling. Empty `Float32Array` placeholders no
+  longer collapse the explicit force-row count to zero when a retained
+  pressure `GPUBuffer` is supplied.
+- Added retained-buffer evidence fields to the grid-update envelope:
+  `pressureInterfaceForceRowsSource`,
+  `pressureInterfaceForceRowsBufferSubmitted`, and
+  `pressureInterfaceAppliedImpulseKnown`.
+- Extended pressure/interface Worker publication/admission descriptors with
+  force-row stride, byte length, retained-buffer residency, and same-lane
+  consumer access protocol.
+
+Files touched:
+
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/sphGridUpdateGpuKernel.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-interface-retained-buffer-admission-evidence-2026-06-15.md`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/test modules.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/sphGridUpdateGpuKernel.test.mjs` reported `14/14`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface"`
+  reported `38/38`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "pressure/interface"`
+  reported `13/13`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `4/4`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-retained-buffer-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; artifacts are under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-retained-buffer-admission-20260615`.
+
+Open:
+
+- Renderer z-buffer/draw-order failures remain queued after the pressure/
+  residency lane unless visual evidence becomes untrustworthy sooner.
+
 ## 2026-06-15 01:14 AKDT - Pressure/interface grid consumption admission gate
 
 Implemented:

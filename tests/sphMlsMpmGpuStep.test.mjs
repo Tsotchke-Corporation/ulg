@@ -1983,6 +1983,9 @@ test('SPH pressure interface stage compute task can produce force rows with WebG
   assert.equal(result.forceRowValues.length, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
   assert.equal(result.forceRowsBuffer.label, 'ulg-sph-pressure-interface-force-rows-out');
   assert.equal(result.forceRowsBufferByteLength, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
+  assert.equal(result.forceRowByteLength, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.pressureInterfaceForceRowsBufferRetained, true);
   assert.equal(result.pressureInterfaceForceSolver.backend, 'webgpu');
   assert.equal(result.pressureInterfaceForceSolver.status, 'pressure-interface-force-solver-ready');
   assert.equal(result.pressureInterfaceStageTaskEvidence.passed, true);

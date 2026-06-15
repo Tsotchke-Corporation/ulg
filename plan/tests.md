@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Pressure/Interface Same-Frame Grid Admission
+## Current Focused Result - 2026-06-15 Pressure/Interface Retained-Buffer Admission Evidence
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -50,7 +50,41 @@ Pressure/interface force-row production now has a WebGPU-resident producer
 path. The WebGPU kernel writes the same 16-float pressure force-row ABI as the
 CPU oracle, and the resident Worker carries the retained force-row `GPUBuffer`
 from `pressureInterface` into `gridUpdate` on the same lane.
+The latest focused slice tightens grid-update evidence for that retained
+buffer handoff: the WebGPU grid-update wrapper now requires the admitted
+grid-force descriptor, records buffer-only pressure rows as retained GPU
+submissions with unverified no-full impulse evidence, and publishes
+stride/byte-length/residency metadata through the StateManager descriptor.
 Focused checks:
+
+- Grid-update pressure retained-buffer evidence:
+  `node --test tests/sphGridUpdateGpuKernel.test.mjs` passed `14/14`. The new
+  cases prove admitted WebGPU pressure rows require StateManager admission,
+  unadmitted approved solvers are blocked, and retained `GPUBuffer` force rows
+  are submitted without uploading a CPU force-row array.
+- Pressure/interface publication descriptor:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "pressure/interface"`
+  passed `13/13`; the pressure/interface host test now asserts force-row
+  stride, byte length, retained-buffer residency, and same-lane consumer
+  protocol in the publication, hot record, import descriptor, and warm delta.
+- Pressure/interface stage wrapper:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface"`
+  passed `38/38`, including the WebGPU pressure stage summary fields.
+- Worker regression:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `4/4`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser authority-host regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-retained-buffer-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, two captured frames per scenario, and
+  artifacts under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-retained-buffer-admission-20260615`.
+
+Prior pressure/interface WebGPU producer checks:
 
 - Pressure/interface WebGPU producer:
   `node --test tests/sphPressureInterfaceGpuKernel.test.mjs` passed `2/2`.

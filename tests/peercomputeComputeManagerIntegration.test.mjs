@@ -3211,6 +3211,12 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
     workerRetainedPressureBufferRefCount: 1,
     retainedPressureBufferRefs: ['pressure-interface-force-rows-buffer'],
     pressureInterfaceForceRowCount: 2,
+    pressureInterfaceForceRowStrideFloats: 16,
+    pressureInterfaceForceRowByteLength: 128,
+    pressureInterfaceForceRowsBufferByteLength: 128,
+    pressureInterfaceForceRowsBufferRetained: true,
+    pressureInterfaceBufferResidency: 'worker-lane-gpu-buffer-retained',
+    pressureInterfaceConsumerAccessProtocol: 'same-worker-lane-retained-buffer-ref',
     outputFamilies: ['pressure-interface-force-rows']
   };
   const workerRunner = { id: 'test-pressure-interface-worker-runner' };
@@ -3228,11 +3234,19 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(publication.sourceStage, 'pressureInterface');
   assert.deepEqual(publication.outputFamilies, candidate.outputFamilies);
   assert.equal(publication.pressureInterfaceForceRowCount, 2);
+  assert.equal(publication.pressureInterfaceForceRowStrideFloats, 16);
+  assert.equal(publication.pressureInterfaceForceRowByteLength, 128);
+  assert.equal(publication.pressureInterfaceForceRowsBufferByteLength, 128);
+  assert.equal(publication.pressureInterfaceForceRowsBufferRetained, true);
+  assert.equal(publication.bufferResidency, 'worker-lane-gpu-buffer-retained');
+  assert.equal(publication.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(publication.gridForceApplicationApproved, false);
   assert.deepEqual(publication.workerRetainedPressureBufferRefs, candidate.workerRetainedPressureBufferRefs);
   assert.deepEqual(publication.retainedPressureBufferRefs, candidate.retainedPressureBufferRefs);
   assert.equal(publication.workerRetainedBufferImport.schema, ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA);
   assert.equal(publication.workerRetainedBufferImport.copyMode, 'zero-copy-worker-retained-ref-descriptor');
+  assert.equal(publication.workerRetainedBufferImport.bufferResidency, 'worker-lane-gpu-buffer-retained');
+  assert.equal(publication.workerRetainedBufferImport.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(publication.workerRetainedBufferImport.gridForceApplicationApproved, false);
 
   const hotRecord = host.stateManager.getHotBuffer(publication.hotBufferKey);
@@ -3242,6 +3256,9 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(hotRecord.sourceStage, 'pressureInterface');
   assert.deepEqual(hotRecord.workerRetainedPressureBufferRefs, candidate.workerRetainedPressureBufferRefs);
   assert.deepEqual(hotRecord.retainedPressureBufferRefs, candidate.retainedPressureBufferRefs);
+  assert.equal(hotRecord.pressureInterfaceForceRowsBufferByteLength, 128);
+  assert.equal(hotRecord.bufferResidency, 'worker-lane-gpu-buffer-retained');
+  assert.equal(hotRecord.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
 
   const warmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-pressure-interface-publications');
   const warmDelta = warmDeltas[publication.commitDeltaTaskId];
@@ -3250,6 +3267,10 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
   assert.equal(warmDelta.payload.workerLocal, true);
   assert.equal(warmDelta.payload.pressureInterfaceForceRowCount, 2);
+  assert.equal(warmDelta.payload.pressureInterfaceForceRowsBufferByteLength, 128);
+  assert.equal(warmDelta.payload.pressureInterfaceForceRowsBufferRetained, true);
+  assert.equal(warmDelta.payload.bufferResidency, 'worker-lane-gpu-buffer-retained');
+  assert.equal(warmDelta.payload.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(warmDelta.payload.gridForceApplicationApproved, false);
   assert.deepEqual(warmDelta.payload.outputFamilies, candidate.outputFamilies);
 });

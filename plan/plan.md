@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 02:05 AKDT: pressure/interface grid
+consumption now distinguishes retained GPU force-row buffers from CPU-readable
+force-row arrays. The WebGPU grid-update wrapper now requires the same
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+descriptor as the CPU/reference path before applying pressure rows, even when
+the force rows arrive as a same-worker retained `GPUBuffer`. Buffer-only
+submissions are labeled as submitted/unverified instead of pretending a zero
+CPU impulse was measured, and the pressure/interface publication descriptor now
+carries force-row stride, byte length, buffer residency, and same-lane consumer
+access protocol through StateManager hot and warm records. Next target: run
+the broader atomics/browser/visual gates for this slice, then continue reducing
+pressure/readback surfaces or move to the queued renderer z-buffer/draw-order
+blocker if visual evidence remains suspect.
+
 Current checkpoint, 2026-06-15 01:51 AKDT: pressure/interface force-row
 production now has its first WebGPU-resident producer path. ULG adds a
 dedicated pressure/interface WGSL kernel that packs material-interface element

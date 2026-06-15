@@ -1,9 +1,24 @@
 # Implementation Status
 
-Updated: 2026-06-15 pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-15 pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added retained-buffer pressure/interface admission evidence. The WebGPU grid
+  update now requires the admitted
+  `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+  descriptor before applying pressure/interface force rows, even when the rows
+  arrive as a same-lane retained `GPUBuffer`. Buffer-only no-full submissions
+  are reported as submitted/unverified retained-buffer work instead of as a
+  measured zero CPU impulse. Pressure/interface Worker publication descriptors
+  now carry force-row stride, byte length, retained-buffer residency, and
+  same-lane consumer protocol through StateManager hot records and warm deltas.
+  Focused validation passed syntax checks, `git diff --check`,
+  grid-update kernel unit `14/14`, resident-step unit `38/38`, resident-stage
+  Worker unit `4/4`, PeerCompute/ULG integration `13/13`, physics atomics `7`
+  with `1` expected skip, focused browser authority-host Playwright `1/1`, and
+  visual matrix `codex-pressure-retained-buffer-admission-20260615` `3/3` with
+  two captured frames per scenario.
 - Added the first WebGPU-resident pressure/interface force-row producer. The
   new WGSL kernel packs material-interface element rows and writes the same
   16-float pressure force-row ABI as the CPU oracle. The pressure stage now

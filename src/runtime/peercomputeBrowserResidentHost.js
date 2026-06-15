@@ -2051,6 +2051,23 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     lease
   });
   const forceRowCount = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceForceRowCount, 0)));
+  const forceRowStrideFloats = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceForceRowStrideFloats, 0)));
+  const forceRowByteLength = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceForceRowByteLength, 0)));
+  const forceRowsBufferByteLength = Math.max(0, Math.trunc(finiteSeedNumber(
+    candidate.pressureInterfaceForceRowsBufferByteLength,
+    forceRowByteLength
+  )));
+  const forceRowsBufferRetained = candidate.pressureInterfaceForceRowsBufferRetained === true
+    || forceRowsBufferByteLength > 0
+    || workerRetainedBufferRefs.length > 0;
+  const bufferResidency = normalizeString(
+    candidate.pressureInterfaceBufferResidency,
+    forceRowsBufferRetained ? 'worker-lane-gpu-buffer-retained' : 'cloneable-force-row-array'
+  );
+  const consumerAccessProtocol = normalizeString(
+    candidate.pressureInterfaceConsumerAccessProtocol,
+    forceRowsBufferRetained ? 'same-worker-lane-retained-buffer-ref' : 'cloneable-force-row-array'
+  );
   const committedAt = Date.now();
   const workerRetainedBufferImport = {
     schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
@@ -2072,7 +2089,13 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     retainedPressureBufferRefs,
     localBufferRefs: [],
     copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    bufferResidency,
+    consumerAccessProtocol,
     pressureInterfaceForceRowCount: forceRowCount,
+    pressureInterfaceForceRowStrideFloats: forceRowStrideFloats,
+    pressureInterfaceForceRowByteLength: forceRowByteLength,
+    pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
+    pressureInterfaceForceRowsBufferRetained: forceRowsBufferRetained,
     stateManagerAdmissionRequired: true,
     gridForceApplicationApproved: false
   };
@@ -2098,7 +2121,13 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     retainedPressureBufferRefs,
     retainedBufferRefs: workerRetainedBufferImport.retainedBufferRefs,
     localBufferRefs: [],
+    bufferResidency,
+    consumerAccessProtocol,
     pressureInterfaceForceRowCount: forceRowCount,
+    pressureInterfaceForceRowStrideFloats: forceRowStrideFloats,
+    pressureInterfaceForceRowByteLength: forceRowByteLength,
+    pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
+    pressureInterfaceForceRowsBufferRetained: forceRowsBufferRetained,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport
   };
@@ -2129,7 +2158,13 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     workerRetainedBufferRefs,
     workerRetainedPressureBufferRefs: workerRetainedBufferImport.workerRetainedPressureBufferRefs,
     retainedPressureBufferRefs,
+    bufferResidency,
+    consumerAccessProtocol,
     pressureInterfaceForceRowCount: forceRowCount,
+    pressureInterfaceForceRowStrideFloats: forceRowStrideFloats,
+    pressureInterfaceForceRowByteLength: forceRowByteLength,
+    pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
+    pressureInterfaceForceRowsBufferRetained: forceRowsBufferRetained,
     outputFamilies: uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']),
     gridForceApplicationApproved: false,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),

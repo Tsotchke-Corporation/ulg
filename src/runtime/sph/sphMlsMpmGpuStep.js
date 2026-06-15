@@ -4168,7 +4168,10 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     forceRowStrideFloats: finiteNumber(pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     forceRowByteLength: pressureResult?.forceRowByteLength ?? forceRowValues.byteLength,
     forceRowValues,
-    pressureInterfaceForceRowsRetained: pressureResult?.pressureInterfaceForceRowsRetained === true || forceRowValues.byteLength > 0
+    pressureInterfaceForceRowsRetained: pressureResult?.pressureInterfaceForceRowsRetained === true || forceRowValues.byteLength > 0,
+    pressureInterfaceForceRowsBufferByteLength: pressureResult?.forceRowsBufferByteLength ?? pressureResult?.forceRowByteLength ?? forceRowValues.byteLength,
+    pressureInterfaceForceRowsBufferRetained: Boolean(pressureResult?.forceRowsBuffer || pressureResult?.pressureInterfaceForceRowsBuffer)
+      || pressureInterfaceForceSolver?.forceRowsBufferRetained === true
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);
@@ -4986,7 +4989,12 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     pressureInterfaceAuthoritativeMutation: result?.pressureInterfaceStageTaskAuthority?.authoritativeStateMutation ?? null,
     pressureInterfaceForceSolverStatus: result?.pressureInterfaceForceSolver?.status || result?.pressureInterfaceForceSolverStatus || null,
     pressureInterfaceForceRowCount: finiteNumber(result?.forceRowCount ?? result?.pressureInterfaceForceSolver?.forceRowCount, 0),
+    pressureInterfaceForceRowStrideFloats: finiteNumber(result?.forceRowStrideFloats ?? result?.pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
+    pressureInterfaceForceRowByteLength: finiteNumber(result?.forceRowByteLength ?? result?.pressureInterfaceForceSolver?.forceRowByteLength, 0),
+    pressureInterfaceForceRowsBufferByteLength: finiteNumber(result?.forceRowsBufferByteLength ?? result?.forceRowByteLength, 0),
     pressureInterfaceForceRowsRetained: result?.pressureInterfaceForceRowsRetained === true || (result?.forceRowByteLength ?? 0) > 0,
+    pressureInterfaceForceRowsBufferRetained: Boolean(result?.forceRowsBuffer || result?.pressureInterfaceForceRowsBuffer)
+      || result?.pressureInterfaceForceSolver?.forceRowsBufferRetained === true,
     pressureInterfaceGridForceAdmissionStatus: result?.pressureInterfaceGridForceAdmissionStatus || null,
     pressureInterfaceGridForceAdmissionApproved: result?.pressureInterfaceGridForceAdmissionApproved ?? false,
     pressureInterfaceGridForceAdmissionSourceHotBufferKey: result?.pressureInterfaceGridForceAdmissionSourceHotBufferKey || null,
@@ -5167,6 +5175,9 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   );
   const hasPressureRef = workerRetainedPressureBufferRefs.length > 0 || retainedPressureBufferRefs.length > 0;
   const forceRowCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowCount, 0));
+  const forceRowStrideFloats = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS));
+  const forceRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowByteLength, 0));
+  const forceRowsBufferByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowsBufferByteLength, forceRowByteLength));
   const forceRowsRetainedOrEmpty = hasPressureRef || forceRowCount === 0;
   const backend = pressureSummary.backend || null;
   const readbackMode = pressureSummary.readbackMode || null;
@@ -5228,7 +5239,17 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     pressureInterfaceAuthoritativeMutation: pressureSummary.pressureInterfaceAuthoritativeMutation ?? null,
     pressureInterfaceForceSolverStatus: solverStatus,
     pressureInterfaceForceRowCount: forceRowCount,
+    pressureInterfaceForceRowStrideFloats: forceRowStrideFloats,
+    pressureInterfaceForceRowByteLength: forceRowByteLength,
+    pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
     pressureInterfaceForceRowsRetained: pressureSummary.pressureInterfaceForceRowsRetained === true,
+    pressureInterfaceForceRowsBufferRetained: pressureSummary.pressureInterfaceForceRowsBufferRetained === true,
+    pressureInterfaceBufferResidency: backend === 'webgpu'
+      ? 'worker-lane-gpu-buffer-retained'
+      : 'cpu-reference-force-row-array',
+    pressureInterfaceConsumerAccessProtocol: backend === 'webgpu'
+      ? 'same-worker-lane-retained-buffer-ref'
+      : 'cloneable-force-row-array',
     retainedBufferRefs,
     retainedPressureBufferRefs,
     workerRetainedBufferRefs,

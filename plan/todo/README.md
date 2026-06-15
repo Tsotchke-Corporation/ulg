@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 02:05 AKDT: grid-update pressure/interface
+consumption now treats retained GPU force-row buffers as first-class submitted
+work instead of collapsing missing CPU rows into zero impulse evidence. The
+WebGPU grid-update wrapper requires the same admitted grid-force descriptor as
+the CPU path, records retained-buffer submissions as unverified no-full GPU
+work, and the pressure/interface StateManager publication records stride,
+byte length, buffer residency, and same-lane consumer protocol. Next priority:
+finish broad validation for this slice, then continue pressure/readback
+copy-reduction or take the queued z-buffer/draw-order renderer blocker if the
+visual harness cannot be trusted.
+
 Current routing note, 2026-06-15 01:51 AKDT: the pressure/interface force-row
 producer now has a WebGPU-resident path. The new WGSL kernel consumes packed
 material-interface elements, writes the same 16-float pressure force-row ABI

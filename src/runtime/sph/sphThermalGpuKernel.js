@@ -1488,6 +1488,21 @@ export function compareSphThermalStepParity(cpuResult, gpuResult, { tolerance = 
   };
 }
 
+function createNoFullReadbackThermalParityReport(tolerance = 2e-3) {
+  return {
+    schema: ULG_SPH_GPU_THERMAL_STEP_PARITY_SCHEMA,
+    status: 'not-run-no-full-readback',
+    reason: 'Full thermal state/thermo readback and CPU parity were skipped for resident WebGPU execution',
+    maxStateAbs: null,
+    maxThermoAbs: null,
+    tolerance,
+    scientificValidation: false,
+    materialValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
 export async function runSphThermalStepWithOptionalWebGpu({
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
@@ -1497,14 +1512,20 @@ export async function runSphThermalStepWithOptionalWebGpu({
   parityTolerance = 2e-3,
   ...args
 } = {}) {
-  const cpuReference = runSphThermalStepCpu(args);
+  const noFullReadback = args.readbackMode === NO_FULL_READBACK_MODE;
+  let cpuReference = null;
+  const getCpuReference = () => {
+    if (!cpuReference) cpuReference = runSphThermalStepCpu(args);
+    return cpuReference;
+  };
   if (!preferWebGpu) {
+    const reference = getCpuReference();
     return {
       schema: ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'cpu-reference',
-      cpuReference,
-      result: cpuReference,
+      cpuReference: reference,
+      result: reference,
       webgpuStatus: { status: 'not-requested' },
       scientificValidation: false,
       materialValidation: false,
@@ -1514,12 +1535,13 @@ export async function runSphThermalStepWithOptionalWebGpu({
   }
   const resolvedDevice = device || deviceResult?.device || navigatorRef?.gpu?.device || null;
   if (!resolvedDevice) {
+    const reference = getCpuReference();
     return {
       schema: ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'webgpu-unavailable-cpu-reference',
-      cpuReference,
-      result: cpuReference,
+      cpuReference: reference,
+      result: reference,
       webgpuStatus: { status: 'fallback-cpu', reason: 'webgpu device unavailable' },
       scientificValidation: false,
       materialValidation: false,
@@ -1529,13 +1551,30 @@ export async function runSphThermalStepWithOptionalWebGpu({
   }
   try {
     const webgpu = await webGpuRunner({ ...args, device: resolvedDevice });
-    const parity = compareSphThermalStepParity(cpuReference, webgpu, { tolerance: parityTolerance });
+    if (noFullReadback) {
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'webgpu-accepted-no-full-readback',
+        cpuReference: null,
+        webgpu,
+        result: webgpu,
+        webgpuParity: createNoFullReadbackThermalParityReport(parityTolerance),
+        webgpuStatus: { status: 'webgpu-executed-no-full-readback' },
+        scientificValidation: false,
+        materialValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    const reference = getCpuReference();
+    const parity = compareSphThermalStepParity(reference, webgpu, { tolerance: parityTolerance });
     if (parity.status === 'pass') {
       return {
         schema: ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
         backend: 'webgpu',
         status: 'webgpu-accepted',
-        cpuReference,
+        cpuReference: reference,
         webgpu,
         result: webgpu,
         webgpuParity: parity,
@@ -1550,9 +1589,9 @@ export async function runSphThermalStepWithOptionalWebGpu({
       schema: ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'webgpu-parity-failed-cpu-reference',
-      cpuReference,
+      cpuReference: reference,
       webgpu,
-      result: cpuReference,
+      result: reference,
       webgpuParity: parity,
       webgpuStatus: { status: 'fallback-cpu', reason: 'thermal parity failed' },
       scientificValidation: false,
@@ -1561,12 +1600,13 @@ export async function runSphThermalStepWithOptionalWebGpu({
       fullPhysicsValidation: false
     };
   } catch (error) {
+    const reference = getCpuReference();
     return {
       schema: ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'webgpu-error-cpu-reference',
-      cpuReference,
-      result: cpuReference,
+      cpuReference: reference,
+      result: reference,
       webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
       scientificValidation: false,
       materialValidation: false,

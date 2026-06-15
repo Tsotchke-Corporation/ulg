@@ -421,6 +421,47 @@ test('SPH thermal optional WebGPU accepts parity-passing thermal runner', async 
   assert.equal(execution.phaseChangeValidation, false);
 });
 
+test('SPH thermal optional WebGPU accepts no-full retained output without CPU parity', async () => {
+  const packed = packedTwoWaterParticles();
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const execution = await runSphThermalStepWithOptionalWebGpu({
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    wallTemperaturesK: {},
+    boxDimsM: [5, 5, 5],
+    dtS: 1e-4,
+    wallRate: 0,
+    preferWebGpu: true,
+    device: {},
+    readbackMode: 'no-full-readback',
+    webGpuRunner(args) {
+      assert.equal(args.readbackMode, 'no-full-readback');
+      return {
+        ...runSphThermalStepCpu(args),
+        backend: 'webgpu',
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: { label: 'thermal-state-retained' },
+        thermoBuffer: { label: 'thermal-thermo-retained' },
+        retainedOutputParticleBuffers: true,
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        readbackMode: 'no-full-readback'
+      };
+    }
+  });
+
+  assert.equal(execution.schema, ULG_SPH_GPU_THERMAL_STEP_EXECUTION_SCHEMA);
+  assert.equal(execution.backend, 'webgpu');
+  assert.equal(execution.status, 'webgpu-accepted-no-full-readback');
+  assert.equal(execution.cpuReference, null);
+  assert.equal(execution.webgpuParity.status, 'not-run-no-full-readback');
+  assert.equal(execution.webgpuStatus.status, 'webgpu-executed-no-full-readback');
+  assert.equal(execution.result.stateBuffer.label, 'thermal-state-retained');
+  assert.equal(execution.result.thermoBuffer.label, 'thermal-thermo-retained');
+  assert.equal(execution.result.normalHotLoopReadbackFree, true);
+});
+
 test('SPH thermal parity rejects state or thermo drift', () => {
   const packed = packedTwoWaterParticles();
   const table = buildSphThermalMaterialTable(materialProperties);

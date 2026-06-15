@@ -35,15 +35,24 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 23:01 AKDT: the focused browser authority
+gate now runs `thermalPhase` on the same warm Worker/lane after the mechanics
+Worker continuation. The Worker consumes its retained G2P state and retained
+thermo source, builds/uploads thermal response graph buffers inside the Worker
+from cloneable scene tables, runs no-full WebGPU thermal execution, waits on
+the Worker queue fence, and adopts the emitted retained `thermoBuffer` into
+the lane record. This proves the first real browser Worker thermal stage path.
+Next priority: fold this into the formal GPUHub stage-plan DAG instead of
+calling the Worker directly from the test, then publish/admit thermal retained
+outputs through NodeKernel/StateManager.
+
 Current routing note, 2026-06-14 22:50 AKDT: the resident-stage Worker module
 now accepts a `thermalPhase` stage id. It can run
 `runSphThermalPhaseStageComputeTask()`, receive retained state/thermo inputs,
 return retained state/thermo outputs, and adopt the emitted `thermoBuffer` into
 the Worker lane record. Direct Worker-payload coverage proves this stage shape
-with an injected thermal runner. This is still not live browser thermal Worker
-execution; next wire the GPUHub resident-stage registration so thermal/phase
-follows the same warm Worker/lane path as mechanics and consumes the real
-Worker-retained G2P output.
+with an injected thermal runner. Superseded by the 23:01 live browser Worker
+thermal stage gate above.
 
 Current routing note, 2026-06-14 22:42 AKDT: the first thermal/phase
 ComputeManager stage-task boundary now exists. ULG exposes
@@ -76,13 +85,14 @@ G2P state/mechanics buffers through the Worker-local lane record instead of
 requiring those hot arrays to return through main. Superseded by the 22:32
 retained-thermo input slice above.
 
-Renderer blocker note, 2026-06-14 22:18 AKDT: user again reports major
-z-buffer/draw-order problems. Keep this as an explicit renderer P0/P1 before
-claiming visual correctness. Audit transparent fluid depth-write/test policy,
-opaque/transparent pass separation, surface sorting for nested fluids/solids,
-container/grid overlay ordering, and the flash/disappear/focus-change symptom.
-Add a close-spaced browser visual regression that catches draw-order flicker
-and vanished volumes independently from physics-state acceptance.
+Renderer blocker note, 2026-06-14 22:18 AKDT; reiterated 2026-06-14 23:08
+AKDT: user again reports major z-buffer/draw-order problems. Keep this as an
+explicit renderer P0/P1 before claiming visual correctness. Audit transparent
+fluid depth-write/test policy, opaque/transparent pass separation, surface
+sorting for nested fluids/solids, container/grid overlay ordering, and the
+flash/disappear/focus-change symptom. Add a close-spaced browser visual
+regression that catches draw-order flicker and vanished volumes independently
+from physics-state acceptance.
 
 Current routing note, 2026-06-14 22:06 AKDT: the Worker-retained mechanics
 stage output now has an admitted publication path. The browser authority host

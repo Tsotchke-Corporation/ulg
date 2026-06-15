@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Worker Thermal/Phase Stage Support
+## Current Focused Result - 2026-06-14 Browser Worker Thermal/Phase Stage
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -13,9 +13,25 @@ P2G/G2P in both the first stage chain and the continuation.
 The latest unit slice adds the first ComputeManager thermal/phase child stage
 task boundary for the next law-family promotion.
 The Worker module now also accepts a `thermalPhase` stage id and can adopt
-retained thermo output into the Worker lane.
+retained thermo output into the Worker lane. The focused browser gate now runs
+that `thermalPhase` stage on the same warm Worker/lane after mechanics
+continuation.
 Focused checks:
 
+- Browser Worker thermal/phase stage:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`. The gate now keeps the mechanics Worker warm, runs the
+  retained mechanics continuation, then calls the same Worker runner with
+  `stage.id="thermalPhase"` and cloneable scene thermal tables. Assertions
+  prove the Worker thermal stage reports `webgpu`,
+  `webgpu-accepted-no-full-readback`, `no-full-readback`, queue fence
+  satisfied, retained thermo input applied, retained thermo output adopted,
+  task evidence passed, and no authoritative mutation.
+- SPH thermal no-full acceptance:
+  `node --test tests/sphThermalGpuKernel.test.mjs --test-name-pattern "no-full retained output"`
+  reported `11/11`. The new case asserts
+  `runSphThermalStepWithOptionalWebGpu()` accepts no-full retained WebGPU
+  output without CPU parity against stale mirrors.
 - ULG resident-stage Worker thermal/phase support:
   `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `2/2`.
   The new thermal case runs `thermalPhase` through
@@ -143,6 +159,8 @@ Focused checks:
   `codex-thermal-phase-stage-task-20260614` passed `3/3`.
   The Worker thermal/phase stage support matrix
   `codex-worker-thermal-phase-stage-support-20260614` passed `3/3`.
+  The browser Worker thermal/phase stage matrix
+  `codex-browser-worker-thermal-phase-stage-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

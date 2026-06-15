@@ -202,6 +202,15 @@ thermal table inputs. This keeps the architecture aligned: same Worker/lane,
 same ComputeManager/GPUHub authority, no main-thread GPU handle transfer, and
 no independent thermal scheduler.
 
+Status update, 2026-06-14 browser Worker thermal/phase stage: the focused
+browser authority-host gate now proves real Worker WebGPU thermal execution
+after same-Worker mechanics continuation. Thermal tables are sent as cloneable
+closure data, response graph GPU buffers are uploaded inside the Worker, and
+thermal no-full retained output is accepted without stale CPU parity. The next
+architecture move is to make this a formal GPUHub stage-plan node and publish
+the retained thermal output through NodeKernel/StateManager rather than only
+asserting it in the browser gate.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

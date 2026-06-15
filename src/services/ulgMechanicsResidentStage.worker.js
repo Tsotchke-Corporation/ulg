@@ -478,6 +478,13 @@ function stageDataForPayload(payload = {}, record) {
   const data = baseStageData(payload);
   if (stageId === 'gridUpdate') {
     data.p2gGridProjection = record.stageResults.p2g || payload.input;
+    const pressureInterfaceOutput = record.stageResults.pressureInterface || null;
+    if (pressureInterfaceOutput?.forceRowsBuffer) {
+      data.pressureInterfaceForceRowsBuffer = pressureInterfaceOutput.forceRowsBuffer;
+    }
+    if (!data.pressureInterfaceForceSolver && pressureInterfaceOutput?.pressureInterfaceForceSolver) {
+      data.pressureInterfaceForceSolver = pressureInterfaceOutput.pressureInterfaceForceSolver;
+    }
   }
   if (stageId === 'g2p') {
     data.gridUpdate = record.stageResults.gridUpdate || payload.input;

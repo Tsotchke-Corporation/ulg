@@ -1904,6 +1904,96 @@ test('SPH pressure interface stage compute task declares retained force-row outp
   assert.equal(result.pressureInterfaceStageTaskAuthority.commitDeltaSuppressed, true);
 });
 
+test('SPH pressure interface stage compute task can produce force rows with WebGPU', async () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normal: [1, 0, 0],
+        normalAreaVectorM2: [1, 0, 0]
+      },
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normal: [-1, 0, 0],
+        normalAreaVectorM2: [-1, 0, 0]
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'synthetic-pressure',
+    totalPressurePa: 120000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {},
+    strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+  };
+  const device = fakeSummaryDevice(new Float32Array(2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length));
+  const result = await runSphPressureInterfaceStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    computeTaskId: 'ulg:test:pressure-interface-stage-webgpu',
+    preferWebGpu: true,
+    readbackMode: 'full-parity-readback',
+    device,
+    gpuFenceRequirement: {
+      schema: 'peercompute.compute.gpu-fence-requirement.v0',
+      required: true,
+      laneId: 'ulg:test:pressure-interface-lane',
+      stateKey: 'ulg:test:pressure-interface-state'
+    },
+    gasPressureSummary,
+    materialInterfaceField,
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+
+  assert.equal(result.computeTaskResultSchema, ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.webgpuStatus.status, 'webgpu-executed');
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.queueCompletionStatus, 'readback-map-completed');
+  assert.equal(result.queueCompletionMethod, 'mapAsync(readback-buffer)');
+  assert.equal(result.fullReadbackPerformed, true);
+  assert.equal(result.normalHotLoopReadbackFree, false);
+  assert.equal(result.forceRowCount, 2);
+  assert.equal(result.forceRowValues.length, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
+  assert.equal(result.forceRowsBuffer.label, 'ulg-sph-pressure-interface-force-rows-out');
+  assert.equal(result.forceRowsBufferByteLength, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(result.pressureInterfaceForceSolver.backend, 'webgpu');
+  assert.equal(result.pressureInterfaceForceSolver.status, 'pressure-interface-force-solver-ready');
+  assert.equal(result.pressureInterfaceStageTaskEvidence.passed, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.executionSource, 'sphPressureInterfaceForceRowsWebGpu');
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(device.dispatches.length > 0, true);
+  assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-elements-in'));
+  assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-force-params'));
+});
+
 test('SPH reaction product stage compute task declares retained product lane output without authority mutation', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

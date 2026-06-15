@@ -114,6 +114,13 @@ const CONTRACTS = [
     bytes: 80
   },
   {
+    file: 'src/runtime/sph/sphPressureInterfaceGpuKernel.js',
+    label: 'ulg-sph-pressure-interface-force-params',
+    factory: 'createPressureInterfaceParamsArray',
+    wgslStruct: 'PressureInterfaceParams',
+    bytes: 16
+  },
+  {
     file: 'src/runtime/sph/sphG2pGpuKernel.js',
     label: 'ulg-mls-mpm-g2p-params',
     factory: 'createParamsArray',

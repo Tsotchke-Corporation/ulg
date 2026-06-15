@@ -1,9 +1,23 @@
 # Implementation Status
 
-Updated: 2026-06-15 pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-15 pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added the first WebGPU-resident pressure/interface force-row producer. The
+  new WGSL kernel packs material-interface element rows and writes the same
+  16-float pressure force-row ABI as the CPU oracle. The pressure stage now
+  uses this producer when `preferWebGpu=true` and a device is available,
+  retains `forceRowsBuffer` for no-full Worker execution, and falls back to
+  the CPU solver when WebGPU is unavailable. The resident Worker now hands the
+  raw pressure row `GPUBuffer` from `pressureInterface` to `gridUpdate` on the
+  same lane. Validation passed syntax checks, `git diff --check`, WebGPU
+  producer unit `2/2`, WebGPU ABI guard `1/1`, resident-step units `38/38`,
+  resident-stage Worker unit `4/4`, PeerCompute/ULG integration `13/13`,
+  focused browser authority-host Playwright `1/1`, physics atomics `7` with
+  `1` expected skip, and visual matrix
+  `codex-pressure-interface-webgpu-producer-20260615` `3/3` with two captured
+  frames per scenario.
 - Added pressure/interface same-frame grid admission inside the
   ComputeManager/GPUHub stage-plan path. When `pressureInterface` immediately
   precedes `gridUpdate`, ULG now publishes the retained pressure force-row

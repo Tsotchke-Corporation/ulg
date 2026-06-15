@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 01:51 AKDT: the pressure/interface force-row
+producer now has a WebGPU-resident path. The new WGSL kernel consumes packed
+material-interface elements, writes the same 16-float pressure force-row ABI
+as the CPU oracle, and retains the output `forceRowsBuffer` for no-full
+Worker execution. The resident Worker now passes the raw retained pressure
+row buffer from `pressureInterface` to `gridUpdate` on the same lane; the
+same-frame admitted descriptor remains required before grid consumption. Next
+priority: reduce remaining pressure publication/consumption copies and
+readback surfaces, then schedule the queued renderer z-buffer/draw-order pass.
+
 Current routing note, 2026-06-15 01:33 AKDT: same-frame intra-DAG
 pressure/interface publication and grid-update admission are complete for the
 ComputeManager/GPUHub stage-plan path. With

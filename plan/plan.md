@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 01:51 AKDT: pressure/interface force-row
+production now has its first WebGPU-resident producer path. ULG adds a
+dedicated pressure/interface WGSL kernel that packs material-interface element
+rows and dispatches one force-row output per interface element using the same
+first-principles uniform-gas-pressure times normal-area law as the CPU oracle.
+`runSphPressureInterfaceStageComputeTask()` now uses this WebGPU producer when
+`preferWebGpu=true` and a device is available, retaining
+`forceRowsBuffer` for no-full hot-loop execution and falling back to the CPU
+solver when WebGPU is unavailable. The resident Worker hands the raw retained
+pressure force-row buffer from `pressureInterface` to `gridUpdate` on the same
+lane, while same-frame StateManager admission remains the authority gate for
+grid consumption. Next target: keep reducing readback/copy surfaces between
+pressure production, publication, and grid consumption, then address the
+queued renderer z-buffer/draw-order blocker before treating browser surfaces
+as final visual truth.
+
 Current checkpoint, 2026-06-15 01:33 AKDT: same-frame pressure/interface
 force-row publication and grid-update admission now work inside the
 ComputeManager/GPUHub stage-plan DAG. When `pressureInterface` runs

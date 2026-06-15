@@ -4685,6 +4685,46 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const sphPressureInterfaceForceRowsWgsl = `
+struct PressureInterfaceParams {
+  element_count: u32,
+  pressure_pa: f32,
+  pad0: f32,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read_write> pressure_force_rows: array<vec4<f32>>;
+@group(0) @binding(2) var<uniform> params: PressureInterfaceParams;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let element_index = global_id.x;
+  if (element_index >= params.element_count) {
+    return;
+  }
+
+  let row0 = interface_elements[element_index * 4u];
+  let row1 = interface_elements[element_index * 4u + 1u];
+  let row2 = interface_elements[element_index * 4u + 2u];
+  let row3 = interface_elements[element_index * 4u + 3u];
+  let area = row1.w;
+  let status = row3.w;
+  var normal_area = vec3<f32>(row2.w, row3.x, row3.y);
+  if (dot(normal_area, normal_area) <= 1.0e-24) {
+    normal_area = row2.xyz * area;
+  }
+  let ready = select(0.0, 1.0, status > 0.0 && area > 0.0 && params.pressure_pa >= 0.0);
+  let material_force = -params.pressure_pa * normal_area * ready;
+  let gas_reaction_force = -material_force;
+
+  pressure_force_rows[element_index * 4u] = row0;
+  pressure_force_rows[element_index * 4u + 1u] = vec4<f32>(row1.xyz, area);
+  pressure_force_rows[element_index * 4u + 2u] = vec4<f32>(material_force, gas_reaction_force.x);
+  pressure_force_rows[element_index * 4u + 3u] = vec4<f32>(gas_reaction_force.y, gas_reaction_force.z, params.pressure_pa, ready);
+}
+`;
+
 export const mlsMpmG2pReconstructWgsl = `
 struct G2pParams {
   particle_count: u32,

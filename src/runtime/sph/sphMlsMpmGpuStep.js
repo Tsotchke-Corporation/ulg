@@ -40,6 +40,7 @@ import {
   SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
   runMlsMpmGridUpdateWithOptionalWebGpu
 } from './sphGridUpdateGpuKernel.js';
+import { runSphPressureInterfaceForceRowsWebGpu } from './sphPressureInterfaceGpuKernel.js';
 import { runMlsMpmG2pWithOptionalWebGpu } from './sphG2pGpuKernel.js';
 import {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
@@ -3891,7 +3892,7 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-pressure-interface-force-law',
     solverId: lawGraphNode?.solverId || 'ulg-sph-pressure-interface-stage',
     stageId: PRESSURE_INTERFACE_STAGE_ID,
-    executionSource: 'gasPressureInterfaceForceSolver',
+    executionSource: pressureResult?.executionSource || 'gasPressureInterfaceForceSolver',
     backend: pressureResult?.backend || null,
     acceptedBackend,
     executionStatus: pressureResult?.status || null,
@@ -4077,6 +4078,7 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     expectedOutputFamilies = [],
     pressureInterfaceStageTask = true,
     pressureInterfaceForceSolverRunner = gasPressureInterfaceForceSolver,
+    pressureInterfaceForceRowsWebGpuRunner = runSphPressureInterfaceForceRowsWebGpu,
     ...stageOptions
   } = data || {};
   const pressureFeedback = stageOptions.pressureFeedback || gasPressureFeedbackSummary({
@@ -4094,7 +4096,52 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     materialInterfaceField: stageOptions.materialInterfaceField || null,
     pressureInterfaceCoupling
   });
-  const pressureInterfaceForceSolver = await pressureInterfaceForceSolverRunner({
+  let pressureResult = null;
+  let webgpuStatus = null;
+  if (
+    stageOptions.preferWebGpu === true
+    && typeof pressureInterfaceForceRowsWebGpuRunner === 'function'
+  ) {
+    let deviceResult = stageOptions.deviceResult || null;
+    if (!deviceResult?.device && stageOptions.device?.createBuffer) {
+      deviceResult = { status: 'webgpu-ready-supplied-device', device: stageOptions.device };
+    }
+    if (!deviceResult?.device && (stageOptions.navigatorRef || globalThis.navigator)) {
+      deviceResult = await requestOpticalGpuDevice(stageOptions.navigatorRef || globalThis.navigator);
+    }
+    if (deviceResult?.device?.createBuffer && deviceResult.device.queue?.writeBuffer) {
+      try {
+        pressureResult = await pressureInterfaceForceRowsWebGpuRunner({
+          device: deviceResult.device,
+          pressureFeedback,
+          pressureInterfaceCoupling,
+          pressureInterfaceForcePreview,
+          materialInterfaceField: stageOptions.materialInterfaceField || null,
+          retainForceRowsBuffer: stageOptions.retainForceRowsBuffer !== false,
+          readbackMode: stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
+        });
+        webgpuStatus = {
+          status: 'webgpu-executed',
+          fallback: null,
+          deviceStatus: deviceResult.status || null
+        };
+      } catch (error) {
+        webgpuStatus = {
+          status: 'webgpu-failed',
+          fallback: 'cpu-reference',
+          reason: error?.message || String(error)
+        };
+        pressureResult = null;
+      }
+    } else {
+      webgpuStatus = {
+        status: 'blocked-webgpu-unavailable',
+        fallback: 'cpu-reference',
+        reason: deviceResult?.reason || deviceResult?.status || 'webgpu-device-unavailable'
+      };
+    }
+  }
+  const pressureInterfaceForceSolver = pressureResult?.pressureInterfaceForceSolver || await pressureInterfaceForceSolverRunner({
     pressureFeedback,
     materialInterfaceField: stageOptions.materialInterfaceField || null,
     pressureInterfaceCoupling
@@ -4102,24 +4149,26 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
   const forceRowValues = pressureInterfaceForceSolver?.forceRowValues instanceof Float32Array
     ? pressureInterfaceForceSolver.forceRowValues
     : new Float32Array(0);
-  const pressureResult = {
+  pressureResult = {
     schema: ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
-    backend: 'cpu-reference',
+    ...(pressureResult || {}),
+    backend: pressureResult?.backend || 'cpu-reference',
     status: pressureInterfaceForceSolver?.status === 'pressure-interface-force-solver-ready'
       ? 'pressure-interface-stage-solver-ready'
       : 'pressure-interface-stage-solver-blocked',
     readbackMode: stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
-    fullReadbackPerformed: false,
-    normalHotLoopReadbackFree: true,
+    fullReadbackPerformed: pressureResult?.fullReadbackPerformed === true,
+    normalHotLoopReadbackFree: pressureResult?.normalHotLoopReadbackFree ?? true,
+    webgpuStatus,
     pressureFeedback,
     pressureInterfaceCoupling,
     pressureInterfaceForcePreview,
     pressureInterfaceForceSolver,
     forceRowCount: finiteNumber(pressureInterfaceForceSolver?.forceRowCount, 0),
     forceRowStrideFloats: finiteNumber(pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
-    forceRowByteLength: forceRowValues.byteLength,
+    forceRowByteLength: pressureResult?.forceRowByteLength ?? forceRowValues.byteLength,
     forceRowValues,
-    pressureInterfaceForceRowsRetained: forceRowValues.byteLength > 0
+    pressureInterfaceForceRowsRetained: pressureResult?.pressureInterfaceForceRowsRetained === true || forceRowValues.byteLength > 0
   };
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
   const gpuFence = createSphPressureInterfaceStageGpuFenceReport(pressureResult, fenceRequirement);
@@ -5820,7 +5869,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     ) {
       return {
         pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
-        pressureInterfaceGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission
+        pressureInterfaceGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission,
+        pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null
       };
     }
     const candidate = buildPressureInterfaceWorkerCompactPublicationCandidateFromStageValue({
@@ -5834,7 +5884,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     if (candidate?.candidateStatus !== 'worker-retained-pressure-interface-publication-candidate-ready') {
       return {
         pressureInterfaceForceSolver: null,
-        pressureInterfaceGridForceAdmission: null
+        pressureInterfaceGridForceAdmission: null,
+        pressureInterfaceForceRowsBuffer: null
       };
     }
     pressureInterfaceSameFrameWorkerCompactPublication = await gpuHubResidentPressureInterfaceStageWorkerOutputPublisher({
@@ -5858,7 +5909,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         pressureResult,
         pressureInterfaceSameFrameGridForceAdmission
       ),
-      pressureInterfaceGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission
+      pressureInterfaceGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission,
+      pressureInterfaceForceRowsBuffer: pressureResult.forceRowsBuffer || pressureResult.pressureInterfaceForceRowsBuffer || null
     };
   };
   const laneStageExecutors = {
@@ -5915,7 +5967,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         ? await publishSameFramePressureInterfaceForGridUpdate(input)
         : {
             pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
-            pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null
+            pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null,
+            pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null
           };
       const result = await submitStageTask('gridUpdate', createMlsMpmMechanicsGridUpdateStageComputeTask, {
         p2gGridProjection: stageResults.p2g,
@@ -5923,7 +5976,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         gravityMPerS2: gravity,
         boxDimsM: dims,
         cflFactor,
-        pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null,
+        pressureInterfaceForceRowsBuffer: sameFramePressure.pressureInterfaceForceRowsBuffer || stepOptions.pressureInterfaceForceRowsBuffer || null,
         pressureInterfaceForceSolver: sameFramePressure.pressureInterfaceForceSolver,
         pressureInterfaceGridForceAdmission: sameFramePressure.pressureInterfaceGridForceAdmission,
         laneId: laneStagePlanId,
@@ -6112,7 +6165,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 ? await publishSameFramePressureInterfaceForGridUpdate(args.input)
                 : {
                     pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
-                    pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null
+                    pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null,
+                    pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null
                   };
               const workerContext = args?.context?.ulgMechanicsResidentStageWorker || {};
               const nextContext = {
@@ -6124,7 +6178,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                     gridUpdate: {
                       ...(workerContext.stageOptions?.gridUpdate || {}),
                       pressureInterfaceForceSolver: sameFramePressure.pressureInterfaceForceSolver,
-                      pressureInterfaceGridForceAdmission: sameFramePressure.pressureInterfaceGridForceAdmission
+                      pressureInterfaceGridForceAdmission: sameFramePressure.pressureInterfaceGridForceAdmission,
+                      pressureInterfaceForceRowsBuffer: sameFramePressure.pressureInterfaceForceRowsBuffer || null
                     }
                   }
                 }

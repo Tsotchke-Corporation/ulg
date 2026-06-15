@@ -22151,3 +22151,82 @@ Open:
   WebGPU-resident execution under ComputeManager/GPUHub authority.
 - The renderer z-buffer/draw-order issue is queued as a visual correctness
   blocker and should not be confused with physics-law acceptance.
+
+## 2026-06-15 01:51 AKDT - Pressure/interface WebGPU force-row producer
+
+Prompt context:
+
+- Continued from the same-frame pressure admission checkpoint. The active todo
+  priority was moving the `pressureInterface` force-row producer away from
+  pure CPU-reference rows toward WebGPU-resident execution under
+  ComputeManager/GPUHub authority.
+
+Implemented:
+
+- Added `sphPressureInterfaceForceRowsWgsl` in `ulg-gpu-abi/src/wgsl.js`.
+  The shader consumes packed material-interface element rows and writes one
+  16-float pressure force-row ABI row per interface element.
+- Added `src/runtime/sph/sphPressureInterfaceGpuKernel.js` with
+  material-interface packing, fixed-size `PressureInterfaceParams`, WebGPU
+  dispatch, optional readback, CPU-side conservation summaries, and no-full
+  retained `forceRowsBuffer` output.
+- Updated `runSphPressureInterfaceStageComputeTask()` to use the WebGPU
+  producer when `preferWebGpu=true` and a usable WebGPU device is available.
+  The CPU solver remains the fallback and oracle path.
+- Threaded the produced `forceRowsBuffer` through same-frame grid-update
+  stage options.
+- Updated `src/services/ulgMechanicsResidentStage.worker.js` so `gridUpdate`
+  can consume the raw pressure force-row `GPUBuffer` retained by the prior
+  `pressureInterface` stage on the same Worker lane.
+- Added producer unit coverage and extended the WebGPU ABI guard for the new
+  pressure params uniform.
+
+Files touched:
+
+- `ulg-gpu-abi/src/wgsl.js`
+- `src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/webgpuKernelAbi.test.mjs`
+- ULG plan/todo/test/log/status/done documentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphPressureInterfaceGpuKernel.test.mjs`
+  reported `2/2`.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs` reported `1/1`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface"`
+  reported `38/38`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `4/4`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  reported `13/13`.
+- PASS: `git diff --check`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: `curl -k -I https://127.0.0.1:5173` returned HTTP/2 `200`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-webgpu-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-webgpu-producer-20260615`.
+
+Open:
+
+- The remaining pressure path still has descriptor publication/admission work
+  that can be made more buffer-native. The next useful slice is reducing
+  remaining pressure publication/consumption copies and readback surfaces while
+  keeping StateManager admission authoritative.
+- The renderer z-buffer/draw-order issue remains queued as a separate visual
+  correctness blocker.

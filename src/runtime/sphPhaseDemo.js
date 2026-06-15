@@ -1801,6 +1801,30 @@ export function gasPressureSummaryFromResidentReaction({
         : []);
   const residentGasSpecies = Object.values(pressureGasLedger?.bySpecies || {});
   if (residentGasRows.length > 0 || residentGasSpecies.length > 0) {
+    const residentProductMassEventGasRows = residentGasRowsFromProductEvents(residentProductMass, reactionTable);
+    const reactionSummaryEventGasRows = residentGasRowsFromProductEvents(reactionSummary, reactionTable);
+    const spatialProductEventGasRows = residentProductMassEventGasRows.length > 0
+      ? residentProductMassEventGasRows
+      : reactionSummaryEventGasRows;
+    const spatialGasSpeciesLedger = spatialProductEventGasRows.length > 0
+      ? spatialGasSpeciesLedgerFromProductEventRows(spatialProductEventGasRows, {
+          boxDimsM: baselineSummary?.boxDimsM || null,
+          source: residentProductMassGasLedger
+            ? 'gpu-resident-product-mass-product-event-spatial-ledger'
+            : 'gpu-resident-reaction-product-event-spatial-ledger',
+          retainedSpatialGasSourceBufferRefs: uniqueStringsFrom(
+            reactionSummary?.retainedProductBufferRefs,
+            residentProductMass?.retainedProductBufferRefs,
+            hasRetainedProductEventBuffer(reactionSummary) || hasRetainedProductEventBuffer(residentProductMass)
+              ? 'resident-product-mass-buffer'
+              : null
+          ),
+          workerRetainedSpatialGasSourceBufferRefs: uniqueStringsFrom(
+            reactionSummary?.workerRetainedProductBufferRefs,
+            residentProductMass?.workerRetainedProductBufferRefs
+          )
+        })
+      : null;
     const species = {};
     for (const [baselineMaterial, item] of Object.entries(baselineSummary?.bySpecies || {})) {
       addGasSpecies(species, baselineMaterial, {
@@ -1837,12 +1861,29 @@ export function gasPressureSummaryFromResidentReaction({
         source: pressureGasLedgerSource,
         fullParticleReadbackPerformed: false,
         baselineSummary,
-        residentLedger: reactionSummary || residentProductMass
+        residentLedger: reactionSummary || residentProductMass,
+        spatialGasSpeciesLedger
       }),
       residentGasSpeciesCount: residentGasSpecies.length || residentGasRows.length,
       residentGasSpeciesLedgerSource: pressureGasLedgerSource,
       residentProductMassStatus: residentProductMass?.status ?? null,
       residentProductMassGasSpeciesLedgerCount: residentProductMass?.gasSpeciesLedgerCount ?? null,
+      retainedSpatialGasSourceBufferRefs: spatialGasSpeciesLedger?.retainedSpatialGasSourceBufferRefs ?? [],
+      workerRetainedSpatialGasSourceBufferRefs: spatialGasSpeciesLedger?.workerRetainedSpatialGasSourceBufferRefs ?? [],
+      spatialGasSourceBufferRetained: spatialGasSpeciesLedger?.spatialGasSourceBufferRetained === true,
+      residentProductGasRows: spatialProductEventGasRows.map((row) => ({
+        material: row.material,
+        materialId: row.materialId,
+        massKg: row.massKg,
+        moles: row.moles,
+        visibleMassKg: row.visibleMassKg,
+        unplacedMassKg: row.unplacedMassKg,
+        positionM: row.positionM,
+        supportVolumeM3: row.supportVolumeM3,
+        productTermIndex: row.productTermIndex,
+        source: row.source
+      })),
+      residentSpatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger?.status ?? 'blocked-resident-spatial-gas-species-ledger-required',
       residentGasSpecies: (residentGasSpecies.length > 0 ? residentGasSpecies : residentGasRows).map((row) => ({
         material: row.material,
         materialId: row.materialId,

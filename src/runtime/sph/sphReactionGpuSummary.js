@@ -381,6 +381,22 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     productEventActiveEventCount: reactionSummary.productEventActiveEventCount ?? productEvents?.activeEventCount ?? 0,
     productEventStrideFloats: productEvents?.rowStrideFloats ?? SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
     productEventStrideBytes: productEvents?.rowStrideBytes ?? SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    productEvents: productEvents
+      ? {
+          ...productEvents,
+          records: Array.isArray(productEvents.records)
+            ? productEvents.records.map((record) => ({ ...record }))
+            : []
+        }
+      : null,
+    productInventory: productInventory
+      ? {
+          ...productInventory,
+          records: Array.isArray(productInventory.records)
+            ? productInventory.records.map((record) => ({ ...record }))
+            : []
+        }
+      : null,
     productInventorySchema: productInventory?.schema ?? null,
     productInventoryCount: reactionSummary.productInventoryCount ?? productInventory?.recordCount ?? 0,
     gasSpeciesLedgerSchema: gasSpeciesLedger?.schema ?? reactionSummary.gasSpeciesLedgerSchema ?? null,

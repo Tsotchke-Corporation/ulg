@@ -24054,3 +24054,104 @@ Open:
   fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
+
+## 2026-06-15 09:18 AKDT - Product-Event Spatial Ledger Source
+
+Prompt time/date: 2026-06-15 09:18 AKDT, continuing the active goal after the
+mounted no-snapshot gas-cell import guard.
+
+Actions:
+
+- Investigated why the mounted Na/H2O no-full path still blocked
+  `gasCellEosProducer` despite retained gas/product work.
+- Confirmed with a one-off browser probe that the live Na/H2O path has
+  `productEventRowCount=144` but `productEvents.records.length=0`; the
+  pressure summary therefore reports
+  `blocked-resident-spatial-gas-species-ledger-required`, producer request
+  reports `blocked-spatial-gas-species-ledger-required`, and mounted gas-cell
+  import reports `blocked-snapshot-gas-cell-import-disabled`.
+- Added preservation of compact `productEvents.records` and
+  `productInventory.records` to `createResidentProductMassHandle()` so
+  CPU/reference or compact-record resident product mass can carry positioned
+  product events into later pressure/EOS stages.
+- Extended `gasPressureSummaryFromResidentReaction()` so the preferred
+  resident product-mass gas-ledger branch can derive a spatial gas species
+  ledger from positioned resident product-event records. The aggregate
+  product-mass gas ledger remains the pressure source; the spatial records
+  only provide local gas-cell EOS geometry/source evidence.
+- Preferred resident product-mass product-event rows over reaction-summary rows
+  to avoid double-counting the same event records.
+- Added unit coverage for resident product-mass handle record preservation and
+  resident product-mass gas-ledger spatial pressure derivation.
+- Updated the mounted Na/H2O browser gate to assert the current no-full
+  blocker explicitly instead of silently treating aggregate gas pressure as
+  local gas-cell readiness.
+- Ran physics atomics and the representative visual sanity matrix.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added
+  `plan/done/product-event-spatial-ledger-source-2026-06-15.md`.
+
+Files touched:
+
+- `src/runtime/sph/sphReactionGpuSummary.js`
+- `src/runtime/sphPhaseDemo.js`
+- `tests/sphPhaseDemo.test.mjs`
+- `tests/sphReactionGpuSummary.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/product-event-spatial-ledger-source-2026-06-15.md`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check src/runtime/sph/sphReactionGpuSummary.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS: `node --check tests/sphReactionGpuSummary.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- Initial FAIL:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "spatial gas|resident product-mass gas ledger|resident positioned gas|resident reaction gas pressure"`
+  failed because the new unit test referenced `demo.materialProperties`
+  without creating a demo fixture.
+- PASS after the fixture fix:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "spatial gas|resident product-mass gas ledger|resident positioned gas|resident reaction gas pressure"`
+  reported `30/30`.
+- PASS:
+  `node --test tests/sphReactionGpuSummary.test.mjs --test-name-pattern "resident product mass handle|product event"`
+  reported `9/9`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "mounted resident Na/H2O promotes product gas pressure"`
+  reported `1/1` in `52.3s`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-product-event-spatial-ledger-source-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-product-event-spatial-ledger-source-20260615`.
+
+Manual frame inspection:
+
+- `liquid-liquid-h2o-mlsmpm` was nonblank and bounded but still fragmented into
+  many small surfaces.
+- `liquid-liquid-h2o-cpu-sph` was nonblank and bounded but still formed stacked
+  blob shapes.
+- `solid-h2o-cpu-sph` was nonblank and bounded but still formed stacked blob
+  shapes.
+
+Open:
+
+- The no-full hot path still needs a GPU/worker compact spatial-gas ledger
+  producer from retained product-event buffers. The current live browser gate
+  intentionally records the blocker rather than hiding it.
+- The gas-cell EOS derivation is still CPU/oracle logic plus WebGPU row upload;
+  a real WGSL EOS shader remains open.
+- The remaining physics behavior blockers are unchanged: MLS-MPM
+  fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
+  ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
+  pulsation/blinking, and renderer z-buffer/focus visual trust.

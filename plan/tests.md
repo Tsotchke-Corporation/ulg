@@ -1,5 +1,46 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Product-Event Spatial Ledger Source
+
+The current slice preserves compact positioned product-event records on
+resident product-mass handles and lets the preferred resident product-mass gas
+ledger pressure path derive a spatial gas species ledger from those records
+when they exist. It also updates the mounted Na/H2O browser gate to expose the
+remaining no-full blocker: retained product-event rows exist, but CPU-side
+event records are absent, so the spatial ledger and gas-cell EOS producer
+still fail closed in the no-full hot path.
+
+Focused checks:
+
+- Syntax and whitespace:
+  `git diff --check`,
+  `node --check src/runtime/sphPhaseDemo.js`,
+  `node --check src/runtime/sph/sphReactionGpuSummary.js`,
+  `node --check tests/sphPhaseDemo.test.mjs`,
+  `node --check tests/sphReactionGpuSummary.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Focused pressure coverage:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "spatial gas|resident product-mass gas ledger|resident positioned gas|resident reaction gas pressure"`
+  passed `30/30`.
+- Focused reaction-summary coverage:
+  `node --test tests/sphReactionGpuSummary.test.mjs --test-name-pattern "resident product mass handle|product event"`
+  passed `9/9`.
+- Mounted Na/H2O browser gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "mounted resident Na/H2O promotes product gas pressure"`
+  passed `1/1` in about `52s`; the gate now asserts product-event rows are
+  retained but event records are unavailable, spatial ledger is blocked, the
+  producer request is blocked, and snapshot gas-cell import is disabled.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-product-event-spatial-ledger-source-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]` under
+  `/tmp/ulg-visual-sanity-matrix/codex-product-event-spatial-ledger-source-20260615`.
+  Manual inspection found bounded nonblank frames, but MLS-MPM H2O remained
+  fragmented and CPU-SPH liquid/solid remained stacked/blob-shaped.
+
 ## Current Focused Result - 2026-06-15 Mounted No-Snapshot Gas-Cell Imports
 
 The current slice removes the mounted pressure-interface hot path's fallback

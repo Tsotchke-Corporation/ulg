@@ -16,6 +16,7 @@ import {
   decodeSphReactionProductEventValues,
   decodeSphReactionProductInventoryValues,
   decodeSphReactionSummaryValues,
+  createResidentProductMassHandle,
   reactionStrictGateFromSummary,
   runSphReactionSummaryWebGpu,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
@@ -356,6 +357,43 @@ test('SPH reaction product event decoder exposes sparse renderable product rows'
   assert.equal(events.sparseStorage, true);
   assert.equal(events.renderableProductStorage, true);
   assert.equal(events.fullParticleReadbackPerformed, false);
+});
+
+test('resident product mass handle preserves positioned product-event records', () => {
+  const reactionSummary = {
+    status: 'reaction-compact-summary-ready',
+    productEventBufferRetained: true,
+    productEventBuffer: { label: 'resident-product-events' },
+    productEventBufferByteLength: 128,
+    productEventRowCount: 1,
+    productEventActiveEventCount: 1,
+    productEvents: {
+      schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+      status: 'product-event-sparse-storage-ready',
+      records: [
+        {
+          status: 'ready',
+          material: 'h2',
+          materialId: 1,
+          routing: 'gas',
+          productTermIndex: 1,
+          massKg: 0.001,
+          moles: 0.5,
+          positionM: [0.5, 1, 1],
+          supportVolumeM3: 4
+        }
+      ]
+    }
+  };
+
+  const handle = createResidentProductMassHandle(reactionSummary);
+
+  assert.equal(handle.status, 'resident-product-mass-buffer-retained');
+  assert.equal(handle.productEvents.schema, ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA);
+  assert.equal(handle.productEvents.records.length, 1);
+  assert.deepEqual(handle.productEvents.records[0].positionM, [0.5, 1, 1]);
+  assert.equal(handle.productEvents.records[0].supportVolumeM3, 4);
+  assert.notEqual(handle.productEvents.records[0], reactionSummary.productEvents.records[0]);
 });
 
 test('SPH reaction atom residual decoder aggregates atom and charge parity rows', () => {

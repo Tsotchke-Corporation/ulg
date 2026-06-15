@@ -2,6 +2,29 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 09:18 AKDT: resident product-mass handles now
+preserve compact product-event and product-inventory records when those records
+exist, and `gasPressureSummaryFromResidentReaction()` can derive a spatial gas
+species ledger from positioned resident product-mass event records even when
+the aggregate resident product-mass gas ledger remains the preferred pressure
+source. This means CPU/reference or compact-record reaction paths can feed the
+resident `gasCellEosProducer` route without falling back to scene snapshots.
+The live no-full browser Na/H2O gate now records the remaining blocker
+explicitly: it has retained product-event rows (`144`) but no CPU event records
+(`0`), so spatial ledger status is still
+`blocked-resident-spatial-gas-species-ledger-required`,
+`gasCellEosProducer` request status is
+`blocked-spatial-gas-species-ledger-required`, and mounted gas-cell import
+status is `blocked-snapshot-gas-cell-import-disabled`. Validation passed
+syntax checks, focused pressure tests `30/30`, reaction summary tests `9/9`,
+the mounted Na/H2O browser gate `1/1`, physics atomics `7` with `1` expected
+opt-in skip, and visual matrix
+`codex-product-event-spatial-ledger-source-20260615` `3/3` with inspected
+frames. Next target: build a GPU/worker compact spatial-gas ledger producer
+from retained product-event buffers so no-full hot paths can produce
+`peercompute.ulg.sph-spatial-gas-species-ledger.v0` without product-event
+CPU readback.
+
 Current checkpoint, 2026-06-15 08:55 AKDT: the mounted resident pressure-
 interface hot path no longer publishes scene-derived gas-cell imports from
 `gasPressureSummary` snapshots. `publishScenePressureInterfaceGasCellFieldImportSource()`

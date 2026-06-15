@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 09:18 AKDT: resident product-mass handles now
+preserve positioned product-event records when records are available, and the
+preferred resident product-mass gas-ledger pressure path can derive a spatial
+gas species ledger from those records. This enables the gas-cell EOS producer
+route for compact-record/reference product-event paths without returning to
+scene snapshot imports. The live no-full Na/H2O browser gate still blocks
+correctly because it has retained product-event rows but zero CPU-side event
+records, so the next priority is a GPU/worker compact spatial-gas ledger
+producer from retained product-event buffers. That producer should emit
+`peercompute.ulg.sph-spatial-gas-species-ledger.v0` or an admitted retained
+descriptor without full product-event readback, then feed the existing
+`gasCellEosProducer` stage.
+
 Current routing note, 2026-06-15 08:55 AKDT: the mounted resident
 pressure-interface hot path no longer publishes gas-cell imports from
 `gasPressureSummary` snapshots. The helper keeps snapshot import compatibility

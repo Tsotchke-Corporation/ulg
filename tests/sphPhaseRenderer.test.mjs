@@ -979,6 +979,11 @@ test('SPH resident pressure interface state owns retained force rows outside ren
     bufferRetained: true,
     forceRowByteLength: 64,
     signature: 'solver-signature',
+    pressureInterfaceGridForceAdmissionSchema: 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0',
+    pressureInterfaceGridForceAdmissionStatus: 'pressure-interface-grid-force-consumption-approved',
+    pressureInterfaceGridForceAdmissionApproved: true,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: 'pressure-interface-worker-retained-hot-buffer-committed',
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: 'ulg:test:pressure-interface-admitted-hot-buffer',
     pressureInterfaceForceRowsUploadQueueCompletionStatus: 'ordered-before-consumer-queue-completed',
     pressureInterfaceForceRowsUploadQueueCompletionMethod: 'queue.writeBuffer -> queue.onSubmittedWorkDone',
     pressureInterfaceForceRowsConsumerQueueCompletionStatus: 'queue-work-completed',
@@ -1009,6 +1014,10 @@ test('SPH resident pressure interface state owns retained force rows outside ren
   assert.equal(state.pressureInterfaceSolverForceRowCount, 1);
   assert.equal(state.pressureInterfaceForceRowsBufferRetained, true);
   assert.equal(state.pressureInterfaceForceRowsBufferByteLength, 64);
+  assert.equal(state.pressureInterfaceGridForceAdmissionSchema, 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0');
+  assert.equal(state.pressureInterfaceGridForceAdmissionStatus, 'pressure-interface-grid-force-consumption-approved');
+  assert.equal(state.pressureInterfaceGridForceAdmissionApproved, true);
+  assert.equal(state.pressureInterfaceGridForceAdmissionSourceHotBufferKey, 'ulg:test:pressure-interface-admitted-hot-buffer');
   assert.equal(state.pressureInterfaceForceRowsUploadQueueCompletionStatus, 'ordered-before-consumer-queue-completed');
   assert.equal(state.pressureInterfaceForceRowsUploadQueueCompletionMethod, 'queue.writeBuffer -> queue.onSubmittedWorkDone');
   assert.equal(state.pressureInterfaceForceRowsConsumerQueueCompletionStatus, 'queue-work-completed');
@@ -1018,4 +1027,64 @@ test('SPH resident pressure interface state owns retained force rows outside ren
   assert.equal(state.pressureInterfaceForceRowsLeaseStatus, 'active');
   assert.equal(state.pressureInterfaceForceRowsLeaseActiveCount, 1);
   assert.equal(state.gpuAuthoritativeState, true);
+});
+
+test('SPH resident pressure interface state blocks force-row upload without grid admission', () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 1,
+    elementCount: 1,
+    elements: [{
+      status: 'interface-element-ready',
+      surfaceIndex: 0,
+      surfaceKey: 'h2o|h2o|liquid',
+      material: 'h2o',
+      phase: 'liquid',
+      materialId: 1,
+      phaseId: 2,
+      axisId: 1,
+      centroidM: [0.5, 0.5, 0.5],
+      normalAreaVectorM2: [0, 1, 0],
+      areaM2: 1
+    }]
+  };
+  const pressureInterfaceForceSolver = {
+    schema: 'peercompute.ulg.sph-pressure-interface-force-solver.v0',
+    status: 'pressure-interface-force-solver-ready',
+    forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
+    forceApplicationStatus: 'solver-ready-not-applied',
+    forceRowCount: 1,
+    forceRowStrideFloats: 16,
+    conservationStatus: 'pairwise-equal-opposite-force-conservative',
+    conservationResidualMagnitudeN: 0
+  };
+  const forceRowsUpload = {
+    status: 'blocked-pressure-interface-grid-force-admission-required',
+    blocker: 'pressure-interface-force-solver-grid-application-not-approved',
+    bufferRetained: false,
+    forceRowByteLength: 0,
+    candidateForceRowByteLength: 64,
+    pressureInterfaceGridForceAdmissionSchema: 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0',
+    pressureInterfaceGridForceAdmissionStatus: 'pressure-interface-grid-force-consumption-blocked',
+    pressureInterfaceGridForceAdmissionApproved: false
+  };
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField,
+    pressureInterfaceForceSolver,
+    pressureInterfaceForceRowsUpload: forceRowsUpload
+  });
+
+  assert.equal(state.status, 'resident-pressure-interface-force-rows-admission-required');
+  assert.equal(state.pressureInterfaceForceRowsUploadStatus, 'blocked-pressure-interface-grid-force-admission-required');
+  assert.equal(state.pressureInterfaceForceRowsUploadBlocker, 'pressure-interface-force-solver-grid-application-not-approved');
+  assert.equal(state.pressureInterfaceForceRowsBufferRetained, false);
+  assert.equal(state.pressureInterfaceForceRowsBufferByteLength, 0);
+  assert.equal(state.pressureInterfaceForceRowsCandidateByteLength, 64);
+  assert.equal(state.pressureInterfaceGridForceAdmissionSchema, 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0');
+  assert.equal(state.pressureInterfaceGridForceAdmissionStatus, 'pressure-interface-grid-force-consumption-blocked');
+  assert.equal(state.pressureInterfaceGridForceAdmissionApproved, false);
+  assert.equal(state.gpuAuthoritativeState, false);
 });

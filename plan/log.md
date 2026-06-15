@@ -22347,3 +22347,115 @@ Open:
   keeping StateManager admission authoritative.
 - The renderer z-buffer/draw-order issue remains queued as a separate visual
   correctness blocker.
+
+## 2026-06-15 02:59 AKDT - Live z-buffer/draw-order follow-up note
+
+Prompt context:
+
+- User reported additional major z-buffer issues with draw order and asked to
+  note it for later.
+
+Recorded:
+
+- Added a top-priority renderer blocker note to `plan/todo/README.md`. The
+  first transparent depth-order pass is not considered final evidence that the
+  live renderer is trustworthy. The follow-up must reproduce the issue with
+  close-spaced frame captures and validate Three.js fallback plus raw WebGPU
+  overlay paths for nested transparent/opaque surfaces, container/grid
+  overlays, focus-change flash/disappear, and surface identity stability.
+
+Files touched:
+
+- `plan/todo/README.md`
+- `plan/log.md`
+
+Open:
+
+- Continue the active pressure-row admission/readback-reduction slice. Treat
+  any visual validation that reproduces draw-order corruption as visually
+  suspect until the renderer follow-up is fixed.
+
+## 2026-06-15 03:25 AKDT - Scene pressure-row upload admission gate
+
+Prompt context:
+
+- Continued the active pressure/readback reduction slice after the user noted
+  additional z-buffer/draw-order problems for later.
+
+Implemented:
+
+- Exported pressure/interface grid-application admission helpers from
+  `src/runtime/sph/sphGridUpdateGpuKernel.js` so the mounted scene uses the
+  same admission decision as grid update.
+- Updated `src/visualization/sphPhaseScene.js` so pressure/interface force-row
+  candidates are not uploaded to a scene-owned `GPUBuffer` unless both the
+  solver and the
+  `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+  descriptor approve grid application.
+- Added telemetry for blocked pressure rows: blocker, candidate byte length,
+  grid-force admission schema/status, approval flag, descriptor status, and
+  source hot-buffer key.
+- Kept unadmitted pressure candidates out of mechanics/resident-step
+  signatures and task inputs. This avoids ComputeManager lane state-key drift
+  from telemetry-only pressure data.
+- Reused the prior lane-owned state key for browser resident continuations,
+  fixing same-lane continuation after reset.
+- Fixed render-state pressure upload status precedence so the high-level
+  pressure state status no longer overwrites the low-level upload status.
+- Updated browser e2e snapshots for pressure admission fields,
+  compact-summary active-grid scan availability, and closure-derived H2O
+  opacity/alpha/depth policy.
+- Added `plan/done/scene-pressure-upload-admission-gate-2026-06-15.md` and
+  updated plan/status/test/todo routing docs.
+
+Files touched:
+
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/sphPhaseRenderer.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/done/scene-pressure-upload-admission-gate-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure interface state|pressure force-row|transparent|render order"`
+  reported `27/27`.
+- PASS:
+  `node --test tests/sphGridUpdateGpuKernel.test.mjs --test-name-pattern "pressure interface|grid force"`
+  reported `14/14`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps|pressure interface|grid admission|grid force"`
+  reported `38/38`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default"`
+  reported `1/1`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-scene-pressure-upload-admission-gate-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-scene-pressure-upload-admission-gate-20260615`.
+- Manual frame inspection: final captured PNGs are nonblank and bounded. The
+  short MLS-MPM frame remains fragmented, so this evidence is a post-slice
+  sanity gate rather than long-horizon liquid-settling acceptance.
+
+Open:
+
+- Continue pressure/readback copy reduction and PeerCompute/GPUHub law-stage
+  promotion.
+- Keep live-device focus-change flash/disappear and any remaining z-buffer or
+  nested-surface artifact queued as separate renderer visual-correctness work.

@@ -35,6 +35,26 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 03:25 AKDT: scene pressure-row upload
+admission is complete. The browser scene can surface pressure/interface
+candidate force-row telemetry, but it cannot upload or feed those rows into
+resident mechanics unless the same admitted grid-force consumption descriptor
+and solver approval are present. The default browser gate now expects
+`resident-pressure-interface-force-rows-admission-required` plus blocked upload
+status for unadmitted pressure rows, and the resident continuation state key
+stays lane-stable across reset/continuation. Continue pressure/readback
+copy-reduction and PeerCompute/GPUHub law-stage promotion; keep the renderer
+z-buffer/focus-change follow-up queued as a separate visual correctness item.
+
+Renderer blocker update, 2026-06-15 02:59 AKDT: user reports additional major
+z-buffer/draw-order problems in the live view. Treat renderer depth/order as
+still open until a follow-up pass reproduces it with close-spaced frame
+captures and validates Three.js fallback plus any raw WebGPU overlay path for
+nested transparent/opaque surfaces, container/grid overlays, focus-change
+flash/disappear, and surface identity stability. Do not treat visual captures
+as authoritative physics evidence when this reproduces; record the artifact
+and either fix the renderer pass or mark the capture as visually suspect.
+
 Current routing note, 2026-06-15 02:20 AKDT: first renderer depth-order pass is
 complete. The immediate Three.js bug was per-surface hash offsets on
 transparent MarchingCubes meshes: those offsets prevented Three's transparent

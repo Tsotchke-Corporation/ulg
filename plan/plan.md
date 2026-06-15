@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 03:25 AKDT: the mounted scene now fail-closes
+pressure/interface force-row uploads behind the same admitted grid-force
+descriptor required by grid update. `sphPhaseScene` will keep unapproved
+pressure/interface force-row candidates as telemetry only, reporting the
+candidate byte length, admission schema/status, and blocker, but it will not
+write a scene-local pressure-row `GPUBuffer` or pass the candidate into
+resident mechanics signatures until
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0` and
+the solver both approve grid application. This also fixed the browser
+ComputeManager continuation lane drift by excluding unadmitted pressure data
+from state signatures and reusing the previous lane-owned state key for
+continuations. Validation passed focused unit gates, default and authority-host
+browser Playwright gates, physics atomics, and the three-scenario visual
+matrix. Next target: continue pressure/readback copy reduction under
+ComputeManager/GPUHub authority while keeping the renderer z-buffer/focus
+follow-up queued as a separate visual trust blocker.
+
 Current checkpoint, 2026-06-15 02:20 AKDT: the queued Three.js renderer
 z-buffer/draw-order blocker has its first concrete fix. Transparent
 MarchingCubes surfaces now share their layer render order so Three.js can sort

@@ -3,9 +3,9 @@
 # Architecture Summary
 
 - repo root: `/home/cos/projects/ulg`
-- files indexed: `273`
-- total lines indexed: `170608`
-- languages: `{"javascript": 104, "text": 84, "markdown": 70, "json": 14, "c": 1}`
+- files indexed: `274`
+- total lines indexed: `171254`
+- languages: `{"javascript": 104, "text": 84, "markdown": 71, "json": 14, "c": 1}`
 
 ## Important Files
 
@@ -43,20 +43,20 @@
 
 ## Top Modules
 
-- `tests`: 73 files, 34685 lines, symbols=0, tests=73, languages={"text": 73}
-- `plan/done`: 40 files, 2591 lines, symbols=0, tests=0, languages={"markdown": 40}
+- `tests`: 73 files, 34816 lines, symbols=0, tests=73, languages={"text": 73}
+- `plan/done`: 41 files, 2649 lines, symbols=0, tests=0, languages={"markdown": 41}
 - `src/runtime`: 30 files, 16150 lines, symbols=356, tests=0, languages={"javascript": 30}
 - `src/runtime/sph`: 26 files, 30279 lines, symbols=700, tests=0, languages={"javascript": 26}
 - `src/runtime/material`: 18 files, 4777 lines, symbols=206, tests=0, languages={"javascript": 18}
-- `plan/todo`: 17 files, 9783 lines, symbols=0, tests=0, languages={"markdown": 17}
+- `plan/todo`: 17 files, 9803 lines, symbols=0, tests=0, languages={"markdown": 17}
 - `.`: 9 files, 2070 lines, symbols=0, tests=0, languages={"text": 4, "markdown": 3, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
 - `src/services`: 5 files, 2087 lines, symbols=53, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 36803 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 36999 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `scripts`: 5 files, 4907 lines, symbols=0, tests=0, languages={"text": 5}
-- `src/visualization`: 4 files, 13063 lines, symbols=336, tests=0, languages={"javascript": 4}
+- `src/visualization`: 4 files, 13304 lines, symbols=340, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8157 lines, symbols=53, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/examples`: 4 files, 184 lines, symbols=0, tests=0, languages={"json": 4}
 - `src`: 3 files, 684 lines, symbols=13, tests=0, languages={"javascript": 2, "text": 1}
@@ -71,14 +71,14 @@
 
 | Lines | Path | Language |
 |---:|---|---|
-| 22350 | `plan/log.md` | markdown |
+| 22462 | `plan/log.md` | markdown |
 | 9563 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
-| 7899 | `src/visualization/sphPhaseScene.js` | javascript |
-| 7718 | `plan/tests.md` | markdown |
-| 7217 | `tests/demo.e2e.mjs` | text |
+| 8140 | `src/visualization/sphPhaseScene.js` | javascript |
+| 7763 | `plan/tests.md` | markdown |
+| 7279 | `tests/demo.e2e.mjs` | text |
 | 5944 | `ulg-gpu-abi/src/wgsl.js` | javascript |
 | 5275 | `src/runtime/sph/sphRenderGpuKernel.js` | javascript |
-| 5098 | `plan/implementation-status.md` | markdown |
+| 5120 | `plan/implementation-status.md` | markdown |
 | 5081 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
 | 4811 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 4355 | `tests/sphMlsMpmGpuStep.test.mjs` | text |
@@ -90,17 +90,17 @@
 | 2015 | `tests/orchestration.test.mjs` | text |
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
 | 1618 | `src/runtime/sph/sphThermalGpuKernel.js` | javascript |
-| 1497 | `plan/plan.md` | markdown |
+| 1514 | `plan/plan.md` | markdown |
 | 1467 | `ulg-gpu-abi/src/index.js` | javascript |
+| 1418 | `plan/todo/README.md` | markdown |
 | 1399 | `plan/todo/perf-upgrade.md` | markdown |
-| 1398 | `plan/todo/README.md` | markdown |
 | 1321 | `plan/todo/sphphasedemo.md` | markdown |
 | 1304 | `tests/abi.test.mjs` | text |
 | 1263 | `src/runtime/sph/sphReactionGpuSummary.js` | javascript |
 | 1141 | `src/runtime/sph/sphGridGpuKernel.js` | javascript |
 | 1119 | `plan/todo/physics-behavior-regression-plan.md` | markdown |
+| 1091 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 1030 | `package-lock.json` | json |
-| 1022 | `tests/sphPhaseRenderer.test.mjs` | text |
 
 ## Call graph
 

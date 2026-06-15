@@ -27,7 +27,12 @@ import {
 } from '../runtime/sph/sphGpuBuffers.js';
 import { runMlsMpmMechanicsPredictWithOptionalWebGpu } from '../runtime/sph/sphMechanicsGpuKernel.js';
 import { runMlsMpmP2gGridProjectionWithOptionalWebGpu } from '../runtime/sph/sphGridGpuKernel.js';
-import { runMlsMpmGridUpdateWithOptionalWebGpu } from '../runtime/sph/sphGridUpdateGpuKernel.js';
+import {
+  ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA,
+  pressureInterfaceForceSolverAllowsGridApplication,
+  pressureInterfaceGridForceAdmissionAllowsApplication,
+  runMlsMpmGridUpdateWithOptionalWebGpu
+} from '../runtime/sph/sphGridUpdateGpuKernel.js';
 import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.js';
 import {
   destroyMlsMpmResidentStepsBuffers,
@@ -226,12 +231,18 @@ function pressureFeedbackFromGasPressureSummary(gasPressureSummary) {
 
 function pressureInterfaceForceRowsUploadFields(upload = null) {
   return {
-    pressureInterfaceForceRowsUploadStatus: upload?.status ?? upload?.pressureInterfaceForceRowsUploadStatus ?? null,
+    pressureInterfaceForceRowsUploadStatus: upload?.pressureInterfaceForceRowsUploadStatus ?? upload?.status ?? null,
+    pressureInterfaceForceRowsUploadBlocker: upload?.blocker
+      ?? upload?.pressureInterfaceForceRowsUploadBlocker
+      ?? null,
     pressureInterfaceForceRowsBufferRetained: Boolean(
       upload?.bufferRetained ?? upload?.pressureInterfaceForceRowsBufferRetained
     ),
     pressureInterfaceForceRowsBufferByteLength: upload?.forceRowByteLength
       ?? upload?.pressureInterfaceForceRowsBufferByteLength
+      ?? 0,
+    pressureInterfaceForceRowsCandidateByteLength: upload?.candidateForceRowByteLength
+      ?? upload?.pressureInterfaceForceRowsCandidateByteLength
       ?? 0,
     pressureInterfaceForceRowsUploadSignature: upload?.signature
       ?? upload?.pressureInterfaceForceRowsUploadSignature
@@ -249,6 +260,22 @@ function pressureInterfaceForceRowsUploadFields(upload = null) {
     pressureInterfaceForceRowsUploadCleanupStatus: upload?.pressureInterfaceForceRowsUploadCleanupStatus
       ?? null,
     pressureInterfaceForceRowsUploadDestroyStatus: upload?.pressureInterfaceForceRowsUploadDestroyStatus
+      ?? null,
+    pressureInterfaceGridForceAdmissionSchema: upload?.pressureInterfaceGridForceAdmissionSchema
+      ?? upload?.gridForceAdmissionSchema
+      ?? null,
+    pressureInterfaceGridForceAdmissionStatus: upload?.pressureInterfaceGridForceAdmissionStatus
+      ?? upload?.gridForceAdmissionStatus
+      ?? null,
+    pressureInterfaceGridForceAdmissionApproved: Boolean(
+      upload?.pressureInterfaceGridForceAdmissionApproved
+      ?? upload?.gridForceAdmissionApproved
+    ),
+    pressureInterfaceGridForceAdmissionDescriptorStatus: upload?.pressureInterfaceGridForceAdmissionDescriptorStatus
+      ?? upload?.gridForceAdmissionDescriptorStatus
+      ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: upload?.pressureInterfaceGridForceAdmissionSourceHotBufferKey
+      ?? upload?.gridForceAdmissionSourceHotBufferKey
       ?? null,
     pressureInterfaceForceRowsLeaseStatus: upload?.residentBufferLeaseLedgerStatus
       ?? upload?.pressureInterfaceForceRowsLeaseStatus
@@ -272,6 +299,7 @@ export function buildSphResidentPressureInterfaceStateSummary({
   pressureInterfaceForcePreview = null,
   pressureInterfaceForceSolver = null,
   pressureInterfaceForceRowsUpload = null,
+  pressureInterfaceGridForceAdmission = null,
   source = 'resident-pressure-interface-state',
   sourceCadence = null
 } = {}) {
@@ -292,12 +320,18 @@ export function buildSphResidentPressureInterfaceStateSummary({
   });
   const uploadFields = pressureInterfaceForceRowsUploadFields(pressureInterfaceForceRowsUpload);
   const solverReady = solver.status === 'pressure-interface-force-solver-ready';
-  const rowsReady = solverReady && uploadFields.pressureInterfaceForceRowsBufferRetained;
+  const uploadBlockedForAdmission = solverReady
+    && uploadFields.pressureInterfaceForceRowsUploadStatus === 'blocked-pressure-interface-grid-force-admission-required';
+  const rowsReady = solverReady
+    && uploadFields.pressureInterfaceForceRowsBufferRetained
+    && uploadFields.pressureInterfaceGridForceAdmissionApproved;
   return {
     schema: 'peercompute.ulg.sph-resident-pressure-interface-state.v0',
     status: rowsReady
       ? 'resident-pressure-interface-force-rows-ready'
-      : (solverReady
+      : (uploadBlockedForAdmission
+          ? 'resident-pressure-interface-force-rows-admission-required'
+          : solverReady
           ? 'resident-pressure-interface-force-solver-ready'
           : 'resident-pressure-interface-blocked'),
     source,
@@ -334,6 +368,22 @@ export function buildSphResidentPressureInterfaceStateSummary({
     pressureInterfaceSolverForceRowCount: solver.forceRowCount,
     pressureInterfaceSolverConservationStatus: solver.conservationStatus,
     pressureInterfaceSolverConservationResidualMagnitudeN: solver.conservationResidualMagnitudeN,
+    pressureInterfaceGridForceAdmission,
+    pressureInterfaceGridForceAdmissionSchema: uploadFields.pressureInterfaceGridForceAdmissionSchema
+      ?? pressureInterfaceGridForceAdmission?.schema
+      ?? null,
+    pressureInterfaceGridForceAdmissionStatus: uploadFields.pressureInterfaceGridForceAdmissionStatus
+      ?? pressureInterfaceGridForceAdmission?.status
+      ?? null,
+    pressureInterfaceGridForceAdmissionApproved: uploadFields.pressureInterfaceGridForceAdmissionApproved,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: uploadFields.pressureInterfaceGridForceAdmissionDescriptorStatus
+      ?? pressureInterfaceGridForceAdmission?.publicationStatus
+      ?? pressureInterfaceGridForceAdmission?.admittedStatus
+      ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: uploadFields.pressureInterfaceGridForceAdmissionSourceHotBufferKey
+      ?? pressureInterfaceGridForceAdmission?.sourceHotBufferKey
+      ?? pressureInterfaceGridForceAdmission?.hotBufferKey
+      ?? null,
     ...uploadFields,
     gpuAuthoritativeState: Boolean(rowsReady || materialInterfaceField?.sourceRenderFieldReadback === false),
     scientificValidation: false,
@@ -370,6 +420,12 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
     pressureInterfaceSolverForceRowCount: pressureState?.pressureInterfaceSolverForceRowCount ?? 0,
     pressureInterfaceSolverConservationStatus: pressureState?.pressureInterfaceSolverConservationStatus ?? null,
     pressureInterfaceSolverConservationResidualMagnitudeN: pressureState?.pressureInterfaceSolverConservationResidualMagnitudeN ?? 0,
+    pressureInterfaceGridForceAdmission: pressureState?.pressureInterfaceGridForceAdmission ?? null,
+    pressureInterfaceGridForceAdmissionSchema: pressureState?.pressureInterfaceGridForceAdmissionSchema ?? null,
+    pressureInterfaceGridForceAdmissionStatus: pressureState?.pressureInterfaceGridForceAdmissionStatus ?? null,
+    pressureInterfaceGridForceAdmissionApproved: pressureState?.pressureInterfaceGridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: pressureState?.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: pressureState?.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
     ...pressureInterfaceForceRowsUploadFields(pressureState)
   };
 }
@@ -2122,9 +2178,110 @@ export function createSphPhaseScene(container, {
   }
 
   function pressureInterfaceForceRowsFromSolver(solver = null) {
-    if (solver?.forceRowValues instanceof Float32Array) return solver.forceRowValues;
-    if (solver?.forceRows instanceof Float32Array) return solver.forceRows;
-    return null;
+    const rows = solver?.forceRowValues instanceof Float32Array
+      ? solver.forceRowValues
+      : (solver?.forceRows instanceof Float32Array ? solver.forceRows : null);
+    if (!(rows instanceof Float32Array)) return null;
+    const forceRowCount = Math.max(0, Math.round(Number(solver?.forceRowCount) || 0));
+    const strideFloats = Math.max(1, Math.round(Number(solver?.forceRowStrideFloats) || 16));
+    if (forceRowCount > 0 && rows.length < forceRowCount * strideFloats) return null;
+    return rows;
+  }
+
+  function currentPressureInterfaceGridForceAdmission() {
+    return sphResidentPressureInterfaceState?.pressureInterfaceGridForceAdmission
+      ?? sphResidentRenderState?.pressureInterfaceGridForceAdmission
+      ?? scene.userData.sphPressureInterfaceGridForceAdmission
+      ?? mlsMpmResidentSteps?.pressureInterfaceSameFrameGridForceAdmission
+      ?? null;
+  }
+
+  function pressureInterfaceGridForceUploadAdmission({
+    pressureInterfaceForceSolver = null,
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    forceRowCount = 0
+  } = {}) {
+    const admission = pressureInterfaceGridForceAdmissionAllowsApplication({
+      pressureInterfaceGridForceAdmission,
+      pressureInterfaceForceSolver,
+      forceRowCount
+    });
+    const solverApproved = pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver);
+    return {
+      ...admission,
+      schema: ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA,
+      solverApproved,
+      approved: admission.approved === true && solverApproved
+    };
+  }
+
+  function blockedPressureInterfaceForceRowsUpload({
+    pressureInterfaceForceSolver = null,
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    forceRowCount = 0,
+    rows = null,
+    signature = null,
+    retainInScene = true
+  } = {}) {
+    const admission = pressureInterfaceGridForceUploadAdmission({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount
+    });
+    const upload = {
+      schema: 'peercompute.ulg.sph-pressure-interface-force-rows-upload.v0',
+      status: 'blocked-pressure-interface-grid-force-admission-required',
+      blocker: admission.solverApproved
+        ? 'pressure-interface-grid-force-consumption-admission-required'
+        : 'pressure-interface-force-solver-grid-application-not-approved',
+      sourceSchema: pressureInterfaceForceSolver?.schema ?? null,
+      forceSolverStatus: pressureInterfaceForceSolver?.status ?? null,
+      forceRowCount,
+      forceRowStrideFloats: pressureInterfaceForceSolver?.forceRowStrideFloats ?? null,
+      forceRowByteLength: 0,
+      candidateForceRowByteLength: rows instanceof Float32Array ? rows.byteLength : 0,
+      buffer: null,
+      bufferRetained: false,
+      signature,
+      pressureInterfaceForceRowsUploadQueueCompletionStatus: null,
+      pressureInterfaceForceRowsUploadQueueCompletionMethod: null,
+      pressureInterfaceForceRowsConsumerQueueCompletionStatus: null,
+      pressureInterfaceForceRowsConsumerQueueCompletionMethod: null,
+      pressureInterfaceForceRowsUploadCleanupStatus: null,
+      pressureInterfaceForceRowsUploadDestroyStatus: null,
+      pressureInterfaceGridForceAdmissionSchema: admission.schema,
+      pressureInterfaceGridForceAdmissionStatus: admission.status,
+      pressureInterfaceGridForceAdmissionApproved: admission.approved === true,
+      pressureInterfaceGridForceAdmissionDescriptorStatus: admission.descriptorStatus,
+      pressureInterfaceGridForceAdmissionSourceHotBufferKey: admission.sourceHotBufferKey,
+      pressureInterfaceForceRowsLeaseStatus: null,
+      pressureInterfaceForceRowsLeaseResourceCount: 0,
+      pressureInterfaceForceRowsLeaseActiveCount: 0,
+      pressureInterfaceForceRowsLeaseSummary: null,
+      retainedInScene: Boolean(retainInScene),
+      scientificValidation: false,
+      gasValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (!retainInScene) return upload;
+    destroyPressureInterfaceForceRowsUpload();
+    pressureInterfaceForceRowsUpload = upload;
+    pressureInterfaceForceRowsUploadSignature = signature;
+    publishPressureInterfaceForceRowsUpload(upload);
+    return upload;
+  }
+
+  function pressureInterfaceForceRowsUploadApproved({
+    pressureInterfaceForceSolver = null,
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
+    forceRowCount = 0
+  } = {}) {
+    return pressureInterfaceGridForceUploadAdmission({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount
+    }).approved === true;
   }
 
   function applyPressureInterfaceUploadFields(target, upload = pressureInterfaceForceRowsUpload) {
@@ -2215,8 +2372,10 @@ export function createSphPhaseScene(container, {
     scene.userData.sphPressureInterfaceForceRowsUpload = null;
     if (sphResidentRenderState) {
       sphResidentRenderState.pressureInterfaceForceRowsUploadStatus = null;
+      sphResidentRenderState.pressureInterfaceForceRowsUploadBlocker = null;
       sphResidentRenderState.pressureInterfaceForceRowsBufferRetained = false;
       sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength = 0;
+      sphResidentRenderState.pressureInterfaceForceRowsCandidateByteLength = 0;
       sphResidentRenderState.pressureInterfaceForceRowsUploadSignature = null;
       sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionStatus = null;
       sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionMethod = null;
@@ -2224,6 +2383,12 @@ export function createSphPhaseScene(container, {
       sphResidentRenderState.pressureInterfaceForceRowsConsumerQueueCompletionMethod = null;
       sphResidentRenderState.pressureInterfaceForceRowsUploadCleanupStatus = null;
       sphResidentRenderState.pressureInterfaceForceRowsUploadDestroyStatus = null;
+      sphResidentRenderState.pressureInterfaceGridForceAdmission = null;
+      sphResidentRenderState.pressureInterfaceGridForceAdmissionSchema = null;
+      sphResidentRenderState.pressureInterfaceGridForceAdmissionStatus = null;
+      sphResidentRenderState.pressureInterfaceGridForceAdmissionApproved = false;
+      sphResidentRenderState.pressureInterfaceGridForceAdmissionDescriptorStatus = null;
+      sphResidentRenderState.pressureInterfaceGridForceAdmissionSourceHotBufferKey = null;
       sphResidentRenderState.pressureInterfaceForceRowsLeaseStatus = null;
       sphResidentRenderState.pressureInterfaceForceRowsLeaseResourceCount = 0;
       sphResidentRenderState.pressureInterfaceForceRowsLeaseActiveCount = 0;
@@ -2304,6 +2469,7 @@ export function createSphPhaseScene(container, {
 
   function uploadPressureInterfaceForceRowsBuffer({
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     device = null,
     retainInScene = true
   } = {}) {
@@ -2320,6 +2486,20 @@ export function createSphPhaseScene(container, {
       return null;
     }
     const signature = pressureInterfaceForceSolverSignature(pressureInterfaceForceSolver);
+    if (!pressureInterfaceForceRowsUploadApproved({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount
+    })) {
+      return blockedPressureInterfaceForceRowsUpload({
+        pressureInterfaceForceSolver,
+        pressureInterfaceGridForceAdmission,
+        forceRowCount,
+        rows,
+        signature,
+        retainInScene
+      });
+    }
     if (
       retainInScene
       &&
@@ -2383,6 +2563,17 @@ export function createSphPhaseScene(container, {
       buffer,
       bufferRetained: true,
       signature,
+      pressureInterfaceGridForceAdmission,
+      pressureInterfaceGridForceAdmissionSchema: ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA,
+      pressureInterfaceGridForceAdmissionStatus: 'pressure-interface-grid-force-consumption-approved',
+      pressureInterfaceGridForceAdmissionApproved: true,
+      pressureInterfaceGridForceAdmissionDescriptorStatus: pressureInterfaceGridForceAdmission?.publicationStatus
+        ?? pressureInterfaceGridForceAdmission?.admittedStatus
+        ?? pressureInterfaceGridForceAdmission?.status
+        ?? null,
+      pressureInterfaceGridForceAdmissionSourceHotBufferKey: pressureInterfaceGridForceAdmission?.sourceHotBufferKey
+        ?? pressureInterfaceGridForceAdmission?.hotBufferKey
+        ?? null,
       pressureInterfaceForceRowsUploadQueueCompletionStatus: 'queue-write-enqueued',
       pressureInterfaceForceRowsUploadQueueCompletionMethod: 'queue.writeBuffer',
       pressureInterfaceForceRowsConsumerQueueCompletionStatus: null,
@@ -2652,6 +2843,7 @@ export function createSphPhaseScene(container, {
       ?? sphResidentRenderState?.materialInterfaceField
       ?? null,
     gasPressureSummary = null,
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     source = 'resident-pressure-interface-physics-refresh',
     sourceCadence = null
   } = {}) {
@@ -2675,6 +2867,7 @@ export function createSphPhaseScene(container, {
       : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
     const pressureInterfaceForceRowsUploadForState = uploadPressureInterfaceForceRowsBuffer({
       pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
       device: device || resolvedDeviceResult?.device || null
     });
     const state = buildSphResidentPressureInterfaceStateSummary({
@@ -2684,6 +2877,7 @@ export function createSphPhaseScene(container, {
       pressureInterfaceForcePreview,
       pressureInterfaceForceSolver,
       pressureInterfaceForceRowsUpload: pressureInterfaceForceRowsUploadForState,
+      pressureInterfaceGridForceAdmission,
       source,
       sourceCadence
     });
@@ -4086,6 +4280,7 @@ export function createSphPhaseScene(container, {
     parityTolerance = 1e-5,
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     webGpuRunner = undefined
   } = {}) {
     if (!p2gGridProjection?.schema) {
@@ -4093,12 +4288,21 @@ export function createSphPhaseScene(container, {
       scene.userData.mlsMpmGridUpdate = null;
       return null;
     }
+    const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
+    const pressureInterfaceGridForceApproved = pressureInterfaceForceRowsUploadApproved({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount: pressureInterfaceForceRowCount
+    });
+    const effectivePressureInterfaceForceSolver = pressureInterfaceGridForceApproved ? pressureInterfaceForceSolver : null;
+    const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
+    const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const signature = mlsMpmGridUpdateSignatureFor({
       p2gGridProjection,
       dt,
       gravityMPerS2,
       cflFactor,
-      pressureInterfaceForceSolver
+      pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver
     });
     if (!force && mlsMpmGridUpdateSignature === signature && mlsMpmGridUpdate) {
       return mlsMpmGridUpdate;
@@ -4114,25 +4318,27 @@ export function createSphPhaseScene(container, {
       let pressureForceRowsBorrow = null;
       try {
         pressureForceRowsBorrow = borrowPressureInterfaceForceRowsForStage({
-          pressureInterfaceForceSolver,
-          pressureInterfaceForceRowsBuffer,
+          pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+          pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer,
           consumerStage: 'mls-mpm-grid-update',
           reason: 'retained-pressure-interface-force-rows-grid-update'
         });
-        resolvedPressureForceRowsUpload = pressureInterfaceForceRowsBuffer
+        resolvedPressureForceRowsUpload = effectivePressureInterfaceForceRowsBuffer
           ? null
           : uploadPressureInterfaceForceRowsBuffer({
-            pressureInterfaceForceSolver,
+            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+            pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
             device: device || resolvedDeviceResult?.device || null,
             retainInScene: false
           });
         const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
           p2gGridProjection,
           p2gGridBuffer: p2gGridProjection?.gpuResult?.gridBuffer ?? p2gGridProjection?.gridBuffer ?? null,
-          pressureInterfaceForceRowsBuffer: pressureInterfaceForceRowsBuffer
+          pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer
             ?? resolvedPressureForceRowsUpload?.buffer
             ?? null,
-          pressureInterfaceForceSolver,
+          pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+          pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
           dt,
           gravityMPerS2,
           boxDimsM: dims,
@@ -4171,7 +4377,7 @@ export function createSphPhaseScene(container, {
             dt,
             gravityMPerS2,
             cflFactor,
-            pressureInterfaceForceSolver
+            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver
           }) !== signature
         ) {
           return {
@@ -4295,6 +4501,7 @@ export function createSphPhaseScene(container, {
     parityTolerances = undefined,
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
     g2pRunner = undefined
@@ -4307,8 +4514,15 @@ export function createSphPhaseScene(container, {
     const effectiveDt = lawGroups.mechanics ? dt : 0;
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
     const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
-    const effectivePressureInterfaceForceSolver = lawGroups.pressure ? pressureInterfaceForceSolver : null;
-    const effectivePressureInterfaceForceRowsBuffer = lawGroups.pressure ? pressureInterfaceForceRowsBuffer : null;
+    const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
+    const pressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount: pressureInterfaceForceRowCount
+    });
+    const effectivePressureInterfaceForceSolver = pressureInterfaceGridForceApproved ? pressureInterfaceForceSolver : null;
+    const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
+    const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
     const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
     const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
@@ -4370,6 +4584,7 @@ export function createSphPhaseScene(container, {
           ? null
           : uploadPressureInterfaceForceRowsBuffer({
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+            pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
             device: device || resolvedDeviceResult?.device || null,
             retainInScene: false
           });
@@ -4389,6 +4604,7 @@ export function createSphPhaseScene(container, {
             ?? resolvedPressureForceRowsUpload?.buffer
             ?? null,
           pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+          pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
@@ -4510,7 +4726,8 @@ export function createSphPhaseScene(container, {
     fusedActiveGridSafetyCells = undefined,
     thermalStepOptions: thermalStepOptionOverrides = null,
     pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
-    pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver)
+    pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
+    pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission()
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
@@ -4520,8 +4737,15 @@ export function createSphPhaseScene(container, {
     const effectiveDt = lawGroups.mechanics ? dt : 0;
     const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
     const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
-    const effectivePressureInterfaceForceSolver = lawGroups.pressure ? pressureInterfaceForceSolver : null;
-    const effectivePressureInterfaceForceRowsBuffer = lawGroups.pressure ? pressureInterfaceForceRowsBuffer : null;
+    const pressureInterfaceForceRowCount = Math.max(0, Math.round(Number(pressureInterfaceForceSolver?.forceRowCount) || 0));
+    const pressureInterfaceGridForceApproved = lawGroups.pressure && pressureInterfaceForceRowsUploadApproved({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount: pressureInterfaceForceRowCount
+    });
+    const effectivePressureInterfaceForceSolver = pressureInterfaceGridForceApproved ? pressureInterfaceForceSolver : null;
+    const effectivePressureInterfaceForceRowsBuffer = pressureInterfaceGridForceApproved ? pressureInterfaceForceRowsBuffer : null;
+    const effectivePressureInterfaceGridForceAdmission = pressureInterfaceGridForceApproved ? pressureInterfaceGridForceAdmission : null;
     const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
     const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
@@ -4683,6 +4907,7 @@ export function createSphPhaseScene(container, {
           ? null
           : uploadPressureInterfaceForceRowsBuffer({
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+            pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
             device: device || resolvedDeviceResult?.device || null,
             retainInScene: false
           });
@@ -4706,6 +4931,7 @@ export function createSphPhaseScene(container, {
             ?? resolvedPressureForceRowsUpload?.buffer
             ?? null,
           pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+          pressureInterfaceGridForceAdmission: effectivePressureInterfaceGridForceAdmission,
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
@@ -4753,13 +4979,27 @@ export function createSphPhaseScene(container, {
         };
         let execution = null;
         if (computeManager && typeof computeManager.submitTask === 'function') {
-          const taskStateKey = computeTaskStateKey || `ulg:sph-resident-state:${signature}`;
+          const continuationTaskStateKey = continueFromResidentState
+            ? (mlsMpmResidentSteps?.computeManagerTask?.stateKey
+              || mlsMpmResidentSteps?.stateManagerCommit?.stateKey
+              || mlsMpmResidentSteps?.commitDelta?.payload?.stateKey
+              || null)
+            : null;
+          const taskStateKey = computeTaskStateKey
+            || continuationTaskStateKey
+            || `ulg:sph-resident-state:${signature}`;
+          const taskStateKeySource = computeTaskStateKey
+            ? 'caller-provided'
+            : (continuationTaskStateKey
+                ? 'previous-continuation-lane-state-key'
+                : 'signature-derived-initial-state-key');
           const resolvedComputeTaskModulePath = computeTaskModulePath
             || computeManager.ulgResidentComputeTaskModulePath
             || 'src/runtime/sph/sphMlsMpmGpuStep.js';
           markResidentStepsProgress('resident-steps-compute-manager-task-submitted', {
             laneId: computeTaskLaneId,
-            stateKey: taskStateKey
+            stateKey: taskStateKey,
+            stateKeySource: taskStateKeySource
           });
           const submission = await submitMlsMpmResidentStepsComputeTask({
             computeManager,
@@ -4823,6 +5063,7 @@ export function createSphPhaseScene(container, {
               : 'inline-execution-returned',
             laneId: computeTaskLaneId,
             stateKey: taskStateKey,
+            stateKeySource: taskStateKeySource,
             domainKey: computeTaskDomainKey,
             submissionStatus: submission?.status ?? null,
             acceptedTaskId: submission?.acceptedTaskId ?? submission?.taskId ?? null,

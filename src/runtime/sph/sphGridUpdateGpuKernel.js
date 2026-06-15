@@ -188,7 +188,7 @@ function pressureForceRowCountFromSolver(pressureInterfaceForceSolver, rows) {
   return explicit;
 }
 
-function pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver) {
+export function pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver) {
   if (!pressureInterfaceForceSolver) return false;
   return pressureInterfaceForceSolver.gridForceApplicationApproved === true
     && PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES.has(
@@ -205,7 +205,7 @@ function pressureInterfaceGridForceAdmissionDescriptor(admission = null) {
     || admission;
 }
 
-function pressureInterfaceGridForceAdmissionAllowsApplication({
+export function pressureInterfaceGridForceAdmissionAllowsApplication({
   pressureInterfaceGridForceAdmission = null,
   pressureInterfaceForceSolver = null,
   forceRowCount = 0

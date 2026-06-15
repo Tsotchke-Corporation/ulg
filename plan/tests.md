@@ -1,6 +1,51 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Transparent Renderer Depth Order
+## Current Focused Result - 2026-06-15 Scene Pressure-Row Upload Admission
+
+The current slice blocks scene-local pressure/interface force-row uploads until
+grid-force consumption is admitted through
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0` and
+the solver is explicitly approved for grid application. Unadmitted pressure
+rows remain candidate telemetry only; they are not written to a scene-owned
+GPU buffer and are excluded from resident mechanics signatures. The browser
+default gate now exposes pressure grid-force admission fields, compact-summary
+active-grid scan availability, and closure-derived H2O alpha/depth policy.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`,
+  `node --check tests/sphPhaseRenderer.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Renderer pressure/depth unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure interface state|pressure force-row|transparent|render order"`
+  passed `27/27`.
+- Grid-update admission coverage:
+  `node --test tests/sphGridUpdateGpuKernel.test.mjs --test-name-pattern "pressure interface|grid force"`
+  passed `14/14`.
+- Resident-step pressure/admission coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps|pressure interface|grid admission|grid force"`
+  passed `38/38`.
+- Default browser derived-material gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default"`
+  passed `1/1`.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-scene-pressure-upload-admission-gate-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-scene-pressure-upload-admission-gate-20260615`.
+  Captured frames were inspected manually; they are nonblank and bounded, but
+  the short MLS-MPM frame remains visually fragmented, so this is not
+  long-horizon liquid-settling acceptance.
+
+## Prior Focused Result - 2026-06-15 Transparent Renderer Depth Order
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated

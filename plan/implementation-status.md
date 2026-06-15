@@ -1,9 +1,31 @@
 # Implementation Status
 
-Updated: 2026-06-15 transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
+Updated: 2026-06-15 scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
 ## Done
 
+- Added the scene pressure-row upload admission gate. The mounted
+  `sphPhaseScene` no longer uploads CPU-side pressure/interface force rows into
+  a scene-owned `GPUBuffer` unless the same
+  `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+  descriptor that grid update requires is approved and the solver is approved
+  for grid application. Unadmitted pressure/interface candidates now remain
+  telemetry-only, report candidate byte length and blocker status, and are
+  excluded from mechanics/resident-step signatures so ComputeManager lane
+  state keys do not drift from inadmissible scene-local data. Same-lane
+  resident continuations also reuse the previous lane-owned state key, fixing
+  browser continuation submissions after reset. Browser e2e diagnostics now
+  expose compact-summary active-grid availability, pressure admission fields,
+  and closure-derived transmissive H2O alpha/depth policy. Validation passed
+  syntax checks, renderer pressure/depth unit coverage `27/27`, grid-update
+  admission unit coverage `14/14`, resident-step pressure/admission unit
+  coverage `38/38`, default derived-material browser Playwright `1/1`,
+  browser PeerCompute resident authority-host Playwright `1/1`, physics
+  atomics `7` with `1` expected opt-in long-horizon skip, and visual matrix
+  `codex-scene-pressure-upload-admission-gate-20260615` `3/3` with two
+  captured frames per scenario. Remaining physics risk: this gates the bad
+  pressure-row scene upload path, but does not by itself prove long-horizon
+  liquid settling or the live-device focus-change renderer symptom.
 - Added the first transparent renderer depth-order pass. Transparent
   MarchingCubes surfaces now share their layer render order so Three.js can
   depth-sort overlapping transmissive/vapor/alpha meshes by camera position;

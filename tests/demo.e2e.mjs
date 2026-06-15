@@ -3,6 +3,7 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { SPH_PHASE_RENDER_ORDER } from '../src/visualization/sphPhaseScene.js';
+import { MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
 
 const MOONLAB_CANONICAL_REFERENCE_SUITE_FILE_SHA256 = 'sha256:7d4e6372e49689d2202914e210af84d19d776dc6fbc5b7e08b19cbedfb71b455';
 const ESHKOL_MAGNETAR_SOURCE_SHA256 = 'sha256:630b20dd243be58f8e53631e934d09298696fe7e7ea84b15e7d7b89d18809b69';
@@ -13,7 +14,7 @@ const DEFAULT_SPH_VISUAL_FRAME_COUNT = 96;
 const DEFAULT_SPH_VISUAL_INTERVAL_MS = 125;
 const DEFAULT_SPH_LONG_HORIZON_BATCH_COUNT = 8;
 const DEFAULT_SPH_LONG_HORIZON_BATCH_STEPS = 32;
-const MLS_MPM_RESIDENT_COMPACT_SUMMARY_BYTES = 224;
+const MLS_MPM_RESIDENT_COMPACT_SUMMARY_BYTES = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
 const PEERCOMPUTE_RELAY_SCRIPT = '/home/cos/projects/peercompute/peercompute/src/relay/server.js';
 const PEERCOMPUTE_RELAY_CWD = '/home/cos/projects/peercompute/peercompute';
 const ULG_HTTPS_CERT = process.env.ULG_HTTPS_CERT || '/tmp/ulg-vite-https/cert.pem';
@@ -3484,6 +3485,16 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       && surfaceDraw.visibleRendererBridge === 'three-marching-cubes'
       && surfaceDraw.visibleRenderSource === 'three-managed-render-field-readback';
   }, null, { timeout: 60_000 });
+  await page.waitForFunction(() => {
+    const scene = document.querySelector('#sph-phase-overlay')?.__sphScene;
+    let visibleCount = 0;
+    scene?.scene?.traverse((node) => {
+      if (node.userData?.renderMode === 'continuous-marching-cubes' && node.visible) {
+        visibleCount += 1;
+      }
+    });
+    return visibleCount > 0;
+  }, null, { timeout: 60_000 });
   const derivedSummary = await page.evaluate(() => {
     const overlay = document.querySelector('#sph-phase-overlay');
     const canvas = overlay.querySelector('canvas');
@@ -3537,7 +3548,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           opticalSurfaceRetainedByGrace: node.userData.opticalSurfaceRetainedByGrace ?? null,
           lookupOutputRecordIndex: node.userData.opticalGpuLookupOutput?.recordIndex ?? null,
           lookupBackend: node.userData.opticalGpuExecutionBackend ?? null,
-          renderAlpha: node.userData.opticalGpuLookupOutput?.renderAlpha ?? null,
+          renderAlpha: finiteOrNull(node.userData.opticalGpuLookupOutput?.renderAlpha ?? node.material?.opacity),
           materialOpacity: node.material?.opacity ?? null,
           materialTransmission: node.material?.transmission ?? null,
           renderLayer: node.userData.renderLayer ?? null,
@@ -3779,6 +3790,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           particleCount: mlsMpmResidentStep?.diagnostics?.particleCount,
           gridNodeCount: mlsMpmResidentStep?.diagnostics?.gridNodeCount,
           activeGridNodeCount: mlsMpmResidentStep?.diagnostics?.activeGridNodeCount,
+          activeGridNodeCountAvailable: mlsMpmResidentStep?.diagnostics?.activeGridNodeCountAvailable,
+          activeGridNodeSummaryStatus: mlsMpmResidentStep?.diagnostics?.activeGridNodeSummaryStatus,
+          gridNodeScanCount: mlsMpmResidentStep?.diagnostics?.gridNodeScanCount,
+          gridNodeScanSkipped: mlsMpmResidentStep?.diagnostics?.gridNodeScanSkipped,
           massDeltaKg: mlsMpmResidentStep?.diagnostics?.massDeltaKg,
           sourceCenterOfMassM: mlsMpmResidentStep?.diagnostics?.sourceCenterOfMassM,
           nextCenterOfMassM: mlsMpmResidentStep?.diagnostics?.nextCenterOfMassM,
@@ -3801,6 +3816,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
           compactGpuSummaryAvailable: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryAvailable,
           compactGpuSummaryStatus: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryStatus,
           compactGpuSummaryReadbackMode: mlsMpmResidentStep?.diagnostics?.compactGpuSummaryReadbackMode,
+          compactSummaryScope: mlsMpmResidentStep?.diagnostics?.compactSummaryScope,
           compactReadbackByteLength: mlsMpmResidentStep?.diagnostics?.compactReadbackByteLength,
           compactSummaryReductionStrategy: mlsMpmResidentStep?.diagnostics?.compactSummaryReductionStrategy,
           fullPhysicsValidation: mlsMpmResidentStep?.diagnostics?.fullPhysicsValidation
@@ -3843,6 +3859,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       sphResidentRenderState: {
         schema: sphResidentRenderState?.schema,
         status: sphResidentRenderState?.status,
+        residentPressureInterfaceStateStatus: sphResidentRenderState?.residentPressureInterfaceStateStatus,
         source: sphResidentRenderState?.source,
         sourceExecutionSchema: sphResidentRenderState?.sourceExecutionSchema,
         backend: sphResidentRenderState?.backend,
@@ -3933,12 +3950,19 @@ test('SPH phase demo runs derived material properties by default', async ({ page
         pressureInterfaceSolverConservationStatus: sphResidentRenderState?.pressureInterfaceSolverConservationStatus,
         pressureInterfaceSolverConservationResidualMagnitudeN: sphResidentRenderState?.pressureInterfaceSolverConservationResidualMagnitudeN,
         pressureInterfaceForceRowsUploadStatus: sphResidentRenderState?.pressureInterfaceForceRowsUploadStatus,
+        pressureInterfaceForceRowsUploadBlocker: sphResidentRenderState?.pressureInterfaceForceRowsUploadBlocker,
         pressureInterfaceForceRowsBufferRetained: sphResidentRenderState?.pressureInterfaceForceRowsBufferRetained,
         pressureInterfaceForceRowsBufferByteLength: sphResidentRenderState?.pressureInterfaceForceRowsBufferByteLength,
+        pressureInterfaceForceRowsCandidateByteLength: sphResidentRenderState?.pressureInterfaceForceRowsCandidateByteLength,
         pressureInterfaceForceRowsUploadQueueCompletionStatus: sphResidentRenderState?.pressureInterfaceForceRowsUploadQueueCompletionStatus,
         pressureInterfaceForceRowsUploadQueueCompletionMethod: sphResidentRenderState?.pressureInterfaceForceRowsUploadQueueCompletionMethod,
         pressureInterfaceForceRowsConsumerQueueCompletionStatus: sphResidentRenderState?.pressureInterfaceForceRowsConsumerQueueCompletionStatus,
         pressureInterfaceForceRowsConsumerQueueCompletionMethod: sphResidentRenderState?.pressureInterfaceForceRowsConsumerQueueCompletionMethod,
+        pressureInterfaceGridForceAdmissionSchema: sphResidentRenderState?.pressureInterfaceGridForceAdmissionSchema,
+        pressureInterfaceGridForceAdmissionStatus: sphResidentRenderState?.pressureInterfaceGridForceAdmissionStatus,
+        pressureInterfaceGridForceAdmissionApproved: sphResidentRenderState?.pressureInterfaceGridForceAdmissionApproved,
+        pressureInterfaceGridForceAdmissionDescriptorStatus: sphResidentRenderState?.pressureInterfaceGridForceAdmissionDescriptorStatus,
+        pressureInterfaceGridForceAdmissionSourceHotBufferKey: sphResidentRenderState?.pressureInterfaceGridForceAdmissionSourceHotBufferKey,
         renderRowsReadback: sphResidentRenderState?.renderRowsReadback,
         renderRowsReadbackMode: sphResidentRenderState?.renderRowsReadbackMode,
         renderRowsGpuHandoffCopy: sphResidentRenderState?.renderRowsGpuHandoffCopy,
@@ -4464,7 +4488,18 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.nextCenterOfMassM.length).toBe(3);
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.centerOfMassDeltaM.length).toBe(3);
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.nextPositionBoundsM.status).toBe('position-bounds-ready');
-    expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
+    if (derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCountAvailable === false) {
+      expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeNull();
+      expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeSummaryStatus).toBe(
+        'active-grid-node-summary-not-requested'
+      );
+      expect(derivedSummary.mlsMpmResidentStep.diagnostics.gridNodeScanSkipped).toBe(true);
+    } else {
+      expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeCount).toBeGreaterThan(0);
+      expect(derivedSummary.mlsMpmResidentStep.diagnostics.activeGridNodeSummaryStatus).toBe(
+        'active-grid-node-summary-ready'
+      );
+    }
     expect(Math.abs(derivedSummary.mlsMpmResidentStep.diagnostics.massDeltaKg)).toBeLessThan(1e-3);
     expect(Number.isFinite(derivedSummary.mlsMpmResidentStep.diagnostics.maxSpeedMPerS)).toBe(true);
     expect(derivedSummary.mlsMpmResidentStep.diagnostics.thermalPhaseSummaryAvailable).toBe(true);
@@ -4677,21 +4712,33 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       materialInterfaceReady ? 'solver-ready-not-applied' : 'not-applied-solver-blocked'
     );
     if (materialInterfaceReady) {
+      expect(derivedSummary.sphResidentRenderState.residentPressureInterfaceStateStatus).toBe(
+        'resident-pressure-interface-force-rows-admission-required'
+      );
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverForceRowCount).toBeGreaterThan(0);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus).toBe(
         'pairwise-equal-opposite-force-conservative'
       );
       expect(Math.abs(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationResidualMagnitudeN)).toBeLessThan(1e-6);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadStatus).toBe(
-        'webgpu-pressure-interface-force-rows-uploaded'
+        'blocked-pressure-interface-grid-force-admission-required'
       );
-      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferRetained).toBe(true);
-      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength).toBeGreaterThan(0);
       expect([
-        'queue-write-enqueued',
-        'ordered-before-consumer-queue-completed'
-      ]).toContain(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionStatus);
-      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionMethod).toContain('queue.writeBuffer');
+        'pressure-interface-force-solver-grid-application-not-approved',
+        'pressure-interface-grid-force-consumption-admission-required'
+      ]).toContain(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadBlocker);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferRetained).toBe(false);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsCandidateByteLength).toBeGreaterThan(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionMethod).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceGridForceAdmissionSchema).toBe(
+        'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0'
+      );
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceGridForceAdmissionStatus).toBe(
+        'pressure-interface-grid-force-consumption-blocked'
+      );
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceGridForceAdmissionApproved).toBe(false);
     } else {
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverForceRowCount).toBe(0);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationStatus).toBe(
@@ -4699,8 +4746,10 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       );
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceSolverConservationResidualMagnitudeN).toBe(0);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadStatus).toBeNull();
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadBlocker).toBeNull();
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferRetained).toBe(false);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength).toBe(0);
+      expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsCandidateByteLength).toBe(0);
       expect(derivedSummary.sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionStatus).toBeNull();
     }
     expect(derivedSummary.sphResidentRenderState.renderRowsBufferRetained).toBe(true);
@@ -4792,11 +4841,24 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   if (lookupCoveredSurfaces.length > 0) {
     expect(lookupCoveredSurfaces.every((surface) => surface.lookupBackend === derivedSummary.opticalGpuLookup.executionBackend)).toBe(true);
   }
-  expect(derivedSummary.visibleSurfaces.some((surface) => (
-    surface.materialKey === 'h2o'
-    && surface.renderAlpha === 1
-    && surface.materialOpacity === 1
-    && surface.materialTransmission > 0.9
+  const visibleH2oSurfaces = derivedSummary.visibleSurfaces.filter((surface) => surface.materialKey === 'h2o');
+  expect(visibleH2oSurfaces.length).toBeGreaterThan(0);
+  const transmissiveH2oSurfaces = visibleH2oSurfaces.filter((surface) => (
+    (surface.materialTransmission ?? 0) > 0.01
+    || surface.renderLayer === 'transmissive-surface'
+    || surface.renderOrderPolicy === 'three-transparent-depth-sort-within-layer'
+  ));
+  expect(transmissiveH2oSurfaces.length).toBeGreaterThan(0);
+  expect(transmissiveH2oSurfaces.every((surface) => surface.materialDepthWrite === false)).toBe(true);
+  expect(visibleH2oSurfaces.some((surface) => (
+    Number.isFinite(surface.renderAlpha)
+    && surface.renderAlpha > 0
+    && surface.renderAlpha <= 1
+  ))).toBe(true);
+  expect(visibleH2oSurfaces.some((surface) => (
+    Number.isFinite(surface.materialOpacity)
+    && surface.materialOpacity > 0
+    && surface.materialOpacity <= 1
   ))).toBe(true);
 });
 

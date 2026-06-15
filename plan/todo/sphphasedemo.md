@@ -1251,6 +1251,10 @@ Remaining before this satisfies the demo's renderer/performance target:
 - Replace the Three.js MarchingCubes bridge with direct WebGPU draw or volume
   buffers.
 - Avoid render-field readback in the normal frame loop.
+- Audit and fix the newly reported major z-buffer/draw-order issues. This
+  should cover transparent/opaque surface ordering, depth-write/depth-test
+  policy, nested fluid/solid surfaces, and container/grid overlay ordering,
+  with browser coverage that fails on wrong draw order.
 - Move per-cell optical/radiation color, incandescence, gas scattering, and
   steam/cloud opacity into GPU-resident closure sampling instead of per-surface
   bridge colors.

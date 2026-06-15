@@ -94,6 +94,10 @@ const PEERCOMPUTE_COMPUTE_MANAGER_URL = new URL(
   '../../peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js',
   import.meta.url
 );
+const PEERCOMPUTE_GPU_HUB_URL = new URL(
+  '../../peercompute/peercompute/src/peercompute/gpu/GPUHubManager.js',
+  import.meta.url
+);
 const PEERCOMPUTE_INDEX_URL = new URL(
   '../../peercompute/peercompute/src/peercompute/index.js',
   import.meta.url
@@ -142,6 +146,19 @@ async function importPeerComputeManager(t) {
     throw error;
   }
   return import(PEERCOMPUTE_COMPUTE_MANAGER_URL.href);
+}
+
+async function importPeerComputeGPUHub(t) {
+  try {
+    await access(fileURLToPath(PEERCOMPUTE_GPU_HUB_URL));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      t.skip('sibling PeerCompute GPUHub checkout is not available');
+      return null;
+    }
+    throw error;
+  }
+  return import(PEERCOMPUTE_GPU_HUB_URL.href);
 }
 
 async function importPeerComputeStateManager(t) {
@@ -493,15 +510,19 @@ async function createPassingMechanicsPromotionEvidence({ manifest } = {}) {
 
 test('ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes', async (t) => {
   const mod = await importPeerComputeManager(t);
+  const gpuHubMod = await importPeerComputeGPUHub(t);
   const stateMod = await importPeerComputeStateManager(t);
   const nodeMod = await importPeerComputeNodeKernel(t);
-  if (!mod || !stateMod || !nodeMod) return;
+  if (!mod || !gpuHubMod || !stateMod || !nodeMod) return;
   const { ComputeManager } = mod;
+  const { GPUHubManager } = gpuHubMod;
   const { StateManager } = stateMod;
   const { NodeKernel } = nodeMod;
+  const gpuHub = new GPUHubManager();
   const computeManager = new ComputeManager({
     enableWorkers: false,
-    gpuDeviceId: 'gpu-device:ulg-solver-descriptors'
+    gpuDeviceId: 'gpu-device:ulg-solver-descriptors',
+    gpuHub
   });
   const stateManager = new StateManager(null, {
     enablePersistence: false,
@@ -1225,6 +1246,15 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
     ['p2g', 'gridUpdate', 'g2p']
   );
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode, 'registered');
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 3);
+  assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
+    p2g: 'gpu-hub-resident-stage-executor',
+    gridUpdate: 'gpu-hub-resident-stage-executor',
+    g2p: 'gpu-hub-resident-stage-executor'
+  });
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
+  assert.deepEqual(new Set(gpuHub.listResidentStageExecutors().map((entry) => entry.stageId)), new Set(['p2g', 'gridUpdate', 'g2p']));
   assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.stageTaskBoundaries, {
     p2g: true,
     gridUpdate: true,
@@ -1270,6 +1300,12 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gridUpdate: true,
     g2p: true
   });
+  assert.deepEqual(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
+    p2g: 'gpu-hub-resident-stage-executor',
+    gridUpdate: 'gpu-hub-resident-stage-executor',
+    g2p: 'gpu-hub-resident-stage-executor'
+  });
+  assert.equal(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
   assert.ok(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.submittedStageTasks.every((task) => (
     task.gpuResidentLaneLaneId === 'ulg:test:mechanics-stage-lane-executor-webgpu-requested'
     && task.gpuResidentLaneStateKey === 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state'

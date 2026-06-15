@@ -5507,6 +5507,11 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         stageExecutionStatus: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStatus ?? null,
         stageExecutionCompletedStageCount: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionCompletedStageCount ?? null,
         stageExecutionStageOrder: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStageOrder ?? [],
+        stageExecutionExecutorSources: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionExecutorSources ?? {},
+        stageExecutionUsedGpuHubExecutors: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionUsedGpuHubExecutors ?? null,
+        gpuHubResidentStageExecutorMode: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuHubResidentStageExecutorMode ?? null,
+        gpuHubResidentStageExecutorRegisteredCount: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuHubResidentStageExecutorRegisteredCount ?? null,
+        gpuHubResidentStageExecutorStageIds: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuHubResidentStageExecutorStageIds ?? [],
         stageLeaseFenceSatisfied: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageLeaseFenceSatisfied ?? null,
         stageTaskLaneAligned: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneAligned ?? null,
         stageTaskLaneIds: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneIds ?? {},
@@ -6037,6 +6042,15 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   expect(result.mechanicsStageTaskChainWebGpu.stageExecutionStatus).toBe('completed');
   expect(result.mechanicsStageTaskChainWebGpu.stageExecutionCompletedStageCount).toBe(3);
   expect(result.mechanicsStageTaskChainWebGpu.stageExecutionStageOrder).toEqual(['p2g', 'gridUpdate', 'g2p']);
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionExecutorSources).toEqual({
+    p2g: 'gpu-hub-resident-stage-executor',
+    gridUpdate: 'gpu-hub-resident-stage-executor',
+    g2p: 'gpu-hub-resident-stage-executor'
+  });
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionUsedGpuHubExecutors).toBe(true);
+  expect(result.mechanicsStageTaskChainWebGpu.gpuHubResidentStageExecutorMode).toBe('registered');
+  expect(result.mechanicsStageTaskChainWebGpu.gpuHubResidentStageExecutorRegisteredCount).toBe(3);
+  expect(new Set(result.mechanicsStageTaskChainWebGpu.gpuHubResidentStageExecutorStageIds)).toEqual(new Set(['p2g', 'gridUpdate', 'g2p']));
   expect(result.mechanicsStageTaskChainWebGpu.stageLeaseFenceSatisfied).toBe(true);
   expect(result.mechanicsStageTaskChainWebGpu.stageTaskLaneAligned).toBe(true);
   expect(result.mechanicsStageTaskChainWebGpu.stageTaskLaneIds).toEqual({

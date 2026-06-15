@@ -3544,7 +3544,8 @@ export async function createPeerComputeResidentAuthorityHost({
     computeManager = new ComputeManager({
       enableWorkers,
       enableWebGPU,
-      gpuDeviceId
+      gpuDeviceId,
+      gpuHub
     });
     await computeManager.initialize();
     nodeKernel = createNodeKernelFacade({

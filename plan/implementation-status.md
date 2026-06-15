@@ -1,9 +1,26 @@
 # Implementation Status
 
-Updated: 2026-06-14 browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Routed ULG mechanics stage-chain execution through the PeerCompute/GPUHub
+  resident stage executor registry. The helper registers P2G, grid-update, and
+  G2P handlers on the ComputeManager-attached GPUHub, then runs
+  `executeGpuResidentLaneStagePlan()` without direct stage callbacks so
+  `GpuResidentLaneManager` resolves the stages via
+  `gpu-hub-resident-stage-executor`. Direct browser authority-host
+  construction now passes the same GPUHub into ComputeManager, and sibling
+  PeerCompute now passes the NodeKernel-owned GPUHub into ComputeManager.
+  Focused Node and browser gates prove all three mechanics stages use GPUHub
+  executor sources while preserving WebGPU backends, `gpu-lane` residency,
+  same parent lane/state keys, completed stage-plan execution, and satisfied
+  fences. Validation passed syntax checks, focused cross-repo integration
+  `11/11`, focused browser authority-host Playwright `1/1`, physics atomics
+  `7` with `1` expected skip, and visual matrix
+  `codex-gpuhub-stage-executor-chain-20260614` `3/3` with two captured frames
+  per scenario. Newly reported major z-buffer/draw-order issues are noted as a
+  deferred renderer blocker, not fixed in this slice.
 - Added browser authority-host validation for the same-lane WebGPU mechanics
   stage chain. The focused Playwright test now calls
   `host.runMechanicsStageTaskChain()` with `preferWebGpu=true`,

@@ -48,9 +48,20 @@ state that moves on screen is the state the laws actually mutated.
   major todo item is not closed if the representative sequences show stale
   meshes, detached surfaces, delayed jumps, unbounded pulsing, or visible motion
   that contradicts resident diagnostics.
+- Render depth/order evidence: visual acceptance must also catch major
+  z-buffer and draw-order failures. Transparent water/steam/product surfaces,
+  opaque/solid surfaces, nested blobs, the container, and grid overlays need
+  explicit depth-test/depth-write/render-order expectations instead of relying
+  on visually plausible static screenshots.
 
 ## Current Diagnosis
 
+- 2026-06-14 20:24 AKDT update: user reports major z-buffer/draw-order issues
+  in the live visualization. Treat this as a deferred renderer blocker after
+  the current GPUHub stage-executor clean point. The fix should audit
+  transparent-vs-opaque surface depth policy, nested surface sorting,
+  MarchingCubes/retained WebGPU overlay ordering, and add browser coverage
+  that fails on wrong draw order.
 - 2026-06-14 18:50 AKDT update: the mounted active-grid scene opt-in probe
   now proves the browser scene can request and report the fused active-grid
   resident mechanics path. The evidence artifact

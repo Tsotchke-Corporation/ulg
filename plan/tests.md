@@ -1,9 +1,9 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Active-Grid Fused Resident Mechanics
+## Current Focused Result - 2026-06-14 GPUHub Resident Stage Executor Chain
 
-The first PeerCompute-side lane executor boundary for this contract is now
-covered. Focused checks:
+The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
+PeerCompute/GPUHub resident stage executor registry. Focused checks:
 
 - ULG mechanics stage-chain lane-plan evidence:
   `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
@@ -11,19 +11,20 @@ covered. Focused checks:
   -> G2P native stage graph outputs are consumed through
   `ComputeManager.executeGpuResidentLaneStagePlan()` and that the non-native
   graph path lets the lane executor submit the actual three stage tasks. The
-  same focused gate now also requests WebGPU for the non-native child stage
-  tasks and proves P2G, grid-update, and G2P are all `gpu-lane` tasks aligned
-  to the parent lane id/state key with satisfied fences. The browser/GPUHub
-  same-device worker path still needs a dedicated validation slice.
+  same focused gate now gives ComputeManager a real sibling `GPUHubManager`
+  and asserts the stage execution source map is
+  `gpu-hub-resident-stage-executor` for P2G, grid-update, and G2P.
 - Browser same-lane WebGPU stage-chain validation:
   `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
   passed `1/1`. The gate now runs `host.runMechanicsStageTaskChain()` with
   `preferWebGpu=true`, `useNativeTaskGraph=false`, a shared scene
   `deviceResult`, and explicit parent lane id/state key. It asserts P2G,
   grid-update, and G2P all report `webgpu` backend, `gpu-lane` residency,
-  same parent lane/state key, completed stage-plan execution, and satisfied
-  fences. This is inline browser authority-host execution; separate GPUHub
-  worker residency remains open.
+  same parent lane/state key, completed stage-plan execution, satisfied
+  fences, GPUHub executor registration, and
+  `gpu-hub-resident-stage-executor` sources for all three mechanics stages.
+  This is inline browser authority-host execution through GPUHub's registry;
+  separate GPUHub worker residency remains open.
 - PeerCompute lane manager:
   `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
   from `/home/cos/projects/peercompute` passed `6/6`.
@@ -47,7 +48,9 @@ covered. Focused checks:
   The same-lane WebGPU-request invariant matrix
   `codex-same-lane-stage-webgpu-request-20260614` passed `3/3`. The browser
   same-lane WebGPU stage-chain matrix
-  `codex-browser-same-lane-webgpu-stage-chain-20260614` passed `3/3`.
+  `codex-browser-same-lane-webgpu-stage-chain-20260614` passed `3/3`. The
+  GPUHub resident stage executor chain matrix
+  `codex-gpuhub-stage-executor-chain-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

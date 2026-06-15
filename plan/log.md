@@ -20989,3 +20989,84 @@ Open:
   resident lane. The next architecture slice is supervised GPUHub/
   ComputeManager worker residency for the same stage handlers, then
   pressure/interface, thermal/phase, and reaction/product promotion.
+
+## 2026-06-14 20:24 AKDT - GPUHub resident stage executor chain
+
+Prompt context:
+
+- Continued from the browser same-lane WebGPU stage-chain checkpoint. The next
+  architecture goal was to stop passing ULG stage callbacks directly into the
+  lane stage-plan execution path and instead let PeerCompute/GPUHub own the
+  resident stage executor registry.
+- User also reported major live z-buffer/draw-order issues and asked to note
+  them for later without interrupting the active architecture work.
+
+Implemented:
+
+- In sibling PeerCompute, added GPUHub resident stage executor registration and
+  lane-manager fallback resolution, then committed it as
+  `b395b1e1 Add GPUHub resident stage executors`.
+- In sibling PeerCompute, passed the NodeKernel-owned GPUHub into
+  ComputeManager so `GpuResidentLaneManager` resolves against the same hub, and
+  committed it as `7936cc0a Share NodeKernel GPUHub with compute lanes`.
+- In ULG, direct browser authority-host construction now passes its GPUHub into
+  ComputeManager.
+- Updated the mechanics stage-lane contract to use distinct law-node aliases
+  for P2G, grid-update, and G2P.
+- `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` now
+  registers its P2G/grid-update/G2P stage handlers on the
+  ComputeManager-attached GPUHub when available. It then calls
+  `executeGpuResidentLaneStagePlan()` without direct stage callbacks so
+  PeerCompute resolves stages through `gpu-hub-resident-stage-executor`.
+- The stage-chain evidence now reports GPUHub executor mode, registered stage
+  count, registered stage ids, per-stage executor source, and whether all
+  stages used GPUHub executors.
+- Focused Node and browser tests now assert the stage execution source map is
+  `gpu-hub-resident-stage-executor` for P2G, grid-update, and G2P.
+- Added the user-reported z-buffer/draw-order issue to
+  `plan/todo/README.md`,
+  `plan/todo/physics-behavior-regression-plan.md`, and
+  `plan/todo/sphphasedemo.md` as a deferred renderer blocker.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `tests/demo.e2e.mjs`
+- `.icc/ulg_status.json`
+- ULG plan/status/todo/test/log/done documentation.
+- Sibling PeerCompute files in commits `b395b1e1` and `7936cc0a`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-gpuhub-stage-executor-chain-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+- PASS: PeerCompute focused GPUHub/lane-manager unit tests passed `10/10`.
+- PASS: PeerCompute NodeKernel start/authority suite passed `8/8` after the
+  new fixture disabled Node IndexedDB persistence.
+
+Open:
+
+- This is still inline GPUHub registry execution, not a dedicated GPU worker
+  that owns the WebGPU device and resident buffers. Next architecture slice:
+  supervised GPUHub/ComputeManager worker residency for this same stage chain.
+- Then promote pressure/interface, thermal/phase, and reaction/product stages
+  behind the same authority boundary.
+- Major z-buffer/draw-order issues are noted for the renderer pass. The fix
+  needs explicit transparent/opaque depth policy, nested-surface ordering, and
+  browser coverage that fails on wrong draw order.

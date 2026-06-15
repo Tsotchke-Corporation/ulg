@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 20:23 AKDT: ULG mechanics stage-chain
+execution now passes through the PeerCompute/GPUHub resident stage executor
+registry. The helper registers P2G, grid-update, and G2P handlers on the
+ComputeManager-attached GPUHub, then calls
+`executeGpuResidentLaneStagePlan()` without direct stage callbacks so
+`GpuResidentLaneManager` resolves each stage through
+`gpu-hub-resident-stage-executor`. The browser authority-host gate proves the
+same WebGPU stage chain still reports WebGPU backends, `gpu-lane` residency,
+shared parent lane/state keys, completed stage-plan execution, satisfied
+fences, and GPUHub executor sources for all three mechanics stages. This is
+still inline GPUHub execution, not a dedicated GPU worker; next is supervised
+GPUHub/ComputeManager worker residency for this same stage chain, followed by
+pressure/interface, thermal/phase, and reaction/product stage promotion.
+
 Current checkpoint, 2026-06-14 19:59 AKDT: the browser authority-host test
 now validates the same-lane WebGPU mechanics stage chain with real browser
 WebGPU backends. The test runs `host.runMechanicsStageTaskChain()` with

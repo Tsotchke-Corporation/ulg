@@ -35,6 +35,26 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 20:23 AKDT: ULG mechanics stage-chain
+execution now registers P2G, grid-update, and G2P handlers on the
+ComputeManager-attached GPUHub and lets `GpuResidentLaneManager` resolve the
+stage plan through `gpu-hub-resident-stage-executor` instead of direct ULG
+callbacks. Focused Node and browser gates prove all three mechanics stages
+use GPUHub executor sources while retaining WebGPU backends, GPU-lane
+residency, same parent lane/state key, completed stage-plan execution, and
+satisfied fences. Next priority remains supervised GPUHub/ComputeManager
+worker residency for this same stage chain, followed by pressure/interface,
+thermal/phase, and reaction/product stage promotion.
+
+Deferred renderer blocker noted 2026-06-14 20:24 AKDT: user reports major
+z-buffer/draw-order issues in the live visualization. Do not let this distract
+from the current GPUHub stage-executor architecture clean point, but keep it
+queued as a renderer P0/P1 before claiming visual correctness. The fix should
+audit transparent/opaque surface ordering, depth-write/depth-test policy,
+nested fluid/solid surfaces, container/grid overlay ordering, and add browser
+coverage that catches wrong draw order rather than relying on static
+screenshots.
+
 Current routing note, 2026-06-14 19:59 AKDT: browser authority-host
 validation now proves the same-lane mechanics stage chain can run P2G,
 grid-update, and G2P as actual `webgpu` child stage tasks under one parent

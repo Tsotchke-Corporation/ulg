@@ -126,6 +126,33 @@ function uniqueStringList(values = []) {
   return Array.from(new Set(normalizeStringList(values)));
 }
 
+function firstNonEmptyStringList(...candidates) {
+  for (const candidate of candidates) {
+    const values = uniqueStringList(candidate);
+    if (values.length > 0) return values;
+  }
+  return [];
+}
+
+function retainedGasCellFieldSourceFrom(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value.schema === ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
+    ? value
+    : (value.retainedGasCellFieldSource
+        || value.pressureInterfaceRetainedGasCellFieldSource
+        || value.workerRetainedBufferImport?.retainedGasCellFieldSource
+        || value.pressureInterfaceGasCellFieldImport?.retainedGasCellFieldSource
+        || value.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
+        || null);
+  if (
+    candidate?.schema === ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
+    && candidate?.status === 'pressure-interface-retained-gas-cell-field-source-ready'
+  ) {
+    return candidate;
+  }
+  return null;
+}
+
 function cloneSerializableValue(value) {
   if (value == null) return value;
   return JSON.parse(JSON.stringify(value));
@@ -2040,27 +2067,31 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     || sourceObject.gasCellFieldAdmission
     || sourceObject.admission
     || null;
+  const retainedGasCellFieldSource = retainedGasCellFieldSourceFrom(sourceObject)
+    || retainedGasCellFieldSourceFrom(resolvedAdmission)
+    || null;
   const admissionApproved = resolvedAdmission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
     && resolvedAdmission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
     && resolvedAdmission?.gasCellFieldConsumptionApproved === true;
   if (!admissionApproved) {
     throw new TypeError('pressure/interface gas-cell field import requires admitted field-consumption evidence');
   }
-  const resolvedRetainedGasPressureBufferRefs = uniqueStringList(
-    retainedGasPressureBufferRefs.length > 0
-      ? retainedGasPressureBufferRefs
-      : (sourceObject.retainedGasPressureBufferRefs
-          || sourceObject.pressureInterfaceGasCellFieldAdmission?.retainedGasPressureBufferRefs
-          || resolvedAdmission.retainedGasPressureBufferRefs
-          || [])
-  );
-  const resolvedWorkerRetainedGasPressureBufferRefs = uniqueStringList(
-    workerRetainedGasPressureBufferRefs.length > 0
-      ? workerRetainedGasPressureBufferRefs
-      : (sourceObject.workerRetainedGasPressureBufferRefs
-          || resolvedAdmission.workerRetainedGasPressureBufferRefs
-          || [])
-  );
+  const resolvedRetainedGasPressureBufferRefs = retainedGasPressureBufferRefs.length > 0
+    ? uniqueStringList(retainedGasPressureBufferRefs)
+    : firstNonEmptyStringList(
+        sourceObject.retainedGasPressureBufferRefs,
+        sourceObject.pressureInterfaceGasCellFieldAdmission?.retainedGasPressureBufferRefs,
+        resolvedAdmission.retainedGasPressureBufferRefs,
+        retainedGasCellFieldSource?.retainedGasPressureBufferRefs
+      );
+  const resolvedWorkerRetainedGasPressureBufferRefs = workerRetainedGasPressureBufferRefs.length > 0
+    ? uniqueStringList(workerRetainedGasPressureBufferRefs)
+    : firstNonEmptyStringList(
+        sourceObject.workerRetainedGasPressureBufferRefs,
+        sourceObject.pressureInterfaceGasCellFieldAdmission?.workerRetainedGasPressureBufferRefs,
+        resolvedAdmission.workerRetainedGasPressureBufferRefs,
+        retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs
+      );
   if (resolvedRetainedGasPressureBufferRefs.length === 0 && resolvedWorkerRetainedGasPressureBufferRefs.length === 0) {
     throw new TypeError('pressure/interface gas-cell field import requires retained gas-cell buffer refs');
   }
@@ -2083,18 +2114,24 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
   const gasPressureCellRowCount = Math.max(
     0,
     Math.trunc(finiteSeedNumber(
-      sourceObject.pressureInterfaceGasPressureCellRowCount,
+      sourceObject.pressureInterfaceGasPressureCellRowCount
+        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
       resolvedGasCellFieldSnapshot.cells.length
     ))
   );
   const gasPressureCellRowStrideFloats = Math.max(
     0,
-    Math.trunc(finiteSeedNumber(sourceObject.pressureInterfaceGasPressureCellRowStrideFloats, 12))
+    Math.trunc(finiteSeedNumber(
+      sourceObject.pressureInterfaceGasPressureCellRowStrideFloats
+        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
+      12
+    ))
   );
   const gasPressureCellRowByteLength = Math.max(
     0,
     Math.trunc(finiteSeedNumber(
-      sourceObject.pressureInterfaceGasPressureCellRowByteLength,
+      sourceObject.pressureInterfaceGasPressureCellRowByteLength
+        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
       gasPressureCellRowCount * gasPressureCellRowStrideFloats * Float32Array.BYTES_PER_ELEMENT
     ))
   );
@@ -2114,6 +2151,7 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
     stateManagerAdmissionRequired: true,
     authoritativeStateMutation: false
@@ -2136,6 +2174,7 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
     pressureInterfaceGasCellFieldImport
   };
@@ -2165,6 +2204,7 @@ export function publishUlgPressureInterfaceGasCellFieldImportSource({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
     gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
     pressureInterfaceGasCellFieldImport
   };
@@ -2210,6 +2250,7 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     throw new TypeError('publishUlgPressureInterfaceGasCellFieldAdmission requires StateManager hot storage and commitDelta');
   }
   const sourceObject = source && typeof source === 'object' ? source : {};
+  const retainedGasCellFieldSource = retainedGasCellFieldSourceFrom(sourceObject);
   const resolvedGasCellFieldSnapshot = gasCellFieldSnapshot
     || sourceObject.gasCellFieldSnapshot
     || sourceObject.gasCellField
@@ -2222,16 +2263,18 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
   ) {
     throw new TypeError('pressure/interface gas-cell field admission requires a ready local gas-cell snapshot');
   }
-  const resolvedRetainedGasPressureBufferRefs = uniqueStringList(
-    retainedGasPressureBufferRefs.length > 0
-      ? retainedGasPressureBufferRefs
-      : (sourceObject.retainedGasPressureBufferRefs || [])
-  );
-  const resolvedWorkerRetainedGasPressureBufferRefs = uniqueStringList(
-    workerRetainedGasPressureBufferRefs.length > 0
-      ? workerRetainedGasPressureBufferRefs
-      : (sourceObject.workerRetainedGasPressureBufferRefs || [])
-  );
+  const resolvedRetainedGasPressureBufferRefs = retainedGasPressureBufferRefs.length > 0
+    ? uniqueStringList(retainedGasPressureBufferRefs)
+    : firstNonEmptyStringList(
+        sourceObject.retainedGasPressureBufferRefs,
+        retainedGasCellFieldSource?.retainedGasPressureBufferRefs
+      );
+  const resolvedWorkerRetainedGasPressureBufferRefs = workerRetainedGasPressureBufferRefs.length > 0
+    ? uniqueStringList(workerRetainedGasPressureBufferRefs)
+    : firstNonEmptyStringList(
+        sourceObject.workerRetainedGasPressureBufferRefs,
+        retainedGasCellFieldSource?.workerRetainedGasPressureBufferRefs
+      );
   if (resolvedRetainedGasPressureBufferRefs.length === 0 && resolvedWorkerRetainedGasPressureBufferRefs.length === 0) {
     throw new TypeError('pressure/interface gas-cell field admission requires retained gas-cell buffer refs');
   }
@@ -2245,15 +2288,21 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     lease
   });
   const gasPressureCellRowCount = Math.max(0, Math.trunc(finiteSeedNumber(
-    sourceObject.pressureInterfaceGasPressureCellRowCount,
+    sourceObject.pressureInterfaceGasPressureCellRowCount
+      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowCount,
     resolvedGasCellFieldSnapshot.cells.length
   )));
   const gasPressureCellRowStrideFloats = Math.max(
     0,
-    Math.trunc(finiteSeedNumber(sourceObject.pressureInterfaceGasPressureCellRowStrideFloats, 12))
+    Math.trunc(finiteSeedNumber(
+      sourceObject.pressureInterfaceGasPressureCellRowStrideFloats
+        ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowStrideFloats,
+      12
+    ))
   );
   const gasPressureCellRowByteLength = Math.max(0, Math.trunc(finiteSeedNumber(
-    sourceObject.pressureInterfaceGasPressureCellRowByteLength,
+    sourceObject.pressureInterfaceGasPressureCellRowByteLength
+      ?? retainedGasCellFieldSource?.pressureInterfaceGasPressureCellRowByteLength,
     gasPressureCellRowCount * gasPressureCellRowStrideFloats * Float32Array.BYTES_PER_ELEMENT
   )));
   const pressureInterfaceGasCellFieldAdmission = {
@@ -2269,6 +2318,7 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     sourceStage,
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
@@ -2300,6 +2350,7 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     sourceStage,
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
@@ -2328,6 +2379,7 @@ export function publishUlgPressureInterfaceGasCellFieldAdmission({
     sourceStage,
     retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,

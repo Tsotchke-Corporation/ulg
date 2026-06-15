@@ -2,6 +2,28 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 07:13 AKDT: pressure/interface gas-cell
+admission and import publication now consume the retained gas-cell field source
+descriptor directly. The resident authority host accepts
+`peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0` from the
+source object or admitted gas-cell field evidence, derives worker/local
+retained gas-pressure refs and row metadata from it, and preserves that
+descriptor in the admission/import objects, StateManager hot records, and warm
+deltas. Empty caller ref arrays no longer mask descriptor refs. This removes
+another caller-fabricated retained-ref path, but the current oracle still keeps
+a local gas-cell snapshot until the dedicated resident EOS producer can publish
+the retained field itself under ComputeManager/GPUHub. Validation passed syntax
+checks, PeerCompute integration `14/14`, pressure stage coverage `43/43`,
+physics atomics `7` with `1` expected opt-in skip, browser authority-host
+Playwright `1/1`, and visual matrix
+`codex-retained-gas-cell-source-consumption-20260615` `3/3` with inspected
+frames. MLS-MPM fragmentation, CPU SPH stacked/blob behavior, ice/solid
+rigidity, volume pulsation/blinking, long-horizon liquid settling, and renderer
+z-buffer/focus visual trust remain open. Next target: add the dedicated
+resident gas-cell EOS producer stage as a ComputeManager/GPUHub retained output
+so the snapshot requirement can be removed from the pressure-interface import
+path.
+
 Current checkpoint, 2026-06-15 06:57 AKDT: pressure/interface Worker
 publication now carries a retained gas-cell field source descriptor through
 StateManager. A local-gradient pressure stage that already has worker/local

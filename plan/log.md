@@ -23568,3 +23568,91 @@ Open:
 - A dedicated resident gas-cell EOS producer stage under ComputeManager/GPUHub
   still needs to be added upstream.
 - The visible physics blockers remain open and unchanged.
+
+## 2026-06-15 07:13 AKDT - Retained Gas-Cell Source Consumption
+
+Prompt time/date: 2026-06-15 07:13:00 AKDT, continuing the active goal after
+the retained gas-cell field source descriptor commit.
+
+Actions:
+
+- Reviewed current worktree state and confirmed the active dirty slice was
+  limited to `src/runtime/peercomputeBrowserResidentHost.js`.
+- Checked ICC status for `ulg`; it was stale by the previous post-refresh
+  commit SHA and will be refreshed at this clean point.
+- Added a host helper to resolve a ready
+  `peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0`
+  descriptor from source objects, admitted gas-cell field evidence,
+  worker-retained imports, or gas-cell import/admission records.
+- Updated `publishUlgPressureInterfaceGasCellFieldAdmission()` so it derives
+  worker/local retained gas-pressure refs and gas-cell row metadata from the
+  retained source descriptor when direct caller refs are absent.
+- Updated `publishUlgPressureInterfaceGasCellFieldImportSource()` so it can
+  derive refs and row metadata from either the source object or the admitted
+  gas-cell field evidence.
+- Added `firstNonEmptyStringList()` so explicit empty caller ref arrays do not
+  mask retained source descriptor refs.
+- Extended
+  `tests/peercomputeComputeManagerIntegration.test.mjs` so the admitted
+  pressure/interface gas-cell field import happy path passes empty caller ref
+  arrays and proves local/worker retained refs, row metadata, hot records, warm
+  deltas, and import/admission records come from the retained source
+  descriptor.
+- Ran the recurring visual sanity matrix against the existing HTTPS Vite server
+  on `0.0.0.0:5173` with run id
+  `codex-retained-gas-cell-source-consumption-20260615`.
+- Added
+  `plan/done/retained-gas-cell-source-consumption-2026-06-15.md` and updated
+  `plan/plan.md`, `plan/todo/README.md`, `plan/implementation-status.md`, and
+  `plan/tests.md`.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/retained-gas-cell-source-consumption-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface"`
+  reported `14/14`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|pressure interface stage compute task can produce force rows"`
+  reported `43/43`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1` in `1.3m`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-retained-gas-cell-source-consumption-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-retained-gas-cell-source-consumption-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` was nonblank and bounded, but still visibly
+    fragmented.
+  - `liquid-liquid-h2o-cpu-sph` was nonblank and bounded, but still showed the
+    known stacked/blob shape.
+  - `solid-h2o-cpu-sph` was nonblank and bounded, but still showed the known
+    stacked/blob shape.
+
+Open:
+
+- The gas-cell import still carries a local gas-cell snapshot for the current
+  pressureInterface oracle path.
+- The next architecture slice should add the dedicated resident gas-cell EOS
+  producer stage as a ComputeManager/GPUHub retained output, then feed that
+  retained output into pressureInterface without caller snapshots.
+- The remaining physics behavior blockers are unchanged: MLS-MPM
+  fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
+  ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
+  pulsation/blinking, and renderer z-buffer/focus visual trust.

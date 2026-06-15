@@ -35,6 +35,20 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 07:13 AKDT: pressure/interface gas-cell
+admission/import now consumes the retained gas-cell field source descriptor
+directly. The host can derive worker/local retained gas-pressure refs and row
+metadata from
+`peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0` even
+when caller ref arrays are empty, and it persists the descriptor through
+StateManager admission/import hot and warm records. Next priority: replace the
+remaining local gas-cell snapshot requirement by adding the dedicated resident
+gas-cell EOS producer stage under ComputeManager/GPUHub, then feed that
+retained output into pressureInterface. Do not mark liquid quality, MLS-MPM
+fragmentation, CPU SPH stacked/blob behavior, ice/solid rigidity, volume
+pulsation/blinking, long-horizon settling, z-buffer/draw-order, or
+focus-resume visual trust complete.
+
 Current routing note, 2026-06-15 06:57 AKDT: the pressure/interface
 Worker-retained publication path now publishes a StateManager-visible retained
 gas-cell field source descriptor for local-gradient gas-cell buffers. This

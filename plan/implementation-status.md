@@ -4,6 +4,11 @@ Updated: 2026-06-15 plain-SPH no-force law isolation, product-event spatial ledg
 
 ## Done
 
+- CPU-particle MarchingCubes surfaces now hide immediately when their
+  material/phase batch is absent. This prevents consumed reactants from leaving
+  stale meshes visible during reaction updates while preserving inactive grace
+  for resident render-field gaps. The public-default Na/H2O visual row now
+  passes with empty issue counts and five frame artifacts.
 - Plain SPH/PBF now has an explicit condensed-liquid pressure participant
   predicate. Solids and gas products no longer enter density, pressure, or PBF
   projection as liquid mass. The new Fe/H2O solid-liquid and room-temperature

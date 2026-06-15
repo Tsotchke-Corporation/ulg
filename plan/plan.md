@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 12:16 AKDT: the targeted Na/H2O stale-surface
+visual failure is fixed. CPU-particle surfaces now hide immediately when their
+material/phase batch is absent; the inactive-surface grace window remains for
+resident render-field gaps, but a consumed reactant can no longer leave a stale
+MarchingCubes mesh visible across reaction batches. Validation passed
+`node --check src/visualization/sphPhaseScene.js`, focused renderer coverage
+`tests/sphPhaseRenderer.test.mjs` (`34/34`), `git diff --check`, and targeted
+visual matrix `codex-sph-reaction-roomtemp-blob1-no-stale-na-20260615` with
+`failedCount=0`, empty issue counts, empty visual-surface issue counts, five
+captured frames, `maxSpeedObservedMPerS ~= 0.541`, pressure impulse `0`, H2O
+surface count `1 -> 1`, and `maxVisibleSurfaceOutsideParticleBoundsM=0`.
+This clears the public-default Na/H2O plain-SPH behavior row. Broader liquid
+free-surface quality, renderer z-buffer/depth-order trust, focus-resume
+flashing, and WebGPU/PeerCompute law migration remain open.
+
 Current checkpoint, 2026-06-15 12:08 AKDT: the plain SPH/PBF condensed
 pressure-participant bug is fixed for solids and reaction gases. The SPH
 carrier now distinguishes "not solid" from "participates in condensed-liquid

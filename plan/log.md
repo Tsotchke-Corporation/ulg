@@ -1,5 +1,41 @@
 # ULG Implementation Log
 
+## 2026-06-15 12:16 AKDT - CPU surface invalidation for consumed reactants
+
+Summary:
+
+- Diagnosed the remaining Na/H2O visual failure as stale CPU MarchingCubes
+  retention, not physics instability. The Na solid mesh stayed visible across
+  batches after the Na batch disappeared, then vanished later after grace
+  expired.
+- Changed `applySurfaceBatches()` so inactive `cpu-particles` surfaces hide
+  immediately when their material/phase batch is absent. Resident render-field
+  surfaces still use inactive grace for transient GPU/readback gaps.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "inactive grace|hide empty surfaces"`
+  reported `34/34`.
+- PASS: `git diff --check`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-sph-reaction-roomtemp-blob1-no-stale-na-20260615 ULG_VISUAL_MATRIX_SCENARIOS=reaction-product-na-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, five captured frames, `maxVisibleSurfaceOutsideParticleBoundsM=0`,
+  pressure impulse `0`, and H2O visible surface count `1 -> 1`.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/cpu-surface-invalidation-consumed-reactants-2026-06-15.md`
+
 ## 2026-06-15 12:08 AKDT - Plain SPH condensed pressure partition
 
 Summary:

@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 12:16 AKDT: the public-default Na/H2O
+plain-SPH visual row now passes. The remaining visual issue after the pressure
+partition fix was stale CPU MarchingCubes retention: the Na solid surface stayed
+visible for grace frames after reaction products consumed the Na batch. CPU
+particle surfaces now hide immediately when their material/phase batch is
+absent, while resident render-field grace remains available for transient GPU
+readback gaps. Targeted matrix
+`codex-sph-reaction-roomtemp-blob1-no-stale-na-20260615` passed with empty
+issue counts and five frames. Next P0 behavior priorities are broader liquid
+free-surface/settling quality, renderer z-buffer/depth-order and focus-resume
+trust, then continuing the PeerCompute/WebGPU law migration.
+
 Current routing note, 2026-06-15 12:08 AKDT: the Na/H2O plain-SPH reaction
 motion failure is narrowed and the pressure-side bug is fixed. Plain SPH now
 keeps only liquid particles in the condensed density/pressure/PBF solve;

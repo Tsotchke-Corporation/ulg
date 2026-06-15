@@ -1,5 +1,26 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 CPU Surface Invalidation
+
+The current slice fixes stale CPU MarchingCubes surfaces after reaction-driven
+material changes. CPU-particle surfaces hide immediately when their
+material/phase batch disappears; retained grace remains for resident
+render-field gaps.
+
+Focused checks:
+
+- Syntax: `node --check src/visualization/sphPhaseScene.js` passed.
+- Renderer coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "inactive grace|hide empty surfaces"`
+  passed `34/34` renderer tests.
+- Diff check: `git diff --check` passed.
+- Targeted browser visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-sph-reaction-roomtemp-blob1-no-stale-na-20260615 ULG_VISUAL_MATRIX_SCENARIOS=reaction-product-na-h2o ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, five captured frames, `maxVisibleSurfaceOutsideParticleBoundsM=0`,
+  `maxSpeedObservedMPerS=0.5410316601618764`, pressure impulse `0`, and H2O
+  visible surface count `1 -> 1`.
+
 ## Current Focused Result - 2026-06-15 Plain SPH Condensed Pressure Partition
 
 The current slice fixes the plain SPH/PBF participant contract. Only

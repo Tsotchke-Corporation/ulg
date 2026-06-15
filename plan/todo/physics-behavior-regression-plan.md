@@ -12,6 +12,17 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 12:16 AKDT update: the targeted Na/H2O stale-surface visual
+  failure is fixed. CPU-particle surface batches now hide absent material/phase
+  surfaces immediately, so a consumed reactant cannot leave its previous
+  MarchingCubes mesh visible during inactive grace frames. The grace behavior
+  remains for resident render-field gaps. Targeted evidence
+  `codex-sph-reaction-roomtemp-blob1-no-stale-na-20260615` passed with
+  `failedCount=0`, empty issue counts, empty visual-surface issue counts,
+  five captured frames, `maxVisibleSurfaceOutsideParticleBoundsM=0`, pressure
+  impulse `0`, and H2O visible surface count `1 -> 1`. This closes the
+  public-default Na/H2O plain-SPH row; do not treat it as closure of broader
+  water free-surface quality, z-buffer/depth-order, or focus-resume trust.
 - 2026-06-15 12:08 AKDT update: the Na/H2O high-speed reaction motion is
   fixed at the condensed-pressure participant boundary. The root cause was
   that plain SPH treated every non-solid particle as a liquid pressure/density

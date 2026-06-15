@@ -6593,7 +6593,14 @@ export function createSphPhaseScene(container, {
           continue;
         }
         const hideStartMs = nowMs();
-        hideSurfaceAfterGrace(surface, renderSource);
+        const immediateHide = renderSource === 'cpu-particles';
+        const hidden = hideSurfaceAfterGrace(surface, renderSource, { immediate: immediateHide });
+        if (renderSource === 'cpu-particles') {
+          surface.mesh.userData.cpuSurfaceRetainedByGrace = !hidden;
+          surface.mesh.userData.cpuSurfaceRetainRejectedReason = hidden
+            ? 'cpu-surface-batch-absent'
+            : null;
+        }
         addTiming('hideInactiveMs', hideStartMs);
       }
     }

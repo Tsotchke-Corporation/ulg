@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 05:28 AKDT: the live scene/stage path now
+uses the resident authority host as the publication boundary for pressure/
+interface gas-cell imports. The scene may derive a candidate from resident
+gas-pressure telemetry, but it only obtains a consumable import by calling
+`host.publishPressureInterfaceGasCellFieldImportSource()` with a ready local
+gas-cell gradient field, admitted field-consumption evidence, and retained
+gas-pressure refs. Missing admission, missing refs, missing local gradients, or
+missing host publisher all fail closed as telemetry. Next priority: make the
+resident gas-cell pressure-gradient producer itself publish retained refs and
+admission through NodeKernel/StateManager/GPUHub so the scene path has real
+WebGPU-resident source data without caller fabrication.
+
 Current routing note, 2026-06-15 05:00 AKDT: the browser resident authority
 host can now publish admitted pressure/interface gas-cell field imports through
 StateManager hot/warm records. This moves import construction behind

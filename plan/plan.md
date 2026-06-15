@@ -2,6 +2,29 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 05:28 AKDT: the live browser scene/stage path
+now requests pressure/interface gas-cell field imports from the resident
+authority host instead of treating caller-built imports as the only route.
+`sphPhaseScene` adds a fail-closed publication helper that extracts a ready
+local gas-cell pressure-gradient field, explicit
+`peercompute.ulg.pressure-interface-gas-cell-field-admission.v0` evidence, and
+retained gas-pressure refs from the resident gas-pressure summary, then calls
+`host.publishPressureInterfaceGasCellFieldImportSource()` to obtain the
+StateManager-backed
+`peercompute.ulg.pressure-interface-gas-cell-field-import.v0` descriptor. The
+mounted physics loop now threads that import/admission through resident
+mechanics, pressure-interface refresh, and render refresh state; state
+summaries expose publication status, source hot-buffer key, retained refs, and
+blocker status. Validation passed syntax checks, focused scene/renderer tests,
+the browser PeerCompute resident authority-host gate, physics atomics, focused
+PeerCompute integration, and the three-scenario visual matrix
+`codex-scene-gas-cell-import-wire-20260615` with inspected final frames. Next
+target: make the actual resident gas-cell pressure-gradient producer publish
+admitted retained refs so this path becomes active in normal WebGPU execution,
+then continue reducing readback/copy surfaces. Keep the remaining unphysical
+liquid/solid behavior, ice flowing in CPU SPH, phone focus flash/disappear, and
+z-buffer/draw-order issues as explicit open blockers.
+
 Current checkpoint, 2026-06-15 05:00 AKDT: gas-cell field imports can now be
 published through the browser resident authority host and StateManager. The
 new

@@ -23012,3 +23012,89 @@ Open:
   pressure-gradient fields and GPU-resident surface extraction.
 - Keep CPU/reference pressure rows as oracle/diagnostic data, not accepted
   worker-retained publication data.
+
+## 2026-06-15 05:28 AKDT - Scene gas-cell import host wiring
+
+Prompt context:
+
+- Continued after the user reported major z-buffer/draw-order issues, asked
+  that they be noted for later, and asked work to continue. The draw-order
+  issue remains queued as visual-correctness debt; this slice stayed focused
+  on routing pressure/interface gas-cell imports through the resident authority
+  host in the live scene path.
+
+Implemented:
+
+- Added a fail-closed scene publication helper,
+  `publishScenePressureInterfaceGasCellFieldImportSource()`, that derives a
+  candidate gas-cell import from resident gas-pressure telemetry only when a
+  ready local gas-cell pressure-gradient field, admitted field-consumption
+  evidence, and retained gas-pressure refs are present.
+- Wired the helper to call
+  `residentAuthorityHost.publishPressureInterfaceGasCellFieldImportSource()`
+  rather than constructing ready import descriptors at the scene boundary.
+- Extended resident pressure-interface state and render-state summaries with
+  gas-cell import publication status, source hot-buffer key, admission status,
+  retained refs, and blocker telemetry.
+- Threaded the published import/admission through resident mechanics
+  scheduling, pressure-interface refresh, and render refresh in the mounted
+  demo loop.
+- Added scene/renderer coverage proving admitted gas-cell imports call the
+  resident authority host, while missing admission fails closed without a host
+  publication attempt.
+- Added `plan/done/scene-gas-cell-import-wiring-2026-06-15.md` and updated
+  `plan/plan.md`, `plan/todo/README.md`, `plan/implementation-status.md`, and
+  `plan/tests.md`.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/sphPhaseRenderer.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/scene-gas-cell-import-wiring-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell field imports|pressure interface state owns retained force rows|render order|transparent|overlay draw order"`
+  reported `28/28`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface force-row descriptors"`
+  reported `14/14`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-scene-gas-cell-import-wire-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-scene-gas-cell-import-wire-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` final frame was nonblank and bounded but still
+    fragmented.
+  - `liquid-liquid-h2o-cpu-sph` final frame was nonblank and bounded but still
+    showed the known unphysical stacked/blob shape.
+  - `solid-h2o-cpu-sph` final frame was nonblank and bounded but still showed
+    the same unacceptable stacked/blob behavior.
+
+Open:
+
+- The actual resident gas-cell pressure-gradient producer still needs to
+  publish admitted retained refs through NodeKernel/StateManager/GPUHub so the
+  host-published import path is active during normal WebGPU execution.
+- Long-horizon liquid settling, CPU SPH liquid shape, ice/solid rigidity,
+  volume pulsation/blinking, and MLS-MPM fragmentation remain open physics
+  behavior blockers.
+- Phone focus flash/disappear and remaining z-buffer/draw-order problems remain
+  open renderer visual-correctness blockers. Visual captures remain sanity
+  evidence, not final physics acceptance, until those are closed.

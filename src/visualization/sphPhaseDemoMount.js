@@ -3380,6 +3380,11 @@ export function mountSphPhaseDemoOverlay({
       || runtime?.residentAuthorityHost
       || globalThis.__ulgResidentAuthorityHost
       || null;
+    const gasPressureForSchedule = currentGasPressureSummary(
+      overlay.__sphResidentGasPressureSummary
+        || activeViewStateGasPressure
+        || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+    );
     let remoteRefreshPreludePromise = Promise.resolve(null);
     if (enableRemoteResidentTaskGraphRefresh) {
       overlay.__sphRemoteResidentTaskGraphRefresh = remoteResidentTaskGraphRefreshTelemetry('pending', {
@@ -3436,6 +3441,9 @@ export function mountSphPhaseDemoOverlay({
       computeTaskModulePath: computeTaskModulePathForSchedule,
       computeTaskLaneId: 'ulg:sph-resident:demo-auto',
       computeTaskDomainKey: 'sph-phase-demo',
+      gasPressureSummary: gasPressureForSchedule,
+      pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
+      pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
       stepCount: normalizedStepCount,
       readbackMode,
       continueFromResidentState,
@@ -3530,6 +3538,13 @@ export function mountSphPhaseDemoOverlay({
           gasPressureSummary: currentGasPressureSummary(
             activeViewStateGasPressure || (driver?.demo ? gasPressureSummary(driver.demo) : null)
           ),
+          residentAuthorityHost: residentAuthorityHostForSchedule,
+          pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
+          pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
+          pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
+          pressureInterfaceGasCellFieldImportSourceTaskId: execution?.computeManagerTask?.acceptedTaskId
+            || execution?.commitDelta?.taskId
+            || null,
           source: 'resident-physics-loop-pressure-interface-refresh',
           sourceCadence: 'resident-step-completed'
         });
@@ -3608,7 +3623,11 @@ export function mountSphPhaseDemoOverlay({
               materialProperties: activeMaterialProperties(),
               gasPressureSummary: overlay.__sphResidentGasPressureSummary
                 || activeViewStateGasPressure
-                || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+                || (driver?.demo ? gasPressureSummary(driver.demo) : null),
+              residentAuthorityHost: residentAuthorityHostForSchedule,
+              pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
+              pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
+              pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null
             });
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
             overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;

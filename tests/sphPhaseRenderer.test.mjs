@@ -24,6 +24,7 @@ import {
   hideRenderFieldSurfaceAfterGrace,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
+  publishScenePressureInterfaceGasCellFieldImportSource,
   residentSurfaceBatchIdentitySignature,
   residentRenderFieldReadbackModeForSurfaceOverlay,
   resolveResidentSurfaceDrawOverlayPolicy,
@@ -45,6 +46,10 @@ import {
 } from '../src/visualization/sphPhaseScene.js';
 import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
 import { createMlsMpmGridSpec } from '../src/runtime/sph/sphGridGpuKernel.js';
+import {
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA
+} from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
   const batches = createContinuousSurfaceBatches({
@@ -1027,6 +1032,125 @@ test('SPH resident pressure interface state owns retained force rows outside ren
   assert.equal(state.pressureInterfaceForceRowsLeaseStatus, 'active');
   assert.equal(state.pressureInterfaceForceRowsLeaseActiveCount, 1);
   assert.equal(state.gpuAuthoritativeState, true);
+});
+
+test('SPH scene requests resident authority publication for admitted gas-cell field imports', () => {
+  const gasCellField = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+    status: 'gas-cell-pressure-field-ready',
+    localPressureGradientReady: true,
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    cellDims: [2, 1, 1],
+    cells: [
+      {
+        status: 'local-gas-pressure-cell-ready',
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        pressurePa: 120000,
+        pressureGradientPaPerM: [0, 0, 0],
+        volumeM3: 4
+      },
+      {
+        status: 'local-gas-pressure-cell-ready',
+        gridIndex: [1, 0, 0],
+        centerM: [1.5, 1, 1],
+        pressurePa: 180000,
+        pressureGradientPaPerM: [0, 0, 0],
+        volumeM3: 4
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-resident-gas-pressure-summary.v0',
+    status: 'gpu-resident-reaction-pressure-summary',
+    source: 'gpu-resident-product-mass-gas-species-ledger',
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      totalPressurePa: 150000,
+      pressureGaugePa: 48675,
+      gasCellField
+    }
+  };
+  const pressureInterfaceGasCellFieldAdmission = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    sourceHotBufferKey: 'ulg:test:gas-cell-source-hot-buffer',
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer']
+  };
+  const calls = [];
+  const residentAuthorityHost = {
+    publishPressureInterfaceGasCellFieldImportSource(options) {
+      calls.push(options);
+      return {
+        schema: 'peercompute.ulg.pressure-interface-gas-cell-field-import-hot-buffer-publication.v0',
+        status: 'pressure-interface-gas-cell-field-import-published',
+        committed: true,
+        hotBufferKey: 'ulg:test:scene-gas-cell-import-hot-buffer',
+        commitDeltaTaskId: 'ulg:test:scene-gas-cell-import-task',
+        commitDeltaScope: 'ulg-pressure-interface-gas-cell-field-imports',
+        pressureInterfaceGasCellFieldImport: {
+          schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+          status: 'pressure-interface-gas-cell-field-import-ready',
+          sourceHotBufferKey: 'ulg:test:scene-gas-cell-import-hot-buffer',
+          retainedGasPressureBufferRefs: options.retainedGasPressureBufferRefs,
+          workerRetainedGasPressureBufferRefs: options.workerRetainedGasPressureBufferRefs,
+          pressureInterfaceGasPressureCellRowCount: options.gasCellFieldSnapshot.cells.length,
+          pressureInterfaceGasCellFieldAdmission: options.pressureInterfaceGasCellFieldAdmission,
+          gasCellFieldSnapshot: options.gasCellFieldSnapshot
+        }
+      };
+    }
+  };
+
+  const publication = publishScenePressureInterfaceGasCellFieldImportSource({
+    residentAuthorityHost,
+    gasPressureSummary,
+    pressureInterfaceGasCellFieldAdmission,
+    cacheKey: 'ulg:test:scene-gas-cell-import-cache',
+    stateKey: 'ulg:test:scene-gas-cell-import-state',
+    sourceTaskId: 'ulg:test:resident-gas-pressure-source',
+    source: 'resident-physics-loop-pressure-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].stateKey, 'ulg:test:scene-gas-cell-import-state');
+  assert.deepEqual(calls[0].retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(calls[0].gasCellFieldSnapshot, gasCellField);
+  assert.equal(calls[0].pressureInterfaceGasCellFieldAdmission, pressureInterfaceGasCellFieldAdmission);
+  assert.equal(publication.status, 'pressure-interface-gas-cell-field-import-published');
+  assert.equal(publication.committed, true);
+  assert.equal(publication.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(publication.pressureInterfaceGasCellFieldImportSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+  assert.equal(publication.pressureInterfaceGasCellFieldImportSourceHotBufferKey, 'ulg:test:scene-gas-cell-import-hot-buffer');
+  assert.equal(publication.pressureInterfaceGasCellFieldAdmissionApproved, true);
+
+  const blocked = publishScenePressureInterfaceGasCellFieldImportSource({
+    residentAuthorityHost,
+    gasPressureSummary,
+    pressureInterfaceGasCellFieldAdmission: null
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(blocked.status, 'blocked-gas-cell-field-consumption-admission-required');
+  assert.equal(blocked.pressureInterfaceGasCellFieldImportReady, false);
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField: {
+      schema: 'peercompute.ulg.sph-material-interface-field.v0',
+      status: 'material-interface-field-ready',
+      readySurfaceCount: 0,
+      totalSurfaceAreaM2: 0,
+      elementCount: 0,
+      elements: []
+    },
+    gasPressureSummary,
+    pressureInterfaceGasCellFieldImportPublication: publication
+  });
+  assert.equal(state.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(state.pressureInterfaceGasCellFieldImportSourceHotBufferKey, 'ulg:test:scene-gas-cell-import-hot-buffer');
+  assert.deepEqual(state.pressureInterfaceGasCellFieldRetainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
 });
 
 test('SPH resident pressure interface state blocks force-row upload without grid admission', () => {

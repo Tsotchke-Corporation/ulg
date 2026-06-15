@@ -1,6 +1,42 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 StateManager Gas-Cell Import Publisher
+## Current Focused Result - 2026-06-15 Scene Gas-Cell Import Host Wiring
+
+The current slice wires the live scene/stage path to the browser resident
+authority host for pressure/interface gas-cell field imports. Scene code can
+derive a candidate from resident gas-pressure telemetry, but it only treats the
+import as ready after `host.publishPressureInterfaceGasCellFieldImportSource()`
+returns the StateManager-backed import descriptor.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check src/visualization/sphPhaseDemoMount.js`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Scene/renderer import publication coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell field imports|pressure interface state owns retained force rows|render order|transparent|overlay draw order"`
+  passed `28/28`.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- PeerCompute gas-cell import publication coverage:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface force-row descriptors"`
+  passed `14/14`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-scene-gas-cell-import-wire-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-scene-gas-cell-import-wire-20260615`.
+  Manual inspection found all final frames nonblank and bounded. The short
+  MLS-MPM capture remains fragmented, and CPU SPH still shows the known
+  unphysical stacked/blob shape; those are open physics behavior defects, not
+  accepted liquid/solid behavior.
+
+## Prior Focused Result - 2026-06-15 StateManager Gas-Cell Import Publisher
 
 The current slice moves gas-cell import construction behind the browser
 resident authority host and StateManager. The host publishes

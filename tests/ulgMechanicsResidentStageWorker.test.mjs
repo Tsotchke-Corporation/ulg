@@ -206,6 +206,74 @@ test('ULG resident stage worker can run pressure interface force-row stage', asy
   assert.ok(pressure.retainedBufferRefs.includes('pressure-interface-force-rows-buffer'));
 });
 
+test('ULG resident stage worker can run gas-cell EOS producer stage', async () => {
+  const spatialGasSpeciesLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    spatialGasSourceBufferRetained: true,
+    retainedSpatialGasSourceBufferRefs: ['resident-product-mass-buffer'],
+    cellDims: [2, 1, 1],
+    cellCount: 2,
+    cells: [
+      {
+        index: 0,
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.04, moles: 200, temperatureK: 300 }
+        }
+      },
+      {
+        index: 1,
+        gridIndex: [1, 0, 0],
+        centerM: [1.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.06, moles: 300, temperatureK: 300 }
+        }
+      }
+    ]
+  };
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:gas-cell-eos-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      boxDimsM: [2, 2, 2],
+      gasPressureSummary: {
+        schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+        status: 'gpu-resident-reaction-pressure-summary',
+        source: 'gpu-resident-product-mass-gas-species-ledger',
+        totalPressurePa: 180000,
+        boxVolumeM3: 8,
+        boxDimsM: [2, 2, 2],
+        bySpecies: {},
+        spatialGasSpeciesLedger
+      }
+    }
+  };
+
+  const eos = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('gasCellEosProducer', ['resident-spatial-gas-species-ledger', 'resident-product-mass'], ['resident-gas-pressure']),
+    context,
+    null,
+    {
+      laneId: 'ulg:test:gas-cell-eos-worker-lane',
+      stateKey: 'ulg:test:gas-cell-eos-worker-state'
+    }
+  ));
+
+  assert.equal(eos.value.workerResidentStage.stageId, 'gasCellEosProducer');
+  assert.equal(eos.value.computeTaskId, 'ulg:test:gas-cell-eos-worker:gasCellEosProducer');
+  assert.equal(eos.value.gasCellEosProducerStageTaskEvidence.passed, true);
+  assert.equal(eos.value.gasCellEosProducerStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(eos.value.gasCellField.localPressureGradientReady, true);
+  assert.equal(eos.value.pressureInterfaceGasPressureCellRowCount, 2);
+  assert.equal(eos.value.retainedGasCellFieldSourceReady, false);
+});
+
 test('ULG resident stage worker can run thermal phase stage and adopt retained thermo output', async () => {
   const buffers = manualBuffers();
   const sourceStateBuffer = { label: 'worker-g2p-state' };

@@ -1,4 +1,5 @@
 import {
+  runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
   runSphReactionProductStageComputeTask,
   runSphThermalPhaseStageComputeTask,
@@ -19,6 +20,7 @@ const GPU_BUFFER_USAGE = {
 
 const STAGE_RUNNERS = {
   p2g: runMlsMpmMechanicsP2gStageComputeTask,
+  gasCellEosProducer: runSphGasCellEosProducerStageComputeTask,
   pressureInterface: runSphPressureInterfaceStageComputeTask,
   gridUpdate: runMlsMpmMechanicsGridUpdateStageComputeTask,
   g2p: runMlsMpmMechanicsG2pStageComputeTask,
@@ -121,6 +123,13 @@ function retainedRefsForStageResult(stageId, result = {}) {
     || result.forceRowByteLength > 0
   )) {
     refs.push('pressure-interface-force-rows-buffer');
+  }
+  if (stageId === 'gasCellEosProducer' && (
+    result.gasPressureCellRowsBufferRetained
+    || result.pressureInterfaceGasPressureCellRowsBufferRetained
+    || result.gasPressureCellsBuffer
+  )) {
+    refs.push('resident-gas-pressure-cells-buffer');
   }
   if (stageId === 'g2p') {
     if (result.stateBuffer || gpuResult.stateBuffer || result.state instanceof Float32Array || result.stateBufferByteLength > 0) {
@@ -448,7 +457,9 @@ function baseStageData(payload = {}) {
           ? ['sph-state-buffer', 'sph-thermo-buffer']
           : (stageId === 'reactionProduct'
             ? ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer']
-            : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']))));
+            : (stageId === 'gasCellEosProducer'
+              ? ['resident-gas-pressure-cells-buffer']
+              : ['sph-state-buffer', 'mls-mpm-mechanics-buffer'])))));
   return {
     ...common,
     ...stageSpecificOptions,

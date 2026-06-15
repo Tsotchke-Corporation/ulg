@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 07:34 AKDT: the dedicated resident gas-cell
+EOS producer stage surface is in place. `gasCellEosProducer` can derive the
+local gas-cell pressure field from a spatial gas species ledger, pack the
+shared 12-float gas-pressure-cell ABI, upload/retain it on a WebGPU lane, and
+publish a retained gas-cell field source descriptor for pressureInterface
+admission/import. The worker stage registry recognizes the new law stage.
+Next priority: wire this producer into the live resident stage chain and scene
+host publication path so snapshot-derived gas-cell imports are replaced by
+ComputeManager/GPUHub-owned producer output. Keep the eventual WGSL EOS shader
+and all visible physics-quality blockers open.
+
 Current routing note, 2026-06-15 07:13 AKDT: pressure/interface gas-cell
 admission/import now consumes the retained gas-cell field source descriptor
 directly. The host can derive worker/local retained gas-pressure refs and row

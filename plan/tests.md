@@ -1,5 +1,44 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Resident Gas-Cell EOS Producer Stage
+
+The current slice adds a ComputeManager/GPUHub stage surface for resident
+gas-cell EOS production. The stage derives the local gas-cell pressure field
+from the spatial gas species ledger, packs the shared 12-float
+gas-pressure-cell ABI, uploads/retains that row buffer on WebGPU when
+requested, and emits a retained gas-cell field source descriptor that the
+resident authority host can admit/import for pressureInterface.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/services/ulgMechanicsResidentStage.worker.js`,
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/ulgMechanicsResidentStageWorker.test.mjs` passed.
+- Worker coverage:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs --test-name-pattern "gas-cell EOS|pressure interface"`
+  passed `5/5`.
+- SPH stage coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS|pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|pressure interface stage compute task can produce force rows"`
+  passed `44/44`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "EOS producer|gas-cell field imports|worker-retained pressure/interface"`
+  passed `15/15`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-resident-gas-cell-eos-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]`. Manual inspection found final frames nonblank and
+  bounded; MLS-MPM fragmentation and CPU SPH stacked/blob behavior remain
+  open.
+
 ## Current Focused Result - 2026-06-15 Retained Gas-Cell Source Consumption
 
 The current slice lets pressure/interface gas-cell admission and import

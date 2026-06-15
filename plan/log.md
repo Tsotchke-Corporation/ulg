@@ -23656,3 +23656,108 @@ Open:
   fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
+
+## 2026-06-15 07:34 AKDT - Resident Gas-Cell EOS Producer Stage
+
+Prompt time/date: 2026-06-15 07:33:57 AKDT, continuing the active goal after
+the retained gas-cell source descriptor consumption commit.
+
+Actions:
+
+- Mapped the existing local gas-cell EOS derivation in `sphPhaseDemo.js`, the
+  pressureInterface gas-cell row ABI in `sphPressureInterfaceGpuKernel.js`, the
+  ComputeManager stage-task patterns in `sphMlsMpmGpuStep.js`, and the resident
+  stage worker registry.
+- Added
+  `peercompute.ulg.sph-gas-cell-eos-producer-stage-compute-task.v0`,
+  `peercompute.ulg.sph-gas-cell-eos-producer-stage-compute-task-result.v0`,
+  and `peercompute.ulg.gas-cell-eos-producer-stage-task-evidence.v0`.
+- Added `createSphGasCellEosProducerStageComputeTask()`,
+  `runSphGasCellEosProducerStageComputeTask()`, and
+  `submitSphGasCellEosProducerStageComputeTask()`.
+- Reused the exported `packGasPressureCellRows()` ABI so the producer emits the
+  same 12-float gas-pressure-cell rows that pressureInterface already consumes.
+- Implemented WebGPU retained row-buffer upload for the producer. When a
+  WebGPU-like device is supplied/requested, the stage writes the packed rows to
+  `resident-gas-pressure-cells-buffer`, awaits `queue.onSubmittedWorkDone()`
+  when available, emits a GPU fence report, and returns a retained gas-cell
+  field source descriptor.
+- Kept the authority boundary non-mutating: the producer emits stage evidence
+  and retained output descriptors, while StateManager/NodeKernel admission is
+  still required before pressureInterface consumes the output.
+- Registered `gasCellEosProducer` in
+  `src/services/ulgMechanicsResidentStage.worker.js` and added
+  `resident-gas-pressure-cells-buffer` retained-ref detection for that stage.
+- Added SPH stage coverage proving task descriptor shape, WebGPU retained row
+  upload, fence/evidence fields, retained source descriptor fields, and
+  non-mutating authority.
+- Added PeerCompute integration proving EOS producer output flows through
+  resident authority host gas-cell admission/import and is then consumed by
+  pressureInterface.
+- Added worker coverage proving the resident stage worker accepts and runs the
+  new `gasCellEosProducer` stage id.
+- Ran the recurring visual sanity matrix against the existing HTTPS Vite server
+  on `0.0.0.0:5173` with run id
+  `codex-resident-gas-cell-eos-producer-20260615`.
+- Added
+  `plan/done/resident-gas-cell-eos-producer-stage-2026-06-15.md` and updated
+  `plan/plan.md`, `plan/todo/README.md`, `plan/implementation-status.md`, and
+  `plan/tests.md`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `tests/ulgMechanicsResidentStageWorker.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/resident-gas-cell-eos-producer-stage-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS:
+  `node --check tests/sphMlsMpmGpuStep.test.mjs && node --check tests/peercomputeComputeManagerIntegration.test.mjs && node --check tests/ulgMechanicsResidentStageWorker.test.mjs`.
+- PASS:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs --test-name-pattern "gas-cell EOS|pressure interface"`
+  reported `5/5`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS|pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|pressure interface stage compute task can produce force rows"`
+  reported `44/44`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "EOS producer|gas-cell field imports|worker-retained pressure/interface"`
+  reported `15/15`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1` in `1.3m`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-resident-gas-cell-eos-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-resident-gas-cell-eos-producer-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` was nonblank and bounded, but still visibly
+    fragmented.
+  - `liquid-liquid-h2o-cpu-sph` was nonblank and bounded, but still showed the
+    known stacked/blob shape.
+  - `solid-h2o-cpu-sph` was nonblank and bounded, but still showed the known
+    stacked/blob shape.
+
+Open:
+
+- The producer stage is available but not yet wired into the live resident
+  stage chain and scene host publication path.
+- The per-cell EOS derivation is still CPU/oracle code followed by WebGPU row
+  upload; a true WGSL EOS shader remains future work.
+- The remaining physics behavior blockers are unchanged: MLS-MPM
+  fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
+  ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
+  pulsation/blinking, and renderer z-buffer/focus visual trust.

@@ -2,6 +2,30 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 07:34 AKDT: the resident gas-cell EOS producer
+now exists as a ComputeManager/GPUHub stage surface. ULG added
+`peercompute.ulg.sph-gas-cell-eos-producer-stage-compute-task.v0`, which
+derives the structured local gas-cell pressure field from the spatial gas
+species ledger, packs the same 12-float gas-pressure-cell row ABI consumed by
+pressureInterface, and uploads/retains those rows on a same-device WebGPU lane
+when requested. The stage publishes non-mutating task evidence, a GPU fence
+report, retained `resident-gas-pressure-cells-buffer` refs, and a
+`peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0`
+descriptor. The resident stage worker now registers `gasCellEosProducer`, and
+PeerCompute integration proves EOS producer output can flow through resident
+authority host admission/import into pressureInterface. This is still a
+producer-stage surface with CPU EOS derivation plus WebGPU-resident row upload;
+the EOS math itself is not yet a WGSL compute shader. Validation passed syntax
+checks, SPH stage coverage `44/44`, PeerCompute integration `15/15`, worker
+coverage `5/5`, physics atomics `7` with `1` expected opt-in skip, browser
+authority-host Playwright `1/1`, and visual matrix
+`codex-resident-gas-cell-eos-producer-20260615` `3/3` with inspected frames.
+MLS-MPM fragmentation, CPU SPH stacked/blob behavior, ice/solid rigidity,
+volume pulsation/blinking, long-horizon liquid settling, and renderer
+z-buffer/focus visual trust remain open. Next target: wire this producer stage
+into the live resident stage chain so the scene no longer derives/publishes
+gas-cell imports from snapshot summaries on the hot path.
+
 Current checkpoint, 2026-06-15 07:13 AKDT: pressure/interface gas-cell
 admission and import publication now consume the retained gas-cell field source
 descriptor directly. The resident authority host accepts

@@ -10,6 +10,7 @@ import {
   createMlsMpmResidentStepsComputeTask,
   runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu,
   runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks,
+  runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
   ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA,
   ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
@@ -23,6 +24,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
@@ -260,6 +262,9 @@ function createFakeWebGpuUploadDevice() {
           offset,
           byteLength: data?.byteLength ?? 0
         });
+      },
+      async onSubmittedWorkDone() {
+        return undefined;
       }
     }
   };
@@ -3481,6 +3486,175 @@ test('ULG resident authority host publishes admitted pressure/interface gas-cell
   assert.equal(stageResult.pressureInterfaceGasCellFieldImportReady, true);
   assert.equal(stageResult.pressureInterfaceGasCellFieldImportSourceHotBufferKey, publication.hotBufferKey);
   assert.deepEqual(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
+});
+
+test('ULG resident authority host publishes gas-cell imports from resident EOS producer output', async (t) => {
+  const computeMod = await importPeerComputeManager(t);
+  const nodeMod = await importPeerComputeNodeKernel(t);
+  const stateMod = await importPeerComputeStateManager(t);
+  if (!computeMod || !nodeMod || !stateMod) return;
+  const host = await createPeerComputeResidentAuthorityHost({
+    nodeKernelModuleUrl: PEERCOMPUTE_NODE_KERNEL_URL.href,
+    computeManagerModuleUrl: PEERCOMPUTE_COMPUTE_MANAGER_URL.href,
+    stateManagerModuleUrl: PEERCOMPUTE_STATE_MANAGER_URL.href,
+    remoteResultQuorumModuleUrl: PEERCOMPUTE_REMOTE_QUORUM_URL.href,
+    computeTaskModulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    enableWorkers: false,
+    enablePersistence: false,
+    disableNetworkProvider: true,
+    disableBroadcast: true,
+    nodeKernelConfig: {
+      pubsubPeerDiscovery: false,
+      maxConnections: 0,
+      maxIncomingPendingConnections: 0,
+      enableNetVizDebugTelemetry: false,
+      enableNetVizSessionBroadcast: false,
+      enableNetVizSessionDiscovery: false
+    }
+  });
+  t.after(() => host.destroy?.());
+
+  const device = createFakeWebGpuUploadDevice();
+  const pressureFor = (pressurePa) => (pressurePa * 4) / (8.31446261815324 * 300);
+  const spatialGasSpeciesLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    source: 'test-spatial-product-events',
+    spatialGasSourceBufferRetained: true,
+    retainedSpatialGasSourceBufferRefs: ['resident-product-mass-buffer'],
+    cellDims: [2, 1, 1],
+    cellCount: 2,
+    cells: [
+      {
+        index: 0,
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.04, moles: pressureFor(120000), temperatureK: 300 }
+        }
+      },
+      {
+        index: 1,
+        gridIndex: [1, 0, 0],
+        centerM: [1.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.06, moles: pressureFor(180000), temperatureK: 300 }
+        }
+      }
+    ]
+  };
+  const eosResult = await runSphGasCellEosProducerStageComputeTask({
+    computeTaskId: 'ulg:test:resident-gas-cell-eos-producer',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    device,
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'gpu-resident-reaction-pressure-summary',
+      source: 'gpu-resident-product-mass-gas-species-ledger',
+      totalPressurePa: 180000,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      bySpecies: {},
+      spatialGasSpeciesLedger
+    },
+    expectedOutputFamilies: ['resident-gas-pressure'],
+    gasCellEosProducerStageTask: true
+  });
+
+  assert.equal(eosResult.computeTaskResultSchema, ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(eosResult.status, 'gas-cell-eos-producer-stage-ready');
+  assert.equal(eosResult.backend, 'webgpu');
+  assert.equal(eosResult.retainedGasCellFieldSourceReady, true);
+  assert.equal(eosResult.retainedGasCellFieldSource.schema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
+  assert.equal(eosResult.pressureInterfaceGasPressureCellRowByteLength, 96);
+
+  const admissionPublication = host.publishPressureInterfaceGasCellFieldAdmission({
+    cacheKey: 'ulg:test:eos-gas-cell-admission-cache',
+    stateKey: 'ulg:test:eos-gas-cell-admission-state',
+    sourceTaskId: eosResult.computeTaskId,
+    sourceStage: 'gasCellEosProducer',
+    source: eosResult,
+    gasCellFieldSnapshot: eosResult.gasCellFieldSnapshot
+  });
+  assert.equal(admissionPublication.pressureInterfaceGasCellFieldAdmission.retainedGasCellFieldSource.sourceTaskId, eosResult.computeTaskId);
+  assert.deepEqual(admissionPublication.pressureInterfaceGasCellFieldAdmission.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+
+  const publication = host.publishPressureInterfaceGasCellFieldImportSource({
+    cacheKey: 'ulg:test:eos-gas-cell-import-cache',
+    stateKey: 'ulg:test:eos-gas-cell-import-state',
+    sourceTaskId: eosResult.computeTaskId,
+    sourceStage: 'gasCellEosProducer',
+    source: eosResult,
+    gasCellFieldSnapshot: eosResult.gasCellFieldSnapshot,
+    pressureInterfaceGasCellFieldAdmission: admissionPublication.pressureInterfaceGasCellFieldAdmission
+  });
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.retainedGasCellFieldSource.sourceTaskId, eosResult.computeTaskId);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowByteLength, 96);
+
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      },
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [-1, 0, 0]
+      }
+    ]
+  };
+  const stageResult = await runSphPressureInterfaceStageComputeTask({
+    computeTaskId: 'ulg:test:pressure-interface-stage-eos-gas-cell-import',
+    preferWebGpu: false,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'synthetic-pressure',
+      totalPressurePa: 120000,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      bySpecies: {},
+      strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+    },
+    materialInterfaceField,
+    pressureInterfaceGasCellFieldImport: publication.pressureInterfaceGasCellFieldImport,
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+  assert.equal(stageResult.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(stageResult.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.ok(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa[0] > 119000);
+  assert.ok(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa[1] > 179000);
+
+  eosResult.destroyGasPressureCellsBuffer?.();
 });
 
 test('ULG resident authority host admits worker-retained pressure/interface force-row descriptors', async (t) => {

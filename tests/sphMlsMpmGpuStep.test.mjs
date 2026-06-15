@@ -36,9 +36,12 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
+  ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   createSphThermalPhaseStageComputeTask,
+  createSphGasCellEosProducerStageComputeTask,
   createSphPressureInterfaceStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
   createMlsMpmResidentStepComputeTask,
@@ -47,6 +50,7 @@ import {
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   runSphThermalPhaseStageComputeTask,
+  runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
   runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmResidentStepComputeTask,
@@ -521,6 +525,7 @@ function fakeSummaryDevice(summaryValues) {
       writeBuffer(buffer, offset, data) {
         writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
       },
+      async onSubmittedWorkDone() {},
       submit(commands) {
         submissions.push(commands);
       }
@@ -1810,6 +1815,109 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
   assert.equal(result.thermalPhaseStageTaskAuthority.status, 'compute-manager-owned-non-mutating-thermal-phase-stage-task');
   assert.equal(result.thermalPhaseStageTaskAuthority.authoritativeStateMutation, false);
   assert.equal(result.thermalPhaseStageTaskAuthority.commitDeltaSuppressed, true);
+});
+
+test('SPH gas-cell EOS producer stage publishes retained gas pressure cell rows', async () => {
+  const spatialGasSpeciesLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    source: 'test-spatial-product-events',
+    spatialGasSourceBufferRetained: true,
+    retainedSpatialGasSourceBufferRefs: ['resident-product-mass-buffer'],
+    cellDims: [2, 1, 1],
+    cellCount: 2,
+    cells: [
+      {
+        index: 0,
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.04, moles: 200, temperatureK: 300 }
+        }
+      },
+      {
+        index: 1,
+        gridIndex: [1, 0, 0],
+        centerM: [1.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.06, moles: 300, temperatureK: 300 }
+        }
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'gpu-resident-reaction-pressure-summary',
+    source: 'gpu-resident-product-mass-gas-species-ledger',
+    totalPressurePa: 180000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {},
+    spatialGasSpeciesLedger
+  };
+  const device = fakeSummaryDevice(new Float32Array(0));
+  const task = createSphGasCellEosProducerStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:gas-cell-eos-producer-stage',
+    laneId: 'ulg:test:gas-cell-eos-lane',
+    stateKey: 'ulg:test:gas-cell-eos-state',
+    domainKey: 'ulg:test-domain',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary,
+    device
+  });
+
+  assert.equal(task.schema, ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.exportName, 'runSphGasCellEosProducerStageComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.suppressCommitDelta, true);
+  assert.deepEqual(task.readFamilies, ['resident-spatial-gas-species-ledger', 'resident-product-mass']);
+  assert.deepEqual(task.writeFamilies, ['resident-gas-pressure']);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuFence.laneId, 'ulg:test:gas-cell-eos-lane');
+  assert.equal(task.gpuResidentLane.owner, 'ulg-resident-gas-cell-eos-law');
+
+  const result = await runSphGasCellEosProducerStageComputeTask(task.data);
+
+  assert.equal(result.computeTaskResultSchema, ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.computeTaskId, 'ulg:test:gas-cell-eos-producer-stage');
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.status, 'gas-cell-eos-producer-stage-ready');
+  assert.equal(result.fullReadbackPerformed, false);
+  assert.equal(result.normalHotLoopReadbackFree, true);
+  assert.equal(result.queueCompletionStatus, 'queue-work-completed');
+  assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.equal(result.gasCellField.localPressureGradientReady, true);
+  assert.equal(result.gasCellField.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(result.pressureInterfaceGasPressureCellRowCount, 2);
+  assert.equal(result.pressureInterfaceGasPressureCellRowStrideFloats, 12);
+  assert.equal(result.pressureInterfaceGasPressureCellRowByteLength, 96);
+  assert.equal(result.pressureInterfaceGasPressureCellRowsBufferRetained, true);
+  assert.equal(result.gasPressureCellsBuffer.label, 'ulg-sph-gas-cell-eos-pressure-cells-out');
+  assert.deepEqual(result.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(result.retainedGasCellFieldSourceReady, true);
+  assert.equal(result.retainedGasCellFieldSource.schema, 'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0');
+  assert.equal(result.retainedGasCellFieldSource.sourceTaskId, 'ulg:test:gas-cell-eos-producer-stage');
+  assert.deepEqual(result.retainedGasCellFieldSource.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(result.retainedGasCellFieldSource.pressureInterfaceGasPressureCellRowByteLength, 96);
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.gasCellEosProducerStageTaskEvidence.schema, 'peercompute.ulg.gas-cell-eos-producer-stage-task-evidence.v0');
+  assert.equal(result.gasCellEosProducerStageTaskEvidence.passed, true);
+  assert.deepEqual(result.gasCellEosProducerStageTaskEvidence.candidateWriteFamilies, ['resident-gas-pressure']);
+  assert.ok(result.gasCellEosProducerStageTaskEvidence.mustNotWriteFamilies.includes('pressure-interface-force-rows'));
+  assert.equal(result.gasCellEosProducerStageTaskAuthority.status, 'compute-manager-owned-non-mutating-gas-cell-eos-producer-stage-task');
+  assert.equal(result.gasCellEosProducerStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(result.gasCellEosProducerStageTaskAuthority.pressureInterfaceMutationApproved, false);
+
+  result.destroyGasPressureCellsBuffer?.();
+  assert.equal(result.gasPressureCellsBuffer.destroyed, true);
 });
 
 test('SPH pressure interface stage compute task declares retained force-row output without authority mutation', async () => {

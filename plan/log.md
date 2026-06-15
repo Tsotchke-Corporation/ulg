@@ -22074,3 +22074,80 @@ Open:
 - Still need a WebGPU-requested Worker acceptance gate that proves in-worker
   WebGPU execution, retained GPU buffers between stages, compact summaries,
   and authorized hot-state publication.
+
+## 2026-06-15 01:33 AKDT - Pressure/interface same-frame grid admission
+
+Prompt context:
+
+- Continued the pressure/interface ComputeManager/GPUHub refactor after the
+  grid-consumption admission gate. User also reported that major z-buffer and
+  draw-order issues remain and asked that they be noted for later.
+
+Implemented:
+
+- Added same-frame pressure/interface publication/admission handling in
+  `src/runtime/sph/sphMlsMpmGpuStep.js`.
+- When `pressureInterface` immediately precedes `gridUpdate` and
+  `approveSameFramePressureInterfaceGridForces=true`, the stage-chain runner
+  now builds a pressure/interface compact publication candidate from the
+  pressure stage value, calls the pressure/interface publisher before
+  `gridUpdate`, creates
+  `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`,
+  and passes an approved solver plus admitted descriptor into the
+  `gridUpdate` Worker context.
+- Added a GPUHub worker wrapper preservation step that copies retained refs
+  into each returned stage `value`, because PeerCompute's lane manager advances
+  the chain using `normalized.value` as the next stage input.
+- Updated `src/services/ulgMechanicsResidentStage.worker.js` to include
+  retained refs in cloneable stage results and in `workerResidentStage`.
+- Extended `tests/peercomputeComputeManagerIntegration.test.mjs` so the
+  injected six-stage Worker DAG asserts same-frame pressure publication,
+  `sameFrameConsumerStage="gridUpdate"`, admitted grid-force descriptor
+  creation, and `gridUpdate` pressure force consumption from its Worker
+  context.
+- Reiterated the renderer z-buffer/draw-order bug in `plan/todo/README.md` as
+  a queued P0/P1 visual correctness blocker separate from physics-law
+  acceptance.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/done/pressure-interface-same-frame-grid-admission-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  reported `13/13`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `4/4`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `37/37`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: `curl -k -I https://127.0.0.1:5173` returned HTTP/2 `200`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-same-frame-grid-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-same-frame-grid-admission-20260615`.
+
+Open:
+
+- The pressure/interface producer still uses CPU-reference force-row derivation
+  in this stage. Next work should move the producer itself toward
+  WebGPU-resident execution under ComputeManager/GPUHub authority.
+- The renderer z-buffer/draw-order issue is queued as a visual correctness
+  blocker and should not be confused with physics-law acceptance.

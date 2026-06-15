@@ -4938,6 +4938,11 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     pressureInterfaceForceSolverStatus: result?.pressureInterfaceForceSolver?.status || result?.pressureInterfaceForceSolverStatus || null,
     pressureInterfaceForceRowCount: finiteNumber(result?.forceRowCount ?? result?.pressureInterfaceForceSolver?.forceRowCount, 0),
     pressureInterfaceForceRowsRetained: result?.pressureInterfaceForceRowsRetained === true || (result?.forceRowByteLength ?? 0) > 0,
+    pressureInterfaceGridForceAdmissionStatus: result?.pressureInterfaceGridForceAdmissionStatus || null,
+    pressureInterfaceGridForceAdmissionApproved: result?.pressureInterfaceGridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: result?.pressureInterfaceGridForceAdmissionSourceHotBufferKey || null,
+    pressureInterfaceForceApplicationStatus: result?.pressureInterfaceForceApplicationStatus || null,
+    pressureInterfaceForceConsumerStatus: result?.pressureInterfaceForceConsumerStatus || null,
     thermalPhaseEvidencePassed: result?.thermalPhaseStageTaskEvidence?.passed === true,
     thermalPhaseAuthoritativeMutation: result?.thermalPhaseStageTaskAuthority?.authoritativeStateMutation ?? null,
     reactionProductEvidencePassed: result?.reactionProductStageTaskEvidence?.passed === true,
@@ -5184,6 +5189,84 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     outputFamilies: ['pressure-interface-force-rows'],
     requiredPublicationProtocol: 'worker-posts-pressure-interface-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
     nextRequiredImplementation: 'authorized-pressure-interface-grid-force-consumption'
+  };
+}
+
+function retainedRefsFromPressureInterfaceStageValue(result = {}) {
+  return uniqueNonEmptyStrings([
+    ...retainedBufferRefsForMechanicsStageResult(PRESSURE_INTERFACE_STAGE_ID, result),
+    ...(result?.retainedBufferRefs || []),
+    ...(result?.pressureInterfaceStageRetainedBufferRefs || []),
+    ...(result?.workerResidentStage?.retainedBufferRefs || []),
+    ...(result?.workerResidentStage?.workerRetainedBufferRefs || [])
+  ]);
+}
+
+function buildPressureInterfaceWorkerCompactPublicationCandidateFromStageValue({
+  pressureResult = null,
+  workerRunnerSupplied = false,
+  workerModuleUrl = null,
+  laneId = null,
+  stateKey = null
+} = {}) {
+  if (!pressureResult || typeof pressureResult !== 'object') return null;
+  const pressureSummary = summarizeMechanicsStageLaneResult(PRESSURE_INTERFACE_STAGE_ID, pressureResult);
+  const stageExecution = {
+    schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+    status: 'completed',
+    stageResults: [
+      {
+        stageId: PRESSURE_INTERFACE_STAGE_ID,
+        status: 'completed',
+        retainedBufferRefs: retainedRefsFromPressureInterfaceStageValue(pressureResult),
+        summary: pressureSummary
+      }
+    ]
+  };
+  return buildPressureInterfaceWorkerCompactPublicationCandidate({
+    stageExecution,
+    stageLaneSummaries: { [PRESSURE_INTERFACE_STAGE_ID]: pressureSummary },
+    stageWorkerResidencyStatuses: { [PRESSURE_INTERFACE_STAGE_ID]: 'worker-ready' },
+    workerRunnerSupplied,
+    workerModuleUrl,
+    laneId,
+    stateKey
+  });
+}
+
+function createPressureInterfaceGridForceAdmissionFromPublication({
+  publication = null,
+  candidate = null,
+  pressureResult = null
+} = {}) {
+  if (!publication || typeof publication !== 'object') return null;
+  return {
+    schema: 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0',
+    status: 'pressure-interface-grid-force-consumption-approved',
+    gridForceApplicationApproved: true,
+    publicationStatus: publication.status || null,
+    committed: publication.committed === true,
+    hotBufferKey: publication.hotBufferKey || null,
+    sourceHotBufferKey: publication.hotBufferKey || null,
+    pressureInterfaceForceRowCount: publication.pressureInterfaceForceRowCount
+      ?? candidate?.pressureInterfaceForceRowCount
+      ?? pressureResult?.forceRowCount
+      ?? pressureResult?.pressureInterfaceForceSolver?.forceRowCount
+      ?? 0,
+    outputFamilies: uniqueNonEmptyStrings(publication.outputFamilies || candidate?.outputFamilies || ['pressure-interface-force-rows']),
+    pressureInterfacePublication: publication,
+    pressureInterfacePublicationCandidate: candidate || null
+  };
+}
+
+function pressureInterfaceForceSolverApprovedForGridConsumption(pressureResult = {}, admission = null) {
+  const solver = pressureResult?.pressureInterfaceForceSolver || pressureResult?.pressureInterfaceForceSolverResult || null;
+  if (!solver || typeof solver !== 'object' || !admission) return null;
+  return {
+    ...solver,
+    forceApplicationStatus: 'pressure-interface-grid-force-consumer-approved',
+    gridForceApplicationApproved: true,
+    gridForceApplicationAdmission: admission
   };
 }
 
@@ -5725,6 +5808,59 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     stageResults[stageId] = result;
     return result;
   };
+  let pressureInterfaceSameFrameWorkerCompactPublicationCandidate = null;
+  let pressureInterfaceSameFrameWorkerCompactPublication = null;
+  let pressureInterfaceSameFrameGridForceAdmission = stepOptions.pressureInterfaceGridForceAdmission || null;
+  const publishSameFramePressureInterfaceForGridUpdate = async (pressureResult = null) => {
+    if (
+      !pressureResult
+      || pressureInterfaceSameFrameGridForceAdmission
+      || stepOptions.approveSameFramePressureInterfaceGridForces !== true
+      || typeof gpuHubResidentPressureInterfaceStageWorkerOutputPublisher !== 'function'
+    ) {
+      return {
+        pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
+        pressureInterfaceGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission
+      };
+    }
+    const candidate = buildPressureInterfaceWorkerCompactPublicationCandidateFromStageValue({
+      pressureResult,
+      workerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
+      workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+      laneId: laneStagePlanId,
+      stateKey: laneStagePlanStateKey
+    });
+    pressureInterfaceSameFrameWorkerCompactPublicationCandidate = candidate;
+    if (candidate?.candidateStatus !== 'worker-retained-pressure-interface-publication-candidate-ready') {
+      return {
+        pressureInterfaceForceSolver: null,
+        pressureInterfaceGridForceAdmission: null
+      };
+    }
+    pressureInterfaceSameFrameWorkerCompactPublication = await gpuHubResidentPressureInterfaceStageWorkerOutputPublisher({
+      candidate,
+      workerRunner: gpuHubResidentStageWorkerRunner,
+      workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+      laneId: laneStagePlanId,
+      stateKey: laneStagePlanStateKey,
+      sourceTaskId: `${taskIdPrefix}:mechanics-stage-plan`,
+      sourceNodeId: 'ulg-pressure-interface-force-law',
+      sourceStage: PRESSURE_INTERFACE_STAGE_ID,
+      sameFrameConsumerStage: 'gridUpdate'
+    });
+    pressureInterfaceSameFrameGridForceAdmission = createPressureInterfaceGridForceAdmissionFromPublication({
+      publication: pressureInterfaceSameFrameWorkerCompactPublication,
+      candidate,
+      pressureResult
+    });
+    return {
+      pressureInterfaceForceSolver: pressureInterfaceForceSolverApprovedForGridConsumption(
+        pressureResult,
+        pressureInterfaceSameFrameGridForceAdmission
+      ),
+      pressureInterfaceGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission
+    };
+  };
   const laneStageExecutors = {
     p2g: async () => {
       const result = await submitStageTask('p2g', createMlsMpmMechanicsP2gStageComputeTask, {
@@ -5774,7 +5910,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         }
       };
     },
-    gridUpdate: async () => {
+    gridUpdate: async ({ input } = {}) => {
+      const sameFramePressure = includePressureInterfaceStage && input?.pressureInterfaceStageTask === true
+        ? await publishSameFramePressureInterfaceForGridUpdate(input)
+        : {
+            pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
+            pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null
+          };
       const result = await submitStageTask('gridUpdate', createMlsMpmMechanicsGridUpdateStageComputeTask, {
         p2gGridProjection: stageResults.p2g,
         dt: dtSeconds,
@@ -5782,8 +5924,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         boxDimsM: dims,
         cflFactor,
         pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null,
-        pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
-        pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null,
+        pressureInterfaceForceSolver: sameFramePressure.pressureInterfaceForceSolver,
+        pressureInterfaceGridForceAdmission: sameFramePressure.pressureInterfaceGridForceAdmission,
         laneId: laneStagePlanId,
         stateKey: laneStagePlanStateKey,
         domainKey: gpuResidentLaneDomainKey,
@@ -5911,17 +6053,89 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && typeof gpuHubForStageExecutors.hasResidentStageExecutor === 'function'
     && typeof gpuHubForStageExecutors.executeResidentStage === 'function';
   if (canUseGpuHubResidentStageExecutors) {
+    const attachRetainedRefsToWorkerStageValue = (result) => {
+      const object = result && typeof result === 'object' ? result : { value: result };
+      const hasValue = Object.prototype.hasOwnProperty.call(object, 'value');
+      const value = hasValue ? object.value : result;
+      if (!value || typeof value !== 'object') return result;
+      const retainedBufferRefs = uniqueNonEmptyStrings([
+        ...(object.retainedBufferRefs || []),
+        ...(object.gpuFence?.retainedBufferRefs || []),
+        ...(value.retainedBufferRefs || []),
+        ...(value.workerResidentStage?.retainedBufferRefs || []),
+        ...(value.workerResidentStage?.workerRetainedBufferRefs || [])
+      ]);
+      if (retainedBufferRefs.length === 0) return result;
+      const nextValue = {
+        ...value,
+        retainedBufferRefs,
+        workerResidentStage: value.workerResidentStage && typeof value.workerResidentStage === 'object'
+          ? {
+              ...value.workerResidentStage,
+              retainedBufferRefs: uniqueNonEmptyStrings([
+                ...(value.workerResidentStage.retainedBufferRefs || []),
+                ...retainedBufferRefs
+              ])
+            }
+          : value.workerResidentStage
+      };
+      return hasValue
+        ? { ...object, value: nextValue, retainedBufferRefs }
+        : { value: nextValue, retainedBufferRefs };
+    };
     gpuHubResidentStageExecutorRegistrations = laneStagePlanContract.passDagStages
       .map((stage) => {
         const stageWorkerRunner = resolveMechanicsStageWorkerRunner(gpuHubResidentStageWorkerRunner, stage.id);
+        const shouldWrapGridUpdateWorkerForSameFramePressure = stage.id === 'gridUpdate'
+          && includePressureInterfaceStage
+          && stepOptions.approveSameFramePressureInterfaceGridForces === true
+          && typeof gpuHubResidentPressureInterfaceStageWorkerOutputPublisher === 'function'
+          && Boolean(stageWorkerRunner);
         const wrappedWorkerRunner = stageWorkerRunner
           ? async (args) => {
-              const result = await executeMechanicsStageWorkerRunner(stageWorkerRunner, {
+              const result = attachRetainedRefsToWorkerStageValue(await executeMechanicsStageWorkerRunner(stageWorkerRunner, {
                 ...args,
                 stageId: stage.id,
                 taskIdPrefix,
                 stageResults
-              });
+              }));
+              const resultObject = result && typeof result === 'object' ? result : { value: result };
+              stageResults[stage.id] = Object.prototype.hasOwnProperty.call(resultObject, 'value')
+                ? resultObject.value
+                : result;
+              return result;
+            }
+          : null;
+        const sameFrameGridUpdateExecutor = shouldWrapGridUpdateWorkerForSameFramePressure
+          ? async (args) => {
+              const sameFramePressure = args?.input?.pressureInterfaceStageTask === true
+                ? await publishSameFramePressureInterfaceForGridUpdate(args.input)
+                : {
+                    pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
+                    pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null
+                  };
+              const workerContext = args?.context?.ulgMechanicsResidentStageWorker || {};
+              const nextContext = {
+                ...(args?.context || {}),
+                ulgMechanicsResidentStageWorker: {
+                  ...workerContext,
+                  stageOptions: {
+                    ...(workerContext.stageOptions || {}),
+                    gridUpdate: {
+                      ...(workerContext.stageOptions?.gridUpdate || {}),
+                      pressureInterfaceForceSolver: sameFramePressure.pressureInterfaceForceSolver,
+                      pressureInterfaceGridForceAdmission: sameFramePressure.pressureInterfaceGridForceAdmission
+                    }
+                  }
+                }
+              };
+              const result = attachRetainedRefsToWorkerStageValue(await executeMechanicsStageWorkerRunner(stageWorkerRunner, {
+                ...args,
+                context: nextContext,
+                stageId: stage.id,
+                taskIdPrefix,
+                stageResults
+              }));
               const resultObject = result && typeof result === 'object' ? result : { value: result };
               stageResults[stage.id] = Object.prototype.hasOwnProperty.call(resultObject, 'value')
                 ? resultObject.value
@@ -5942,6 +6156,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             bufferTransferPolicy: stepOptions.preferWebGpu === true
               ? 'worker-owns-device-and-retained-buffers-required'
               : 'worker-local-cpu-state-required',
+            workerReady: Boolean(wrappedWorkerRunner || sameFrameGridUpdateExecutor),
             ...(gpuHubResidentStageWorkerPolicy || {})
           }
           : {
@@ -5960,10 +6175,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             laneId: laneStagePlanId,
             stateKey: laneStagePlanStateKey,
             defaultEnabled: false,
-            workerRunnerSupplied: Boolean(wrappedWorkerRunner)
+            workerRunnerSupplied: Boolean(wrappedWorkerRunner || sameFrameGridUpdateExecutor)
           },
-          ...(wrappedWorkerRunner ? { workerRunner: wrappedWorkerRunner } : {}),
-          executor: laneStageExecutors[stage.id]
+          ...(wrappedWorkerRunner && !sameFrameGridUpdateExecutor ? { workerRunner: wrappedWorkerRunner } : {}),
+          executor: sameFrameGridUpdateExecutor || laneStageExecutors[stage.id]
         });
       })
       .filter(Boolean);
@@ -6231,7 +6446,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     }
   }
   const pressureInterfaceWorkerCompactPublicationCandidate = includePressureInterfaceStage
-    ? buildPressureInterfaceWorkerCompactPublicationCandidate({
+    ? (pressureInterfaceSameFrameWorkerCompactPublicationCandidate || buildPressureInterfaceWorkerCompactPublicationCandidate({
         stageExecution: gpuResidentLaneStagePlanExecution,
         stageLaneSummaries,
         stageWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
@@ -6239,10 +6454,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
         laneId: laneStagePlanId,
         stateKey: laneStagePlanStateKey
-      })
+      }))
     : null;
-  let pressureInterfaceWorkerCompactPublication = null;
+  let pressureInterfaceWorkerCompactPublication = pressureInterfaceSameFrameWorkerCompactPublication;
   if (
+    !pressureInterfaceWorkerCompactPublication
+    &&
     pressureInterfaceWorkerCompactPublicationCandidate?.candidateStatus === 'worker-retained-pressure-interface-publication-candidate-ready'
     && typeof gpuHubResidentPressureInterfaceStageWorkerOutputPublisher === 'function'
   ) {
@@ -6447,6 +6664,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     pressureInterfaceRetainedPressureBufferRefCount: pressureInterfaceWorkerCompactPublicationCandidate?.retainedPressureBufferRefs?.length ?? 0,
     pressureInterfacePublishedForceRowCount: pressureInterfaceWorkerCompactPublicationCandidate?.pressureInterfaceForceRowCount ?? 0,
     pressureInterfacePublicationAuthority: pressureInterfaceWorkerCompactPublicationCandidate?.publicationAuthority || null,
+    pressureInterfaceSameFrameGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission,
+    pressureInterfaceSameFrameGridForceAdmissionStatus: pressureInterfaceSameFrameGridForceAdmission?.status || null,
+    pressureInterfaceSameFrameGridForceAdmissionApproved: pressureInterfaceSameFrameGridForceAdmission?.gridForceApplicationApproved === true,
+    pressureInterfaceSameFrameGridForceAdmissionHotBufferKey: pressureInterfaceSameFrameGridForceAdmission?.hotBufferKey || null,
     thermalWorkerCompactPublicationCandidate,
     thermalWorkerCompactPublicationCandidateStatus: thermalWorkerCompactPublicationCandidate?.candidateStatus || null,
     thermalWorkerCompactPublication,
@@ -6558,6 +6779,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       pressureInterfaceWorkerCompactPublicationHotBufferKey: stageTaskChain.pressureInterfaceWorkerCompactPublicationHotBufferKey,
       pressureInterfaceWorkerCompactSummaryStatus: stageTaskChain.pressureInterfaceWorkerCompactSummaryStatus,
       pressureInterfacePublishedForceRowCount: stageTaskChain.pressureInterfacePublishedForceRowCount,
+      pressureInterfaceSameFrameGridForceAdmissionStatus: stageTaskChain.pressureInterfaceSameFrameGridForceAdmissionStatus,
+      pressureInterfaceSameFrameGridForceAdmissionApproved: stageTaskChain.pressureInterfaceSameFrameGridForceAdmissionApproved,
+      pressureInterfaceSameFrameGridForceAdmissionHotBufferKey: stageTaskChain.pressureInterfaceSameFrameGridForceAdmissionHotBufferKey,
       thermalWorkerCompactPublicationStatus: stageTaskChain.thermalWorkerCompactPublicationStatus,
       thermalWorkerCompactPublicationCommitted: stageTaskChain.thermalWorkerCompactPublicationCommitted,
       thermalWorkerCompactPublicationHotBufferKey: stageTaskChain.thermalWorkerCompactPublicationHotBufferKey,

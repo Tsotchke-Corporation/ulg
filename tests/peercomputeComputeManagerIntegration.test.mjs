@@ -1446,6 +1446,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     preferWebGpu: true,
     readbackMode: 'no-full-readback',
     includePressureInterfaceStage: true,
+    approveSameFramePressureInterfaceGridForces: true,
     includeThermalPhaseStage: true,
     includeReactionProductStage: true,
     gasPressureSummary: {
@@ -1541,6 +1542,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
           workerStatus: executor?.workerPolicy?.status || null,
           contextSchema: context?.ulgMechanicsResidentStageWorker?.schema || null,
           contextHasPressureInterface: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.materialInterfaceField),
+          contextHasGridForceAdmission: Boolean(context?.ulgMechanicsResidentStageWorker?.stageOptions?.gridUpdate?.pressureInterfaceGridForceAdmission),
           contextHasThermalTables: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.thermalMaterialTable),
           contextHasReactionTable: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.reactionTable)
         });
@@ -1619,12 +1621,27 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
           };
         }
         if (stage.id === 'gridUpdate') {
+          const gridUpdateStageOptions = context?.ulgMechanicsResidentStageWorker?.stageOptions?.gridUpdate || {};
           return {
             value: {
               ...base,
               computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
               updatedGridBufferByteLength: 96,
-              mechanicsGridUpdateStageTaskEvidence: { schema: 'peercompute.ulg.mechanics-grid-update-stage-task-evidence.v0', passed: true }
+              mechanicsGridUpdateStageTaskEvidence: { schema: 'peercompute.ulg.mechanics-grid-update-stage-task-evidence.v0', passed: true },
+              pressureInterfaceGridForceAdmissionSchema: gridUpdateStageOptions.pressureInterfaceGridForceAdmission?.schema || null,
+              pressureInterfaceGridForceAdmissionStatus: gridUpdateStageOptions.pressureInterfaceGridForceAdmission?.status || null,
+              pressureInterfaceGridForceAdmissionApproved: gridUpdateStageOptions.pressureInterfaceGridForceAdmission?.gridForceApplicationApproved === true,
+              pressureInterfaceGridForceAdmissionSourceHotBufferKey: gridUpdateStageOptions.pressureInterfaceGridForceAdmission?.hotBufferKey || null,
+              pressureInterfaceForceApplicationStatus: gridUpdateStageOptions.pressureInterfaceGridForceAdmission
+                ? 'pressure-interface-grid-force-consumer-applied'
+                : 'not-applied',
+              pressureInterfaceForceConsumerStatus: gridUpdateStageOptions.pressureInterfaceGridForceAdmission
+                ? 'grid-momentum-impulse-consumed'
+                : null,
+              pressureInterfaceImpulseProofStatus: gridUpdateStageOptions.pressureInterfaceGridForceAdmission
+                ? 'actual-grid-node-impulse'
+                : null,
+              pressureInterfaceForceRowCount: gridUpdateStageOptions.pressureInterfaceGridForceAdmission?.pressureInterfaceForceRowCount ?? 0
             },
             retainedBufferRefs: ['mls-mpm-grid-update-buffer', 'ulg-worker:test:gridUpdate:grid'],
             summary: { backend: 'webgpu', stage: 'gridUpdate' }
@@ -1721,6 +1738,10 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasPressureInterface, true);
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasThermalTables, true);
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasReactionTable, true);
+  assert.equal(
+    thermalStageWorkerBridgeCalls.find((entry) => entry.stageId === 'gridUpdate')?.contextHasGridForceAdmission,
+    true
+  );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 6);
   assert.deepEqual(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
@@ -1784,11 +1805,24 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationHotBufferKey,
     'ulg:test:pressure-interface-publication-hot-buffer'
   );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceSameFrameGridForceAdmissionStatus,
+    'pressure-interface-grid-force-consumption-approved'
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceSameFrameGridForceAdmissionApproved,
+    true
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceSameFrameGridForceAdmissionHotBufferKey,
+    'ulg:test:pressure-interface-publication-hot-buffer'
+  );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfacePublishedForceRowCount, 2);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceRetainedPressureBufferRefCount, 1);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerRetainedPressureBufferRefCount, 1);
   assert.equal(pressureInterfaceStagePublicationPayloads.length, 1);
   assert.equal(pressureInterfaceStagePublicationPayloads[0].sourceStage, 'pressureInterface');
+  assert.equal(pressureInterfaceStagePublicationPayloads[0].sameFrameConsumerStage, 'gridUpdate');
   assert.deepEqual(pressureInterfaceStagePublicationPayloads[0].candidate.outputFamilies, ['pressure-interface-force-rows']);
   assert.equal(pressureInterfaceStagePublicationPayloads[0].candidate.publicationAuthority, 'nodekernel-state-manager-admission-required');
   assert.equal(pressureInterfaceStagePublicationPayloads[0].candidate.pressureInterfaceForceRowCount, 2);
@@ -1835,6 +1869,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.pressureInterface.pressureInterfaceForceRowsRetained,
     true
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.gridUpdate.pressureInterfaceGridForceAdmissionApproved,
+    true
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.gridUpdate.pressureInterfaceForceApplicationStatus,
+    'pressure-interface-grid-force-consumer-applied'
   );
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.thermalPhase.workerRetainedThermoInputStatus,

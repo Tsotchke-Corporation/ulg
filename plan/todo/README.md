@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 01:33 AKDT: same-frame intra-DAG
+pressure/interface publication and grid-update admission are complete for the
+ComputeManager/GPUHub stage-plan path. With
+`approveSameFramePressureInterfaceGridForces=true`, `pressureInterface`
+publishes its retained force-row descriptor before `gridUpdate` executes,
+creates
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`, and
+injects that admitted descriptor plus an approved pressure solver into the
+`gridUpdate` Worker context. The next priority is moving the
+pressure/interface force-row producer away from CPU-reference rows toward a
+WebGPU-resident stage while keeping NodeKernel/StateManager admission and
+GPUHub lane authority intact.
+
 Current routing note, 2026-06-15 01:14 AKDT: grid-update pressure consumption
 now has an explicit admission gate. Direct force solvers are blocked unless
 paired with `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
@@ -112,6 +125,11 @@ before treating visual captures as authoritative evidence. The later renderer
 pass must test transparent/opaque pass ordering, depth-write/depth-test policy,
 nested liquid/solid surfaces, container/grid overlay ordering, focus-change
 flash/disappear behavior, and multi-frame draw-order flicker.
+
+Renderer blocker update, 2026-06-15 01:33 AKDT: user reiterated that major
+z-buffer/draw-order issues remain. Keep this queued after the current
+ComputeManager/GPUHub physics authority slices and before any claim that
+browser surface captures are final visual truth.
 
 Current routing note, 2026-06-14 23:23 AKDT: `thermalPhase` now runs as an
 opt-in fourth node in the formal ComputeManager/GPUHub stage-plan DAG. The

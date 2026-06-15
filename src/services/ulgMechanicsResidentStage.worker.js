@@ -589,6 +589,7 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     ...retainedRefsForStageResult(stageId, rawResult),
     ...workerRetainedBufferRefs
   ])];
+  cloneableResult.retainedBufferRefs = retainedBufferRefs;
   cloneableResult.workerResidentStage = {
     schema: ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
     status: 'worker-stage-completed',
@@ -608,6 +609,7 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerRetainedThermoInputStatus: workerRetainedThermoInput?.status || null,
     workerRetainedThermoOutput,
     workerRetainedThermoOutputStatus: workerRetainedThermoOutput?.status || null,
+    retainedBufferRefs,
     workerRetainedBufferRefs,
     cloneableResultReturned: true
   };

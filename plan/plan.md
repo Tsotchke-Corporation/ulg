@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 01:33 AKDT: same-frame pressure/interface
+force-row publication and grid-update admission now work inside the
+ComputeManager/GPUHub stage-plan DAG. When `pressureInterface` runs
+immediately before `gridUpdate` with
+`approveSameFramePressureInterfaceGridForces=true`, ULG publishes the
+Worker-retained force-row descriptor through the pressure/interface publisher,
+creates
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`, and
+injects the approved solver plus admission object into the `gridUpdate`
+worker context before that stage executes. The GPUHub wrapper now preserves
+retained buffer refs inside the stage `value` handed to the next stage, so
+same-frame consumers do not lose Worker-local retained-ref descriptors at the
+PeerCompute lane-manager boundary. Next target: move the pressure/interface
+force-row producer itself toward WebGPU-resident execution and keep the
+renderer z-buffer/draw-order blocker separate from physics acceptance.
+
 Current checkpoint, 2026-06-15 01:14 AKDT: grid update now refuses
 pressure/interface force rows unless they are paired with an explicit admitted
 grid-force consumption descriptor. Direct

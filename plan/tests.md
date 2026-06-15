@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Pressure/Interface Grid Consumption Admission
+## Current Focused Result - 2026-06-15 Pressure/Interface Same-Frame Grid Admission
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -40,8 +40,38 @@ pressure solvers are blocked unless paired with
 `gridForceApplicationApproved=true`; successful application reports admission
 status, source hot-buffer key, force-row count, applied impulse, and impulse
 proof diagnostics.
+Same-frame pressure/interface publication now works inside the formal
+ComputeManager/GPUHub stage-plan DAG. When `pressureInterface` runs immediately
+before `gridUpdate`, the runner publishes the retained force-row descriptor,
+creates an admitted grid-force descriptor, preserves Worker-retained refs
+inside the stage value handed to the next stage, and injects the approved
+solver/admission into the `gridUpdate` Worker context before execution.
 Focused checks:
 
+- Pressure/interface same-frame grid admission:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs` passed
+  `13/13`. The updated integration path proves
+  `p2g -> pressureInterface -> gridUpdate -> g2p -> thermalPhase -> reactionProduct`
+  still executes through GPUHub resident-stage executors, that
+  `pressureInterface` publishes exactly once with `sameFrameConsumerStage`
+  set to `gridUpdate`, that the same-frame
+  `pressure-interface-grid-force-consumption-approved` descriptor is created,
+  and that `gridUpdate` receives/applies the admitted descriptor from its
+  Worker context.
+- Worker/runtime regressions:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `4/4`;
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `37/37`.
+- Browser authority-host regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-same-frame-grid-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-same-frame-grid-admission-20260615`.
 - Pressure/interface grid consumption admission:
   `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `37/37`. The new cases
   prove direct pressure solvers are blocked without an admitted grid-force

@@ -1,4 +1,5 @@
 import {
+  runSphReactionProductStageComputeTask,
   runSphThermalPhaseStageComputeTask,
   runMlsMpmMechanicsG2pStageComputeTask,
   runMlsMpmMechanicsGridUpdateStageComputeTask,
@@ -19,7 +20,8 @@ const STAGE_RUNNERS = {
   p2g: runMlsMpmMechanicsP2gStageComputeTask,
   gridUpdate: runMlsMpmMechanicsGridUpdateStageComputeTask,
   g2p: runMlsMpmMechanicsG2pStageComputeTask,
-  thermalPhase: runSphThermalPhaseStageComputeTask
+  thermalPhase: runSphThermalPhaseStageComputeTask,
+  reactionProduct: runSphReactionProductStageComputeTask
 };
 
 const retainedLanes = new Map();
@@ -132,6 +134,24 @@ function retainedRefsForStageResult(stageId, result = {}) {
       refs.push('sph-thermo-buffer');
     }
   }
+  if (stageId === 'reactionProduct') {
+    if (result.stateBuffer || gpuResult.stateBuffer || result.state instanceof Float32Array || result.stateBufferByteLength > 0) {
+      refs.push('sph-state-buffer');
+    }
+    if (result.thermoBuffer || gpuResult.thermoBuffer || result.thermo instanceof Float32Array || result.thermoBufferByteLength > 0) {
+      refs.push('sph-thermo-buffer');
+    }
+    if (result.mechanicsBuffer || gpuResult.mechanicsBuffer || result.mechanics instanceof Float32Array || result.mechanicsBufferByteLength > 0) {
+      refs.push('mls-mpm-mechanics-buffer');
+    }
+    if (
+      result.residentProductMass?.productEventBufferRetained
+      || result.residentProductMassBufferRetained
+      || result.reactionSummary?.productEventBufferRetained
+    ) {
+      refs.push('resident-product-mass-buffer');
+    }
+  }
   return refs;
 }
 
@@ -183,8 +203,15 @@ function retainedG2pOutput(record) {
   return source;
 }
 
+function retainedThermalOutput(record) {
+  const thermal = record?.stageResults?.thermalPhase || null;
+  const source = thermal?.gpuResult || thermal;
+  if (!source?.stateBuffer && !source?.thermoBuffer) return null;
+  return source;
+}
+
 function stageUsesSphThermo(stageId) {
-  return stageId === 'p2g' || stageId === 'g2p' || stageId === 'thermalPhase';
+  return stageId === 'p2g' || stageId === 'g2p' || stageId === 'thermalPhase' || stageId === 'reactionProduct';
 }
 
 function ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult }) {
@@ -387,7 +414,9 @@ function baseStageData(payload = {}) {
       ? ['mls-mpm-grid-update-buffer']
       : (stageId === 'thermalPhase'
         ? ['sph-state-buffer', 'sph-thermo-buffer']
-        : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']));
+        : (stageId === 'reactionProduct'
+          ? ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer']
+          : ['sph-state-buffer', 'mls-mpm-mechanics-buffer'])));
   return {
     ...common,
     ...(context.stageOptions?.[stageId] || {}),
@@ -456,6 +485,49 @@ function stageDataForPayload(payload = {}, record) {
         sourceStage: data.sourceStateBuffer === g2pOutput?.stateBuffer ? 'g2p' : (data.sphParticleUpload?.sourceStage || 'thermal-phase-input'),
         stateBuffer: data.sourceStateBuffer || data.sphParticleUpload?.stateBuffer || null,
         thermoBuffer: retainedThermoBuffer || data.sphParticleUpload?.thermoBuffer || null
+      };
+    }
+  }
+  if (stageId === 'reactionProduct') {
+    const g2pOutput = retainedG2pOutput(record);
+    const thermalOutput = retainedThermalOutput(record);
+    const retainedThermoBuffer = thermalOutput?.thermoBuffer
+      || record.retainedThermoBuffer
+      || data?.sourceThermoBuffer
+      || data?.sphParticleUpload?.thermoBuffer
+      || null;
+    data.sourceStateBuffer = data.sourceStateBuffer
+      || thermalOutput?.stateBuffer
+      || g2pOutput?.stateBuffer
+      || data?.sphParticleUpload?.stateBuffer
+      || null;
+    data.sourceThermoBuffer = retainedThermoBuffer;
+    data.sourceMechanicsBuffer = data.sourceMechanicsBuffer
+      || g2pOutput?.mechanicsBuffer
+      || data?.mlsMpmParticleUpload?.mechanicsBuffer
+      || null;
+    if (data.reactionStepOptions && typeof data.reactionStepOptions === 'object') {
+      Object.assign(data, data.reactionStepOptions);
+    }
+    if (data.sourceStateBuffer || retainedThermoBuffer) {
+      data.sphParticleUpload = {
+        ...(data.sphParticleUpload || {}),
+        schema: data.sphParticleUpload?.schema || 'peercompute.ulg.worker-retained-sph-particle-upload.v0',
+        status: 'webgpu-uploaded',
+        workerRetained: true,
+        sourceStage: thermalOutput?.stateBuffer ? 'thermalPhase' : (data.sphParticleUpload?.sourceStage || 'g2p'),
+        stateBuffer: data.sourceStateBuffer || data.sphParticleUpload?.stateBuffer || null,
+        thermoBuffer: retainedThermoBuffer || data.sphParticleUpload?.thermoBuffer || null
+      };
+    }
+    if (data.sourceMechanicsBuffer) {
+      data.mlsMpmParticleUpload = {
+        ...(data.mlsMpmParticleUpload || {}),
+        schema: data.mlsMpmParticleUpload?.schema || 'peercompute.ulg.worker-retained-mls-mpm-particle-upload.v0',
+        status: 'webgpu-uploaded',
+        workerRetained: true,
+        sourceStage: 'g2p',
+        mechanicsBuffer: data.sourceMechanicsBuffer
       };
     }
   }

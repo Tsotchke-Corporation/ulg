@@ -63,13 +63,16 @@ function stage(id, reads = [], writes = []) {
   };
 }
 
-function payload(stageRecord, context, input = null) {
+function payload(stageRecord, context, input = null, {
+  laneId = 'ulg:test:mechanics-worker-lane',
+  stateKey = 'ulg:test:mechanics-worker-state'
+} = {}) {
   return {
     stage: stageRecord,
     input,
     lease: {
-      laneId: 'ulg:test:mechanics-worker-lane',
-      stateKey: 'ulg:test:mechanics-worker-state',
+      laneId,
+      stateKey,
       queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission'
     },
     context: {
@@ -195,4 +198,104 @@ test('ULG resident stage worker can run thermal phase stage and adopt retained t
   assert.equal(thermalInputs[0].sourceStateBuffer, sourceStateBuffer);
   assert.equal(thermalInputs[0].sourceThermoBuffer, sourceThermoBuffer);
   assert.equal(thermalInputs[0].retainOutputParticleBuffers, true);
+});
+
+test('ULG resident stage worker can run reaction product stage with retained particle and product outputs', async () => {
+  const buffers = manualBuffers();
+  const sourceStateBuffer = { label: 'worker-reaction-state-source' };
+  const sourceThermoBuffer = { label: 'worker-reaction-thermo-source' };
+  const sourceMechanicsBuffer = { label: 'worker-reaction-mechanics-source' };
+  const outputStateBuffer = { label: 'worker-reaction-state-output' };
+  const outputThermoBuffer = { label: 'worker-reaction-thermo-output' };
+  const outputMechanicsBuffer = { label: 'worker-reaction-mechanics-output' };
+  const productEventBuffer = { label: 'worker-reaction-product-events' };
+  const reactionInputs = [];
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:reaction-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      ...buffers,
+      reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
+      thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+      sphParticleUpload: {
+        status: 'webgpu-uploaded',
+        stateBuffer: sourceStateBuffer,
+        thermoBuffer: sourceThermoBuffer
+      },
+      mlsMpmParticleUpload: {
+        status: 'webgpu-uploaded',
+        mechanicsBuffer: sourceMechanicsBuffer
+      },
+      sourceStateBuffer,
+      sourceThermoBuffer,
+      sourceMechanicsBuffer,
+      reactionStepRunner(args) {
+        reactionInputs.push(args);
+        return {
+          schema: 'peercompute.ulg.sph-gpu-reaction-step-execution.v0',
+          backend: 'webgpu',
+          status: 'webgpu-accepted',
+          webgpuStatus: { status: 'webgpu-executed' },
+          result: {
+            schema: 'peercompute.ulg.sph-gpu-reaction-step.v0',
+            backend: 'webgpu',
+            status: 'reaction-step-executed',
+            particleCount: buffers.sphParticleState.particleCount,
+            reactionCount: 1,
+            productTermCount: 1,
+            gasProductCount: 0,
+            state: new Float32Array(),
+            thermo: new Float32Array(),
+            mechanics: new Float32Array(),
+            stateBuffer: outputStateBuffer,
+            thermoBuffer: outputThermoBuffer,
+            mechanicsBuffer: outputMechanicsBuffer,
+            stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+            thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+            mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+            retainedOutputParticleBuffers: true,
+            residentProductMass: {
+              schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+              status: 'resident-product-mass-buffer-retained',
+              productEventBuffer,
+              productEventBufferRetained: true,
+              productEventBufferByteLength: 64,
+              productEventRowCount: 1
+            },
+            residentProductMassStatus: 'resident-product-mass-buffer-retained',
+            residentProductMassBufferRetained: true,
+            readbackMode: 'full-parity-readback',
+            fullReadbackPerformed: true
+          }
+        };
+      }
+    }
+  };
+
+  const reaction = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('reactionProduct', ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics'], ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass']),
+    context,
+    null,
+    {
+      laneId: 'ulg:test:reaction-worker-lane',
+      stateKey: 'ulg:test:reaction-worker-state'
+    }
+  ));
+
+  assert.equal(reaction.value.workerResidentStage.stageId, 'reactionProduct');
+  assert.equal(reaction.value.computeTaskId, 'ulg:test:reaction-worker:reactionProduct');
+  assert.equal(reaction.value.reactionProductStageTaskEvidence.passed, true);
+  assert.equal(reaction.value.reactionProductStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(reaction.value.workerResidentStage.workerRetainedThermoOutputStatus, 'adopted-worker-retained-thermo-output');
+  assert.ok(reaction.retainedBufferRefs.includes('sph-state-buffer'));
+  assert.ok(reaction.retainedBufferRefs.includes('sph-thermo-buffer'));
+  assert.ok(reaction.retainedBufferRefs.includes('mls-mpm-mechanics-buffer'));
+  assert.ok(reaction.retainedBufferRefs.includes('resident-product-mass-buffer'));
+  assert.equal(reactionInputs.length, 1);
+  assert.equal(reactionInputs[0].sourceStateBuffer, sourceStateBuffer);
+  assert.equal(reactionInputs[0].sourceThermoBuffer, sourceThermoBuffer);
+  assert.equal(reactionInputs[0].sourceMechanicsBuffer, sourceMechanicsBuffer);
+  assert.equal(reactionInputs[0].retainOutputParticleBuffers, true);
 });

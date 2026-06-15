@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Thermal/Phase Worker Publication Admission
+## Current Focused Result - 2026-06-15 Reaction/Product Worker Stage DAG Boundary
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -18,8 +18,41 @@ that `thermalPhase` stage through the formal ComputeManager/GPUHub stage-plan
 DAG on the same warm Worker/lane after mechanics continuation.
 Thermal retained output now also has a NodeKernel/StateManager publication
 path with its own schema and `sph-thermo-phase` output family admission.
+The current unit/integration slice adds the first reaction/product child stage
+boundary after thermal. It is non-authoritative and evidence-only, but the
+Worker and injected PeerCompute DAG now know how to execute `reactionProduct`
+and retain state/thermo/mechanics/product refs without full readback.
 Focused checks:
 
+- Reaction/product Worker stage DAG boundary:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`. The injected Worker-runner case now proves
+  `p2g -> gridUpdate -> g2p -> thermalPhase -> reactionProduct` through GPUHub
+  resident-stage executors, all five stages `worker-ready`, and
+  `reactionProduct` non-authoritative task evidence with retained product-mass
+  buffer signaling.
+- SPH reaction no-full acceptance:
+  `node --test tests/sphReactionGpuKernel.test.mjs --test-name-pattern "no-full retained output"`
+  reported `10/10`. The new case asserts
+  `runSphReactionStepWithOptionalWebGpu()` accepts no-full retained WebGPU
+  reaction output without CPU parity against stale mirrors.
+- ULG resident-stage Worker reaction/product support:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `3/3`.
+  The new reaction case runs `reactionProduct` through
+  `runUlgMechanicsResidentStageWorkerPayload()` with an injected reaction
+  runner, verifies retained state/thermo/mechanics inputs are forwarded,
+  asserts `reactionProductStageTaskEvidence.passed=true`, and confirms
+  retained product-mass output refs are reported.
+- SPH reaction/product stage task boundary:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "stage compute task"`
+  reported `34/34`. The new focused case asserts the reaction/product stage
+  declares GPU lane/fence requirements, retained state/thermo/mechanics/product
+  refs, candidate writes for `resident-product-mass`, and no StateManager
+  mutation.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-reaction-product-stage-dag-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0` with artifacts under
+  `/tmp/ulg-visual-sanity-matrix/codex-reaction-product-stage-dag-20260614`.
 - Thermal/phase Worker publication admission:
   `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
   passed `1/1`. The focused browser gate now supplies

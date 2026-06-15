@@ -51,7 +51,8 @@ import {
   runSphThermalStepWebGpu
 } from './sphThermalGpuKernel.js';
 import {
-  runSphReactionStepWebGpu
+  runSphReactionStepWebGpu,
+  runSphReactionStepWithOptionalWebGpu
 } from './sphReactionGpuKernel.js';
 import {
   runMlsMpmMechanicsRefreshWithOptionalWebGpu
@@ -113,6 +114,9 @@ export const ULG_SPH_THERMAL_PHASE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA =
 export const ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-thermal-phase-stage-compute-task.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-thermal-phase-stage-compute-task-result.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.thermal-phase-stage-task-evidence.v0';
+export const ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-reaction-product-stage-compute-task.v0';
+export const ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-reaction-product-stage-compute-task-result.v0';
+export const ULG_SPH_REACTION_PRODUCT_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.reaction-product-stage-task-evidence.v0';
 const ULG_MLS_MPM_MECHANICS_STAGE_LANE_CONTRACT_SCHEMA = 'peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0';
 export const ULG_MLS_MPM_MECHANICS_CHILD_STAGE_KERNEL_EVIDENCE_SCHEMA = 'peercompute.ulg.mechanics-child-stage-kernel-evidence.v0';
 export const ULG_MLS_MPM_MECHANICS_CHILD_P2G_STAGE_EVIDENCE_SCHEMA = 'peercompute.ulg.mechanics-child-p2g-stage-evidence.v0';
@@ -135,6 +139,7 @@ const GPU_BUFFER_USAGE = {
 const DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS = 3;
 const MECHANICS_STAGE_ORDER = Object.freeze(['p2g', 'gridUpdate', 'g2p']);
 const THERMAL_PHASE_STAGE_ID = 'thermalPhase';
+const REACTION_PRODUCT_STAGE_ID = 'reactionProduct';
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -4091,6 +4096,284 @@ export function submitSphThermalPhaseStageComputeTask({ computeManager, ...taskO
   return computeManager.submitTask(createSphThermalPhaseStageComputeTask(taskOptions));
 }
 
+function createSphReactionProductStageTaskEvidence(reactionExecution = {}, {
+  computeTaskId = null,
+  lawGraphNode = null,
+  gpuFenceRequirement = null
+} = {}) {
+  const result = reactionExecution?.result || reactionExecution || {};
+  const backend = reactionExecution?.backend || result?.backend || null;
+  const stateOutputPresent = Boolean(result?.stateBuffer || result?.state instanceof Float32Array || result?.state?.length > 0);
+  const thermoOutputPresent = Boolean(result?.thermoBuffer || result?.thermo instanceof Float32Array || result?.thermo?.length > 0);
+  const mechanicsOutputPresent = Boolean(result?.mechanicsBuffer || result?.mechanics instanceof Float32Array || result?.mechanics?.length > 0);
+  const residentProductMassPresent = Boolean(
+    result?.residentProductMass
+      || result?.residentProductMassBufferRetained
+      || result?.reactionSummary?.productEventBufferRetained
+      || result?.reactionSummary?.productInventory?.schema
+  );
+  const acceptedBackend = backend === 'webgpu' || backend === 'cpu-reference';
+  const passed = acceptedBackend && stateOutputPresent && thermoOutputPresent && mechanicsOutputPresent;
+  return {
+    schema: ULG_SPH_REACTION_PRODUCT_STAGE_TASK_EVIDENCE_SCHEMA,
+    passed,
+    status: passed ? 'reaction-product-stage-task-evidence-pass' : 'reaction-product-stage-task-evidence-fail',
+    reason: passed
+      ? 'reaction-product-stage-produced-particle-output'
+      : (!acceptedBackend
+        ? 'reaction-product-stage-task-backend-invalid'
+        : 'reaction-product-stage-output-missing'),
+    computeTaskId,
+    lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-reaction-product-gas-law',
+    solverId: lawGraphNode?.solverId || 'ulg-sph-reaction-product-stage',
+    stageId: REACTION_PRODUCT_STAGE_ID,
+    executionSource: 'runSphReactionStepWithOptionalWebGpu',
+    backend,
+    acceptedBackend,
+    executionStatus: reactionExecution?.status || result?.status || null,
+    readbackMode: result?.readbackMode || reactionExecution?.readbackMode || null,
+    fullReadbackPerformed: result?.fullReadbackPerformed === true,
+    normalHotLoopReadbackFree: result?.normalHotLoopReadbackFree === true,
+    particleCount: finiteNumber(result?.particleCount, 0),
+    reactionCount: finiteNumber(result?.reactionCount, 0),
+    productTermCount: finiteNumber(result?.productTermCount, 0),
+    gasProductCount: finiteNumber(result?.gasProductCount, 0),
+    outputBuffersRetained: Boolean(result?.retainedOutputParticleBuffers || result?.stateBuffer || result?.thermoBuffer || result?.mechanicsBuffer),
+    stateOutputPresent,
+    thermoOutputPresent,
+    mechanicsOutputPresent,
+    residentProductMassPresent,
+    residentProductMassStatus: result?.residentProductMassStatus || result?.residentProductMass?.status || null,
+    residentProductMassBufferRetained: result?.residentProductMassBufferRetained === true
+      || result?.residentProductMass?.productEventBufferRetained === true,
+    webgpuStatus: reactionExecution?.webgpuStatus ? { ...reactionExecution.webgpuStatus } : null,
+    webgpuParityStatus: reactionExecution?.webgpuParity?.status || null,
+    gpuFenceRequired: gpuFenceRequirement?.required === true,
+    readFamilies: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
+    candidateWriteFamilies: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'],
+    authoritativeWriteFamilies: [],
+    mustNotWriteFamilies: ['pressure-interface-force-rows'],
+    promotionStatus: 'reaction-product-stage-task-evidence-only-not-authoritative',
+    scientificValidation: false,
+    materialValidation: false,
+    chemistryValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function createSphReactionProductStageGpuFenceReport(reactionExecution = {}, requirement = {}) {
+  const result = reactionExecution?.result || reactionExecution || {};
+  const required = requirement?.required === true;
+  const status = reactionExecution?.webgpuStatus?.status || null;
+  const webgpuCompleted = (reactionExecution?.backend || result?.backend) !== 'webgpu'
+    || result?.fullReadbackPerformed === true
+    || status === 'webgpu-executed'
+    || status === 'webgpu-executed-no-full-readback';
+  const fenceSatisfied = !required || webgpuCompleted;
+  return {
+    schema: PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA,
+    required,
+    fenceSatisfied,
+    status: fenceSatisfied ? 'gpu-fence-satisfied' : 'gpu-fence-unsatisfied',
+    reason: fenceSatisfied
+      ? (required ? 'reaction-product-stage-queue-completion-evidenced' : 'gpu-fence-not-required')
+      : 'reaction-product-stage-queue-completion-not-evidenced',
+    laneId: requirement?.laneId || null,
+    stateKey: requirement?.stateKey || null,
+    source: 'ulg-sph-reaction-product-stage-compute-task',
+    backend: reactionExecution?.backend || result?.backend || null,
+    readbackMode: result?.readbackMode || reactionExecution?.readbackMode || null,
+    fullReadbackPerformed: result?.fullReadbackPerformed === true
+  };
+}
+
+export function createSphReactionProductStageComputeTask({
+  modulePath,
+  taskId = null,
+  taskFamily = 'ulg-sph-reaction-product-stage',
+  solverId = 'ulg-sph-reaction-product-stage',
+  owner = 'ulg-reaction-product-gas-law',
+  lawGraphId = 'peercompute.ulg.local-sph-law-closure-graph',
+  lawGraphNodeId = 'ulg-reaction-product-gas-law',
+  laneId = 'ulg:reaction-product-stage:active',
+  stateKey = 'ulg:reaction-product-stage-state',
+  domainKey = null,
+  localExecution = 'inline',
+  queueFencePolicy = 'queue.onSubmittedWorkDone-before-admission',
+  readFamilies = ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
+  writeFamilies = ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'],
+  retainedBufferRefs = ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer'],
+  returnEnvelope = true,
+  suppressCommitDelta = true,
+  ...stageOptions
+} = {}) {
+  if (typeof modulePath !== 'string' || modulePath.trim() === '') {
+    throw new Error('createSphReactionProductStageComputeTask requires a modulePath for the ULG reaction/product stage task handler');
+  }
+  const {
+    gpuResidentLaneManager: _ignoredLaneManager,
+    gpuResidentLaneId: _ignoredLaneId,
+    gpuResidentLaneStateKey: _ignoredLaneStateKey,
+    gpuResidentLaneDomainKey: _ignoredLaneDomainKey,
+    ...taskStageOptions
+  } = stageOptions;
+  const readbackMode = taskStageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const requiresGpuLane = taskStageOptions.preferWebGpu === true
+    || readbackMode === NO_FULL_READBACK_MODE
+    || Boolean(taskStageOptions.sphParticleUpload || taskStageOptions.sourceStateBuffer || taskStageOptions.sourceThermoBuffer || taskStageOptions.sourceMechanicsBuffer);
+  const lawGraphNode = createResidentLawGraphNodeTaskRef({
+    graphId: lawGraphId,
+    nodeId: lawGraphNodeId,
+    solverId,
+    readFamilies,
+    writeFamilies,
+    requiredClosures: ['reaction-table', 'thermal-material-table', 'thermal-phase-response-table', 'sedenion-reaction-scope'],
+    validationGates: [
+      'reaction-mass-ledger',
+      'stoichiometry-ledger',
+      'sedenion-scope-check',
+      'gpu-fence-report'
+    ],
+    cachePolicy: 'hot-reaction-product-stage-gpu-lane-or-cpu-oracle'
+  });
+  const gpuFence = requiresGpuLane
+    ? createResidentGpuFenceRequirement({
+        laneId,
+        stateKey,
+        queueFencePolicy,
+        retainedBufferRefs,
+        source: 'ulg-sph-reaction-product-stage-compute-task',
+        required: true
+      })
+    : null;
+  const gpuResidentLane = requiresGpuLane
+    ? createResidentGpuLaneTaskDescriptor({
+        laneId,
+        stateKey,
+        domainKey,
+        solverId,
+        owner,
+        localExecution,
+        readFamilies,
+        writeFamilies,
+        retainedBufferRefs,
+        queueFencePolicy,
+        copyBudget: computeResidentLaneTaskCopyBudget({
+          ...taskStageOptions,
+          readbackMode,
+          gpuResidentLaneCopyBudget: stageOptions.gpuResidentLaneCopyBudget
+        })
+      })
+    : null;
+  const id = taskId || `ulg-sph-reaction-product-stage:${finiteNumber(taskStageOptions.sphParticleState?.step, 0)}`;
+  return {
+    schema: ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA,
+    id,
+    runtime: 'js',
+    taskFamily,
+    solverId,
+    module: modulePath,
+    exportName: 'runSphReactionProductStageComputeTask',
+    returnEnvelope,
+    suppressCommitDelta,
+    residency: requiresGpuLane ? 'gpu-lane' : 'cpu-oracle',
+    lawGraphNode,
+    readFamilies: [...readFamilies],
+    writeFamilies: [...writeFamilies],
+    expectedOutputFamilies: [...writeFamilies],
+    ...(requiresGpuLane ? {
+      webgpu: {
+        residency: 'gpu-lane',
+        requiresQueueFence: true,
+        laneId,
+        stateKey,
+        domainKey,
+        queueFencePolicy,
+        retainedBufferRefs: [...retainedBufferRefs],
+        copyBudget: { ...gpuResidentLane.copyBudget }
+      },
+      gpuFence,
+      gpuResidentLane
+    } : {}),
+    data: {
+      ...taskStageOptions,
+      readbackMode,
+      retainOutputParticleBuffers: taskStageOptions.retainOutputParticleBuffers ?? true,
+      gpuFenceRequirement: gpuFence,
+      gpuResidentLane,
+      lawGraphNode,
+      computeTaskSchema: ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA,
+      computeTaskId: id,
+      expectedOutputFamilies: [...writeFamilies],
+      reactionProductStageTask: true
+    }
+  };
+}
+
+export async function runSphReactionProductStageComputeTask(data = {}) {
+  const {
+    gpuResidentLaneManager: _ignoredLaneManager,
+    gpuFenceRequirement = null,
+    gpuResidentLane = null,
+    lawGraphNode = null,
+    computeTaskSchema = ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA,
+    computeTaskId = null,
+    expectedOutputFamilies = [],
+    reactionProductStageTask = true,
+    reactionStepRunner = runSphReactionStepWithOptionalWebGpu,
+    ...stageOptions
+  } = data || {};
+  const reactionExecution = await reactionStepRunner({
+    ...stageOptions,
+    retainOutputParticleBuffers: stageOptions.retainOutputParticleBuffers ?? true
+  });
+  const reactionResult = reactionExecution?.result || reactionExecution || {};
+  const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
+  const gpuFence = createSphReactionProductStageGpuFenceReport(reactionExecution, fenceRequirement);
+  const reactionProductStageTaskEvidence = createSphReactionProductStageTaskEvidence(reactionExecution, {
+    computeTaskId,
+    lawGraphNode,
+    gpuFenceRequirement: fenceRequirement
+  });
+  return {
+    ...reactionResult,
+    backend: reactionExecution?.backend || reactionResult?.backend || null,
+    status: reactionExecution?.status || reactionResult?.status || null,
+    reactionExecution,
+    computeTaskResultSchema: ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+    computeTaskSchema,
+    computeTaskId,
+    lawGraphNode,
+    gpuFence,
+    gpuFenceReport: gpuFence,
+    gpuResidentLaneRequirement: gpuResidentLane || null,
+    expectedOutputFamilies: [...expectedOutputFamilies],
+    reactionProductStageTask: reactionProductStageTask === true,
+    reactionProductStageTaskEvidence,
+    reactionProductStageTaskAuthority: {
+      schema: 'peercompute.ulg.reaction-product-stage-task-authority.v0',
+      status: 'compute-manager-owned-non-mutating-reaction-product-stage-task',
+      taskId: computeTaskId,
+      lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-reaction-product-gas-law',
+      solverId: lawGraphNode?.solverId || 'ulg-sph-reaction-product-stage',
+      readFamilies: [...(lawGraphNode?.readFamilies || ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'])],
+      writeFamilies: [...(lawGraphNode?.writeFamilies || ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass'])],
+      commitDeltaSuppressed: true,
+      authoritativeStateMutation: false,
+      gpuFenceRequired: gpuFenceRequirement?.required === true,
+      gpuFenceSatisfied: gpuFence.fenceSatisfied === true
+    }
+  };
+}
+
+export function submitSphReactionProductStageComputeTask({ computeManager, ...taskOptions } = {}) {
+  if (!computeManager || typeof computeManager.submitTask !== 'function') {
+    throw new Error('submitSphReactionProductStageComputeTask requires a ComputeManager-compatible submitTask() method');
+  }
+  return computeManager.submitTask(createSphReactionProductStageComputeTask(taskOptions));
+}
+
 function stripMechanicsStageTaskRuntimeFields({
   defaultRunner: _defaultRunner,
   stageId: _stageId,
@@ -4112,17 +4395,24 @@ function createMlsMpmMechanicsStageLaneContract({
   readFamilies = ['sph-particle-state', 'mls-mpm-mechanics'],
   writeFamilies = ['sph-particle-state', 'mls-mpm-mechanics'],
   retainedBufferRefs = ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer'],
-  includeThermalPhaseStage = false
+  includeThermalPhaseStage = false,
+  includeReactionProductStage = false
 } = {}) {
-  const contractReadFamilies = includeThermalPhaseStage
-    ? uniqueNonEmptyStrings([...readFamilies, 'sph-thermo-phase'])
-    : [...readFamilies];
-  const contractWriteFamilies = includeThermalPhaseStage
-    ? uniqueNonEmptyStrings([...writeFamilies, 'sph-thermo-phase'])
-    : [...writeFamilies];
-  const laneRetainedBufferRefs = includeThermalPhaseStage
-    ? uniqueNonEmptyStrings([...retainedBufferRefs, 'sph-thermo-buffer'])
-    : [...retainedBufferRefs];
+  const contractReadFamilies = uniqueNonEmptyStrings([
+    ...readFamilies,
+    ...(includeThermalPhaseStage || includeReactionProductStage ? ['sph-thermo-phase'] : []),
+    ...(includeReactionProductStage ? ['reaction-closure-table'] : [])
+  ]);
+  const contractWriteFamilies = uniqueNonEmptyStrings([
+    ...writeFamilies,
+    ...(includeThermalPhaseStage || includeReactionProductStage ? ['sph-thermo-phase'] : []),
+    ...(includeReactionProductStage ? ['resident-product-mass'] : [])
+  ]);
+  const laneRetainedBufferRefs = uniqueNonEmptyStrings([
+    ...retainedBufferRefs,
+    ...(includeThermalPhaseStage || includeReactionProductStage ? ['sph-thermo-buffer'] : []),
+    ...(includeReactionProductStage ? ['resident-product-mass-buffer'] : [])
+  ]);
   const passDagStages = [
     {
       id: 'p2g',
@@ -4155,6 +4445,15 @@ function createMlsMpmMechanicsStageLaneContract({
       writes: ['sph-thermo-phase']
     });
   }
+  if (includeReactionProductStage) {
+    passDagStages.push({
+      id: REACTION_PRODUCT_STAGE_ID,
+      lawNodeId: 'ulg-reaction-product-gas-law',
+      runtimeTarget: 'compute-manager-stage-task',
+      reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
+      writes: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass']
+    });
+  }
   return {
     schema: ULG_MLS_MPM_MECHANICS_STAGE_LANE_CONTRACT_SCHEMA,
     authority: 'compute-manager-gpuhub-resident-lane-contract',
@@ -4168,9 +4467,11 @@ function createMlsMpmMechanicsStageLaneContract({
     laneMustRetainBuffers: laneRetainedBufferRefs,
     sequenceRequested: true,
     sequenceRunnable: true,
-    sequenceMode: includeThermalPhaseStage
-      ? 'mechanics-plus-thermal-phase-stage-task-chain'
-      : 'mechanics-stage-task-chain',
+    sequenceMode: includeReactionProductStage
+      ? 'mechanics-plus-thermal-reaction-product-stage-task-chain'
+      : (includeThermalPhaseStage
+        ? 'mechanics-plus-thermal-phase-stage-task-chain'
+        : 'mechanics-stage-task-chain'),
     defaultEnabled: false,
     passDagStages,
     ownershipRules: [
@@ -4204,6 +4505,24 @@ function retainedBufferRefsForMechanicsStageResult(stageId, result = {}) {
     }
     if (result?.thermoBuffer || result?.gpuResult?.thermoBuffer || result?.thermo instanceof Float32Array || result?.thermoBufferByteLength > 0) {
       refs.push('sph-thermo-buffer');
+    }
+  }
+  if (stageId === REACTION_PRODUCT_STAGE_ID) {
+    if (result?.stateBuffer || result?.gpuResult?.stateBuffer || result?.state instanceof Float32Array || result?.stateBufferByteLength > 0) {
+      refs.push('sph-state-buffer');
+    }
+    if (result?.thermoBuffer || result?.gpuResult?.thermoBuffer || result?.thermo instanceof Float32Array || result?.thermoBufferByteLength > 0) {
+      refs.push('sph-thermo-buffer');
+    }
+    if (result?.mechanicsBuffer || result?.gpuResult?.mechanicsBuffer || result?.mechanics instanceof Float32Array || result?.mechanicsBufferByteLength > 0) {
+      refs.push('mls-mpm-mechanics-buffer');
+    }
+    if (
+      result?.residentProductMass?.productEventBufferRetained
+      || result?.residentProductMassBufferRetained
+      || result?.reactionSummary?.productEventBufferRetained
+    ) {
+      refs.push('resident-product-mass-buffer');
     }
   }
   return refs;
@@ -4269,7 +4588,13 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     workerRetainedThermoOutput: result?.workerResidentStage?.workerRetainedThermoOutput || null,
     workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || []),
     thermalPhaseEvidencePassed: result?.thermalPhaseStageTaskEvidence?.passed === true,
-    thermalPhaseAuthoritativeMutation: result?.thermalPhaseStageTaskAuthority?.authoritativeStateMutation ?? null
+    thermalPhaseAuthoritativeMutation: result?.thermalPhaseStageTaskAuthority?.authoritativeStateMutation ?? null,
+    reactionProductEvidencePassed: result?.reactionProductStageTaskEvidence?.passed === true,
+    reactionProductAuthoritativeMutation: result?.reactionProductStageTaskAuthority?.authoritativeStateMutation ?? null,
+    reactionProductOutputMutatesParticles: reactionOutputMutatesParticles(result),
+    reactionProductResidentProductMassStatus: result?.residentProductMassStatus || result?.residentProductMass?.status || null,
+    reactionProductResidentProductMassBufferRetained: result?.residentProductMassBufferRetained === true
+      || result?.residentProductMass?.productEventBufferRetained === true
   };
 }
 
@@ -4511,6 +4836,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentThermalStageWorkerOutputPublisher = null,
   gpuHubResidentStageWorkerUseRetainedInput = false,
   includeThermalPhaseStage = false,
+  includeReactionProductStage = false,
   gpuResidentLaneId = null,
   gpuResidentLaneStateKey = null,
   gpuResidentLaneDomainKey = null,
@@ -4539,7 +4865,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     laneId: laneStagePlanId,
     stateKey: laneStagePlanStateKey,
     domainKey: gpuResidentLaneDomainKey,
-    includeThermalPhaseStage
+    includeThermalPhaseStage,
+    includeReactionProductStage
   });
   const stageOrder = laneStagePlanContract.passDagStages.map((stage) => stage.id);
   const sphParticleState = stepOptions.sphParticleState;
@@ -4559,6 +4886,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && typeof nativeTaskGraphSubmitter.submitTaskGraph === 'function'
     && stepOptions.preferWebGpu !== true
     && includeThermalPhaseStage !== true
+    && includeReactionProductStage !== true
     && !stepOptions.sphParticleUpload
     && !stepOptions.mlsMpmParticleUpload;
   if (canUseNativeTaskGraph) {
@@ -4941,6 +5269,58 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           ...summarizeMechanicsStageLaneResult(THERMAL_PHASE_STAGE_ID, result)
         }
       };
+    },
+    [REACTION_PRODUCT_STAGE_ID]: async () => {
+      const g2pOutput = retainedG2pOutputBuffers(stageResults.g2p);
+      const thermalOutput = retainedThermalOutputBuffers(stageResults[THERMAL_PHASE_STAGE_ID]);
+      const sourceStateBuffer = thermalOutput.stateBuffer || g2pOutput.stateBuffer || null;
+      const sourceThermoBuffer = thermalOutput.thermoBuffer || stepOptions.sphParticleUpload?.thermoBuffer || null;
+      const result = await submitStageTask(REACTION_PRODUCT_STAGE_ID, createSphReactionProductStageComputeTask, {
+        sphParticleState,
+        mlsMpmParticleState,
+        reactionTable: stepOptions.reactionTable || null,
+        thermalMaterialTable: stepOptions.thermalMaterialTable || null,
+        thermalClosureGraphSet: stepOptions.thermalClosureGraphSet || null,
+        thermalClosureGraphBank: stepOptions.thermalClosureGraphBank || null,
+        thermalPhaseResponseTable: stepOptions.thermalPhaseResponseTable || null,
+        sphParticleUpload: sourceStateBuffer || sourceThermoBuffer
+          ? {
+            ...(stepOptions.sphParticleUpload || {}),
+            schema: stepOptions.sphParticleUpload?.schema || 'peercompute.ulg.reaction-product-stage-sph-particle-upload.v0',
+            status: 'webgpu-uploaded',
+            sourceStage: thermalOutput.stateBuffer ? THERMAL_PHASE_STAGE_ID : 'g2p',
+            stateBuffer: sourceStateBuffer,
+            thermoBuffer: sourceThermoBuffer
+          }
+          : stepOptions.sphParticleUpload,
+        mlsMpmParticleUpload: g2pOutput.mechanicsBuffer
+          ? {
+            ...(stepOptions.mlsMpmParticleUpload || {}),
+            schema: stepOptions.mlsMpmParticleUpload?.schema || 'peercompute.ulg.reaction-product-stage-mls-mpm-particle-upload.v0',
+            status: 'webgpu-uploaded',
+            sourceStage: 'g2p',
+            mechanicsBuffer: g2pOutput.mechanicsBuffer
+          }
+          : stepOptions.mlsMpmParticleUpload,
+        sourceStateBuffer,
+        sourceThermoBuffer,
+        sourceMechanicsBuffer: g2pOutput.mechanicsBuffer || null,
+        resetMechanics: stepOptions.reactionStepOptions?.resetMechanics ?? true,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        domainKey: gpuResidentLaneDomainKey,
+        preferWebGpu: stepOptions.preferWebGpu === true,
+        readbackMode
+      });
+      return {
+        value: result,
+        retainedBufferRefs: retainedBufferRefsForMechanicsStageResult(REACTION_PRODUCT_STAGE_ID, result),
+        summary: {
+          computeTaskResultSchema: result?.computeTaskResultSchema || null,
+          evidencePassed: result?.reactionProductStageTaskEvidence?.passed === true,
+          ...summarizeMechanicsStageLaneResult(REACTION_PRODUCT_STAGE_ID, result)
+        }
+      };
     }
   };
   const gpuHubForStageExecutors = resolveMechanicsStageGpuHub(computeManager);
@@ -5071,6 +5451,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
                 thermalPhaseResponseTable: stepOptions.thermalPhaseResponseTable || null,
                 wallTemperaturesK: stepOptions.wallTemperaturesK || {},
                 dtS: stepOptions.dtS ?? dtSeconds
+              } : {}),
+              ...(includeReactionProductStage ? {
+                reactionTable: stepOptions.reactionTable || null,
+                reactionStepOptions: stepOptions.reactionStepOptions || {}
               } : {})
             }
           }
@@ -5158,10 +5542,16 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     g2p: evidence.g2p || null,
     ...(includeThermalPhaseStage ? {
       [THERMAL_PHASE_STAGE_ID]: stageResults[THERMAL_PHASE_STAGE_ID]?.thermalPhaseStageTaskEvidence || null
+    } : {}),
+    ...(includeReactionProductStage ? {
+      [REACTION_PRODUCT_STAGE_ID]: stageResults[REACTION_PRODUCT_STAGE_ID]?.reactionProductStageTaskEvidence || null
     } : {})
   };
   if (includeThermalPhaseStage && stageResults[THERMAL_PHASE_STAGE_ID]?.thermalPhaseStageTask === true) {
     stageTaskBoundaries[THERMAL_PHASE_STAGE_ID] = true;
+  }
+  if (includeReactionProductStage && stageResults[REACTION_PRODUCT_STAGE_ID]?.reactionProductStageTask === true) {
+    stageTaskBoundaries[REACTION_PRODUCT_STAGE_ID] = true;
   }
   const stageLaneSummaries = Object.fromEntries(
     stageOrder.map((stageId) => [

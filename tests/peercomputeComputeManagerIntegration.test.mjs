@@ -22,6 +22,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
@@ -1437,10 +1438,13 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     preferWebGpu: true,
     readbackMode: 'no-full-readback',
     includeThermalPhaseStage: true,
+    includeReactionProductStage: true,
     thermalMaterialTable: { schema: 'test-thermal-material-table.v0' },
     thermalClosureGraphSet: { schema: 'test-thermal-closure-graph-set.v0' },
     thermalClosureGraphBank: null,
     thermalPhaseResponseTable: { schema: 'test-thermal-phase-response-table.v0' },
+    reactionTable: { schema: 'test-reaction-table.v0', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
+    reactionStepOptions: { resetMechanics: true },
     wallTemperaturesK: {},
     gpuResidentLaneId: 'ulg:test:mechanics-stage-gpuhub-worker-thermal',
     gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-gpuhub-worker-thermal-state',
@@ -1462,7 +1466,8 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
           inputSource: input?.source || null,
           workerStatus: executor?.workerPolicy?.status || null,
           contextSchema: context?.ulgMechanicsResidentStageWorker?.schema || null,
-          contextHasThermalTables: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.thermalMaterialTable)
+          contextHasThermalTables: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.thermalMaterialTable),
+          contextHasReactionTable: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.reactionTable)
         });
         const gpuResidentLaneRequirement = {
           laneId: lease.laneId,
@@ -1534,21 +1539,54 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
             summary: { backend: 'webgpu', stage: 'g2p' }
           };
         }
+        if (stage.id === 'thermalPhase') {
+          return {
+            value: {
+              ...base,
+              computeTaskResultSchema: ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+              stateBufferByteLength: 64,
+              thermoBufferByteLength: 64,
+              retainedOutputParticleBuffers: true,
+              fullReadbackPerformed: false,
+              thermalPhaseStageTask: true,
+              thermalPhaseStageTaskEvidence: {
+                schema: 'peercompute.ulg.thermal-phase-stage-task-evidence.v0',
+                passed: true
+              },
+              thermalPhaseStageTaskAuthority: {
+                schema: 'peercompute.ulg.thermal-phase-stage-task-authority.v0',
+                authoritativeStateMutation: false
+              },
+              workerResidentStage: {
+                ...base.workerResidentStage,
+                workerRetainedThermoInputStatus: 'applied-worker-retained-thermo-input',
+                workerRetainedThermoOutputStatus: 'adopted-worker-retained-thermo-output'
+              }
+            },
+            retainedBufferRefs: ['sph-thermo-buffer', 'ulg-worker:test:thermalPhase:thermo'],
+            summary: { backend: 'webgpu', stage: 'thermalPhase' }
+          };
+        }
         return {
           value: {
             ...base,
-            computeTaskResultSchema: ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+            computeTaskResultSchema: ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
             stateBufferByteLength: 64,
             thermoBufferByteLength: 64,
+            mechanicsBufferByteLength: 64,
             retainedOutputParticleBuffers: true,
             fullReadbackPerformed: false,
-            thermalPhaseStageTask: true,
-            thermalPhaseStageTaskEvidence: {
-              schema: 'peercompute.ulg.thermal-phase-stage-task-evidence.v0',
+            productTermCount: 1,
+            gasProductCount: 0,
+            residentProductMassStatus: 'resident-product-mass-buffer-retained',
+            residentProductMassBufferRetained: true,
+            reactionProductStageTask: true,
+            reactionProductStageTaskEvidence: {
+              schema: 'peercompute.ulg.reaction-product-stage-task-evidence.v0',
               passed: true
             },
-            thermalPhaseStageTaskAuthority: {
-              schema: 'peercompute.ulg.thermal-phase-stage-task-authority.v0',
+            reactionProductStageTaskAuthority: {
+              schema: 'peercompute.ulg.reaction-product-stage-task-authority.v0',
               authoritativeStateMutation: false
             },
             workerResidentStage: {
@@ -1557,52 +1595,64 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
               workerRetainedThermoOutputStatus: 'adopted-worker-retained-thermo-output'
             }
           },
-          retainedBufferRefs: ['sph-thermo-buffer', 'ulg-worker:test:thermalPhase:thermo'],
-          summary: { backend: 'webgpu', stage: 'thermalPhase' }
+          retainedBufferRefs: ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer', 'ulg-worker:test:reactionProduct:product'],
+          summary: { backend: 'webgpu', stage: 'reactionProduct' }
         };
       }
     }
   });
   assert.deepEqual(
     thermalStageWorkerBridgeCalls.map((entry) => entry.stageId),
-    ['p2g', 'gridUpdate', 'g2p', 'thermalPhase']
+    ['p2g', 'gridUpdate', 'g2p', 'thermalPhase', 'reactionProduct']
   );
   assert.deepEqual(
     thermalStageWorkerBridgeCalls.map((entry) => entry.workerStatus),
-    ['worker-ready', 'worker-ready', 'worker-ready', 'worker-ready']
+    ['worker-ready', 'worker-ready', 'worker-ready', 'worker-ready', 'worker-ready']
   );
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextSchema, 'peercompute.ulg.mechanics-resident-stage-worker-context.v0');
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasThermalTables, true);
-  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 4);
+  assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasReactionTable, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 5);
   assert.deepEqual(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
-    ['p2g', 'gridUpdate', 'g2p', 'thermalPhase']
+    ['p2g', 'gridUpdate', 'g2p', 'thermalPhase', 'reactionProduct']
   );
-  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 4);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 5);
   assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
     p2g: 'gpu-hub-resident-stage-executor',
     gridUpdate: 'gpu-hub-resident-stage-executor',
     g2p: 'gpu-hub-resident-stage-executor',
-    thermalPhase: 'gpu-hub-resident-stage-executor'
+    thermalPhase: 'gpu-hub-resident-stage-executor',
+    reactionProduct: 'gpu-hub-resident-stage-executor'
   });
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
   assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses, {
     p2g: 'worker-ready',
     gridUpdate: 'worker-ready',
     g2p: 'worker-ready',
-    thermalPhase: 'worker-ready'
+    thermalPhase: 'worker-ready',
+    reactionProduct: 'worker-ready'
   });
-  assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageOrder, ['p2g', 'gridUpdate', 'g2p', 'thermalPhase']);
+  assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageOrder, ['p2g', 'gridUpdate', 'g2p', 'thermalPhase', 'reactionProduct']);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskBoundaries.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskBoundaries.reactionProduct, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskResultSchemas.thermalPhase, ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskResultSchemas.reactionProduct, ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidenceSchemas.thermalPhase, 'peercompute.ulg.thermal-phase-stage-task-evidence.v0');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidenceSchemas.reactionProduct, 'peercompute.ulg.reaction-product-stage-task-evidence.v0');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidencePassed.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidencePassed.reactionProduct, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.allStageTaskEvidencePassed, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.thermalPhase, 'webgpu');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.reactionProduct, 'webgpu');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskExecutionStatuses.thermalPhase, 'webgpu-accepted-no-full-readback');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskExecutionStatuses.reactionProduct, 'webgpu-accepted-no-full-readback');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskFenceSatisfied.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskFenceSatisfied.reactionProduct, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskReadbackModes.thermalPhase, 'no-full-readback');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskReadbackModes.reactionProduct, 'no-full-readback');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.reactionProduct, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCandidateStatus, 'worker-retained-thermal-phase-publication-candidate-ready');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationStatus, 'worker-retained-thermal-phase-output-published');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCommitted, true);
@@ -1623,6 +1673,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.thermalPhase.thermalPhaseAuthoritativeMutation,
     false
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.reactionProduct.reactionProductAuthoritativeMutation,
+    false
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.reactionProduct.reactionProductResidentProductMassBufferRetained,
+    true
   );
 
   const mechanicsChildDryRun = await runUlgMechanicsChildDryRunTask({

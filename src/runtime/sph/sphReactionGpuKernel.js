@@ -2007,14 +2007,20 @@ export async function runSphReactionStepWithOptionalWebGpu({
   readbackMode = FULL_READBACK_MODE,
   ...args
 } = {}) {
-  const cpuReference = runSphReactionStepCpu(args);
+  const noFullReadback = readbackMode === NO_FULL_READBACK_MODE || args.readbackMode === NO_FULL_READBACK_MODE;
+  let cpuReference = null;
+  const getCpuReference = () => {
+    if (!cpuReference) cpuReference = runSphReactionStepCpu(args);
+    return cpuReference;
+  };
   if (!preferWebGpu) {
+    const reference = getCpuReference();
     return {
       schema: ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'cpu-reference',
-      cpuReference,
-      result: cpuReference,
+      cpuReference: reference,
+      result: reference,
       webgpuStatus: { status: 'not-requested' },
       scientificValidation: false,
       materialValidation: false,
@@ -2028,12 +2034,13 @@ export async function runSphReactionStepWithOptionalWebGpu({
     ? { status: 'webgpu-device-ready', device: resolvedDevice }
     : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
   if (!resolvedDeviceResult?.device) {
+    const reference = getCpuReference();
     return {
       schema: ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'webgpu-unavailable-cpu-reference',
-      cpuReference,
-      result: cpuReference,
+      cpuReference: reference,
+      result: reference,
       webgpuStatus: { status: 'fallback-cpu', reason: resolvedDeviceResult?.reason || 'webgpu device unavailable' },
       scientificValidation: false,
       materialValidation: false,
@@ -2048,15 +2055,31 @@ export async function runSphReactionStepWithOptionalWebGpu({
       device: resolvedDeviceResult.device,
       readbackMode
     });
-    const parity = webgpu.readbackMode === NO_FULL_READBACK_MODE
-      ? createNoFullReadbackParityReport(parityTolerance)
-      : compareSphReactionStepParity(cpuReference, webgpu, { tolerance: parityTolerance });
+    if (noFullReadback || webgpu.readbackMode === NO_FULL_READBACK_MODE) {
+      return {
+        schema: ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'webgpu-accepted-no-full-readback',
+        cpuReference: null,
+        webgpu,
+        result: webgpu,
+        webgpuParity: createNoFullReadbackParityReport(parityTolerance),
+        webgpuStatus: { status: 'webgpu-executed-no-full-readback' },
+        scientificValidation: false,
+        materialValidation: false,
+        chemistryValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    const reference = getCpuReference();
+    const parity = compareSphReactionStepParity(reference, webgpu, { tolerance: parityTolerance });
     if (parity.status === 'pass' || parity.status === 'not-run-no-full-readback') {
       return {
         schema: ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
         backend: 'webgpu',
-        status: parity.status === 'pass' ? 'webgpu-accepted' : 'webgpu-accepted-no-full-readback',
-        cpuReference,
+        status: 'webgpu-accepted',
+        cpuReference: reference,
         webgpu,
         result: webgpu,
         webgpuParity: parity,
@@ -2072,9 +2095,9 @@ export async function runSphReactionStepWithOptionalWebGpu({
       schema: ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'webgpu-parity-failed-cpu-reference',
-      cpuReference,
+      cpuReference: reference,
       webgpu,
-      result: cpuReference,
+      result: reference,
       webgpuParity: parity,
       webgpuStatus: { status: 'fallback-cpu', reason: 'reaction parity failed' },
       scientificValidation: false,
@@ -2084,12 +2107,13 @@ export async function runSphReactionStepWithOptionalWebGpu({
       fullPhysicsValidation: false
     };
   } catch (error) {
+    const reference = getCpuReference();
     return {
       schema: ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA,
       backend: 'cpu-reference',
       status: 'webgpu-error-cpu-reference',
-      cpuReference,
-      result: cpuReference,
+      cpuReference: reference,
+      result: reference,
       webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
       scientificValidation: false,
       materialValidation: false,

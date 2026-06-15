@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 00:01 AKDT: the first reaction/product
+ComputeManager stage boundary and Worker/GPUHub DAG slot now exist. ULG
+exposes `createSphReactionProductStageComputeTask()` and
+`runSphReactionProductStageComputeTask()`, the resident Worker accepts
+`reactionProduct`, and the injected PeerCompute integration proves
+`p2g -> gridUpdate -> g2p -> thermalPhase -> reactionProduct` executes through
+GPUHub resident-stage executors with all five stages `worker-ready`. The
+reaction no-full wrapper now accepts retained WebGPU output without stale CPU
+parity. This stage is still evidence-only and non-authoritative; next priority
+is to add Worker-retained reaction/product publication/admission through
+NodeKernel/StateManager, then promote pressure/interface rows behind the same
+ComputeManager/GPUHub worker authority.
+
 Current routing note, 2026-06-14 23:36 AKDT: Worker-retained thermal/phase
 output now has its own publication/admission path. Mechanics publication stays
 mechanics-only, while `thermalPhase` publishes retained thermo refs under
@@ -44,7 +57,15 @@ The browser authority gate proves hot record storage, live Worker backend,
 warm delta admission, and retained thermo refs. Next priority: promote
 pressure/interface and reaction/product stages behind the same
 ComputeManager/GPUHub Worker authority and make them consume the admitted
-thermal retained-ref descriptor.
+thermal retained-ref descriptor. Superseded by the 2026-06-15 00:01
+reaction/product stage DAG note above.
+
+Renderer blocker note, 2026-06-14 23:42 AKDT: user reports major z-buffer and
+draw-order issues are still visible. Keep this queued as a renderer P0/P1
+before treating visual captures as authoritative evidence. The later renderer
+pass must test transparent/opaque pass ordering, depth-write/depth-test policy,
+nested liquid/solid surfaces, container/grid overlay ordering, focus-change
+flash/disappear behavior, and multi-frame draw-order flicker.
 
 Current routing note, 2026-06-14 23:23 AKDT: `thermalPhase` now runs as an
 opt-in fourth node in the formal ComputeManager/GPUHub stage-plan DAG. The

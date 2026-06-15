@@ -403,6 +403,53 @@ test('SPH reaction optional WebGPU accepts a parity-passing reaction runner', as
   assert.equal(execution.chemistryValidation, false);
 });
 
+test('SPH reaction optional WebGPU accepts no-full retained output without CPU parity', async () => {
+  const packed = packedThreeParticles();
+  const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);
+  const table = reactionTable();
+  const execution = await runSphReactionStepWithOptionalWebGpu({
+    ...packed,
+    reactionTable: table,
+    thermalMaterialTable,
+    preferWebGpu: true,
+    device: {},
+    readbackMode: 'no-full-readback',
+    webGpuRunner(args) {
+      assert.equal(args.readbackMode, 'no-full-readback');
+      return {
+        schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'reaction-step-executed',
+        particleCount: packed.sphParticleState.particleCount,
+        reactionCount: table.reactionCount,
+        productTermCount: table.productTermCount,
+        gasProductCount: table.gasProductCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        mechanics: new Float32Array(),
+        proposals: new Float32Array(),
+        stateBuffer: { label: 'reaction-state-retained' },
+        thermoBuffer: { label: 'reaction-thermo-retained' },
+        mechanicsBuffer: { label: 'reaction-mechanics-retained' },
+        retainedOutputParticleBuffers: true,
+        fullReadbackPerformed: false,
+        normalHotLoopReadbackFree: true,
+        readbackMode: 'no-full-readback'
+      };
+    }
+  });
+
+  assert.equal(execution.schema, ULG_SPH_GPU_REACTION_STEP_EXECUTION_SCHEMA);
+  assert.equal(execution.backend, 'webgpu');
+  assert.equal(execution.status, 'webgpu-accepted-no-full-readback');
+  assert.equal(execution.cpuReference, null);
+  assert.equal(execution.webgpuParity.status, 'not-run-no-full-readback');
+  assert.equal(execution.webgpuStatus.status, 'webgpu-executed-no-full-readback');
+  assert.equal(execution.result.stateBuffer.label, 'reaction-state-retained');
+  assert.equal(execution.result.thermoBuffer.label, 'reaction-thermo-retained');
+  assert.equal(execution.result.mechanicsBuffer.label, 'reaction-mechanics-retained');
+});
+
 test('SPH reaction parity rejects reaction output drift', () => {
   const packed = packedThreeParticles();
   const thermalMaterialTable = buildSphThermalMaterialTable(materialProperties);

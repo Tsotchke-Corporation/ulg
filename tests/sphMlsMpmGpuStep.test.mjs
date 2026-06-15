@@ -25,6 +25,8 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+  ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA,
+  ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
@@ -41,6 +43,8 @@ import {
   runMlsMpmResidentStepsComputeTask,
   runMlsMpmResidentStepsWithOptionalWebGpu,
   runMlsMpmResidentStepWithOptionalWebGpu,
+  createSphReactionProductStageComputeTask,
+  runSphReactionProductStageComputeTask,
   submitMlsMpmResidentStepComputeTask,
   submitMlsMpmResidentStepsComputeTask
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
@@ -1683,6 +1687,124 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
   assert.equal(result.thermalPhaseStageTaskAuthority.status, 'compute-manager-owned-non-mutating-thermal-phase-stage-task');
   assert.equal(result.thermalPhaseStageTaskAuthority.authoritativeStateMutation, false);
   assert.equal(result.thermalPhaseStageTaskAuthority.commitDeltaSuppressed, true);
+});
+
+test('SPH reaction product stage compute task declares retained product lane output without authority mutation', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceStateBuffer = tracker.buffer('reaction-state-in');
+  const sourceThermoBuffer = tracker.buffer('reaction-thermo-in');
+  const sourceMechanicsBuffer = tracker.buffer('reaction-mechanics-in');
+  const productEventBuffer = tracker.buffer('reaction-product-events');
+  const task = createSphReactionProductStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:reaction-product-stage',
+    laneId: 'ulg:test:reaction-product-lane',
+    stateKey: 'ulg:test:reaction-product-state',
+    domainKey: 'ulg:test-domain',
+    preferWebGpu: true,
+    sphParticleState: buffers.sphParticleState,
+    mlsMpmParticleState: buffers.mlsMpmParticleState,
+    reactionTable: { schema: 'peercompute.ulg.sph-gpu-reaction-table.v0', reactionCount: 1, productTermCount: 1, gasProductCount: 0 },
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: sourceStateBuffer,
+      thermoBuffer: sourceThermoBuffer
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: sourceMechanicsBuffer
+    },
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    sourceMechanicsBuffer
+  });
+
+  assert.equal(task.schema, ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.exportName, 'runSphReactionProductStageComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.suppressCommitDelta, true);
+  assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuFence.laneId, 'ulg:test:reaction-product-lane');
+  assert.equal(task.gpuResidentLane.owner, 'ulg-reaction-product-gas-law');
+  assert.deepEqual(task.writeFamilies, ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass']);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer']);
+
+  const result = await runSphReactionProductStageComputeTask({
+    ...task.data,
+    reactionStepRunner(args) {
+      assert.equal(args.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+      assert.equal(args.mlsMpmParticleUpload.mechanicsBuffer, sourceMechanicsBuffer);
+      assert.equal(args.sourceStateBuffer, sourceStateBuffer);
+      assert.equal(args.sourceThermoBuffer, sourceThermoBuffer);
+      assert.equal(args.sourceMechanicsBuffer, sourceMechanicsBuffer);
+      assert.equal(args.retainOutputParticleBuffers, true);
+      return {
+        schema: 'peercompute.ulg.sph-gpu-reaction-step-execution.v0',
+        backend: 'webgpu',
+        status: 'webgpu-accepted',
+        webgpuStatus: { status: 'webgpu-executed' },
+        result: {
+          schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
+          backend: 'webgpu',
+          status: 'reaction-step-executed',
+          particleCount: buffers.sphParticleState.particleCount,
+          reactionCount: 1,
+          productTermCount: 1,
+          gasProductCount: 0,
+          state: new Float32Array(),
+          thermo: new Float32Array(),
+          mechanics: new Float32Array(),
+          stateBuffer: tracker.buffer('reaction-state-out'),
+          thermoBuffer: tracker.buffer('reaction-thermo-out'),
+          mechanicsBuffer: tracker.buffer('reaction-mechanics-out'),
+          stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+          thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+          mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+          residentProductMass: {
+            schema: ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA,
+            status: 'resident-product-mass-buffer-retained',
+            productEventBuffer,
+            productEventBufferRetained: true,
+            productEventBufferByteLength: 64,
+            productEventRowCount: 1
+          },
+          residentProductMassStatus: 'resident-product-mass-buffer-retained',
+          residentProductMassBufferRetained: true,
+          retainedOutputParticleBuffers: true,
+          readbackMode: 'full-parity-readback',
+          fullReadbackPerformed: true,
+          normalHotLoopReadbackFree: false
+        }
+      };
+    }
+  });
+
+  assert.equal(result.computeTaskResultSchema, ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.computeTaskId, 'ulg:test:reaction-product-stage');
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.status, 'webgpu-accepted');
+  assert.equal(result.stateBuffer.label, 'reaction-state-out');
+  assert.equal(result.thermoBuffer.label, 'reaction-thermo-out');
+  assert.equal(result.mechanicsBuffer.label, 'reaction-mechanics-out');
+  assert.equal(result.residentProductMass.productEventBuffer, productEventBuffer);
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.reactionProductStageTaskEvidence.schema, 'peercompute.ulg.reaction-product-stage-task-evidence.v0');
+  assert.equal(result.reactionProductStageTaskEvidence.passed, true);
+  assert.deepEqual(result.reactionProductStageTaskEvidence.candidateWriteFamilies, [
+    'sph-particle-state',
+    'sph-thermo-phase',
+    'mls-mpm-mechanics',
+    'resident-product-mass'
+  ]);
+  assert.ok(result.reactionProductStageTaskEvidence.mustNotWriteFamilies.includes('pressure-interface-force-rows'));
+  assert.equal(result.reactionProductStageTaskAuthority.status, 'compute-manager-owned-non-mutating-reaction-product-stage-task');
+  assert.equal(result.reactionProductStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(result.reactionProductStageTaskAuthority.commitDeltaSuppressed, true);
 });
 
 test('MLS-MPM resident step compute task submit helper uses a ComputeManager-compatible submitTask surface', async () => {

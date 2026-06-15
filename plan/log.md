@@ -1,5 +1,67 @@
 # ULG Implementation Log
 
+## 2026-06-15 00:01 AKDT - Reaction/product Worker stage DAG boundary
+
+Implemented:
+
+- Added `reactionProduct` as a ComputeManager/GPUHub stage-task boundary with
+  GPU-lane/fence descriptors, retained state/thermo/mechanics/product refs,
+  and non-authoritative task evidence.
+- Extended the formal stage-plan contract so an opt-in DAG can execute
+  `p2g -> gridUpdate -> g2p -> thermalPhase -> reactionProduct`.
+- Extended `src/services/ulgMechanicsResidentStage.worker.js` so the warm
+  Worker can run `reactionProduct`, borrow retained thermal/G2P buffers, and
+  return clone-safe retained refs for particle and resident product-mass
+  outputs.
+- Changed `runSphReactionStepWithOptionalWebGpu()` so no-full retained WebGPU
+  reaction output is accepted without computing stale CPU parity.
+
+Validation:
+
+- PASS: syntax checks for changed source/tests.
+- PASS: `git diff --check`.
+- PASS:
+  `node --test tests/sphReactionGpuKernel.test.mjs --test-name-pattern "no-full retained output"`
+  reported `10/10`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `3/3`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "stage compute task"`
+  reported `34/34`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-reaction-product-stage-dag-20260614` reported
+  `failedCount=0` for `3` scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Publish/admit Worker-retained reaction/product output through
+  NodeKernel/StateManager before treating reaction/product state as
+  authoritative.
+- Promote pressure/interface force-row production/consumption behind the same
+  ComputeManager/GPUHub Worker authority.
+- Renderer z-buffer/draw-order failures remain queued as a renderer P0/P1
+  blocker before visual captures are treated as authoritative.
+
+## 2026-06-14 23:42 AKDT - Renderer z-buffer/draw-order blocker report
+
+- Recorded the user's current report that major z-buffer and draw-order issues
+  remain visible in the live scene.
+- Kept the issue queued as renderer P0/P1 debt instead of mixing it into the
+  current ComputeManager/GPUHub worker authority slice.
+- Future renderer acceptance must include multi-frame browser coverage for
+  transparent/opaque pass ordering, depth-write/depth-test policy, nested
+  liquid/solid surfaces, container/grid overlay ordering, focus-change
+  flash/disappear symptoms, and draw-order flicker.
+
 ## 2026-06-14 23:36 AKDT - Thermal/phase Worker publication admission
 
 Implemented:

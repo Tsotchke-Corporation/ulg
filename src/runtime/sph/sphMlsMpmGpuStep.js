@@ -578,6 +578,519 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   }
 }
 
+async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
+  device,
+  sphParticleState,
+  mlsMpmParticleState,
+  sphParticleUpload,
+  mlsMpmParticleUpload,
+  gridSpacingM = sphParticleState?.smoothingLengthM,
+  boxDimsM = DEFAULT_BOX_DIMS_M,
+  dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
+  gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
+  cflFactor = DEFAULT_CFL_FACTOR,
+  internalPressureScale = 1,
+  stepCount = 1,
+  summaryRunner = runMlsMpmResidentSummaryWebGpu,
+  compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
+  cohortRanges = null,
+  sourceSlot = sphParticleUpload?.slot ?? 0,
+  preferWebGpu = true
+}) {
+  const count = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
+  const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
+  const dtSeconds = finiteNumber(dt, 0);
+  const particleCount = sphParticleState.particleCount;
+  const gridSpec = createMlsMpmGridSpec({ boxDimsM: dims, gridSpacingM });
+  const gridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const stateByteLength = sphParticleState.state.byteLength;
+  const mechanicsByteLength = mlsMpmParticleState.mechanics.byteLength;
+  const stageTimingStartMs = nowMs();
+  const stageMs = {
+    deviceAcquire: 0,
+    fusedMechanicsSequence: 0,
+    p2gGridProjection: 0,
+    gridUpdate: 0,
+    g2pReconstruction: 0,
+    thermalStep: 0,
+    reactionStep: 0,
+    mechanicsRefresh: 0,
+    compactSummary: 0
+  };
+  const sequenceEncodeStartMs = nowMs();
+  const gridBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-fused-sequence-p2g-grid-out',
+    size: Math.max(4, gridByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const updatedGridBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-fused-sequence-grid-update-out',
+    size: Math.max(4, updatedGridByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const statePingBuffers = [
+    device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a',
+      size: Math.max(4, stateByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    }),
+    device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b',
+      size: Math.max(4, stateByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    })
+  ];
+  const mechanicsPingBuffers = [
+    device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a',
+      size: Math.max(4, mechanicsByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    }),
+    device.createBuffer({
+      label: 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b',
+      size: Math.max(4, mechanicsByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    })
+  ];
+  const p2gParamsBuffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-fused-sequence-p2g-params',
+    createFusedP2gParamsArray(gridSpec, particleCount, dtSeconds, internalPressureScale),
+    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const gridUpdateParamsBuffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-fused-sequence-grid-update-params',
+    createFusedGridUpdateParamsArray({
+      gridSpec,
+      dt: dtSeconds,
+      gravityMPerS2: gravity,
+      boxDimsM: dims,
+      cflFactor,
+      pressureInterfaceForceRowCount: 0
+    }),
+    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const g2pParamsBuffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-fused-sequence-g2p-params',
+    createFusedG2pParamsArray({
+      particleCount,
+      gridSpec,
+      dt: dtSeconds,
+      boxDimsM: dims,
+      internalPressureScale,
+      liquidWallDampingAlpha: mlsMpmParticleState.liquidWallDampingAlpha,
+      liquidWallDampingDistanceM: mlsMpmParticleState.liquidWallDampingDistanceM
+    }),
+    GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const productEventBuffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-fused-sequence-empty-product-events',
+    new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS),
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const pressureRowsBuffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-fused-sequence-empty-pressure-force-rows',
+    new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
+    GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+  );
+  const allCreatedBuffers = [
+    gridBuffer,
+    updatedGridBuffer,
+    ...statePingBuffers,
+    ...mechanicsPingBuffers,
+    p2gParamsBuffer,
+    gridUpdateParamsBuffer,
+    g2pParamsBuffer,
+    productEventBuffer,
+    pressureRowsBuffer
+  ];
+  let finalStateBuffer = null;
+  let finalMechanicsBuffer = null;
+  let finalSourceStateBuffer = sphParticleUpload.stateBuffer;
+  let finalSourceMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
+  let returned = false;
+  try {
+    const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.v2',
+      label: 'ulg-mls-mpm-p2g-grid-projection',
+      code: mlsMpmP2gGridProjectionWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'storage'),
+        computeBufferBinding(4, 'uniform'),
+        computeBufferBinding(5, 'read-only-storage')
+      ]
+    });
+    const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-grid-update.v1',
+      label: 'ulg-mls-mpm-grid-update',
+      code: mlsMpmGridUpdateWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'storage'),
+        computeBufferBinding(2, 'uniform'),
+        computeBufferBinding(3, 'read-only-storage')
+      ]
+    });
+    const { pipeline: g2pPipeline, bindGroupLayout: g2pBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-g2p-reconstruct.v1',
+      label: 'ulg-mls-mpm-g2p-reconstruct',
+      code: mlsMpmG2pReconstructWgsl,
+      entryPoint: 'main',
+      bindings: [
+        computeBufferBinding(0, 'read-only-storage'),
+        computeBufferBinding(1, 'read-only-storage'),
+        computeBufferBinding(2, 'read-only-storage'),
+        computeBufferBinding(3, 'read-only-storage'),
+        computeBufferBinding(4, 'storage'),
+        computeBufferBinding(5, 'storage'),
+        computeBufferBinding(6, 'uniform')
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    let currentStateBuffer = sphParticleUpload.stateBuffer;
+    let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;
+    for (let index = 0; index < count; index += 1) {
+      if (index === count - 1) {
+        finalSourceStateBuffer = currentStateBuffer;
+        finalSourceMechanicsBuffer = currentMechanicsBuffer;
+      }
+      const pingIndex = index % 2;
+      const outStateBuffer = statePingBuffers[pingIndex];
+      const outMechanicsBuffer = mechanicsPingBuffers[pingIndex];
+      const p2gBindGroup = device.createBindGroup({
+        layout: p2gBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: currentStateBuffer } },
+          { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+          { binding: 2, resource: { buffer: currentMechanicsBuffer } },
+          { binding: 3, resource: { buffer: gridBuffer } },
+          { binding: 4, resource: { buffer: p2gParamsBuffer } },
+          { binding: 5, resource: { buffer: productEventBuffer } }
+        ]
+      });
+      const p2gPass = encoder.beginComputePass();
+      p2gPass.setPipeline(p2gPipeline);
+      p2gPass.setBindGroup(0, p2gBindGroup);
+      p2gPass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+      p2gPass.end();
+
+      const gridUpdateBindGroup = device.createBindGroup({
+        layout: gridUpdateBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: gridBuffer } },
+          { binding: 1, resource: { buffer: updatedGridBuffer } },
+          { binding: 2, resource: { buffer: gridUpdateParamsBuffer } },
+          { binding: 3, resource: { buffer: pressureRowsBuffer } }
+        ]
+      });
+      const gridUpdatePass = encoder.beginComputePass();
+      gridUpdatePass.setPipeline(gridUpdatePipeline);
+      gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
+      gridUpdatePass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+      gridUpdatePass.end();
+
+      const g2pBindGroup = device.createBindGroup({
+        layout: g2pBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: currentStateBuffer } },
+          { binding: 1, resource: { buffer: sphParticleUpload.thermoBuffer } },
+          { binding: 2, resource: { buffer: currentMechanicsBuffer } },
+          { binding: 3, resource: { buffer: updatedGridBuffer } },
+          { binding: 4, resource: { buffer: outStateBuffer } },
+          { binding: 5, resource: { buffer: outMechanicsBuffer } },
+          { binding: 6, resource: { buffer: g2pParamsBuffer } }
+        ]
+      });
+      const g2pPass = encoder.beginComputePass();
+      g2pPass.setPipeline(g2pPipeline);
+      g2pPass.setBindGroup(0, g2pBindGroup);
+      g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
+      g2pPass.end();
+      currentStateBuffer = outStateBuffer;
+      currentMechanicsBuffer = outMechanicsBuffer;
+      finalStateBuffer = outStateBuffer;
+      finalMechanicsBuffer = outMechanicsBuffer;
+    }
+    device.queue.submit([encoder.finish()]);
+    stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);
+    const webgpuStatus = {
+      status: 'webgpu-executed-no-full-readback',
+      reason: `Fused WebGPU MLS-MPM mechanics sequence executed ${count} substeps without full readback`
+    };
+    const pressureFields = pressureInterfaceGridForceBlockedFields();
+    const p2gGridProjection = {
+      schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
+      projectionSchema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+      backend: 'webgpu',
+      status: webgpuStatus.status,
+      kernelScope: 'gather-form-p2g-stress-momentum-projection',
+      particleCount,
+      gridSpacingM: gridSpec.gridSpacingM,
+      gridDims: [...gridSpec.gridDims],
+      gridNodeCount: gridSpec.gridNodeCount,
+      gridShift: gridSpec.shift,
+      gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
+      dt: dtSeconds,
+      internalPressureScale,
+      gridNodes: new Float32Array(),
+      gridBuffer,
+      gridBufferByteLength: gridByteLength,
+      readbackMode: NO_FULL_READBACK_MODE,
+      fullReadbackPerformed: false,
+      retainedGridBuffer: true,
+      webgpuStatus,
+      webgpuParity: {
+        status: 'not-run-no-full-readback',
+        reason: 'fused no-full resident mechanics sequence skipped P2G readback'
+      },
+      fusedResidentSequence: true,
+      fusedResidentSequenceStepCount: count
+    };
+    const gridUpdate = {
+      schema: ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
+      updateSchema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+      backend: 'webgpu',
+      status: webgpuStatus.status,
+      kernelScope: 'mls-mpm-grid-velocity-update-gravity-cfl-walls',
+      particleCount,
+      gridSpacingM: gridSpec.gridSpacingM,
+      gridDims: [...gridSpec.gridDims],
+      gridNodeCount: gridSpec.gridNodeCount,
+      gridShift: gridSpec.shift,
+      gridNodeStrideFloats: MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
+      dt: dtSeconds,
+      gravityMPerS2: [...gravity],
+      boxDimsM: [...dims],
+      cflFactor,
+      updatedGridNodes: new Float32Array(),
+      updatedGridBuffer,
+      updatedGridBufferByteLength: updatedGridByteLength,
+      readbackMode: NO_FULL_READBACK_MODE,
+      fullReadbackPerformed: false,
+      retainedUpdatedGridBuffer: true,
+      queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+      queueCompletionMethod: 'deferred fused mechanics sequence cleanup',
+      webgpuStatus,
+      webgpuParity: {
+        status: 'not-run-no-full-readback',
+        reason: 'fused no-full resident mechanics sequence skipped grid-update readback'
+      },
+      ...pressureFields,
+      fusedResidentSequence: true,
+      fusedResidentSequenceStepCount: count
+    };
+    const g2pReconstruction = {
+      schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
+      reconstructionSchema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+      backend: 'webgpu',
+      status: 'reconstructed',
+      kernelScope: 'mls-mpm-g2p-velocity-affine-deformation-reconstruction',
+      particleCount,
+      gridNodeCount: gridSpec.gridNodeCount,
+      gridSpacingM: gridSpec.gridSpacingM,
+      gridDims: [...gridSpec.gridDims],
+      gridShift: gridSpec.shift,
+      dt: dtSeconds,
+      internalPressureScale,
+      stateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
+      mechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+      state: new Float32Array(),
+      mechanics: new Float32Array(),
+      stateBuffer: finalStateBuffer,
+      mechanicsBuffer: finalMechanicsBuffer,
+      stateBufferByteLength: stateByteLength,
+      mechanicsBufferByteLength: mechanicsByteLength,
+      retainedOutputParticleBuffers: true,
+      readbackMode: NO_FULL_READBACK_MODE,
+      fullReadbackPerformed: false,
+      webgpuStatus,
+      webgpuParity: {
+        status: 'not-run-no-full-readback',
+        reason: 'fused no-full resident mechanics sequence skipped G2P readback'
+      },
+      gpuResult: {
+        backend: 'webgpu',
+        readbackMode: NO_FULL_READBACK_MODE,
+        stateBuffer: finalStateBuffer,
+        mechanicsBuffer: finalMechanicsBuffer,
+        stateBufferByteLength: stateByteLength,
+        mechanicsBufferByteLength: mechanicsByteLength,
+        retainedOutputParticleBuffers: true,
+        destroyOutputParticleBuffers: () => {
+          finalStateBuffer.destroy?.();
+          finalMechanicsBuffer.destroy?.();
+        }
+      },
+      destroyOutputParticleBuffers: () => {
+        finalStateBuffer.destroy?.();
+        finalMechanicsBuffer.destroy?.();
+      },
+      fusedResidentSequence: true,
+      fusedResidentSequenceStepCount: count
+    };
+    const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
+    const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
+    const finalSourceStep = sourceStep + count - 1;
+    const finalSourceTime = sourceTime + dtSeconds * (count - 1);
+    const finalSourceSlot = sourceSlot === 0
+      ? ((count - 1) % 2)
+      : (1 - ((count - 1) % 2));
+    const finalSourceSphParticleState = {
+      ...sphParticleState,
+      step: finalSourceStep,
+      time: finalSourceTime,
+      status: 'gpu-resident-unread-ready',
+      cpuStateStale: true
+    };
+    const finalSourceMlsMpmParticleState = {
+      ...mlsMpmParticleState,
+      step: finalSourceStep,
+      time: finalSourceTime,
+      status: 'gpu-resident-unread-ready',
+      cpuStateStale: true
+    };
+    const finalSourceSphParticleUpload = {
+      ...sphParticleUpload,
+      stateBuffer: finalSourceStateBuffer,
+      ownsStateBuffer: false,
+      slot: finalSourceSlot,
+      sourceSlot: finalSourceSlot,
+      nextSlot: finalSourceSlot,
+      step: finalSourceStep,
+      time: finalSourceTime
+    };
+    const finalSourceMlsMpmParticleUpload = {
+      ...mlsMpmParticleUpload,
+      mechanicsBuffer: finalSourceMechanicsBuffer,
+      ownsMechanicsBuffer: false,
+      slot: finalSourceSlot,
+      sourceSlot: finalSourceSlot,
+      nextSlot: finalSourceSlot,
+      step: finalSourceStep,
+      time: finalSourceTime
+    };
+    let compactGpuSummary = null;
+    if (typeof summaryRunner === 'function') {
+      const compactSummaryStartMs = nowMs();
+      try {
+        compactGpuSummary = await summaryRunner({
+          device,
+          sphParticleState: finalSourceSphParticleState,
+          mlsMpmParticleState: finalSourceMlsMpmParticleState,
+          sphParticleUpload: finalSourceSphParticleUpload,
+          mlsMpmParticleUpload: finalSourceMlsMpmParticleUpload,
+          gridUpdate,
+          g2pReconstruction,
+          thermalStep: null,
+          reactionStep: null,
+          mechanicsRefreshStep: null,
+          cohortRanges,
+          summaryScope: compactSummaryScope
+        });
+      } catch (error) {
+        compactGpuSummary = {
+          schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+          backend: 'webgpu',
+          status: 'compact-summary-unavailable',
+          reason: error instanceof Error ? error.message : String(error),
+          compactGpuSummaryAvailable: false,
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
+      stageMs.compactSummary = Math.max(0, nowMs() - compactSummaryStartMs);
+    }
+    const stageTiming = {
+      schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
+      totalMs: Math.max(0, nowMs() - stageTimingStartMs),
+      stageMs: { ...stageMs },
+      queueFenceMs: {
+        compactSummaryMapAsync: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null
+      },
+      compactSummaryTiming: compactGpuSummary?.timing ?? null,
+      fusedResidentSequence: true,
+      fusedResidentSequenceStepCount: count,
+      requestedReadbackMode: NO_FULL_READBACK_MODE,
+      preferWebGpu,
+      compactSummaryRequested: true,
+      compactSummaryScope,
+      thermalRequested: false,
+      mechanicsRefreshRequested: false,
+      reactionRequested: false,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    const finalStep = await residentStepEnvelope({
+      sphParticleState: finalSourceSphParticleState,
+      mlsMpmParticleState: finalSourceMlsMpmParticleState,
+      p2gGridProjection,
+      gridUpdate,
+      g2pReconstruction,
+      thermalStep: null,
+      reactionStep: null,
+      mechanicsRefreshStep: null,
+      inputResidentProductMass: null,
+      compactGpuSummary,
+      dt: dtSeconds,
+      gravityMPerS2: gravity,
+      boxDimsM: dims,
+      cflFactor,
+      preferWebGpu,
+      device,
+      sphParticleUpload: finalSourceSphParticleUpload,
+      mlsMpmParticleUpload: finalSourceMlsMpmParticleUpload,
+      sourceSlot: finalSourceSlot,
+      pressureInterfaceForceSolver: null,
+      internalPressureScale,
+      stageTiming
+    });
+    finalStep.sequenceIndex = count - 1;
+    finalStep.fusedResidentSequence = {
+      schema: 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
+      status: 'fused-resident-sequence-executed',
+      stepCount: count,
+      commandSubmissionCount: 1,
+      dispatchCount: count * 3,
+      retainedBufferMode: 'ping-pong-state-mechanics-single-grid',
+      finalSourceSlot,
+      finalNextSlot: finalStep.particlePingPong?.nextSlot ?? null
+    };
+    const temporaryBuffers = [
+      p2gParamsBuffer,
+      gridUpdateParamsBuffer,
+      g2pParamsBuffer,
+      productEventBuffer,
+      pressureRowsBuffer,
+      ...statePingBuffers.filter((buffer) => buffer !== finalStateBuffer),
+      ...mechanicsPingBuffers.filter((buffer) => buffer !== finalMechanicsBuffer)
+    ];
+    deferSubmittedWorkCleanup(device, () => {
+      for (const buffer of temporaryBuffers) buffer.destroy?.();
+    });
+    returned = true;
+    return finalStep;
+  } finally {
+    if (!returned) {
+      for (const buffer of allCreatedBuffers) buffer.destroy?.();
+    }
+  }
+}
+
 function assertPackedInputs({ sphParticleState, mlsMpmParticleState }) {
   if (sphParticleState?.schema !== ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA) {
     throw new TypeError('MLS-MPM resident step requires a packed SPH GPU particle buffer');
@@ -5358,6 +5871,109 @@ export async function runMlsMpmResidentStepsWithOptionalWebGpu({
   };
 
   markSequenceProgress('resident-sequence-started');
+
+  const requestedReadbackMode = args.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const resolvedDevice = args.device || args.deviceResult?.device || null;
+  const useFusedNoFullResidentMechanicsSequence = Boolean(args.fuseNoFullResidentMechanicsSequence)
+    && count > 1
+    && compactSummaryMode === 'final-only'
+    && requestedReadbackMode === NO_FULL_READBACK_MODE
+    && args.preferWebGpu
+    && Boolean(resolvedDevice?.createBuffer && resolvedDevice.queue?.writeBuffer)
+    && sphParticleUpload?.status === 'webgpu-uploaded'
+    && mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+    && !args.p2gRunner
+    && !args.gridUpdateRunner
+    && !args.g2pRunner
+    && !args.p2gStageRunner
+    && !args.gridUpdateStageRunner
+    && !args.g2pStageRunner
+    && !args.thermalMaterialTable
+    && !(args.reactionTable?.reactionCount > 0)
+    && !args.pressureInterfaceForceRowsBuffer
+    && !args.pressureInterfaceForceSolver
+    && !residentProductMass;
+  if (useFusedNoFullResidentMechanicsSequence) {
+    markSequenceProgress('resident-sequence-fused-mechanics-started', {
+      stepCount: count
+    });
+    const finalStep = await runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
+      device: resolvedDevice,
+      sphParticleState,
+      mlsMpmParticleState,
+      sphParticleUpload,
+      mlsMpmParticleUpload,
+      gridSpacingM: args.gridSpacingM,
+      boxDimsM: args.boxDimsM,
+      dt: args.dt,
+      gravityMPerS2: args.gravityMPerS2,
+      cflFactor: args.cflFactor,
+      internalPressureScale: args.internalPressureScale,
+      stepCount: count,
+      summaryRunner: args.summaryRunner ?? runMlsMpmResidentSummaryWebGpu,
+      compactSummaryScope: resolvedCompactSummaryScope,
+      cohortRanges: args.cohortRanges ?? null,
+      sourceSlot,
+      preferWebGpu: args.preferWebGpu
+    });
+    const nextSphParticleState = cloneSphParticleStateForNext(sphParticleState, finalStep);
+    const nextMlsMpmParticleState = cloneMlsMpmParticleStateForNext(mlsMpmParticleState, finalStep);
+    const stepSummaries = Array.from({ length: count }, (_, index) => {
+      const summary = summarizeResidentStepForSequence(finalStep, index);
+      summary.status = index === count - 1
+        ? finalStep.status
+        : 'resident-step-fused-sequence-intermediate';
+      summary.fusedResidentSequence = true;
+      summary.fusedResidentSequenceStepCount = count;
+      summary.compactSummaryMode = compactSummaryMode;
+      summary.compactSummaryAvailable = index === count - 1;
+      return summary;
+    });
+    markSequenceProgress('resident-sequence-fused-mechanics-complete', {
+      completedStepCount: count,
+      backend: finalStep.backend,
+      stageTiming: finalStep.stageTiming || null
+    });
+    return {
+      schema: ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+      backend: finalStep.backend || 'webgpu',
+      status: 'resident-steps-executed',
+      stepCount: count,
+      completedStepCount: count,
+      compactSummaryMode,
+      compactSummaryScope: resolvedCompactSummaryScope,
+      retainIntermediateSteps,
+      retainedIntermediateStepCount: 0,
+      retainedSteps,
+      finalStep,
+      stepSummaries,
+      nextSphParticleState,
+      nextMlsMpmParticleState,
+      nextParticleUploads: finalStep.nextParticleUploads ?? null,
+      nextResidentProductMass: null,
+      nextParticleBufferMode: finalStep.nextParticleBufferMode ?? 'not-available',
+      readbackMode: finalStep.readbackMode ?? NO_FULL_READBACK_MODE,
+      normalHotLoopReadbackFree: Boolean(finalStep.normalHotLoopReadbackFree),
+      renderStateReadbackAvailable: finalStep.renderStateReadbackAvailable ?? false,
+      residentAuthorityLedgerStatus: finalStep.residentAuthorityLedgerStatus ?? null,
+      residentAuthorityFamilyOwners: compactResidentAuthorityFamilyOwners(
+        finalStep.residentAuthorityFamilyOwners || finalStep.residentAuthoritySummary?.familyOwners
+      ),
+      residentAuthorityWarnings: [...(finalStep.residentAuthorityWarnings || [])],
+      residentAuthorityBlockers: [...(finalStep.residentAuthorityBlockers || [])],
+      residentBufferLeaseLedgerStatus: finalStep.residentBufferLeaseLedgerStatus ?? null,
+      residentBufferLeaseResourceCount: finalStep.residentBufferLeaseResourceCount ?? 0,
+      residentBufferLeaseActiveLeaseCount: finalStep.residentBufferLeaseActiveLeaseCount ?? 0,
+      residentBufferLeaseWarnings: [...(finalStep.residentBufferLeaseWarnings || [])],
+      residentBufferLeaseBlockers: [...(finalStep.residentBufferLeaseBlockers || [])],
+      fusedResidentSequence: finalStep.fusedResidentSequence,
+      gpuAuthoritativeState: false,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
 
   for (let index = 0; index < count; index += 1) {
     const summarizeStep = compactSummaryMode !== 'final-only' || index === count - 1;

@@ -1319,7 +1319,17 @@ async function runBrowserProbe({
   }
 }
 
-async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches, batchSteps, readbackMode, compactSummaryScope, thermalWallRate }) {
+async function runDirectResidentProbe({
+  baseUrl,
+  scenarioUrl,
+  timeoutMs,
+  batches,
+  batchSteps,
+  readbackMode,
+  compactSummaryScope,
+  thermalWallRate,
+  fuseResidentMechanicsSequence = false
+}) {
   const browser = await launchProbeBrowser();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
   try {
@@ -1332,6 +1342,7 @@ async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches
       readbackMode: requestedReadbackMode,
       compactSummaryScope: requestedCompactSummaryScope,
       thermalWallRate: requestedThermalWallRate,
+      fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
       defaults
     }) => {
       const finiteOrNull = (value) => {
@@ -2142,7 +2153,8 @@ async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches
               cohortRanges: activeCohortRanges,
               stepCount: requestedBatchSteps,
               compactSummaryMode: 'final-only',
-              retainIntermediateSteps: false
+              retainIntermediateSteps: false,
+              fuseNoFullResidentMechanicsSequence: requestedFuseResidentMechanicsSequence
             });
             metrics.push(sample({
               batchIndex,
@@ -2201,9 +2213,10 @@ async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches
         batchCount: requestedBatches,
         batchStepCount: requestedBatchSteps,
         requestedSubsteps: requestedBatches * requestedBatchSteps,
-            readbackMode: requestedReadbackMode,
-            compactSummaryScope: requestedCompactSummaryScope,
-            thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
+        readbackMode: requestedReadbackMode,
+        compactSummaryScope: requestedCompactSummaryScope,
+        fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
+        thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
         renderEveryBatches: 0,
         errors,
         metrics,
@@ -2223,6 +2236,7 @@ async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches
       readbackMode,
       compactSummaryScope,
       thermalWallRate,
+      fuseResidentMechanicsSequence,
       defaults: {
         wallTemperatureK: DEFAULT_WALL_TEMPERATURE_K,
         dropTemperatureK: DEFAULT_DROP_TEMPERATURE_K,
@@ -2848,6 +2862,8 @@ async function main() {
     process.env.ULG_PROBE_COMPACT_SUMMARY_SCOPE,
     readbackMode === 'no-full-readback' ? 'particle-visual' : 'full'
   );
+  const fuseResidentMechanicsSequence = process.env.ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE === '1'
+    || process.env.ULG_PROBE_FUSE_NO_FULL_RESIDENT_MECHANICS_SEQUENCE === '1';
   const renderReadbackMode = process.env.ULG_PROBE_RENDER_READBACK_MODE === 'no-full-readback'
     ? 'no-full-readback'
     : 'full-parity-readback';
@@ -2942,7 +2958,8 @@ async function main() {
         batchSteps,
         readbackMode,
         compactSummaryScope,
-        thermalWallRate
+        thermalWallRate,
+        fuseResidentMechanicsSequence
       })
       : await runBrowserProbe({
         baseUrl: server.baseUrl,

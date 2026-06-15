@@ -20442,3 +20442,43 @@ Open:
   boundaries.
 - Keep the Na/H2O all-reactions visual timeout in the reaction/product/gas
   pressure backlog; it did not regress in this resident-mechanics slice.
+
+## 2026-06-14 23:02 AKDT - Opt-in fused mechanics sequence evidence
+
+Implemented:
+
+- Added `fuseNoFullResidentMechanicsSequence` to the repeated MLS-MPM/SPH
+  resident step runner. The opt-in mechanics-only no-full path records all
+  P2G/grid-update/G2P substeps in one WebGPU command submission, ping-pongs
+  particle state/mechanics buffers, reuses grid buffers, and emits the normal
+  final resident-step envelope plus compact summary.
+- Added `ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1` for direct-resident
+  timing probes.
+- Kept the path default-off and limited to no-full, final-only, mechanics-only
+  batches with no thermal/reaction/product/pressure-interface side effects.
+
+Evidence:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "fused mechanics sequence|fused no-full mechanics|ping-pong retained|ping-pong unread|compact GPU summary"`
+  reported `31/31` because Node evaluated the whole file.
+- PASS:
+  `/tmp/ulg-history-probes/current-fused-sequence-mechanics-64-20260614.json`
+  classified `good` with `fuseResidentMechanicsSequence=true`; J stayed around
+  `0.99999..1.0214`; max speed was about `0.299 m/s`; sequence encode was
+  about `5.4 ms`; compact-summary `mapAsync` still waited about `13.62 s`.
+- PASS: targeted default-path visual matrix
+  `codex-fused-sequence-default-visual-20260614` reported `failedCount=0`.
+  It captured `3` frames each for `liquid-liquid-h2o-mlsmpm` and
+  `solid-h2o-cpu-sph`.
+
+Conclusion:
+
+- Submission cadence is not the dominant `64`-step mechanics-only bottleneck.
+  The next P0 is sparse/tiled/active-grid P2G and grid-update work under the
+  ComputeManager GPU resident lane. Multi-substep command batching remains
+  useful as the wrapper once the kernels stop doing full-grid gather work every
+  substep.

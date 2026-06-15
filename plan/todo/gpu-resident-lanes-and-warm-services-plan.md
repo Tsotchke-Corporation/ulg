@@ -120,6 +120,17 @@ ComputeManager/GPU-lane pass DAG, with hot particle/grid buffers ping-ponged
 inside the lane and compact summaries emitted only at validation/render
 boundaries.
 
+Status update, 2026-06-14 fused sequence evidence: the explicit
+`fuseNoFullResidentMechanicsSequence` path now batches the mechanics-only
+P2G/grid-update/G2P sequence into one command submission for a no-full
+`final-only` batch. The `64`-substep H2O/H2O mechanics-only probe stayed
+`good`, but compact-summary `mapAsync` still waited about `13.62 s`; the
+sequence encode stage took only about `5.4 ms`. This shifts the lane priority:
+keep command batching as the wrapper, but the next real performance work is
+sparse/tiled/active-grid P2G and grid update. The current gather-style P2G
+still scans particles from every grid node every substep, so a GPU lane that
+keeps buffers resident still needs a better active-grid/neighbor structure.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs
@@ -325,6 +336,10 @@ state directly outside PeerCompute admission.
    - 2026-06-14 evidence: fusing P2G/grid-update/G2P within one substep is
      insufficient by itself. The next lane implementation must own a
      multi-substep sequence, not just a per-substep command encoder.
+   - 2026-06-14 follow-up evidence: one command submission for the full
+     `64`-substep mechanics-only sequence is also insufficient. Prioritize
+     sparse/tiled active-grid P2G and grid-update kernels before spending more
+     effort on submission cadence.
 5. Add domain partitioning later:
    - tile/domain ownership;
    - halo or boundary exchange;

@@ -3299,6 +3299,109 @@ test('MLS-MPM resident steps ping-pong retained particle buffers across repeated
   assert.equal(tracker.destroyed, 8);
 });
 
+test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    summaryRunner({ sphParticleUpload, mlsMpmParticleUpload, g2pReconstruction, gridUpdate }) {
+      assert.equal(sphParticleUpload.stateBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-state-ping-a');
+      assert.equal(mlsMpmParticleUpload.mechanicsBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-a');
+      assert.equal(g2pReconstruction.stateBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b');
+      assert.equal(gridUpdate.fusedResidentSequence, true);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-resident-summary-execution.v0',
+        backend: 'webgpu',
+        status: 'compact-summary-ready',
+        compactGpuSummaryAvailable: true,
+        readbackMode: 'no-full-readback',
+        summaryScope: 'full',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: gridUpdate.gridNodeCount,
+        activeGridNodeCount: null,
+        activeGridNodeCountAvailable: false,
+        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-requested',
+        gridNodeScanCount: 0,
+        gridNodeScanSkipped: true,
+        sourceMassKg: 8,
+        nextMassKg: 8,
+        massDeltaKg: 0,
+        maxSpeedMPerS: 0,
+        maxDisplacementM: 0,
+        minVolumeRatioJ: 1,
+        maxVolumeRatioJ: 1,
+        phaseMassKg: { solid: 0, liquid: 8, gas: 0, plasma: 0 },
+        phaseMassTotalKg: 8,
+        thermalPhaseSummaryAvailable: true,
+        compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
+        timing: {
+          schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
+          totalMs: 0,
+          setupMs: 0,
+          encodeMs: 0,
+          submitMs: 0,
+          mapAsyncWaitMs: 0,
+          decodeMs: 0,
+          queueFenceAttribution: 'unit-summary-runner',
+          summaryKernelDispatchCount: 0,
+          summaryWorkgroupCount: 0,
+          compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+        },
+        mapAsyncWaitMs: 0,
+        queueFenceAttribution: 'unit-summary-runner'
+      };
+    }
+  });
+
+  assert.equal(execution.schema, ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA);
+  assert.equal(execution.status, 'resident-steps-executed');
+  assert.equal(execution.stepCount, 2);
+  assert.equal(execution.completedStepCount, 2);
+  assert.equal(execution.fusedResidentSequence.status, 'fused-resident-sequence-executed');
+  assert.equal(execution.fusedResidentSequence.commandSubmissionCount, 1);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, true);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentSequenceStepCount, 2);
+  assert.equal(execution.finalStep.particlePingPong.sourceSlot, 1);
+  assert.equal(execution.finalStep.particlePingPong.nextSlot, 0);
+  assert.equal(execution.finalStep.particlePingPong.step, 1);
+  assert.equal(execution.finalStep.particlePingPong.nextStep, 2);
+  assert.equal(execution.nextSphParticleState.step, 2);
+  assert.equal(execution.nextSphParticleState.time, 0.2);
+  assert.equal(execution.nextSphParticleState.cpuStateStale, true);
+  assert.equal(execution.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-state-ping-b');
+  assert.equal(execution.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+  assert.equal(execution.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'ulg-mls-mpm-fused-sequence-g2p-mechanics-ping-b');
+  assert.equal(execution.stepSummaries.length, 2);
+  assert.equal(execution.stepSummaries[0].status, 'resident-step-fused-sequence-intermediate');
+  assert.equal(execution.stepSummaries[1].status, 'resident-step-webgpu-executed');
+  assert.equal(execution.stepSummaries[0].fusedResidentSequence, true);
+  assert.equal(device.submissions.length, 1);
+  assert.equal(device.dispatches.length, 6);
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 7);
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
+});
+
 test('MLS-MPM resident steps ping-pong unread retained buffers across repeated steps', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

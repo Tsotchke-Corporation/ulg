@@ -18,11 +18,15 @@ Updated: 2026-06-14 resident summary fence attribution, opt-in fused mechanics e
   `/tmp/ulg-history-probes/current-default-mechanics-64-after-fused-gate-20260614.json`
   and stayed `good`, with `fusedMechanics=0`, no issues, J about
   `0.99999..1.0214`, max speed about `0.299 m/s`, and compact-summary
-  `mapAsync` about `13.52 s`. Current interpretation: reducing three stage
-  submits to one submit per substep is not enough; the P0 performance path is a
-  ComputeManager/GPU-lane multi-substep resident pass DAG that keeps hot
-  buffers resident across a sequence and only fences at validation/render
-  boundaries.
+  `mapAsync` about `13.52 s`. A follow-up opt-in sequence path then recorded
+  all `64` mechanics-only substeps in one command submission and
+  `/tmp/ulg-history-probes/current-fused-sequence-mechanics-64-20260614.json`
+  still classified `good`, but compact-summary `mapAsync` still waited about
+  `13.62 s` while sequence encode took only about `5.4 ms`. Current
+  interpretation: command-submission count is not the dominant bottleneck. The
+  P0 performance path is sparse/tiled/active-grid P2G and grid-update work
+  under a ComputeManager/GPU-lane sequence, because the current gather kernels
+  still do full-grid work every substep.
 - Added compact-summary fence attribution telemetry and probe browser launch
   controls. Resident summary execution now reports internal setup/encode/
   submit/`mapAsync`/decode timings and the probe analysis reports
@@ -31,10 +35,10 @@ Updated: 2026-06-14 resident summary fence attribution, opt-in fused mechanics e
   `mapAsync` wait for a `336` byte summary row; system Chrome/Vulkan stays
   about the same; thermal/reaction-off mechanics-only stays about `13.50 s`.
   Current interpretation: the summary readback fence is draining queued
-  resident mechanics command buffers. The tested single-substep fused path is
-  not enough, so remaining P0 is a multi-substep fused/sparse resident
-  mechanics lane under ComputeManager/GPU authority so validation does not
-  require hundreds of tiny stage command submissions.
+  resident mechanics command buffers. The tested single-substep and
+  multi-substep fused command paths are not enough, so remaining P0 is a
+  sparse/tiled resident mechanics lane under ComputeManager/GPU authority that
+  reduces full-grid gather work before optimizing command-submission cadence.
 - Promoted the long-horizon H2O/H2O settle evidence from CPU/reference-only to
   direct-resident no-full telemetry. The
   `/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json`

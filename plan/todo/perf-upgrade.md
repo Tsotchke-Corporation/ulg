@@ -50,6 +50,20 @@ Throughput correction, 2026-06-14 AKDT:
 - Keep the one-substep fused path opt-in until it becomes part of that larger
   multi-substep lane or has independent throughput evidence.
 
+Follow-up correction, 2026-06-14 AKDT:
+
+- The opt-in multi-substep mechanics sequence path now batches `64` P2G/
+  grid-update/G2P substeps into one command submission and still keeps the
+  mechanics-only H2O/H2O direct-resident probe `good`.
+- It still does not materially reduce the compact-summary fence: the
+  `64`-substep fused sequence waited about `13.62 s` in `mapAsync`, while
+  sequence encoding was only about `5.4 ms`.
+- Therefore command batching is not the main missing optimization. The current
+  gather-style P2G scans all particles from every grid node every substep. The
+  next hot-loop performance item is sparse/tiled/active-grid P2G and grid
+  update, then keep that sparse sequence resident under the ComputeManager GPU
+  lane.
+
 Architecture correction, 2026-06-12 AKDT:
 
 - The GPU-resident hot loop should be packaged as ComputeManager-compatible law

@@ -555,6 +555,59 @@ function compactSpatialGasRowsFixture(rows = [
   return values;
 }
 
+function productEventRowsFixture(rows = [
+  {
+    positionM: [0.5, 0.5, 0.5],
+    materialId: 3022823,
+    massKg: 0.01,
+    moles: 5,
+    temperatureK: 293.15,
+    supportVolumeM3: 0,
+    productTermIndex: 0,
+    sourceParticleIndex: 0
+  },
+  {
+    positionM: [3.5, 3.5, 3.5],
+    materialId: 3022823,
+    massKg: 0.02,
+    moles: 10,
+    temperatureK: 293.15,
+    supportVolumeM3: 0,
+    productTermIndex: 0,
+    sourceParticleIndex: 1
+  }
+]) {
+  const stride = 32;
+  const values = new Float32Array(rows.length * stride);
+  rows.forEach((row, index) => {
+    const offset = index * stride;
+    values[offset] = row.positionM[0];
+    values[offset + 1] = row.positionM[1];
+    values[offset + 2] = row.positionM[2];
+    values[offset + 3] = row.massKg;
+    values[offset + 4] = row.materialId;
+    values[offset + 5] = row.productTermIndex;
+    values[offset + 6] = row.reactionIndex ?? 0;
+    values[offset + 7] = row.sourceParticleIndex ?? index;
+    values[offset + 8] = row.partnerParticleIndex ?? -1;
+    values[offset + 9] = row.moles;
+    values[offset + 10] = row.routingId ?? 1;
+    values[offset + 11] = row.phaseId ?? 2;
+    values[offset + 12] = row.visibleMassKg ?? 0;
+    values[offset + 13] = row.unplacedMassKg ?? row.massKg;
+    values[offset + 14] = row.coefficient ?? 1;
+    values[offset + 15] = row.molarMassKgPerMol ?? (row.massKg / row.moles);
+    values[offset + 16] = row.temperatureK;
+    values[offset + 17] = row.restDensityKgPerM3 ?? 0;
+    values[offset + 18] = row.statusCode ?? 1;
+    values[offset + 20] = row.velocityMPerS?.[0] ?? 0;
+    values[offset + 21] = row.velocityMPerS?.[1] ?? 0;
+    values[offset + 22] = row.velocityMPerS?.[2] ?? 0;
+    values[offset + 23] = row.supportVolumeM3 ?? 0;
+  });
+  return values;
+}
+
 function fakeSummaryDevice(summaryValues) {
   const createdBuffers = [];
   const bindGroups = [];
@@ -2046,6 +2099,60 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
 
   result.destroySpatialGasLedgerRowsBuffer?.();
   assert.equal(result.spatialGasLedgerRowsBuffer.destroyed, true);
+});
+
+test('SPH spatial gas ledger producer derives positioned gas rows when product support volume is missing', async () => {
+  const productEventRows = productEventRowsFixture();
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: false,
+    readbackMode: 'no-full-readback',
+    productEventRows,
+    productEventRowCount: 2,
+    productEventStrideFloats: 32,
+    boxDimsM: [4, 4, 4],
+    reactionTable: {
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+      productTermMetadata: [
+        { productTermIndex: 0, material: 'h2', routing: 'gas' }
+      ]
+    },
+    residentProductMass: {
+      schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+      status: 'resident-product-mass-buffer-retained',
+      productEventBufferRetained: true,
+      productEventRowCount: 2,
+      productEventStrideFloats: 32,
+      gasSpeciesLedger: {
+        schema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
+        status: 'gas-species-resident-ledger-ready',
+        records: [{
+          material: 'h2',
+          materialId: 3022823,
+          massKg: 0.03,
+          moles: 15,
+          temperatureK: 293.15,
+          eventCount: 2,
+          status: 'ready'
+        }]
+      }
+    }
+  });
+
+  assert.equal(result.status, 'spatial-gas-ledger-producer-stage-ready');
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.aggregateSpatialGasLedgerFallbackUsed, false);
+  assert.equal(result.executionSource, 'cpu-product-event-compact-spatial-gas-ledger');
+  assert.equal(result.spatialGasLedgerDerivation, 'positioned-product-event-rows');
+  assert.equal(result.spatialGasPositionSource, 'resident-product-event-row-positions');
+  assert.equal(result.spatialGasSupportVolumeFallbackM3, 32);
+  assert.equal(result.spatialGasSpeciesLedger.spatialGasSupportVolumeSource, 'product-event-row-support-volume-or-derived-gas-ledger-share');
+  assert.equal(result.spatialGasSpeciesLedger.sourceEventRowCount, 2);
+  assert.equal(result.spatialGasSpeciesLedger.cellCount, 2);
+  assert.deepEqual(result.spatialGasSpeciesLedger.cellDims, [2, 2, 2]);
+  assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 5);
+  assert.equal(result.spatialGasSpeciesLedger.cells[1].bySpecies.h2.moles, 10);
+  assert.equal(result.compactSpatialGasRows[7], 32);
+  assert.equal(result.compactSpatialGasRows[SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS + 7], 32);
 });
 
 test('SPH spatial gas ledger producer stage falls back to aggregate gas ledger when retained event rows are positionless', async () => {

@@ -35,6 +35,23 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 10:48 AKDT: the immediate no-full Na/H2O
+spatial-gas blocker is now past the sealed-box fallback. The WebGPU
+`spatialGasLedgerProducer` compact stage transcodes retained product-event rows
+to compact spatial-gas rows, while the JS decoder performs the safety filter
+for active gas rows. The mounted gate now proves positioned H2 product-event
+rows feed `gasCellEosProducer` and the admitted pressure gas-cell import
+without full product-event readback, with aggregate fallback disabled. Keep a
+follow-up item for the WGSL predicate/filter anomaly: do not reintroduce
+shader-side boolean filtering on compact rows until a small fake-device/browser
+probe proves Chromium/Dawn writes expected rows. The public defaults are plain
+SPH CPU reference, sodium over water, both `293.15 K`, blob size `1`, and the
+GitHub Pages build has been regenerated. Next priority is WGSL gas-cell EOS
+inside the ComputeManager/GPUHub stage, while P0 visual behavior remains open:
+the full matrix failed `11/12` after this slice, mostly due H2O surface
+identity/bounds, Na/H2O high-speed motion, CPU-SPH stacked/blob settling, solid
+rigidity, and renderer visual-trust issues.
+
 Current routing note, 2026-06-15 09:57 AKDT: the no-full mounted Na/H2O path
 now runs the resident spatial-gas producer, gas-cell EOS producer, and admitted
 gas-cell import path without full product-event readback. This uses a strictly

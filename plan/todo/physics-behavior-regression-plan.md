@@ -12,6 +12,19 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 10:48 AKDT update: the positioned retained product-event gas path
+  is fixed for the mounted no-full Na/H2O gate, but this does not clear the
+  broad physics behavior regression. A full visual matrix after the fix wrote
+  `/tmp/ulg-visual-sanity-matrix/2026-06-15T18-36-32-215Z` and failed `11/12`.
+  The only good scenario was `phase-change-hot-h2o-water`; H2O/H2O, cold H2O,
+  law-isolation, and Na/H2O scenarios still classify bad, with repeated
+  visible-surface-expanded-beyond-particle-bounds findings and Na/H2O
+  high-speed reaction motion. Treat this as the active P0 visual/physics
+  behavior debt after the current WebGPU residency slice. Also track the WGSL
+  compact-row predicate anomaly separately: browser WebGPU row readback showed
+  ready positioned H2 rows, but shader-side filtering produced no compact rows,
+  so filtering now happens in JS until a reduced shader probe proves the branch
+  behavior.
 - 2026-06-15 09:57 AKDT update: the mounted Na/H2O no-full path can now run
   `spatialGasLedgerProducer -> gasCellEosProducer -> admitted gas-cell import`
   without full product-event readback by using a labelled one-cell sealed-box

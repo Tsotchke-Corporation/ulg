@@ -4892,7 +4892,7 @@ test('SPH phase demo reacts room-temperature Na + H2O through derived product cl
 
 test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({ page }) => {
   test.setTimeout(150_000);
-  await page.goto('/?drop=Na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');
+  await page.goto('/?drop=Na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4&mech=sph&residentAuto=0&visualCapture=1&blob=1');
   if (await page.locator('#sph-phase-overlay').count() === 0) {
     await page.locator('#run-sph-phase').click();
   }
@@ -5015,11 +5015,11 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
   expect(result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus).toBe('blocked-resident-spatial-gas-species-ledger-required');
   expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus).toBe('spatial-gas-ledger-producer-stage-result-ready');
   expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
-  expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(true);
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(false);
   expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasLedgerDerivation)
-    .toBe('aggregate-gas-ledger-single-cell-sealed-box');
+    .toBe('positioned-product-event-rows');
   expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasPositionSource)
-    .toBe('aggregate-gas-ledger-no-positioned-product-events');
+    .toBe('resident-product-event-row-positions');
   expect(result.pressureInterfaceState?.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength).toBeGreaterThan(0);
   expect(result.pressureInterfaceState?.spatialGasLedgerProducerFullProductEventReadbackPerformed).toBe(false);
   expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus).toBe('gas-cell-eos-producer-stage-result-ready');

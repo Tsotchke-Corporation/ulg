@@ -1,5 +1,103 @@
 # ULG Implementation Log
 
+## 2026-06-15 10:48 AKDT - Positioned product-event spatial gas ledger
+
+Prompt:
+
+- User asked to keep the current task moving, then set public defaults to plain
+  SPH, sodium plus water, both room temperature, blob size `1`, and make a
+  GitHub Pages build after the immediate fix.
+
+Implemented:
+
+- Replaced the temporary mounted Na/H2O sealed-box spatial-gas bridge with a
+  positioned spatial gas ledger produced from retained product-event rows.
+- Debugged the retained product-event buffer directly: the browser WebGPU path
+  already had ready H2 rows with routing `1`, positive moles, and positions.
+  The failure was in compacting/filtering those rows into the spatial-gas
+  compact row buffer.
+- Updated the WebGPU compact stage to unconditionally transcode product-event
+  rows into compact rows, carrying status and routing through the ABI.
+- Moved active-row filtering to the JS decoder so only status-ready gas rows
+  with positive moles, positive support volume, and finite positions become
+  spatial gas cells.
+- Added support-volume fallback metadata from aggregate gas event count and box
+  volume for product-event rows that lack row support volume. This fallback
+  fills support volume on positioned rows; it does not mark the ledger as an
+  aggregate sealed-box fallback.
+- Updated the mounted Na/H2O browser gate so it asserts positioned product-
+  event provenance instead of sealed-box aggregate fallback.
+- Added atomic coverage for positioned product-event rows with missing support
+  volume.
+- Confirmed the public demo defaults are plain SPH CPU reference, sodium over
+  water, both `293.15 K`, blob size `1`, and rebuilt GitHub Pages output.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/positioned-spatial-gas-ledger-product-event-compact-2026-06-15.md`
+- `.icc/ulg_status.json`
+- `.icc/ulg_arch_summary.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "spatial gas ledger|gas-cell EOS producer before pressureInterface|gas-cell EOS producer stage publishes"`
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "spatial gas ledger producer|gas-cell EOS producer|gas-cell import|gas-cell field"`
+- `node --test tests/ulgMechanicsResidentStageWorker.test.mjs --test-name-pattern "spatial gas ledger|gas-cell EOS producer|pressure interface"`
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "spatial gas|gas-cell|EOS producer|pressure interface"`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted resident Na/H2O promotes product gas pressure"`
+- `npm run test:physics-atomics`
+- `npm run build:pages`
+- `npm run probe:sph-visual-matrix`
+- `git diff --check`
+- `npm run icc:update`
+
+Validation:
+
+- PASS: syntax check for `src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: focused SPH stage coverage reported `48/48`.
+- PASS: focused scene gas-cell coverage reported `34/34`.
+- PASS: worker pressure/gas coverage reported `6/6`.
+- PASS: PeerCompute pressure/gas coverage reported `15/15`.
+- PASS: mounted Na/H2O browser gate reported `1/1` and now shows
+  `spatialGasLedgerDerivation=positioned-product-event-rows`,
+  `spatialGasPositionSource=resident-product-event-row-positions`, aggregate
+  fallback `false`, gas-cell EOS producer ready, and admitted pressure gas-cell
+  import ready.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon liquid skip.
+- PASS: fresh-browser default probe reported mechanics `sph`, drop `Na`, base
+  `h2o`, temperatures `293.15`, and blob `1`.
+- PASS: `npm run build:pages` completed.
+- PASS: `npm run icc:update` refreshed `295` indexed files and `1529`
+  memory chunks.
+- FAIL/OPEN: full visual matrix
+  `/tmp/ulg-visual-sanity-matrix/2026-06-15T18-36-32-215Z` reported
+  `scenarioCount=12`, `failedCount=11`. The only good scenario was
+  `phase-change-hot-h2o-water`; the bad cases include H2O/H2O, cold H2O,
+  law-isolation, and Na/H2O scenarios. Logs show repeated
+  `visible-surface-expanded-beyond-particle-bounds`; Na/H2O still has
+  high-speed reaction motion. Frame artifact capture was disabled in this
+  matrix run.
+
+Open:
+
+- Investigate the WGSL compact-row predicate anomaly with a reduced browser
+  probe before moving filtering back into shader code.
+- Move gas-cell EOS derivation from CPU/oracle row generation plus WebGPU row
+  upload into a WGSL producer stage under ComputeManager/GPUHub.
+- Continue P0 behavior repair for liquid/solid motion, H2O surface identity,
+  Na/H2O reaction dynamics, CPU-SPH stacked/blob settling, ice/solid rigidity,
+  volume pulsing/blinking, and renderer z-buffer/focus visual trust.
+
 ## 2026-06-15 09:57 AKDT - Spatial gas ledger producer aggregate fallback
 
 Implemented:

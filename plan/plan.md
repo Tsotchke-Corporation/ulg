@@ -2,6 +2,36 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 10:48 AKDT: the retained product-event buffer
+path now produces positioned spatial gas cells for the mounted no-full Na/H2O
+route instead of relying on the sealed-box aggregate fallback. Direct
+diagnostics showed the product-event buffer already contained ready H2 rows
+with gas routing, moles, and positions, but the WGSL compact stage wrote no
+active rows when it filtered in-shader. The fix keeps the GPU stage as a simple
+row transcode from retained product events into the compact spatial-gas row
+ABI, then performs status/routing/moles/support/finite-position filtering in
+the JS decoder. Missing per-row support volume is derived from aggregate gas
+event count and box volume only as support-volume fallback metadata; it no
+longer changes positioned gas rows into a sealed-box spatial ledger. The
+mounted Na/H2O browser gate now reports
+`spatialGasLedgerDerivation=positioned-product-event-rows`,
+`spatialGasPositionSource=resident-product-event-row-positions`, aggregate
+fallback `false`, resident gas-cell EOS producer ready, and admitted pressure
+gas-cell import ready without full product-event readback. Validation passed
+syntax, focused SPH gas coverage `48/48`, focused renderer gas coverage
+`34/34`, worker pressure coverage `6/6`, PeerCompute pressure/gas coverage
+`15/15`, mounted Na/H2O e2e `1/1`, physics atomics `7` with `1` expected
+opt-in skip, and `npm run build:pages`. The public UI defaults remain plain
+SPH CPU reference, sodium over water, both `293.15 K`, blob size `1`. The
+post-slice full visual matrix
+`/tmp/ulg-visual-sanity-matrix/2026-06-15T18-36-32-215Z` failed `11/12`; treat
+that as open physics/visual debt, not as completion of liquid/solid behavior.
+Next target: move the gas-cell EOS math itself into WGSL under the existing
+ComputeManager/GPUHub producer stage, and separately attack the visual
+behavior blockers: H2O surface identity/bounds, Na/H2O high-speed reaction
+motion, CPU-SPH stacked/blob settling, mounted ice/solid rigidity, volume
+pulsing/blinking, and renderer z-buffer/focus trust.
+
 Current checkpoint, 2026-06-15 09:57 AKDT: the mounted no-full Na/H2O path now
 gets past the retained product-event row gap without fabricating local plume
 geometry. `spatialGasLedgerProducer` first uses positioned compact product-

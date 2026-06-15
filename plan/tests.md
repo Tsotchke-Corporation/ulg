@@ -1,5 +1,56 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Positioned Product-Event Spatial Gas Ledger
+
+The current slice replaces the temporary sealed-box bridge in the mounted
+no-full Na/H2O gate with a positioned spatial gas ledger derived from retained
+product-event rows. The WebGPU compact stage now transcodes product-event rows
+into the compact spatial-gas row ABI, while the decoder filters inactive,
+non-gas, zero-mole, zero-support, or non-finite-position rows. Per-row support
+volume can still fall back to a derived box-volume/event-count share when the
+retained product row omits support, but ledger derivation stays
+`positioned-product-event-rows` and position source stays
+`resident-product-event-row-positions`.
+
+Focused checks:
+
+- Syntax and whitespace:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js` and `git diff --check`
+  passed.
+- Focused SPH stage coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "spatial gas ledger|gas-cell EOS producer before pressureInterface|gas-cell EOS producer stage publishes"`
+  passed `48/48`.
+- Focused scene gas-cell coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "spatial gas ledger producer|gas-cell EOS producer|gas-cell import|gas-cell field"`
+  passed `34/34`.
+- Worker pressure/gas coverage:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs --test-name-pattern "spatial gas ledger|gas-cell EOS producer|pressure interface"`
+  passed `6/6`.
+- PeerCompute pressure/gas coverage:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "spatial gas|gas-cell|EOS producer|pressure interface"`
+  passed `15/15`.
+- Mounted Na/H2O browser gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs tests/demo.e2e.mjs --grep "SPH phase mounted resident Na/H2O promotes product gas pressure"`
+  passed `1/1` in about `1.1m`. The gate now asserts aggregate fallback
+  `false`, `positioned-product-event-rows`,
+  `resident-product-event-row-positions`, gas-cell EOS producer ready, and
+  admitted pressure gas-cell import ready without full product-event readback.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Public defaults and Pages build:
+  a fresh browser probe confirmed mechanics `sph`, drop `Na`, base `h2o`,
+  drop/base temperatures `293.15`, and blob `1`; `npm run build:pages` passed.
+- Post-slice full visual matrix:
+  `npm run probe:sph-visual-matrix` wrote
+  `/tmp/ulg-visual-sanity-matrix/2026-06-15T18-36-32-215Z` and failed `11/12`.
+  The failure is retained as open visual/physics debt. Summary issue arrays
+  were empty, but individual scenario logs show repeated
+  `visible-surface-expanded-beyond-particle-bounds` findings; Na/H2O still
+  shows high-speed reaction motion. Visual frame artifact capture was disabled
+  for that run, so it is a classification/diagnostic gate, not final visual
+  sequence evidence.
+
 ## Current Focused Result - 2026-06-15 Spatial Gas Ledger Producer Fallback
 
 The current slice makes the mounted no-full Na/H2O pressure path complete

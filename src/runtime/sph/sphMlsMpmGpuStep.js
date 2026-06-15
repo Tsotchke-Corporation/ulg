@@ -534,14 +534,19 @@ async function readGpuBuffer(device, sourceBuffer, byteLength, label) {
 
 function createSpatialGasLedgerProductEventCompactParams({
   productEventRowCount,
-  productEventStrideFloats
+  productEventStrideFloats,
+  spatialGasSupportVolumeFallbackM3 = 0
 } = {}) {
-  const buffer = new ArrayBuffer(16);
+  const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.floor(finiteNumber(productEventRowCount, 0))), true);
   view.setUint32(4, Math.max(1, Math.floor(finiteNumber(productEventStrideFloats, SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS))), true);
   view.setUint32(8, SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS, true);
   view.setUint32(12, 0, true);
+  view.setFloat32(16, Math.max(0, finiteNumber(spatialGasSupportVolumeFallbackM3, 0)), true);
+  view.setUint32(20, 0, true);
+  view.setUint32(24, 0, true);
+  view.setUint32(28, 0, true);
   return buffer;
 }
 
@@ -552,6 +557,10 @@ struct Params {
   product_event_stride_floats: u32,
   compact_stride_floats: u32,
   pad0: u32,
+  spatial_gas_support_volume_fallback_m3: f32,
+  pad1: u32,
+  pad2: u32,
+  pad3: u32,
 };
 
 @group(0) @binding(0) var<storage, read> product_events: array<f32>;
@@ -569,15 +578,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let status = product_events[src + 18u];
   let routing = product_events[src + 10u];
   let moles = product_events[src + 9u];
-  let support_volume = product_events[src + 23u];
-  let is_gas = routing > 0.5 && routing < 1.5;
-  let active = status > 0.5 && is_gas && moles > 0.0 && support_volume > 0.0;
-  if (!active) {
-    for (var i = 0u; i < 12u; i = i + 1u) {
-      compact_rows[dst + i] = 0.0;
-    }
-    return;
-  }
+  let source_support_volume = product_events[src + 23u];
+  let support_volume = select(
+    params.spatial_gas_support_volume_fallback_m3,
+    source_support_volume,
+    source_support_volume > 0.0
+  );
   compact_rows[dst + 0u] = product_events[src + 0u];
   compact_rows[dst + 1u] = product_events[src + 1u];
   compact_rows[dst + 2u] = product_events[src + 2u];
@@ -588,7 +594,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   compact_rows[dst + 7u] = support_volume;
   compact_rows[dst + 8u] = product_events[src + 5u];
   compact_rows[dst + 9u] = f32(row);
-  compact_rows[dst + 10u] = 1.0;
+  compact_rows[dst + 10u] = status;
   compact_rows[dst + 11u] = routing;
 }
 `;
@@ -616,6 +622,7 @@ function decodeSpatialGasLedgerCompactRows(values, {
   boxDimsM = null,
   reactionTable = null,
   source = 'gpu-resident-product-event-compact-spatial-ledger',
+  spatialGasSupportVolumeFallbackM3 = 0,
   retainedSpatialGasSourceBufferRefs = [],
   workerRetainedSpatialGasSourceBufferRefs = [],
   retainedSpatialGasLedgerBufferRefs = [],
@@ -638,9 +645,12 @@ function decodeSpatialGasLedgerCompactRows(values, {
     const status = values[offset + 10];
     const moles = finiteNumber(values[offset + 5], 0);
     const supportVolumeM3 = finiteNumber(values[offset + 7], 0);
+    const routingId = finiteNumber(values[offset + 11], 1);
     const positionM = [values[offset], values[offset + 1], values[offset + 2]].map((value) => finiteNumber(value, NaN));
     if (
       status <= 0.5
+      || routingId <= 0.5
+      || routingId >= 1.5
       || moles <= 0
       || supportVolumeM3 <= 0
       || positionM.some((value) => !Number.isFinite(value))
@@ -656,7 +666,7 @@ function decodeSpatialGasLedgerCompactRows(values, {
       supportVolumeM3,
       productTermIndex: Math.round(finiteNumber(values[offset + 8], 0)),
       sourceRowIndex: Math.round(finiteNumber(values[offset + 9], rowIndex)),
-      routingId: finiteNumber(values[offset + 11], 1),
+      routingId,
       status: 'ready'
     });
   }
@@ -736,6 +746,10 @@ function decodeSpatialGasLedgerCompactRows(values, {
     source,
     spatialGasLedgerDerivation: 'positioned-product-event-rows',
     spatialGasPositionSource: 'resident-product-event-row-positions',
+    spatialGasSupportVolumeSource: spatialGasSupportVolumeFallbackM3 > 0
+      ? 'product-event-row-support-volume-or-derived-gas-ledger-share'
+      : 'product-event-row-support-volume',
+    spatialGasSupportVolumeFallbackM3: Math.max(0, finiteNumber(spatialGasSupportVolumeFallbackM3, 0)),
     retainedSpatialGasSourceBufferRefs: uniqueNonEmptyStrings(retainedSpatialGasSourceBufferRefs),
     workerRetainedSpatialGasSourceBufferRefs: uniqueNonEmptyStrings(workerRetainedSpatialGasSourceBufferRefs),
     spatialGasSourceBufferRetained: retainedSourceRefs.length > 0,
@@ -785,6 +799,33 @@ function aggregateGasRecordsForSpatialLedger(...sources) {
     byMaterial.set(material, bucket);
   }
   return [...byMaterial.values()];
+}
+
+function deriveSpatialGasSupportVolumeFallbackM3({
+  boxDimsM = null,
+  residentProductMass = null,
+  reactionSummary = null,
+  gasPressureSummary = null,
+  productEventRowCount = 0,
+  explicitFallbackM3 = null
+} = {}) {
+  const explicit = finiteNumber(explicitFallbackM3, 0);
+  if (explicit > 0) return explicit;
+  const records = aggregateGasRecordsForSpatialLedger(
+    residentProductMass,
+    reactionSummary,
+    gasPressureSummary?.gasSpeciesLedger,
+    gasPressureSummary
+  );
+  if (!records.length) return 0;
+  const dims = finiteVector3(boxDimsM || gasPressureSummary?.boxDimsM, DEFAULT_BOX_DIMS_M)
+    .map((value) => Math.max(value, 1e-9));
+  const volumeM3 = dims.reduce((product, value) => product * value, 1);
+  const gasEventCount = records.reduce((sum, record) => sum + Math.max(0, finiteNumber(record?.eventCount, 0)), 0);
+  const denominator = gasEventCount > 0
+    ? gasEventCount
+    : Math.max(1, Math.floor(finiteNumber(productEventRowCount, 0)) || records.length);
+  return volumeM3 / denominator;
 }
 
 function spatialGasLedgerFromAggregateGasLedger({
@@ -862,7 +903,8 @@ function spatialGasLedgerFromAggregateGasLedger({
 
 function compactSpatialGasRowsFromProductEventRows(productEventRows, {
   productEventRowCount = null,
-  productEventStrideFloats = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+  productEventStrideFloats = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
+  spatialGasSupportVolumeFallbackM3 = 0
 } = {}) {
   if (!(productEventRows instanceof Float32Array)) return null;
   const stride = Math.max(1, Math.floor(finiteNumber(productEventStrideFloats, SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS)));
@@ -879,7 +921,10 @@ function compactSpatialGasRowsFromProductEventRows(productEventRows, {
     const status = productEventRows[src + 18] ?? 0;
     const routing = productEventRows[src + 10] ?? 0;
     const moles = productEventRows[src + 9] ?? 0;
-    const supportVolume = productEventRows[src + 23] ?? 0;
+    const sourceSupportVolume = productEventRows[src + 23] ?? 0;
+    const supportVolume = sourceSupportVolume > 0
+      ? sourceSupportVolume
+      : Math.max(0, finiteNumber(spatialGasSupportVolumeFallbackM3, 0));
     const active = status > 0.5 && routing > 0.5 && routing < 1.5 && moles > 0 && supportVolume > 0;
     if (!active) continue;
     compactRows[dst] = productEventRows[src] ?? 0;
@@ -4829,6 +4874,14 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
       ?? stageOptions.reactionSummary?.productEvents?.rowStrideFloats,
     SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
   )));
+  const spatialGasSupportVolumeFallbackM3 = deriveSpatialGasSupportVolumeFallbackM3({
+    boxDimsM: stageOptions.boxDimsM,
+    residentProductMass,
+    reactionSummary: stageOptions.reactionSummary,
+    gasPressureSummary: stageOptions.gasPressureSummary || stageOptions.pressureSummary || null,
+    productEventRowCount,
+    explicitFallbackM3: stageOptions.spatialGasSupportVolumeFallbackM3
+  });
   const retainedSpatialGasSourceBufferRefs = uniqueNonEmptyStrings([
     ...(stageOptions.retainedSpatialGasSourceBufferRefs || []),
     ...(residentProductMass?.retainedProductBufferRefs || []),
@@ -4887,7 +4940,8 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
           'ulg-sph-spatial-gas-ledger-compact-params',
           createSpatialGasLedgerProductEventCompactParams({
             productEventRowCount,
-            productEventStrideFloats
+            productEventStrideFloats,
+            spatialGasSupportVolumeFallbackM3
           }),
           GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
         );
@@ -4968,7 +5022,8 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
   if (!compactRows && stageOptions.productEventRows instanceof Float32Array) {
     compactRows = compactSpatialGasRowsFromProductEventRows(stageOptions.productEventRows, {
       productEventRowCount,
-      productEventStrideFloats
+      productEventStrideFloats,
+      spatialGasSupportVolumeFallbackM3
     });
     reason = null;
   }
@@ -4985,6 +5040,7 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
         source: backend === 'webgpu'
           ? 'gpu-resident-product-event-compact-spatial-ledger'
           : 'cpu-product-event-compact-spatial-ledger',
+        spatialGasSupportVolumeFallbackM3,
         retainedSpatialGasSourceBufferRefs,
         workerRetainedSpatialGasSourceBufferRefs,
         retainedSpatialGasLedgerBufferRefs,
@@ -5058,6 +5114,10 @@ export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) 
     queueCompletionMethod,
     productEventRowCount,
     productEventStrideFloats,
+    spatialGasSupportVolumeFallbackM3,
+    spatialGasSupportVolumeFallbackSource: spatialGasSupportVolumeFallbackM3 > 0
+      ? 'aggregate-gas-ledger-event-count-box-volume-share'
+      : null,
     compactSpatialGasRows: compactRows,
     compactSpatialGasRowCount,
     compactSpatialGasRowStrideFloats: SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,

@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 11:03 AKDT: the visual surface bounds gate now
+compares rendered MarchingCubes meshes against particle bounds inflated by the
+actual rendered support radius. The previous
+`visible-surface-expanded-beyond-particle-bounds` failures were caused by
+comparing mesh bounds to particle-center bounds with a fixed `0.2 m`
+tolerance, even though the surfaces reported `surfaceRadiusM` around
+`0.18..0.26 m`. `scripts/sph-long-horizon-probe.mjs` now uses
+`particleBoundsToleranceM + max(surfaceRadiusM, requestedSurfaceRadiusM,
+cpuMarchingCubesRadiusFloorM)` for particle-bound overflow checks, while
+outside-box and larger-than-box checks remain unchanged. The matrix summary
+keeps the support-radius metadata for future failures. Validation passed
+syntax checks, `npm run test:physics-atomics` (`7` pass, `1` expected opt-in
+skip), and focused H2O visual matrix
+`codex-surface-radius-bounds-trio-20260615` over MLS-MPM H2O/H2O, CPU-SPH
+H2O/H2O, and solid H2O CPU-SPH with `failedCount=0`, issue counts empty,
+frame capture ready, and two PNG frames per scenario. This clears the false
+surface-bounds blocker only; short liquid visual cases still report two H2O
+surfaces, so long-horizon liquid merge/free-surface acceptance remains open.
+
 Current checkpoint, 2026-06-15 10:56 AKDT: the visual sanity matrix now
 captures dense frame artifacts by default and carries the probe's actual
 `analysis.issues` into `summary.json`. The prior full matrix failure was

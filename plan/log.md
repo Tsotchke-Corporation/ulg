@@ -1,5 +1,61 @@
 # ULG Implementation Log
 
+## 2026-06-15 11:03 AKDT - Surface-radius-aware visual bounds gate
+
+Implemented:
+
+- Fixed the visual probe's particle-bound surface overflow check so it accounts
+  for expected continuous-surface support radius.
+- `scripts/sph-long-horizon-probe.mjs` now inflates particle-center bounds by
+  `particleBoundsToleranceM + max(surfaceRadiusM, requestedSurfaceRadiusM,
+  cpuMarchingCubesRadiusFloorM)` before flagging
+  `visible-surface-expanded-beyond-particle-bounds`.
+- `scripts/sph-visual-sanity-matrix.mjs` now preserves support-radius metadata
+  in compact visual-surface issue rows when a true overflow remains.
+
+Files touched:
+
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/surface-radius-visual-bounds-gate-2026-06-15.md`
+- `.icc/ulg_status.json`
+- `.icc/ulg_arch_summary.md`
+
+Commands run:
+
+- `node --check scripts/sph-long-horizon-probe.mjs`
+- `node --check scripts/sph-visual-sanity-matrix.mjs`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-surface-radius-bounds-smoke-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=2 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+- `npm run test:physics-atomics`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-surface-radius-bounds-trio-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+- `git diff --check`
+- `npm run icc:update`
+
+Validation:
+
+- PASS: syntax checks passed.
+- PASS: surface-radius visual smoke reported `failedCount=0`,
+  `issueCounts={}`, `visualSurfaceIssueCounts={}`, frame artifact status
+  `ready`, and `frameCount=2`.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon skip.
+- PASS: focused H2O visual trio reported `failedCount=0`, empty issue counts,
+  frame artifact status `ready`, and two PNG frames per scenario.
+- PASS: `git diff --check`.
+- PASS: `npm run icc:update` refreshed `297` indexed files and `1533`
+  memory chunks.
+
+Open:
+
+- This is not a water-settling fix. The short liquid visual summaries still
+  report two visible H2O surfaces. Long-horizon liquid merge/free-surface
+  acceptance remains the next behavior target.
+
 ## 2026-06-15 10:56 AKDT - Dense visual matrix summaries
 
 Prompt:

@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 11:03 AKDT: the H2O visual surface bounds
+failure is narrowed. The matrix no longer treats normal MarchingCubes support
+radius as geometry escaping particle bounds; `particleBoundsToleranceM` is now
+augmented by each surface's rendered support radius. Focused H2O visual trio
+`codex-surface-radius-bounds-trio-20260615` passes with frame artifacts and
+empty issue counts. Keep the real behavior debt open: short liquid scenarios
+still show two visible H2O surfaces, and long-horizon liquid merge/free-surface
+quality still needs a dedicated visual acceptance gate before we can say water
+settling is fixed.
+
 Current routing note, 2026-06-15 10:56 AKDT: the visual sanity matrix now
 defaults to writing close-spaced PNG frame artifacts and propagates
 `analysis.issues` plus compact visual-surface issue details into

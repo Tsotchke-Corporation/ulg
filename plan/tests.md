@@ -1,5 +1,32 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Surface Radius Bounds Gate
+
+The current slice fixes the visual probe's surface bounds acceptance rule. A
+continuous/MarchingCubes surface is expected to extend beyond particle centers
+by its rendered support radius. The probe now inflates particle bounds by
+`particleBoundsToleranceM + max(surfaceRadiusM, requestedSurfaceRadiusM,
+cpuMarchingCubesRadiusFloorM)` before flagging
+`visible-surface-expanded-beyond-particle-bounds`; outside-box and
+larger-than-box checks are unchanged.
+
+Focused checks:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs` and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Surface-radius visual smoke:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-surface-radius-bounds-smoke-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=2 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, frame artifact status
+  `ready`, and `frameCount=2`.
+- Focused H2O visual trio:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-surface-radius-bounds-trio-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, empty issue counts, frame artifact status
+  `ready`, and two PNG frames per scenario.
+
 ## Current Focused Result - 2026-06-15 Dense Visual Matrix Summaries
 
 The current slice fixes the visual matrix as a validation harness. Matrix runs

@@ -12,6 +12,15 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 11:03 AKDT update: the repeated
+  `visible-surface-expanded-beyond-particle-bounds` finding was a harness
+  false positive for normal MarchingCubes support radius. The probe now inflates
+  particle-center bounds by the rendered surface support radius before flagging
+  particle-bound overflow. Focused H2O visual trio
+  `codex-surface-radius-bounds-trio-20260615` passes with no issue counts and
+  two captured frames per scenario. Do not over-read this as liquid acceptance:
+  short H2O/H2O visual cases still show two visible H2O surfaces, and long-
+  horizon liquid merge/settling remains open.
 - 2026-06-15 10:56 AKDT update: the visual matrix harness now captures frames
   by default and propagates `analysis.issues` plus compact visual-surface issue
   details into `summary.json`. Smoke evidence

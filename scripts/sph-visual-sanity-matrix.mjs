@@ -140,7 +140,10 @@ function compactVisualSurfaceIssue(issue) {
     phase: issue?.phase ?? null,
     renderSource: issue?.renderSource ?? null,
     axes: Array.isArray(issue?.axes) ? issue.axes : [],
-    maxOverflowM: finiteOrNull(issue?.maxOverflowM)
+    maxOverflowM: finiteOrNull(issue?.maxOverflowM),
+    particleBoundsToleranceM: finiteOrNull(issue?.particleBoundsToleranceM),
+    particleSupportRadiusM: finiteOrNull(issue?.particleSupportRadiusM),
+    allowedParticleBoundsOverflowM: finiteOrNull(issue?.allowedParticleBoundsOverflowM)
   };
 }
 

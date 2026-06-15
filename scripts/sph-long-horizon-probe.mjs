@@ -2706,9 +2706,22 @@ function analyzeTimeline(timeline, {
         if (particleBounds?.min && particleBounds?.max) {
           const expandedAxes = [];
           const overflows = [];
+          const particleSupportRadiusM = Math.max(
+            0,
+            finiteMetric(surface.surfaceRadiusM),
+            finiteMetric(surface.requestedSurfaceRadiusM),
+            finiteMetric(surface.cpuMarchingCubesRadiusFloorM)
+          );
+          const allowedParticleBoundsOverflowM = particleBoundsToleranceM + particleSupportRadiusM;
           for (let axis = 0; axis < 3; axis += 1) {
-            const minOverflow = Math.max(0, Number(particleBounds.min[axis]) - Number(bounds.min[axis]) - particleBoundsToleranceM);
-            const maxOverflow = Math.max(0, Number(bounds.max[axis]) - Number(particleBounds.max[axis]) - particleBoundsToleranceM);
+            const minOverflow = Math.max(
+              0,
+              Number(particleBounds.min[axis]) - Number(bounds.min[axis]) - allowedParticleBoundsOverflowM
+            );
+            const maxOverflow = Math.max(
+              0,
+              Number(bounds.max[axis]) - Number(particleBounds.max[axis]) - allowedParticleBoundsOverflowM
+            );
             const overflow = Math.max(minOverflow, maxOverflow);
             if (overflow > 0) {
               expandedAxes.push(axis);
@@ -2725,6 +2738,9 @@ function analyzeTimeline(timeline, {
               renderSource: surface.renderSource ?? null,
               axes: expandedAxes,
               maxOverflowM: Math.max(...overflows),
+              particleBoundsToleranceM,
+              particleSupportRadiusM,
+              allowedParticleBoundsOverflowM,
               particleBounds,
               bounds
             });

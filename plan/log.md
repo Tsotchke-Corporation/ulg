@@ -1,5 +1,67 @@
 # ULG Implementation Log
 
+## 2026-06-15 AKDT - Render depth/order visual matrix gate
+
+Summary:
+
+- Closed the recurring visual-matrix blind spot for z-buffer/draw-order policy.
+- Extended `scripts/sph-long-horizon-probe.mjs` so each visual sample records
+  visible-surface render layer, object/base render order, render-order policy,
+  material depth-write/depth-test, and container grid/wire policy.
+- Added analyzer failures under `render-depth-order-visual-trust` for
+  transparent surfaces that write depth, opaque surfaces that do not write
+  depth, transparent same-layer surfaces with hashed object render order, and
+  broken non-depth-writing container overlays.
+- Extended `scripts/sph-visual-sanity-matrix.mjs` compact issue summaries so
+  the exact render metadata survives in `summary.json`.
+- Updated `plan/plan.md`, `plan/todo/README.md`, `plan/tests.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and
+  `plan/done/render-depth-order-visual-matrix-gate-2026-06-15.md`.
+
+Files touched:
+
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/tests.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/done/render-depth-order-visual-matrix-gate-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-visual-sanity-matrix.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "transparent|draw order|depth|render order"`
+  reported `35/35`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-depth-policy-cpu-sph-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, and three frames.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-depth-policy-solid-liquid-20260615 ULG_VISUAL_MATRIX_SCENARIOS=solid-liquid-contact-fe-h2o ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, and three frames.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-depth-policy-two-row-refresh-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, and three frames for each row.
+- Spot-check of the mixed row showed H2O as `transmissive-surface`,
+  `depthWrite=false`, `depthTest=true`, `renderOrder=renderOrderBase=200`,
+  and `three-transparent-depth-sort-within-layer`; Fe as `opaque-surface`,
+  `depthWrite=true`, `depthTest=true`, and `stable-opaque-layer-order`; and
+  grid/wire as non-depth-writing overlays.
+
+Open:
+
+- This is a recurring metadata gate, not a pixel-perfect renderer proof.
+- Real-device focus-resume flashing/disappearing and pixel-level z-buffer
+  artifacts still need dedicated capture/probe work if they reproduce.
+
 ## 2026-06-15 AKDT - Plain SPH liquid settling acceptance
 
 Summary:

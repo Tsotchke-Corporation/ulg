@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 AKDT: renderer depth/order visual trust now
+has a recurring matrix gate. The long-horizon probe captures explicit
+render-layer, render-order, depth-write/depth-test, and container grid/wire
+metadata, and the analyzer fails on bad transparent sorting, bad opaque depth
+writes, or broken overlay ordering. Focused evidence:
+`codex-render-depth-policy-cpu-sph-20260615` and
+`codex-render-depth-policy-solid-liquid-20260615` both passed with empty issue
+counts; the mixed row showed H2O as transparent no-depth-write/same-layer
+sortable, Fe as opaque depth-write, and grid/wire as non-depth-writing
+overlays. Fresh combined evidence
+`codex-render-depth-policy-two-row-refresh-20260615` passed both rows with
+empty issue counts and three frames each. Keep mobile focus-resume flashing and
+pixel-level z-buffer probes open, but do not accept future visual-matrix rows
+if this metadata guard fails.
+
 Current routing note, 2026-06-15 AKDT: the immediate long-horizon CPU-SPH
 same-material liquid settling regression is closed for the mounted/browser
 reference lane. Contact-at-wall now removes the residual gravity half-kick,

@@ -793,8 +793,29 @@ async function runBrowserProbe({
       };
       const surfaceSnapshot = (sceneApi) => {
         const surfaces = [];
+        const materialsOf = (material) => Array.isArray(material) ? material : [material].filter(Boolean);
+        const materialFlag = (material, key, fallback = null) => {
+          const materials = materialsOf(material);
+          if (!materials.length) return fallback;
+          return materials.every((entry) => entry?.[key] === true)
+            ? true
+            : (materials.every((entry) => entry?.[key] === false) ? false : 'mixed');
+        };
+        const nodeRenderPolicy = (node) => ({
+          renderLayer: node?.userData?.renderLayer ?? null,
+          renderOrder: finiteOrNull(node?.renderOrder),
+          renderOrderBase: finiteOrNull(node?.userData?.renderOrderBase),
+          renderOrderPolicy: node?.userData?.renderOrderPolicy ?? null,
+          materialTransparent: materialFlag(node?.material, 'transparent'),
+          materialDepthWrite: materialFlag(node?.material, 'depthWrite'),
+          materialDepthTest: materialFlag(node?.material, 'depthTest')
+        });
+        let containerWire = null;
+        let containerGrid = null;
         sceneApi?.scene?.updateMatrixWorld?.(true);
         sceneApi?.scene?.traverse?.((node) => {
+          if (node.userData?.renderLayer === 'container-wire') containerWire = nodeRenderPolicy(node);
+          if (node.userData?.renderLayer === 'container-grid') containerGrid = nodeRenderPolicy(node);
           if (node.userData?.renderMode !== 'continuous-marching-cubes') return;
           const bounds = boundsFromGeometry(node);
           surfaces.push({
@@ -825,6 +846,7 @@ async function runBrowserProbe({
             surfaceBoundsClipPaddingM: finiteOrNull(node.userData.surfaceBoundsClipPaddingM),
             surfaceBoxClipStatus: node.userData.surfaceBoxClipStatus ?? null,
             surfaceBoxClipVertexCount: node.userData.surfaceBoxClipVertexCount ?? null,
+            ...nodeRenderPolicy(node),
             vertexCount: bounds?.vertexCount ?? 0,
             vertexCapacity: bounds?.vertexCapacity ?? node.geometry?.attributes?.position?.count ?? 0,
             drawRange: bounds?.drawRange ?? null,
@@ -837,7 +859,9 @@ async function runBrowserProbe({
           visibleCount: visible.length,
           h2oVisibleCount: visible.filter((surface) => String(surface.materialKey || '').toLowerCase().includes('h2o')).length,
           all: surfaces,
-          visible
+          visible,
+          containerWire,
+          containerGrid
         };
       };
       markProbeProgress('in-page-probe-helpers-ready');
@@ -2599,9 +2623,81 @@ function analyzeTimeline(timeline, {
   let maxVisibleSurfaceOutsideM = 0;
   let maxVisibleSurfaceOutsideParticleBoundsM = 0;
   if (!directResident) {
+    const transparentRenderLayers = new Set(['transmissive-surface', 'vapor-surface', 'alpha-surface']);
+    const knownSurfaceRenderLayers = new Set(['opaque-surface', ...transparentRenderLayers]);
+    const pushRenderVisualIssue = (issue, metricIndex, surface, extra = {}) => {
+      visualSurfaceIssues.push({
+        issue,
+        metricIndex,
+        materialKey: surface?.materialKey ?? null,
+        phase: surface?.phase ?? null,
+        renderSource: surface?.renderSource ?? null,
+        renderLayer: surface?.renderLayer ?? null,
+        renderOrder: finiteMetric(surface?.renderOrder),
+        renderOrderBase: finiteMetric(surface?.renderOrderBase),
+        renderOrderPolicy: surface?.renderOrderPolicy ?? null,
+        materialTransparent: surface?.materialTransparent ?? null,
+        materialDepthWrite: surface?.materialDepthWrite ?? null,
+        materialDepthTest: surface?.materialDepthTest ?? null,
+        ...extra
+      });
+    };
     metrics.forEach((metric, metricIndex) => {
       const particleBounds = metric.residentStep?.diagnostics?.nextPositionBoundsM;
       const visibleSurfaces = metric.surfaces?.visible || [];
+      const visibleRenderOrders = visibleSurfaces
+        .map((surface) => finiteMetric(surface.renderOrder))
+        .filter(Number.isFinite);
+      const maxVisibleRenderOrder = visibleRenderOrders.length ? Math.max(...visibleRenderOrders) : null;
+      const containerWire = metric.surfaces?.containerWire || null;
+      const containerGrid = metric.surfaces?.containerGrid || null;
+      if (visibleSurfaces.length) {
+        if (!containerWire) {
+          visualSurfaceIssues.push({ issue: 'render-container-wire-missing', metricIndex });
+        } else {
+          const wireOrder = finiteMetric(containerWire.renderOrder);
+          if (!Number.isFinite(wireOrder)) {
+            visualSurfaceIssues.push({ issue: 'render-container-wire-missing-render-order', metricIndex, ...containerWire });
+          } else if (Number.isFinite(maxVisibleRenderOrder) && wireOrder <= maxVisibleRenderOrder) {
+            visualSurfaceIssues.push({
+              issue: 'render-container-wire-not-above-surfaces',
+              metricIndex,
+              renderOrder: wireOrder,
+              maxVisibleRenderOrder,
+              ...containerWire
+            });
+          }
+          if (containerWire.materialDepthWrite !== false) {
+            visualSurfaceIssues.push({ issue: 'render-container-wire-depth-write-enabled', metricIndex, ...containerWire });
+          }
+          if (containerWire.materialDepthTest === false) {
+            visualSurfaceIssues.push({ issue: 'render-container-wire-depth-test-disabled', metricIndex, ...containerWire });
+          }
+        }
+        if (!containerGrid) {
+          visualSurfaceIssues.push({ issue: 'render-container-grid-missing', metricIndex });
+        } else {
+          const gridOrder = finiteMetric(containerGrid.renderOrder);
+          const wireOrder = finiteMetric(containerWire?.renderOrder);
+          if (!Number.isFinite(gridOrder)) {
+            visualSurfaceIssues.push({ issue: 'render-container-grid-missing-render-order', metricIndex, ...containerGrid });
+          } else if (Number.isFinite(wireOrder) && gridOrder >= wireOrder) {
+            visualSurfaceIssues.push({
+              issue: 'render-container-grid-not-below-wire',
+              metricIndex,
+              renderOrder: gridOrder,
+              wireRenderOrder: wireOrder,
+              ...containerGrid
+            });
+          }
+          if (containerGrid.materialDepthWrite !== false) {
+            visualSurfaceIssues.push({ issue: 'render-container-grid-depth-write-enabled', metricIndex, ...containerGrid });
+          }
+          if (containerGrid.materialDepthTest !== true) {
+            visualSurfaceIssues.push({ issue: 'render-container-grid-depth-test-disabled', metricIndex, ...containerGrid });
+          }
+        }
+      }
       if (expectedLiquidH2oSameMaterial) {
         const particleCount = Number(metric.residentStep?.diagnostics?.particleCount ?? 0);
         const residentRenderField = metric.renderState?.source === 'resident-gpu-render-field';
@@ -2666,6 +2762,40 @@ function analyzeTimeline(timeline, {
         }
       }
       for (const surface of visibleSurfaces) {
+        const renderLayer = String(surface.renderLayer || '');
+        const renderOrder = finiteMetric(surface.renderOrder);
+        const renderOrderBase = finiteMetric(surface.renderOrderBase);
+        if (!knownSurfaceRenderLayers.has(renderLayer)) {
+          pushRenderVisualIssue('render-surface-unknown-layer', metricIndex, surface);
+        }
+        if (!Number.isFinite(renderOrder)) {
+          pushRenderVisualIssue('render-surface-missing-render-order', metricIndex, surface);
+        }
+        if (surface.materialDepthTest === false) {
+          pushRenderVisualIssue('render-surface-depth-test-disabled', metricIndex, surface);
+        }
+        if (transparentRenderLayers.has(renderLayer) || surface.materialDepthWrite === false) {
+          if (surface.materialDepthWrite !== false) {
+            pushRenderVisualIssue('render-transparent-surface-depth-write-enabled', metricIndex, surface);
+          }
+          if (surface.renderOrderPolicy !== 'three-transparent-depth-sort-within-layer') {
+            pushRenderVisualIssue('render-transparent-surface-not-depth-sortable', metricIndex, surface);
+          }
+          if (
+            Number.isFinite(renderOrder)
+            && Number.isFinite(renderOrderBase)
+            && Math.abs(renderOrder - renderOrderBase) > 1e-9
+          ) {
+            pushRenderVisualIssue('render-transparent-surface-hashed-render-order', metricIndex, surface);
+          }
+        } else if (renderLayer === 'opaque-surface') {
+          if (surface.materialDepthWrite !== true) {
+            pushRenderVisualIssue('render-opaque-surface-depth-write-disabled', metricIndex, surface);
+          }
+          if (surface.renderOrderPolicy !== 'stable-opaque-layer-order') {
+            pushRenderVisualIssue('render-opaque-surface-unstable-order-policy', metricIndex, surface);
+          }
+        }
         const bounds = surface.worldBounds;
         if (!bounds?.min || !bounds?.max || !bounds?.size) continue;
         const outsideAxes = [];
@@ -2867,6 +2997,9 @@ function analyzeTimeline(timeline, {
   }
   if (visualSurfaceIssues.some((item) => item.issue === 'same-material-h2o-visible-surface-disappeared')) {
     issues.push('same-material-h2o-visible-surface-disappeared');
+  }
+  if (visualSurfaceIssues.some((item) => String(item.issue || '').startsWith('render-'))) {
+    issues.push('render-depth-order-visual-trust');
   }
   return {
     schema: 'peercompute.ulg.sph-history-long-horizon-analysis.v0',

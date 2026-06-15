@@ -2,6 +2,26 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 AKDT: the recurring visual matrix now enforces
+renderer depth/order policy instead of only recording plausible screenshots.
+`scripts/sph-long-horizon-probe.mjs` captures per-surface render layer,
+render order/base order, render-order policy, material depth-write/depth-test,
+and container grid/wire policy; the analyzer fails with
+`render-depth-order-visual-trust` if transparent surfaces write depth, opaque
+surfaces fail to write depth, transparent surfaces use hashed render order
+instead of Three.js same-layer camera sorting, or the grid/wire overlays lose
+their non-depth-writing order. `scripts/sph-visual-sanity-matrix.mjs` now
+preserves these fields in compact summaries. Validation passed syntax checks,
+focused renderer tests `35/35`, CPU-SPH H2O visual row
+`codex-render-depth-policy-cpu-sph-20260615`, and mixed Fe/H2O row
+`codex-render-depth-policy-solid-liquid-20260615`; both visual rows reported
+empty issue counts and empty visual-surface issue counts. Fresh two-row
+validation `codex-render-depth-policy-two-row-refresh-20260615` also passed
+both rows with empty issue counts and three frames each. This closes a
+validation blind spot, not every live focus-resume or pixel-level z-buffer
+artifact; mobile real-device focus flashing and deeper pixel probes remain
+open.
+
 Current checkpoint, 2026-06-15 AKDT: the plain CPU-SPH same-material liquid
 settling slice is fixed for the long browser probe that reproduced the delayed
 drop/stacked-water behavior. The SPH carrier now cancels gravity half-kicks at

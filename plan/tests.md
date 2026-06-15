@@ -1,5 +1,36 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Render Depth/Order Matrix Gate
+
+The recurring visual sanity matrix now treats renderer depth/order metadata as
+acceptance evidence. Screenshots are no longer enough: visible surfaces must
+report coherent render layer/order/depth policy, and container grid/wire
+overlays must keep their non-depth-writing order.
+
+Focused checks:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs` and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Renderer coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "transparent|draw order|depth|render order"`
+  passed `35/35`.
+- CPU-SPH liquid visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-depth-policy-cpu-sph-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and three frames.
+- Mixed opaque/transparent visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-depth-policy-solid-liquid-20260615 ULG_VISUAL_MATRIX_SCENARIOS=solid-liquid-contact-fe-h2o ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and three frames. Spot
+  check: H2O reported `transmissive-surface`, `depthWrite=false`,
+  `depthTest=true`, `renderOrder=renderOrderBase=200`, and
+  `three-transparent-depth-sort-within-layer`; Fe reported `opaque-surface`,
+  `depthWrite=true`, and `stable-opaque-layer-order`; grid/wire reported
+  `depthWrite=false`, `depthTest=true`.
+- Fresh combined visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-render-depth-policy-two-row-refresh-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed both rows with `failedCount=0`, empty issue counts, empty
+  visual-surface issue counts, and three frames per row.
+
 ## Current Focused Result - 2026-06-15 Plain SPH Liquid Settling
 
 The current slice fixes the long-horizon CPU-SPH same-material liquid settling

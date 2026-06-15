@@ -12,6 +12,21 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 AKDT update: renderer depth/order visual trust now has a recurring
+  visual-matrix gate. The long-horizon probe records per-surface render layer,
+  render order/base order, render-order policy, material depth-write/depth-test,
+  and container grid/wire render policy. The analyzer now fails with
+  `render-depth-order-visual-trust` if transparent surfaces write depth, opaque
+  surfaces fail to write depth, transparent surfaces use hashed render order
+  instead of same-layer camera sorting, or the container overlays lose their
+  non-depth-writing order. Focused visual evidence
+  `codex-render-depth-policy-cpu-sph-20260615` and
+  `codex-render-depth-policy-solid-liquid-20260615` passed with empty issue
+  counts and frame artifacts. Fresh combined evidence
+  `codex-render-depth-policy-two-row-refresh-20260615` passed both rows with
+  empty issue counts and three frames each. This closes the recurring-matrix
+  metadata blind spot; real-device focus flashing and pixel-level depth
+  artifacts remain open.
 - 2026-06-15 AKDT update: the long-horizon CPU-SPH H2O/H2O settling regression
   is now fixed for the mounted/browser reference lane. The root issue was not
   only render identity; the carrier also allowed a residual gravity half-kick

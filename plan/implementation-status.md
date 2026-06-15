@@ -29,6 +29,16 @@ Updated: 2026-06-14 active-grid resident mechanics slice, resident summary fence
   for H2O/H2O MLS-MPM and solid H2O CPU-SPH. Remaining work: keep the path
   opt-in until scene-paired resident validation, ComputeManager/GPU-lane
   ownership, and broader law-family interactions are wired.
+- Threaded the active-grid request into the ComputeManager resident-steps task
+  descriptor surface as metadata-only authority plumbing. Resident steps tasks
+  now publish `peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0` on the
+  law graph node, `webgpu` descriptor, GPU resident lane descriptor, task data,
+  solver-registry input, and compute-task result. The policy distinguishes
+  `requested` from `enabled`; it only enables active-grid when the fused
+  resident sequence wrapper is also requested, and declares the no-full,
+  final-only, trustworthy-bounds, clear-before-G2P, and full-grid-layout
+  constraints needed for placement review. Focused resident task tests passed
+  `32/32`.
 - Added an opt-in fused no-full resident mechanics path that records P2G,
   grid-update, and G2P into one WebGPU command submission for a single
   substep. The first browser probe found and fixed the crash

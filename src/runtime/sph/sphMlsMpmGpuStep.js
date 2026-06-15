@@ -89,6 +89,7 @@ const NO_FULL_READBACK_MODE = 'no-full-readback';
 const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
 const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-resident-gpu-lane-adapter.v0';
 const ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA = 'peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0';
+const ULG_MLS_MPM_ACTIVE_GRID_DISPATCH_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task.v0';
 export const ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.mls-mpm-resident-compute-task-result.v0';
 export const ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.mls-mpm-resident-steps-compute-task.v0';
@@ -2330,6 +2331,45 @@ function createResidentGpuFenceRequirement({
   };
 }
 
+function createResidentActiveGridDispatchPolicy({
+  requested = false,
+  fusedResidentSequence = false,
+  stepCount = 1,
+  readbackMode = FULL_READBACK_MODE,
+  compactSummaryMode = 'every-step',
+  safetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS
+} = {}) {
+  const activeRequested = requested === true;
+  const sequenceRequested = fusedResidentSequence === true;
+  const enabled = activeRequested && sequenceRequested;
+  return {
+    schema: ULG_MLS_MPM_ACTIVE_GRID_DISPATCH_POLICY_SCHEMA,
+    enabled,
+    mode: enabled ? 'fused-resident-sequence-active-grid-aabb' : 'full-grid-dispatch',
+    requested: activeRequested,
+    fusedResidentSequenceRequested: sequenceRequested,
+    stepCount,
+    readbackMode,
+    compactSummaryMode,
+    safetyCells: enabled
+      ? Math.max(1, Math.round(finiteNumber(
+          safetyCells == null ? DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS : safetyCells,
+          DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS
+        )))
+      : 0,
+    requiresNoFullReadback: enabled,
+    requiresFinalOnlyCompactSummary: enabled,
+    requiresFusedResidentSequence: activeRequested,
+    requiresTrustworthyPositionBounds: enabled,
+    requiresGridClearBeforeG2p: enabled,
+    retainedGridLayout: 'full-grid-row-layout',
+    authority: 'compute-manager-gpu-resident-lane-policy',
+    promotionStatus: enabled
+      ? 'opt-in-validation-required'
+      : (activeRequested ? 'blocked-fused-resident-sequence-not-requested' : 'not-requested')
+  };
+}
+
 function createResidentGpuLaneTaskDescriptor({
   laneId,
   stateKey,
@@ -2341,7 +2381,8 @@ function createResidentGpuLaneTaskDescriptor({
   writeFamilies = [],
   retainedBufferRefs = [],
   queueFencePolicy,
-  copyBudget
+  copyBudget,
+  activeGridDispatchPolicy = null
 }) {
   return {
     schema: PEERCOMPUTE_GPU_RESIDENT_LANE_TASK_SCHEMA,
@@ -2356,7 +2397,8 @@ function createResidentGpuLaneTaskDescriptor({
     writeFamilies: [...writeFamilies],
     retainedBufferRefs: [...retainedBufferRefs],
     queueFencePolicy,
-    copyBudget: { ...copyBudget }
+    copyBudget: { ...copyBudget },
+    activeGridDispatchPolicy
   };
 }
 
@@ -2534,6 +2576,14 @@ export function createMlsMpmResidentStepsComputeTask({
   const readbackMode = taskStepOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const stepCount = Math.max(1, Math.round(finiteNumber(taskStepOptions.stepCount, 1)));
   const compactSummaryMode = taskStepOptions.compactSummaryMode || 'every-step';
+  const activeGridDispatchPolicy = createResidentActiveGridDispatchPolicy({
+    requested: Boolean(taskStepOptions.fuseNoFullResidentMechanicsActiveGrid || taskStepOptions.fuseNoFullResidentActiveGrid),
+    fusedResidentSequence: Boolean(taskStepOptions.fuseNoFullResidentMechanicsSequence),
+    stepCount,
+    readbackMode,
+    compactSummaryMode,
+    safetyCells: taskStepOptions.activeGridSafetyCells ?? taskStepOptions.fusedActiveGridSafetyCells
+  });
   const summarizedStepCount = readbackMode === NO_FULL_READBACK_MODE
     ? (compactSummaryMode === 'final-only' ? 1 : stepCount)
     : 0;
@@ -2559,6 +2609,7 @@ export function createMlsMpmResidentStepsComputeTask({
     readFamilies,
     writeFamilies
   });
+  lawGraphNode.activeGridDispatchPolicy = activeGridDispatchPolicy;
   const gpuFence = createResidentGpuFenceRequirement({
     laneId,
     stateKey,
@@ -2577,7 +2628,8 @@ export function createMlsMpmResidentStepsComputeTask({
     writeFamilies,
     retainedBufferRefs,
     queueFencePolicy,
-    copyBudget: laneCopyBudget
+    copyBudget: laneCopyBudget,
+    activeGridDispatchPolicy
   });
   const id = taskId || `ulg-mls-mpm-resident-steps:${finiteNumber(taskStepOptions.sphParticleState?.step ?? taskStepOptions.mlsMpmParticleState?.step, 0)}:${stepCount}`;
   return {
@@ -2603,7 +2655,8 @@ export function createMlsMpmResidentStepsComputeTask({
       domainKey,
       queueFencePolicy,
       retainedBufferRefs: [...retainedBufferRefs],
-      copyBudget: { ...laneCopyBudget }
+      copyBudget: { ...laneCopyBudget },
+      activeGridDispatchPolicy
     },
     gpuFence,
     gpuResidentLane,
@@ -2611,6 +2664,7 @@ export function createMlsMpmResidentStepsComputeTask({
       ...taskStepOptions,
       stepCount,
       readbackMode,
+      activeGridDispatchPolicy,
       gpuFenceRequirement: gpuFence,
       gpuResidentLane,
       lawGraphNode,
@@ -2683,6 +2737,7 @@ export function createMlsMpmResidentStepsSolverComputeTask({
         domainKey: baseTask.gpuResidentLane?.domainKey || baseTask.webgpu?.domainKey || null,
         stepCount: baseTask.data?.stepCount ?? null,
         readbackMode: baseTask.data?.readbackMode || null,
+        activeGridDispatchPolicy: baseTask.data?.activeGridDispatchPolicy || null,
         computeTaskSchema: baseTask.schema,
         lawGraphNodeId: baseTask.lawGraphNode?.nodeId || null
       },
@@ -2743,6 +2798,7 @@ export async function runMlsMpmResidentStepsComputeTask(data = {}) {
     computeTaskSchema = ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA,
     computeTaskId = null,
     peerComputeSolverTask = null,
+    activeGridDispatchPolicy = null,
     emitCommitDelta = true,
     commitDeltaScope = 'ulg-sph-resident-pass-dag',
     commitDeltaStateKey = null,
@@ -2764,6 +2820,7 @@ export async function runMlsMpmResidentStepsComputeTask(data = {}) {
     computeTaskSchema,
     lawGraphNode,
     peerComputeSolverTask,
+    activeGridDispatchPolicy,
     gpuFence,
     gpuFenceReport: gpuFence,
     gpuResidentLaneRequirement: gpuResidentLane || null

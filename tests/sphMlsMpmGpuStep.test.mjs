@@ -1647,9 +1647,12 @@ test('MLS-MPM resident steps compute task declares a ComputeManager GPU lane pas
   assert.equal(task.gpuResidentLane.domainKey, 'ulg:test-domain');
   assert.equal(task.gpuResidentLane.copyBudget.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
   assert.equal(task.gpuResidentLane.copyBudget.compactSummaryBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(task.gpuResidentLane.activeGridDispatchPolicy.enabled, false);
+  assert.equal(task.webgpu.activeGridDispatchPolicy.enabled, false);
   assert.equal(task.lawGraphNode.schema, 'peercompute.ulg.law-graph-node-task-ref.v0');
   assert.equal(task.lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
   assert.equal(task.lawGraphNode.runtimeTarget, 'webgpu-resident-lane');
+  assert.equal(task.lawGraphNode.activeGridDispatchPolicy.enabled, false);
   assert.deepEqual(task.readFamilies, task.gpuResidentLane.readFamilies);
   assert.deepEqual(task.expectedOutputFamilies, task.writeFamilies);
   assert.equal(task.data.gpuResidentLaneManager, undefined);
@@ -1773,7 +1776,11 @@ test('MLS-MPM resident steps compute task submit helper uses a ComputeManager-co
     taskId: 'ulg:test:submit-steps-task',
     laneId: 'ulg:test:sph-resident-steps-submit',
     stateKey: 'ulg:test:sph-state-steps-submit',
-    stepCount: 2
+    stepCount: 2,
+    compactSummaryMode: 'final-only',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 4
   });
 
   assert.equal(submitted.length, 1);
@@ -1783,6 +1790,8 @@ test('MLS-MPM resident steps compute task submit helper uses a ComputeManager-co
   assert.equal(solverCreateCalls[0].input.stateKey, 'ulg:test:sph-state-steps-submit');
   assert.equal(solverCreateCalls[0].input.input.laneId, 'ulg:test:sph-resident-steps-submit');
   assert.equal(solverCreateCalls[0].input.input.stepCount, 2);
+  assert.equal(solverCreateCalls[0].input.input.activeGridDispatchPolicy.enabled, true);
+  assert.equal(solverCreateCalls[0].input.input.activeGridDispatchPolicy.safetyCells, 4);
   assert.equal(submitted[0].schema, ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA);
   assert.equal(submitted[0].module, './registered-resident-solver.js');
   assert.equal(submitted[0].data.schema, 'peercompute.compute.solver-task.v0');
@@ -1792,6 +1801,10 @@ test('MLS-MPM resident steps compute task submit helper uses a ComputeManager-co
   assert.equal(submitted[0].peerComputeSolverTask.affinityKey, 'ulg-mls-mpm-sph-resident-steps:ulg:test:sph-state-steps-submit');
   assert.equal(submitted[0].data.peerComputeSolverTask.created, true);
   assert.equal(submitted[0].gpuResidentLane.laneId, 'ulg:test:sph-resident-steps-submit');
+  assert.equal(submitted[0].gpuResidentLane.activeGridDispatchPolicy.enabled, true);
+  assert.equal(submitted[0].webgpu.activeGridDispatchPolicy.enabled, true);
+  assert.equal(submitted[0].data.activeGridDispatchPolicy.enabled, true);
+  assert.equal(submitted[0].data.activeGridDispatchPolicy.requiresFusedResidentSequence, true);
   assert.equal(submitted[0].gpuFence.stateKey, 'ulg:test:sph-state-steps-submit');
   assert.equal(submitted[0].lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
   assert.equal(submitted[0].data.gpuResidentLane.laneId, 'ulg:test:sph-resident-steps-submit');

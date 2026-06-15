@@ -20563,3 +20563,35 @@ Open:
 - Next performance slice should replace the coarse active AABB with tiled or
   neighbor-indexed P2G/grid update while preserving the StateManager/
   ComputeManager authority boundary.
+
+## 2026-06-14 18:32 AKDT - Active-grid policy on ComputeManager task surface
+
+Implemented:
+
+- Added `peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0` metadata for
+  resident steps ComputeManager tasks.
+- The policy is attached to the resident pass DAG law graph node, WebGPU task
+  descriptor, GPU resident lane descriptor, task data, solver-registry input,
+  and compute-task result.
+- The policy separates `requested` from `enabled`; active-grid only advertises
+  `enabled=true` when `fuseNoFullResidentMechanicsActiveGrid` and
+  `fuseNoFullResidentMechanicsSequence` are both requested. Otherwise it
+  records blocked/not-requested status instead of overclaiming lane behavior.
+- The policy declares the constraints a future distributed placement surface
+  needs to inspect: no-full readback, final-only compact summary, fused
+  sequence wrapper, trustworthy position bounds, clear-before-G2P, and
+  full-grid row layout.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps compute task|active-grid dispatch"`
+  reported `32/32` because Node evaluated the full resident test file.
+
+Open:
+
+- This is descriptor/authority plumbing only. The runtime path remains opt-in
+  and still needs promotion into the actual ComputeManager/GPU-lane execution
+  DAG with scene-paired validation before default use.

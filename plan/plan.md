@@ -17,6 +17,15 @@ the active box after WebGPU owns the state. Keep this path opt-in until it has
 scene-paired validation and ComputeManager/GPU-lane ownership, but treat
 sparse/tiled/neighbor P2G as the confirmed next performance lever.
 
+Current checkpoint, 2026-06-14 18:32 AKDT: the active-grid request is now
+visible at the ComputeManager resident-steps task boundary as
+`peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0`. The policy is
+attached to the law graph node, WebGPU descriptor, GPU resident lane
+descriptor, task data, solver-registry input, and compute-task result. It
+separates `requested` from `enabled`, requiring the fused resident sequence
+wrapper before active-grid is advertised as enabled. This is metadata-only
+authority plumbing; it does not make active-grid default.
+
 Current checkpoint, 2026-06-14 17:42 AKDT: compact-summary attribution is now
 instrumented. A `64`-substep direct-resident no-full H2O/H2O probe spends
 about `14.49 s` waiting on the final summary `mapAsync` fence for a `336` byte

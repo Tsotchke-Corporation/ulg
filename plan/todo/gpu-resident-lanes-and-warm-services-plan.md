@@ -145,6 +145,17 @@ into the ComputeManager GPU resident lane, not as permission to build a
 scene-local scheduler or make active-grid default before pressure/thermal/
 reaction interactions and scene-paired visual gates pass.
 
+Status update, 2026-06-14 active-grid task policy: resident steps
+ComputeManager tasks now publish
+`peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0` through the law graph
+node, WebGPU descriptor, GPU resident lane descriptor, task data,
+solver-registry input, and compute-task result. The policy only sets
+`enabled=true` when active-grid is requested together with
+`fuseNoFullResidentMechanicsSequence`; otherwise it records a blocked/not-
+requested status. This gives ComputeManager/NodeKernel placement and review
+surfaces a stable declaration of the active-grid constraints before the
+runtime path is promoted to default lane execution.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

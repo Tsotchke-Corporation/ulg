@@ -7,6 +7,7 @@ const DEFAULT_OUTPUT_DIR = '/tmp/ulg-visual-sanity-matrix';
 const DEFAULT_BATCHES = 4;
 const DEFAULT_BATCH_STEPS = 24;
 const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_FRAME_MAX = 16;
 
 const SCENARIOS = [
   {
@@ -87,6 +88,85 @@ const SCENARIOS = [
 function positiveInteger(value, fallback) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
+function envFlagEnabled(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) return false;
+  if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+  return fallback;
+}
+
+function arrayOf(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueStrings(...sources) {
+  const values = [];
+  const seen = new Set();
+  for (const source of sources) {
+    for (const value of arrayOf(source)) {
+      const text = String(value || '').trim();
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      values.push(text);
+    }
+  }
+  return values;
+}
+
+function finiteOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function visualSurfaceIssueKey(issue) {
+  const axes = Array.isArray(issue?.axes) ? issue.axes.join(',') : '';
+  return [
+    issue?.issue || 'unknown',
+    issue?.materialKey || '',
+    issue?.phase || '',
+    issue?.renderSource || '',
+    axes
+  ].join('|');
+}
+
+function compactVisualSurfaceIssue(issue) {
+  return {
+    issue: issue?.issue || 'unknown',
+    metricIndex: Number.isFinite(Number(issue?.metricIndex)) ? Number(issue.metricIndex) : null,
+    materialKey: issue?.materialKey ?? null,
+    phase: issue?.phase ?? null,
+    renderSource: issue?.renderSource ?? null,
+    axes: Array.isArray(issue?.axes) ? issue.axes : [],
+    maxOverflowM: finiteOrNull(issue?.maxOverflowM)
+  };
+}
+
+function uniqueVisualSurfaceIssues(...sources) {
+  const values = [];
+  const seen = new Set();
+  for (const source of sources) {
+    for (const issue of arrayOf(source)) {
+      if (!issue || typeof issue !== 'object') continue;
+      const key = visualSurfaceIssueKey(issue);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      values.push(compactVisualSurfaceIssue(issue));
+    }
+  }
+  return values;
+}
+
+function countBy(values, keyOf = (value) => value) {
+  const counts = {};
+  for (const value of arrayOf(values)) {
+    const key = String(keyOf(value) || '').trim();
+    if (!key) continue;
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
 }
 
 function selectedScenarios() {
@@ -219,7 +299,12 @@ function scenarioEnv({
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
     env.ULG_PROBE_FRAME_DIR = frameDir;
     env.ULG_PROBE_FRAME_EVERY = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_EVERY, 1));
-    env.ULG_PROBE_FRAME_MAX = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_MAX, 64));
+    env.ULG_PROBE_FRAME_MAX = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_MAX, DEFAULT_FRAME_MAX));
+  } else if (envFlagEnabled(process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES, true)) {
+    env.ULG_PROBE_CAPTURE_FRAMES = '1';
+    env.ULG_PROBE_FRAME_DIR = frameDir;
+    env.ULG_PROBE_FRAME_EVERY = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_EVERY, 1));
+    env.ULG_PROBE_FRAME_MAX = String(positiveInteger(process.env.ULG_VISUAL_MATRIX_FRAME_MAX, DEFAULT_FRAME_MAX));
   }
   return env;
 }
@@ -237,6 +322,7 @@ async function main() {
   const batchSteps = positiveInteger(process.env.ULG_VISUAL_MATRIX_BATCH_STEPS, DEFAULT_BATCH_STEPS);
   const timeoutMs = positiveInteger(process.env.ULG_VISUAL_MATRIX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
   const allowFailures = process.env.ULG_VISUAL_MATRIX_ALLOW_FAILURES === '1';
+  const captureFrames = envFlagEnabled(process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES, true);
   const scenarios = selectedScenarios();
   if (!scenarios.length) {
     throw new Error('No SPH visual sanity matrix scenarios selected');
@@ -288,18 +374,39 @@ async function main() {
       };
       await writeFile(outputPath, `${JSON.stringify(probe, null, 2)}\n`, 'utf8');
     }
-    const failed = run.code !== 0 || probe?.status === 'bad' || (probe?.issues || []).length > 0;
+    const issues = uniqueStrings(probe?.issues, probe?.analysis?.issues);
+    const visualSurfaceIssues = uniqueVisualSurfaceIssues(
+      probe?.visualSurfaceIssues,
+      probe?.analysis?.visualSurfaceIssues
+    );
+    const analysis = probe?.analysis || {};
+    const failed = run.code !== 0 || probe?.status === 'bad' || issues.length > 0;
     results.push({
       label: scenario.label,
       url: scenario.url,
       code: run.code,
       timedOut: run.timedOut,
       status: probe?.status || null,
-      issues: probe?.issues || [],
-      visualSurfaceIssues: probe?.visualSurfaceIssues || [],
+      analysisStatus: analysis.status || null,
+      issues,
+      issueCount: issues.length,
+      visualSurfaceIssues,
+      visualSurfaceIssueCount: visualSurfaceIssues.length,
+      visualSurfaceIssueTypes: Object.keys(countBy(visualSurfaceIssues, (issue) => issue.issue)),
+      maxSpeedObservedMPerS: finiteOrNull(analysis.maxSpeedObservedMPerS),
+      maxDisplacementObservedM: finiteOrNull(analysis.maxDisplacementObservedM),
+      minVolumeObservedJ: finiteOrNull(analysis.minVolumeObservedJ),
+      maxVolumeObservedJ: finiteOrNull(analysis.maxVolumeObservedJ),
+      maxPressureImpulseNSeconds: finiteOrNull(analysis.maxPressureImpulseNSeconds),
+      maxNextTimeS: finiteOrNull(analysis.maxNextTimeS),
+      firstH2oVisibleSurfaceCount: finiteOrNull(analysis.firstH2oVisibleSurfaceCount),
+      lastH2oVisibleSurfaceCount: finiteOrNull(analysis.lastH2oVisibleSurfaceCount),
+      maxVisibleSurfaceOutsideM: finiteOrNull(analysis.maxVisibleSurfaceOutsideM),
+      maxVisibleSurfaceOutsideParticleBoundsM: finiteOrNull(analysis.maxVisibleSurfaceOutsideParticleBoundsM),
       outputPath,
       logPath,
-      frameDir: process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES === '1' ? frameDir : null,
+      frameDir: captureFrames ? frameDir : null,
+      frameArtifactStatus: probe?.visualFrameArtifacts?.status || null,
       frameCount: probe?.visualFrameArtifacts?.frameCount ?? 0,
       failed
     });
@@ -311,6 +418,12 @@ async function main() {
     outputRoot,
     scenarioCount: results.length,
     failedCount: results.filter((result) => result.failed).length,
+    captureFrames,
+    issueCounts: countBy(results.flatMap((result) => result.issues)),
+    visualSurfaceIssueCounts: countBy(
+      results.flatMap((result) => result.visualSurfaceIssues),
+      (issue) => issue.issue
+    ),
     results
   };
   const summaryPath = path.join(outputRoot, 'summary.json');

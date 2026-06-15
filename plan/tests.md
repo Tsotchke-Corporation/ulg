@@ -1,5 +1,31 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Dense Visual Matrix Summaries
+
+The current slice fixes the visual matrix as a validation harness. Matrix runs
+now capture close-spaced PNG frame artifacts by default and copy the probe's
+actual `analysis.issues` into the matrix summary. The summary also records
+compact visual-surface issue details, issue counts, frame artifact status,
+observed motion/J/pressure metrics, visible H2O surface counts, and maximum
+surface overflow. This turns failed matrix runs into actionable physics
+evidence instead of only `status=bad` rows.
+
+Focused checks:
+
+- Syntax and listing:
+  `node --check scripts/sph-visual-sanity-matrix.mjs` and
+  `node scripts/sph-visual-sanity-matrix.mjs --list` passed.
+- Visual summary smoke:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-visual-summary-issues-smoke-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=2 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  completed with expected `failedCount=1`. The summary now reports
+  `captureFrames=true`, issue count
+  `visible-surface-expanded-beyond-particle-bounds=1`, visual surface issue
+  count `2`, frame artifact status `ready`, and `frameCount=2`.
+- Frame artifact inspection:
+  `/tmp/ulg-visual-sanity-matrix/codex-visual-summary-issues-smoke-20260615/liquid-liquid-h2o-cpu-sph-frames`
+  contains two non-empty PNGs. Manual inspection of the final frame showed a
+  nonblank scene with detached/stacked H2O blobs, matching the summary failure.
+
 ## Current Focused Result - 2026-06-15 Positioned Product-Event Spatial Gas Ledger
 
 The current slice replaces the temporary sealed-box bridge in the mounted

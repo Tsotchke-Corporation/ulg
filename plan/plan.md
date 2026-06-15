@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 10:56 AKDT: the visual sanity matrix now
+captures dense frame artifacts by default and carries the probe's actual
+`analysis.issues` into `summary.json`. The prior full matrix failure was
+nearly useless at the summary layer because per-scenario issues lived under
+`analysis.issues`, while `scripts/sph-visual-sanity-matrix.mjs` only copied
+top-level `probe.issues`; frame capture was also off unless explicitly set.
+The matrix now defaults to close-spaced PNG capture unless
+`ULG_VISUAL_MATRIX_CAPTURE_FRAMES=0`, records compact visual-surface issue
+entries, issue counts, frame artifact status/count, observed speed,
+displacement, J bounds, pressure impulse, sim time, H2O visible surface counts,
+and surface-overflow metrics. A focused smoke run
+`codex-visual-summary-issues-smoke-20260615` over
+`liquid-liquid-h2o-cpu-sph` deliberately failed but now reports
+`visible-surface-expanded-beyond-particle-bounds`, two compact surface-overflow
+entries, frame artifact status `ready`, and two captured PNGs. Next target:
+use this dense harness to attack the exposed P0 behavior failure, starting with
+same-material H2O surface identity/bounds and the detached/stacked CPU-SPH
+liquid surfaces before treating visual captures as physics acceptance again.
+
 Current checkpoint, 2026-06-15 10:48 AKDT: the retained product-event buffer
 path now produces positioned spatial gas cells for the mounted no-full Na/H2O
 route instead of relying on the sealed-box aggregate fallback. Direct

@@ -12,6 +12,16 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 10:56 AKDT update: the visual matrix harness now captures frames
+  by default and propagates `analysis.issues` plus compact visual-surface issue
+  details into `summary.json`. Smoke evidence
+  `/tmp/ulg-visual-sanity-matrix/codex-visual-summary-issues-smoke-20260615`
+  now shows the CPU-SPH H2O/H2O failure directly in the matrix summary:
+  `visible-surface-expanded-beyond-particle-bounds`, two captured frames, max
+  overflow about `0.229 m` in X/Z and `0.095 m` in Y, and two visible H2O
+  surfaces. Use this as the next P0 behavior target; do not treat the visual
+  matrix as accepted unless the summary issue counts are empty and the frame
+  artifacts are nonblank.
 - 2026-06-15 10:48 AKDT update: the positioned retained product-event gas path
   is fixed for the mounted no-full Na/H2O gate, but this does not clear the
   broad physics behavior regression. A full visual matrix after the fix wrote

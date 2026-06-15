@@ -1,5 +1,72 @@
 # ULG Implementation Log
 
+## 2026-06-15 10:56 AKDT - Dense visual matrix summaries
+
+Prompt:
+
+- Continued the active goal to stabilize ULG SPH/MLS-MPM physics behavior,
+  add dense visual validation, and keep plan/todo architecture aligned with
+  ComputeManager/NodeKernel direction.
+
+Implemented:
+
+- Fixed `scripts/sph-visual-sanity-matrix.mjs` so matrix summaries propagate
+  `probe.analysis.issues`; the previous summary only copied top-level
+  `probe.issues`, which hid the real failure causes from failed scenarios.
+- Made visual matrix frame capture default-on unless
+  `ULG_VISUAL_MATRIX_CAPTURE_FRAMES=0`, with a default max of `16` frames per
+  scenario.
+- Added compact visual-surface issue rows to the matrix summary without copying
+  full geometry bounds into `summary.json`.
+- Added summary issue counts, visual-surface issue counts, frame artifact
+  status/count, observed speed, displacement, J bounds, pressure impulse, sim
+  time, H2O visible surface counts, and surface overflow metrics.
+- Verified the harness with a small CPU-SPH H2O/H2O run that is expected to
+  fail while still producing actionable summary issues and PNG frame artifacts.
+
+Files touched:
+
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/dense-visual-matrix-summary-2026-06-15.md`
+- `.icc/ulg_status.json`
+- `.icc/ulg_arch_summary.md`
+
+Commands run:
+
+- `node --check scripts/sph-visual-sanity-matrix.mjs`
+- `node scripts/sph-visual-sanity-matrix.mjs --list`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-visual-summary-issues-smoke-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=2 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+- `git diff --check`
+- `npm run icc:update`
+
+Validation:
+
+- PASS: syntax and scenario listing checks passed.
+- PASS/EXPECTED-FAIL: visual summary smoke completed with `failedCount=1`,
+  `captureFrames=true`, issue count
+  `visible-surface-expanded-beyond-particle-bounds=1`, two compact visual
+  surface issue rows, frame artifact status `ready`, and `frameCount=2`.
+- PASS: frame artifact files were non-empty PNGs:
+  `0000-b000-initial.png` and
+  `0001-b001-plain-sph-cpu-reference-batch.png`.
+- PASS: manual frame inspection found a nonblank scene and confirmed detached/
+  stacked H2O blobs matching the summary issue.
+- PASS: `git diff --check`.
+- PASS: `npm run icc:update` refreshed `296` indexed files and `1532`
+  memory chunks.
+
+Open:
+
+- Use the now-actionable visual matrix output to fix same-material H2O surface
+  identity/bounds and CPU-SPH stacked/blob behavior.
+- Run the full matrix with the new default frame capture after the next
+  behavior fix.
+
 ## 2026-06-15 10:48 AKDT - Positioned product-event spatial gas ledger
 
 Prompt:

@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 10:56 AKDT: the visual sanity matrix now
+defaults to writing close-spaced PNG frame artifacts and propagates
+`analysis.issues` plus compact visual-surface issue details into
+`summary.json`. This fixes a validation blind spot from the `11/12` failed
+full matrix: failures are now actionable at the matrix summary layer instead
+of requiring manual digs into each giant probe JSON/log. Keep this as the
+mandatory visual gate for each major slice. The next active behavior target is
+the now-visible H2O surface identity/bounds failure: same-material CPU-SPH
+liquid still renders as detached/stacked H2O surfaces with
+`visible-surface-expanded-beyond-particle-bounds`, so visual acceptance is not
+cleared even when physics atomics pass.
+
 Current routing note, 2026-06-15 10:48 AKDT: the immediate no-full Na/H2O
 spatial-gas blocker is now past the sealed-box fallback. The WebGPU
 `spatialGasLedgerProducer` compact stage transcodes retained product-event rows

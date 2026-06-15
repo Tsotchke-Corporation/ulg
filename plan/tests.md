@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Browser Worker Thermal/Phase Stage
+## Current Focused Result - 2026-06-14 Formal GPUHub Thermal/Phase Stage DAG
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -14,10 +14,25 @@ The latest unit slice adds the first ComputeManager thermal/phase child stage
 task boundary for the next law-family promotion.
 The Worker module now also accepts a `thermalPhase` stage id and can adopt
 retained thermo output into the Worker lane. The focused browser gate now runs
-that `thermalPhase` stage on the same warm Worker/lane after mechanics
-continuation.
+that `thermalPhase` stage through the formal ComputeManager/GPUHub stage-plan
+DAG on the same warm Worker/lane after mechanics continuation.
 Focused checks:
 
+- Formal GPUHub thermal/phase stage DAG:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`. The retained continuation now requests
+  `includeThermalPhaseStage=true` from `host.runMechanicsStageTaskChain()`.
+  Assertions prove `thermalPhase` appears in the stage-plan execution order,
+  uses `gpu-hub-resident-stage-executor`, reports `worker-ready`, runs
+  `webgpu-accepted-no-full-readback`, satisfies the queue fence, applies
+  retained thermo input, adopts retained thermo output, passes thermal task
+  evidence, and remains non-authoritative.
+- PeerCompute formal thermal DAG integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`. The new injected Worker-runner case proves the opt-in
+  stage plan executes `p2g -> gridUpdate -> g2p -> thermalPhase` through
+  GPUHub resident-stage executors with all four stages `worker-ready`, and
+  verifies thermal tables are present in the Worker context.
 - Browser Worker thermal/phase stage:
   `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
   passed `1/1`. The gate now keeps the mechanics Worker warm, runs the
@@ -26,7 +41,8 @@ Focused checks:
   prove the Worker thermal stage reports `webgpu`,
   `webgpu-accepted-no-full-readback`, `no-full-readback`, queue fence
   satisfied, retained thermo input applied, retained thermo output adopted,
-  task evidence passed, and no authoritative mutation.
+  task evidence passed, and no authoritative mutation. Superseded by the
+  formal GPUHub thermal/phase stage DAG check above.
 - SPH thermal no-full acceptance:
   `node --test tests/sphThermalGpuKernel.test.mjs --test-name-pattern "no-full retained output"`
   reported `11/11`. The new case asserts

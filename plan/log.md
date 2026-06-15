@@ -1,5 +1,55 @@
 # ULG Implementation Log
 
+## 2026-06-14 23:23 AKDT - Formal GPUHub thermal/phase stage DAG
+
+Implemented:
+
+- Added an opt-in `includeThermalPhaseStage` path to the
+  ComputeManager/GPUHub mechanics stage-chain contract.
+- The formal lane pass DAG can now execute
+  `p2g -> gridUpdate -> g2p -> thermalPhase` on the same lane/state key.
+- `thermalPhase` is registered through the existing GPUHub resident-stage
+  executor path and summarized with the same backend, readback, fence, worker
+  residency, evidence, and authority fields as the mechanics stages.
+- The browser authority-host gate no longer calls
+  `mechanicsStageWorkerRunner.runStage()` directly for thermal. The retained
+  continuation now requests `includeThermalPhaseStage=true` from
+  `host.runMechanicsStageTaskChain()`, proving PeerCompute owns the stage.
+- Worker-retained mechanics publication now treats a 4-stage execution as
+  valid when all mechanics stages completed, while retaining the thermal output
+  as a non-authoritative candidate for the next StateManager admission slice.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `git diff --check`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal phase stage compute task"`
+  reported `33/33`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-formal-thermal-stage-dag-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Publish/admit Worker-retained thermal outputs through NodeKernel/StateManager
+  instead of only retaining them inside the Worker lane.
+- Continue to pressure/interface and reaction/product stage promotion after the
+  thermal retained-output admission path is explicit.
+- Renderer z-buffer/draw-order failures remain queued as a renderer P0/P1
+  blocker before visual captures are treated as authoritative.
+
 ## 2026-06-14 23:01 AKDT - Browser Worker thermal/phase stage
 
 Implemented:

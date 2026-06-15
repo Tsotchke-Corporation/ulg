@@ -133,6 +133,7 @@ const GPU_BUFFER_USAGE = {
 };
 const DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS = 3;
 const MECHANICS_STAGE_ORDER = Object.freeze(['p2g', 'gridUpdate', 'g2p']);
+const THERMAL_PHASE_STAGE_ID = 'thermalPhase';
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -4109,8 +4110,50 @@ function createMlsMpmMechanicsStageLaneContract({
   queueFencePolicy = 'queue.onSubmittedWorkDone-before-admission',
   readFamilies = ['sph-particle-state', 'mls-mpm-mechanics'],
   writeFamilies = ['sph-particle-state', 'mls-mpm-mechanics'],
-  retainedBufferRefs = ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer']
+  retainedBufferRefs = ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer'],
+  includeThermalPhaseStage = false
 } = {}) {
+  const contractReadFamilies = includeThermalPhaseStage
+    ? uniqueNonEmptyStrings([...readFamilies, 'sph-thermo-phase'])
+    : [...readFamilies];
+  const contractWriteFamilies = includeThermalPhaseStage
+    ? uniqueNonEmptyStrings([...writeFamilies, 'sph-thermo-phase'])
+    : [...writeFamilies];
+  const laneRetainedBufferRefs = includeThermalPhaseStage
+    ? uniqueNonEmptyStrings([...retainedBufferRefs, 'sph-thermo-buffer'])
+    : [...retainedBufferRefs];
+  const passDagStages = [
+    {
+      id: 'p2g',
+      lawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
+      runtimeTarget: 'compute-manager-stage-task',
+      reads: ['sph-particle-state', 'mls-mpm-mechanics'],
+      writes: ['mls-mpm-grid']
+    },
+    {
+      id: 'gridUpdate',
+      lawNodeId: 'ulg-mls-mpm-mechanics-grid-update-stage',
+      runtimeTarget: 'compute-manager-stage-task',
+      reads: ['mls-mpm-grid'],
+      writes: ['mls-mpm-grid']
+    },
+    {
+      id: 'g2p',
+      lawNodeId: 'ulg-mls-mpm-mechanics-g2p-stage',
+      runtimeTarget: 'compute-manager-stage-task',
+      reads: ['mls-mpm-grid', 'sph-particle-state', 'mls-mpm-mechanics'],
+      writes: ['sph-particle-state', 'mls-mpm-mechanics']
+    }
+  ];
+  if (includeThermalPhaseStage) {
+    passDagStages.push({
+      id: THERMAL_PHASE_STAGE_ID,
+      lawNodeId: 'ulg-thermal-phase-law',
+      runtimeTarget: 'compute-manager-stage-task',
+      reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics'],
+      writes: ['sph-thermo-phase']
+    });
+  }
   return {
     schema: ULG_MLS_MPM_MECHANICS_STAGE_LANE_CONTRACT_SCHEMA,
     authority: 'compute-manager-gpuhub-resident-lane-contract',
@@ -4119,36 +4162,16 @@ function createMlsMpmMechanicsStageLaneContract({
     stateKey,
     domainKey,
     queueFencePolicy,
-    readFamilies: [...readFamilies],
-    writeFamilies: [...writeFamilies],
-    laneMustRetainBuffers: [...retainedBufferRefs],
+    readFamilies: contractReadFamilies,
+    writeFamilies: contractWriteFamilies,
+    laneMustRetainBuffers: laneRetainedBufferRefs,
     sequenceRequested: true,
     sequenceRunnable: true,
-    sequenceMode: 'mechanics-stage-task-chain',
+    sequenceMode: includeThermalPhaseStage
+      ? 'mechanics-plus-thermal-phase-stage-task-chain'
+      : 'mechanics-stage-task-chain',
     defaultEnabled: false,
-    passDagStages: [
-      {
-        id: 'p2g',
-        lawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
-        runtimeTarget: 'compute-manager-stage-task',
-        reads: ['sph-particle-state', 'mls-mpm-mechanics'],
-        writes: ['mls-mpm-grid']
-      },
-      {
-        id: 'gridUpdate',
-        lawNodeId: 'ulg-mls-mpm-mechanics-grid-update-stage',
-        runtimeTarget: 'compute-manager-stage-task',
-        reads: ['mls-mpm-grid'],
-        writes: ['mls-mpm-grid']
-      },
-      {
-        id: 'g2p',
-        lawNodeId: 'ulg-mls-mpm-mechanics-g2p-stage',
-        runtimeTarget: 'compute-manager-stage-task',
-        reads: ['mls-mpm-grid', 'sph-particle-state', 'mls-mpm-mechanics'],
-        writes: ['sph-particle-state', 'mls-mpm-mechanics']
-      }
-    ],
+    passDagStages,
     ownershipRules: [
       'single-authoritative-owner-after-each-stage',
       'stage-output-remains-non-authoritative-until-state-manager-admission',
@@ -4172,6 +4195,14 @@ function retainedBufferRefsForMechanicsStageResult(stageId, result = {}) {
     }
     if (result?.mechanicsBuffer || result?.gpuResult?.mechanicsBuffer || result?.mechanics instanceof Float32Array || result?.mechanicsBufferByteLength > 0) {
       refs.push('mls-mpm-mechanics-buffer');
+    }
+  }
+  if (stageId === THERMAL_PHASE_STAGE_ID) {
+    if (result?.stateBuffer || result?.gpuResult?.stateBuffer || result?.state instanceof Float32Array || result?.stateBufferByteLength > 0) {
+      refs.push('sph-state-buffer');
+    }
+    if (result?.thermoBuffer || result?.gpuResult?.thermoBuffer || result?.thermo instanceof Float32Array || result?.thermoBufferByteLength > 0) {
+      refs.push('sph-thermo-buffer');
     }
   }
   return refs;
@@ -4213,6 +4244,7 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     || null;
   return {
     stageId,
+    executionStatus: result?.status || null,
     backend: result?.backend || null,
     residency: gpuResidentLaneRequirement ? 'gpu-lane' : 'cpu-oracle',
     laneId: gpuResidentLaneRequirement?.laneId || gpuResidentLaneExecution?.lease?.laneId || null,
@@ -4234,7 +4266,9 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     workerRetainedThermoInput: result?.workerResidentStage?.workerRetainedThermoInput || null,
     workerRetainedThermoOutputStatus: result?.workerResidentStage?.workerRetainedThermoOutputStatus || null,
     workerRetainedThermoOutput: result?.workerResidentStage?.workerRetainedThermoOutput || null,
-    workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || [])
+    workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || []),
+    thermalPhaseEvidencePassed: result?.thermalPhaseStageTaskEvidence?.passed === true,
+    thermalPhaseAuthoritativeMutation: result?.thermalPhaseStageTaskAuthority?.authoritativeStateMutation ?? null
   };
 }
 
@@ -4307,8 +4341,11 @@ function buildMechanicsWorkerCompactPublicationCandidate({
       )
     ])
   );
+  const completedStageIds = new Set((stageExecution?.stageResults || [])
+    .filter((entry) => entry?.status === 'completed')
+    .map((entry) => entry.stageId));
   const stageExecutionCompleted = stageExecution?.status === 'completed'
-    && stageExecution?.completedStageCount === MECHANICS_STAGE_ORDER.length;
+    && MECHANICS_STAGE_ORDER.every((stageId) => completedStageIds.has(stageId));
   const allWorkerReady = MECHANICS_STAGE_ORDER.every((stageId) => (
     stageWorkerResidencyStatuses[stageId] === 'worker-ready'
   ));
@@ -4351,6 +4388,7 @@ function buildMechanicsWorkerCompactPublicationCandidate({
     stateKey,
     workerModuleUrl,
     stageOrder: [...MECHANICS_STAGE_ORDER],
+    observedStageOrder: (stageExecution?.stageResults || []).map((entry) => entry.stageId).filter(Boolean),
     stageBackends,
     stageReadbackModes,
     stageWorkerWebGpuStatuses,
@@ -4359,7 +4397,9 @@ function buildMechanicsWorkerCompactPublicationCandidate({
     workerRetainedBufferRefs,
     workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
     retainedBufferRefs: uniqueNonEmptyStrings(stageExecution?.retainedBufferRefs || []),
-    outputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    outputFamilies: completedStageIds.has(THERMAL_PHASE_STAGE_ID)
+      ? ['sph-particle-state', 'mls-mpm-mechanics', 'sph-thermo-phase']
+      : ['sph-particle-state', 'mls-mpm-mechanics'],
     requiredPublicationProtocol: 'worker-posts-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
     nextRequiredImplementation: 'authorized-worker-compact-output-publication'
   };
@@ -4379,6 +4419,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerModuleUrl = null,
   gpuHubResidentStageWorkerOutputPublisher = null,
   gpuHubResidentStageWorkerUseRetainedInput = false,
+  includeThermalPhaseStage = false,
   gpuResidentLaneId = null,
   gpuResidentLaneStateKey = null,
   gpuResidentLaneDomainKey = null,
@@ -4406,8 +4447,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const laneStagePlanContract = createMlsMpmMechanicsStageLaneContract({
     laneId: laneStagePlanId,
     stateKey: laneStagePlanStateKey,
-    domainKey: gpuResidentLaneDomainKey
+    domainKey: gpuResidentLaneDomainKey,
+    includeThermalPhaseStage
   });
+  const stageOrder = laneStagePlanContract.passDagStages.map((stage) => stage.id);
   const sphParticleState = stepOptions.sphParticleState;
   const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
   const dims = finiteVector3(stepOptions.boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -4424,6 +4467,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const canUseNativeTaskGraph = useNativeTaskGraph !== false
     && typeof nativeTaskGraphSubmitter.submitTaskGraph === 'function'
     && stepOptions.preferWebGpu !== true
+    && includeThermalPhaseStage !== true
     && !stepOptions.sphParticleUpload
     && !stepOptions.mlsMpmParticleUpload;
   if (canUseNativeTaskGraph) {
@@ -4587,9 +4631,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         solverId: 'ulg-mls-mpm-mechanics-stage-plan',
         taskId: `${taskIdPrefix}:mechanics-stage-plan`,
         owner: 'ulg-mls-mpm-mechanics-law',
-        readFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
-        writeFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
-        retainedBufferRefs: ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer'],
+        readFamilies: laneStagePlanContract.readFamilies,
+        writeFamilies: laneStagePlanContract.writeFamilies,
+        retainedBufferRefs: laneStagePlanContract.laneMustRetainBuffers,
         queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission',
         residentSequenceLaneContract: laneStagePlanContract,
         copyBudget: {
@@ -4779,6 +4823,33 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           ...summarizeMechanicsStageLaneResult('g2p', result)
         }
       };
+    },
+    [THERMAL_PHASE_STAGE_ID]: async () => {
+      const result = await submitStageTask(THERMAL_PHASE_STAGE_ID, createSphThermalPhaseStageComputeTask, {
+        sphParticleState,
+        mlsMpmParticleState,
+        thermalMaterialTable: stepOptions.thermalMaterialTable || null,
+        thermalClosureGraphSet: stepOptions.thermalClosureGraphSet || null,
+        thermalClosureGraphBank: stepOptions.thermalClosureGraphBank || null,
+        thermalPhaseResponseTable: stepOptions.thermalPhaseResponseTable || null,
+        wallTemperaturesK: stepOptions.wallTemperaturesK || {},
+        boxDimsM: dims,
+        dtS: stepOptions.dtS ?? dtSeconds,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        domainKey: gpuResidentLaneDomainKey,
+        preferWebGpu: stepOptions.preferWebGpu === true,
+        readbackMode
+      });
+      return {
+        value: result,
+        retainedBufferRefs: retainedBufferRefsForMechanicsStageResult(THERMAL_PHASE_STAGE_ID, result),
+        summary: {
+          computeTaskResultSchema: result?.computeTaskResultSchema || null,
+          evidencePassed: result?.thermalPhaseStageTaskEvidence?.passed === true,
+          ...summarizeMechanicsStageLaneResult(THERMAL_PHASE_STAGE_ID, result)
+        }
+      };
     }
   };
   const gpuHubForStageExecutors = resolveMechanicsStageGpuHub(computeManager);
@@ -4870,9 +4941,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         solverId: 'ulg-mls-mpm-mechanics-stage-plan',
         taskId: `${taskIdPrefix}:mechanics-stage-plan`,
         owner: 'ulg-mls-mpm-mechanics-law',
-        readFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
-        writeFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
-        retainedBufferRefs: ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer'],
+        readFamilies: laneStagePlanContract.readFamilies,
+        writeFamilies: laneStagePlanContract.writeFamilies,
+        retainedBufferRefs: laneStagePlanContract.laneMustRetainBuffers,
         queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission',
         residentSequenceLaneContract: laneStagePlanContract,
         copyBudget: {
@@ -4901,7 +4972,15 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
               cflFactor,
               laneId: laneStagePlanId,
               stateKey: laneStagePlanStateKey,
-              domainKey: gpuResidentLaneDomainKey
+              domainKey: gpuResidentLaneDomainKey,
+              ...(includeThermalPhaseStage ? {
+                thermalMaterialTable: stepOptions.thermalMaterialTable || null,
+                thermalClosureGraphSet: stepOptions.thermalClosureGraphSet || null,
+                thermalClosureGraphBank: stepOptions.thermalClosureGraphBank || null,
+                thermalPhaseResponseTable: stepOptions.thermalPhaseResponseTable || null,
+                wallTemperaturesK: stepOptions.wallTemperaturesK || {},
+                dtS: stepOptions.dtS ?? dtSeconds
+              } : {})
             }
           }
         : null;
@@ -4982,8 +5061,19 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   });
   const stageTaskBoundaries = { ...(step.mechanicsOnlySplitPath?.stageTaskBoundaries || {}) };
   const evidence = step.mechanicsOnlySplitPath?.stageTaskEvidence || {};
+  const stageEvidenceByStage = {
+    p2g: evidence.p2g || null,
+    gridUpdate: evidence.gridUpdate || null,
+    g2p: evidence.g2p || null,
+    ...(includeThermalPhaseStage ? {
+      [THERMAL_PHASE_STAGE_ID]: stageResults[THERMAL_PHASE_STAGE_ID]?.thermalPhaseStageTaskEvidence || null
+    } : {})
+  };
+  if (includeThermalPhaseStage && stageResults[THERMAL_PHASE_STAGE_ID]?.thermalPhaseStageTask === true) {
+    stageTaskBoundaries[THERMAL_PHASE_STAGE_ID] = true;
+  }
   const stageLaneSummaries = Object.fromEntries(
-    ['p2g', 'gridUpdate', 'g2p'].map((stageId) => [
+    stageOrder.map((stageId) => [
       stageId,
       summarizeMechanicsStageLaneResult(stageId, stageResults[stageId])
     ])
@@ -5008,6 +5098,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   );
   const stageTaskNormalHotLoopReadbackFree = Object.fromEntries(
     Object.entries(stageLaneSummaries).map(([stageId, summary]) => [stageId, summary.normalHotLoopReadbackFree])
+  );
+  const stageTaskExecutionStatuses = Object.fromEntries(
+    Object.entries(stageLaneSummaries).map(([stageId, summary]) => [stageId, summary.executionStatus])
+  );
+  const stageTaskEvidencePassed = Object.fromEntries(
+    stageOrder.map((stageId) => [stageId, stageEvidenceByStage[stageId]?.passed === true])
   );
   const stageExecutionExecutorSources = Object.fromEntries(
     (gpuResidentLaneStagePlanExecution?.stageResults || [])
@@ -5134,6 +5230,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageTaskFenceSatisfied: stageTaskFenceSatisfied,
     gpuResidentLaneStageTaskReadbackModes: stageTaskReadbackModes,
     gpuResidentLaneStageTaskNormalHotLoopReadbackFree: stageTaskNormalHotLoopReadbackFree,
+    gpuResidentLaneStageTaskExecutionStatuses: stageTaskExecutionStatuses,
     gpuResidentLaneStageTaskLaneAligned: allStageTaskLaneIdsMatchPlan,
     gpuResidentLaneStageLeaseId: gpuResidentLaneStagePlanLease?.leaseId || null,
     gpuResidentLaneStageLeaseFenceStatus: gpuResidentLaneStagePlanLeaseExecution?.gpuFence?.status || null,
@@ -5155,21 +5252,18 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
     authoritativeStateMutation: false,
     childLawAuthority: 'not-admitted',
-    stageOrder: ['p2g', 'gridUpdate', 'g2p'],
+    stageOrder: [...stageOrder],
     stageTaskBoundaries,
     submittedStageTasks,
-    stageTaskResultSchemas: {
-      p2g: stageResults.p2g?.computeTaskResultSchema || null,
-      gridUpdate: stageResults.gridUpdate?.computeTaskResultSchema || null,
-      g2p: stageResults.g2p?.computeTaskResultSchema || null
-    },
-    stageTaskEvidenceSchemas: {
-      p2g: evidence.p2g?.schema || null,
-      gridUpdate: evidence.gridUpdate?.schema || null,
-      g2p: evidence.g2p?.schema || null
-    },
-    allStageTaskEvidencePassed: ['p2g', 'gridUpdate', 'g2p']
-      .every((stageId) => evidence[stageId]?.passed === true),
+    stageTaskResultSchemas: Object.fromEntries(
+      stageOrder.map((stageId) => [stageId, stageResults[stageId]?.computeTaskResultSchema || null])
+    ),
+    stageTaskEvidenceSchemas: Object.fromEntries(
+      stageOrder.map((stageId) => [stageId, stageEvidenceByStage[stageId]?.schema || null])
+    ),
+    stageTaskEvidencePassed,
+    allStageTaskEvidencePassed: stageOrder
+      .every((stageId) => stageEvidenceByStage[stageId]?.passed === true),
     scientificValidation: false,
     fullPhysicsValidation: false
   };
@@ -5224,10 +5318,16 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       gpuResidentLaneStageTaskBackends: { ...stageTaskChain.gpuResidentLaneStageTaskBackends },
       gpuResidentLaneStageTaskResidencies: { ...stageTaskChain.gpuResidentLaneStageTaskResidencies },
       gpuResidentLaneStageTaskFenceSatisfied: { ...stageTaskChain.gpuResidentLaneStageTaskFenceSatisfied },
+      gpuResidentLaneStageTaskReadbackModes: { ...stageTaskChain.gpuResidentLaneStageTaskReadbackModes },
+      gpuResidentLaneStageTaskNormalHotLoopReadbackFree: { ...stageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree },
+      gpuResidentLaneStageTaskExecutionStatuses: { ...stageTaskChain.gpuResidentLaneStageTaskExecutionStatuses },
       gpuResidentLaneStageTaskLaneAligned: stageTaskChain.gpuResidentLaneStageTaskLaneAligned,
       gpuResidentLaneStageLeaseFenceStatus: stageTaskChain.gpuResidentLaneStageLeaseFenceStatus,
       gpuResidentLaneStageLeaseFenceSatisfied: stageTaskChain.gpuResidentLaneStageLeaseFenceSatisfied,
       nodeKernelOwned: stageTaskChain.nodeKernelOwned,
+      stageTaskResultSchemas: { ...stageTaskChain.stageTaskResultSchemas },
+      stageTaskEvidenceSchemas: { ...stageTaskChain.stageTaskEvidenceSchemas },
+      stageTaskEvidencePassed: { ...stageTaskChain.stageTaskEvidencePassed },
       allStageTaskEvidencePassed: stageTaskChain.allStageTaskEvidencePassed
     };
   }

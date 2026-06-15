@@ -5534,7 +5534,6 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
       const mechanicsStageWorkerRunner = host.createUlgMechanicsResidentStageWorkerRunner({ timeoutMs: 60000 });
       let mechanicsStageTaskChainWorker = null;
       let mechanicsStageTaskChainWorkerContinuation = null;
-      let mechanicsStageTaskChainWorkerThermal = null;
       let disposeMechanicsStageWorkerRunner = true;
       try {
         mechanicsStageTaskChainWorker = await host.runMechanicsStageTaskChain({
@@ -5563,46 +5562,19 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
             gpuHubResidentStageWorkerRunner: mechanicsStageWorkerRunner,
             gpuHubResidentStageWorkerModuleUrl: host.ulgMechanicsResidentStageWorkerModulePath,
             gpuHubResidentStageWorkerOutputPublisher: (payload) => host.publishWorkerRetainedMechanicsStageOutput(payload),
-            gpuHubResidentStageWorkerUseRetainedInput: true
-          });
-        }
-        if (mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.workerCompactPublicationCommitted === true) {
-          mechanicsStageTaskChainWorkerThermal = await mechanicsStageWorkerRunner.runStage({
-            stage: {
-              id: 'thermalPhase',
-              lawNodeId: 'ulg-thermal-phase-law',
-              runtimeTarget: 'gpu-hub-resident-stage-worker',
-              reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics'],
-              writes: ['sph-thermo-phase']
-            },
-            lease: {
-              laneId: 'ulg:browser:mechanics-stage-worker-bridge-chain-lane',
-              stateKey: 'ulg:browser:mechanics-stage-worker-bridge-chain-state',
-              queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission'
-            },
-            context: {
-              ulgMechanicsResidentStageWorker: {
-                schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
-                taskIdPrefix: 'ulg:browser:worker-thermal-phase-stage',
-                preferWebGpu: true,
-                readbackMode: 'no-full-readback',
-                common: {
-                  ...mechanicsOnlyChildTaskInput,
-                  thermalMaterialTable: scene.getSphThermalMaterialTable?.(),
-                  thermalClosureGraphSet: scene.getSphThermalClosureGraphBuffers?.(),
-                  thermalClosureGraphBank: scene.getSphThermalClosureGraphBuffers?.()?.graphBank ?? null,
-                  thermalPhaseResponseTable: scene.getSphThermalPhaseResponseTable?.(),
-                  boxDimsM: scene.getBoxDimensionsM?.() ?? [5, 5, 5],
-                  dtS: mechanicsOnlyChildTaskInput.mlsMpmParticleState?.mechanicsDtS ?? 0
-                }
-              }
-            }
+            gpuHubResidentStageWorkerUseRetainedInput: true,
+            includeThermalPhaseStage: true,
+            thermalMaterialTable: scene.getSphThermalMaterialTable?.(),
+            thermalClosureGraphSet: scene.getSphThermalClosureGraphBuffers?.(),
+            thermalClosureGraphBank: scene.getSphThermalClosureGraphBuffers?.()?.graphBank ?? null,
+            thermalPhaseResponseTable: scene.getSphThermalPhaseResponseTable?.(),
+            boxDimsM: scene.getBoxDimensionsM?.() ?? [5, 5, 5],
+            dtS: mechanicsOnlyChildTaskInput.mlsMpmParticleState?.mechanicsDtS ?? 0
           });
         }
         disposeMechanicsStageWorkerRunner = !(
           mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCommitted === true
           || mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.workerCompactPublicationCommitted === true
-          || mechanicsStageTaskChainWorkerThermal?.summary?.status === 'worker-stage-completed'
         );
       } finally {
         if (disposeMechanicsStageWorkerRunner) mechanicsStageWorkerRunner.dispose?.();
@@ -5614,6 +5586,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
       const workerPublicationWarmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-mechanics-publications') || {};
       const workerPublicationWarmDelta = Object.values(workerPublicationWarmDeltas)
         .find((entry) => entry?.payload?.hotBufferKey === workerPublicationHotBufferKey) || null;
+      const workerThermalLaneSummary = mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.thermalPhase || {};
       const mechanicsStageTaskChainWorkerSummary = {
         schema: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.schema ?? null,
         status: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.status ?? null,
@@ -5654,16 +5627,19 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         workerContinuationG2pRetainedThermoInputStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.g2p?.workerRetainedThermoInputStatus ?? null,
         workerContinuationPublicationStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.workerCompactPublicationStatus ?? null,
         workerContinuationPublicationCommitted: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.workerCompactPublicationCommitted ?? null,
-        workerThermalStageStatus: mechanicsStageTaskChainWorkerThermal?.summary?.status ?? null,
-        workerThermalStageBackend: mechanicsStageTaskChainWorkerThermal?.summary?.backend ?? null,
-        workerThermalStageExecutionStatus: mechanicsStageTaskChainWorkerThermal?.value?.status ?? null,
-        workerThermalStageReadbackMode: mechanicsStageTaskChainWorkerThermal?.value?.readbackMode ?? null,
-        workerThermalStageNormalHotLoopReadbackFree: mechanicsStageTaskChainWorkerThermal?.value?.normalHotLoopReadbackFree ?? null,
-        workerThermalStageQueueFenceSatisfied: mechanicsStageTaskChainWorkerThermal?.value?.workerResidentStage?.workerQueueFenceSatisfied ?? null,
-        workerThermalStageThermoInputStatus: mechanicsStageTaskChainWorkerThermal?.value?.workerResidentStage?.workerRetainedThermoInputStatus ?? null,
-        workerThermalStageThermoOutputStatus: mechanicsStageTaskChainWorkerThermal?.value?.workerResidentStage?.workerRetainedThermoOutputStatus ?? null,
-        workerThermalStageEvidencePassed: mechanicsStageTaskChainWorkerThermal?.value?.thermalPhaseStageTaskEvidence?.passed ?? null,
-        workerThermalStageAuthoritativeMutation: mechanicsStageTaskChainWorkerThermal?.value?.thermalPhaseStageTaskAuthority?.authoritativeStateMutation ?? null
+        workerThermalStageInFormalDag: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStageOrder?.includes?.('thermalPhase') ?? null,
+        workerThermalStageExecutorSource: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionExecutorSources?.thermalPhase ?? null,
+        workerThermalStageWorkerResidencyStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerResidencyStatuses?.thermalPhase ?? null,
+        workerThermalStageStatus: workerThermalLaneSummary.workerResidentStageStatus ?? null,
+        workerThermalStageBackend: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskBackends?.thermalPhase ?? null,
+        workerThermalStageExecutionStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskExecutionStatuses?.thermalPhase ?? null,
+        workerThermalStageReadbackMode: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskReadbackModes?.thermalPhase ?? null,
+        workerThermalStageNormalHotLoopReadbackFree: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskNormalHotLoopReadbackFree?.thermalPhase ?? null,
+        workerThermalStageQueueFenceSatisfied: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskFenceSatisfied?.thermalPhase ?? null,
+        workerThermalStageThermoInputStatus: workerThermalLaneSummary.workerRetainedThermoInputStatus ?? null,
+        workerThermalStageThermoOutputStatus: workerThermalLaneSummary.workerRetainedThermoOutputStatus ?? null,
+        workerThermalStageEvidencePassed: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.stageTaskEvidencePassed?.thermalPhase ?? null,
+        workerThermalStageAuthoritativeMutation: workerThermalLaneSummary.thermalPhaseAuthoritativeMutation ?? null
       };
       const registeredSolvers = host.computeManager.listSolvers?.() || [];
       const residentSolver = registeredSolvers.find((solver) => solver.id === 'ulg-mls-mpm-sph-resident-steps') || null;
@@ -6308,22 +6284,27 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     }
   });
   expect(result.mechanicsStageTaskChainWorker.workerContinuationStatus).toBe('compute-manager-stage-task-chain-executed');
-  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskBackends).toEqual({
-    p2g: 'webgpu',
-    gridUpdate: 'webgpu',
-    g2p: 'webgpu'
-  });
-  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskFenceSatisfied).toEqual({
-    p2g: true,
-    gridUpdate: true,
-    g2p: true
-  });
+	  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskBackends).toEqual({
+	    p2g: 'webgpu',
+	    gridUpdate: 'webgpu',
+	    g2p: 'webgpu',
+	    thermalPhase: 'webgpu'
+	  });
+	  expect(result.mechanicsStageTaskChainWorker.workerContinuationStageTaskFenceSatisfied).toEqual({
+	    p2g: true,
+	    gridUpdate: true,
+	    g2p: true,
+	    thermalPhase: true
+	  });
   expect(result.mechanicsStageTaskChainWorker.workerContinuationP2gRetainedInputStatus).toBe('applied-worker-retained-g2p-input');
   expect(result.mechanicsStageTaskChainWorker.workerContinuationP2gRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
   expect(result.mechanicsStageTaskChainWorker.workerContinuationG2pRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
-  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationStatus).toBe('worker-retained-mechanics-output-published');
-  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationCommitted).toBe(true);
-  expect(result.mechanicsStageTaskChainWorker.workerThermalStageStatus).toBe('worker-stage-completed');
+	  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationStatus).toBe('worker-retained-mechanics-output-published');
+	  expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationCommitted).toBe(true);
+	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageInFormalDag).toBe(true);
+	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageExecutorSource).toBe('gpu-hub-resident-stage-executor');
+	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageWorkerResidencyStatus).toBe('worker-ready');
+	  expect(result.mechanicsStageTaskChainWorker.workerThermalStageStatus).toBe('worker-stage-completed');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageBackend).toBe('webgpu');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageExecutionStatus).toBe('webgpu-accepted-no-full-readback');
   expect(result.mechanicsStageTaskChainWorker.workerThermalStageReadbackMode).toBe('no-full-readback');

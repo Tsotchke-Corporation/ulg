@@ -21,7 +21,8 @@ import {
   ULG_MLS_MPM_MECHANICS_ONLY_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
-  ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA
+  ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
   ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
@@ -1424,6 +1425,185 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gridUpdate: true,
     g2p: true
   });
+
+  const thermalStageWorkerBridgeCalls = [];
+  const gpuHubWorkerThermalStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...mechanicsStageParticle,
+    computeManager,
+    modulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    stageTaskIdPrefix: 'ulg:test:mechanics-stage-gpuhub-worker-thermal-chain',
+    useNativeTaskGraph: false,
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    includeThermalPhaseStage: true,
+    thermalMaterialTable: { schema: 'test-thermal-material-table.v0' },
+    thermalClosureGraphSet: { schema: 'test-thermal-closure-graph-set.v0' },
+    thermalClosureGraphBank: null,
+    thermalPhaseResponseTable: { schema: 'test-thermal-phase-response-table.v0' },
+    wallTemperaturesK: {},
+    gpuResidentLaneId: 'ulg:test:mechanics-stage-gpuhub-worker-thermal',
+    gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-gpuhub-worker-thermal-state',
+    gpuHubResidentStageWorkerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    gpuHubResidentStageWorkerRunner: {
+      async runStage({ stage, input, lease, executor, context }) {
+        thermalStageWorkerBridgeCalls.push({
+          stageId: stage.id,
+          inputSource: input?.source || null,
+          workerStatus: executor?.workerPolicy?.status || null,
+          contextSchema: context?.ulgMechanicsResidentStageWorker?.schema || null,
+          contextHasThermalTables: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.thermalMaterialTable)
+        });
+        const gpuResidentLaneRequirement = {
+          laneId: lease.laneId,
+          stateKey: lease.stateKey
+        };
+        const gpuFence = {
+          schema: 'peercompute.compute.gpu-fence-report.v0',
+          status: 'queue-work-completed',
+          fenceSatisfied: true,
+          required: true,
+          laneId: lease.laneId,
+          stateKey: lease.stateKey
+        };
+        const base = {
+          backend: 'webgpu',
+          status: 'webgpu-accepted-no-full-readback',
+          readbackMode: 'no-full-readback',
+          normalHotLoopReadbackFree: true,
+          gpuResidentLaneRequirement,
+          gpuFence,
+          gpuFenceReport: gpuFence,
+          workerResidentStage: {
+            schema: 'peercompute.ulg.mechanics-resident-stage-worker-stage.v0',
+            status: 'worker-stage-completed',
+            workerWebGpuRequested: true,
+            workerWebGpuStatus: 'worker-webgpu-ready',
+            workerDeviceCached: true,
+            workerQueueFenceSatisfied: true
+          }
+        };
+        if (stage.id === 'p2g') {
+          return {
+            value: {
+              ...base,
+              computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_P2G_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+              gridBufferByteLength: 96,
+              mechanicsP2gStageTaskEvidence: { schema: 'peercompute.ulg.mechanics-p2g-stage-task-evidence.v0', passed: true }
+            },
+            retainedBufferRefs: ['mls-mpm-p2g-grid-buffer', 'ulg-worker:test:p2g:grid'],
+            summary: { backend: 'webgpu', stage: 'p2g' }
+          };
+        }
+        if (stage.id === 'gridUpdate') {
+          return {
+            value: {
+              ...base,
+              computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+              updatedGridBufferByteLength: 96,
+              mechanicsGridUpdateStageTaskEvidence: { schema: 'peercompute.ulg.mechanics-grid-update-stage-task-evidence.v0', passed: true }
+            },
+            retainedBufferRefs: ['mls-mpm-grid-update-buffer', 'ulg-worker:test:gridUpdate:grid'],
+            summary: { backend: 'webgpu', stage: 'gridUpdate' }
+          };
+        }
+        if (stage.id === 'g2p') {
+          return {
+            value: {
+              ...base,
+              computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+              stateBufferByteLength: 64,
+              mechanicsBufferByteLength: 64,
+              mechanicsG2pStageTaskEvidence: { schema: 'peercompute.ulg.mechanics-g2p-stage-task-evidence.v0', passed: true },
+              workerResidentStage: {
+                ...base.workerResidentStage,
+                workerRetainedThermoInputStatus: 'applied-worker-retained-thermo-input'
+              }
+            },
+            retainedBufferRefs: ['sph-state-buffer', 'mls-mpm-mechanics-buffer', 'ulg-worker:test:g2p:state'],
+            summary: { backend: 'webgpu', stage: 'g2p' }
+          };
+        }
+        return {
+          value: {
+            ...base,
+            computeTaskResultSchema: ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+            stateBufferByteLength: 64,
+            thermoBufferByteLength: 64,
+            retainedOutputParticleBuffers: true,
+            fullReadbackPerformed: false,
+            thermalPhaseStageTask: true,
+            thermalPhaseStageTaskEvidence: {
+              schema: 'peercompute.ulg.thermal-phase-stage-task-evidence.v0',
+              passed: true
+            },
+            thermalPhaseStageTaskAuthority: {
+              schema: 'peercompute.ulg.thermal-phase-stage-task-authority.v0',
+              authoritativeStateMutation: false
+            },
+            workerResidentStage: {
+              ...base.workerResidentStage,
+              workerRetainedThermoInputStatus: 'applied-worker-retained-thermo-input',
+              workerRetainedThermoOutputStatus: 'adopted-worker-retained-thermo-output'
+            }
+          },
+          retainedBufferRefs: ['sph-thermo-buffer', 'ulg-worker:test:thermalPhase:thermo'],
+          summary: { backend: 'webgpu', stage: 'thermalPhase' }
+        };
+      }
+    }
+  });
+  assert.deepEqual(
+    thermalStageWorkerBridgeCalls.map((entry) => entry.stageId),
+    ['p2g', 'gridUpdate', 'g2p', 'thermalPhase']
+  );
+  assert.deepEqual(
+    thermalStageWorkerBridgeCalls.map((entry) => entry.workerStatus),
+    ['worker-ready', 'worker-ready', 'worker-ready', 'worker-ready']
+  );
+  assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextSchema, 'peercompute.ulg.mechanics-resident-stage-worker-context.v0');
+  assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasThermalTables, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 4);
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
+    ['p2g', 'gridUpdate', 'g2p', 'thermalPhase']
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 4);
+  assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
+    p2g: 'gpu-hub-resident-stage-executor',
+    gridUpdate: 'gpu-hub-resident-stage-executor',
+    g2p: 'gpu-hub-resident-stage-executor',
+    thermalPhase: 'gpu-hub-resident-stage-executor'
+  });
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
+  assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses, {
+    p2g: 'worker-ready',
+    gridUpdate: 'worker-ready',
+    g2p: 'worker-ready',
+    thermalPhase: 'worker-ready'
+  });
+  assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageOrder, ['p2g', 'gridUpdate', 'g2p', 'thermalPhase']);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskBoundaries.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskResultSchemas.thermalPhase, ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidenceSchemas.thermalPhase, 'peercompute.ulg.thermal-phase-stage-task-evidence.v0');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidencePassed.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.allStageTaskEvidencePassed, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.thermalPhase, 'webgpu');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskExecutionStatuses.thermalPhase, 'webgpu-accepted-no-full-readback');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskFenceSatisfied.thermalPhase, true);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskReadbackModes.thermalPhase, 'no-full-readback');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskNormalHotLoopReadbackFree.thermalPhase, true);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.thermalPhase.workerRetainedThermoInputStatus,
+    'applied-worker-retained-thermo-input'
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.thermalPhase.workerRetainedThermoOutputStatus,
+    'adopted-worker-retained-thermo-output'
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskLaneSummaries.thermalPhase.thermalPhaseAuthoritativeMutation,
+    false
+  );
 
   const mechanicsChildDryRun = await runUlgMechanicsChildDryRunTask({
     referenceEvidence: measuredMechanicsEvidence,

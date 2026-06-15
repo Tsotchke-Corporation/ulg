@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 23:23 AKDT: `thermalPhase` is now part of the
+formal ComputeManager/GPUHub stage-plan DAG when
+`includeThermalPhaseStage=true`. The browser authority-host gate no longer
+calls the Worker thermal stage directly; the retained same-lane continuation
+executes `p2g -> gridUpdate -> g2p -> thermalPhase` through
+`host.runMechanicsStageTaskChain()`, with GPUHub resident-stage executor
+sources, Worker-ready residency, no-full WebGPU execution, queue-fence
+evidence, retained thermo input/output summaries, and non-authoritative
+thermal task evidence. Next target: publish/admit Worker-retained thermal
+outputs through NodeKernel/StateManager instead of only carrying the
+`thermoBuffer` inside the Worker lane.
+
 Current checkpoint, 2026-06-14 23:01 AKDT: the browser Worker path now executes
 a real `thermalPhase` stage after the same-Worker mechanics continuation. The
 focused authority-host gate sends cloneable thermal tables to the already warm
@@ -12,7 +24,8 @@ retained thermal `thermoBuffer`. Thermal no-full acceptance is explicit in
 `runSphThermalStepWithOptionalWebGpu()`, so this no longer compares Worker-hot
 state against a stale CPU mirror. Next target: promote this direct Worker call
 into the formal ComputeManager/GPUHub stage-plan DAG and StateManager
-publication path.
+publication path. Superseded by the 23:23 formal GPUHub thermal/phase stage DAG
+above.
 
 Current checkpoint, 2026-06-14 22:50 AKDT: the checked-in resident-stage Worker
 module now has a `thermalPhase` stage path. The Worker imports

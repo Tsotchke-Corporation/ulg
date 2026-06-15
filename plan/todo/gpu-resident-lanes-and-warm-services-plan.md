@@ -211,6 +211,16 @@ architecture move is to make this a formal GPUHub stage-plan node and publish
 the retained thermal output through NodeKernel/StateManager rather than only
 asserting it in the browser gate.
 
+Status update, 2026-06-14 formal GPUHub thermal/phase stage DAG: thermal/phase
+is now an opt-in fourth node in the same ComputeManager/GPUHub resident stage
+plan as mechanics. With `includeThermalPhaseStage=true`, the pass DAG executes
+`p2g -> gridUpdate -> g2p -> thermalPhase` through GPUHub resident-stage
+executors on the same Worker/lane. The browser gate no longer has a test-only
+direct Worker call for thermal. The next architecture move is Worker-retained
+thermal output publication/admission through NodeKernel/StateManager, followed
+by pressure/interface and reaction/product stage promotion behind the same
+authority path.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

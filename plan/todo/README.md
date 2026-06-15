@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 23:23 AKDT: `thermalPhase` now runs as an
+opt-in fourth node in the formal ComputeManager/GPUHub stage-plan DAG. The
+browser authority-host gate requests `includeThermalPhaseStage=true` on the
+same Worker/lane retained continuation, so PeerCompute executes
+`p2g -> gridUpdate -> g2p -> thermalPhase` through GPUHub resident-stage
+executors instead of a direct test-only Worker call. Validation passed focused
+PeerCompute integration, resident-step units, the browser authority gate,
+physics atomics, and the representative visual matrix. Next priority: publish
+and admit Worker-retained thermal outputs through NodeKernel/StateManager so
+downstream pressure/interface and reaction/product stages consume an admitted
+thermal retained-ref descriptor rather than only a Worker-local lane record.
+
 Current routing note, 2026-06-14 23:01 AKDT: the focused browser authority
 gate now runs `thermalPhase` on the same warm Worker/lane after the mechanics
 Worker continuation. The Worker consumes its retained G2P state and retained
@@ -44,7 +56,8 @@ the Worker queue fence, and adopts the emitted retained `thermoBuffer` into
 the lane record. This proves the first real browser Worker thermal stage path.
 Next priority: fold this into the formal GPUHub stage-plan DAG instead of
 calling the Worker directly from the test, then publish/admit thermal retained
-outputs through NodeKernel/StateManager.
+outputs through NodeKernel/StateManager. Superseded by the 23:23 formal DAG
+note above.
 
 Current routing note, 2026-06-14 22:50 AKDT: the resident-stage Worker module
 now accepts a `thermalPhase` stage id. It can run

@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 04:37 AKDT: local gas-cell pressure-field
+consumption is now admission-gated. PressureInterface stage evidence,
+Worker compact publication candidates, and the browser authority host all
+distinguish a computable local oracle gas-cell field from an admitted
+distributed gas-cell field. Retained gas-cell buffer refs alone are no longer
+enough: local-gradient pressure publication also requires
+`peercompute.ulg.pressure-interface-gas-cell-field-admission.v0` with
+`pressure-interface-gas-cell-field-consumption-approved`. Next priority:
+replace caller-supplied local gas-cell fields with admitted retained gas-cell
+refs loaded from StateManager/GPUHub inside the ComputeManager stage DAG.
+Keep the reported z-buffer/draw-order issue queued as renderer visual
+correctness, not as a blocker for this pressure admission slice.
+
 Current routing note, 2026-06-15 04:23 AKDT: pressure/interface Worker
 publication now admits local gas-cell pressure buffers only when they are
 worker-retained. If a pressure stage uses local pressure gradients, the

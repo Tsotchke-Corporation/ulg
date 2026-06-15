@@ -8,6 +8,7 @@ import {
 import {
   ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   createMlsMpmMechanicsG2pStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
   createMlsMpmMechanicsP2gStageComputeTask,
@@ -2070,6 +2071,30 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
   const forceRowsBufferRetained = candidate.pressureInterfaceForceRowsBufferRetained === true
     || workerRetainedBufferRefs.length > 0;
   const localPressureGradientReady = candidate.localPressureGradientReady === true;
+  const pressureInterfaceGasCellFieldAdmissionSchema = normalizeString(
+    candidate.pressureInterfaceGasCellFieldAdmissionSchema
+      || candidate.pressureInterfaceGasCellFieldAdmission?.schema,
+    null
+  );
+  const pressureInterfaceGasCellFieldAdmissionStatus = normalizeString(
+    candidate.pressureInterfaceGasCellFieldAdmissionStatus
+      || candidate.pressureInterfaceGasCellFieldAdmission?.status,
+    localPressureGradientReady ? 'pressure-interface-gas-cell-field-admission-required' : 'not-required-uniform-pressure-field'
+  );
+  const pressureInterfaceGasCellFieldAdmissionApproved = !localPressureGradientReady
+    || (
+      candidate.pressureInterfaceGasCellFieldAdmissionApproved === true
+      && pressureInterfaceGasCellFieldAdmissionSchema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
+      && pressureInterfaceGasCellFieldAdmissionStatus === 'pressure-interface-gas-cell-field-consumption-approved'
+    );
+  const pressureInterfaceGasCellFieldConsumerStatus = normalizeString(
+    candidate.pressureInterfaceGasCellFieldConsumerStatus,
+    localPressureGradientReady
+      ? (pressureInterfaceGasCellFieldAdmissionApproved
+          ? 'admitted-local-gas-cell-field-consumer-ready'
+          : 'blocked-local-gas-cell-field-admission-required')
+      : 'uniform-pressure-field-no-local-gas-cell-admission-required'
+  );
   const gasPressureCellRowCount = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceGasPressureCellRowCount, 0)));
   const gasPressureCellRowStrideFloats = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceGasPressureCellRowStrideFloats, 0)));
   const gasPressureCellRowByteLength = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceGasPressureCellRowByteLength, 0)));
@@ -2102,6 +2127,9 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     )
   ) {
     throw new TypeError('pressure/interface local gas-cell publication requires worker-lane GPU retained gas-cell buffers');
+  }
+  if (localPressureGradientReady && !pressureInterfaceGasCellFieldAdmissionApproved) {
+    throw new TypeError('pressure/interface local gas-cell publication requires admitted gas-cell field consumption evidence');
   }
   const committedAt = Date.now();
   const workerRetainedBufferImport = {
@@ -2136,6 +2164,10 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     localPressureGradientReady,
     localPressureGradientStatus: candidate.localPressureGradientStatus || null,
     localPressureGradientForceCouplingStatus: candidate.localPressureGradientForceCouplingStatus || null,
+    pressureInterfaceGasCellFieldAdmissionSchema,
+    pressureInterfaceGasCellFieldAdmissionStatus,
+    pressureInterfaceGasCellFieldAdmissionApproved,
+    pressureInterfaceGasCellFieldConsumerStatus,
     workerRetainedGasPressureBufferRefs,
     retainedGasPressureBufferRefs,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
@@ -2179,6 +2211,10 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     localPressureGradientReady,
     localPressureGradientStatus: workerRetainedBufferImport.localPressureGradientStatus,
     localPressureGradientForceCouplingStatus: workerRetainedBufferImport.localPressureGradientForceCouplingStatus,
+    pressureInterfaceGasCellFieldAdmissionSchema,
+    pressureInterfaceGasCellFieldAdmissionStatus,
+    pressureInterfaceGasCellFieldAdmissionApproved,
+    pressureInterfaceGasCellFieldConsumerStatus,
     workerRetainedGasPressureBufferRefs,
     retainedGasPressureBufferRefs,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
@@ -2227,6 +2263,10 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     localPressureGradientReady,
     localPressureGradientStatus: workerRetainedBufferImport.localPressureGradientStatus,
     localPressureGradientForceCouplingStatus: workerRetainedBufferImport.localPressureGradientForceCouplingStatus,
+    pressureInterfaceGasCellFieldAdmissionSchema,
+    pressureInterfaceGasCellFieldAdmissionStatus,
+    pressureInterfaceGasCellFieldAdmissionApproved,
+    pressureInterfaceGasCellFieldConsumerStatus,
     workerRetainedGasPressureBufferRefs,
     retainedGasPressureBufferRefs,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,

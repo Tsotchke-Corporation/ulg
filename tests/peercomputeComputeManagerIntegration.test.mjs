@@ -22,6 +22,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
@@ -3229,6 +3230,10 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
     localPressureGradientReady: true,
     localPressureGradientStatus: 'local-pressure-gradient-field-ready',
     localPressureGradientForceCouplingStatus: 'local-pressure-gradient-force-coupling-ready',
+    pressureInterfaceGasCellFieldAdmissionSchema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    pressureInterfaceGasCellFieldAdmissionStatus: 'pressure-interface-gas-cell-field-consumption-approved',
+    pressureInterfaceGasCellFieldAdmissionApproved: true,
+    pressureInterfaceGasCellFieldConsumerStatus: 'admitted-local-gas-cell-field-consumer-ready',
     workerRetainedGasPressureBufferRefs: ['ulg-worker:test:pressureInterface:gasCells'],
     retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
     pressureInterfaceGasPressureCellRowCount: 2,
@@ -3258,6 +3263,10 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(publication.pressureInterfaceForceRowsBufferRetained, true);
   assert.equal(publication.pressureFieldMode, 'local-gas-cell-pressure-gradient');
   assert.equal(publication.localPressureGradientReady, true);
+  assert.equal(publication.pressureInterfaceGasCellFieldAdmissionSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA);
+  assert.equal(publication.pressureInterfaceGasCellFieldAdmissionStatus, 'pressure-interface-gas-cell-field-consumption-approved');
+  assert.equal(publication.pressureInterfaceGasCellFieldAdmissionApproved, true);
+  assert.equal(publication.pressureInterfaceGasCellFieldConsumerStatus, 'admitted-local-gas-cell-field-consumer-ready');
   assert.equal(publication.pressureInterfaceGasPressureCellRowCount, 2);
   assert.equal(publication.pressureInterfaceGasPressureCellRowStrideFloats, 12);
   assert.equal(publication.pressureInterfaceGasPressureCellRowByteLength, 96);
@@ -3275,6 +3284,7 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(publication.workerRetainedBufferImport.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(publication.workerRetainedBufferImport.gridForceApplicationApproved, false);
   assert.equal(publication.workerRetainedBufferImport.pressureInterfaceGasPressureCellRowsBufferRetained, true);
+  assert.equal(publication.workerRetainedBufferImport.pressureInterfaceGasCellFieldAdmissionApproved, true);
 
   assert.throws(() => host.publishWorkerRetainedPressureInterfaceStageOutput({
     candidate: {
@@ -3288,6 +3298,20 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
     sourceTaskId: 'ulg:test:pressure-interface-stage-plan-invalid',
     sourceStage: 'pressureInterface'
   }), /requires worker-lane GPU retained force-row buffers/);
+
+  assert.throws(() => host.publishWorkerRetainedPressureInterfaceStageOutput({
+    candidate: {
+      ...candidate,
+      pressureInterfaceGasCellFieldAdmissionSchema: null,
+      pressureInterfaceGasCellFieldAdmissionStatus: 'pressure-interface-gas-cell-field-admission-required',
+      pressureInterfaceGasCellFieldAdmissionApproved: false,
+      pressureInterfaceGasCellFieldConsumerStatus: 'blocked-local-gas-cell-field-admission-required'
+    },
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:pressure-interface-stage-plan-local-gas-unadmitted',
+    sourceStage: 'pressureInterface'
+  }), /requires admitted gas-cell field consumption evidence/);
 
   assert.throws(() => host.publishWorkerRetainedPressureInterfaceStageOutput({
     candidate: {
@@ -3312,6 +3336,8 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(hotRecord.pressureInterfaceForceRowsBufferByteLength, 128);
   assert.equal(hotRecord.pressureInterfaceGasPressureCellRowByteLength, 96);
   assert.deepEqual(hotRecord.workerRetainedGasPressureBufferRefs, candidate.workerRetainedGasPressureBufferRefs);
+  assert.equal(hotRecord.pressureInterfaceGasCellFieldAdmissionApproved, true);
+  assert.equal(hotRecord.pressureInterfaceGasCellFieldConsumerStatus, 'admitted-local-gas-cell-field-consumer-ready');
   assert.equal(hotRecord.bufferResidency, 'worker-lane-gpu-buffer-retained');
   assert.equal(hotRecord.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
 
@@ -3326,6 +3352,8 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(warmDelta.payload.pressureInterfaceForceRowsBufferRetained, true);
   assert.equal(warmDelta.payload.pressureInterfaceGasPressureCellRowCount, 2);
   assert.equal(warmDelta.payload.pressureInterfaceGasPressureCellRowsBufferRetained, true);
+  assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldAdmissionSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA);
+  assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldAdmissionApproved, true);
   assert.deepEqual(warmDelta.payload.workerRetainedGasPressureBufferRefs, candidate.workerRetainedGasPressureBufferRefs);
   assert.equal(warmDelta.payload.bufferResidency, 'worker-lane-gpu-buffer-retained');
   assert.equal(warmDelta.payload.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');

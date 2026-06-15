@@ -123,6 +123,7 @@ export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-pressure-interface-stage-compute-task-result.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.pressure-interface-stage-task-evidence.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0';
+export const ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA = 'peercompute.ulg.pressure-interface-gas-cell-field-admission.v0';
 export const ULG_SPH_THERMAL_PHASE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-thermal-phase-worker-compact-publication-candidate.v0';
 export const ULG_SPH_REACTION_PRODUCT_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-reaction-product-worker-compact-publication-candidate.v0';
 export const ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-thermal-phase-stage-compute-task.v0';
@@ -3915,6 +3916,10 @@ function createSphPressureInterfaceStageTaskEvidence(pressureResult = {}, {
     localPressureGradientForceCouplingStatus: solver?.localPressureGradientForceCouplingStatus
       || pressureResult?.pressureFeedback?.localPressureGradientForceCouplingStatus
       || null,
+    pressureInterfaceGasCellFieldAdmissionSchema: pressureResult?.pressureInterfaceGasCellFieldAdmissionSchema || null,
+    pressureInterfaceGasCellFieldAdmissionStatus: pressureResult?.pressureInterfaceGasCellFieldAdmissionStatus || null,
+    pressureInterfaceGasCellFieldAdmissionApproved: pressureResult?.pressureInterfaceGasCellFieldAdmissionApproved === true,
+    pressureInterfaceGasCellFieldConsumerStatus: pressureResult?.pressureInterfaceGasCellFieldConsumerStatus || null,
     pressureInterfaceForceRowCount: finiteNumber(solver?.forceRowCount ?? pressureResult?.forceRowCount, 0),
     pressureInterfaceForceRowsPresent: forceRowsPresent,
     pressureInterfaceConservationStatus: solver?.conservationStatus || null,
@@ -4106,6 +4111,26 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     materialInterfaceField: stageOptions.materialInterfaceField || null,
     pressureInterfaceCoupling
   });
+  const pressureInterfaceGasCellFieldAdmission = stageOptions.pressureInterfaceGasCellFieldAdmission
+    || stageOptions.gasPressureCellFieldAdmission
+    || null;
+  const localPressureGradientReady = pressureFeedback?.gasCellField?.localPressureGradientReady === true;
+  const pressureInterfaceGasCellFieldAdmissionApproved = !localPressureGradientReady
+    || (
+      pressureInterfaceGasCellFieldAdmission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
+      && pressureInterfaceGasCellFieldAdmission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
+      && pressureInterfaceGasCellFieldAdmission?.gasCellFieldConsumptionApproved === true
+    );
+  const pressureInterfaceGasCellFieldAdmissionStatus = localPressureGradientReady
+    ? (pressureInterfaceGasCellFieldAdmissionApproved
+        ? 'pressure-interface-gas-cell-field-consumption-approved'
+        : 'pressure-interface-gas-cell-field-admission-required')
+    : 'not-required-uniform-pressure-field';
+  const pressureInterfaceGasCellFieldConsumerStatus = localPressureGradientReady
+    ? (pressureInterfaceGasCellFieldAdmissionApproved
+        ? 'admitted-local-gas-cell-field-consumer-ready'
+        : 'blocked-local-gas-cell-field-admission-required')
+    : 'uniform-pressure-field-no-local-gas-cell-admission-required';
   let pressureResult = null;
   let webgpuStatus = null;
   if (
@@ -4174,6 +4199,11 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
     pressureInterfaceCoupling,
     pressureInterfaceForcePreview,
     pressureInterfaceForceSolver,
+    pressureInterfaceGasCellFieldAdmission,
+    pressureInterfaceGasCellFieldAdmissionSchema: pressureInterfaceGasCellFieldAdmission?.schema || null,
+    pressureInterfaceGasCellFieldAdmissionStatus,
+    pressureInterfaceGasCellFieldAdmissionApproved,
+    pressureInterfaceGasCellFieldConsumerStatus,
     forceRowCount: finiteNumber(pressureInterfaceForceSolver?.forceRowCount, 0),
     forceRowStrideFloats: finiteNumber(pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     forceRowByteLength: pressureResult?.forceRowByteLength ?? forceRowValues.byteLength,
@@ -4210,6 +4240,8 @@ export async function runSphPressureInterfaceStageComputeTask(data = {}) {
       solverId: lawGraphNode?.solverId || 'ulg-sph-pressure-interface-stage',
       readFamilies: [...(lawGraphNode?.readFamilies || ['resident-gas-pressure', 'sph-material-interface-field'])],
       writeFamilies: [...(lawGraphNode?.writeFamilies || ['pressure-interface-force-rows'])],
+      pressureInterfaceGasCellFieldAdmissionRequired: localPressureGradientReady,
+      pressureInterfaceGasCellFieldAdmissionApproved,
       commitDeltaSuppressed: true,
       authoritativeStateMutation: false,
       gridForceApplicationApproved: false,
@@ -5022,6 +5054,12 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     localPressureGradientForceCouplingStatus: result?.pressureInterfaceForceSolver?.localPressureGradientForceCouplingStatus
       || result?.pressureFeedback?.localPressureGradientForceCouplingStatus
       || null,
+    pressureInterfaceGasCellFieldAdmissionSchema: result?.pressureInterfaceGasCellFieldAdmissionSchema
+      || result?.pressureInterfaceGasCellFieldAdmission?.schema
+      || null,
+    pressureInterfaceGasCellFieldAdmissionStatus: result?.pressureInterfaceGasCellFieldAdmissionStatus || null,
+    pressureInterfaceGasCellFieldAdmissionApproved: result?.pressureInterfaceGasCellFieldAdmissionApproved === true,
+    pressureInterfaceGasCellFieldConsumerStatus: result?.pressureInterfaceGasCellFieldConsumerStatus || null,
     pressureInterfaceGasPressureCellRowCount: finiteNumber(
       result?.gasPressureCellRowCount
         ?? result?.pressureInterfaceForceSolver?.gasPressureCellRowCount,
@@ -5253,6 +5291,8 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   const gasPressureCellRowStrideFloats = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceGasPressureCellRowStrideFloats, 0));
   const gasPressureCellRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceGasPressureCellRowByteLength, 0));
   const gasPressureCellRowsBufferRetained = pressureSummary.pressureInterfaceGasPressureCellRowsBufferRetained === true;
+  const gasCellFieldAdmissionApproved = !localPressureGradientReady
+    || pressureSummary.pressureInterfaceGasCellFieldAdmissionApproved === true;
   const backend = pressureSummary.backend || null;
   const readbackMode = pressureSummary.readbackMode || null;
   const workerResidencyStatus = stageWorkerResidencyStatuses[PRESSURE_INTERFACE_STAGE_ID] || null;
@@ -5272,27 +5312,30 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
       && gasPressureCellRowByteLength > 0
       && gasPressureCellRowsBufferRetained
     );
-  const blocker = !workerRunnerSupplied
-    ? 'worker-runner-not-supplied'
-    : (!pressureStageCompleted
-      ? 'pressure-interface-stage-execution-not-completed'
-      : (workerResidencyStatus !== 'worker-ready'
-        ? 'pressure-interface-worker-residency-not-ready'
-        : (!backendAllowed
-          ? 'pressure-interface-worker-webgpu-retained-buffer-required'
-          : (readbackMode !== NO_FULL_READBACK_MODE || pressureSummary.normalHotLoopReadbackFree !== true
-            ? 'pressure-interface-no-full-readback-required'
-            : (!evidencePassed
-              ? 'pressure-interface-force-row-evidence-not-passed'
-              : (solverStatus !== 'pressure-interface-force-solver-ready'
-                ? 'pressure-interface-force-solver-not-ready'
-                : (!mutationSuppressed
-                  ? 'pressure-interface-authority-must-remain-non-mutating'
-                  : (!retainedGpuForceRowsProven
-                    ? 'pressure-interface-retained-gpu-force-row-buffer-required'
-                    : (!retainedGpuGasCellsProven
-                        ? 'pressure-interface-retained-local-gas-cell-buffer-required'
-                        : null)))))))));
+  let blocker = null;
+  if (!workerRunnerSupplied) {
+    blocker = 'worker-runner-not-supplied';
+  } else if (!pressureStageCompleted) {
+    blocker = 'pressure-interface-stage-execution-not-completed';
+  } else if (workerResidencyStatus !== 'worker-ready') {
+    blocker = 'pressure-interface-worker-residency-not-ready';
+  } else if (!backendAllowed) {
+    blocker = 'pressure-interface-worker-webgpu-retained-buffer-required';
+  } else if (readbackMode !== NO_FULL_READBACK_MODE || pressureSummary.normalHotLoopReadbackFree !== true) {
+    blocker = 'pressure-interface-no-full-readback-required';
+  } else if (!evidencePassed) {
+    blocker = 'pressure-interface-force-row-evidence-not-passed';
+  } else if (solverStatus !== 'pressure-interface-force-solver-ready') {
+    blocker = 'pressure-interface-force-solver-not-ready';
+  } else if (!mutationSuppressed) {
+    blocker = 'pressure-interface-authority-must-remain-non-mutating';
+  } else if (!retainedGpuForceRowsProven) {
+    blocker = 'pressure-interface-retained-gpu-force-row-buffer-required';
+  } else if (!retainedGpuGasCellsProven) {
+    blocker = 'pressure-interface-retained-local-gas-cell-buffer-required';
+  } else if (!gasCellFieldAdmissionApproved) {
+    blocker = 'pressure-interface-local-gas-cell-field-admission-required';
+  }
   const candidateReady = !blocker;
   return {
     schema: ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
@@ -5337,6 +5380,10 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     localPressureGradientReady,
     localPressureGradientStatus: pressureSummary.localPressureGradientStatus || null,
     localPressureGradientForceCouplingStatus: pressureSummary.localPressureGradientForceCouplingStatus || null,
+    pressureInterfaceGasCellFieldAdmissionSchema: pressureSummary.pressureInterfaceGasCellFieldAdmissionSchema || null,
+    pressureInterfaceGasCellFieldAdmissionStatus: pressureSummary.pressureInterfaceGasCellFieldAdmissionStatus || null,
+    pressureInterfaceGasCellFieldAdmissionApproved: gasCellFieldAdmissionApproved,
+    pressureInterfaceGasCellFieldConsumerStatus: pressureSummary.pressureInterfaceGasCellFieldConsumerStatus || null,
     pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,

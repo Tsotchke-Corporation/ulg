@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 04:37 AKDT: pressure/interface local gas-cell
+field consumption now has an explicit admission contract. A local-gradient
+pressureInterface stage reports whether
+`peercompute.ulg.pressure-interface-gas-cell-field-admission.v0` approved
+consumption of the gas-cell field; missing approval records
+`pressure-interface-gas-cell-field-admission-required` and
+`blocked-local-gas-cell-field-admission-required` even when force rows can be
+computed for local oracle purposes. Worker compact publication candidates now
+fail closed for local gas-cell fields unless that admission is present, and
+the browser authority host rejects publication attempts that provide retained
+gas-cell buffers without admitted field-consumption evidence. Validation
+passed syntax checks, focused pressure-interface stage tests, PeerCompute host
+publication tests, WebGPU pressure producer coverage, physics atomics, and
+the three-scenario visual matrix
+`codex-gas-cell-field-admission-20260615` with inspected final frames. Next
+target: make pressureInterface consume admitted retained gas-cell refs from
+StateManager/GPUHub inside the ComputeManager DAG instead of receiving
+caller-supplied local cell fields.
+
 Current checkpoint, 2026-06-15 04:23 AKDT: pressure/interface publication now
 preserves and gates retained local gas-cell pressure buffers. When a
 pressureInterface stage uses local pressure gradients, the WebGPU producer can

@@ -1,5 +1,91 @@
 # ULG Implementation Log
 
+## 2026-06-15 04:37 AKDT - Local gas-cell field admission consumer gate
+
+Prompt:
+
+- User reported major z-buffer issues with draw order and asked to note it for
+  later. The issue was already queued as renderer visual-correctness debt, so
+  work continued on the in-progress pressure/local-gas-cell admission slice.
+
+Implemented:
+
+- Added the pressure/interface gas-cell field admission schema:
+  `peercompute.ulg.pressure-interface-gas-cell-field-admission.v0`.
+- Added stage-result, stage-evidence, stage-authority, and lane-summary fields
+  that distinguish admitted local gas-cell field consumption from blocked
+  caller-supplied local oracle fields.
+- Replaced the fragile nested pressure publication blocker ternary with an
+  explicit ordered blocker sequence.
+- Added a Worker compact publication blocker:
+  `pressure-interface-local-gas-cell-field-admission-required`.
+- Extended browser authority-host pressure publication to reject local-gradient
+  pressure publication unless retained gas-cell buffer refs are accompanied by
+  admitted gas-cell field-consumption evidence.
+- Preserved gas-cell field admission schema/status/approval/consumer status in
+  pressure/interface StateManager hot records, warm deltas, and retained-buffer
+  import descriptors.
+- Added focused tests for blocked and admitted stage-level local gas-cell
+  consumption and host publication rejection without admission.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-gas-cell-field-admission-consumer-2026-06-15.md`
+
+Commands run:
+
+- `sed -n '1,220p' /home/cos/.codex/skills/icc/SKILL.md`
+- `sed -n '1,180p' /home/cos/projects/AGENTS.md`
+- `git status --short`
+- `rg -n "z-buffer|Z-buffer|draw order|draw-order|depth" plan AGENTS.md /home/cos/projects/AGENTS.md`
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+- `git diff -- src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*local gas-cell|pressure interface stage compute task can produce force rows with WebGPU|pressure interface stage compute task declares retained"`
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained pressure/interface force-row descriptors"`
+- `node --test tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `npm run test:physics-atomics`
+- `curl -k -I --max-time 5 https://127.0.0.1:5173/`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-cell-field-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+- `find /tmp/ulg-visual-sanity-matrix/codex-gas-cell-field-admission-20260615 -maxdepth 2 -type f | sort`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/test modules.
+- PASS: pressure-interface stage admission coverage reported `40/40`.
+- PASS: PeerCompute host publication coverage reported `13/13`.
+- PASS: WebGPU pressure producer coverage reported `3/3`.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon liquid skip.
+- PASS: HTTPS Vite server responded with HTTP `200`.
+- PASS: visual matrix `codex-gas-cell-field-admission-20260615` reported
+  `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two frames per
+  scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-gas-cell-field-admission-20260615`.
+- PASS: manually inspected final frames for MLS-MPM H2O/H2O, CPU-SPH
+  H2O/H2O, and solid H2O CPU-SPH. All were nonblank and bounded. MLS-MPM still
+  shows the known short-horizon fragmentation.
+
+Open:
+
+- PressureInterface still receives local gas-cell fields from the caller for
+  local oracle computation. Next slice should consume admitted retained
+  gas-cell refs from StateManager/GPUHub inside the ComputeManager DAG.
+- Renderer z-buffer/draw-order and focus-change flash/disappear issues remain
+  queued as separate visual-correctness blockers.
+
 ## 2026-06-15 04:23 AKDT - Retained local gas-cell publication gate
 
 Implemented:

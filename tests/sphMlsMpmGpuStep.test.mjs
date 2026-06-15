@@ -37,6 +37,7 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   createSphThermalPhaseStageComputeTask,
   createSphPressureInterfaceStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
@@ -2074,6 +2075,191 @@ test('SPH pressure interface stage records admitted local gas-cell pressure fiel
   assert.equal(result.pressureInterfaceStageTaskEvidence.pressureInterfaceGasCellFieldAdmissionApproved, true);
   assert.equal(result.pressureInterfaceStageTaskAuthority.pressureInterfaceGasCellFieldAdmissionRequired, true);
   assert.equal(result.pressureInterfaceStageTaskAuthority.pressureInterfaceGasCellFieldAdmissionApproved, true);
+});
+
+test('SPH pressure interface stage consumes an admitted retained gas-cell field import', async () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      },
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [-1, 0, 0]
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'synthetic-pressure',
+    totalPressurePa: 120000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {},
+    strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+  };
+  const pressureInterfaceGasCellFieldAdmission = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    sourceHotBufferKey: 'ulg:test:gas-cell-import-hot-buffer',
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer']
+  };
+  const pressureInterfaceGasCellFieldImport = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    sourceHotBufferKey: 'ulg:test:gas-cell-import-hot-buffer',
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+    pressureInterfaceGasCellFieldAdmission,
+    gasCellFieldSnapshot: {
+      localPressureGradientReady: true,
+      cellDims: [2, 1, 1],
+      cells: [
+        {
+          gridIndex: [0, 0, 0],
+          centerM: [0.5, 1, 1],
+          pressurePa: 120000,
+          pressureGradientPaPerM: [0, 0, 0],
+          volumeM3: 4
+        },
+        {
+          gridIndex: [1, 0, 0],
+          centerM: [1.5, 1, 1],
+          pressurePa: 180000,
+          pressureGradientPaPerM: [0, 0, 0],
+          volumeM3: 4
+        }
+      ]
+    }
+  };
+
+  const result = await runSphPressureInterfaceStageComputeTask({
+    computeTaskId: 'ulg:test:pressure-interface-stage-local-gas-import',
+    preferWebGpu: false,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary,
+    materialInterfaceField,
+    pressureInterfaceGasCellFieldImport,
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, true);
+  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
+  assert.equal(result.pressureInterfaceGasCellFieldAdmissionApproved, true);
+  assert.equal(result.pressureInterfaceGasCellFieldImportSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+  assert.equal(result.pressureInterfaceGasCellFieldImportStatus, 'pressure-interface-gas-cell-field-import-ready');
+  assert.equal(result.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(result.pressureInterfaceGasCellFieldImportSourceHotBufferKey, 'ulg:test:gas-cell-import-hot-buffer');
+  assert.deepEqual(result.pressureInterfaceGasCellFieldImportRetainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.pressureInterfaceGasCellFieldImportSourceHotBufferKey, 'ulg:test:gas-cell-import-hot-buffer');
+  assert.equal(result.pressureInterfaceStageTaskAuthority.pressureInterfaceGasCellFieldImportReady, true);
+});
+
+test('SPH pressure interface stage blocks gas-cell field imports without retained refs', async () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 1,
+    elementCount: 1,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      }
+    ]
+  };
+  const pressureInterfaceGasCellFieldAdmission = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    sourceHotBufferKey: 'ulg:test:gas-cell-import-hot-buffer'
+  };
+  const result = await runSphPressureInterfaceStageComputeTask({
+    computeTaskId: 'ulg:test:pressure-interface-stage-local-gas-import-blocked',
+    preferWebGpu: false,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'synthetic-pressure',
+      totalPressurePa: 120000,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      bySpecies: {},
+      strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+    },
+    materialInterfaceField,
+    pressureInterfaceGasCellFieldImport: {
+      schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+      status: 'pressure-interface-gas-cell-field-import-ready',
+      sourceHotBufferKey: 'ulg:test:gas-cell-import-hot-buffer',
+      retainedGasPressureBufferRefs: [],
+      pressureInterfaceGasCellFieldAdmission,
+      gasCellFieldSnapshot: {
+        localPressureGradientReady: true,
+        cellDims: [1, 1, 1],
+        cells: [
+          {
+            gridIndex: [0, 0, 0],
+            centerM: [0.5, 1, 1],
+            pressurePa: 180000,
+            pressureGradientPaPerM: [0, 0, 0],
+            volumeM3: 8
+          }
+        ]
+      }
+    },
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'uniform-single-cell-sealed-gas');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, false);
+  assert.equal(result.pressureInterfaceGasCellFieldImportReady, false);
+  assert.equal(result.pressureInterfaceGasCellFieldImportStatus, 'pressure-interface-gas-cell-field-import-retained-buffer-ref-required');
+  assert.equal(result.pressureInterfaceGasCellFieldAdmissionStatus, 'not-required-uniform-pressure-field');
+  assert.equal(result.pressureInterfaceGasCellFieldAdmissionApproved, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.pressureInterfaceGasCellFieldImportReady, false);
 });
 
 test('SPH pressure interface stage compute task can produce force rows with WebGPU', async () => {

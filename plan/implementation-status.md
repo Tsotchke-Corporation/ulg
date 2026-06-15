@@ -1,9 +1,25 @@
 # Implementation Status
 
-Updated: 2026-06-15 local gas-cell field consumption admission gate, retained local gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
+Updated: 2026-06-15 admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
 ## Done
 
+- Added the admitted gas-cell field import descriptor. PressureInterface can
+  now consume
+  `peercompute.ulg.pressure-interface-gas-cell-field-import.v0` when it is
+  ready, carries admitted gas-cell field-consumption evidence, includes
+  retained gas-cell refs, and provides a local gas-cell snapshot for the
+  CPU/WebGPU oracle path. Invalid imports report precise blocked status and do
+  not replace uniform sealed-gas pressure. Stage evidence, lane summaries, and
+  Worker compact publication candidates expose import schema/status/source hot
+  buffer metadata. The mechanics stage DAG now passes gas-cell import/admission
+  fields through inline lane execution and Worker common context. Validation
+  passed syntax checks, pressureInterface stage coverage `42/42`, Worker stage
+  coverage `4/4`, PeerCompute integration `13/13`, physics atomics `7` with
+  `1` expected opt-in skip, and visual matrix
+  `codex-gas-cell-field-import-20260615` `3/3` with two captured frames per
+  scenario. Manual frame inspection found final frames nonblank and bounded;
+  MLS-MPM still shows the known short-horizon fragmentation.
 - Added the local gas-cell field consumption admission gate. PressureInterface
   stage results, stage evidence, lane summaries, and Worker compact publication
   candidates now distinguish a local gas-cell field that is computable by the

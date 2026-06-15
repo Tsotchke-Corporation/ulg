@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 04:50 AKDT: pressureInterface now has an
+admitted retained gas-cell field import contract. A
+`peercompute.ulg.pressure-interface-gas-cell-field-import.v0` descriptor can
+inject a local gas-cell pressure field only when it is ready, carries the
+admitted gas-cell field-consumption object, includes retained gas-cell refs,
+and provides a local gas-cell snapshot for the CPU/WebGPU oracle path. Invalid
+imports remain blocked and leave pressureInterface on uniform sealed-gas
+pressure. Next priority: create the NodeKernel/StateManager/GPUHub source that
+publishes these imports from resident gas-cell buffers, so callers stop
+constructing the import descriptor directly.
+
 Current routing note, 2026-06-15 04:37 AKDT: local gas-cell pressure-field
 consumption is now admission-gated. PressureInterface stage evidence,
 Worker compact publication candidates, and the browser authority host all

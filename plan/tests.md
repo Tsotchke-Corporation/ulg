@@ -1,6 +1,40 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Local Gas-Cell Field Admission Gate
+## Current Focused Result - 2026-06-15 Admitted Gas-Cell Field Import
+
+The current slice adds
+`peercompute.ulg.pressure-interface-gas-cell-field-import.v0` as the admitted
+input seam for local gas-cell pressure fields. The pressureInterface stage now
+uses an imported local gas-cell field only when the descriptor is ready, has
+admitted field-consumption evidence, has retained gas-cell refs, and includes a
+local gas-cell snapshot for oracle parity. Blocked imports leave the stage on
+uniform sealed-gas pressure.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js` and
+  `node --check tests/sphMlsMpmGpuStep.test.mjs` passed.
+- Pressure/interface stage import coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage compute task can produce force rows with WebGPU|pressure interface stage compute task declares retained"`
+  passed `42/42`.
+- Worker resident stage coverage:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `4/4`.
+- PeerCompute integration coverage:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained pressure/interface force-row descriptors|mechanics-stage-gpuhub-worker-ready|resident pass-DAG task runs through real PeerCompute GPU lane authority"`
+  passed `13/13`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-cell-field-import-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-gas-cell-field-import-20260615`.
+  Manual inspection found all final frames nonblank and bounded; MLS-MPM still
+  shows the known short-horizon fragmentation.
+
+## Prior Focused Result - 2026-06-15 Local Gas-Cell Field Admission Gate
 
 The current slice gates local gas-cell pressure-field consumption separately
 from retained buffer publication. A pressureInterface stage may compute a

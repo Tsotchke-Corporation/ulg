@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 04:50 AKDT: pressureInterface can now consume
+an admitted retained gas-cell field import descriptor. The new
+`peercompute.ulg.pressure-interface-gas-cell-field-import.v0` contract requires
+ready status, admitted field-consumption evidence, retained gas-cell refs, and
+a local gas-cell snapshot before it injects local pressure gradients into the
+pressure feedback path. Invalid imports stay visible as blocked import status
+and do not silently convert uniform sealed-gas pressure into local-gradient
+physics. The mechanics stage DAG passes the import/admission fields through
+inline lane execution and Worker common context, so ComputeManager/GPUHub have
+a stable input seam for the next StateManager-backed gas-cell source. Validation
+passed syntax checks, focused pressureInterface stage coverage, Worker stage
+coverage, PeerCompute integration, physics atomics, and the three-scenario
+visual matrix `codex-gas-cell-field-import-20260615` with inspected final
+frames. Next target: publish/store the gas-cell field import source through
+NodeKernel/StateManager rather than constructing it at the caller boundary.
+
 Current checkpoint, 2026-06-15 04:37 AKDT: pressure/interface local gas-cell
 field consumption now has an explicit admission contract. A local-gradient
 pressureInterface stage reports whether

@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 19:13 AKDT: PeerCompute's
+`GpuResidentLaneManager` now consumes the ULG resident sequence lane contract
+as a first-class lane stage plan. `ComputeManager` preserves
+`residentSequenceLaneContract` in normalized GPU resident lane requirements,
+passes it into the lane lease, and returns the derived
+`peercompute.compute.gpu-resident-lane-stage-plan.v0` in the task execution
+envelope. The new generic `executeStagePlan()` boundary can run supplied
+stage executors under one active lane lease and merge retained refs before the
+lease fence completes. This is still default-off for ULG physics behavior, but
+it is the first real PeerCompute/GPUHub lane-owned stage boundary that future
+P2G/grid/G2P/thermal/reaction workers can move behind.
+
 Current checkpoint, 2026-06-14 18:58 AKDT: resident steps tasks now carry a
 metadata-only `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0`.
 The contract is attached to the law graph node, WebGPU descriptor, GPU

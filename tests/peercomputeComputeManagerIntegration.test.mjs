@@ -1408,7 +1408,19 @@ test('ULG resident pass-DAG task runs through real PeerCompute GPU lane authorit
   assert.equal(result.computeExecution.schema, 'peercompute.compute.task-execution.v0');
   assert.equal(result.computeExecution.gpuFenceSatisfied, true);
   assert.equal(result.computeExecution.gpuResidentLaneRequirement.localExecution, 'inline');
+  assert.equal(
+    result.computeExecution.gpuResidentLaneRequirement.residentSequenceLaneContract.schema,
+    'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0'
+  );
+  assert.equal(
+    result.computeExecution.gpuResidentLaneRequirement.residentSequenceLaneContract.sequenceMode,
+    'per-step-resident-pass-dag'
+  );
   assert.equal(result.computeExecution.gpuResidentLaneExecution.gpuFence.status, 'queue-work-completed');
+  assert.equal(result.computeExecution.gpuResidentLaneExecution.stagePlan.schema, 'peercompute.compute.gpu-resident-lane-stage-plan.v0');
+  assert.equal(result.computeExecution.gpuResidentLaneExecution.stagePlan.contractSchema, 'peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0');
+  assert.equal(result.computeExecution.gpuResidentLaneExecution.stagePlan.stageCount, 4);
+  assert.equal(result.computeExecution.gpuResidentLaneExecution.stagePlan.defaultEnabled, false);
   assert.equal(computeManager.getStats().gpuResidentLanes.activeLeaseCount, 0);
   assert.equal(computeManager.getStats().gpuResidentLanes.completedLeaseCount, 1);
 });

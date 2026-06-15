@@ -20707,3 +20707,74 @@ Open:
   lane-owned worker/stage executor boundary that consumes this contract, keeps
   hot buffers on one GPU lane, and admits only compact deltas/retained refs
   through StateManager.
+
+## 2026-06-14 19:13 AKDT - PeerCompute lane stage-plan executor boundary
+
+Prompt context:
+
+- User asked to make periodic local commits at coherent clean points and to
+  keep that rule in the agent file. Verified the repo-local and parent agent
+  files already carry that rule, committed the prior resident sequence lane
+  contract slice, then continued the next todo item: consuming that contract
+  at the ComputeManager/GPUHub lane boundary.
+
+Implemented:
+
+- In sibling PeerCompute, `ComputeManager` now preserves
+  `residentSequenceLaneContract` while normalizing GPU resident lane
+  requirements and passes it into `GpuResidentLaneManager` leases.
+- `GpuResidentLaneManager` now derives
+  `peercompute.compute.gpu-resident-lane-stage-plan.v0` from a resident lane
+  contract, stores the plan on the lane/lease, exposes an async
+  `executeStagePlan()` method for supplied stage handlers, merges retained
+  refs under the active lease, and returns the stage plan/execution records in
+  completed lane execution envelopes.
+- `ComputeManager` exposes `executeGpuResidentLaneStagePlan()` as the manager
+  authority facade for the lane manager executor.
+- ULG cross-repo integration now asserts that the
+  `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0` produced by
+  resident steps tasks survives real `ComputeManager.submitTask()` execution
+  and appears as a derived stage plan with `defaultEnabled=false`.
+
+Files touched:
+
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js`
+- `/home/cos/projects/peercompute/peercompute/src/peercompute/index.js`
+- `/home/cos/projects/peercompute/peercompute/tests/unit/gpuResidentLaneManager.test.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG and PeerCompute plan/log/test documentation.
+
+Validation:
+
+- PASS: `node --check` for the touched PeerCompute lane manager,
+  ComputeManager, index export, lane-manager unit file, and ULG integration
+  test.
+- PASS:
+  `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  reported `6/6`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "resident pass-DAG task runs through real PeerCompute GPU lane authority|GPU resident lane|law graph"`
+  reported `11/11`.
+- PASS:
+  `EMSDK_QUIET=1 node --test peercompute/tests/computeManager.unit.test.js`
+  reported `2/2`.
+- PASS:
+  `EMSDK_QUIET=1 node --test peercompute/tests/unit/computeManager.commitDelta.test.js`
+  reported `19/19`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-lane-stage-plan-executor-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- The stage-plan executor currently runs supplied handlers; ULG's actual
+  mechanics P2G/grid/G2P implementation still needs to move behind this
+  boundary one law family at a time.
+- Keep resident sequence and active-grid default-off until the real mechanics
+  stage executor passes CPU/reference parity, StateManager admission, GPU
+  fence/retained-ref checks, and broader pressure/thermal/reaction/long-liquid
+  visual gates.

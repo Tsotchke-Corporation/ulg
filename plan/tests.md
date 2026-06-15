@@ -2,6 +2,27 @@
 
 ## Current Focused Result - 2026-06-14 Active-Grid Fused Resident Mechanics
 
+The first PeerCompute-side lane executor boundary for this contract is now
+covered. Focused checks:
+
+- PeerCompute lane manager:
+  `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  from `/home/cos/projects/peercompute` passed `6/6`.
+- PeerCompute ComputeManager regressions:
+  `EMSDK_QUIET=1 node --test peercompute/tests/computeManager.unit.test.js`
+  passed `2/2`, and
+  `EMSDK_QUIET=1 node --test peercompute/tests/unit/computeManager.commitDelta.test.js`
+  passed `19/19`.
+- Cross-repo ULG integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "resident pass-DAG task runs through real PeerCompute GPU lane authority|GPU resident lane|law graph"`
+  passed `11/11`, including the assertion that ULG's resident sequence lane
+  contract reaches the ComputeManager execution envelope as a derived stage
+  plan with `defaultEnabled=false`.
+- Physics and visual gates stayed green:
+  `npm run test:physics-atomics` passed `7` with `1` expected skip, and visual
+  matrix `codex-lane-stage-plan-executor-20260614` passed `3/3` with two
+  captured frames per scenario.
+
 The opt-in active-grid mechanics sequence is validated behind
 `fuseNoFullResidentMechanicsActiveGrid` and
 `ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1`. Direct-resident probes remain the

@@ -1,9 +1,24 @@
 # Implementation Status
 
-Updated: 2026-06-14 resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added the first PeerCompute-side resident lane stage-plan executor boundary
+  for the ULG sequence contract. Sibling PeerCompute now preserves
+  `residentSequenceLaneContract` through `ComputeManager` normalization,
+  stores it on `GpuResidentLaneManager` leases, derives
+  `peercompute.compute.gpu-resident-lane-stage-plan.v0`, exposes
+  `executeGpuResidentLaneStagePlan()`/`executeStagePlan()` for supplied stage
+  handlers, and returns the stage plan in the GPU lane execution envelope.
+  ULG's cross-repo integration now asserts its
+  `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0` reaches that
+  execution envelope with `defaultEnabled=false`. Validation passed
+  PeerCompute lane manager `6/6`, core ComputeManager `2/2`, ComputeManager
+  commit-delta `19/19`, ULG focused PeerCompute integration `11/11`, physics
+  atomics `7` with `1` expected skip, and visual matrix
+  `codex-lane-stage-plan-executor-20260614` `3/3` with two captured frames
+  per scenario.
 - Added a metadata-only resident sequence lane contract for ComputeManager/
   GPUHub promotion review. Resident steps tasks now carry
   `peercompute.ulg.mls-mpm-resident-sequence-lane-contract.v0` through the law

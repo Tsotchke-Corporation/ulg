@@ -182,6 +182,19 @@ sequence requirements are present, and always keeps `defaultEnabled=false`.
 This is the review surface a future `GpuResidentLaneManager`/GPUHub worker
 executor should consume before the lane claims authoritative mutation.
 
+Status update, 2026-06-14 lane stage-plan executor: sibling PeerCompute now
+does consume that resident sequence contract at the GPU resident lane boundary.
+`ComputeManager` preserves `residentSequenceLaneContract` in normalized lane
+requirements and passes it to `GpuResidentLaneManager`; the manager derives
+`peercompute.compute.gpu-resident-lane-stage-plan.v0`, stores it on the lease,
+can execute supplied stage handlers through `executeStagePlan()`, merges
+retained buffer refs under the same active lease, and returns the plan in the
+lane execution envelope. ULG integration asserts the contract and stage plan
+survive real `ComputeManager.submitTask()` execution. Keep ULG physics
+default-off here until actual mechanics/pressure/thermal/reaction stages are
+promoted one family at a time with CPU oracle, StateManager admission, GPU
+fence, and visual gates.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 08:55 AKDT: the mounted resident
+pressure-interface hot path no longer publishes gas-cell imports from
+`gasPressureSummary` snapshots. The helper keeps snapshot import compatibility
+by default for explicit callers, but mounted refresh passes
+`allowSummaryGasCellFieldImport=false`, so normal hot-path imports must come
+from a supplied admitted import or a resident `gasCellEosProducer` result.
+Snapshot candidates now block as `blocked-snapshot-gas-cell-import-disabled`
+with retained-ref and snapshot-readiness diagnostics instead of being
+published. Next priority: make normal resident scenarios emit a ready spatial
+gas species ledger so this producer route is active in realistic gas/product
+cases, then move gas-cell EOS derivation into a WGSL/WebGPU kernel. Keep the
+visible physics-quality blockers open.
+
 Current routing note, 2026-06-15 08:32 AKDT: the mounted resident
 pressure-interface hot loop now requests `gasCellEosProducer` through the
 resident authority host when a ready spatial gas species ledger exists and no

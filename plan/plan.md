@@ -2,6 +2,26 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 08:55 AKDT: the mounted resident pressure-
+interface hot path no longer publishes scene-derived gas-cell imports from
+`gasPressureSummary` snapshots. `publishScenePressureInterfaceGasCellFieldImportSource()`
+keeps its default compatibility path for explicit helper callers, but mounted
+refresh now calls it with `allowSummaryGasCellFieldImport=false`, so a gas-cell
+import must be either supplied as an admitted descriptor or produced by the
+resident `gasCellEosProducer` stage. Snapshot candidates are reported as
+`blocked-snapshot-gas-cell-import-disabled` with the retained refs and snapshot
+readiness visible for diagnostics, but the scene does not publish them into the
+hot path. Validation passed syntax checks, scene gas-cell coverage `33/33`,
+physics atomics `7` with `1` expected opt-in skip, browser authority-host
+Playwright `1/1`, and visual matrix
+`codex-mounted-no-snapshot-gas-import-20260615` `3/3` with inspected frames.
+This removes the snapshot import fallback from the mounted route, but normal
+resident scenarios still need a ready spatial gas species ledger before the
+producer path can replace every practical gas-cell import. MLS-MPM
+fragmentation, CPU-SPH stacked/blob behavior, long-horizon liquid settling,
+ice/solid rigidity, volume pulsation/blinking, and renderer z-buffer/focus
+trust remain open.
+
 Current checkpoint, 2026-06-15 08:32 AKDT: the mounted resident pressure-
 interface hot loop now asks the resident authority host to run the
 `gasCellEosProducer` stage when a ready spatial gas species ledger exists and

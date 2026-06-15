@@ -506,11 +506,16 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   sourceTaskId = null,
   sourceNodeId = 'ulg-resident-gas-pressure-law',
   sourceStage = 'residentGasPressure',
-  hotBufferKeyPrefix = 'ulg:scene-pressure-interface-gas-cell-field-import'
+  hotBufferKeyPrefix = 'ulg:scene-pressure-interface-gas-cell-field-import',
+  allowSummaryGasCellFieldImport = true
 } = {}) {
   const producerGasCellField = pressureInterfaceGasCellFieldFromProducerResult(gasCellEosProducerStageResult);
-  const gasCellField = producerGasCellField || pressureInterfaceGasCellFieldFromSummary(gasPressureSummary);
-  const sourceObject = producerGasCellField ? gasCellEosProducerStageResult : gasPressureSummary;
+  const summaryGasCellField = pressureInterfaceGasCellFieldFromSummary(gasPressureSummary);
+  const candidateGasCellField = producerGasCellField || summaryGasCellField;
+  const gasCellField = producerGasCellField || (allowSummaryGasCellFieldImport ? summaryGasCellField : null);
+  const sourceObject = producerGasCellField
+    ? gasCellEosProducerStageResult
+    : (allowSummaryGasCellFieldImport ? gasPressureSummary : null);
   const effectiveSourceStage = producerGasCellField ? 'gasCellEosProducer' : sourceStage;
   const effectiveSourceTaskId = sourceTaskId || (producerGasCellField ? gasCellEosProducerStageResult?.computeTaskId : null);
   let admission = pressureInterfaceGasCellFieldAdmissionFromSummary(
@@ -538,7 +543,7 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
     source,
     sourceCadence,
     gasPressureSummary,
-    gasCellField,
+    gasCellField: candidateGasCellField,
     pressureInterfaceGasCellFieldAdmission: admission,
     pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
     retainedGasPressureBufferRefs,
@@ -549,6 +554,13 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
       ...blockedBase,
       status: 'blocked-gas-pressure-summary-unavailable',
       blocker: 'gas-pressure-summary-or-gas-cell-eos-producer-result-required'
+    });
+  }
+  if (!producerGasCellField && !allowSummaryGasCellFieldImport) {
+    return blockedPressureInterfaceGasCellFieldImportPublication({
+      ...blockedBase,
+      status: 'blocked-snapshot-gas-cell-import-disabled',
+      blocker: 'gas-cell-eos-producer-result-or-supplied-import-required'
     });
   }
   if (!localPressureGradientReady) {
@@ -3442,7 +3454,8 @@ export function createSphPhaseScene(container, {
           source,
           sourceCadence,
           sourceTaskId: pressureInterfaceGasCellFieldImportSourceTaskId,
-          sourceStage: 'residentGasPressure'
+          sourceStage: 'residentGasPressure',
+          allowSummaryGasCellFieldImport: false
         });
     const effectivePressureInterfaceGasCellFieldImport = pressureInterfaceGasCellFieldImportPublication
       ?.pressureInterfaceGasCellFieldImportReady

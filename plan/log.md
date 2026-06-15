@@ -23976,3 +23976,81 @@ Open:
   fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
+
+## 2026-06-15 08:55 AKDT - Mounted No-Snapshot Gas-Cell Import Guard
+
+Prompt time/date: 2026-06-15 08:55 AKDT, continuing the active goal after the
+mounted gas-cell EOS producer hot-loop commit.
+
+Actions:
+
+- Continued from the mounted producer request slice and inspected
+  `publishScenePressureInterfaceGasCellFieldImportSource()`.
+- Identified the remaining mounted hot-path fallback: when no producer result
+  existed, the helper could still derive a gas-cell field from
+  `gasPressureSummary` and publish that snapshot through the resident authority
+  host.
+- Added `allowSummaryGasCellFieldImport` to the helper, defaulting to `true`
+  for compatibility with explicit helper callers and tests.
+- Set mounted `refreshSphResidentPressureInterfaceState()` calls to pass
+  `allowSummaryGasCellFieldImport=false`, so mounted imports now require either
+  a supplied admitted import or a resident `gasCellEosProducer` result.
+- Added a focused test proving mounted-style calls block ready summary
+  snapshots as `blocked-snapshot-gas-cell-import-disabled` while the default
+  compatibility path still publishes them.
+- Ran post-slice physics atomics, browser authority-host, and visual sequence
+  validation because this changes mounted behavior.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added
+  `plan/done/mounted-no-snapshot-gas-cell-imports-2026-06-15.md`.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `tests/sphPhaseRenderer.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/mounted-no-snapshot-gas-cell-imports-2026-06-15.md`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "summary-snapshot|gas-cell EOS producer|gas-cell import|gas-cell field"`
+  reported `33/33`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1` in `1.4m`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mounted-no-snapshot-gas-import-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-mounted-no-snapshot-gas-import-20260615`.
+
+Manual frame inspection:
+
+- `liquid-liquid-h2o-mlsmpm` was nonblank and bounded but still fragmented into
+  many small surfaces.
+- `liquid-liquid-h2o-cpu-sph` was nonblank and bounded but still formed stacked
+  blob shapes.
+- `solid-h2o-cpu-sph` was nonblank and bounded but still formed stacked blob
+  shapes.
+
+Open:
+
+- Normal resident scenarios still need to produce a ready spatial gas species
+  ledger so the producer route becomes active in realistic gas/product cases.
+- The gas-cell EOS derivation is still CPU/oracle logic plus WebGPU row upload;
+  a real WGSL EOS shader remains open.
+- The remaining physics behavior blockers are unchanged: MLS-MPM
+  fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
+  ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
+  pulsation/blinking, and renderer z-buffer/focus visual trust.

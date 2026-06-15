@@ -1,5 +1,37 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Mounted No-Snapshot Gas-Cell Imports
+
+The current slice removes the mounted pressure-interface hot path's fallback
+that published gas-cell imports directly from `gasPressureSummary` snapshots.
+The helper still allows snapshot imports by default for explicit compatibility
+callers, but mounted refresh now passes `allowSummaryGasCellFieldImport=false`
+so imports must come from a supplied admitted import or a resident
+`gasCellEosProducer` result.
+
+Focused checks:
+
+- Syntax and whitespace:
+  `git diff --check`,
+  `node --check src/visualization/sphPhaseScene.js`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Scene gas-cell coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "summary-snapshot|gas-cell EOS producer|gas-cell import|gas-cell field"`
+  passed `33/33`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1` in about `1.4m`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mounted-no-snapshot-gas-import-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]` under
+  `/tmp/ulg-visual-sanity-matrix/codex-mounted-no-snapshot-gas-import-20260615`.
+  Manual inspection found bounded nonblank frames, but MLS-MPM H2O remained
+  fragmented and CPU-SPH liquid/solid remained stacked/blob-shaped.
+
 ## Current Focused Result - 2026-06-15 Mounted Gas-Cell EOS Hot Loop
 
 The current slice wires the mounted resident pressure-interface refresh to

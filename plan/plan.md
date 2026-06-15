@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 06:29 AKDT: pressure/interface gas-cell field
+admission can now be minted by the resident authority host and stored through
+StateManager before import publication. The new
+`peercompute.ulg.pressure-interface-gas-cell-field-admission-hot-buffer-publication.v0`
+path validates a ready local gas-cell field plus retained gas-pressure refs,
+stores the approved
+`peercompute.ulg.pressure-interface-gas-cell-field-admission.v0` descriptor as
+hot/warm StateManager evidence, and exposes host summary/status telemetry. The
+scene helper now asks the host for admission when a ready gas-cell field and
+retained refs exist, then uses that host-published admission to publish the
+existing gas-cell field import. Missing retained refs or missing host authority
+still fail closed. Validation passed focused renderer/scene coverage,
+PeerCompute integration, physics atomics, the browser authority-host gate, and
+visual matrix `codex-gas-cell-admission-publisher-20260615` `3/3` with
+inspected frames. Next target: move the spatial gas-cell ledger/field itself
+into a retained ComputeManager/GPUHub output with real worker/local GPU buffer
+refs, so admission and import publication are fed by lane-owned state rather
+than snapshot fields.
+
 Current checkpoint, 2026-06-15 06:09 AKDT: the first spatial gas-cell EOS
 producer contract is in place. Aggregate resident gas-species ledgers still
 update only the uniform sealed-box pressure and explicitly report

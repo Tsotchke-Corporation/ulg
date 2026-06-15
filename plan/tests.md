@@ -1,5 +1,38 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Gas-Cell Field Admission Publisher
+
+The current slice moves gas-cell field-consumption admission behind the
+resident authority host and StateManager. The scene can now ask the host to
+publish/admit a ready local gas-cell field with retained gas-pressure refs, then
+use that host-published admission to publish the gas-cell field import.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Scene/renderer admission coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell field imports|admit gas-cell|pressure interface state owns retained force rows"`
+  passed `29/29`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface|resident pass-DAG task runs through real PeerCompute GPU lane authority"`
+  passed `14/14`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-cell-admission-publisher-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]`. Manual inspection found the frames nonblank and
+  bounded, with MLS-MPM fragmentation and CPU SPH stacked/blob behavior still
+  open.
+
 ## Current Focused Result - 2026-06-15 Spatial Gas-Cell EOS Producer
 
 The current slice prevents aggregate resident gas ledgers from being mistaken

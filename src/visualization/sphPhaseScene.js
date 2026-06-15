@@ -296,6 +296,7 @@ function blockedPressureInterfaceGasCellFieldImportPublication({
   gasPressureSummary = null,
   gasCellField = null,
   pressureInterfaceGasCellFieldAdmission = null,
+  pressureInterfaceGasCellFieldAdmissionPublication = null,
   retainedGasPressureBufferRefs = [],
   workerRetainedGasPressureBufferRefs = []
 } = {}) {
@@ -323,6 +324,10 @@ function blockedPressureInterfaceGasCellFieldImportPublication({
     pressureInterfaceGasCellFieldAdmissionApproved: pressureInterfaceGasCellFieldAdmission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
       && pressureInterfaceGasCellFieldAdmission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
       && pressureInterfaceGasCellFieldAdmission?.gasCellFieldConsumptionApproved === true,
+    pressureInterfaceGasCellFieldAdmissionPublication,
+    pressureInterfaceGasCellFieldAdmissionPublicationSchema: pressureInterfaceGasCellFieldAdmissionPublication?.schema || null,
+    pressureInterfaceGasCellFieldAdmissionPublicationStatus: pressureInterfaceGasCellFieldAdmissionPublication?.status || null,
+    pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey: pressureInterfaceGasCellFieldAdmissionPublication?.hotBufferKey || null,
     retainedGasPressureBufferRefs: [...retainedGasPressureBufferRefs],
     workerRetainedGasPressureBufferRefs: [...workerRetainedGasPressureBufferRefs],
     retainedGasPressureBufferRefCount: retainedGasPressureBufferRefs.length,
@@ -350,7 +355,7 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   hotBufferKeyPrefix = 'ulg:scene-pressure-interface-gas-cell-field-import'
 } = {}) {
   const gasCellField = pressureInterfaceGasCellFieldFromSummary(gasPressureSummary);
-  const admission = pressureInterfaceGasCellFieldAdmissionFromSummary(
+  let admission = pressureInterfaceGasCellFieldAdmissionFromSummary(
     gasPressureSummary,
     pressureInterfaceGasCellFieldAdmission
   );
@@ -359,16 +364,19 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   const localPressureGradientReady = gasCellField?.localPressureGradientReady === true
     && Array.isArray(gasCellField?.cells)
     && gasCellField.cells.length > 0;
-  const admissionApproved = admission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
+  let admissionApproved = admission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
     && admission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
     && admission?.gasCellFieldConsumptionApproved === true;
   const publisher = residentAuthorityHost?.publishPressureInterfaceGasCellFieldImportSource;
+  const admissionPublisher = residentAuthorityHost?.publishPressureInterfaceGasCellFieldAdmission;
+  let admissionPublication = null;
   const blockedBase = {
     source,
     sourceCadence,
     gasPressureSummary,
     gasCellField,
     pressureInterfaceGasCellFieldAdmission: admission,
+    pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
     retainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs
   };
@@ -386,9 +394,38 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
       blocker: 'ready-local-gas-cell-gradient-field-required'
     });
   }
+  if (!admissionApproved && (retainedGasPressureBufferRefs.length > 0 || workerRetainedGasPressureBufferRefs.length > 0) && typeof admissionPublisher === 'function') {
+    try {
+      admissionPublication = admissionPublisher.call(residentAuthorityHost, {
+        cacheKey,
+        stateKey,
+        source: gasPressureSummary,
+        sourceTaskId,
+        sourceNodeId,
+        sourceStage,
+        gasCellFieldSnapshot: gasCellField,
+        retainedGasPressureBufferRefs,
+        workerRetainedGasPressureBufferRefs
+      });
+      admission = admissionPublication?.pressureInterfaceGasCellFieldAdmission || admission;
+      admissionApproved = admission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
+        && admission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
+        && admission?.gasCellFieldConsumptionApproved === true;
+    } catch (error) {
+      return blockedPressureInterfaceGasCellFieldImportPublication({
+        ...blockedBase,
+        pressureInterfaceGasCellFieldAdmission: admission,
+        pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
+        status: 'pressure-interface-gas-cell-field-admission-publication-error',
+        blocker: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
   if (!admissionApproved) {
     return blockedPressureInterfaceGasCellFieldImportPublication({
       ...blockedBase,
+      pressureInterfaceGasCellFieldAdmission: admission,
+      pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
       status: 'blocked-gas-cell-field-consumption-admission-required',
       blocker: 'pressure-interface-gas-cell-field-admission-required'
     });
@@ -396,6 +433,8 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   if (retainedGasPressureBufferRefs.length === 0 && workerRetainedGasPressureBufferRefs.length === 0) {
     return blockedPressureInterfaceGasCellFieldImportPublication({
       ...blockedBase,
+      pressureInterfaceGasCellFieldAdmission: admission,
+      pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
       status: 'blocked-retained-gas-cell-buffer-ref-required',
       blocker: 'retained-gas-cell-buffer-ref-required'
     });
@@ -403,6 +442,8 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   if (typeof publisher !== 'function') {
     return blockedPressureInterfaceGasCellFieldImportPublication({
       ...blockedBase,
+      pressureInterfaceGasCellFieldAdmission: admission,
+      pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
       status: 'blocked-resident-authority-host-publisher-unavailable',
       blocker: 'resident-authority-host-publisher-required'
     });
@@ -443,6 +484,10 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
       pressureInterfaceGasCellFieldAdmissionSchema: admission.schema,
       pressureInterfaceGasCellFieldAdmissionStatus: admission.status,
       pressureInterfaceGasCellFieldAdmissionApproved: true,
+      pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
+      pressureInterfaceGasCellFieldAdmissionPublicationSchema: admissionPublication?.schema || null,
+      pressureInterfaceGasCellFieldAdmissionPublicationStatus: admissionPublication?.status || null,
+      pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey: admissionPublication?.hotBufferKey || null,
       retainedGasPressureBufferRefs,
       workerRetainedGasPressureBufferRefs,
       retainedGasPressureBufferRefCount: retainedGasPressureBufferRefs.length,
@@ -457,6 +502,8 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   } catch (error) {
     return blockedPressureInterfaceGasCellFieldImportPublication({
       ...blockedBase,
+      pressureInterfaceGasCellFieldAdmission: admission,
+      pressureInterfaceGasCellFieldAdmissionPublication: admissionPublication,
       status: 'pressure-interface-gas-cell-field-import-publication-error',
       blocker: error instanceof Error ? error.message : String(error)
     });
@@ -636,6 +683,10 @@ export function buildSphResidentPressureInterfaceStateSummary({
     pressureInterfaceGasCellFieldAdmissionSchema: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionSchema ?? null,
     pressureInterfaceGasCellFieldAdmissionStatus: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionStatus ?? null,
     pressureInterfaceGasCellFieldAdmissionApproved: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionApproved === true,
+    pressureInterfaceGasCellFieldAdmissionPublication: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionPublication ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublicationSchema: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionPublicationSchema ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublicationStatus: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionPublicationStatus ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey: pressureInterfaceGasCellFieldImportPublication?.pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey ?? null,
     pressureInterfaceGasCellFieldRetainedGasPressureBufferRefs: [
       ...(pressureInterfaceGasCellFieldImportPublication?.retainedGasPressureBufferRefs || [])
     ],
@@ -699,6 +750,10 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
     pressureInterfaceGasCellFieldAdmissionSchema: pressureState?.pressureInterfaceGasCellFieldAdmissionSchema ?? null,
     pressureInterfaceGasCellFieldAdmissionStatus: pressureState?.pressureInterfaceGasCellFieldAdmissionStatus ?? null,
     pressureInterfaceGasCellFieldAdmissionApproved: pressureState?.pressureInterfaceGasCellFieldAdmissionApproved ?? false,
+    pressureInterfaceGasCellFieldAdmissionPublication: pressureState?.pressureInterfaceGasCellFieldAdmissionPublication ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublicationSchema: pressureState?.pressureInterfaceGasCellFieldAdmissionPublicationSchema ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublicationStatus: pressureState?.pressureInterfaceGasCellFieldAdmissionPublicationStatus ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey: pressureState?.pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey ?? null,
     pressureInterfaceGasCellFieldRetainedGasPressureBufferRefs: [
       ...(pressureState?.pressureInterfaceGasCellFieldRetainedGasPressureBufferRefs || [])
     ],

@@ -76,6 +76,7 @@ import {
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
@@ -3255,6 +3256,7 @@ test('ULG resident authority host publishes admitted pressure/interface gas-cell
   t.after(() => host.destroy?.());
 
   const summary = summarizePeerComputeResidentAuthorityHost(host);
+  assert.equal(summary.residentPressureInterfaceGasCellFieldAdmissionPublicationReady, true);
   assert.equal(summary.residentPressureInterfaceGasCellFieldImportPublicationReady, true);
 
   const gasCellFieldSnapshot = {
@@ -3277,13 +3279,29 @@ test('ULG resident authority host publishes admitted pressure/interface gas-cell
       }
     ]
   };
-  const pressureInterfaceGasCellFieldAdmission = {
-    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
-    status: 'pressure-interface-gas-cell-field-consumption-approved',
-    gasCellFieldConsumptionApproved: true,
-    sourceHotBufferKey: 'ulg:test:gas-cell-source-hot-buffer',
+  const admissionPublication = host.publishPressureInterfaceGasCellFieldAdmission({
+    cacheKey: 'ulg:test:gas-cell-admission-cache',
+    stateKey: 'ulg:test:gas-cell-admission-state',
+    hotBufferKey: 'ulg:test:gas-cell-admission-hot-buffer',
+    sourceTaskId: 'ulg:test:resident-gas-pressure-source',
+    sourceStage: 'residentGasPressure',
+    source: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      spatialGasSpeciesLedgerSchema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+      spatialGasSpeciesLedgerStatus: 'spatial-gas-species-ledger-ready'
+    },
+    gasCellFieldSnapshot,
     retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer']
-  };
+  });
+  assert.equal(admissionPublication.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(admissionPublication.status, 'pressure-interface-gas-cell-field-admission-published');
+  assert.equal(admissionPublication.committed, true);
+  assert.equal(admissionPublication.pressureInterfaceGasCellFieldAdmission.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA);
+  assert.equal(admissionPublication.pressureInterfaceGasCellFieldAdmission.status, 'pressure-interface-gas-cell-field-consumption-approved');
+  assert.equal(admissionPublication.pressureInterfaceGasCellFieldAdmission.sourceHotBufferKey, admissionPublication.hotBufferKey);
+  assert.deepEqual(admissionPublication.pressureInterfaceGasCellFieldAdmission.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+
+  const pressureInterfaceGasCellFieldAdmission = admissionPublication.pressureInterfaceGasCellFieldAdmission;
   const publication = host.publishPressureInterfaceGasCellFieldImportSource({
     cacheKey: 'ulg:test:gas-cell-import-cache',
     stateKey: 'ulg:test:gas-cell-import-state',
@@ -3333,6 +3351,15 @@ test('ULG resident authority host publishes admitted pressure/interface gas-cell
   assert.equal(warmDelta.payload.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA);
   assert.equal(warmDelta.payload.status, 'pressure-interface-gas-cell-field-import-admitted');
   assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
+
+  const admissionHotRecord = host.stateManager.getHotBuffer(admissionPublication.hotBufferKey);
+  assert.equal(admissionHotRecord.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(admissionHotRecord.status, 'pressure-interface-gas-cell-field-admission-hot-buffer-source-stored');
+  const admissionWarmDeltas = host.stateManager.getWarmDeltas('ulg-pressure-interface-gas-cell-field-admissions');
+  const admissionWarmDelta = admissionWarmDeltas[admissionPublication.commitDeltaTaskId];
+  assert.equal(admissionWarmDelta.payload.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(admissionWarmDelta.payload.status, 'pressure-interface-gas-cell-field-admission-admitted');
+  assert.equal(admissionWarmDelta.payload.hotBufferKey, admissionPublication.hotBufferKey);
   assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldImport.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
 
   const materialInterfaceField = {

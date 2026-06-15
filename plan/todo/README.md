@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 06:29 AKDT: the resident authority host can
+now publish/admit pressure-interface gas-cell field-consumption evidence
+through StateManager before the import descriptor is published. The scene no
+longer needs caller-built admission when a ready gas-cell field and retained
+gas-pressure refs are present; it asks the host to mint
+`peercompute.ulg.pressure-interface-gas-cell-field-admission.v0`, then uses the
+host-published admission to publish the import. Next priority: make the
+spatial gas-cell ledger/field itself a retained ComputeManager/GPUHub output
+with real worker/local GPU refs, then feed that lane-owned source into the
+admission/import path. Keep liquid quality, MLS-MPM fragmentation, CPU SPH
+stacked/blob behavior, and renderer z-buffer/focus visual trust open.
+
 Current routing note, 2026-06-15 06:09 AKDT: the first spatial gas-cell EOS
 producer contract is complete. Aggregate resident gas-species ledgers remain
 uniform sealed-box pressure only and cannot unlock local gradients. True

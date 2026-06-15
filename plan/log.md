@@ -23307,3 +23307,96 @@ Open:
 - Long-horizon liquid settling, CPU SPH liquid quality, ice/solid rigidity in
   mounted routes, volume pulsation/blinking, MLS-MPM fragmentation, phone
   focus flash/disappear, and z-buffer/draw-order remain open blockers.
+
+## 2026-06-15 06:29 AKDT - Gas-cell field admission publisher
+
+Prompt context:
+
+- Continued the active pressure/gas-cell residency path after committing the
+  spatial gas-cell EOS producer. The next goal was to move caller-built
+  gas-cell field-consumption admission behind the resident authority host and
+  StateManager.
+
+Implemented:
+
+- Added
+  `peercompute.ulg.pressure-interface-gas-cell-field-admission-hot-buffer-publication.v0`
+  and `publishUlgPressureInterfaceGasCellFieldAdmission()` in
+  `src/runtime/peercomputeBrowserResidentHost.js`.
+- The new host publisher validates a ready local gas-cell pressure field and
+  retained gas-pressure refs before minting
+  `peercompute.ulg.pressure-interface-gas-cell-field-admission.v0`.
+- The admission publisher stores a hot-buffer record and warm StateManager
+  delta under `ulg-pressure-interface-gas-cell-field-admissions`, preserving
+  retained refs, gas-cell row metadata, spatial gas ledger provenance, and
+  local pressure-field resolution.
+- Exposed `publishPressureInterfaceGasCellFieldAdmission()` on the resident
+  authority host and added summary telemetry
+  `residentPressureInterfaceGasCellFieldAdmissionPublicationReady`.
+- Updated `publishScenePressureInterfaceGasCellFieldImportSource()` so the
+  scene asks the resident authority host to publish/admit gas-cell field
+  consumption when a ready gas-cell field and retained refs exist but no
+  explicit admission was supplied. The import publisher still refuses to run
+  without approved admission and retained refs.
+- Added scene state/render telemetry for the gas-cell field admission
+  publication record and hot-buffer key.
+- Updated PeerCompute integration and renderer/scene tests to prove the
+  host-published admission feeds import publication.
+- Added `plan/done/gas-cell-field-admission-publisher-2026-06-15.md` and
+  updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `src/visualization/sphPhaseScene.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/gas-cell-field-admission-publisher-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell field imports|admit gas-cell|pressure interface state owns retained force rows"`
+  reported `29/29`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface|resident pass-DAG task runs through real PeerCompute GPU lane authority"`
+  reported `14/14`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-cell-admission-publisher-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-gas-cell-admission-publisher-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` final frame was nonblank and bounded but still
+    visibly fragmented.
+  - `liquid-liquid-h2o-cpu-sph` final frame was nonblank and bounded but still
+    showed the known stacked/blob shape.
+  - `solid-h2o-cpu-sph` final frame was nonblank and bounded but still showed
+    the known stacked/blob shape.
+
+Open:
+
+- The spatial gas-cell ledger/field still needs a retained ComputeManager/
+  GPUHub output with real worker/local GPU refs; the new admission publisher
+  consumes retained refs but does not itself create them.
+- The remaining physics behavior blockers are unchanged: long-horizon liquid
+  settling/free-surface quality, CPU SPH liquid/solid shape, ice/solid
+  mounted-route rigidity, volume pulsation/blinking, and MLS-MPM
+  fragmentation.
+- Renderer visual-trust blockers remain open for z-buffer/draw-order and
+  phone focus flash/disappear.

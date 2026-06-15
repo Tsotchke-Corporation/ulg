@@ -1949,6 +1949,9 @@ async function importPeerComputeClasses({
     ComputeManager: bundled.ComputeManager || computeModule.ComputeManager,
     StateManager: bundled.StateManager || stateModule.StateManager,
     GPUHubManager: bundled.GPUHubManager || gpuModule.GPUHubManager || null,
+    createResidentStageWorkerBackend: bundled.createResidentStageWorkerBackend
+      || gpuModule.createResidentStageWorkerBackend
+      || null,
     createRemoteResultQuorumValidator: bundled.createRemoteResultQuorumValidator
       || quorumModule.createRemoteResultQuorumValidator
       || null
@@ -3472,6 +3475,7 @@ export async function createPeerComputeResidentAuthorityHost({
     ComputeManager,
     StateManager,
     GPUHubManager,
+    createResidentStageWorkerBackend,
     createRemoteResultQuorumValidator
   } = await importPeerComputeClasses({
     peercomputeModuleUrl,
@@ -3657,6 +3661,8 @@ export async function createPeerComputeResidentAuthorityHost({
     stateManagerModuleUrl,
     gpuHubModuleUrl,
     computeTaskModulePath,
+    createResidentStageWorkerBackend,
+    peercomputeResidentStageWorkerBridgeAvailable: typeof createResidentStageWorkerBackend === 'function',
     nodeKernelMode,
     nodeKernelAuthority: summarizeNodeKernelAuthority({
       nodeKernel,

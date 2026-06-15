@@ -1,9 +1,22 @@
 # Implementation Status
 
-Updated: 2026-06-14 GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added the ULG-side worker-ready seam for mechanics stage-chain execution.
+  `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` now
+  accepts a supplied GPUHub resident-stage worker runner/policy/module URL and
+  wraps the runner so P2G, grid-update, and G2P returned worker values populate
+  the normal stage-result evidence. Focused integration now proves a supplied
+  backend reports `worker-ready` for all three stages while preserving
+  `gpu-hub-resident-stage-executor` sources, backend summaries, and satisfied
+  fences. Default browser/live behavior remains `blocked-worker-backend-missing`
+  until the actual worker-owned WebGPU module exists. Validation passed syntax
+  checks, focused cross-repo integration `11/11`, focused browser
+  authority-host Playwright `1/1`, physics atomics `7` with `1` expected skip,
+  and visual matrix `codex-gpuhub-worker-ready-runner-seam-20260614` `3/3`
+  with two captured frames per scenario.
 - Added ULG-facing worker-residency policy evidence for the mechanics stage
   chain. P2G, grid-update, and G2P GPUHub stage registrations now request
   dedicated worker residency while PeerCompute reports

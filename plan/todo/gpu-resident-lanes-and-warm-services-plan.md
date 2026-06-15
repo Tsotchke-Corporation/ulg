@@ -246,6 +246,15 @@ inline fallback. This is not live worker execution yet; it is the acceptance
 surface for adding a worker-owned WebGPU device/buffer backend without
 transferring main-thread `GPUBuffer` handles.
 
+Status update, 2026-06-14 GPUHub worker-ready runner seam: sibling
+PeerCompute now exports a resident-stage Worker bridge, and ULG can consume a
+supplied GPUHub resident-stage worker runner for the mechanics P2G,
+grid-update, and G2P chain. When supplied, the runner is wrapped by ULG so
+returned worker values populate the normal stage-result evidence while
+PeerCompute reports `worker-ready` on each stage. Defaults still report
+`blocked-worker-backend-missing`; the next implementation is the actual ULG
+browser worker module that owns a WebGPU device and retained lane buffers.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

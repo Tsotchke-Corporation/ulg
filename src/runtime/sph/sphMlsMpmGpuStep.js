@@ -3914,6 +3914,21 @@ function resolveMechanicsStageGpuHub(computeManager) {
   return laneManager?.gpuHub || computeManager?.gpuHub || null;
 }
 
+function resolveMechanicsStageWorkerRunner(workerRunner, stageId) {
+  if (!workerRunner) return null;
+  if (typeof workerRunner === 'function' || typeof workerRunner.runStage === 'function') return workerRunner;
+  if (workerRunner && typeof workerRunner === 'object') {
+    return workerRunner[stageId] || workerRunner.default || workerRunner['*'] || null;
+  }
+  return null;
+}
+
+async function executeMechanicsStageWorkerRunner(workerRunner, args) {
+  if (typeof workerRunner === 'function') return workerRunner(args);
+  if (workerRunner && typeof workerRunner.runStage === 'function') return workerRunner.runStage(args);
+  throw new Error(`Mechanics stage worker runner is not executable: ${args?.stage?.id || 'unknown-stage'}`);
+}
+
 function summarizeMechanicsStageLaneResult(stageId, result = {}) {
   const gpuResidentLaneRequirement = result?.gpuResidentLaneRequirement
     || result?.computeExecution?.gpuResidentLaneRequirement
@@ -3947,6 +3962,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   useGpuResidentLaneStagePlan = true,
   useGpuHubResidentStageExecutors = true,
   requestGpuHubWorkerResidency = true,
+  gpuHubResidentStageWorkerRunner = null,
+  gpuHubResidentStageWorkerPolicy = null,
+  gpuHubResidentStageWorkerModuleUrl = null,
   gpuResidentLaneId = null,
   gpuResidentLaneStateKey = null,
   gpuResidentLaneDomainKey = null,
@@ -4358,37 +4376,60 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && typeof gpuHubForStageExecutors.executeResidentStage === 'function';
   if (canUseGpuHubResidentStageExecutors) {
     gpuHubResidentStageExecutorRegistrations = laneStagePlanContract.passDagStages
-      .map((stage) => gpuHubForStageExecutors.registerResidentStageExecutor({
-        stageId: stage.id,
-        lawNodeId: stage.lawNodeId,
-        runtimeTarget: stepOptions.preferWebGpu === true
-          ? 'webgpu-compute-manager-stage-task'
-          : 'cpu-compute-manager-stage-task',
-        workerPolicy: requestGpuHubWorkerResidency !== false
+      .map((stage) => {
+        const stageWorkerRunner = resolveMechanicsStageWorkerRunner(gpuHubResidentStageWorkerRunner, stage.id);
+        const wrappedWorkerRunner = stageWorkerRunner
+          ? async (args) => {
+              const result = await executeMechanicsStageWorkerRunner(stageWorkerRunner, {
+                ...args,
+                stageId: stage.id,
+                taskIdPrefix,
+                stageResults
+              });
+              const resultObject = result && typeof result === 'object' ? result : { value: result };
+              stageResults[stage.id] = Object.prototype.hasOwnProperty.call(resultObject, 'value')
+                ? resultObject.value
+                : result;
+              return result;
+            }
+          : null;
+        const requestedWorkerPolicy = requestGpuHubWorkerResidency !== false
           ? {
             mode: 'dedicated-worker',
             workerType: stepOptions.preferWebGpu === true
               ? 'webgpu-compute-worker'
               : 'cpu-compute-worker',
+            workerModuleUrl: gpuHubResidentStageWorkerModuleUrl,
             startupMode: 'warm-on-first-use',
             idleTtlMs: 60000,
             sameDeviceRequired: stepOptions.preferWebGpu === true,
             bufferTransferPolicy: stepOptions.preferWebGpu === true
               ? 'worker-owns-device-and-retained-buffers-required'
-              : 'worker-local-cpu-state-required'
+              : 'worker-local-cpu-state-required',
+            ...(gpuHubResidentStageWorkerPolicy || {})
           }
           : {
             mode: 'inline'
+          };
+        return gpuHubForStageExecutors.registerResidentStageExecutor({
+          stageId: stage.id,
+          lawNodeId: stage.lawNodeId,
+          runtimeTarget: stepOptions.preferWebGpu === true
+            ? 'webgpu-compute-manager-stage-task'
+            : 'cpu-compute-manager-stage-task',
+          workerPolicy: requestedWorkerPolicy,
+          metadata: {
+            source: 'ulg-mechanics-stage-task-chain',
+            taskIdPrefix,
+            laneId: laneStagePlanId,
+            stateKey: laneStagePlanStateKey,
+            defaultEnabled: false,
+            workerRunnerSupplied: Boolean(wrappedWorkerRunner)
           },
-        metadata: {
-          source: 'ulg-mechanics-stage-task-chain',
-          taskIdPrefix,
-          laneId: laneStagePlanId,
-          stateKey: laneStagePlanStateKey,
-          defaultEnabled: false
-        },
-        executor: laneStageExecutors[stage.id]
-      }))
+          ...(wrappedWorkerRunner ? { workerRunner: wrappedWorkerRunner } : {}),
+          executor: laneStageExecutors[stage.id]
+        });
+      })
       .filter(Boolean);
     gpuHubResidentStageExecutorMode = gpuHubResidentStageExecutorRegistrations.length === laneStagePlanContract.passDagStages.length
       ? 'registered'
@@ -4602,6 +4643,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageExecutionWorkerResidency: stageExecutionWorkerResidency,
     gpuResidentLaneStageExecutionWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
     gpuResidentLaneStageExecutionRequestedWorkerResidency: requestGpuHubWorkerResidency !== false,
+    gpuResidentLaneStageExecutionWorkerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
+    gpuResidentLaneStageExecutionWorkerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
     gpuHubResidentStageExecutorMode,
     gpuHubResidentStageExecutorRegisteredCount: gpuHubResidentStageExecutorRegistrations.length,
     gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
@@ -4679,6 +4722,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       gpuResidentLaneStageExecutionWorkerResidency: { ...stageTaskChain.gpuResidentLaneStageExecutionWorkerResidency },
       gpuResidentLaneStageExecutionWorkerResidencyStatuses: { ...stageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses },
       gpuResidentLaneStageExecutionRequestedWorkerResidency: stageTaskChain.gpuResidentLaneStageExecutionRequestedWorkerResidency,
+      gpuResidentLaneStageExecutionWorkerRunnerSupplied: stageTaskChain.gpuResidentLaneStageExecutionWorkerRunnerSupplied,
+      gpuResidentLaneStageExecutionWorkerModuleUrl: stageTaskChain.gpuResidentLaneStageExecutionWorkerModuleUrl,
       gpuHubResidentStageExecutorMode: stageTaskChain.gpuHubResidentStageExecutorMode,
       gpuHubResidentStageExecutorRegisteredCount: stageTaskChain.gpuHubResidentStageExecutorRegisteredCount,
       gpuHubResidentStageExecutorStageIds: [...stageTaskChain.gpuHubResidentStageExecutorStageIds],

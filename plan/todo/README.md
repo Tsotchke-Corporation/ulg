@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 21:01 AKDT: ULG mechanics stage-chain
+registration can now consume a supplied GPUHub resident-stage worker runner.
+When a backend is supplied, P2G, grid-update, and G2P report `worker-ready`,
+the stage plan still resolves through `gpu-hub-resident-stage-executor`, and
+returned worker values populate the normal stage-result evidence. The default
+live path remains truthful `blocked-worker-backend-missing` because ULG still
+needs the actual browser worker module that owns its WebGPU device and
+retained lane buffers. Next priority: implement that worker-owned backend for
+the same stage chain without copying main-thread `GPUBuffer` handles.
+
 Current routing note, 2026-06-14 20:41 AKDT: ULG mechanics stage-chain
 registration now requests dedicated worker residency for P2G, grid-update, and
 G2P GPUHub stage executors, but the evidence correctly reports

@@ -2,6 +2,16 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 21:01 AKDT: ULG mechanics stage-chain
+execution can now attach a supplied GPUHub resident-stage worker runner to
+the P2G, grid-update, and G2P stage executor registrations. The wrapped
+runner preserves the normal stage-result evidence map, so the lane summary
+continues to report backend, lane/state key, fence, and retained-buffer
+details while PeerCompute marks the worker policy `worker-ready`. Browser and
+default execution still stay blocked/fallback until the next implementation
+adds a real ULG worker module that owns its WebGPU device and retained lane
+buffers.
+
 Current checkpoint, 2026-06-14 20:41 AKDT: ULG mechanics stage-chain
 registration now requests dedicated worker residency for P2G, grid-update, and
 G2P GPUHub stage executors while truthfully reporting fallback. PeerCompute's

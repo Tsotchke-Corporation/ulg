@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 GPUHub Worker Policy Evidence
+## Current Focused Result - 2026-06-14 GPUHub Worker-Ready Runner Seam
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -15,9 +15,13 @@ worker residency without overclaiming live worker execution. Focused checks:
   same focused gate now gives ComputeManager a real sibling `GPUHubManager`
   and asserts the stage execution source map is
   `gpu-hub-resident-stage-executor` for P2G, grid-update, and G2P. It now
-  also asserts all three stage worker-residency statuses are
+  also asserts all three default stage worker-residency statuses are
   `blocked-worker-backend-missing`, which is the expected fallback until a
-  worker-owned GPU backend exists.
+  worker-owned GPU backend exists. The same gate now supplies an explicit
+  GPUHub resident-stage worker runner and asserts all three stages report
+  `worker-ready`, keep `gpu-hub-resident-stage-executor` as the executor
+  source, and preserve backend/fence stage summaries from returned worker
+  values.
 - Browser same-lane WebGPU stage-chain validation:
   `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
   passed `1/1`. The gate now runs `host.runMechanicsStageTaskChain()` with
@@ -60,6 +64,8 @@ worker residency without overclaiming live worker execution. Focused checks:
   `codex-gpuhub-stage-executor-chain-20260614` passed `3/3`. The GPUHub
   worker-policy evidence matrix
   `codex-gpuhub-worker-policy-evidence-20260614` passed `3/3`.
+  The GPUHub worker-ready runner seam matrix
+  `codex-gpuhub-worker-ready-runner-seam-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

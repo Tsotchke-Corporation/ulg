@@ -21130,3 +21130,72 @@ Open:
   arbitrary child workers.
 - The reported z-buffer/draw-order blocker remains queued for the renderer
   pass.
+
+## 2026-06-14 21:01 AKDT - GPUHub worker-ready runner seam
+
+Prompt context:
+
+- Continued the PeerCompute/GPUHub worker residency refactor after sibling
+  PeerCompute added `createResidentStageWorkerBackend()` and committed
+  `465159b6 Add resident stage worker bridge`.
+- The safe ULG step was to let the mechanics stage chain consume a supplied
+  worker backend and report `worker-ready` only when one is actually present,
+  while keeping the default live path truthful about the missing worker-owned
+  WebGPU backend.
+
+Implemented:
+
+- `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` now
+  accepts `gpuHubResidentStageWorkerRunner`,
+  `gpuHubResidentStageWorkerPolicy`, and
+  `gpuHubResidentStageWorkerModuleUrl`.
+- When a stage worker runner is supplied, ULG wraps it and attaches it to the
+  GPUHub resident stage executor registration as `workerRunner`.
+- Wrapped worker results write their `value` back into the normal
+  `stageResults` map, preserving backend, lane/state key, fence, retained
+  buffer, and evidence summaries after PeerCompute executes the stage plan.
+- `mechanicsStageTaskChain` now exposes
+  `gpuResidentLaneStageExecutionWorkerRunnerSupplied` and
+  `gpuResidentLaneStageExecutionWorkerModuleUrl` beside the per-stage worker
+  residency statuses.
+- `createPeerComputeResidentAuthorityHost()` now surfaces PeerCompute's
+  `createResidentStageWorkerBackend` export and a
+  `peercomputeResidentStageWorkerBridgeAvailable` flag for future browser
+  wiring.
+- Added a focused integration assertion that supplies a worker runner and
+  proves P2G, grid-update, and G2P report `worker-ready` while still resolving
+  through `gpu-hub-resident-stage-executor`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG plan/todo/test/log/done documentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: visual matrix `codex-gpuhub-worker-ready-runner-seam-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured
+  frames each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- This is a bridge seam and test-backed backend hook, not final live worker
+  residency. The next implementation step is the actual ULG mechanics
+  resident-stage worker module that initializes/owns WebGPU resources and
+  retains lane buffers across stage invocations.
+- Browser evidence still defaults to `blocked-worker-backend-missing` until
+  that module is wired.

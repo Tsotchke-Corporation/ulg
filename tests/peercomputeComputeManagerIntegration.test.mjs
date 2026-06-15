@@ -1326,6 +1326,105 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-grid-update-stage'].completed, 7);
   assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-g2p-stage'].completed, 6);
 
+  const workerBridgeCalls = [];
+  const gpuHubWorkerReadyStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...mechanicsStageParticle,
+    computeManager,
+    modulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    stageTaskIdPrefix: 'ulg:test:mechanics-stage-gpuhub-worker-ready-chain',
+    useNativeTaskGraph: false,
+    preferWebGpu: true,
+    readbackMode: 'full-parity-readback',
+    gpuResidentLaneId: 'ulg:test:mechanics-stage-gpuhub-worker-ready',
+    gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-gpuhub-worker-ready-state',
+    gpuHubResidentStageWorkerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    gpuHubResidentStageWorkerRunner: {
+      async runStage({ stage, input, lease, executor }) {
+        workerBridgeCalls.push({
+          stageId: stage.id,
+          inputSource: input?.source || null,
+          workerStatus: executor?.workerPolicy?.status || null
+        });
+        const gpuResidentLaneRequirement = {
+          laneId: lease.laneId,
+          stateKey: lease.stateKey
+        };
+        const gpuFence = {
+          schema: 'peercompute.compute.gpu-fence-report.v0',
+          status: 'queue-work-completed',
+          fenceSatisfied: true,
+          required: true,
+          laneId: lease.laneId,
+          stateKey: lease.stateKey
+        };
+        const base = {
+          backend: 'webgpu-worker-bridge-test',
+          gpuResidentLaneRequirement,
+          gpuFence,
+          gpuFenceReport: gpuFence
+        };
+        if (stage.id === 'p2g') {
+          return {
+            value: {
+              ...base,
+              computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_P2G_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+              gridBufferByteLength: 96,
+              mechanicsP2gStageTaskEvidence: { passed: true }
+            },
+            retainedBufferRefs: ['mls-mpm-p2g-grid-buffer'],
+            summary: { backend: 'webgpu-worker-bridge-test', stage: 'p2g' }
+          };
+        }
+        if (stage.id === 'gridUpdate') {
+          return {
+            value: {
+              ...base,
+              computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+              updatedGridBufferByteLength: 96,
+              mechanicsGridUpdateStageTaskEvidence: { passed: true }
+            },
+            retainedBufferRefs: ['mls-mpm-grid-update-buffer'],
+            summary: { backend: 'webgpu-worker-bridge-test', stage: 'gridUpdate' }
+          };
+        }
+        return {
+          value: {
+            ...base,
+            computeTaskResultSchema: ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+            stateBufferByteLength: 64,
+            mechanicsBufferByteLength: 64,
+            mechanicsG2pStageTaskEvidence: { passed: true }
+          },
+          retainedBufferRefs: ['sph-state-buffer', 'mls-mpm-mechanics-buffer'],
+          summary: { backend: 'webgpu-worker-bridge-test', stage: 'g2p' }
+        };
+      }
+    }
+  });
+  assert.deepEqual(workerBridgeCalls.map((entry) => entry.stageId), ['p2g', 'gridUpdate', 'g2p']);
+  assert.deepEqual(workerBridgeCalls.map((entry) => entry.workerStatus), ['worker-ready', 'worker-ready', 'worker-ready']);
+  assert.deepEqual(gpuHubWorkerReadyStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses, {
+    p2g: 'worker-ready',
+    gridUpdate: 'worker-ready',
+    g2p: 'worker-ready'
+  });
+  assert.equal(gpuHubWorkerReadyStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerRunnerSupplied, true);
+  assert.equal(
+    gpuHubWorkerReadyStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerModuleUrl,
+    '/workers/ulg-mechanics-resident-stage.worker.js'
+  );
+  assert.equal(gpuHubWorkerReadyStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
+  assert.deepEqual(gpuHubWorkerReadyStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends, {
+    p2g: 'webgpu-worker-bridge-test',
+    gridUpdate: 'webgpu-worker-bridge-test',
+    g2p: 'webgpu-worker-bridge-test'
+  });
+  assert.deepEqual(gpuHubWorkerReadyStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskFenceSatisfied, {
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
+
   const mechanicsChildDryRun = await runUlgMechanicsChildDryRunTask({
     referenceEvidence: measuredMechanicsEvidence,
     mechanicsOnlyChildTaskEvidence: mechanicsOnlyResidentTaskResult

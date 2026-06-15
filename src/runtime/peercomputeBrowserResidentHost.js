@@ -9,6 +9,7 @@ import {
   ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   createMlsMpmMechanicsG2pStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
   createMlsMpmMechanicsP2gStageComputeTask,
@@ -67,6 +68,7 @@ export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompu
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-hot-buffer-publication.v0';
 export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-buffer-import.v0';
 export const ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.pressure-interface-worker-retained-hot-buffer-publication.v0';
+export const ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.pressure-interface-gas-cell-field-import-hot-buffer-publication.v0';
 export const ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.reaction-product-worker-retained-buffer-import.v0';
 export const ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.reaction-product-worker-retained-hot-buffer-publication.v0';
 export const ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_POST_STAGE_SEED_NODE_SCHEMA = 'peercompute.ulg.remote-task-graph-sph-mls-mpm-post-stage-seed-node.v0';
@@ -1994,6 +1996,187 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
   return {
     ...payload,
     status: 'worker-retained-thermal-phase-output-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
+  };
+}
+
+export function publishUlgPressureInterfaceGasCellFieldImportSource({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  source = null,
+  gasCellFieldSnapshot = null,
+  pressureInterfaceGasCellFieldAdmission = null,
+  retainedGasPressureBufferRefs = [],
+  workerRetainedGasPressureBufferRefs = [],
+  sourceTaskId = null,
+  sourceNodeId = 'ulg-resident-gas-pressure-law',
+  sourceStage = 'residentGasPressure',
+  scope = 'ulg-pressure-interface-gas-cell-field-imports',
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgPressureInterfaceGasCellFieldImportSource requires StateManager hot storage and commitDelta');
+  }
+  const sourceObject = source && typeof source === 'object' ? source : {};
+  const resolvedGasCellFieldSnapshot = gasCellFieldSnapshot
+    || sourceObject.gasCellFieldSnapshot
+    || sourceObject.gasCellField
+    || sourceObject.pressureFeedback?.gasCellField
+    || null;
+  const resolvedAdmission = pressureInterfaceGasCellFieldAdmission
+    || sourceObject.pressureInterfaceGasCellFieldAdmission
+    || sourceObject.gasCellFieldAdmission
+    || sourceObject.admission
+    || null;
+  const admissionApproved = resolvedAdmission?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA
+    && resolvedAdmission?.status === 'pressure-interface-gas-cell-field-consumption-approved'
+    && resolvedAdmission?.gasCellFieldConsumptionApproved === true;
+  if (!admissionApproved) {
+    throw new TypeError('pressure/interface gas-cell field import requires admitted field-consumption evidence');
+  }
+  const resolvedRetainedGasPressureBufferRefs = uniqueStringList(
+    retainedGasPressureBufferRefs.length > 0
+      ? retainedGasPressureBufferRefs
+      : (sourceObject.retainedGasPressureBufferRefs
+          || sourceObject.pressureInterfaceGasCellFieldAdmission?.retainedGasPressureBufferRefs
+          || resolvedAdmission.retainedGasPressureBufferRefs
+          || [])
+  );
+  const resolvedWorkerRetainedGasPressureBufferRefs = uniqueStringList(
+    workerRetainedGasPressureBufferRefs.length > 0
+      ? workerRetainedGasPressureBufferRefs
+      : (sourceObject.workerRetainedGasPressureBufferRefs
+          || resolvedAdmission.workerRetainedGasPressureBufferRefs
+          || [])
+  );
+  if (resolvedRetainedGasPressureBufferRefs.length === 0 && resolvedWorkerRetainedGasPressureBufferRefs.length === 0) {
+    throw new TypeError('pressure/interface gas-cell field import requires retained gas-cell buffer refs');
+  }
+  if (
+    resolvedGasCellFieldSnapshot?.localPressureGradientReady !== true
+    || !Array.isArray(resolvedGasCellFieldSnapshot?.cells)
+    || resolvedGasCellFieldSnapshot.cells.length === 0
+  ) {
+    throw new TypeError('pressure/interface gas-cell field import requires a ready local gas-cell snapshot');
+  }
+  const resolvedCacheKey = normalizeString(cacheKey, sourceObject.cacheKey || sourceObject.laneId || null);
+  const resolvedStateKey = normalizeString(stateKey, sourceObject.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:pressure-interface-gas-cell-field-import-source',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const gasPressureCellRowCount = Math.max(
+    0,
+    Math.trunc(finiteSeedNumber(
+      sourceObject.pressureInterfaceGasPressureCellRowCount,
+      resolvedGasCellFieldSnapshot.cells.length
+    ))
+  );
+  const gasPressureCellRowStrideFloats = Math.max(
+    0,
+    Math.trunc(finiteSeedNumber(sourceObject.pressureInterfaceGasPressureCellRowStrideFloats, 12))
+  );
+  const gasPressureCellRowByteLength = Math.max(
+    0,
+    Math.trunc(finiteSeedNumber(
+      sourceObject.pressureInterfaceGasPressureCellRowByteLength,
+      gasPressureCellRowCount * gasPressureCellRowStrideFloats * Float32Array.BYTES_PER_ELEMENT
+    ))
+  );
+  const pressureInterfaceGasCellFieldImport = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-ready',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sourceSchema: sourceObject.schema || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
+    workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
+    gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false
+  };
+  const committedAt = Date.now();
+  const hotBufferRecord = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceSchema: sourceObject.schema || null,
+    sourceMode: 'state-manager-retained-gas-cell-field-import',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
+    workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
+    gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
+    pressureInterfaceGasCellFieldImport
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, 'ulg-pressure-interface-gas-cell-field-imports');
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-pressure-interface-gas-cell-field-import:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-import-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sourceMode: 'state-manager-retained-gas-cell-field-import',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    retainedGasPressureBufferRefs: resolvedRetainedGasPressureBufferRefs,
+    workerRetainedGasPressureBufferRefs: resolvedWorkerRetainedGasPressureBufferRefs,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasCellFieldAdmission: cloneSerializableValue(resolvedAdmission),
+    gasCellFieldSnapshot: cloneSerializableValue(resolvedGasCellFieldSnapshot),
+    pressureInterfaceGasCellFieldImport
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'pressure-interface-gas-cell-field-import-published',
     committed: true,
     hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
     commitDeltaTaskId: deltaTaskId,
@@ -4487,6 +4670,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishPressureInterfaceGasCellFieldImportSource(options = {}) {
+      return publishUlgPressureInterfaceGasCellFieldImportSource({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     publishWorkerRetainedReactionProductStageOutput(options = {}) {
       return publishUlgReactionProductWorkerRetainedHotBufferSource({
         stateManager,
@@ -5161,6 +5351,7 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
     residentWorkerRetainedThermalPhasePublicationReady: typeof host?.publishWorkerRetainedThermalPhaseStageOutput === 'function',
     residentWorkerRetainedPressureInterfacePublicationReady: typeof host?.publishWorkerRetainedPressureInterfaceStageOutput === 'function',
+    residentPressureInterfaceGasCellFieldImportPublicationReady: typeof host?.publishPressureInterfaceGasCellFieldImportSource === 'function',
     residentWorkerRetainedReactionProductPublicationReady: typeof host?.publishWorkerRetainedReactionProductStageOutput === 'function',
     residentRemoteSeedHotBufferRefreshReady: typeof host?.refreshRemoteSeedHotBuffers === 'function',
     residentRemoteSeedHotBufferRefreshExecutorReady: typeof host?.createRemoteSeedHotBufferRefreshExecutor === 'function',

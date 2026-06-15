@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 05:00 AKDT: gas-cell field imports can now be
+published through the browser resident authority host and StateManager. The
+new
+`peercompute.ulg.pressure-interface-gas-cell-field-import-hot-buffer-publication.v0`
+record validates admitted field-consumption evidence, retained gas-cell refs,
+and a ready local gas-cell snapshot, stores the import in hot state, commits a
+warm delta, and returns a
+`peercompute.ulg.pressure-interface-gas-cell-field-import.v0` descriptor that
+the pressureInterface stage can consume. Focused integration coverage proves
+bad admission and missing-ref cases are rejected and that the returned import
+drives local-gradient pressure rows. Validation passed syntax checks, focused
+PeerCompute integration, physics atomics, and the three-scenario visual matrix
+`codex-gas-cell-import-publisher-20260615`. Next target: replace remaining
+caller construction in the live scene/stage path with this host-published gas
+cell import when resident gas-cell fields are available.
+
 Current checkpoint, 2026-06-15 04:50 AKDT: pressureInterface can now consume
 an admitted retained gas-cell field import descriptor. The new
 `peercompute.ulg.pressure-interface-gas-cell-field-import.v0` contract requires

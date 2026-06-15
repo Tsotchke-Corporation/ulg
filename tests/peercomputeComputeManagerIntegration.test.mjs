@@ -10,6 +10,7 @@ import {
   createMlsMpmResidentStepsComputeTask,
   runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu,
   runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks,
+  runSphPressureInterfaceStageComputeTask,
   ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA,
   ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_MECHANICS_G2P_STAGE_COMPUTE_TASK_SCHEMA,
@@ -23,6 +24,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
@@ -74,6 +76,7 @@ import {
   runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode,
   runUlgMechanicsPromotionEvidenceTask,
   selectRemoteGraphRefreshSeedPayload,
+  ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
@@ -3178,6 +3181,173 @@ test('ULG resident authority host admits worker-retained reaction/product output
   assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
   assert.equal(warmDelta.payload.workerLocal, true);
   assert.deepEqual(warmDelta.payload.outputFamilies, candidate.outputFamilies);
+});
+
+test('ULG resident authority host publishes admitted pressure/interface gas-cell field imports', async (t) => {
+  const computeMod = await importPeerComputeManager(t);
+  const nodeMod = await importPeerComputeNodeKernel(t);
+  const stateMod = await importPeerComputeStateManager(t);
+  if (!computeMod || !nodeMod || !stateMod) return;
+  const host = await createPeerComputeResidentAuthorityHost({
+    nodeKernelModuleUrl: PEERCOMPUTE_NODE_KERNEL_URL.href,
+    computeManagerModuleUrl: PEERCOMPUTE_COMPUTE_MANAGER_URL.href,
+    stateManagerModuleUrl: PEERCOMPUTE_STATE_MANAGER_URL.href,
+    remoteResultQuorumModuleUrl: PEERCOMPUTE_REMOTE_QUORUM_URL.href,
+    computeTaskModulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    enableWorkers: false,
+    enablePersistence: false,
+    disableNetworkProvider: true,
+    disableBroadcast: true,
+    nodeKernelConfig: {
+      pubsubPeerDiscovery: false,
+      maxConnections: 0,
+      maxIncomingPendingConnections: 0,
+      enableNetVizDebugTelemetry: false,
+      enableNetVizSessionBroadcast: false,
+      enableNetVizSessionDiscovery: false
+    }
+  });
+  t.after(() => host.destroy?.());
+
+  const summary = summarizePeerComputeResidentAuthorityHost(host);
+  assert.equal(summary.residentPressureInterfaceGasCellFieldImportPublicationReady, true);
+
+  const gasCellFieldSnapshot = {
+    localPressureGradientReady: true,
+    cellDims: [2, 1, 1],
+    cells: [
+      {
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        pressurePa: 120000,
+        pressureGradientPaPerM: [0, 0, 0],
+        volumeM3: 4
+      },
+      {
+        gridIndex: [1, 0, 0],
+        centerM: [1.5, 1, 1],
+        pressurePa: 180000,
+        pressureGradientPaPerM: [0, 0, 0],
+        volumeM3: 4
+      }
+    ]
+  };
+  const pressureInterfaceGasCellFieldAdmission = {
+    schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+    status: 'pressure-interface-gas-cell-field-consumption-approved',
+    gasCellFieldConsumptionApproved: true,
+    sourceHotBufferKey: 'ulg:test:gas-cell-source-hot-buffer',
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer']
+  };
+  const publication = host.publishPressureInterfaceGasCellFieldImportSource({
+    cacheKey: 'ulg:test:gas-cell-import-cache',
+    stateKey: 'ulg:test:gas-cell-import-state',
+    hotBufferKey: 'ulg:test:gas-cell-import-hot-buffer',
+    sourceTaskId: 'ulg:test:resident-gas-pressure-source',
+    sourceStage: 'residentGasPressure',
+    gasCellFieldSnapshot,
+    pressureInterfaceGasCellFieldAdmission,
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer']
+  });
+
+  assert.equal(publication.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(publication.status, 'pressure-interface-gas-cell-field-import-published');
+  assert.equal(publication.committed, true);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.status, 'pressure-interface-gas-cell-field-import-ready');
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.sourceHotBufferKey, publication.hotBufferKey);
+  assert.deepEqual(publication.pressureInterfaceGasCellFieldImport.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.equal(publication.pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowCount, 2);
+
+  assert.throws(() => host.publishPressureInterfaceGasCellFieldImportSource({
+    gasCellFieldSnapshot,
+    pressureInterfaceGasCellFieldAdmission: {
+      ...pressureInterfaceGasCellFieldAdmission,
+      gasCellFieldConsumptionApproved: false
+    },
+    retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer']
+  }), /requires admitted field-consumption evidence/);
+
+  assert.throws(() => host.publishPressureInterfaceGasCellFieldImportSource({
+    gasCellFieldSnapshot,
+    pressureInterfaceGasCellFieldAdmission: {
+      ...pressureInterfaceGasCellFieldAdmission,
+      retainedGasPressureBufferRefs: []
+    },
+    retainedGasPressureBufferRefs: []
+  }), /requires retained gas-cell buffer refs/);
+
+  const hotRecord = host.stateManager.getHotBuffer(publication.hotBufferKey);
+  assert.equal(hotRecord.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(hotRecord.status, 'pressure-interface-gas-cell-field-import-hot-buffer-source-stored');
+  assert.equal(hotRecord.pressureInterfaceGasCellFieldImport.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+  assert.deepEqual(hotRecord.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+
+  const warmDeltas = host.stateManager.getWarmDeltas('ulg-pressure-interface-gas-cell-field-imports');
+  const warmDelta = warmDeltas[publication.commitDeltaTaskId];
+  assert.equal(warmDelta.payload.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(warmDelta.payload.status, 'pressure-interface-gas-cell-field-import-admitted');
+  assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
+  assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldImport.schema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA);
+
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      },
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [-1, 0, 0]
+      }
+    ]
+  };
+  const stageResult = await runSphPressureInterfaceStageComputeTask({
+    computeTaskId: 'ulg:test:pressure-interface-stage-host-gas-cell-import',
+    preferWebGpu: false,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'synthetic-pressure',
+      totalPressurePa: 120000,
+      boxVolumeM3: 8,
+      boxDimsM: [2, 2, 2],
+      bySpecies: {},
+      strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+    },
+    materialInterfaceField,
+    pressureInterfaceGasCellFieldImport: publication.pressureInterfaceGasCellFieldImport,
+    expectedOutputFamilies: ['pressure-interface-force-rows'],
+    pressureInterfaceStageTask: true
+  });
+  assert.equal(stageResult.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(stageResult.pressureInterfaceGasCellFieldImportReady, true);
+  assert.equal(stageResult.pressureInterfaceGasCellFieldImportSourceHotBufferKey, publication.hotBufferKey);
+  assert.deepEqual(stageResult.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
 });
 
 test('ULG resident authority host admits worker-retained pressure/interface force-row descriptors', async (t) => {

@@ -3,9 +3,9 @@
 # Architecture Summary
 
 - repo root: `/home/cos/projects/ulg`
-- files indexed: `280`
-- total lines indexed: `174053`
-- languages: `{"javascript": 104, "text": 84, "markdown": 77, "json": 14, "c": 1}`
+- files indexed: `281`
+- total lines indexed: `174581`
+- languages: `{"javascript": 104, "text": 84, "markdown": 78, "json": 14, "c": 1}`
 
 ## Important Files
 
@@ -43,18 +43,18 @@
 
 ## Top Modules
 
-- `tests`: 73 files, 35495 lines, symbols=0, tests=73, languages={"text": 73}
-- `plan/done`: 47 files, 2943 lines, symbols=0, tests=0, languages={"markdown": 47}
-- `src/runtime`: 30 files, 16494 lines, symbols=360, tests=0, languages={"javascript": 30}
+- `tests`: 73 files, 35665 lines, symbols=0, tests=73, languages={"text": 73}
+- `plan/done`: 48 files, 2982 lines, symbols=0, tests=0, languages={"markdown": 48}
+- `src/runtime`: 30 files, 16685 lines, symbols=361, tests=0, languages={"javascript": 30}
 - `src/runtime/sph`: 26 files, 30754 lines, symbols=708, tests=0, languages={"javascript": 26}
 - `src/runtime/material`: 18 files, 4777 lines, symbols=206, tests=0, languages={"javascript": 18}
-- `plan/todo`: 17 files, 9872 lines, symbols=0, tests=0, languages={"markdown": 17}
+- `plan/todo`: 17 files, 9881 lines, symbols=0, tests=0, languages={"markdown": 17}
 - `.`: 9 files, 2070 lines, symbols=0, tests=0, languages={"text": 4, "markdown": 3, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
 - `src/services`: 5 files, 2087 lines, symbols=53, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 37908 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 38027 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `scripts`: 5 files, 4907 lines, symbols=0, tests=0, languages={"text": 5}
 - `src/visualization`: 4 files, 13304 lines, symbols=340, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8186 lines, symbols=53, tests=0, languages={"javascript": 4}
@@ -71,27 +71,27 @@
 
 | Lines | Path | Language |
 |---:|---|---|
-| 22955 | `plan/log.md` | markdown |
+| 23015 | `plan/log.md` | markdown |
 | 9839 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
 | 8140 | `src/visualization/sphPhaseScene.js` | javascript |
-| 7985 | `plan/tests.md` | markdown |
+| 8012 | `plan/tests.md` | markdown |
 | 7279 | `tests/demo.e2e.mjs` | text |
 | 5973 | `ulg-gpu-abi/src/wgsl.js` | javascript |
+| 5380 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
 | 5275 | `src/runtime/sph/sphRenderGpuKernel.js` | javascript |
-| 5217 | `plan/implementation-status.md` | markdown |
-| 5189 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
+| 5233 | `plan/implementation-status.md` | markdown |
 | 4811 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 4718 | `tests/sphMlsMpmGpuStep.test.mjs` | text |
-| 4226 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
+| 4396 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
 | 3134 | `scripts/sph-long-horizon-probe.mjs` | text |
 | 2311 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2126 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
 | 2092 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2015 | `tests/orchestration.test.mjs` | text |
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
+| 1627 | `plan/plan.md` | markdown |
 | 1618 | `src/runtime/sph/sphThermalGpuKernel.js` | javascript |
-| 1611 | `plan/plan.md` | markdown |
-| 1487 | `plan/todo/README.md` | markdown |
+| 1496 | `plan/todo/README.md` | markdown |
 | 1467 | `ulg-gpu-abi/src/index.js` | javascript |
 | 1399 | `plan/todo/perf-upgrade.md` | markdown |
 | 1321 | `plan/todo/sphphasedemo.md` | markdown |

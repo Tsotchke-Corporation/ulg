@@ -35,6 +35,15 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 05:00 AKDT: the browser resident authority
+host can now publish admitted pressure/interface gas-cell field imports through
+StateManager hot/warm records. This moves import construction behind
+NodeKernel/StateManager authority: callers should request
+`host.publishPressureInterfaceGasCellFieldImportSource()` instead of
+hand-building import descriptors. Next priority: wire the live scene/stage
+path to use this host-published gas-cell import when resident gas-cell fields
+exist, then remove any remaining direct caller construction from the hot path.
+
 Current routing note, 2026-06-15 04:50 AKDT: pressureInterface now has an
 admitted retained gas-cell field import contract. A
 `peercompute.ulg.pressure-interface-gas-cell-field-import.v0` descriptor can

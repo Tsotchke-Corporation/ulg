@@ -1,6 +1,33 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Admitted Gas-Cell Field Import
+## Current Focused Result - 2026-06-15 StateManager Gas-Cell Import Publisher
+
+The current slice moves gas-cell import construction behind the browser
+resident authority host and StateManager. The host publishes
+`peercompute.ulg.pressure-interface-gas-cell-field-import-hot-buffer-publication.v0`
+records and returns a pressureInterface-consumable
+`peercompute.ulg.pressure-interface-gas-cell-field-import.v0` descriptor.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js` and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- PeerCompute gas-cell import publication coverage:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface force-row descriptors"`
+  passed `14/14`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-cell-import-publisher-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-gas-cell-import-publisher-20260615`.
+  Manual inspection found all final frames nonblank and bounded; MLS-MPM still
+  shows the known short-horizon fragmentation.
+
+## Prior Focused Result - 2026-06-15 Admitted Gas-Cell Field Import
 
 The current slice adds
 `peercompute.ulg.pressure-interface-gas-cell-field-import.v0` as the admitted

@@ -1,5 +1,65 @@
 # ULG Implementation Log
 
+## 2026-06-15 05:00 AKDT - StateManager gas-cell import publisher
+
+Implemented:
+
+- Added
+  `peercompute.ulg.pressure-interface-gas-cell-field-import-hot-buffer-publication.v0`.
+- Added `publishUlgPressureInterfaceGasCellFieldImportSource()` and exposed it
+  as `host.publishPressureInterfaceGasCellFieldImportSource()`.
+- The host publisher validates admitted gas-cell field-consumption evidence,
+  retained gas-cell refs, and a ready local gas-cell snapshot before storing a
+  StateManager hot record and committing a warm delta.
+- The publisher returns a
+  `peercompute.ulg.pressure-interface-gas-cell-field-import.v0` descriptor that
+  `runSphPressureInterfaceStageComputeTask()` can consume directly.
+- Added integration coverage for successful publication, invalid admission
+  rejection, missing retained-ref rejection, hot/warm record preservation, and
+  pressureInterface consumption of the returned import.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-gas-cell-import-publisher-2026-06-15.md`
+
+Commands run:
+
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "gas-cell field imports|worker-retained pressure/interface force-row descriptors"`
+- `npm run test:physics-atomics`
+- `curl -k -I --max-time 5 https://127.0.0.1:5173/`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-cell-import-publisher-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/test modules.
+- PASS: PeerCompute integration coverage reported `14/14`.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon liquid skip.
+- PASS: HTTPS Vite server responded with HTTP `200`.
+- PASS: visual matrix `codex-gas-cell-import-publisher-20260615` reported
+  `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two frames per
+  scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-gas-cell-import-publisher-20260615`.
+- PASS: manually inspected final frames for MLS-MPM H2O/H2O, CPU-SPH
+  H2O/H2O, and solid H2O CPU-SPH. All were nonblank and bounded. MLS-MPM still
+  shows the known short-horizon fragmentation.
+
+Open:
+
+- The live scene/stage path still needs to request the host-published import
+  when resident gas-cell fields are available.
+- Renderer z-buffer/draw-order and focus-change flash/disappear issues remain
+  queued as separate visual-correctness blockers.
+
 ## 2026-06-15 04:50 AKDT - Admitted gas-cell field import
 
 Implemented:

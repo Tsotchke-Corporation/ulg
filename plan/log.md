@@ -1,5 +1,46 @@
 # ULG Implementation Log
 
+## 2026-06-14 22:50 AKDT - Worker thermal/phase stage support
+
+Implemented:
+
+- Extended `src/services/ulgMechanicsResidentStage.worker.js` with a
+  `thermalPhase` stage id.
+- The Worker stage can call `runSphThermalPhaseStageComputeTask()`, forward
+  retained state/thermo inputs, and adopt emitted thermal `thermoBuffer` output
+  into the Worker lane record.
+- Added direct Worker-payload unit coverage using an injected thermal runner.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check tests/ulgMechanicsResidentStageWorker.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `2/2`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal phase stage compute task"`
+  reported `33/33`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-worker-thermal-phase-stage-support-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured frames
+  each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Register the `thermalPhase` stage in the browser GPUHub resident-stage chain
+  after mechanics G2P and provide the real thermal tables/retained inputs.
+- Keep the first live Worker thermal path full-parity/readback until no-full
+  thermal queue-fence and compact summary evidence are explicit.
+
 ## 2026-06-14 22:42 AKDT - Thermal/phase stage task boundary
 
 Implemented:

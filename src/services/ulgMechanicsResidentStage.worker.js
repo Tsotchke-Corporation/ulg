@@ -1,4 +1,5 @@
 import {
+  runSphThermalPhaseStageComputeTask,
   runMlsMpmMechanicsG2pStageComputeTask,
   runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmMechanicsP2gStageComputeTask
@@ -17,7 +18,8 @@ const GPU_BUFFER_USAGE = {
 const STAGE_RUNNERS = {
   p2g: runMlsMpmMechanicsP2gStageComputeTask,
   gridUpdate: runMlsMpmMechanicsGridUpdateStageComputeTask,
-  g2p: runMlsMpmMechanicsG2pStageComputeTask
+  g2p: runMlsMpmMechanicsG2pStageComputeTask,
+  thermalPhase: runSphThermalPhaseStageComputeTask
 };
 
 const retainedLanes = new Map();
@@ -122,6 +124,14 @@ function retainedRefsForStageResult(stageId, result = {}) {
       refs.push('mls-mpm-mechanics-buffer');
     }
   }
+  if (stageId === 'thermalPhase') {
+    if (result.stateBuffer || gpuResult.stateBuffer || result.state instanceof Float32Array || result.stateBufferByteLength > 0) {
+      refs.push('sph-state-buffer');
+    }
+    if (result.thermoBuffer || gpuResult.thermoBuffer || result.thermo instanceof Float32Array || result.thermoBufferByteLength > 0) {
+      refs.push('sph-thermo-buffer');
+    }
+  }
   return refs;
 }
 
@@ -174,7 +184,7 @@ function retainedG2pOutput(record) {
 }
 
 function stageUsesSphThermo(stageId) {
-  return stageId === 'p2g' || stageId === 'g2p';
+  return stageId === 'p2g' || stageId === 'g2p' || stageId === 'thermalPhase';
 }
 
 function ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult }) {
@@ -375,7 +385,9 @@ function baseStageData(payload = {}) {
     ? ['mls-mpm-p2g-grid-buffer']
     : (stageId === 'gridUpdate'
       ? ['mls-mpm-grid-update-buffer']
-      : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']);
+      : (stageId === 'thermalPhase'
+        ? ['sph-state-buffer', 'sph-thermo-buffer']
+        : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']));
   return {
     ...common,
     ...(context.stageOptions?.[stageId] || {}),
@@ -429,6 +441,23 @@ function stageDataForPayload(payload = {}, record) {
   }
   if (stageId === 'g2p') {
     data.gridUpdate = record.stageResults.gridUpdate || payload.input;
+  }
+  if (stageId === 'thermalPhase') {
+    const g2pOutput = retainedG2pOutput(record);
+    const retainedThermoBuffer = record.retainedThermoBuffer || data?.sourceThermoBuffer || data?.sphParticleUpload?.thermoBuffer || null;
+    data.sourceStateBuffer = data.sourceStateBuffer || g2pOutput?.stateBuffer || data?.sphParticleUpload?.stateBuffer || null;
+    data.sourceThermoBuffer = retainedThermoBuffer;
+    if (data.sourceStateBuffer || retainedThermoBuffer) {
+      data.sphParticleUpload = {
+        ...(data.sphParticleUpload || {}),
+        schema: data.sphParticleUpload?.schema || 'peercompute.ulg.worker-retained-sph-particle-upload.v0',
+        status: 'webgpu-uploaded',
+        workerRetained: true,
+        sourceStage: data.sourceStateBuffer === g2pOutput?.stateBuffer ? 'g2p' : (data.sphParticleUpload?.sourceStage || 'thermal-phase-input'),
+        stateBuffer: data.sourceStateBuffer || data.sphParticleUpload?.stateBuffer || null,
+        thermoBuffer: retainedThermoBuffer || data.sphParticleUpload?.thermoBuffer || null
+      };
+    }
   }
   return data;
 }

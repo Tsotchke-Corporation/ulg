@@ -1,9 +1,18 @@
 # Implementation Status
 
-Updated: 2026-06-14 thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-14 worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added Worker thermal/phase stage support. The checked-in resident-stage
+  Worker now accepts `thermalPhase`, forwards retained state/thermo inputs into
+  `runSphThermalPhaseStageComputeTask()`, and adopts emitted retained
+  `thermoBuffer` output into the Worker lane record. Validation passed syntax
+  checks, `git diff --check`, Worker unit `2/2`, resident-step unit `33/33`,
+  focused PeerCompute/ULG integration `11/11`, focused browser authority-host
+  Playwright `1/1`, physics atomics `7` with `1` expected skip, and visual
+  matrix `codex-worker-thermal-phase-stage-support-20260614` `3/3` with two
+  captured frames per scenario.
 - Added the first ComputeManager thermal/phase stage-task boundary.
   `createSphThermalPhaseStageComputeTask()` and
   `runSphThermalPhaseStageComputeTask()` wrap the existing thermal step in a

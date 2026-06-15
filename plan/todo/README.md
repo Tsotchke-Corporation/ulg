@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 22:50 AKDT: the resident-stage Worker module
+now accepts a `thermalPhase` stage id. It can run
+`runSphThermalPhaseStageComputeTask()`, receive retained state/thermo inputs,
+return retained state/thermo outputs, and adopt the emitted `thermoBuffer` into
+the Worker lane record. Direct Worker-payload coverage proves this stage shape
+with an injected thermal runner. This is still not live browser thermal Worker
+execution; next wire the GPUHub resident-stage registration so thermal/phase
+follows the same warm Worker/lane path as mechanics and consumes the real
+Worker-retained G2P output.
+
 Current routing note, 2026-06-14 22:42 AKDT: the first thermal/phase
 ComputeManager stage-task boundary now exists. ULG exposes
 `createSphThermalPhaseStageComputeTask()` and

@@ -194,6 +194,14 @@ thermal stage where the retained G2P state and retained thermo source already
 live, adopt the resulting thermo buffer into the lane record, and only publish
 compact descriptors through NodeKernel/StateManager after queue-fence evidence.
 
+Status update, 2026-06-14 Worker thermal/phase stage support: the resident-stage
+Worker module can now execute a `thermalPhase` stage shape and adopt retained
+thermal output into its lane record. Direct Worker-payload coverage proves the
+contract, but the browser GPUHub path still needs real stage registration and
+thermal table inputs. This keeps the architecture aligned: same Worker/lane,
+same ComputeManager/GPUHub authority, no main-thread GPU handle transfer, and
+no independent thermal scheduler.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

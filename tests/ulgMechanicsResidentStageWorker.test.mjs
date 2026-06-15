@@ -127,3 +127,72 @@ test('ULG mechanics resident stage worker runs P2G, grid update, and G2P through
   assert.ok(g2p.retainedBufferRefs.includes('sph-state-buffer'));
   assert.ok(g2p.retainedBufferRefs.includes('mls-mpm-mechanics-buffer'));
 });
+
+test('ULG resident stage worker can run thermal phase stage and adopt retained thermo output', async () => {
+  const buffers = manualBuffers();
+  const sourceStateBuffer = { label: 'worker-g2p-state' };
+  const sourceThermoBuffer = { label: 'worker-source-thermo' };
+  const outputStateBuffer = { label: 'worker-thermal-state' };
+  const outputThermoBuffer = { label: 'worker-thermal-thermo' };
+  const thermalInputs = [];
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:thermal-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      ...buffers,
+      thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+      sphParticleUpload: {
+        status: 'webgpu-uploaded',
+        stateBuffer: sourceStateBuffer,
+        thermoBuffer: sourceThermoBuffer
+      },
+      sourceStateBuffer,
+      sourceThermoBuffer,
+      boxDimsM: [5, 5, 5],
+      dtS: buffers.mlsMpmParticleState.mechanicsDtS,
+      thermalStepRunner(args) {
+        thermalInputs.push(args);
+        return {
+          schema: 'peercompute.ulg.sph-gpu-thermal-step-execution.v0',
+          backend: 'webgpu',
+          status: 'webgpu-accepted',
+          webgpuStatus: { status: 'webgpu-executed' },
+          result: {
+            schema: 'peercompute.ulg.sph-gpu-thermal-step.v0',
+            backend: 'webgpu',
+            status: 'thermal-step-executed',
+            particleCount: buffers.sphParticleState.particleCount,
+            state: new Float32Array(),
+            thermo: new Float32Array(),
+            stateBuffer: outputStateBuffer,
+            thermoBuffer: outputThermoBuffer,
+            stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+            thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+            retainedOutputParticleBuffers: true,
+            readbackMode: 'full-parity-readback',
+            fullReadbackPerformed: true
+          }
+        };
+      }
+    }
+  };
+
+  const thermal = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('thermalPhase', ['sph-particle-state', 'sph-thermo-phase'], ['sph-thermo-phase']),
+    context
+  ));
+
+  assert.equal(thermal.value.workerResidentStage.stageId, 'thermalPhase');
+  assert.equal(thermal.value.computeTaskId, 'ulg:test:thermal-worker:thermalPhase');
+  assert.equal(thermal.value.thermalPhaseStageTaskEvidence.passed, true);
+  assert.equal(thermal.value.thermalPhaseStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(thermal.value.workerResidentStage.workerRetainedThermoOutputStatus, 'adopted-worker-retained-thermo-output');
+  assert.ok(thermal.retainedBufferRefs.includes('sph-state-buffer'));
+  assert.ok(thermal.retainedBufferRefs.includes('sph-thermo-buffer'));
+  assert.equal(thermalInputs.length, 1);
+  assert.equal(thermalInputs[0].sourceStateBuffer, sourceStateBuffer);
+  assert.equal(thermalInputs[0].sourceThermoBuffer, sourceThermoBuffer);
+  assert.equal(thermalInputs[0].retainOutputParticleBuffers, true);
+});

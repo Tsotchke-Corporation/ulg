@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Thermal/Phase Stage Task Boundary
+## Current Focused Result - 2026-06-14 Worker Thermal/Phase Stage Support
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -12,8 +12,17 @@ The Worker lane now also seeds one retained thermo buffer and reuses it for
 P2G/G2P in both the first stage chain and the continuation.
 The latest unit slice adds the first ComputeManager thermal/phase child stage
 task boundary for the next law-family promotion.
+The Worker module now also accepts a `thermalPhase` stage id and can adopt
+retained thermo output into the Worker lane.
 Focused checks:
 
+- ULG resident-stage Worker thermal/phase support:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `2/2`.
+  The new thermal case runs `thermalPhase` through
+  `runUlgMechanicsResidentStageWorkerPayload()` with an injected thermal
+  runner, verifies retained state/thermo inputs are forwarded, asserts
+  `thermalPhaseStageTaskEvidence.passed=true`, and confirms the Worker reports
+  `adopted-worker-retained-thermo-output`.
 - SPH thermal/phase stage task boundary:
   `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal phase stage compute task"`
   passed; the filtered command reported `33/33` resident-step tests. The new
@@ -132,6 +141,8 @@ Focused checks:
   `codex-worker-retained-thermo-input-20260614` passed `3/3`.
   The thermal/phase stage task matrix
   `codex-thermal-phase-stage-task-20260614` passed `3/3`.
+  The Worker thermal/phase stage support matrix
+  `codex-worker-thermal-phase-stage-support-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

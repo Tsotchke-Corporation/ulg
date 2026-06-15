@@ -2,6 +2,16 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 22:50 AKDT: the checked-in resident-stage Worker
+module now has a `thermalPhase` stage path. The Worker imports
+`runSphThermalPhaseStageComputeTask()`, can build retained state/thermo inputs
+from the lane record or supplied uploads, and records
+`adopted-worker-retained-thermo-output` when the thermal stage emits a retained
+`thermoBuffer`. Unit validation proves the direct Worker-payload contract with
+an injected thermal runner. The next implementation target is the browser
+GPUHub registration and real Worker WebGPU thermal execution after mechanics
+G2P, not a new scheduler.
+
 Current checkpoint, 2026-06-14 22:42 AKDT: thermal/phase promotion now has an
 executable ComputeManager stage-task boundary. `sphMlsMpmGpuStep.js` exports
 `createSphThermalPhaseStageComputeTask()` and

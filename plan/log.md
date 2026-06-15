@@ -20829,3 +20829,54 @@ Open:
   boundary. The next promotion step is to execute the actual WebGPU mechanics
   stage work inside the lane executor and then repeat the pattern for
   pressure, thermal/phase, and reaction/product stages.
+
+## 2026-06-14 19:36 AKDT - Lane executor submits mechanics stage tasks
+
+Prompt context:
+
+- Continued from the mechanics stage-chain lane-plan evidence slice. The next
+  step was to make the lane executor drive the mechanics stage tasks directly
+  when the native task graph is disabled, while keeping mutation
+  non-authoritative and guarded by the CPU/reference path.
+
+Implemented:
+
+- Shared mechanics stage input normalization between the native task graph and
+  lane-executor paths.
+- Updated the stage-task submit helper to reuse stage results already produced
+  by the lane executor so the mechanics-only step does not duplicate P2G,
+  grid-update, or G2P work.
+- Added a non-native graph path where `executeGpuResidentLaneStagePlan()` runs
+  handlers that submit the P2G, grid-update, and G2P ComputeManager stage
+  tasks, record retained refs, complete the lane fence, and leave the
+  resulting stage outputs in the existing stage-result cache.
+- Extended the focused cross-repo integration test to prove the
+  `useNativeTaskGraph=false` path completes all three ordered stage tasks
+  through the lane executor.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG plan/status/todo/test/log documentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-mechanics-stage-task-lane-executor-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured
+  frames each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- The focused lane-executed stage-task path is still CPU/inline in Node. The
+  next promotion is browser/WebGPU same-device execution under this same lane
+  executor and then pressure/interface, thermal/phase, and reaction/product
+  stage promotion.

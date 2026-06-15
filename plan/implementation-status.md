@@ -1,9 +1,21 @@
 # Implementation Status
 
-Updated: 2026-06-14 ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Extended the ULG mechanics stage-plan path so the lane executor can submit
+  the actual P2G, grid-update, and G2P ComputeManager stage tasks when the
+  native task graph is disabled. Stage handlers run inside
+  `executeGpuResidentLaneStagePlan()`, populate the stage-result cache, and
+  the mechanics-only step consumes those lane-produced outputs without
+  duplicate execution. This is still non-authoritative and default-off for
+  state mutation, but it moves the mechanics stage-task chain behind the
+  PeerCompute lane executor boundary instead of only annotating existing graph
+  results. Validation passed syntax checks, focused cross-repo integration
+  `11/11`, physics atomics `7` with `1` expected skip, and visual matrix
+  `codex-mechanics-stage-task-lane-executor-20260614` `3/3` with two captured
+  frames per scenario.
 - Wired the existing ULG mechanics P2G -> grid-update -> G2P stage-chain
   helper to the PeerCompute GPU resident lane stage-plan boundary as
   non-authoritative evidence. The helper now builds

@@ -3941,6 +3941,16 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     stateKey: laneStagePlanStateKey,
     domainKey: gpuResidentLaneDomainKey
   });
+  const sphParticleState = stepOptions.sphParticleState;
+  const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
+  const dims = finiteVector3(stepOptions.boxDimsM, DEFAULT_BOX_DIMS_M);
+  const gravity = finiteVector3(
+    stepOptions.gravityMPerS2 ?? mlsMpmParticleState?.gravityMPerS2,
+    DEFAULT_GRAVITY_M_PER_S2
+  );
+  const dtSeconds = finiteNumber(stepOptions.dt ?? mlsMpmParticleState?.mechanicsDtS, 0);
+  const cflFactor = stepOptions.cflFactor ?? mlsMpmParticleState?.gridCflFactor ?? DEFAULT_CFL_FACTOR;
+  const readbackMode = stepOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
   const nativeTaskGraphSubmitter = nodeKernel && typeof nodeKernel.submitTaskGraph === 'function'
     ? nodeKernel
     : computeManager;
@@ -3950,16 +3960,6 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     && !stepOptions.sphParticleUpload
     && !stepOptions.mlsMpmParticleUpload;
   if (canUseNativeTaskGraph) {
-    const sphParticleState = stepOptions.sphParticleState;
-    const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
-    const dims = finiteVector3(stepOptions.boxDimsM, DEFAULT_BOX_DIMS_M);
-    const gravity = finiteVector3(
-      stepOptions.gravityMPerS2 ?? mlsMpmParticleState?.gravityMPerS2,
-      DEFAULT_GRAVITY_M_PER_S2
-    );
-    const dtSeconds = finiteNumber(stepOptions.dt ?? mlsMpmParticleState?.mechanicsDtS, 0);
-    const cflFactor = stepOptions.cflFactor ?? mlsMpmParticleState?.gridCflFactor ?? DEFAULT_CFL_FACTOR;
-    const readbackMode = stepOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
     nativeTaskGraph = await nativeTaskGraphSubmitter.submitTaskGraph({
       graphId: `${taskIdPrefix}:native-graph`,
       cachePolicy: {
@@ -4205,6 +4205,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   }
   const submitStageTask = async (stageId, createTask, stageOptions) => {
     if (nativeTaskGraph?.nodeResults?.[stageId]) return nativeTaskGraph.nodeResults[stageId];
+    if (stageResults[stageId]) return stageResults[stageId];
     const task = createTask({
       ...stripMechanicsStageTaskRuntimeFields(stageOptions),
       modulePath,
@@ -4224,6 +4225,141 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     stageResults[stageId] = result;
     return result;
   };
+  const canExecuteStageTasksThroughLanePlan = useGpuResidentLaneStagePlan !== false
+    && !gpuResidentLaneStagePlanExecution
+    && typeof computeManager.acquireGpuResidentLaneLease === 'function'
+    && typeof computeManager.executeGpuResidentLaneStagePlan === 'function'
+    && typeof computeManager.completeGpuResidentLaneLease === 'function';
+  if (canExecuteStageTasksThroughLanePlan) {
+    try {
+      gpuResidentLaneStagePlanLease = computeManager.acquireGpuResidentLaneLease({
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        domainKey: gpuResidentLaneDomainKey,
+        solverId: 'ulg-mls-mpm-mechanics-stage-plan',
+        taskId: `${taskIdPrefix}:mechanics-stage-plan`,
+        owner: 'ulg-mls-mpm-mechanics-law',
+        readFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+        writeFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+        retainedBufferRefs: ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer'],
+        queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission',
+        residentSequenceLaneContract: laneStagePlanContract,
+        copyBudget: {
+          schema: 'peercompute.compute.gpu-resident-lane-copy-budget.v0',
+          uploadBytes: 0,
+          readbackBytes: 0,
+          retainedBytes: 0,
+          compactSummaryBytes: 0,
+          fullReadbackReason: null
+        }
+      });
+      gpuResidentLaneStagePlanExecution = await computeManager.executeGpuResidentLaneStagePlan(
+        gpuResidentLaneStagePlanLease.leaseId,
+        {
+          input: {
+            source: nativeTaskGraph
+              ? 'ulg-mechanics-stage-chain-native-task-graph-results'
+              : 'ulg-mechanics-stage-chain-lane-executor-stage-tasks',
+            taskIdPrefix
+          },
+          context: {
+            nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
+            nativeTaskGraphSchema: nativeTaskGraph?.schema || null,
+            nativeTaskGraphStatus: nativeTaskGraph?.status || null,
+            stageTasksSubmittedByLaneExecutor: !nativeTaskGraph
+          },
+          stageExecutors: {
+            p2g: async () => {
+              const result = await submitStageTask('p2g', createMlsMpmMechanicsP2gStageComputeTask, {
+                sphParticleState,
+                mlsMpmParticleState,
+                gridSpacingM: stepOptions.gridSpacingM ?? sphParticleState?.smoothingLengthM,
+                boxDimsM: dims,
+                dt: dtSeconds,
+                preferWebGpu: stepOptions.preferWebGpu === true,
+                readbackMode
+              });
+              return {
+                value: result,
+                retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('p2g', result),
+                summary: {
+                  computeTaskResultSchema: result?.computeTaskResultSchema || null,
+                  evidencePassed: result?.mechanicsP2gStageTaskEvidence?.passed === true
+                }
+              };
+            },
+            gridUpdate: async () => {
+              const result = await submitStageTask('gridUpdate', createMlsMpmMechanicsGridUpdateStageComputeTask, {
+                p2gGridProjection: stageResults.p2g,
+                dt: dtSeconds,
+                gravityMPerS2: gravity,
+                boxDimsM: dims,
+                cflFactor,
+                preferWebGpu: stepOptions.preferWebGpu === true,
+                readbackMode
+              });
+              return {
+                value: result,
+                retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('gridUpdate', result),
+                summary: {
+                  computeTaskResultSchema: result?.computeTaskResultSchema || null,
+                  evidencePassed: result?.mechanicsGridUpdateStageTaskEvidence?.passed === true
+                }
+              };
+            },
+            g2p: async () => {
+              const result = await submitStageTask('g2p', createMlsMpmMechanicsG2pStageComputeTask, {
+                sphParticleState,
+                mlsMpmParticleState,
+                gridUpdate: stageResults.gridUpdate,
+                dt: dtSeconds,
+                boxDimsM: dims,
+                preferWebGpu: stepOptions.preferWebGpu === true,
+                readbackMode
+              });
+              return {
+                value: result,
+                retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('g2p', result),
+                summary: {
+                  computeTaskResultSchema: result?.computeTaskResultSchema || null,
+                  evidencePassed: result?.mechanicsG2pStageTaskEvidence?.passed === true
+                }
+              };
+            }
+          }
+        }
+      );
+      gpuResidentLaneStagePlanLeaseExecution = computeManager.completeGpuResidentLaneLease(
+        gpuResidentLaneStagePlanLease.leaseId,
+        {
+          status: 'queue-work-completed',
+          method: 'compute-manager.executeGpuResidentLaneStagePlan',
+          queueCompletionStatus: 'queue-work-completed',
+          queueCompletionMethod: 'compute-manager.executeGpuResidentLaneStagePlan',
+          retainedBufferRefs: gpuResidentLaneStagePlanExecution.retainedBufferRefs,
+          source: nativeTaskGraph
+            ? 'ulg-mechanics-stage-plan-executor'
+            : 'ulg-mechanics-stage-plan-executor-stage-tasks'
+        }
+      );
+    } catch (error) {
+      if (gpuResidentLaneStagePlanLease?.leaseId && typeof computeManager.rejectGpuResidentLaneLease === 'function') {
+        try {
+          gpuResidentLaneStagePlanRejected = computeManager.rejectGpuResidentLaneLease(
+            gpuResidentLaneStagePlanLease.leaseId,
+            'mechanics-stage-plan-executor-error'
+          );
+        } catch {
+          // Keep the original stage-plan error as the diagnostic source.
+        }
+      }
+      gpuResidentLaneStagePlanExecution = {
+        schema: 'peercompute.compute.gpu-resident-lane-stage-execution.v0',
+        status: 'failed',
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
   const step = await runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
     ...stepOptions,
     p2gStageRunner: (stageOptions) => submitStageTask(

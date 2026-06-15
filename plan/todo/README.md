@@ -35,16 +35,24 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 19:36 AKDT: the mechanics stage-plan executor
+now drives actual ComputeManager stage-task submissions in the non-native
+graph path. With `useNativeTaskGraph=false`, the lane executor submits P2G,
+grid-update, and G2P stage tasks, records completed stage count/order and
+fence evidence, and the mechanics-only step consumes the lane-produced stage
+results without duplicate execution. This remains non-authoritative and CPU/
+inline in the focused test; next priority is to run the WebGPU-backed stage
+tasks under the same lane executor with same-device retained buffers, then
+promote pressure/interface, thermal/phase, and reaction/product stages behind
+the same boundary.
+
 Current routing note, 2026-06-14 19:28 AKDT: the first ULG mechanics consumer
 of the PeerCompute lane stage-plan boundary is in place. The existing
 mechanics stage-chain helper now wraps real P2G/grid-update/G2P stage graph
 outputs in `peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0`,
 executes the contract through `ComputeManager.executeGpuResidentLaneStagePlan()`,
 and records completed stage count/order plus lane fence evidence. This is
-still CPU-oracle/native-stage output and remains non-authoritative. Next
-priority: move the actual WebGPU mechanics stage execution itself into this
-lane executor path, then expand the same lane-boundary pattern to pressure,
-thermal/phase, and reaction/product stages with long-horizon liquid gates.
+still CPU-oracle/native-stage output and remains non-authoritative.
 
 Current routing note, 2026-06-14 19:13 AKDT: the resident sequence contract is
 now consumed by sibling PeerCompute's `GpuResidentLaneManager`. The manager

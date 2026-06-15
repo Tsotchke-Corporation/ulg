@@ -2,6 +2,17 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 19:36 AKDT: the mechanics stage-plan executor
+can now drive actual ComputeManager stage-task submissions when the native
+task graph is disabled. `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()`
+pre-runs `executeGpuResidentLaneStagePlan()` with stage handlers that submit
+the P2G, grid-update, and G2P ComputeManager tasks, caches their results, and
+lets the mechanics-only step consume those lane-produced stage outputs
+without duplicate execution. The focused integration now proves both the
+native graph evidence path and the lane-executed stage-task path complete
+three ordered stages under the PeerCompute lane contract, still
+non-authoritative and `defaultEnabled=false`.
+
 Current checkpoint, 2026-06-14 19:28 AKDT: ULG's mechanics stage-chain helper
 now consumes actual P2G -> grid-update -> G2P stage outputs through the
 PeerCompute GPU resident lane stage-plan boundary. The path builds

@@ -208,6 +208,15 @@ not yet move actual WebGPU mutation into the lane executor; it proves the
 mechanics law stage outputs can be represented behind the PeerCompute lane
 contract before promotion.
 
+Status update, 2026-06-14 mechanics stage-task lane executor: the same helper
+can now let the lane executor drive actual ComputeManager stage-task
+submissions when the native task graph is disabled. `executeGpuResidentLaneStagePlan()`
+calls handlers that submit P2G, grid-update, and G2P tasks, stores those
+stage results, and the mechanics-only step consumes them without duplicate
+execution. This is still non-authoritative and defaults to CPU/inline in the
+focused validation; the next promotion is to run WebGPU-backed stage tasks
+there with same-device retained buffers.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

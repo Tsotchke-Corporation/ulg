@@ -1202,6 +1202,39 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-grid-update-stage'].completed, 5);
   assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-g2p-stage'].completed, 4);
 
+  const laneExecutedStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
+    ...mechanicsStageParticle,
+    computeManager,
+    modulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    stageTaskIdPrefix: 'ulg:test:mechanics-stage-lane-executor-chain',
+    useNativeTaskGraph: false,
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback'
+  });
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.schedulerStatus,
+    'ulg-helper-stage-runners-used-awaiting-gpu-graph-semantics'
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlanContractSchema,
+    'peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0'
+  );
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStatus, 'completed');
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 3);
+  assert.deepEqual(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
+    ['p2g', 'gridUpdate', 'g2p']
+  );
+  assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.stageTaskBoundaries, {
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageLeaseFenceSatisfied, true);
+  assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-p2g-stage'].completed, 7);
+  assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-grid-update-stage'].completed, 6);
+  assert.equal(computeManager.getStats().byTaskFamily['ulg-mls-mpm-mechanics-g2p-stage'].completed, 5);
+
   const mechanicsChildDryRun = await runUlgMechanicsChildDryRunTask({
     referenceEvidence: measuredMechanicsEvidence,
     mechanicsOnlyChildTaskEvidence: mechanicsOnlyResidentTaskResult

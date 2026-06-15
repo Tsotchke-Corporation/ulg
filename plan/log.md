@@ -21199,3 +21199,70 @@ Open:
   retains lane buffers across stage invocations.
 - Browser evidence still defaults to `blocked-worker-backend-missing` until
   that module is wired.
+
+## 2026-06-14 21:24 AKDT - Mechanics resident-stage Worker module
+
+Prompt context:
+
+- Continued after the worker-ready runner seam. The next bounded item was a
+  real checked-in ULG Worker module for the mechanics P2G -> grid-update ->
+  G2P chain, without claiming copy-free worker-owned WebGPU before validating
+  it.
+
+Implemented:
+
+- Added `src/services/ulgMechanicsResidentStage.worker.js`.
+- The Worker module handles PeerCompute `run-resident-stage` messages, runs
+  the existing ULG mechanics stage task handlers, keeps raw stage outputs in a
+  worker-local lane store, and returns clone-safe values/summaries with
+  retained-buffer refs.
+- `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` now sends
+  a ULG mechanics worker context envelope to supplied worker runners, including
+  particle state, mechanics state, dt, box dimensions, gravity, CFL factor,
+  lane id, state key, readback mode, and preference flags.
+- `createPeerComputeResidentAuthorityHost()` now exposes
+  `createUlgMechanicsResidentStageWorkerRunner()` and the checked-in worker
+  module path. `summarizePeerComputeResidentAuthorityHost()` reports bridge
+  availability, worker-runner factory readiness, and module path.
+- Added a Node worker payload test and extended the focused browser authority
+  host gate to create the actual Worker bridge runner and run P2G,
+  grid-update, and G2P through the real browser Worker module.
+
+Files touched:
+
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/ulgMechanicsResidentStageWorker.test.mjs`
+- `tests/demo.e2e.mjs`
+- ULG plan/todo/test/log/done/status documentation.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/ulgMechanicsResidentStageWorker.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `1/1`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix
+  `codex-ulg-mechanics-resident-stage-worker-module-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- This is the first real browser Worker module for mechanics resident stages,
+  but it is not yet the final copy-free WebGPU hot path. The next promotion is
+  worker-owned WebGPU device/buffer retention, compact summaries, and
+  StateManager/NodeKernel-authorized hot-state publication.

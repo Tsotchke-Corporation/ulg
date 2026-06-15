@@ -255,6 +255,15 @@ PeerCompute reports `worker-ready` on each stage. Defaults still report
 `blocked-worker-backend-missing`; the next implementation is the actual ULG
 browser worker module that owns a WebGPU device and retained lane buffers.
 
+Status update, 2026-06-14 mechanics resident-stage Worker module: ULG now has
+`src/services/ulgMechanicsResidentStage.worker.js` plus browser-host factory
+`createUlgMechanicsResidentStageWorkerRunner()`. The focused Playwright gate
+creates the PeerCompute Worker bridge, runs the mechanics P2G -> grid-update
+-> G2P chain through the real browser Worker module, and asserts
+`worker-ready` for all three stages. The module keeps raw stage outputs in a
+worker-local lane store and returns clone-safe values/summaries; worker-owned
+WebGPU device/buffer retention remains the next acceptance target.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

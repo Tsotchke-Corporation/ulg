@@ -1,11 +1,16 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 GPUHub Worker-Ready Runner Seam
+## Current Focused Result - 2026-06-14 Mechanics Resident-Stage Worker Module
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
 worker residency without overclaiming live worker execution. Focused checks:
 
+- ULG mechanics resident-stage Worker module:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `1/1`.
+  The test runs P2G, grid-update, and G2P through
+  `runUlgMechanicsResidentStageWorkerPayload()`, reusing one worker-local lane
+  store and verifying worker-stage completion/fence evidence.
 - ULG mechanics stage-chain lane-plan evidence:
   `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
   passed `11/11`, including assertions that the mechanics P2G -> grid-update
@@ -33,9 +38,11 @@ worker residency without overclaiming live worker execution. Focused checks:
   `gpu-hub-resident-stage-executor` sources for all three mechanics stages.
   It also checks the serialized browser evidence reports requested worker
   residency with `blocked-worker-backend-missing` for P2G, grid-update, and
-  G2P.
-  This is inline browser authority-host execution through GPUHub's registry;
-  separate GPUHub worker residency remains open.
+  G2P on the default path. The same gate now creates
+  `host.createUlgMechanicsResidentStageWorkerRunner()`, runs the CPU/reference
+  mechanics chain through the real browser Worker module, and asserts
+  `worker-ready` for P2G, grid-update, and G2P through PeerCompute's Worker
+  bridge. Worker-owned WebGPU buffer retention remains open.
 - PeerCompute lane manager:
   `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
   from `/home/cos/projects/peercompute` passed `6/6`.
@@ -66,6 +73,8 @@ worker residency without overclaiming live worker execution. Focused checks:
   `codex-gpuhub-worker-policy-evidence-20260614` passed `3/3`.
   The GPUHub worker-ready runner seam matrix
   `codex-gpuhub-worker-ready-runner-seam-20260614` passed `3/3`.
+  The mechanics resident-stage Worker module matrix
+  `codex-ulg-mechanics-resident-stage-worker-module-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

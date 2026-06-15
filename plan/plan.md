@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 21:24 AKDT: ULG now includes
+`src/services/ulgMechanicsResidentStage.worker.js`, a mechanics resident-stage
+Worker module for the P2G -> grid-update -> G2P chain. The browser authority
+host exposes `createUlgMechanicsResidentStageWorkerRunner()`, which wraps
+PeerCompute's `createResidentStageWorkerBackend()` and keeps the Worker
+available for stage messages. Focused browser validation now runs the
+mechanics chain through the real Worker bridge and reports `worker-ready` for
+all three stages. The module stores raw stage outputs in a worker-local lane
+record and sends clone-safe values/summaries back to the main thread. This is
+not yet the final WebGPU-resident hot path; the next promotion is worker-owned
+WebGPU device/buffer retention with compact/authorized state publication.
+
 Current checkpoint, 2026-06-14 21:01 AKDT: ULG mechanics stage-chain
 execution can now attach a supplied GPUHub resident-stage worker runner to
 the P2G, grid-update, and G2P stage executor registrations. The wrapped

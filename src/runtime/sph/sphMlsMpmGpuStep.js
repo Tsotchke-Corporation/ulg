@@ -4470,6 +4470,26 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           fullReadbackReason: null
         }
       });
+      const mechanicsResidentStageWorkerContext = gpuHubResidentStageWorkerRunner
+        ? {
+            schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+            taskIdPrefix,
+            preferWebGpu: stepOptions.preferWebGpu === true,
+            readbackMode,
+            common: {
+              sphParticleState,
+              mlsMpmParticleState,
+              gridSpacingM: stepOptions.gridSpacingM ?? sphParticleState?.smoothingLengthM,
+              boxDimsM: dims,
+              dt: dtSeconds,
+              gravityMPerS2: gravity,
+              cflFactor,
+              laneId: laneStagePlanId,
+              stateKey: laneStagePlanStateKey,
+              domainKey: gpuResidentLaneDomainKey
+            }
+          }
+        : null;
       const stagePlanExecutionOptions = {
         input: {
           source: nativeTaskGraph
@@ -4483,7 +4503,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           nativeTaskGraphStatus: nativeTaskGraph?.status || null,
           stageTasksSubmittedByLaneExecutor: !nativeTaskGraph,
           gpuHubResidentStageExecutorMode,
-          gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId)
+          gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
+          ...(mechanicsResidentStageWorkerContext
+            ? { ulgMechanicsResidentStageWorker: mechanicsResidentStageWorkerContext }
+            : {})
         }
       };
       if (!useRegisteredGpuHubStageExecutors) {

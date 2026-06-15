@@ -5531,6 +5531,39 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         allStageTaskEvidencePassed: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.allStageTaskEvidencePassed ?? null,
         splitStageTaskBoundaries: mechanicsStageTaskChainWebGpu?.mechanicsOnlySplitPath?.stageTaskBoundaries ?? null
       };
+      const mechanicsStageWorkerRunner = host.createUlgMechanicsResidentStageWorkerRunner({ timeoutMs: 60000 });
+      let mechanicsStageTaskChainWorker = null;
+      try {
+        mechanicsStageTaskChainWorker = await host.runMechanicsStageTaskChain({
+          ...mechanicsOnlyChildTaskInput,
+          stageTaskIdPrefix: 'ulg:browser:mechanics-stage-worker-bridge-chain',
+          preferWebGpu: false,
+          useNativeTaskGraph: false,
+          readbackMode: 'full-parity-readback',
+          compactSummaryScope: 'particle-visual',
+          gpuResidentLaneId: 'ulg:browser:mechanics-stage-worker-bridge-chain-lane',
+          gpuResidentLaneStateKey: 'ulg:browser:mechanics-stage-worker-bridge-chain-state',
+          gpuHubResidentStageWorkerRunner: mechanicsStageWorkerRunner,
+          gpuHubResidentStageWorkerModuleUrl: host.ulgMechanicsResidentStageWorkerModulePath
+        });
+      } finally {
+        mechanicsStageWorkerRunner.dispose?.();
+      }
+      const mechanicsStageTaskChainWorkerSummary = {
+        schema: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.schema ?? null,
+        status: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.status ?? null,
+        schedulerStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.schedulerStatus ?? null,
+        stageExecutionStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStatus ?? null,
+        stageExecutionCompletedStageCount: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionCompletedStageCount ?? null,
+        stageExecutionStageOrder: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStageOrder ?? [],
+        stageExecutionExecutorSources: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionExecutorSources ?? {},
+        stageExecutionWorkerResidencyStatuses: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerResidencyStatuses ?? {},
+        stageExecutionWorkerRunnerSupplied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerRunnerSupplied ?? null,
+        stageExecutionWorkerModuleUrl: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerModuleUrl ?? null,
+        stageTaskBackends: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskBackends ?? {},
+        stageTaskFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskFenceSatisfied ?? {},
+        stageLeaseFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageLeaseFenceSatisfied ?? null
+      };
       const registeredSolvers = host.computeManager.listSolvers?.() || [];
       const residentSolver = registeredSolvers.find((solver) => solver.id === 'ulg-mls-mpm-sph-resident-steps') || null;
       const residentLawFamilySolvers = registeredSolvers
@@ -5742,6 +5775,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         mechanicsG2pStageTask,
         mechanicsStageTaskChain,
         mechanicsStageTaskChainWebGpu: mechanicsStageTaskChainWebGpuSummary,
+        mechanicsStageTaskChainWorker: mechanicsStageTaskChainWorkerSummary,
         mechanicsChildDryRunTask,
         mechanicsPromotionEvidenceTask,
         admittedMechanicsPromotionTask,
@@ -5811,6 +5845,9 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   expect(result.summary.residentMechanicsGridUpdateStageTaskReady).toBe(true);
   expect(result.summary.residentMechanicsG2pStageTaskReady).toBe(true);
   expect(result.summary.residentMechanicsStageTaskChainReady).toBe(true);
+  expect(result.summary.peercomputeResidentStageWorkerBridgeAvailable).toBe(true);
+  expect(result.summary.residentMechanicsStageWorkerRunnerFactoryReady).toBe(true);
+  expect(result.summary.residentMechanicsStageWorkerModulePath).toBe('/src/services/ulgMechanicsResidentStage.worker.js');
   expect(result.lawGraphManifestSchema).toBe('peercompute.ulg.law-closure-graph-manifest.v0');
   expect(result.lawGraphManifestNodeCount).toBe(5);
   expect(result.lawGraphManifestEdgeCount).toBe(7);
@@ -6099,6 +6136,30 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     gridUpdate: true,
     g2p: true
   });
+  expect(result.mechanicsStageTaskChainWorker.schema).toBe('peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0');
+  expect(result.mechanicsStageTaskChainWorker.status).toBe('compute-manager-stage-task-chain-executed');
+  expect(result.mechanicsStageTaskChainWorker.schedulerStatus).toBe('ulg-helper-stage-runners-used-awaiting-gpu-graph-semantics');
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionStatus).toBe('completed');
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionCompletedStageCount).toBe(3);
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionStageOrder).toEqual(['p2g', 'gridUpdate', 'g2p']);
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionExecutorSources).toEqual({
+    p2g: 'gpu-hub-resident-stage-executor',
+    gridUpdate: 'gpu-hub-resident-stage-executor',
+    g2p: 'gpu-hub-resident-stage-executor'
+  });
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionWorkerResidencyStatuses).toEqual({
+    p2g: 'worker-ready',
+    gridUpdate: 'worker-ready',
+    g2p: 'worker-ready'
+  });
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionWorkerRunnerSupplied).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.stageExecutionWorkerModuleUrl).toBe('/src/services/ulgMechanicsResidentStage.worker.js');
+  expect(result.mechanicsStageTaskChainWorker.stageTaskFenceSatisfied).toEqual({
+    p2g: true,
+    gridUpdate: true,
+    g2p: true
+  });
+  expect(result.mechanicsStageTaskChainWorker.stageLeaseFenceSatisfied).toBe(true);
   expect(result.mechanicsChildDryRunTask.schema).toBe('peercompute.ulg.mechanics-child-dry-run-evidence.v0');
   expect(result.mechanicsChildDryRunTask.taskWrapped).toBe(true);
   expect(result.mechanicsChildDryRunTask.accepted).toBe(true);

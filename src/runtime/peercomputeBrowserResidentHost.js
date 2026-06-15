@@ -73,6 +73,7 @@ export const DEFAULT_PEERCOMPUTE_STATE_MANAGER_MODULE_URL = '/@fs/home/cos/proje
 export const DEFAULT_PEERCOMPUTE_GPU_HUB_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/gpu/GPUHubManager.js';
 export const DEFAULT_PEERCOMPUTE_REMOTE_RESULT_QUORUM_MODULE_URL = '/@fs/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/RemoteResultQuorumValidator.js';
 export const DEFAULT_ULG_RESIDENT_COMPUTE_TASK_MODULE_PATH = '/src/runtime/sph/sphMlsMpmGpuStep.js';
+export const DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH = '/src/services/ulgMechanicsResidentStage.worker.js';
 export const DEFAULT_ULG_MECHANICS_PROMOTION_EVIDENCE_MODULE_PATH = '/src/runtime/mechanicsPromotionEvidence.js';
 
 let sharedHostPromise = null;
@@ -3639,6 +3640,18 @@ export async function createPeerComputeResidentAuthorityHost({
     modulePath: computeTaskModulePath,
     ...request
   });
+  const createUlgMechanicsResidentStageWorkerRunner = (options = {}) => {
+    if (typeof createResidentStageWorkerBackend !== 'function') {
+      throw new Error('PeerCompute createResidentStageWorkerBackend is not available');
+    }
+    return createResidentStageWorkerBackend({
+      workerModuleUrl: options.workerModuleUrl || DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
+      workerFactory: options.workerFactory,
+      workerScriptType: options.workerScriptType || 'module',
+      requestIdPrefix: options.requestIdPrefix || 'ulg-mechanics-resident-stage-worker',
+      timeoutMs: options.timeoutMs ?? 30000
+    });
+  };
   const bridge = attachResidentStateManagerCommitBridge({
     computeManager,
     stateManager,
@@ -3663,6 +3676,8 @@ export async function createPeerComputeResidentAuthorityHost({
     computeTaskModulePath,
     createResidentStageWorkerBackend,
     peercomputeResidentStageWorkerBridgeAvailable: typeof createResidentStageWorkerBackend === 'function',
+    createUlgMechanicsResidentStageWorkerRunner,
+    ulgMechanicsResidentStageWorkerModulePath: DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
     nodeKernelMode,
     nodeKernelAuthority: summarizeNodeKernelAuthority({
       nodeKernel,
@@ -4399,6 +4414,9 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       || typeof host?.submitMechanicsG2pStageTask === 'function',
     residentMechanicsStageTaskChainReady: typeof host?.computeManager?.runUlgMechanicsStageTaskChain === 'function'
       || typeof host?.runMechanicsStageTaskChain === 'function',
+    peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,
+    residentMechanicsStageWorkerRunnerFactoryReady: typeof host?.createUlgMechanicsResidentStageWorkerRunner === 'function',
+    residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
     residentRemoteSeedHotBufferRefreshReady: typeof host?.refreshRemoteSeedHotBuffers === 'function',
     residentRemoteSeedHotBufferRefreshExecutorReady: typeof host?.createRemoteSeedHotBufferRefreshExecutor === 'function',

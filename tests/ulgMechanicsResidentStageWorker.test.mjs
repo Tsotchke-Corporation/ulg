@@ -1,0 +1,127 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT
+} from '../ulg-gpu-abi/src/index.js';
+import {
+  ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA,
+  runUlgMechanicsResidentStageWorkerPayload
+} from '../src/services/ulgMechanicsResidentStage.worker.js';
+
+function manualBuffers({
+  position = [1.25, 1.25, 1.25],
+  velocity = [0, 0, 0],
+  massKg = 8,
+  smoothingLengthM = 1,
+  restDensityKgPerM3 = 8,
+  mechanicsDtS = 0.1
+} = {}) {
+  const state = new Float32Array([
+    position[0], position[1], position[2], massKg,
+    velocity[0], velocity[1], velocity[2], 123
+  ]);
+  const thermo = new Float32Array(12);
+  thermo[3] = restDensityKgPerM3;
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], 0);
+  mechanics[18] = 1;
+  mechanics[19] = massKg / restDensityKgPerM3;
+  mechanics[20] = 1;
+  mechanics[21] = 1;
+  return {
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      smoothingLengthM,
+      step: 0,
+      time: 0,
+      state,
+      thermo
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      step: 0,
+      time: 0,
+      mechanicsDtS,
+      gridCflFactor: 10,
+      gravityMPerS2: [0, 0, 0],
+      mechanics
+    }
+  };
+}
+
+function stage(id, reads = [], writes = []) {
+  return {
+    id,
+    lawNodeId: `ulg-mls-mpm-mechanics-${id}-stage`,
+    runtimeTarget: 'gpu-hub-resident-stage-worker',
+    reads,
+    writes
+  };
+}
+
+function payload(stageRecord, context, input = null) {
+  return {
+    stage: stageRecord,
+    input,
+    lease: {
+      laneId: 'ulg:test:mechanics-worker-lane',
+      stateKey: 'ulg:test:mechanics-worker-state',
+      queueFencePolicy: 'queue.onSubmittedWorkDone-before-admission'
+    },
+    context: {
+      ulgMechanicsResidentStageWorker: context
+    }
+  };
+}
+
+test('ULG mechanics resident stage worker runs P2G, grid update, and G2P through one retained lane store', async () => {
+  const buffers = manualBuffers();
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:mechanics-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      ...buffers,
+      gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+      boxDimsM: [5, 5, 5],
+      dt: buffers.mlsMpmParticleState.mechanicsDtS,
+      gravityMPerS2: [0, 0, 0],
+      cflFactor: 10
+    }
+  };
+
+  const p2g = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('p2g', ['sph-particle-state', 'mls-mpm-mechanics'], ['mls-mpm-grid']),
+    context
+  ));
+  assert.equal(p2g.summary.schema, ULG_MECHANICS_RESIDENT_STAGE_WORKER_RESULT_SCHEMA);
+  assert.equal(p2g.summary.status, 'worker-stage-completed');
+  assert.equal(p2g.value.workerResidentStage.stageId, 'p2g');
+  assert.equal(p2g.value.workerResidentStage.retainedWithinWorker, true);
+  assert.equal(p2g.value.computeTaskId, 'ulg:test:mechanics-worker:p2g');
+
+  const gridUpdate = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('gridUpdate', ['mls-mpm-grid'], ['mls-mpm-grid']),
+    context,
+    p2g.value
+  ));
+  assert.equal(gridUpdate.value.workerResidentStage.stageId, 'gridUpdate');
+  assert.equal(gridUpdate.value.computeTaskId, 'ulg:test:mechanics-worker:gridUpdate');
+  assert.equal(gridUpdate.value.gpuFence.fenceSatisfied, true);
+
+  const g2p = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('g2p', ['mls-mpm-grid', 'sph-particle-state', 'mls-mpm-mechanics'], ['sph-particle-state', 'mls-mpm-mechanics']),
+    context,
+    gridUpdate.value
+  ));
+  assert.equal(g2p.value.workerResidentStage.stageId, 'g2p');
+  assert.equal(g2p.value.computeTaskId, 'ulg:test:mechanics-worker:g2p');
+  assert.equal(g2p.value.gpuFence.fenceSatisfied, true);
+  assert.ok(g2p.retainedBufferRefs.includes('sph-state-buffer'));
+  assert.ok(g2p.retainedBufferRefs.includes('mls-mpm-mechanics-buffer'));
+});

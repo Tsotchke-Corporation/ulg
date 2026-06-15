@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 21:24 AKDT: ULG now has a checked-in
+mechanics resident-stage Worker module and the browser authority-host gate
+creates a PeerCompute `createResidentStageWorkerBackend()` runner for it. The
+focused browser test runs P2G, grid-update, and G2P through the real browser
+Worker bridge and reports `worker-ready` for all three stages. This first
+module keeps raw stage outputs in a worker-local lane store and returns
+clone-safe summaries/values to the main thread; it is still CPU/reference
+worker execution unless WebGPU is explicitly validated in the worker. Next
+priority: promote the worker path to worker-owned WebGPU device/buffer
+retention so the hot mechanics lane no longer round-trips through main-thread
+arrays.
+
 Current routing note, 2026-06-14 21:01 AKDT: ULG mechanics stage-chain
 registration can now consume a supplied GPUHub resident-stage worker runner.
 When a backend is supplied, P2G, grid-update, and G2P report `worker-ready`,

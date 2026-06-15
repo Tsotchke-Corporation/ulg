@@ -2038,6 +2038,16 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
       || candidate.workerRetainedBufferRefs
       || workerRetainedBufferRefs
   );
+  const workerRetainedGasPressureBufferRefs = uniqueStringList(
+    candidate.workerRetainedGasPressureBufferRefs
+      || candidate.retainedGasPressureBufferRefs
+      || []
+  );
+  const retainedGasPressureBufferRefs = uniqueStringList(
+    candidate.retainedGasPressureBufferRefs
+      || candidate.workerRetainedGasPressureBufferRefs
+      || []
+  );
   if (workerRetainedBufferRefs.length === 0 && retainedPressureBufferRefs.length === 0) {
     throw new TypeError('pressure/interface worker retained publication requires pressure force-row refs');
   }
@@ -2059,6 +2069,13 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
   )));
   const forceRowsBufferRetained = candidate.pressureInterfaceForceRowsBufferRetained === true
     || workerRetainedBufferRefs.length > 0;
+  const localPressureGradientReady = candidate.localPressureGradientReady === true;
+  const gasPressureCellRowCount = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceGasPressureCellRowCount, 0)));
+  const gasPressureCellRowStrideFloats = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceGasPressureCellRowStrideFloats, 0)));
+  const gasPressureCellRowByteLength = Math.max(0, Math.trunc(finiteSeedNumber(candidate.pressureInterfaceGasPressureCellRowByteLength, 0)));
+  const gasPressureCellRowsBufferRetained = candidate.pressureInterfaceGasPressureCellRowsBufferRetained === true
+    || workerRetainedGasPressureBufferRefs.length > 0
+    || retainedGasPressureBufferRefs.length > 0;
   const bufferResidency = normalizeString(
     candidate.pressureInterfaceBufferResidency,
     forceRowsBufferRetained ? 'worker-lane-gpu-buffer-retained' : 'cloneable-force-row-array'
@@ -2074,6 +2091,17 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     || consumerAccessProtocol !== 'same-worker-lane-retained-buffer-ref'
   ) {
     throw new TypeError('pressure/interface worker retained publication requires worker-lane GPU retained force-row buffers');
+  }
+  if (
+    localPressureGradientReady
+    && (
+      gasPressureCellRowCount <= 0
+      || gasPressureCellRowByteLength <= 0
+      || !gasPressureCellRowsBufferRetained
+      || (workerRetainedGasPressureBufferRefs.length === 0 && retainedGasPressureBufferRefs.length === 0)
+    )
+  ) {
+    throw new TypeError('pressure/interface local gas-cell publication requires worker-lane GPU retained gas-cell buffers');
   }
   const committedAt = Date.now();
   const workerRetainedBufferImport = {
@@ -2103,6 +2131,17 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     pressureInterfaceForceRowByteLength: forceRowByteLength,
     pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
     pressureInterfaceForceRowsBufferRetained: forceRowsBufferRetained,
+    pressureFieldMode: candidate.pressureFieldMode || null,
+    pressureFieldResolution: candidate.pressureFieldResolution || null,
+    localPressureGradientReady,
+    localPressureGradientStatus: candidate.localPressureGradientStatus || null,
+    localPressureGradientForceCouplingStatus: candidate.localPressureGradientForceCouplingStatus || null,
+    workerRetainedGasPressureBufferRefs,
+    retainedGasPressureBufferRefs,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
     stateManagerAdmissionRequired: true,
     gridForceApplicationApproved: false
   };
@@ -2135,6 +2174,17 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     pressureInterfaceForceRowByteLength: forceRowByteLength,
     pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
     pressureInterfaceForceRowsBufferRetained: forceRowsBufferRetained,
+    pressureFieldMode: workerRetainedBufferImport.pressureFieldMode,
+    pressureFieldResolution: workerRetainedBufferImport.pressureFieldResolution,
+    localPressureGradientReady,
+    localPressureGradientStatus: workerRetainedBufferImport.localPressureGradientStatus,
+    localPressureGradientForceCouplingStatus: workerRetainedBufferImport.localPressureGradientForceCouplingStatus,
+    workerRetainedGasPressureBufferRefs,
+    retainedGasPressureBufferRefs,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport
   };
@@ -2172,6 +2222,17 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     pressureInterfaceForceRowByteLength: forceRowByteLength,
     pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
     pressureInterfaceForceRowsBufferRetained: forceRowsBufferRetained,
+    pressureFieldMode: workerRetainedBufferImport.pressureFieldMode,
+    pressureFieldResolution: workerRetainedBufferImport.pressureFieldResolution,
+    localPressureGradientReady,
+    localPressureGradientStatus: workerRetainedBufferImport.localPressureGradientStatus,
+    localPressureGradientForceCouplingStatus: workerRetainedBufferImport.localPressureGradientForceCouplingStatus,
+    workerRetainedGasPressureBufferRefs,
+    retainedGasPressureBufferRefs,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
     outputFamilies: uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']),
     gridForceApplicationApproved: false,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),

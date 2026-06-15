@@ -4899,6 +4899,13 @@ function retainedBufferRefsForMechanicsStageResult(stageId, result = {}) {
   )) {
     refs.push('pressure-interface-force-rows-buffer');
   }
+  if (stageId === PRESSURE_INTERFACE_STAGE_ID && (
+    result?.gasPressureCellRowsBufferRetained
+    || result?.gasPressureCellsBuffer
+    || result?.pressureInterfaceForceSolver?.gasPressureCellRowsBufferRetained
+  )) {
+    refs.push('resident-gas-pressure-cells-buffer');
+  }
   if (stageId === 'g2p') {
     if (result?.stateBuffer || result?.gpuResult?.stateBuffer || result?.state instanceof Float32Array || result?.stateBufferByteLength > 0) {
       refs.push('sph-state-buffer');
@@ -5015,6 +5022,25 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     localPressureGradientForceCouplingStatus: result?.pressureInterfaceForceSolver?.localPressureGradientForceCouplingStatus
       || result?.pressureFeedback?.localPressureGradientForceCouplingStatus
       || null,
+    pressureInterfaceGasPressureCellRowCount: finiteNumber(
+      result?.gasPressureCellRowCount
+        ?? result?.pressureInterfaceForceSolver?.gasPressureCellRowCount,
+      0
+    ),
+    pressureInterfaceGasPressureCellRowStrideFloats: finiteNumber(
+      result?.gasPressureCellRowStrideFloats
+        ?? result?.pressureInterfaceForceSolver?.gasPressureCellRowStrideFloats,
+      0
+    ),
+    pressureInterfaceGasPressureCellRowByteLength: finiteNumber(
+      result?.gasPressureCellRowByteLength
+        ?? result?.gasPressureCellRowsBufferByteLength
+        ?? result?.pressureInterfaceForceSolver?.gasPressureCellRowByteLength,
+      0
+    ),
+    pressureInterfaceGasPressureCellRowsBufferRetained: result?.gasPressureCellRowsBufferRetained === true
+      || result?.pressureInterfaceForceSolver?.gasPressureCellRowsBufferRetained === true
+      || Boolean(result?.gasPressureCellsBuffer),
     pressureInterfaceForceRowCount: finiteNumber(result?.forceRowCount ?? result?.pressureInterfaceForceSolver?.forceRowCount, 0),
     pressureInterfaceForceRowStrideFloats: finiteNumber(result?.forceRowStrideFloats ?? result?.pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     pressureInterfaceForceRowByteLength: finiteNumber(result?.forceRowByteLength ?? result?.pressureInterfaceForceSolver?.forceRowByteLength, 0),
@@ -5204,14 +5230,29 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
       return text.includes('pressure') || text.includes('forcerows') || text.includes('force-rows');
     })
   );
+  const workerRetainedGasPressureBufferRefs = uniqueNonEmptyStrings(
+    workerRetainedBufferRefs.filter((ref) => {
+      const text = String(ref || '').toLowerCase();
+      return text.includes('gas-pressure') || text.includes('gas-cells');
+    })
+  );
   const retainedPressureBufferRefs = uniqueNonEmptyStrings(
     retainedBufferRefs.filter((ref) => String(ref || '').includes('pressure-interface-force-rows'))
   );
+  const retainedGasPressureBufferRefs = uniqueNonEmptyStrings(
+    retainedBufferRefs.filter((ref) => String(ref || '').includes('resident-gas-pressure-cells'))
+  );
   const hasPressureRef = workerRetainedPressureBufferRefs.length > 0 || retainedPressureBufferRefs.length > 0;
+  const hasGasPressureRef = workerRetainedGasPressureBufferRefs.length > 0 || retainedGasPressureBufferRefs.length > 0;
   const forceRowCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowCount, 0));
   const forceRowStrideFloats = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS));
   const forceRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowByteLength, 0));
   const forceRowsBufferByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowsBufferByteLength, forceRowByteLength));
+  const localPressureGradientReady = pressureSummary.localPressureGradientReady === true;
+  const gasPressureCellRowCount = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceGasPressureCellRowCount, 0));
+  const gasPressureCellRowStrideFloats = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceGasPressureCellRowStrideFloats, 0));
+  const gasPressureCellRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceGasPressureCellRowByteLength, 0));
+  const gasPressureCellRowsBufferRetained = pressureSummary.pressureInterfaceGasPressureCellRowsBufferRetained === true;
   const backend = pressureSummary.backend || null;
   const readbackMode = pressureSummary.readbackMode || null;
   const workerResidencyStatus = stageWorkerResidencyStatuses[PRESSURE_INTERFACE_STAGE_ID] || null;
@@ -5223,6 +5264,14 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     && hasPressureRef
     && forceRowsBufferByteLength > 0
     && pressureSummary.pressureInterfaceForceRowsBufferRetained === true;
+  const retainedGpuGasCellsProven = !localPressureGradientReady
+    || (
+      backend === 'webgpu'
+      && hasGasPressureRef
+      && gasPressureCellRowCount > 0
+      && gasPressureCellRowByteLength > 0
+      && gasPressureCellRowsBufferRetained
+    );
   const blocker = !workerRunnerSupplied
     ? 'worker-runner-not-supplied'
     : (!pressureStageCompleted
@@ -5241,7 +5290,9 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
                   ? 'pressure-interface-authority-must-remain-non-mutating'
                   : (!retainedGpuForceRowsProven
                     ? 'pressure-interface-retained-gpu-force-row-buffer-required'
-                    : null))))))));
+                    : (!retainedGpuGasCellsProven
+                        ? 'pressure-interface-retained-local-gas-cell-buffer-required'
+                        : null)))))))));
   const candidateReady = !blocker;
   return {
     schema: ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
@@ -5281,6 +5332,15 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     pressureInterfaceForceRowsBufferByteLength: forceRowsBufferByteLength,
     pressureInterfaceForceRowsRetained: pressureSummary.pressureInterfaceForceRowsRetained === true,
     pressureInterfaceForceRowsBufferRetained: pressureSummary.pressureInterfaceForceRowsBufferRetained === true,
+    pressureFieldMode: pressureSummary.pressureFieldMode || null,
+    pressureFieldResolution: pressureSummary.pressureFieldResolution || null,
+    localPressureGradientReady,
+    localPressureGradientStatus: pressureSummary.localPressureGradientStatus || null,
+    localPressureGradientForceCouplingStatus: pressureSummary.localPressureGradientForceCouplingStatus || null,
+    pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+    pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+    pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+    pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
     pressureInterfaceBufferResidency: backend === 'webgpu'
       ? 'worker-lane-gpu-buffer-retained'
       : 'blocked-non-webgpu-pressure-interface-output',
@@ -5289,10 +5349,14 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
       : 'blocked-cloneable-pressure-interface-force-row-array',
     retainedBufferRefs,
     retainedPressureBufferRefs,
+    retainedGasPressureBufferRefs,
     workerRetainedBufferRefs,
     workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
     workerRetainedPressureBufferRefs,
     workerRetainedPressureBufferRefCount: workerRetainedPressureBufferRefs.length,
+    workerRetainedGasPressureBufferRefs,
+    workerRetainedGasPressureBufferRefCount: workerRetainedGasPressureBufferRefs.length,
+    inputFamilies: ['resident-gas-pressure', 'sph-material-interface-field'],
     outputFamilies: ['pressure-interface-force-rows'],
     requiredPublicationProtocol: 'worker-posts-pressure-interface-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
     nextRequiredImplementation: 'authorized-pressure-interface-grid-force-consumption'

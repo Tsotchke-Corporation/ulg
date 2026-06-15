@@ -35,6 +35,15 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 04:23 AKDT: pressure/interface Worker
+publication now admits local gas-cell pressure buffers only when they are
+worker-retained. If a pressure stage uses local pressure gradients, the
+publication candidate and authority host require retained gas-cell buffer refs,
+row count, row stride, byte length, and retained-buffer status before the
+pressure/interface output can be published through StateManager. Next priority:
+make the pressureInterface stage consume admitted retained gas-cell refs from
+StateManager/GPUHub rather than caller-supplied local fields.
+
 Current routing note, 2026-06-15 04:13 AKDT: the local gas-cell pressure field
 contract has first CPU and WebGPU support. ULG can now represent per-cell gas
 pressure and pressure gradients, sample them at material-interface centroids,

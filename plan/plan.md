@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 04:23 AKDT: pressure/interface publication now
+preserves and gates retained local gas-cell pressure buffers. When a
+pressureInterface stage uses local pressure gradients, the WebGPU producer can
+retain the gas-cell input buffer beside the retained force-row buffer; stage
+summaries report gas-cell row count, stride, byte length, and retained status.
+The Worker compact publication candidate now fail-closes local-gradient
+publication unless a worker-retained gas-cell buffer ref is present, and
+NodeKernel/StateManager hot/warm publication records preserve the gas-cell
+buffer metadata and reject cloneable/local-gradient publications without
+retained gas-cell refs. Validation passed focused producer, PeerCompute
+publication, resident pressure-stage, physics atomics, browser authority-host,
+and visual matrix gates. Next target: make pressureInterface consume admitted
+retained local gas-cell refs from StateManager inside the ComputeManager/GPUHub
+DAG instead of receiving caller-supplied local cell fields.
+
 Current checkpoint, 2026-06-15 04:13 AKDT: pressure/interface force rows now
 have a structured local gas-cell pressure field contract. `gasPressureCellFieldSummary()`
 can normalize a ready local gas-cell field with per-cell pressure and

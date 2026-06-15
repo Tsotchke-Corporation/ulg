@@ -297,5 +297,9 @@ test('pressure/interface WebGPU producer accepts local gas-cell pressure rows', 
   assert.equal(result.pressureInterfaceForceSolver.localPressureGradientValidation, true);
   assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'local-gradient-interface-traction');
   assert.equal(result.pressureInterfaceForceSolver.gasPressureCellRowCount, 2);
+  assert.equal(result.pressureInterfaceForceSolver.gasPressureCellRowsBufferRetained, true);
+  assert.equal(result.gasPressureCellRowsBufferRetained, true);
+  assert.equal(result.gasPressureCellsBuffer?.label, 'ulg-sph-pressure-interface-gas-cells-in');
+  assert.equal(result.gasPressureCellRowsBufferByteLength, 2 * SPH_GAS_PRESSURE_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT);
   assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
 });

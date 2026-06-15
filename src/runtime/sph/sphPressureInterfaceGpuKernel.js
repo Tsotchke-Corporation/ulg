@@ -445,6 +445,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
       });
   let returnedRetainedForceRowsBuffer = false;
+  let returnedRetainedGasPressureCellsBuffer = false;
   let queueCompletionStatus = 'not-submitted';
   let queueCompletionMethod = null;
 
@@ -525,7 +526,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
       gasPressureCellRowCount: packedGasPressureCells.rowCount,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
-      gasPressureCellRowsBufferRetained: packedGasPressureCells.rowCount > 0,
+      gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
       pressureModelId,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
@@ -575,6 +576,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       gasPressureCellRowCount: packedGasPressureCells.rowCount,
       gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
       gasPressureCellRowByteLength: packedGasPressureCells.rowByteLength,
+      gasPressureCellRowsBufferRetained: retainForceRowsBuffer === true && packedGasPressureCells.rowCount > 0,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };
@@ -584,11 +586,17 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       result.destroyForceRowsBuffer = () => forceRowsBuffer.destroy?.();
       returnedRetainedForceRowsBuffer = true;
     }
+    if (retainForceRowsBuffer && packedGasPressureCells.rowCount > 0) {
+      result.gasPressureCellsBuffer = gasPressureCellsBuffer;
+      result.gasPressureCellRowsBufferByteLength = packedGasPressureCells.rowByteLength;
+      result.destroyGasPressureCellsBuffer = () => gasPressureCellsBuffer.destroy?.();
+      returnedRetainedGasPressureCellsBuffer = true;
+    }
     return result;
   } finally {
     const cleanup = () => {
       inputBuffer.destroy?.();
-      gasPressureCellsBuffer.destroy?.();
+      if (!returnedRetainedGasPressureCellsBuffer) gasPressureCellsBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
       if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) forceRowsBuffer.destroy?.();

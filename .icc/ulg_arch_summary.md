@@ -3,9 +3,9 @@
 # Architecture Summary
 
 - repo root: `/home/cos/projects/ulg`
-- files indexed: `277`
-- total lines indexed: `172689`
-- languages: `{"javascript": 104, "text": 84, "markdown": 74, "json": 14, "c": 1}`
+- files indexed: `278`
+- total lines indexed: `173062`
+- languages: `{"javascript": 104, "text": 84, "markdown": 75, "json": 14, "c": 1}`
 
 ## Important Files
 
@@ -43,18 +43,18 @@
 
 ## Top Modules
 
-- `tests`: 73 files, 35073 lines, symbols=0, tests=73, languages={"text": 73}
-- `plan/done`: 44 files, 2811 lines, symbols=0, tests=0, languages={"markdown": 44}
-- `src/runtime`: 30 files, 16393 lines, symbols=360, tests=0, languages={"javascript": 30}
-- `src/runtime/sph`: 26 files, 30507 lines, symbols=705, tests=0, languages={"javascript": 26}
+- `tests`: 73 files, 35115 lines, symbols=0, tests=73, languages={"text": 73}
+- `plan/done`: 45 files, 2861 lines, symbols=0, tests=0, languages={"markdown": 45}
+- `src/runtime`: 30 files, 16454 lines, symbols=360, tests=0, languages={"javascript": 30}
+- `src/runtime/sph`: 26 files, 30579 lines, symbols=705, tests=0, languages={"javascript": 26}
 - `src/runtime/material`: 18 files, 4777 lines, symbols=206, tests=0, languages={"javascript": 18}
-- `plan/todo`: 17 files, 9839 lines, symbols=0, tests=0, languages={"markdown": 17}
+- `plan/todo`: 17 files, 9848 lines, symbols=0, tests=0, languages={"markdown": 17}
 - `.`: 9 files, 2070 lines, symbols=0, tests=0, languages={"text": 4, "markdown": 3, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
 - `src/services`: 5 files, 2087 lines, symbols=53, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 37479 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 37618 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `scripts`: 5 files, 4907 lines, symbols=0, tests=0, languages={"text": 5}
 - `src/visualization`: 4 files, 13304 lines, symbols=340, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8186 lines, symbols=53, tests=0, languages={"javascript": 4}
@@ -71,18 +71,18 @@
 
 | Lines | Path | Language |
 |---:|---|---|
-| 22730 | `plan/log.md` | markdown |
-| 9600 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
+| 22802 | `plan/log.md` | markdown |
+| 9664 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
 | 8140 | `src/visualization/sphPhaseScene.js` | javascript |
-| 7879 | `plan/tests.md` | markdown |
+| 7916 | `plan/tests.md` | markdown |
 | 7279 | `tests/demo.e2e.mjs` | text |
 | 5973 | `ulg-gpu-abi/src/wgsl.js` | javascript |
 | 5275 | `src/runtime/sph/sphRenderGpuKernel.js` | javascript |
-| 5169 | `plan/implementation-status.md` | markdown |
-| 5088 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
+| 5184 | `plan/implementation-status.md` | markdown |
+| 5149 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
 | 4811 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 4366 | `tests/sphMlsMpmGpuStep.test.mjs` | text |
-| 4160 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
+| 4198 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
 | 3134 | `scripts/sph-long-horizon-probe.mjs` | text |
 | 2311 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2126 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
@@ -90,9 +90,9 @@
 | 2015 | `tests/orchestration.test.mjs` | text |
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
 | 1618 | `src/runtime/sph/sphThermalGpuKernel.js` | javascript |
-| 1561 | `plan/plan.md` | markdown |
+| 1576 | `plan/plan.md` | markdown |
 | 1467 | `ulg-gpu-abi/src/index.js` | javascript |
-| 1454 | `plan/todo/README.md` | markdown |
+| 1463 | `plan/todo/README.md` | markdown |
 | 1399 | `plan/todo/perf-upgrade.md` | markdown |
 | 1321 | `plan/todo/sphphasedemo.md` | markdown |
 | 1304 | `tests/abi.test.mjs` | text |

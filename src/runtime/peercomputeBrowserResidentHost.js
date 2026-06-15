@@ -16,6 +16,7 @@ import {
   createMlsMpmMechanicsP2gStageComputeTask,
   createMlsMpmMechanicsOnlyResidentStepsComputeTask,
   createMlsMpmResidentStepsComputeTask,
+  createSphGasCellEosProducerStageComputeTask,
   runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks
 } from './sph/sphMlsMpmGpuStep.js';
 import {
@@ -4814,10 +4815,18 @@ export async function createPeerComputeResidentAuthorityHost({
     });
     return computeManager.submitTask(task);
   };
+  computeManager.submitUlgGasCellEosProducerStageTask = (request = {}) => {
+    const task = createSphGasCellEosProducerStageComputeTask({
+      modulePath: computeTaskModulePath,
+      ...request
+    });
+    return computeManager.submitTask(task);
+  };
   computeManager.runUlgMechanicsStageTaskChain = (request = {}) => runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
     computeManager,
     nodeKernel,
     modulePath: computeTaskModulePath,
+    residentAuthorityHost: host,
     ...request
   });
   const createUlgMechanicsResidentStageWorkerRunner = (options = {}) => {
@@ -4921,6 +4930,9 @@ export async function createPeerComputeResidentAuthorityHost({
     },
     submitMechanicsG2pStageTask(request = {}) {
       return computeManager.submitUlgMechanicsG2pStageTask(request);
+    },
+    submitGasCellEosProducerStageTask(request = {}) {
+      return computeManager.submitUlgGasCellEosProducerStageTask(request);
     },
     runMechanicsStageTaskChain(request = {}) {
       return computeManager.runUlgMechanicsStageTaskChain(request);
@@ -5634,6 +5646,8 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       || typeof host?.submitMechanicsGridUpdateStageTask === 'function',
     residentMechanicsG2pStageTaskReady: typeof host?.computeManager?.submitUlgMechanicsG2pStageTask === 'function'
       || typeof host?.submitMechanicsG2pStageTask === 'function',
+    residentGasCellEosProducerStageTaskReady: typeof host?.computeManager?.submitUlgGasCellEosProducerStageTask === 'function'
+      || typeof host?.submitGasCellEosProducerStageTask === 'function',
     residentMechanicsStageTaskChainReady: typeof host?.computeManager?.runUlgMechanicsStageTaskChain === 'function'
       || typeof host?.runMechanicsStageTaskChain === 'function',
     peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,

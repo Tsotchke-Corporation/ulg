@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 08:14 AKDT: the resident gas-cell EOS
+producer is now in the formal ComputeManager mechanics stage-chain before
+pressureInterface. Opt-in chains can execute
+`p2g -> gasCellEosProducer -> pressureInterface -> gridUpdate -> g2p`, use the
+resident authority host to publish/admit/import the producer's retained
+gas-cell field, and feed the imported field into pressureInterface without
+fabricating a partial pressure feedback object. The scene helper can publish
+from a producer result source, and the resident worker mirrors the same
+behavior. Next priority: wire the mounted resident hot loop to request this
+producer stage when spatial gas ledger inputs are available, then retire
+snapshot-derived scene gas-cell imports from the hot path. Keep WGSL EOS,
+long-horizon liquid quality, MLS-MPM fragmentation, CPU SPH stacked/blob
+behavior, ice/solid rigidity, volume pulsation/blinking, z-buffer/draw-order,
+and focus-resume visual trust open.
+
 Current routing note, 2026-06-15 07:34 AKDT: the dedicated resident gas-cell
 EOS producer stage surface is in place. `gasCellEosProducer` can derive the
 local gas-cell pressure field from a spatial gas species ledger, pack the

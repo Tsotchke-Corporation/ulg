@@ -1,5 +1,49 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Gas-Cell EOS Stage-Chain Import Wiring
+
+The current slice wires `gasCellEosProducer` into the opt-in ComputeManager
+mechanics stage-chain before pressureInterface. The chain can publish the
+producer's retained gas-cell field through the resident authority host,
+admit/import it for pressureInterface, and preserve pressure feedback derivation
+from the producer-enriched gas-pressure summary instead of constructing a
+partial synthetic feedback object.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/services/ulgMechanicsResidentStage.worker.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Focused stage-chain and scene coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS producer before pressureInterface"`
+  passed `45/45`, and
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "producer result source"`
+  passed `30/30`.
+- Broader pressure/gas coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS|pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|pressure interface stage compute task can produce force rows|gas-cell EOS producer before pressureInterface"`
+  passed `45/45`.
+- Scene gas-cell coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell"`
+  passed `30/30`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "EOS producer|gas-cell field imports|worker-retained pressure/interface"`
+  passed `15/15`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-eos-stage-chain-live-wire-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]`. Manual inspection found bounded nonblank frames,
+  but MLS-MPM H2O fragmentation and CPU-SPH stacked/blob shapes remain open.
+
 ## Current Focused Result - 2026-06-15 Resident Gas-Cell EOS Producer Stage
 
 The current slice adds a ComputeManager/GPUHub stage surface for resident

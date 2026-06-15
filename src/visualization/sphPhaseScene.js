@@ -253,6 +253,20 @@ function pressureInterfaceGasCellFieldFromSummary(gasPressureSummary = null) {
     || null;
 }
 
+function pressureInterfaceGasCellFieldFromProducerResult(producerResult = null) {
+  return producerResult?.gasCellFieldSnapshot
+    || producerResult?.gasCellField
+    || producerResult?.pressureFeedback?.gasCellField
+    || null;
+}
+
+function pressureInterfaceRetainedGasCellFieldSourceFromProducerResult(producerResult = null) {
+  return producerResult?.retainedGasCellFieldSource
+    || producerResult?.pressureInterfaceGasCellFieldImport?.retainedGasCellFieldSource
+    || producerResult?.pressureInterfaceGasCellFieldAdmission?.retainedGasCellFieldSource
+    || null;
+}
+
 function pressureInterfaceGasCellFieldAdmissionFromSummary(gasPressureSummary = null, explicitAdmission = null) {
   const pressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
   return explicitAdmission
@@ -278,6 +292,15 @@ function retainedGasPressureRefsFromSummary(gasPressureSummary = null) {
   ]);
 }
 
+function retainedGasPressureRefsFromProducerResult(producerResult = null) {
+  const retainedSource = pressureInterfaceRetainedGasCellFieldSourceFromProducerResult(producerResult);
+  return uniqueSceneStringList([
+    ...sceneStringList(producerResult?.retainedGasPressureBufferRefs),
+    ...sceneStringList(producerResult?.residentGasPressureBufferRefs),
+    ...sceneStringList(retainedSource?.retainedGasPressureBufferRefs)
+  ]);
+}
+
 function workerRetainedGasPressureRefsFromSummary(gasPressureSummary = null) {
   const pressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
   const gasCellField = pressureInterfaceGasCellFieldFromSummary(gasPressureSummary);
@@ -285,6 +308,14 @@ function workerRetainedGasPressureRefsFromSummary(gasPressureSummary = null) {
     ...sceneStringList(gasPressureSummary?.workerRetainedGasPressureBufferRefs),
     ...sceneStringList(pressureFeedback?.workerRetainedGasPressureBufferRefs),
     ...sceneStringList(gasCellField?.workerRetainedGasPressureBufferRefs)
+  ]);
+}
+
+function workerRetainedGasPressureRefsFromProducerResult(producerResult = null) {
+  const retainedSource = pressureInterfaceRetainedGasCellFieldSourceFromProducerResult(producerResult);
+  return uniqueSceneStringList([
+    ...sceneStringList(producerResult?.workerRetainedGasPressureBufferRefs),
+    ...sceneStringList(retainedSource?.workerRetainedGasPressureBufferRefs)
   ]);
 }
 
@@ -344,6 +375,7 @@ function blockedPressureInterfaceGasCellFieldImportPublication({
 export function publishScenePressureInterfaceGasCellFieldImportSource({
   residentAuthorityHost = null,
   gasPressureSummary = null,
+  gasCellEosProducerStageResult = null,
   pressureInterfaceGasCellFieldAdmission = null,
   cacheKey = null,
   stateKey = null,
@@ -354,13 +386,23 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
   sourceStage = 'residentGasPressure',
   hotBufferKeyPrefix = 'ulg:scene-pressure-interface-gas-cell-field-import'
 } = {}) {
-  const gasCellField = pressureInterfaceGasCellFieldFromSummary(gasPressureSummary);
+  const producerGasCellField = pressureInterfaceGasCellFieldFromProducerResult(gasCellEosProducerStageResult);
+  const gasCellField = producerGasCellField || pressureInterfaceGasCellFieldFromSummary(gasPressureSummary);
+  const sourceObject = producerGasCellField ? gasCellEosProducerStageResult : gasPressureSummary;
+  const effectiveSourceStage = producerGasCellField ? 'gasCellEosProducer' : sourceStage;
+  const effectiveSourceTaskId = sourceTaskId || (producerGasCellField ? gasCellEosProducerStageResult?.computeTaskId : null);
   let admission = pressureInterfaceGasCellFieldAdmissionFromSummary(
     gasPressureSummary,
     pressureInterfaceGasCellFieldAdmission
   );
-  const retainedGasPressureBufferRefs = retainedGasPressureRefsFromSummary(gasPressureSummary);
-  const workerRetainedGasPressureBufferRefs = workerRetainedGasPressureRefsFromSummary(gasPressureSummary);
+  const retainedGasPressureBufferRefs = uniqueSceneStringList([
+    ...retainedGasPressureRefsFromProducerResult(gasCellEosProducerStageResult),
+    ...retainedGasPressureRefsFromSummary(gasPressureSummary)
+  ]);
+  const workerRetainedGasPressureBufferRefs = uniqueSceneStringList([
+    ...workerRetainedGasPressureRefsFromProducerResult(gasCellEosProducerStageResult),
+    ...workerRetainedGasPressureRefsFromSummary(gasPressureSummary)
+  ]);
   const localPressureGradientReady = gasCellField?.localPressureGradientReady === true
     && Array.isArray(gasCellField?.cells)
     && gasCellField.cells.length > 0;
@@ -380,11 +422,11 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
     retainedGasPressureBufferRefs,
     workerRetainedGasPressureBufferRefs
   };
-  if (!gasPressureSummary) {
+  if (!gasPressureSummary && !sourceObject) {
     return blockedPressureInterfaceGasCellFieldImportPublication({
       ...blockedBase,
       status: 'blocked-gas-pressure-summary-unavailable',
-      blocker: 'gas-pressure-summary-required'
+      blocker: 'gas-pressure-summary-or-gas-cell-eos-producer-result-required'
     });
   }
   if (!localPressureGradientReady) {
@@ -399,10 +441,10 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
       admissionPublication = admissionPublisher.call(residentAuthorityHost, {
         cacheKey,
         stateKey,
-        source: gasPressureSummary,
-        sourceTaskId,
+        source: sourceObject,
+        sourceTaskId: effectiveSourceTaskId,
         sourceNodeId,
-        sourceStage,
+        sourceStage: effectiveSourceStage,
         gasCellFieldSnapshot: gasCellField,
         retainedGasPressureBufferRefs,
         workerRetainedGasPressureBufferRefs
@@ -453,10 +495,10 @@ export function publishScenePressureInterfaceGasCellFieldImportSource({
       cacheKey,
       stateKey,
       hotBufferKeyPrefix,
-      source: gasPressureSummary,
-      sourceTaskId,
+      source: sourceObject,
+      sourceTaskId: effectiveSourceTaskId,
       sourceNodeId,
-      sourceStage,
+      sourceStage: effectiveSourceStage,
       gasCellFieldSnapshot: gasCellField,
       pressureInterfaceGasCellFieldAdmission: admission,
       retainedGasPressureBufferRefs,
@@ -3199,6 +3241,7 @@ export function createSphPhaseScene(container, {
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     pressureInterfaceGasCellFieldAdmission = null,
     pressureInterfaceGasCellFieldImport = null,
+    gasCellEosProducerStageResult = null,
     residentAuthorityHost = null,
     pressureInterfaceGasCellFieldImportSourceTaskId = null,
     pressureInterfaceGasCellFieldImportStateKey = null,
@@ -3239,6 +3282,7 @@ export function createSphPhaseScene(container, {
       : publishScenePressureInterfaceGasCellFieldImportSource({
           residentAuthorityHost,
           gasPressureSummary,
+          gasCellEosProducerStageResult,
           pressureInterfaceGasCellFieldAdmission,
           cacheKey: pressureInterfaceGasCellFieldImportSourceTaskId
             || `ulg:scene-pressure-interface-gas-cell-field-import:${source}:${pressureInterfaceGasCellFieldImportStateKey || 'active'}`,

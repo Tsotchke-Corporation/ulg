@@ -23761,3 +23761,117 @@ Open:
   fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
+
+## 2026-06-15 08:14 AKDT - Gas-Cell EOS Stage-Chain Pressure Import Wiring
+
+Prompt time/date: 2026-06-15 08:14:25 AKDT, continuing the active goal after
+the todo-status update and the uncommitted gas-cell stage-chain wiring handoff.
+
+Actions:
+
+- Re-read `/home/cos/projects/AGENTS.md`, `plan/plan.md`, and the recent
+  `plan/log.md` entries before changing code.
+- Used ICC per project instruction:
+  `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+  reported a fresh index at `aa85497`.
+- Validated the in-progress gas-cell stage-chain edits and reproduced the
+  failing stage-chain test.
+- Diagnosed the failure as a partial synthetic `pressureFeedback` object:
+  `pressureFeedbackWithGasCellEosProducerResult()` created feedback from
+  `null`, which bypassed normal `gasPressureFeedbackSummary()` derivation and
+  left pressureInterface with a local gas-cell field but no complete wall
+  pressure ledger.
+- Patched the main runtime and resident worker mirror so producer output only
+  augments an existing feedback object. When no feedback exists, it remains
+  `null` and pressureInterface derives full feedback from the producer-enriched
+  gas-pressure summary.
+- Verified the opt-in ComputeManager mechanics stage-chain now runs
+  `p2g -> gasCellEosProducer -> pressureInterface -> gridUpdate -> g2p`, asks
+  the resident authority host to publish/admit/import the producer gas-cell
+  field, and passes that import into pressureInterface.
+- Verified the scene import helper can publish from a gas-cell EOS producer
+  result source.
+- Confirmed by grep that mounted scene hot-loop opt-in is still open; this
+  slice completed the formal stage-chain/helper path, not the mounted hot path.
+- Inspected the post-slice visual frames and recorded that they are nonblank
+  and bounded but still show the known physics-quality blockers.
+- Added
+  `plan/done/gas-cell-eos-stage-chain-pressure-import-2026-06-15.md` and
+  updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `src/visualization/sphPhaseScene.js`
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/gas-cell-eos-stage-chain-pressure-import-2026-06-15.md`
+
+Validation:
+
+- PASS: `git diff --check`.
+- PASS:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/services/ulgMechanicsResidentStage.worker.js`,
+  `node --check src/visualization/sphPhaseScene.js`, and
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS:
+  `node --check tests/sphMlsMpmGpuStep.test.mjs` and
+  `node --check tests/sphPhaseRenderer.test.mjs`.
+- Initial FAIL:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS producer before pressureInterface"`
+  failed because `stageTaskEvidencePassed.pressureInterface` was `false`.
+- PASS after the feedback-merge fix:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS producer before pressureInterface"`
+  reported `45/45`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "producer result source"`
+  reported `30/30`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS|pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|pressure interface stage compute task can produce force rows|gas-cell EOS producer before pressureInterface"`
+  reported `45/45`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell"`
+  reported `30/30`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "EOS producer|gas-cell field imports|worker-retained pressure/interface"`
+  reported `15/15`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1` in `1.4m`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-gas-eos-stage-chain-live-wire-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-gas-eos-stage-chain-live-wire-20260615`.
+
+Manual frame inspection:
+
+- `liquid-liquid-h2o-mlsmpm` was nonblank and bounded, but still visibly
+  fragmented.
+- `liquid-liquid-h2o-cpu-sph` was nonblank and bounded, but still showed the
+  stacked/blob shape.
+- `solid-h2o-cpu-sph` was nonblank and bounded, but still showed the
+  stacked/blob shape.
+
+Open:
+
+- Mounted scene hot-loop opt-in for `gasCellEosProducer` remains next.
+- Snapshot-derived scene gas-cell imports still need to be retired from the hot
+  path once mounted producer-stage inputs are available.
+- The EOS math is still CPU/oracle derivation plus WebGPU row upload; a true
+  WGSL EOS shader remains open.
+- The remaining physics behavior blockers are unchanged: MLS-MPM
+  fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
+  ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
+  pulsation/blinking, and renderer z-buffer/focus visual trust.

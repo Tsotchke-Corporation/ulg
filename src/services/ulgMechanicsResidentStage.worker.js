@@ -242,6 +242,48 @@ function retainedThermalOutput(record) {
   return source;
 }
 
+function gasCellEosProducerGasCellField(record) {
+  const result = record?.stageResults?.gasCellEosProducer || null;
+  return result?.gasCellFieldSnapshot
+    || result?.gasCellField
+    || result?.pressureFeedback?.gasCellField
+    || null;
+}
+
+function pressureSummaryWithGasCellEosProducer(record, pressureSummary = null) {
+  const gasCellField = gasCellEosProducerGasCellField(record);
+  if (!gasCellField?.localPressureGradientReady) return pressureSummary;
+  const base = pressureSummary && typeof pressureSummary === 'object'
+    ? pressureSummary
+    : {
+        schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+        status: 'worker-gas-cell-eos-producer-pressure-summary-local',
+        source: 'worker-gas-cell-eos-producer-stage'
+      };
+  return {
+    ...base,
+    gasCellField,
+    pressureFeedback: base.pressureFeedback && typeof base.pressureFeedback === 'object'
+      ? {
+          ...base.pressureFeedback,
+          gasCellField
+        }
+      : base.pressureFeedback
+  };
+}
+
+function pressureFeedbackWithGasCellEosProducer(record, pressureFeedback = null) {
+  const gasCellField = gasCellEosProducerGasCellField(record);
+  if (!gasCellField?.localPressureGradientReady) return pressureFeedback;
+  if (!pressureFeedback || typeof pressureFeedback !== 'object') return null;
+  return {
+    ...pressureFeedback,
+    schema: pressureFeedback.schema || 'peercompute.ulg.sph-gas-pressure-feedback.v0',
+    status: pressureFeedback.status || 'worker-gas-cell-eos-producer-pressure-feedback-local',
+    gasCellField
+  };
+}
+
 function stageUsesSphThermo(stageId) {
   return stageId === 'p2g' || stageId === 'g2p' || stageId === 'thermalPhase' || stageId === 'reactionProduct';
 }
@@ -516,6 +558,13 @@ function stageDataForPayload(payload = {}, record) {
     }
     if (!data.pressureInterfaceForceSolver && pressureInterfaceOutput?.pressureInterfaceForceSolver) {
       data.pressureInterfaceForceSolver = pressureInterfaceOutput.pressureInterfaceForceSolver;
+    }
+  }
+  if (stageId === 'pressureInterface') {
+    const gasCellField = gasCellEosProducerGasCellField(record);
+    if (gasCellField?.localPressureGradientReady) {
+      data.gasPressureSummary = pressureSummaryWithGasCellEosProducer(record, data.gasPressureSummary || data.pressureSummary || null);
+      data.pressureFeedback = pressureFeedbackWithGasCellEosProducer(record, data.pressureFeedback || null);
     }
   }
   if (stageId === 'g2p') {

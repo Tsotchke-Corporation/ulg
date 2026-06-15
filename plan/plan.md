@@ -2,6 +2,24 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 06:57 AKDT: pressure/interface Worker
+publication now carries a retained gas-cell field source descriptor through
+StateManager. A local-gradient pressure stage that already has worker/local
+retained gas-cell buffer refs now exposes
+`peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0` with
+row count/stride/byte length, retained gas pressure refs, admission status,
+source families, and zero-copy worker-retained access protocol. This is not yet
+the final gas-cell producer; it is the StateManager-visible retained source
+surface that lets the next slice replace snapshot gas-cell imports with
+lane-owned retained source consumption. Validation passed syntax checks,
+PeerCompute integration `14/14`, pressure stage coverage `43/43`, physics
+atomics `7` with `1` expected opt-in skip, browser authority-host Playwright
+`1/1`, and visual matrix `codex-retained-gas-cell-field-source-20260615` `3/3`
+with inspected frames. MLS-MPM fragmentation and CPU SPH stacked/blob behavior
+remain open. Next target: consume this retained gas-cell field source directly
+from the pressure/interface gas-cell import/admission path without requiring a
+caller-built snapshot.
+
 Current checkpoint, 2026-06-15 06:44 AKDT: spatial gas-cell source provenance
 now survives from retained product-event buffers through the spatial gas
 species ledger, local EOS gas-cell field, and pressure feedback summary. The

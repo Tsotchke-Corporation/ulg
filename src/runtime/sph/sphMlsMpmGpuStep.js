@@ -123,6 +123,7 @@ export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-pressure-interface-stage-compute-task-result.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.pressure-interface-stage-task-evidence.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0';
+export const ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA = 'peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0';
 export const ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA = 'peercompute.ulg.pressure-interface-gas-cell-field-admission.v0';
 export const ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA = 'peercompute.ulg.pressure-interface-gas-cell-field-import.v0';
 export const ULG_SPH_THERMAL_PHASE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-thermal-phase-worker-compact-publication-candidate.v0';
@@ -5474,6 +5475,9 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
       && gasPressureCellRowByteLength > 0
       && gasPressureCellRowsBufferRetained
     );
+  const retainedGasCellFieldSourceReady = localPressureGradientReady
+    && retainedGpuGasCellsProven
+    && hasGasPressureRef;
   let blocker = null;
   if (!workerRunnerSupplied) {
     blocker = 'worker-runner-not-supplied';
@@ -5554,6 +5558,15 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
+    retainedGasCellFieldSourceSchema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+    retainedGasCellFieldSourceStatus: retainedGasCellFieldSourceReady
+      ? 'pressure-interface-retained-gas-cell-field-source-ready'
+      : (localPressureGradientReady
+          ? 'blocked-retained-gas-cell-field-source-required'
+          : 'not-required-uniform-pressure-field'),
+    retainedGasCellFieldSourceReady,
+    retainedGasCellFieldSourceFamilies: retainedGasCellFieldSourceReady ? ['resident-gas-pressure'] : [],
+    retainedGasCellFieldSourceRefCount: workerRetainedGasPressureBufferRefs.length + retainedGasPressureBufferRefs.length,
     pressureInterfaceBufferResidency: backend === 'webgpu'
       ? 'worker-lane-gpu-buffer-retained'
       : 'blocked-non-webgpu-pressure-interface-output',
@@ -5571,6 +5584,7 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     workerRetainedGasPressureBufferRefCount: workerRetainedGasPressureBufferRefs.length,
     inputFamilies: ['resident-gas-pressure', 'sph-material-interface-field'],
     outputFamilies: ['pressure-interface-force-rows'],
+    retainedSourceFamilies: retainedGasCellFieldSourceReady ? ['resident-gas-pressure'] : [],
     requiredPublicationProtocol: 'worker-posts-pressure-interface-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager',
     nextRequiredImplementation: 'authorized-pressure-interface-grid-force-consumption'
   };
@@ -7056,6 +7070,17 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     pressureInterfaceWorkerRetainedPressureBufferRefCount: pressureInterfaceWorkerCompactPublicationCandidate?.workerRetainedPressureBufferRefCount ?? 0,
     pressureInterfaceRetainedPressureBufferRefs: pressureInterfaceWorkerCompactPublicationCandidate?.retainedPressureBufferRefs || [],
     pressureInterfaceRetainedPressureBufferRefCount: pressureInterfaceWorkerCompactPublicationCandidate?.retainedPressureBufferRefs?.length ?? 0,
+    pressureInterfaceRetainedGasCellFieldSourceSchema: pressureInterfaceWorkerCompactPublication?.retainedGasCellFieldSourceSchema
+      || pressureInterfaceWorkerCompactPublicationCandidate?.retainedGasCellFieldSourceSchema
+      || null,
+    pressureInterfaceRetainedGasCellFieldSourceStatus: pressureInterfaceWorkerCompactPublication?.retainedGasCellFieldSourceStatus
+      || pressureInterfaceWorkerCompactPublicationCandidate?.retainedGasCellFieldSourceStatus
+      || null,
+    pressureInterfaceRetainedGasCellFieldSourceReady: pressureInterfaceWorkerCompactPublication?.retainedGasCellFieldSourceReady === true
+      || pressureInterfaceWorkerCompactPublicationCandidate?.retainedGasCellFieldSourceReady === true,
+    pressureInterfaceRetainedSourceFamilies: pressureInterfaceWorkerCompactPublication?.retainedSourceFamilies
+      || pressureInterfaceWorkerCompactPublicationCandidate?.retainedSourceFamilies
+      || [],
     pressureInterfacePublishedForceRowCount: pressureInterfaceWorkerCompactPublicationCandidate?.pressureInterfaceForceRowCount ?? 0,
     pressureInterfacePublicationAuthority: pressureInterfaceWorkerCompactPublicationCandidate?.publicationAuthority || null,
     pressureInterfaceSameFrameGridForceAdmission: pressureInterfaceSameFrameGridForceAdmission,

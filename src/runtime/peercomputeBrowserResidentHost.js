@@ -10,6 +10,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+  ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
   createMlsMpmMechanicsG2pStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
   createMlsMpmMechanicsP2gStageComputeTask,
@@ -2482,6 +2483,54 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     throw new TypeError('pressure/interface local gas-cell publication requires admitted gas-cell field consumption evidence');
   }
   const committedAt = Date.now();
+  const retainedGasCellFieldSourceReady = localPressureGradientReady
+    && gasPressureCellRowsBufferRetained
+    && gasPressureCellRowCount > 0
+    && gasPressureCellRowByteLength > 0
+    && (workerRetainedGasPressureBufferRefs.length > 0 || retainedGasPressureBufferRefs.length > 0);
+  const retainedGasCellFieldSource = retainedGasCellFieldSourceReady
+    ? {
+        schema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+        status: 'pressure-interface-retained-gas-cell-field-source-ready',
+        cacheKey: resolvedCacheKey,
+        stateKey: resolvedStateKey,
+        sourceHotBufferKey: resolvedHotBufferKey,
+        sourceMode: 'worker-retained-pressure-interface-gas-cell-field-source',
+        sourceSchema: candidate.schema || null,
+        sourceTaskId,
+        sourceNodeId,
+        sourceStage,
+        workerModuleUrl: workerModuleUrl || candidate.workerModuleUrl || null,
+        sameDevice: candidate.sameDeviceMainThreadHandlesAvailable === true,
+        workerLocal: candidate.workerLocalRetainedRefsOnly !== false,
+        copyMode: 'zero-copy-worker-retained-ref-descriptor',
+        bufferResidency,
+        consumerAccessProtocol,
+        retainedGasPressureBufferRefs,
+        workerRetainedGasPressureBufferRefs,
+        pressureInterfaceGasPressureCellRowCount: gasPressureCellRowCount,
+        pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
+        pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
+        pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
+        pressureFieldMode: candidate.pressureFieldMode || null,
+        pressureFieldResolution: candidate.pressureFieldResolution || null,
+        localPressureGradientReady,
+        localPressureGradientStatus: candidate.localPressureGradientStatus || null,
+        localPressureGradientForceCouplingStatus: candidate.localPressureGradientForceCouplingStatus || null,
+        pressureInterfaceGasCellFieldAdmissionSchema,
+        pressureInterfaceGasCellFieldAdmissionStatus,
+        pressureInterfaceGasCellFieldAdmissionApproved,
+        pressureInterfaceGasCellFieldConsumerStatus,
+        sourceFamilies: ['resident-gas-pressure'],
+        stateManagerAdmissionRequired: true,
+        authoritativeStateMutation: false
+      }
+    : null;
+  const retainedSourceFamilies = uniqueStringList(
+    candidate.retainedSourceFamilies || candidate.retainedGasCellFieldSourceFamilies || (
+      retainedGasCellFieldSource ? ['resident-gas-pressure'] : []
+    )
+  );
   const workerRetainedBufferImport = {
     schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
     status: 'pressure-interface-worker-retained-buffer-source-ready',
@@ -2524,6 +2573,13 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
+    retainedGasCellFieldSourceSchema: retainedGasCellFieldSource?.schema || null,
+    retainedGasCellFieldSourceStatus: retainedGasCellFieldSource?.status || (
+      localPressureGradientReady ? 'blocked-retained-gas-cell-field-source-required' : 'not-required-uniform-pressure-field'
+    ),
+    retainedGasCellFieldSourceReady: Boolean(retainedGasCellFieldSource),
+    retainedGasCellFieldSource: cloneSerializableValue(retainedGasCellFieldSource),
+    retainedSourceFamilies,
     stateManagerAdmissionRequired: true,
     gridForceApplicationApproved: false
   };
@@ -2571,6 +2627,11 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
+    retainedGasCellFieldSourceSchema: workerRetainedBufferImport.retainedGasCellFieldSourceSchema,
+    retainedGasCellFieldSourceStatus: workerRetainedBufferImport.retainedGasCellFieldSourceStatus,
+    retainedGasCellFieldSourceReady: workerRetainedBufferImport.retainedGasCellFieldSourceReady,
+    retainedGasCellFieldSource: workerRetainedBufferImport.retainedGasCellFieldSource,
+    retainedSourceFamilies,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
     workerRetainedBufferImport
   };
@@ -2623,6 +2684,11 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     pressureInterfaceGasPressureCellRowStrideFloats: gasPressureCellRowStrideFloats,
     pressureInterfaceGasPressureCellRowByteLength: gasPressureCellRowByteLength,
     pressureInterfaceGasPressureCellRowsBufferRetained: gasPressureCellRowsBufferRetained,
+    retainedGasCellFieldSourceSchema: workerRetainedBufferImport.retainedGasCellFieldSourceSchema,
+    retainedGasCellFieldSourceStatus: workerRetainedBufferImport.retainedGasCellFieldSourceStatus,
+    retainedGasCellFieldSourceReady: workerRetainedBufferImport.retainedGasCellFieldSourceReady,
+    retainedGasCellFieldSource: workerRetainedBufferImport.retainedGasCellFieldSource,
+    retainedSourceFamilies,
     outputFamilies: uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']),
     gridForceApplicationApproved: false,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),

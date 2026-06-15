@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 06:57 AKDT: the pressure/interface
+Worker-retained publication path now publishes a StateManager-visible retained
+gas-cell field source descriptor for local-gradient gas-cell buffers. This
+keeps the gas-cell field as a lane-owned retained source instead of only a
+scene/caller snapshot, while still preserving the current import/admission
+gates. Next priority: have the pressure-interface gas-cell admission/import
+path consume this retained source descriptor directly, then move upstream to a
+dedicated resident gas-cell EOS producer stage under ComputeManager/GPUHub.
+Do not mark liquid quality, MLS-MPM fragmentation, CPU SPH stacked/blob
+behavior, z-buffer/focus visual trust, or long-horizon settling as complete.
+
 Current routing note, 2026-06-15 06:44 AKDT: spatial gas-cell source
 provenance now threads through the local EOS path without treating source refs
 as pressure-cell refs. Positioned gas product events backed by an actual

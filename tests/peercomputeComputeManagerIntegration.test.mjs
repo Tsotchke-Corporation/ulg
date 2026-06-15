@@ -25,6 +25,7 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+  ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
@@ -1869,6 +1870,34 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.retainedGasPressureBufferRefs,
     ['resident-gas-pressure-cells-buffer']
   );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.retainedGasCellFieldSourceSchema,
+    ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.retainedGasCellFieldSourceStatus,
+    'pressure-interface-retained-gas-cell-field-source-ready'
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.retainedGasCellFieldSourceReady,
+    true
+  );
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.retainedSourceFamilies,
+    ['resident-gas-pressure']
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceRetainedGasCellFieldSourceSchema,
+    ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceRetainedGasCellFieldSourceReady,
+    true
+  );
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceRetainedSourceFamilies,
+    ['resident-gas-pressure']
+  );
   assert.equal(pressureInterfaceStagePublicationPayloads.length, 1);
   assert.equal(pressureInterfaceStagePublicationPayloads[0].sourceStage, 'pressureInterface');
   assert.equal(pressureInterfaceStagePublicationPayloads[0].sameFrameConsumerStage, 'gridUpdate');
@@ -3513,6 +3542,14 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(publication.pressureInterfaceGasPressureCellRowStrideFloats, 12);
   assert.equal(publication.pressureInterfaceGasPressureCellRowByteLength, 96);
   assert.equal(publication.pressureInterfaceGasPressureCellRowsBufferRetained, true);
+  assert.equal(publication.retainedGasCellFieldSourceSchema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
+  assert.equal(publication.retainedGasCellFieldSourceStatus, 'pressure-interface-retained-gas-cell-field-source-ready');
+  assert.equal(publication.retainedGasCellFieldSourceReady, true);
+  assert.deepEqual(publication.retainedSourceFamilies, ['resident-gas-pressure']);
+  assert.equal(publication.retainedGasCellFieldSource.schema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
+  assert.equal(publication.retainedGasCellFieldSource.sourceHotBufferKey, publication.hotBufferKey);
+  assert.deepEqual(publication.retainedGasCellFieldSource.workerRetainedGasPressureBufferRefs, candidate.workerRetainedGasPressureBufferRefs);
+  assert.deepEqual(publication.retainedGasCellFieldSource.retainedGasPressureBufferRefs, candidate.retainedGasPressureBufferRefs);
   assert.equal(publication.bufferResidency, 'worker-lane-gpu-buffer-retained');
   assert.equal(publication.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(publication.gridForceApplicationApproved, false);
@@ -3527,6 +3564,9 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(publication.workerRetainedBufferImport.gridForceApplicationApproved, false);
   assert.equal(publication.workerRetainedBufferImport.pressureInterfaceGasPressureCellRowsBufferRetained, true);
   assert.equal(publication.workerRetainedBufferImport.pressureInterfaceGasCellFieldAdmissionApproved, true);
+  assert.equal(publication.workerRetainedBufferImport.retainedGasCellFieldSourceSchema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
+  assert.equal(publication.workerRetainedBufferImport.retainedGasCellFieldSourceReady, true);
+  assert.deepEqual(publication.workerRetainedBufferImport.retainedSourceFamilies, ['resident-gas-pressure']);
 
   assert.throws(() => host.publishWorkerRetainedPressureInterfaceStageOutput({
     candidate: {
@@ -3580,6 +3620,10 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.deepEqual(hotRecord.workerRetainedGasPressureBufferRefs, candidate.workerRetainedGasPressureBufferRefs);
   assert.equal(hotRecord.pressureInterfaceGasCellFieldAdmissionApproved, true);
   assert.equal(hotRecord.pressureInterfaceGasCellFieldConsumerStatus, 'admitted-local-gas-cell-field-consumer-ready');
+  assert.equal(hotRecord.retainedGasCellFieldSourceSchema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
+  assert.equal(hotRecord.retainedGasCellFieldSourceReady, true);
+  assert.equal(hotRecord.retainedGasCellFieldSource.sourceHotBufferKey, publication.hotBufferKey);
+  assert.deepEqual(hotRecord.retainedSourceFamilies, ['resident-gas-pressure']);
   assert.equal(hotRecord.bufferResidency, 'worker-lane-gpu-buffer-retained');
   assert.equal(hotRecord.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
 
@@ -3597,6 +3641,10 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldAdmissionSchema, ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA);
   assert.equal(warmDelta.payload.pressureInterfaceGasCellFieldAdmissionApproved, true);
   assert.deepEqual(warmDelta.payload.workerRetainedGasPressureBufferRefs, candidate.workerRetainedGasPressureBufferRefs);
+  assert.equal(warmDelta.payload.retainedGasCellFieldSourceSchema, ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA);
+  assert.equal(warmDelta.payload.retainedGasCellFieldSourceReady, true);
+  assert.deepEqual(warmDelta.payload.retainedGasCellFieldSource.sourceFamilies, ['resident-gas-pressure']);
+  assert.deepEqual(warmDelta.payload.retainedSourceFamilies, ['resident-gas-pressure']);
   assert.equal(warmDelta.payload.bufferResidency, 'worker-lane-gpu-buffer-retained');
   assert.equal(warmDelta.payload.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(warmDelta.payload.gridForceApplicationApproved, false);

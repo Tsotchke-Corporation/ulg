@@ -1,5 +1,39 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Retained Gas-Cell Field Source
+
+The current slice adds a StateManager-visible retained gas-cell field source
+descriptor to the pressure/interface Worker publication path. When a
+local-gradient pressure stage has worker/local retained gas-cell buffer refs,
+the publication now carries
+`peercompute.ulg.pressure-interface-retained-gas-cell-field-source.v0` through
+the candidate, worker-retained import, hot record, warm delta, and stage-chain
+summary.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained pressure/interface|resident pass-DAG task runs through real PeerCompute GPU lane authority"`
+  passed `14/14`.
+- Pressure stage coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|pressure interface stage compute task can produce force rows"`
+  passed `43/43`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-retained-gas-cell-field-source-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]`. Manual inspection found final frames nonblank and
+  bounded; MLS-MPM fragmentation and CPU SPH stacked/blob shape remain open.
+
 ## Current Focused Result - 2026-06-15 Spatial Gas-Cell Source Provenance
 
 The current slice preserves retained product-event source provenance as the

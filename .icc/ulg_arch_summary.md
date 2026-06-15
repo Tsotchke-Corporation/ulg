@@ -3,9 +3,9 @@
 # Architecture Summary
 
 - repo root: `/home/cos/projects/ulg`
-- files indexed: `286`
-- total lines indexed: `177433`
-- languages: `{"javascript": 104, "text": 84, "markdown": 83, "json": 14, "c": 1}`
+- files indexed: `287`
+- total lines indexed: `177791`
+- languages: `{"javascript": 104, "markdown": 84, "text": 84, "json": 14, "c": 1}`
 
 ## Important Files
 
@@ -43,18 +43,18 @@
 
 ## Top Modules
 
-- `tests`: 73 files, 36266 lines, symbols=0, tests=73, languages={"text": 73}
-- `plan/done`: 53 files, 3232 lines, symbols=0, tests=0, languages={"markdown": 53}
-- `src/runtime`: 30 files, 17253 lines, symbols=376, tests=0, languages={"javascript": 30}
-- `src/runtime/sph`: 26 files, 30796 lines, symbols=713, tests=0, languages={"javascript": 26}
+- `tests`: 73 files, 36314 lines, symbols=0, tests=73, languages={"text": 73}
+- `plan/done`: 54 files, 3294 lines, symbols=0, tests=0, languages={"markdown": 54}
+- `src/runtime`: 30 files, 17319 lines, symbols=376, tests=0, languages={"javascript": 30}
+- `src/runtime/sph`: 26 files, 30821 lines, symbols=713, tests=0, languages={"javascript": 26}
 - `src/runtime/material`: 18 files, 4777 lines, symbols=206, tests=0, languages={"javascript": 18}
-- `plan/todo`: 17 files, 9961 lines, symbols=0, tests=0, languages={"markdown": 17}
+- `plan/todo`: 17 files, 9972 lines, symbols=0, tests=0, languages={"markdown": 17}
 - `.`: 9 files, 2070 lines, symbols=0, tests=0, languages={"text": 4, "markdown": 3, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
 - `src/services`: 5 files, 2108 lines, symbols=54, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 38848 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 38994 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `scripts`: 5 files, 4907 lines, symbols=0, tests=0, languages={"text": 5}
 - `src/visualization`: 4 files, 13773 lines, symbols=350, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8186 lines, symbols=53, tests=0, languages={"javascript": 4}
@@ -71,27 +71,27 @@
 
 | Lines | Path | Language |
 |---:|---|---|
-| 23488 | `plan/log.md` | markdown |
-| 9881 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
+| 23571 | `plan/log.md` | markdown |
+| 9906 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
 | 8590 | `src/visualization/sphPhaseScene.js` | javascript |
-| 8187 | `plan/tests.md` | markdown |
+| 8221 | `plan/tests.md` | markdown |
 | 7279 | `tests/demo.e2e.mjs` | text |
 | 5973 | `ulg-gpu-abi/src/wgsl.js` | javascript |
-| 5555 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
-| 5306 | `plan/implementation-status.md` | markdown |
+| 5621 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |
+| 5317 | `plan/implementation-status.md` | markdown |
 | 5275 | `src/runtime/sph/sphRenderGpuKernel.js` | javascript |
 | 4830 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 4787 | `tests/sphMlsMpmGpuStep.test.mjs` | text |
-| 4468 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
+| 4516 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
 | 3134 | `scripts/sph-long-horizon-probe.mjs` | text |
 | 2704 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2126 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
 | 2092 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2015 | `tests/orchestration.test.mjs` | text |
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
-| 1727 | `plan/plan.md` | markdown |
+| 1745 | `plan/plan.md` | markdown |
 | 1618 | `src/runtime/sph/sphThermalGpuKernel.js` | javascript |
-| 1568 | `plan/todo/README.md` | markdown |
+| 1579 | `plan/todo/README.md` | markdown |
 | 1467 | `ulg-gpu-abi/src/index.js` | javascript |
 | 1399 | `plan/todo/perf-upgrade.md` | markdown |
 | 1321 | `plan/todo/sphphasedemo.md` | markdown |

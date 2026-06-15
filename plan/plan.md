@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 06:44 AKDT: spatial gas-cell source provenance
+now survives from retained product-event buffers through the spatial gas
+species ledger, local EOS gas-cell field, and pressure feedback summary. The
+runtime only mints the generic `resident-product-mass-buffer` source ref when a
+product-event buffer is actually retained, while explicit retained product
+refs still pass through unchanged. This keeps source provenance distinct from
+pressure gas-cell buffer refs and gives the next retained ComputeManager/GPUHub
+gas-cell producer a real input lineage to publish through StateManager.
+Validation passed syntax checks, gas/pressure coverage `29/29`, pressure stage
+coverage `43/43`, physics atomics `7` with `1` expected opt-in skip, and visual
+matrix `codex-spatial-gas-source-provenance-20260615` `3/3` with inspected
+frames. The visual frames remained nonblank and bounded, but MLS-MPM
+fragmentation and CPU SPH stacked/blob behavior remain open blockers. Next
+target: promote the spatial gas-cell ledger/field itself into a retained
+ComputeManager/GPUHub output with real worker/local GPU refs, then use that
+lane-owned source for gas-cell admission/import publication.
+
 Current checkpoint, 2026-06-15 06:29 AKDT: pressure/interface gas-cell field
 admission can now be minted by the resident authority host and stored through
 StateManager before import publication. The new

@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 06:44 AKDT: spatial gas-cell source
+provenance now threads through the local EOS path without treating source refs
+as pressure-cell refs. Positioned gas product events backed by an actual
+retained product-event buffer mark the spatial gas species ledger, derived
+gas-cell pressure field, and pressure feedback gas-cell field with
+`retainedSpatialGasSourceBufferRefs=["resident-product-mass-buffer"]`; synthetic
+or aggregate ledgers remain unretained. Next priority is unchanged: make the
+spatial gas-cell ledger/field itself a retained ComputeManager/GPUHub output
+with real worker/local GPU refs, then feed that lane-owned source into
+StateManager admission/import. Keep liquid quality, MLS-MPM fragmentation, CPU
+SPH stacked/blob behavior, z-buffer/focus visual trust, and long-horizon
+settling open.
+
 Current routing note, 2026-06-15 06:29 AKDT: the resident authority host can
 now publish/admit pressure-interface gas-cell field-consumption evidence
 through StateManager before the import descriptor is published. The scene no

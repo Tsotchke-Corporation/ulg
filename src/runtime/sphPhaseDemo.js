@@ -673,6 +673,18 @@ function vector3From(value, fallback = [0, 0, 0]) {
   });
 }
 
+function uniqueStringsFrom(...values) {
+  return [...new Set(values.flatMap((value) => (
+    Array.isArray(value) ? value : [value]
+  ))
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean))];
+}
+
+function hasRetainedProductEventBuffer(handle) {
+  return Boolean(handle?.productEventBufferRetained && handle?.productEventBuffer);
+}
+
 function cellDimsFrom(value, fallback = [0, 0, 0]) {
   if (!Array.isArray(value)) return [...fallback];
   return [0, 1, 2].map((index) => {
@@ -883,6 +895,10 @@ export function deriveLocalGasCellPressureFieldFromSpatialGasLedger({
     spatialGasSpeciesLedgerSchema: ledger.schema || RESIDENT_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
     spatialGasSpeciesLedgerStatus: ledger.status || 'spatial-gas-species-ledger-ready',
     residentSpatialGasSpeciesLedgerStatus: 'resident-spatial-gas-species-ledger-eos-ready',
+    retainedSpatialGasSourceBufferRefs: uniqueStringsFrom(ledger.retainedSpatialGasSourceBufferRefs),
+    workerRetainedSpatialGasSourceBufferRefs: uniqueStringsFrom(ledger.workerRetainedSpatialGasSourceBufferRefs),
+    spatialGasSourceBufferRetained: ledger.spatialGasSourceBufferRetained === true
+      || uniqueStringsFrom(ledger.retainedSpatialGasSourceBufferRefs, ledger.workerRetainedSpatialGasSourceBufferRefs).length > 0,
     eosPressureClosure: 'ideal-gas-law-per-cell',
     pressureFieldMode: LOCAL_GAS_CELL_PRESSURE_FIELD_MODE,
     pressureFieldResolution: LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION,
@@ -1002,6 +1018,12 @@ export function gasPressureCellFieldSummary({
   const localGradientReady = usable
     && localCells.length > 0
     && effectiveField?.localPressureGradientReady === true;
+  const retainedSpatialGasSourceBufferRefs = localGradientReady
+    ? uniqueStringsFrom(effectiveField?.retainedSpatialGasSourceBufferRefs)
+    : [];
+  const workerRetainedSpatialGasSourceBufferRefs = localGradientReady
+    ? uniqueStringsFrom(effectiveField?.workerRetainedSpatialGasSourceBufferRefs)
+    : [];
   const pressureGaugePa = usable ? totalPressurePa - finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
   const spatialLedger = spatialGasSpeciesLedgerFromPressureSummary(pressureSummary);
   return {
@@ -1061,6 +1083,12 @@ export function gasPressureCellFieldSummary({
     eosPressureClosure: localGradientReady && spatialField?.eosPressureClosure
       ? spatialField.eosPressureClosure
       : null,
+    retainedSpatialGasSourceBufferRefs,
+    workerRetainedSpatialGasSourceBufferRefs,
+    spatialGasSourceBufferRetained: localGradientReady
+      && (effectiveField?.spatialGasSourceBufferRetained === true
+        || retainedSpatialGasSourceBufferRefs.length > 0
+        || workerRetainedSpatialGasSourceBufferRefs.length > 0),
     residentGasCellGradientCouplingValidation: false,
     pressureFieldValidation: localGradientReady,
     forceCouplingValidation: false,
@@ -1644,7 +1672,9 @@ function residentGasRowsFromProductInventory(reactionSummary, reactionTable) {
 
 function spatialGasSpeciesLedgerFromProductEventRows(productEventGasRows = [], {
   boxDimsM = null,
-  source = 'gpu-resident-reaction-product-events'
+  source = 'gpu-resident-reaction-product-events',
+  retainedSpatialGasSourceBufferRefs = [],
+  workerRetainedSpatialGasSourceBufferRefs = []
 } = {}) {
   const dims = pressureBoxDimensionsM(boxDimsM, null);
   if (!dims.every((value) => value > 0)) return null;
@@ -1721,6 +1751,12 @@ function spatialGasSpeciesLedgerFromProductEventRows(productEventGasRows = [], {
     schema: RESIDENT_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
     status: 'spatial-gas-species-ledger-ready',
     source,
+    retainedSpatialGasSourceBufferRefs: uniqueStringsFrom(retainedSpatialGasSourceBufferRefs),
+    workerRetainedSpatialGasSourceBufferRefs: uniqueStringsFrom(workerRetainedSpatialGasSourceBufferRefs),
+    spatialGasSourceBufferRetained: uniqueStringsFrom(
+      retainedSpatialGasSourceBufferRefs,
+      workerRetainedSpatialGasSourceBufferRefs
+    ).length > 0,
     cellDims,
     cellCount: cells.length,
     cells,
@@ -1850,7 +1886,18 @@ export function gasPressureSummaryFromResidentReaction({
     const spatialGasSpeciesLedger = productEventGasRows.length > 0
       ? spatialGasSpeciesLedgerFromProductEventRows(productEventGasRows, {
           boxDimsM: baselineSummary?.boxDimsM || null,
-          source: 'gpu-resident-reaction-product-event-spatial-ledger'
+          source: 'gpu-resident-reaction-product-event-spatial-ledger',
+          retainedSpatialGasSourceBufferRefs: uniqueStringsFrom(
+            reactionSummary?.retainedProductBufferRefs,
+            residentProductMass?.retainedProductBufferRefs,
+            hasRetainedProductEventBuffer(reactionSummary) || hasRetainedProductEventBuffer(residentProductMass)
+              ? 'resident-product-mass-buffer'
+              : null
+          ),
+          workerRetainedSpatialGasSourceBufferRefs: uniqueStringsFrom(
+            reactionSummary?.workerRetainedProductBufferRefs,
+            residentProductMass?.workerRetainedProductBufferRefs
+          )
         })
       : null;
     return {
@@ -1869,6 +1916,9 @@ export function gasPressureSummaryFromResidentReaction({
       }),
       residentProductGasSource: source,
       residentProductGasRowCount: productGasRows.length,
+      retainedSpatialGasSourceBufferRefs: spatialGasSpeciesLedger?.retainedSpatialGasSourceBufferRefs ?? [],
+      workerRetainedSpatialGasSourceBufferRefs: spatialGasSpeciesLedger?.workerRetainedSpatialGasSourceBufferRefs ?? [],
+      spatialGasSourceBufferRetained: spatialGasSpeciesLedger?.spatialGasSourceBufferRetained === true,
       residentProductGasRows: productGasRows.map((row) => ({
         material: row.material,
         materialId: row.materialId,

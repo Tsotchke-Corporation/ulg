@@ -23400,3 +23400,88 @@ Open:
   fragmentation.
 - Renderer visual-trust blockers remain open for z-buffer/draw-order and
   phone focus flash/disappear.
+
+## 2026-06-15 06:44 AKDT - Spatial Gas Source Provenance
+
+Prompt time/date: 2026-06-15 06:41:46 AKDT, continuing the active goal to
+stabilize ULG SPH/MLS-MPM physics, maintain dense visual validation, and keep
+the ComputeManager/NodeKernel architecture aligned.
+
+Actions:
+
+- Re-read `/home/cos/projects/AGENTS.md` and the ICC skill instructions before
+  continuing the active repo work.
+- Checked the failing focused test from the in-progress slice:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "spatial gas|positioned gas|gas pressure"`.
+  It failed `28/29` at `tests/sphPhaseDemo.test.mjs:751` because the
+  positioned product-event spatial gas ledger did not mark a retained source.
+- Audited the product-event buffer conventions in `src/runtime/sphPhaseDemo.js`
+  and related tests. The correct rule is stricter than a loose boolean:
+  `resident-product-mass-buffer` source provenance should be minted only when
+  an actual retained product-event buffer handle is present. Explicit retained
+  product refs still pass through unchanged.
+- Added `hasRetainedProductEventBuffer()` and threaded
+  `retainedSpatialGasSourceBufferRefs`,
+  `workerRetainedSpatialGasSourceBufferRefs`, and
+  `spatialGasSourceBufferRetained` through:
+  - `spatialGasSpeciesLedgerFromProductEventRows()`;
+  - `deriveLocalGasCellPressureFieldFromSpatialGasLedger()`;
+  - `gasPressureCellFieldSummary()`;
+  - `gasPressureSummaryFromResidentReaction()`.
+- Updated `tests/sphPhaseDemo.test.mjs` so the positioned gas product-event
+  fixture uses an actual retained product-event buffer stub before expecting
+  `resident-product-mass-buffer` provenance, and removed a misleading
+  retained flag from the non-positioned product-event test.
+- Ran the recurring visual sanity matrix against the existing HTTPS Vite server
+  on `0.0.0.0:5173` with run id
+  `codex-spatial-gas-source-provenance-20260615`.
+- Spot-checked final PNG frames with `view_image`.
+- Added `plan/done/spatial-gas-source-provenance-2026-06-15.md` and updated
+  `plan/plan.md`, `plan/todo/README.md`, `plan/implementation-status.md`, and
+  `plan/tests.md`.
+
+Files touched:
+
+- `src/runtime/sphPhaseDemo.js`
+- `tests/sphPhaseDemo.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/spatial-gas-source-provenance-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "spatial gas|positioned gas|gas pressure"`
+  reported `29/29`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|local gas-cell|pressure interface stage compute task can produce force rows"`
+  reported `43/43`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: `git diff --check`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-spatial-gas-source-provenance-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-spatial-gas-source-provenance-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` was nonblank and bounded, but still visibly
+    fragmented.
+  - `liquid-liquid-h2o-cpu-sph` was nonblank and bounded, but still showed the
+    known stacked/blob shape.
+  - `solid-h2o-cpu-sph` was nonblank and bounded, but still showed the known
+    stacked/blob shape.
+
+Open:
+
+- The spatial gas-cell ledger/field still needs to become a retained
+  ComputeManager/GPUHub output with real worker/local GPU refs.
+- The remaining physics behavior blockers are unchanged: MLS-MPM
+  fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
+  ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
+  pulsation/blinking, and renderer z-buffer/focus visual trust.

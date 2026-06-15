@@ -532,6 +532,8 @@ test('spatial gas species ledger derives local EOS gas-cell pressure gradients',
   assert.equal(field.eosPressureClosure, 'ideal-gas-law-per-cell');
   assert.equal(field.localPressureGradientReady, true);
   assert.equal(field.residentSpatialGasSpeciesLedgerStatus, 'resident-spatial-gas-species-ledger-eos-ready');
+  assert.deepEqual(field.retainedSpatialGasSourceBufferRefs, []);
+  assert.equal(field.spatialGasSourceBufferRetained, false);
   assert.deepEqual(field.cellDims, [2, 1, 1]);
   assert.equal(field.cellCount, 2);
   near(field.cells[0].pressurePa, 100000, 1e-6);
@@ -697,6 +699,8 @@ test('resident positioned gas product events produce spatial gas-cell EOS pressu
     reactionSummary: {
       status: 'reaction-compact-summary-ready',
       compactLedgerAvailable: true,
+      productEventBufferRetained: true,
+      productEventBuffer: { label: 'resident-positioned-product-events' },
       productEvents: {
         status: 'product-event-sparse-storage-ready',
         records: [
@@ -745,12 +749,17 @@ test('resident positioned gas product events produce spatial gas-cell EOS pressu
   assert.equal(pressure.source, 'gpu-resident-reaction-product-events');
   assert.equal(pressure.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
   assert.equal(pressure.spatialGasSpeciesLedger.source, 'gpu-resident-reaction-product-event-spatial-ledger');
+  assert.equal(pressure.spatialGasSpeciesLedger.spatialGasSourceBufferRetained, true);
+  assert.deepEqual(pressure.spatialGasSpeciesLedger.retainedSpatialGasSourceBufferRefs, ['resident-product-mass-buffer']);
+  assert.deepEqual(pressure.retainedSpatialGasSourceBufferRefs, ['resident-product-mass-buffer']);
   assert.equal(pressure.residentSpatialGasSpeciesLedgerStatus, 'spatial-gas-species-ledger-ready');
   assert.equal(pressure.pressureFeedback.gasCellField.localPressureGradientReady, true);
   assert.equal(
     pressure.pressureFeedback.gasCellField.residentSpatialGasSpeciesLedgerStatus,
     'resident-spatial-gas-species-ledger-eos-ready'
   );
+  assert.equal(pressure.pressureFeedback.gasCellField.spatialGasSourceBufferRetained, true);
+  assert.deepEqual(pressure.pressureFeedback.gasCellField.retainedSpatialGasSourceBufferRefs, ['resident-product-mass-buffer']);
   assert.equal(pressure.pressureFeedback.gasCellField.cellCount, 2);
   near(pressure.pressureFeedback.gasCellField.cells[0].pressurePa, 100000, 1e-6);
   near(pressure.pressureFeedback.gasCellField.cells[1].pressurePa, 200000, 1e-6);

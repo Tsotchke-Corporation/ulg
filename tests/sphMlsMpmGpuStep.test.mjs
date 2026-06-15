@@ -25,14 +25,18 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+  ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA,
+  ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  createSphThermalPhaseStageComputeTask,
   createMlsMpmResidentStepComputeTask,
   createMlsMpmResidentStepsComputeTask,
   createMlsMpmResidentStepGpuFenceReport,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
+  runSphThermalPhaseStageComputeTask,
   runMlsMpmResidentStepComputeTask,
   runMlsMpmResidentStepsComputeTask,
   runMlsMpmResidentStepsWithOptionalWebGpu,
@@ -1593,6 +1597,92 @@ test('MLS-MPM resident step compute task handler returns explicit GPU fence evid
   const directFence = createMlsMpmResidentStepGpuFenceReport(result, task.gpuFence);
   assert.equal(directFence.fenceSatisfied, true);
   assert.equal(directFence.laneId, 'ulg:test:sph-resident');
+});
+
+test('SPH thermal phase stage compute task declares retained thermo lane output without authority mutation', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceStateBuffer = tracker.buffer('g2p-state-in');
+  const sourceThermoBuffer = tracker.buffer('source-thermo-in');
+  const task = createSphThermalPhaseStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:thermal-phase-stage',
+    laneId: 'ulg:test:thermal-phase-lane',
+    stateKey: 'ulg:test:thermal-phase-state',
+    domainKey: 'ulg:test-domain',
+    preferWebGpu: true,
+    sphParticleState: buffers.sphParticleState,
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state-upload'),
+      thermoBuffer: sourceThermoBuffer
+    },
+    sourceStateBuffer,
+    sourceThermoBuffer,
+    boxDimsM: [5, 5, 5],
+    dtS: 0.1
+  });
+
+  assert.equal(task.schema, ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.exportName, 'runSphThermalPhaseStageComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.suppressCommitDelta, true);
+  assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuFence.laneId, 'ulg:test:thermal-phase-lane');
+  assert.equal(task.gpuResidentLane.owner, 'ulg-thermal-phase-law');
+  assert.deepEqual(task.writeFamilies, ['sph-thermo-phase']);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, ['sph-state-buffer', 'sph-thermo-buffer']);
+
+  const result = await runSphThermalPhaseStageComputeTask({
+    ...task.data,
+    thermalStepRunner(args) {
+      assert.equal(args.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
+      assert.equal(args.sourceStateBuffer, sourceStateBuffer);
+      assert.equal(args.sourceThermoBuffer, sourceThermoBuffer);
+      assert.equal(args.retainOutputParticleBuffers, true);
+      return {
+        schema: 'peercompute.ulg.sph-gpu-thermal-step-execution.v0',
+        backend: 'webgpu',
+        status: 'webgpu-accepted',
+        webgpuStatus: { status: 'webgpu-executed' },
+        result: {
+          schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+          backend: 'webgpu',
+          status: 'thermal-step-executed',
+          particleCount: buffers.sphParticleState.particleCount,
+          state: new Float32Array(),
+          thermo: new Float32Array(),
+          stateBuffer: tracker.buffer('thermal-state-out'),
+          thermoBuffer: tracker.buffer('thermal-thermo-out'),
+          stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+          thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+          retainedOutputParticleBuffers: true,
+          readbackMode: 'full-parity-readback',
+          fullReadbackPerformed: true,
+          normalHotLoopReadbackFree: false
+        }
+      };
+    }
+  });
+
+  assert.equal(result.computeTaskResultSchema, ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.computeTaskId, 'ulg:test:thermal-phase-stage');
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.status, 'webgpu-accepted');
+  assert.equal(result.stateBuffer.label, 'thermal-state-out');
+  assert.equal(result.thermoBuffer.label, 'thermal-thermo-out');
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.thermalPhaseStageTaskEvidence.schema, 'peercompute.ulg.thermal-phase-stage-task-evidence.v0');
+  assert.equal(result.thermalPhaseStageTaskEvidence.passed, true);
+  assert.deepEqual(result.thermalPhaseStageTaskEvidence.candidateWriteFamilies, ['sph-thermo-phase']);
+  assert.ok(result.thermalPhaseStageTaskEvidence.mustNotWriteFamilies.includes('resident-product-mass'));
+  assert.equal(result.thermalPhaseStageTaskAuthority.status, 'compute-manager-owned-non-mutating-thermal-phase-stage-task');
+  assert.equal(result.thermalPhaseStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(result.thermalPhaseStageTaskAuthority.commitDeltaSuppressed, true);
 });
 
 test('MLS-MPM resident step compute task submit helper uses a ComputeManager-compatible submitTask surface', async () => {

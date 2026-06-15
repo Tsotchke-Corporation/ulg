@@ -1,9 +1,20 @@
 # Implementation Status
 
-Updated: 2026-06-14 worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-14 thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added the first ComputeManager thermal/phase stage-task boundary.
+  `createSphThermalPhaseStageComputeTask()` and
+  `runSphThermalPhaseStageComputeTask()` wrap the existing thermal step in a
+  GPU-lane/fence-aware, commit-suppressed task that reads retained SPH
+  state/thermo plus mechanics context, emits retained state/thermo outputs, and
+  reports `thermalPhaseStageTaskAuthority.authoritativeStateMutation=false`.
+  Validation passed syntax checks, `git diff --check`, resident-step unit
+  `33/33`, focused PeerCompute/ULG integration `11/11`, physics atomics `7`
+  with `1` expected skip, and visual matrix
+  `codex-thermal-phase-stage-task-20260614` `3/3` with two captured frames per
+  scenario.
 - Added Worker-retained thermo input for the mechanics Worker lane. WebGPU
   P2G/G2P now borrow a lane-owned thermo buffer through `sphParticleUpload`
   instead of independently uploading thermo per stage. The Worker seeds that

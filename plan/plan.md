@@ -2,6 +2,17 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 22:42 AKDT: thermal/phase promotion now has an
+executable ComputeManager stage-task boundary. `sphMlsMpmGpuStep.js` exports
+`createSphThermalPhaseStageComputeTask()` and
+`runSphThermalPhaseStageComputeTask()`, wrapping the existing thermal step in
+a GPU-lane/fence-aware, commit-suppressed, evidence-only task. The task reads
+retained SPH state/thermo plus mechanics context, writes candidate
+`sph-thermo-phase`, retains state/thermo outputs, and reports
+`thermalPhaseStageTaskAuthority.authoritativeStateMutation=false`. This sets
+up the next Worker slice: register thermal/phase as a GPUHub resident-stage
+Worker executor so it runs where the retained Worker buffers live.
+
 Current checkpoint, 2026-06-14 22:32 AKDT: the Worker mechanics lane now
 retains thermo input alongside state/mechanics. For WebGPU P2G/G2P stages, the
 Worker seeds one retained thermo buffer from the CPU mirror when the lane has

@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Worker-Retained Thermo Input
+## Current Focused Result - 2026-06-14 Thermal/Phase Stage Task Boundary
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -10,8 +10,20 @@ mechanics output through StateManager, and runs a second same-Worker/same-lane
 continuation where P2G consumes the prior retained G2P state/mechanics buffers.
 The Worker lane now also seeds one retained thermo buffer and reuses it for
 P2G/G2P in both the first stage chain and the continuation.
+The latest unit slice adds the first ComputeManager thermal/phase child stage
+task boundary for the next law-family promotion.
 Focused checks:
 
+- SPH thermal/phase stage task boundary:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal phase stage compute task"`
+  passed; the filtered command reported `33/33` resident-step tests. The new
+  focused case asserts `createSphThermalPhaseStageComputeTask()` declares a
+  GPU lane/fence, retained state/thermo refs, `sph-thermo-phase` candidate
+  writes, and no StateManager mutation. It then runs
+  `runSphThermalPhaseStageComputeTask()` with an injected WebGPU-like thermal
+  runner and verifies retained state/thermo output, fence satisfaction,
+  `thermalPhaseStageTaskEvidence.passed=true`, and
+  `thermalPhaseStageTaskAuthority.authoritativeStateMutation=false`.
 - ULG mechanics resident-stage Worker module:
   `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `1/1`.
   The test runs P2G, grid-update, and G2P through
@@ -118,6 +130,8 @@ Focused checks:
   `codex-worker-retained-continuation-20260614` passed `3/3`.
   The Worker retained thermo input matrix
   `codex-worker-retained-thermo-input-20260614` passed `3/3`.
+  The thermal/phase stage task matrix
+  `codex-thermal-phase-stage-task-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

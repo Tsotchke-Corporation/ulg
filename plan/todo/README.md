@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 22:42 AKDT: the first thermal/phase
+ComputeManager stage-task boundary now exists. ULG exposes
+`createSphThermalPhaseStageComputeTask()` and
+`runSphThermalPhaseStageComputeTask()` as an evidence-only, commit-suppressed
+thermal/phase child task with GPU-lane/fence descriptors, retained state/
+thermo outputs, and `thermalPhaseStageTaskAuthority.authoritativeStateMutation
+= false`. This is not the Worker thermal law yet; it is the executable task
+contract the next Worker module can run under GPUHub/ComputeManager. Next:
+register a thermal/phase Worker stage runner that consumes the Worker-retained
+G2P state plus retained thermo, emits retained thermal state/thermo, and feeds
+that thermo source into reaction/product and mechanics refresh.
+
 Current routing note, 2026-06-14 22:32 AKDT: the Worker mechanics lane now
 seeds and reuses a Worker-retained thermo buffer for WebGPU P2G/G2P stages.
 The first Worker WebGPU stage creates the thermo buffer once from the CPU

@@ -1,5 +1,44 @@
 # ULG Implementation Log
 
+## 2026-06-14 22:42 AKDT - Thermal/phase stage task boundary
+
+Implemented:
+
+- Added `createSphThermalPhaseStageComputeTask()` and
+  `runSphThermalPhaseStageComputeTask()` as the first thermal/phase
+  ComputeManager child stage boundary.
+- The task declares GPU-lane/fence requirements, retained state/thermo refs,
+  `sph-thermo-phase` candidate writes, and suppresses commit deltas.
+- The task wraps an injectable thermal step runner, returns retained state/
+  thermo outputs, records `thermalPhaseStageTaskEvidence`, and reports
+  `thermalPhaseStageTaskAuthority.authoritativeStateMutation=false`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `git diff --check`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "thermal phase stage compute task"`
+  reported `33/33`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-thermal-phase-stage-task-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Register this thermal/phase task behind a GPUHub resident-stage Worker runner
+  so it consumes Worker-retained G2P state/thermo and emits Worker-retained
+  thermal state/thermo.
+- Add no-full thermal parity-skip semantics only after the task has a Worker
+  queue-fence and compact summary evidence path.
+
 ## 2026-06-14 22:32 AKDT - Worker-retained thermo input
 
 Implemented:

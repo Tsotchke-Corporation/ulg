@@ -185,6 +185,15 @@ thermal/phase as a ComputeManager/GPUHub Worker stage that consumes retained
 state/thermo/mechanics refs, emits retained state/thermo output, and lets the
 same Worker lane carry that output into reaction/product and mechanics refresh.
 
+Status update, 2026-06-14 thermal/phase stage task boundary: ULG now has an
+evidence-only ComputeManager task wrapper for the thermal/phase law. The new
+task declares GPU lane/fence requirements, retained state/thermo refs,
+candidate `sph-thermo-phase` writes, and no authoritative mutation. This is
+the boundary the Worker promotion should use next: the Worker should run this
+thermal stage where the retained G2P state and retained thermo source already
+live, adopt the resulting thermo buffer into the lane record, and only publish
+compact descriptors through NodeKernel/StateManager after queue-fence evidence.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

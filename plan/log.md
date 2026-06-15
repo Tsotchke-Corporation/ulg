@@ -1,5 +1,68 @@
 # ULG Implementation Log
 
+## 2026-06-15 01:14 AKDT - Pressure/interface grid consumption admission gate
+
+Implemented:
+
+- Added
+  `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0` as
+  the explicit approval object required before grid update can apply
+  pressure/interface force rows.
+- Changed `pressureInterfaceForceSolverAllowsGridApplication()` so a direct
+  solver status is no longer enough. The solver must be ready, mark
+  `gridForceApplicationApproved=true`, and grid update must receive an
+  admitted pressure force-row descriptor with
+  `gridForceApplicationApproved=true`.
+- Threaded `pressureInterfaceGridForceAdmission` through the CPU reference grid
+  update, optional WebGPU wrapper, resident-step path, and grid-update stage
+  compute task.
+- Extended grid-update envelopes and resident diagnostics with admission
+  schema/status, source hot-buffer key, force-row count, applied impulse, and
+  impulse proof fields.
+- Updated grid-update stage evidence so it passes for either suppressed
+  pressure rows or admitted/approved pressure-row consumption, while direct
+  unadmitted pressure remains evidence-failing.
+
+Files touched:
+
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-interface-grid-consumption-admission-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `37/37`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  reported `13/13`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-grid-consumption-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; artifacts are under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-grid-consumption-admission-20260615`.
+
+Open:
+
+- Same-frame intra-DAG pressure publication/admission remains open. The current
+  gate consumes prior/admitted descriptors supplied by the caller; the next
+  architecture slice should publish/admit `pressureInterface` output before
+  constructing `gridUpdate` in the same stage-plan execution.
+- Renderer z-buffer/draw-order failures remain queued as a separate P0/P1
+  visual correctness blocker.
+
 ## 2026-06-15 00:53 AKDT - Pressure/interface Worker publication admission
 
 Implemented:

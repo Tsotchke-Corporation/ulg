@@ -22,6 +22,7 @@ export {
 
 export const MLS_MPM_GPU_GRID_VELOCITY_FLOATS = MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
+export const ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA = 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0';
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -45,6 +46,11 @@ const EMPTY_PRESSURE_INTERFACE_FORCE_ROWS = new Float32Array(SPH_PRESSURE_INTERF
 const PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES = new Set([
   'apply-to-mls-mpm-grid',
   'pressure-interface-grid-force-consumer-approved'
+]);
+const PRESSURE_INTERFACE_ADMITTED_DESCRIPTOR_STATUSES = new Set([
+  'worker-retained-pressure-interface-output-admitted',
+  'worker-retained-pressure-interface-output-published',
+  'pressure-interface-grid-force-consumption-approved'
 ]);
 
 function finiteNumber(value, fallback = 0) {
@@ -121,6 +127,11 @@ function outputEnvelope({
     pressureInterfaceForceSolverStatus: pressureInterfaceForceSolver?.status ?? null,
     pressureInterfaceForceCouplingStatus: pressureInterfaceForceSolver?.forceCouplingStatus ?? null,
     pressureInterfaceForceApplicationStatus: pressureInterfaceForceApplication?.status ?? 'not-applied',
+    pressureInterfaceGridForceAdmissionSchema: pressureInterfaceForceApplication?.gridForceAdmissionSchema ?? null,
+    pressureInterfaceGridForceAdmissionStatus: pressureInterfaceForceApplication?.gridForceAdmissionStatus ?? null,
+    pressureInterfaceGridForceAdmissionApproved: pressureInterfaceForceApplication?.gridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: pressureInterfaceForceApplication?.gridForceAdmissionDescriptorStatus ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: pressureInterfaceForceApplication?.gridForceAdmissionSourceHotBufferKey ?? null,
     pressureInterfaceForceRowCount: pressureInterfaceForceApplication?.forceRowCount ?? 0,
     pressureInterfaceAppliedImpulseNSeconds: pressureInterfaceForceApplication?.appliedImpulseNSeconds ?? [0, 0, 0],
     pressureInterfaceAppliedImpulseMagnitudeNSeconds: pressureInterfaceForceApplication?.appliedImpulseMagnitudeNSeconds ?? 0,
@@ -170,14 +181,75 @@ function pressureForceRowCountFromSolver(pressureInterfaceForceSolver, rows) {
 
 function pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver) {
   if (!pressureInterfaceForceSolver) return false;
-  if (pressureInterfaceForceSolver.gridForceApplicationApproved === true) return true;
-  return PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES.has(
-    pressureInterfaceForceSolver.forceApplicationStatus
+  return pressureInterfaceForceSolver.gridForceApplicationApproved === true
+    && PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES.has(
+      pressureInterfaceForceSolver.forceApplicationStatus
+    );
+}
+
+function pressureInterfaceGridForceAdmissionDescriptor(admission = null) {
+  if (!admission || typeof admission !== 'object') return null;
+  return admission.pressureInterfacePublication
+    || admission.admittedPressureInterfacePublication
+    || admission.publication
+    || admission.descriptor
+    || admission;
+}
+
+function pressureInterfaceGridForceAdmissionAllowsApplication({
+  pressureInterfaceGridForceAdmission = null,
+  pressureInterfaceForceSolver = null,
+  forceRowCount = 0
+} = {}) {
+  const descriptor = pressureInterfaceGridForceAdmissionDescriptor(pressureInterfaceGridForceAdmission);
+  const status = pressureInterfaceGridForceAdmission?.status || descriptor?.status || null;
+  const descriptorStatus = descriptor?.status
+    || pressureInterfaceGridForceAdmission?.publicationStatus
+    || pressureInterfaceGridForceAdmission?.admittedStatus
+    || status;
+  const outputFamilies = Array.isArray(pressureInterfaceGridForceAdmission?.outputFamilies)
+    ? pressureInterfaceGridForceAdmission.outputFamilies
+    : (Array.isArray(descriptor?.outputFamilies) ? descriptor.outputFamilies : []);
+  const admittedForceRowCount = Math.max(
+    0,
+    Math.round(finiteNumber(
+      pressureInterfaceGridForceAdmission?.pressureInterfaceForceRowCount
+        ?? descriptor?.pressureInterfaceForceRowCount,
+      forceRowCount
+    ))
   );
+  const solverForceRowCount = Math.max(0, Math.round(finiteNumber(pressureInterfaceForceSolver?.forceRowCount, forceRowCount)));
+  const admissionApproved = pressureInterfaceGridForceAdmission?.gridForceApplicationApproved === true;
+  const descriptorAdmitted = PRESSURE_INTERFACE_ADMITTED_DESCRIPTOR_STATUSES.has(descriptorStatus)
+    || descriptor?.committed === true
+    || pressureInterfaceGridForceAdmission?.committed === true;
+  const familyAccepted = outputFamilies.includes('pressure-interface-force-rows');
+  const rowCountAccepted = admittedForceRowCount >= solverForceRowCount || solverForceRowCount === 0;
+  return {
+    schema: ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA,
+    status: admissionApproved && descriptorAdmitted && familyAccepted && rowCountAccepted
+      ? 'pressure-interface-grid-force-consumption-approved'
+      : 'pressure-interface-grid-force-consumption-blocked',
+    approved: admissionApproved && descriptorAdmitted && familyAccepted && rowCountAccepted,
+    admissionApproved,
+    descriptorAdmitted,
+    descriptorStatus,
+    familyAccepted,
+    rowCountAccepted,
+    forceRowCount: admittedForceRowCount,
+    solverForceRowCount,
+    sourceHotBufferKey: pressureInterfaceGridForceAdmission?.sourceHotBufferKey
+      || pressureInterfaceGridForceAdmission?.hotBufferKey
+      || descriptor?.sourceHotBufferKey
+      || descriptor?.hotBufferKey
+      || null,
+    outputFamilies: [...outputFamilies]
+  };
 }
 
 function pressureInterfaceForceApplicationSummary({
   pressureInterfaceForceSolver = null,
+  pressureInterfaceGridForceAdmission = null,
   forceRowCount = 0,
   appliedImpulseNSeconds = [0, 0, 0],
   appliedImpulseSource = 'grid-node-distributed-impulse',
@@ -185,8 +257,14 @@ function pressureInterfaceForceApplicationSummary({
   applicationApproved = pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver)
 } = {}) {
   const solverReady = pressureInterfaceForceSolver?.status === 'pressure-interface-force-solver-ready';
-  const blockedNotApproved = solverReady && !applicationApproved;
-  const ready = solverReady && applicationApproved && forceRowCount > 0;
+  const admission = pressureInterfaceGridForceAdmissionAllowsApplication({
+    pressureInterfaceGridForceAdmission,
+    pressureInterfaceForceSolver,
+    forceRowCount
+  });
+  const approvedByAdmission = applicationApproved && admission.approved === true;
+  const blockedNotApproved = solverReady && !approvedByAdmission;
+  const ready = solverReady && approvedByAdmission && forceRowCount > 0;
   const proven = ready && impulseProofStatus === 'actual-grid-node-impulse';
   return {
     schema: 'peercompute.ulg.mls-mpm-pressure-interface-grid-force-consumer.v0',
@@ -203,7 +281,13 @@ function pressureInterfaceForceApplicationSummary({
     forceSolverSchema: pressureInterfaceForceSolver?.schema ?? null,
     forceSolverStatus: pressureInterfaceForceSolver?.status ?? null,
     forceSolverApplicationStatus: pressureInterfaceForceSolver?.forceApplicationStatus ?? null,
-    applicationApproved,
+    applicationApproved: approvedByAdmission,
+    solverApplicationApproved: applicationApproved,
+    gridForceAdmissionSchema: admission.schema,
+    gridForceAdmissionStatus: admission.status,
+    gridForceAdmissionApproved: admission.approved,
+    gridForceAdmissionDescriptorStatus: admission.descriptorStatus,
+    gridForceAdmissionSourceHotBufferKey: admission.sourceHotBufferKey,
     forceRowCount,
     appliedImpulseNSeconds: [...appliedImpulseNSeconds],
     appliedImpulseMagnitudeNSeconds: Math.hypot(
@@ -265,7 +349,8 @@ export function updateMlsMpmGridCpu({
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   cflFactor = DEFAULT_CFL_FACTOR,
-  pressureInterfaceForceSolver = null
+  pressureInterfaceForceSolver = null,
+  pressureInterfaceGridForceAdmission = null
 } = {}) {
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -277,7 +362,12 @@ export function updateMlsMpmGridCpu({
   const vmax2 = vmax * vmax;
   const source = p2gGridProjection.gridNodes;
   const updatedGridNodes = new Float32Array(p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS);
-  const pressureForceApplicationApproved = pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver);
+  const pressureForceApplicationApproved = pressureInterfaceForceSolverAllowsGridApplication(pressureInterfaceForceSolver)
+    && pressureInterfaceGridForceAdmissionAllowsApplication({
+      pressureInterfaceGridForceAdmission,
+      pressureInterfaceForceSolver,
+      forceRowCount: pressureInterfaceForceSolver?.forceRowCount ?? 0
+    }).approved === true;
   const pressureForceRows = pressureForceApplicationApproved
     ? pressureForceRowsFromSolver(pressureInterfaceForceSolver)
     : null;
@@ -348,6 +438,7 @@ export function updateMlsMpmGridCpu({
     pressureInterfaceForceSolver,
       pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
         pressureInterfaceForceSolver,
+        pressureInterfaceGridForceAdmission,
         forceRowCount: pressureForceRowCount,
         appliedImpulseNSeconds,
         appliedImpulseSource: 'grid-node-distributed-impulse',
@@ -657,6 +748,11 @@ function executionFromUpdate(update, {
     pressureInterfaceForceSolverStatus: update?.pressureInterfaceForceSolverStatus ?? null,
     pressureInterfaceForceCouplingStatus: update?.pressureInterfaceForceCouplingStatus ?? null,
     pressureInterfaceForceApplicationStatus: update?.pressureInterfaceForceApplicationStatus ?? null,
+    pressureInterfaceGridForceAdmissionSchema: update?.pressureInterfaceGridForceAdmissionSchema ?? null,
+    pressureInterfaceGridForceAdmissionStatus: update?.pressureInterfaceGridForceAdmissionStatus ?? null,
+    pressureInterfaceGridForceAdmissionApproved: update?.pressureInterfaceGridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: update?.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: update?.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
     pressureInterfaceForceRowCount: update?.pressureInterfaceForceRowCount ?? 0,
     pressureInterfaceAppliedImpulseNSeconds: update?.pressureInterfaceAppliedImpulseNSeconds ?? [0, 0, 0],
     pressureInterfaceAppliedImpulseMagnitudeNSeconds: update?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? 0,
@@ -699,6 +795,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   p2gGridBuffer = null,
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
+  pressureInterfaceGridForceAdmission = null,
   dt = p2gGridProjection?.dt ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
@@ -723,7 +820,8 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         gravityMPerS2,
         boxDimsM,
         cflFactor,
-        pressureInterfaceForceSolver
+        pressureInterfaceForceSolver,
+        pressureInterfaceGridForceAdmission
       });
     }
     return cpuReference;
@@ -783,6 +881,7 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       p2gGridBuffer,
       pressureInterfaceForceRowsBuffer,
       pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
       dt,
       gravityMPerS2,
       boxDimsM,

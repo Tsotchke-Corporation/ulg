@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Pressure/Interface Worker Publication Admission
+## Current Focused Result - 2026-06-15 Pressure/Interface Grid Consumption Admission
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -34,8 +34,34 @@ NodeKernel/StateManager publication path. The authority host stores admitted
 force-row retained-ref descriptors as hot records and commits warm deltas under
 `ulg-worker-retained-pressure-interface-publications`; the admitted payload
 still carries `gridForceApplicationApproved=false`.
+Grid-update pressure consumption now has a separate admission gate. Direct
+pressure solvers are blocked unless paired with
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0` and
+`gridForceApplicationApproved=true`; successful application reports admission
+status, source hot-buffer key, force-row count, applied impulse, and impulse
+proof diagnostics.
 Focused checks:
 
+- Pressure/interface grid consumption admission:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `37/37`. The new cases
+  prove direct pressure solvers are blocked without an admitted grid-force
+  approval, admitted pressure rows are consumed as grid impulses, optional
+  WebGPU runner args carry the admission object, resident-step diagnostics
+  preserve admission evidence, and the grid-update stage task evidence passes
+  only for admitted/approved pressure consumption.
+- PeerCompute regression:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs` passed
+  `13/13`.
+- Browser authority-host regression:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-grid-consumption-admission-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0` with artifacts under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-grid-consumption-admission-20260615`.
 - Pressure/interface Worker publication admission:
   `node --test tests/peercomputeComputeManagerIntegration.test.mjs` passed
   `13/13`. The updated stage-chain integration proves a ready

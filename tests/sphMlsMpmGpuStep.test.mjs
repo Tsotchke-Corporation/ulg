@@ -31,11 +31,14 @@ import {
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+  ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_SCHEMA,
+  ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   createSphThermalPhaseStageComputeTask,
   createSphPressureInterfaceStageComputeTask,
+  createMlsMpmMechanicsGridUpdateStageComputeTask,
   createMlsMpmResidentStepComputeTask,
   createMlsMpmResidentStepsComputeTask,
   createMlsMpmResidentStepGpuFenceReport,
@@ -43,6 +46,7 @@ import {
   destroyMlsMpmResidentStepsBuffers,
   runSphThermalPhaseStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
+  runMlsMpmMechanicsGridUpdateStageComputeTask,
   runMlsMpmResidentStepComputeTask,
   runMlsMpmResidentStepsComputeTask,
   runMlsMpmResidentStepsWithOptionalWebGpu,
@@ -153,6 +157,21 @@ function pressureInterfaceForceSolverFixture({
     forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
     forceRowCount: 1,
     forceRowValues
+  };
+}
+
+function pressureInterfaceGridForceAdmissionFixture({
+  forceRowCount = 1,
+  sourceHotBufferKey = 'ulg:test:pressure-interface-admitted-hot-buffer'
+} = {}) {
+  return {
+    schema: 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0',
+    status: 'pressure-interface-grid-force-consumption-approved',
+    gridForceApplicationApproved: true,
+    publicationStatus: 'worker-retained-pressure-interface-output-admitted',
+    hotBufferKey: sourceHotBufferKey,
+    pressureInterfaceForceRowCount: forceRowCount,
+    outputFamilies: ['pressure-interface-force-rows']
   };
 }
 
@@ -633,7 +652,7 @@ test('MLS-MPM resident step preserves shifted grid origin into G2P', async () =>
   nearlyEqual(step.state[1], 2.5 + gravity[1] * 0.01 * 0.01, 1e-6);
 });
 
-test('MLS-MPM grid update consumes pressure-interface force rows as grid impulses', () => {
+test('MLS-MPM grid update blocks pressure-interface force rows without admitted grid-force approval', () => {
   const buffers = manualBuffers({
     position: [2, 2, 2],
     velocity: [0, 0, 0],
@@ -646,7 +665,8 @@ test('MLS-MPM grid update consumes pressure-interface force rows as grid impulse
   });
   const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
     centroid: [2, 2, 2],
-    forceApplicationStatus: 'apply-to-mls-mpm-grid'
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
   });
   const update = updateMlsMpmGridCpu({
     p2gGridProjection: projection,
@@ -655,6 +675,42 @@ test('MLS-MPM grid update consumes pressure-interface force rows as grid impulse
     boxDimsM: [5, 5, 5],
     cflFactor: 10,
     pressureInterfaceForceSolver
+  });
+
+  assert.equal(update.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(update.pressureInterfaceGridForceAdmissionApproved, false);
+  assert.equal(update.pressureInterfaceGridForceAdmissionStatus, 'pressure-interface-grid-force-consumption-blocked');
+  assert.equal(update.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-blocked-not-approved');
+  assert.equal(update.pressureInterfaceForceConsumerStatus, 'blocked-pressure-force-solver-not-approved-for-grid-application');
+  assert.equal(update.pressureInterfaceForceRowCount, 0);
+  assert.equal(update.pressureInterfaceAppliedImpulseMagnitudeNSeconds, 0);
+});
+
+test('MLS-MPM grid update consumes admitted pressure-interface force rows as grid impulses', () => {
+  const buffers = manualBuffers({
+    position: [2, 2, 2],
+    velocity: [0, 0, 0],
+    mechanicsDtS: 0.25
+  });
+  const projection = projectMlsMpmP2gGridCpu({
+    ...buffers,
+    gridSpacingM: 1,
+    boxDimsM: [5, 5, 5]
+  });
+  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
+    centroid: [2, 2, 2],
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
+  });
+  const pressureInterfaceGridForceAdmission = pressureInterfaceGridForceAdmissionFixture();
+  const update = updateMlsMpmGridCpu({
+    p2gGridProjection: projection,
+    dt: 0.25,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [5, 5, 5],
+    cflFactor: 10,
+    pressureInterfaceForceSolver,
+    pressureInterfaceGridForceAdmission
   });
   const sourceCenterOffset = nodeOffset(projection, 2, 2, 2, projection.gridNodeStrideFloats);
   const centerOffset = nodeOffset(update, 2, 2, 2, update.gridNodeStrideFloats);
@@ -665,6 +721,9 @@ test('MLS-MPM grid update consumes pressure-interface force rows as grid impulse
   assert.equal(update.schema, ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA);
   assert.equal(update.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
   assert.equal(update.pressureInterfaceForceSolverStatus, 'pressure-interface-force-solver-ready');
+  assert.equal(update.pressureInterfaceGridForceAdmissionApproved, true);
+  assert.equal(update.pressureInterfaceGridForceAdmissionStatus, 'pressure-interface-grid-force-consumption-approved');
+  assert.equal(update.pressureInterfaceGridForceAdmissionSourceHotBufferKey, 'ulg:test:pressure-interface-admitted-hot-buffer');
   assert.equal(update.pressureInterfaceForceCouplingStatus, 'pressure-force-solver-ready-not-applied');
   assert.equal(update.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
   assert.equal(update.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
@@ -691,14 +750,17 @@ test('MLS-MPM grid update optional WebGPU path forwards pressure force rows', as
     boxDimsM: [3, 3, 3]
   });
   const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
-    forceApplicationStatus: 'apply-to-mls-mpm-grid'
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
   });
+  const pressureInterfaceGridForceAdmission = pressureInterfaceGridForceAdmissionFixture();
   const pressureInterfaceForceRowsBuffer = { label: 'pressure-interface-force-rows' };
   let runnerCalls = 0;
   const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
     p2gGridProjection: projection,
     pressureInterfaceForceRowsBuffer,
     pressureInterfaceForceSolver,
+    pressureInterfaceGridForceAdmission,
     dt: 0.25,
     gravityMPerS2: [0, 0, 0],
     boxDimsM: [3, 3, 3],
@@ -709,6 +771,7 @@ test('MLS-MPM grid update optional WebGPU path forwards pressure force rows', as
       runnerCalls += 1;
       assert.equal(args.pressureInterfaceForceRowsBuffer, pressureInterfaceForceRowsBuffer);
       assert.equal(args.pressureInterfaceForceSolver, pressureInterfaceForceSolver);
+      assert.equal(args.pressureInterfaceGridForceAdmission, pressureInterfaceGridForceAdmission);
       const result = updateMlsMpmGridCpu(args);
       return { ...result, backend: 'webgpu' };
     }
@@ -718,6 +781,7 @@ test('MLS-MPM grid update optional WebGPU path forwards pressure force rows', as
   assert.equal(execution.backend, 'webgpu');
   assert.equal(execution.webgpuStatus.status, 'webgpu-executed');
   assert.equal(execution.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(execution.pressureInterfaceGridForceAdmissionApproved, true);
   assert.equal(execution.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
   assert.equal(execution.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
   assert.equal(execution.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
@@ -733,8 +797,10 @@ test('MLS-MPM resident step routes pressure-interface force solver into grid upd
     mechanicsDtS: 0.25
   });
   const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
-    forceApplicationStatus: 'apply-to-mls-mpm-grid'
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
   });
+  const pressureInterfaceGridForceAdmission = pressureInterfaceGridForceAdmissionFixture();
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
     preferWebGpu: false,
@@ -742,27 +808,78 @@ test('MLS-MPM resident step routes pressure-interface force solver into grid upd
     dt: 0.25,
     gravityMPerS2: [0, 0, 0],
     cflFactor: 10,
-    pressureInterfaceForceSolver
+    pressureInterfaceForceSolver,
+    pressureInterfaceGridForceAdmission
   });
 
   assert.equal(step.schema, ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA);
   assert.equal(step.gridUpdate.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(step.gridUpdate.pressureInterfaceGridForceAdmissionApproved, true);
   assert.equal(step.gridUpdate.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
   assert.equal(step.gridUpdate.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
   assert.equal(step.gridUpdate.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
   assert.equal(step.gridUpdate.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
   assert.equal(step.pressureInterfaceForceSolver, pressureInterfaceForceSolver);
   assert.equal(step.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(step.pressureInterfaceGridForceAdmissionApproved, true);
   assert.equal(step.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
   assert.equal(step.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
   assert.equal(step.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
   assert.equal(step.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
   assert.equal(step.diagnostics.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
+  assert.equal(step.diagnostics.pressureInterfaceGridForceAdmissionApproved, true);
   assert.equal(step.diagnostics.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
   assert.equal(step.diagnostics.pressureInterfaceAppliedImpulseSource, 'grid-node-distributed-impulse');
   assert.equal(step.diagnostics.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
   assert.equal(step.diagnostics.pressureInterfaceForceRowCount, 1);
   nearlyEqual(step.diagnostics.pressureInterfaceAppliedImpulseNSeconds[0], 2, 1e-5);
+});
+
+test('MLS-MPM grid-update stage task consumes admitted pressure-interface rows with evidence', async () => {
+  const buffers = manualBuffers({
+    position: [1, 1, 1],
+    velocity: [0, 0, 0],
+    mechanicsDtS: 0.25
+  });
+  const projection = projectMlsMpmP2gGridCpu({
+    ...buffers,
+    gridSpacingM: 1,
+    boxDimsM: [3, 3, 3]
+  });
+  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
+    forceApplicationStatus: 'apply-to-mls-mpm-grid',
+    gridForceApplicationApproved: true
+  });
+  const pressureInterfaceGridForceAdmission = pressureInterfaceGridForceAdmissionFixture();
+  const task = createMlsMpmMechanicsGridUpdateStageComputeTask({
+    p2gGridProjection: projection,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:grid-update-pressure-admitted',
+    pressureInterfaceForceSolver,
+    pressureInterfaceGridForceAdmission,
+    dt: 0.25,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [3, 3, 3],
+    cflFactor: 10,
+    preferWebGpu: false
+  });
+
+  assert.equal(task.schema, ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.data.pressureInterfaceForceSolver, pressureInterfaceForceSolver);
+  assert.equal(task.data.pressureInterfaceGridForceAdmission, pressureInterfaceGridForceAdmission);
+
+  const result = await runMlsMpmMechanicsGridUpdateStageComputeTask(task.data);
+
+  assert.equal(result.computeTaskResultSchema, ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_MLS_MPM_MECHANICS_GRID_UPDATE_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.pressureInterfaceGridForceAdmissionApproved, true);
+  assert.equal(result.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-applied');
+  assert.equal(result.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-consumed');
+  assert.equal(result.pressureInterfaceImpulseProofStatus, 'actual-grid-node-impulse');
+  assert.equal(result.mechanicsGridUpdateStageTaskEvidence.passed, true);
+  assert.equal(result.mechanicsGridUpdateStageTaskEvidence.pressureInterface.suppressed, false);
+  assert.equal(result.mechanicsGridUpdateStageTaskEvidence.pressureInterface.admittedAndApproved, true);
+  assert.equal(result.mechanicsGridUpdateStageTaskAuthority.authoritativeStateMutation, false);
 });
 
 test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', async () => {

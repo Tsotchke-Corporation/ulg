@@ -631,6 +631,7 @@ function canUseFusedNoFullMechanicsPath({
   g2pRunner,
   pressureInterfaceForceRowsBuffer,
   pressureInterfaceForceSolver,
+  pressureInterfaceGridForceAdmission,
   residentProductMass
 }) {
   return requestedReadbackMode === NO_FULL_READBACK_MODE
@@ -643,6 +644,7 @@ function canUseFusedNoFullMechanicsPath({
     && !g2pRunner
     && !pressureInterfaceForceRowsBuffer
     && !pressureInterfaceForceSolver
+    && !pressureInterfaceGridForceAdmission
     && !residentProductMass;
 }
 
@@ -1758,6 +1760,11 @@ function pressureInterfaceGridForceDiagnostics(gridUpdate) {
     pressureInterfaceForceSolverStatus: gridUpdate?.pressureInterfaceForceSolverStatus ?? null,
     pressureInterfaceForceCouplingStatus: gridUpdate?.pressureInterfaceForceCouplingStatus ?? null,
     pressureInterfaceForceApplicationStatus: gridUpdate?.pressureInterfaceForceApplicationStatus ?? null,
+    pressureInterfaceGridForceAdmissionSchema: gridUpdate?.pressureInterfaceGridForceAdmissionSchema ?? null,
+    pressureInterfaceGridForceAdmissionStatus: gridUpdate?.pressureInterfaceGridForceAdmissionStatus ?? null,
+    pressureInterfaceGridForceAdmissionApproved: gridUpdate?.pressureInterfaceGridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: gridUpdate?.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: gridUpdate?.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
     pressureInterfaceForceRowCount: gridUpdate?.pressureInterfaceForceRowCount ?? 0,
     pressureInterfaceAppliedImpulseNSeconds: [...(gridUpdate?.pressureInterfaceAppliedImpulseNSeconds ?? [0, 0, 0])],
     pressureInterfaceAppliedImpulseMagnitudeNSeconds: gridUpdate?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? 0,
@@ -3293,6 +3300,11 @@ function createMlsMpmMechanicsGridUpdateStageTaskEvidence(update = {}, {
   const pressureSuppressed = finiteNumber(update?.pressureInterfaceForceRowCount, 0) === 0
     && finiteNumber(update?.pressureInterfaceAppliedImpulseMagnitudeNSeconds, 0) === 0
     && (!update?.pressureInterfaceForceSolverStatus || update.pressureInterfaceForceApplicationStatus === 'not-applied');
+  const pressureApproved = update?.pressureInterfaceGridForceAdmissionApproved === true
+    && update?.pressureInterfaceForceApplicationStatus === 'pressure-interface-grid-force-consumer-applied'
+    && update?.pressureInterfaceForceConsumerStatus === 'grid-momentum-impulse-consumed'
+    && update?.pressureInterfaceImpulseProofStatus === 'actual-grid-node-impulse'
+    && finiteNumber(update?.pressureInterfaceForceRowCount, 0) > 0;
   const gridNodeStrideBytes = finiteNumber(
     update?.gridNodeStrideBytes,
     finiteNumber(update?.gridNodeStrideFloats, 0) * Float32Array.BYTES_PER_ELEMENT
@@ -3303,7 +3315,7 @@ function createMlsMpmMechanicsGridUpdateStageTaskEvidence(update = {}, {
   const passed = Boolean(
     update
       && acceptedBackend
-      && pressureSuppressed
+      && (pressureSuppressed || pressureApproved)
       && gridUpdated
   );
   return {
@@ -3314,8 +3326,8 @@ function createMlsMpmMechanicsGridUpdateStageTaskEvidence(update = {}, {
       ? 'compute-manager-owned-grid-update-stage-task-ready'
       : !acceptedBackend
         ? 'mechanics-grid-update-stage-task-backend-invalid'
-        : !pressureSuppressed
-          ? 'mechanics-grid-update-stage-task-pressure-interface-not-suppressed'
+        : !(pressureSuppressed || pressureApproved)
+          ? 'mechanics-grid-update-stage-task-pressure-interface-not-admitted-or-suppressed'
           : 'mechanics-grid-update-stage-task-grid-output-missing',
     computeTaskId,
     lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-mls-mpm-mechanics-law',
@@ -3333,6 +3345,10 @@ function createMlsMpmMechanicsGridUpdateStageTaskEvidence(update = {}, {
     updatedGridBufferRetained: Boolean(update?.updatedGridBuffer || update?.gpuResult?.updatedGridBuffer),
     pressureInterface: {
       suppressed: pressureSuppressed,
+      admittedAndApproved: pressureApproved,
+      gridForceAdmissionStatus: update?.pressureInterfaceGridForceAdmissionStatus || null,
+      gridForceAdmissionApproved: update?.pressureInterfaceGridForceAdmissionApproved === true,
+      gridForceAdmissionSourceHotBufferKey: update?.pressureInterfaceGridForceAdmissionSourceHotBufferKey || null,
       forceRowCount: finiteNumber(update?.pressureInterfaceForceRowCount, 0),
       appliedImpulseMagnitudeNSeconds: finiteNumber(update?.pressureInterfaceAppliedImpulseMagnitudeNSeconds, 0),
       applicationStatus: update?.pressureInterfaceForceApplicationStatus || null
@@ -3408,8 +3424,6 @@ export function createMlsMpmMechanicsGridUpdateStageComputeTask({
     gpuResidentLaneId: _ignoredLaneId,
     gpuResidentLaneStateKey: _ignoredLaneStateKey,
     gpuResidentLaneDomainKey: _ignoredLaneDomainKey,
-    pressureInterfaceForceRowsBuffer: _ignoredPressureRowsBuffer,
-    pressureInterfaceForceSolver: _ignoredPressureForceSolver,
     ...taskStageOptions
   } = stageOptions;
   const readbackMode = taskStageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
@@ -3497,8 +3511,6 @@ export function createMlsMpmMechanicsGridUpdateStageComputeTask({
     data: {
       ...taskStageOptions,
       readbackMode,
-      pressureInterfaceForceRowsBuffer: null,
-      pressureInterfaceForceSolver: null,
       retainUpdatedGridBuffer: taskStageOptions.retainUpdatedGridBuffer ?? true,
       gpuFenceRequirement: gpuFence,
       gpuResidentLane,
@@ -3525,8 +3537,6 @@ export async function runMlsMpmMechanicsGridUpdateStageComputeTask(data = {}) {
   } = data || {};
   const update = await runMlsMpmGridUpdateWithOptionalWebGpu({
     ...stageOptions,
-    pressureInterfaceForceRowsBuffer: null,
-    pressureInterfaceForceSolver: null,
     retainUpdatedGridBuffer: stageOptions.retainUpdatedGridBuffer ?? true
   });
   const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
@@ -5531,11 +5541,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           },
           createTask: ({ getResult }) => createMlsMpmMechanicsGridUpdateStageComputeTask({
             p2gGridProjection: getResult('p2g'),
-            dt: dtSeconds,
-            gravityMPerS2: gravity,
-            boxDimsM: dims,
-            cflFactor,
-            modulePath,
+          dt: dtSeconds,
+          gravityMPerS2: gravity,
+          boxDimsM: dims,
+          cflFactor,
+          pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null,
+          pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
+          pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null,
+          modulePath,
             taskId: `${taskIdPrefix}:gridUpdate`,
             preferWebGpu: false,
             readbackMode
@@ -5768,6 +5781,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         gravityMPerS2: gravity,
         boxDimsM: dims,
         cflFactor,
+        pressureInterfaceForceRowsBuffer: stepOptions.pressureInterfaceForceRowsBuffer || null,
+        pressureInterfaceForceSolver: stepOptions.pressureInterfaceForceSolver || null,
+        pressureInterfaceGridForceAdmission: stepOptions.pressureInterfaceGridForceAdmission || null,
         laneId: laneStagePlanId,
         stateKey: laneStagePlanStateKey,
         domainKey: gpuResidentLaneDomainKey,
@@ -7634,6 +7650,11 @@ async function residentStepEnvelope({
     pressureInterfaceForceSolverStatus: gridUpdate?.pressureInterfaceForceSolverStatus ?? null,
     pressureInterfaceForceCouplingStatus: gridUpdate?.pressureInterfaceForceCouplingStatus ?? null,
     pressureInterfaceForceApplicationStatus: gridUpdate?.pressureInterfaceForceApplicationStatus ?? null,
+    pressureInterfaceGridForceAdmissionSchema: gridUpdate?.pressureInterfaceGridForceAdmissionSchema ?? null,
+    pressureInterfaceGridForceAdmissionStatus: gridUpdate?.pressureInterfaceGridForceAdmissionStatus ?? null,
+    pressureInterfaceGridForceAdmissionApproved: gridUpdate?.pressureInterfaceGridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: gridUpdate?.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: gridUpdate?.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
     pressureInterfaceForceRowCount: gridUpdate?.pressureInterfaceForceRowCount ?? 0,
     pressureInterfaceAppliedImpulseNSeconds: [...(gridUpdate?.pressureInterfaceAppliedImpulseNSeconds ?? [0, 0, 0])],
     pressureInterfaceAppliedImpulseMagnitudeNSeconds: gridUpdate?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? 0,
@@ -7741,6 +7762,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   internalPressureScale = 1,
   pressureInterfaceForceRowsBuffer = null,
   pressureInterfaceForceSolver = null,
+  pressureInterfaceGridForceAdmission = null,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -7885,6 +7907,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       g2pRunner,
       pressureInterfaceForceRowsBuffer,
       pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
       residentProductMass
     });
     if (useFusedNoFullMechanics) {
@@ -7935,6 +7958,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     p2gGridBuffer: p2gGridProjection?.gpuResult?.gridBuffer ?? p2gGridProjection?.gridBuffer ?? null,
     pressureInterfaceForceRowsBuffer,
     pressureInterfaceForceSolver,
+    pressureInterfaceGridForceAdmission,
     dt: dtSeconds,
     gravityMPerS2: gravity,
     boxDimsM: dims,
@@ -8723,6 +8747,11 @@ function summarizeResidentStepForSequence(step, index) {
     pressureInterfaceForceSolverStatus: step.pressureInterfaceForceSolverStatus ?? null,
     pressureInterfaceForceCouplingStatus: step.pressureInterfaceForceCouplingStatus ?? null,
     pressureInterfaceForceApplicationStatus: step.pressureInterfaceForceApplicationStatus ?? null,
+    pressureInterfaceGridForceAdmissionSchema: step.pressureInterfaceGridForceAdmissionSchema ?? null,
+    pressureInterfaceGridForceAdmissionStatus: step.pressureInterfaceGridForceAdmissionStatus ?? null,
+    pressureInterfaceGridForceAdmissionApproved: step.pressureInterfaceGridForceAdmissionApproved ?? false,
+    pressureInterfaceGridForceAdmissionDescriptorStatus: step.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
+    pressureInterfaceGridForceAdmissionSourceHotBufferKey: step.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
     pressureInterfaceForceRowCount: step.pressureInterfaceForceRowCount ?? 0,
     pressureInterfaceAppliedImpulseNSeconds: [...(step.pressureInterfaceAppliedImpulseNSeconds ?? [0, 0, 0])],
     pressureInterfaceAppliedImpulseMagnitudeNSeconds: step.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? 0,
@@ -8789,6 +8818,11 @@ function summarizeResidentStepForSequence(step, index) {
       pressureInterfaceForceSolverStatus: step.diagnostics?.pressureInterfaceForceSolverStatus ?? null,
       pressureInterfaceForceCouplingStatus: step.diagnostics?.pressureInterfaceForceCouplingStatus ?? null,
       pressureInterfaceForceApplicationStatus: step.diagnostics?.pressureInterfaceForceApplicationStatus ?? null,
+      pressureInterfaceGridForceAdmissionSchema: step.diagnostics?.pressureInterfaceGridForceAdmissionSchema ?? null,
+      pressureInterfaceGridForceAdmissionStatus: step.diagnostics?.pressureInterfaceGridForceAdmissionStatus ?? null,
+      pressureInterfaceGridForceAdmissionApproved: step.diagnostics?.pressureInterfaceGridForceAdmissionApproved ?? false,
+      pressureInterfaceGridForceAdmissionDescriptorStatus: step.diagnostics?.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
+      pressureInterfaceGridForceAdmissionSourceHotBufferKey: step.diagnostics?.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
       pressureInterfaceForceRowCount: step.diagnostics?.pressureInterfaceForceRowCount ?? 0,
       pressureInterfaceAppliedImpulseNSeconds: [...(step.diagnostics?.pressureInterfaceAppliedImpulseNSeconds ?? [0, 0, 0])],
       pressureInterfaceAppliedImpulseMagnitudeNSeconds: step.diagnostics?.pressureInterfaceAppliedImpulseMagnitudeNSeconds ?? 0,

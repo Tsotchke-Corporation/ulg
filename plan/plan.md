@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 01:14 AKDT: grid update now refuses
+pressure/interface force rows unless they are paired with an explicit admitted
+grid-force consumption descriptor. Direct
+`pressureInterfaceForceSolver.forceApplicationStatus="apply-to-mls-mpm-grid"`
+is no longer sufficient: the solver must also carry
+`gridForceApplicationApproved=true`, and grid update must receive a
+`peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+object tied to admitted `pressure-interface-force-rows`. The CPU reference,
+optional WebGPU wrapper, resident step, and grid-update stage task all surface
+admission status, source hot-buffer key, force-row count, applied impulse, and
+impulse proof diagnostics. This is a prior/admitted-descriptor consumer gate;
+same-frame intra-DAG pressure publication before `gridUpdate` remains the next
+architecture slice.
+
 Current checkpoint, 2026-06-15 00:53 AKDT: pressure/interface force-row output
 now has a Worker-retained publication/admission path through the
 NodeKernel/StateManager authority surface. ULG builds

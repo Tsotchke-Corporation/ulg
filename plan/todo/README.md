@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 01:14 AKDT: grid-update pressure consumption
+now has an explicit admission gate. Direct force solvers are blocked unless
+paired with `peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0`
+and `gridForceApplicationApproved=true`; successful consumption reports
+admission status, source hot-buffer key, force-row count, applied impulse, and
+impulse proof diagnostics. The next priority is same-frame intra-DAG pressure
+publication/admission: when `pressureInterface` runs immediately before
+`gridUpdate`, the stage-plan executor must publish/admit the force-row
+descriptor before the `gridUpdate` task is created, rather than relying on a
+prior-frame descriptor supplied by the caller.
+
 Current routing note, 2026-06-15 00:53 AKDT: pressure/interface force-row
 output now has a Worker-retained publication/admission path. The
 `pressureInterface` stage builds a dedicated compact publication candidate,

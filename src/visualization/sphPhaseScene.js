@@ -260,6 +260,20 @@ function pressureInterfaceGasCellFieldFromProducerResult(producerResult = null) 
     || null;
 }
 
+function pressureInterfaceSpatialGasSpeciesLedgerFromSummary(gasPressureSummary = null) {
+  const pressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
+  return gasPressureSummary?.spatialGasSpeciesLedger
+    || pressureFeedback?.spatialGasSpeciesLedger
+    || gasPressureSummary?.gasCellField?.spatialGasSpeciesLedger
+    || null;
+}
+
+function pressureInterfaceSpatialGasSpeciesLedgerReady(spatialGasSpeciesLedger = null) {
+  return spatialGasSpeciesLedger?.schema === 'peercompute.ulg.sph-spatial-gas-species-ledger.v0'
+    && Array.isArray(spatialGasSpeciesLedger.cells)
+    && spatialGasSpeciesLedger.cells.length > 0;
+}
+
 function pressureInterfaceRetainedGasCellFieldSourceFromProducerResult(producerResult = null) {
   return producerResult?.retainedGasCellFieldSource
     || producerResult?.pressureInterfaceGasCellFieldImport?.retainedGasCellFieldSource
@@ -317,6 +331,114 @@ function workerRetainedGasPressureRefsFromProducerResult(producerResult = null) 
     ...sceneStringList(producerResult?.workerRetainedGasPressureBufferRefs),
     ...sceneStringList(retainedSource?.workerRetainedGasPressureBufferRefs)
   ]);
+}
+
+function gasCellEosProducerResultFromSubmission(submission = null) {
+  return submission?.result
+    || submission?.taskResult
+    || submission?.execution
+    || submission?.value
+    || submission
+    || null;
+}
+
+export async function submitSceneGasCellEosProducerStageForPressureInterface({
+  residentAuthorityHost = null,
+  gasPressureSummary = null,
+  preferWebGpu = true,
+  navigatorRef = null,
+  device = null,
+  deviceResult = null,
+  readbackMode = RESIDENT_NO_FULL_READBACK_MODE,
+  cacheKey = null,
+  stateKey = null,
+  source = 'resident-pressure-interface-physics-refresh',
+  sourceCadence = null,
+  sourceTaskId = null,
+  sourceStage = 'residentGasPressure',
+  boxDimsM = null
+} = {}) {
+  const spatialGasSpeciesLedger = pressureInterfaceSpatialGasSpeciesLedgerFromSummary(gasPressureSummary);
+  const taskId = sourceTaskId || cacheKey || `ulg:scene-gas-cell-eos-producer:${source}:${stateKey || 'active'}`;
+  const base = {
+    schema: 'peercompute.ulg.sph-scene-gas-cell-eos-producer-stage-request.v0',
+    source,
+    sourceCadence,
+    sourceStage,
+    sourceTaskId: taskId,
+    stateKey,
+    gasPressureSummarySchema: gasPressureSummary?.schema || null,
+    gasPressureSummaryStatus: gasPressureSummary?.status || null,
+    spatialGasSpeciesLedgerSchema: spatialGasSpeciesLedger?.schema || null,
+    spatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger?.status || null,
+    spatialGasSpeciesLedgerCellCount: Array.isArray(spatialGasSpeciesLedger?.cells)
+      ? spatialGasSpeciesLedger.cells.length
+      : 0,
+    gasCellEosProducerStageResult: null,
+    gasCellEosProducerStageResultReady: false,
+    gasCellEosProducerRetainedSourceReady: false
+  };
+  if (!pressureInterfaceSpatialGasSpeciesLedgerReady(spatialGasSpeciesLedger)) {
+    return {
+      ...base,
+      status: 'blocked-spatial-gas-species-ledger-required',
+      blocker: 'ready-spatial-gas-species-ledger-required'
+    };
+  }
+  const submitter = residentAuthorityHost?.submitGasCellEosProducerStageTask;
+  if (typeof submitter !== 'function') {
+    return {
+      ...base,
+      status: 'blocked-resident-authority-host-gas-cell-eos-producer-submit-required',
+      blocker: 'resident-authority-host-gas-cell-eos-producer-submit-required'
+    };
+  }
+  try {
+    const submission = await submitter.call(residentAuthorityHost, {
+      taskId,
+      gasPressureSummary,
+      pressureSummary: gasPressureSummary,
+      spatialGasSpeciesLedger,
+      boxDimsM: boxDimsM || gasPressureSummary?.boxDimsM || null,
+      preferWebGpu,
+      navigatorRef,
+      device,
+      deviceResult,
+      readbackMode,
+      stateKey,
+      laneId: stateKey ? `ulg:scene-gas-cell-eos-producer:${stateKey}` : undefined,
+      source: 'scene-mounted-pressure-interface-gas-cell-eos-producer'
+    });
+    const result = gasCellEosProducerResultFromSubmission(submission);
+    const gasCellField = pressureInterfaceGasCellFieldFromProducerResult(result);
+    const resultReady = Boolean(
+      result
+        && gasCellField?.localPressureGradientReady === true
+        && Array.isArray(gasCellField.cells)
+        && gasCellField.cells.length > 0
+    );
+    const retainedSourceReady = result?.retainedGasCellFieldSourceReady === true
+      || pressureInterfaceRetainedGasCellFieldSourceFromProducerResult(result)?.status === 'pressure-interface-retained-gas-cell-field-source-ready';
+    return {
+      ...base,
+      status: resultReady
+        ? 'gas-cell-eos-producer-stage-result-ready'
+        : (result?.status || 'gas-cell-eos-producer-stage-result-blocked'),
+      blocker: resultReady ? null : (result?.reason || 'gas-cell-eos-producer-stage-result-not-ready'),
+      submissionStatus: submission?.status || null,
+      gasCellEosProducerStageResult: result,
+      gasCellEosProducerStageResultReady: resultReady,
+      gasCellEosProducerRetainedSourceReady: retainedSourceReady,
+      retainedGasPressureBufferRefs: retainedGasPressureRefsFromProducerResult(result),
+      workerRetainedGasPressureBufferRefs: workerRetainedGasPressureRefsFromProducerResult(result)
+    };
+  } catch (error) {
+    return {
+      ...base,
+      status: 'gas-cell-eos-producer-stage-request-error',
+      blocker: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 function blockedPressureInterfaceGasCellFieldImportPublication({
@@ -624,6 +746,7 @@ export function buildSphResidentPressureInterfaceStateSummary({
   pressureInterfaceForceRowsUpload = null,
   pressureInterfaceGridForceAdmission = null,
   pressureInterfaceGasCellFieldImportPublication = null,
+  gasCellEosProducerStageRequest = null,
   source = 'resident-pressure-interface-state',
   sourceCadence = null
 } = {}) {
@@ -735,6 +858,13 @@ export function buildSphResidentPressureInterfaceStateSummary({
     pressureInterfaceGasCellFieldWorkerRetainedGasPressureBufferRefs: [
       ...(pressureInterfaceGasCellFieldImportPublication?.workerRetainedGasPressureBufferRefs || [])
     ],
+    gasCellEosProducerStageRequest,
+    gasCellEosProducerStageRequestSchema: gasCellEosProducerStageRequest?.schema ?? null,
+    gasCellEosProducerStageRequestStatus: gasCellEosProducerStageRequest?.status ?? null,
+    gasCellEosProducerStageRequestBlocker: gasCellEosProducerStageRequest?.blocker ?? null,
+    gasCellEosProducerStageResultReady: gasCellEosProducerStageRequest?.gasCellEosProducerStageResultReady === true,
+    gasCellEosProducerRetainedSourceReady: gasCellEosProducerStageRequest?.gasCellEosProducerRetainedSourceReady === true,
+    gasCellEosProducerStageSpatialLedgerCellCount: gasCellEosProducerStageRequest?.spatialGasSpeciesLedgerCellCount ?? 0,
     ...uploadFields,
     gpuAuthoritativeState: Boolean(rowsReady || materialInterfaceField?.sourceRenderFieldReadback === false),
     scientificValidation: false,
@@ -3250,6 +3380,28 @@ export function createSphPhaseScene(container, {
   } = {}) {
     const suppliedImportReady = pressureInterfaceGasCellFieldImport?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA
       && pressureInterfaceGasCellFieldImport?.status === 'pressure-interface-gas-cell-field-import-ready';
+    let effectiveGasCellEosProducerStageResult = gasCellEosProducerStageResult;
+    let gasCellEosProducerStageRequest = null;
+    if (!suppliedImportReady && !effectiveGasCellEosProducerStageResult) {
+      gasCellEosProducerStageRequest = await submitSceneGasCellEosProducerStageForPressureInterface({
+        residentAuthorityHost,
+        gasPressureSummary,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult,
+        cacheKey: pressureInterfaceGasCellFieldImportSourceTaskId
+          || `ulg:scene-gas-cell-eos-producer:${source}:${pressureInterfaceGasCellFieldImportStateKey || 'active'}`,
+        stateKey: pressureInterfaceGasCellFieldImportStateKey,
+        source,
+        sourceCadence,
+        sourceTaskId: pressureInterfaceGasCellFieldImportSourceTaskId,
+        sourceStage: 'residentGasPressure'
+      });
+      if (gasCellEosProducerStageRequest?.gasCellEosProducerStageResultReady) {
+        effectiveGasCellEosProducerStageResult = gasCellEosProducerStageRequest.gasCellEosProducerStageResult;
+      }
+    }
     const pressureInterfaceGasCellFieldImportPublication = pressureInterfaceGasCellFieldImport
       ? {
           schema: 'peercompute.ulg.sph-scene-pressure-interface-gas-cell-field-import-publication.v0',
@@ -3282,7 +3434,7 @@ export function createSphPhaseScene(container, {
       : publishScenePressureInterfaceGasCellFieldImportSource({
           residentAuthorityHost,
           gasPressureSummary,
-          gasCellEosProducerStageResult,
+          gasCellEosProducerStageResult: effectiveGasCellEosProducerStageResult,
           pressureInterfaceGasCellFieldAdmission,
           cacheKey: pressureInterfaceGasCellFieldImportSourceTaskId
             || `ulg:scene-pressure-interface-gas-cell-field-import:${source}:${pressureInterfaceGasCellFieldImportStateKey || 'active'}`,
@@ -3340,6 +3492,7 @@ export function createSphPhaseScene(container, {
       pressureInterfaceForceRowsUpload: pressureInterfaceForceRowsUploadForState,
       pressureInterfaceGridForceAdmission,
       pressureInterfaceGasCellFieldImportPublication,
+      gasCellEosProducerStageRequest,
       source,
       sourceCadence
     });

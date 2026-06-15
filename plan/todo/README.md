@@ -35,6 +35,22 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 08:32 AKDT: the mounted resident
+pressure-interface hot loop now requests `gasCellEosProducer` through the
+resident authority host when a ready spatial gas species ledger exists and no
+ready gas-cell import is already supplied. The request is fail-closed and
+telemetry-bearing: missing spatial ledgers, missing host submitters, submitted
+task status, retained gas-pressure refs, retained source readiness, and
+spatial ledger cell counts are all surfaced on the resident pressure-interface
+state. Ready producer output is fed into the existing host-published gas-cell
+admission/import helper rather than letting the scene become a scheduler.
+Next priority: remove the remaining snapshot-derived gas-cell import fallback
+from the mounted hot path once normal resident scenarios produce a spatial gas
+ledger, then promote the EOS derivation itself into a WGSL/WebGPU compute
+stage. Keep MLS-MPM fragmentation, CPU SPH stacked/blob behavior, mounted ice/
+solid rigidity, volume pulsation/blinking, long-horizon liquid settling,
+renderer z-buffer/draw-order, and focus-resume visual trust open.
+
 Current routing note, 2026-06-15 08:14 AKDT: the resident gas-cell EOS
 producer is now in the formal ComputeManager mechanics stage-chain before
 pressureInterface. Opt-in chains can execute

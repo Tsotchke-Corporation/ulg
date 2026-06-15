@@ -2,6 +2,28 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 08:32 AKDT: the mounted resident pressure-
+interface hot loop now asks the resident authority host to run the
+`gasCellEosProducer` stage when a ready spatial gas species ledger exists and
+no ready pressure-interface gas-cell import has already been supplied. The
+scene request path fails closed when the ledger is absent or the host lacks
+`submitGasCellEosProducerStageTask()`, records request status/blocker/source
+metadata on the resident pressure-interface state, and feeds a ready producer
+result back into the existing host-published gas-cell admission/import helper.
+This keeps the mounted scene as a requester/telemetry surface rather than a
+second scheduler: the producer task still runs through the resident authority
+host and retains pressure gas-cell refs for StateManager/GPUHub admission.
+Validation passed syntax checks, scene gas-cell coverage `32/32`, SPH
+gas/pressure coverage `45/45`, PeerCompute integration `15/15`, physics
+atomics `7` with `1` expected opt-in skip, browser authority-host Playwright
+`1/1`, and visual matrix `codex-mounted-gas-eos-hot-loop-20260615` `3/3` with
+inspected frames. Manual frame inspection remains a warning, not acceptance:
+MLS-MPM H2O is fragmented and CPU-SPH liquid/solid still render as stacked
+blob shapes. Next target: remove the remaining snapshot-derived gas-cell
+import fallback from the mounted hot path once the spatial gas ledger is
+available in the normal resident scenarios, then move the EOS derivation itself
+from CPU/oracle code plus WebGPU row upload into WGSL.
+
 Current checkpoint, 2026-06-15 08:14 AKDT: the resident gas-cell EOS producer
 is now wired into the formal ComputeManager mechanics stage-chain path before
 pressureInterface. Opt-in stage chains can run

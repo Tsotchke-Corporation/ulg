@@ -25,6 +25,7 @@ import {
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   publishScenePressureInterfaceGasCellFieldImportSource,
+  submitSceneGasCellEosProducerStageForPressureInterface,
   residentSurfaceBatchIdentitySignature,
   residentRenderFieldReadbackModeForSurfaceOverlay,
   resolveResidentSurfaceDrawOverlayPolicy,
@@ -1358,6 +1359,156 @@ test('SPH scene publishes gas-cell import from gas-cell EOS producer result sour
   assert.equal(publication.pressureInterfaceGasCellFieldImportReady, true);
   assert.equal(publication.pressureInterfaceGasCellFieldAdmissionApproved, true);
   assert.equal(publication.pressureInterfaceGasCellFieldImport.pressureInterfaceGasPressureCellRowByteLength, 96);
+});
+
+test('SPH scene blocks mounted gas-cell EOS producer requests without a spatial gas ledger', async () => {
+  const calls = [];
+  const residentAuthorityHost = {
+    async submitGasCellEosProducerStageTask(options) {
+      calls.push(options);
+      return {
+        status: 'unexpected-submission'
+      };
+    }
+  };
+
+  const request = await submitSceneGasCellEosProducerStageForPressureInterface({
+    residentAuthorityHost,
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-resident-gas-pressure-summary.v0',
+      status: 'gpu-resident-reaction-pressure-summary'
+    },
+    stateKey: 'ulg:test:mounted-pressure-interface-state',
+    source: 'resident-physics-loop-pressure-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  assert.equal(calls.length, 0);
+  assert.equal(request.schema, 'peercompute.ulg.sph-scene-gas-cell-eos-producer-stage-request.v0');
+  assert.equal(request.status, 'blocked-spatial-gas-species-ledger-required');
+  assert.equal(request.blocker, 'ready-spatial-gas-species-ledger-required');
+  assert.equal(request.gasCellEosProducerStageResultReady, false);
+  assert.equal(request.spatialGasSpeciesLedgerCellCount, 0);
+});
+
+test('SPH scene requests mounted gas-cell EOS producer stage through resident authority host', async () => {
+  const spatialGasSpeciesLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    cells: [
+      {
+        status: 'spatial-gas-cell-ready',
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        volumeM3: 4,
+        species: [
+          {
+            formula: 'H2O',
+            phase: 'gas',
+            massKg: 0.001,
+            temperatureK: 500,
+            amountMol: 0.055
+          }
+        ]
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-resident-gas-pressure-summary.v0',
+    status: 'gpu-resident-reaction-pressure-summary',
+    boxDimsM: [2, 2, 2],
+    spatialGasSpeciesLedger
+  };
+  const gasCellField = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+    status: 'gas-cell-pressure-field-ready',
+    localPressureGradientReady: true,
+    cellDims: [1, 1, 1],
+    cells: [
+      {
+        status: 'local-gas-pressure-cell-ready',
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        pressurePa: 140000,
+        pressureGradientPaPerM: [0, 0, 0],
+        volumeM3: 4
+      }
+    ]
+  };
+  const submitCalls = [];
+  const residentAuthorityHost = {
+    async submitGasCellEosProducerStageTask(options) {
+      submitCalls.push(options);
+      return {
+        status: 'task-execution-completed',
+        result: {
+          schema: 'peercompute.ulg.sph-gas-cell-eos-producer-stage-compute-task-result.v0',
+          status: 'gas-cell-eos-producer-stage-ready',
+          computeTaskId: options.taskId,
+          gasCellFieldSnapshot: gasCellField,
+          retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+          retainedGasCellFieldSourceReady: true,
+          retainedGasCellFieldSource: {
+            schema: ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
+            status: 'pressure-interface-retained-gas-cell-field-source-ready',
+            sourceTaskId: options.taskId,
+            sourceStage: 'gasCellEosProducer',
+            retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+            workerRetainedGasPressureBufferRefs: ['worker:resident-gas-pressure-cells-buffer'],
+            pressureInterfaceGasPressureCellRowCount: 1,
+            pressureInterfaceGasPressureCellRowStrideFloats: 12,
+            pressureInterfaceGasPressureCellRowByteLength: 48
+          }
+        }
+      };
+    }
+  };
+
+  const request = await submitSceneGasCellEosProducerStageForPressureInterface({
+    residentAuthorityHost,
+    gasPressureSummary,
+    preferWebGpu: true,
+    stateKey: 'ulg:test:mounted-pressure-interface-state',
+    sourceTaskId: 'ulg:test:mounted-pressure-interface-source',
+    source: 'resident-physics-loop-pressure-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  assert.equal(submitCalls.length, 1);
+  assert.equal(submitCalls[0].taskId, 'ulg:test:mounted-pressure-interface-source');
+  assert.equal(submitCalls[0].stateKey, 'ulg:test:mounted-pressure-interface-state');
+  assert.equal(submitCalls[0].laneId, 'ulg:scene-gas-cell-eos-producer:ulg:test:mounted-pressure-interface-state');
+  assert.equal(submitCalls[0].source, 'scene-mounted-pressure-interface-gas-cell-eos-producer');
+  assert.equal(submitCalls[0].preferWebGpu, true);
+  assert.equal(submitCalls[0].spatialGasSpeciesLedger, spatialGasSpeciesLedger);
+  assert.equal(submitCalls[0].gasPressureSummary, gasPressureSummary);
+  assert.equal(submitCalls[0].pressureSummary, gasPressureSummary);
+  assert.deepEqual(submitCalls[0].boxDimsM, [2, 2, 2]);
+  assert.equal(request.status, 'gas-cell-eos-producer-stage-result-ready');
+  assert.equal(request.submissionStatus, 'task-execution-completed');
+  assert.equal(request.gasCellEosProducerStageResultReady, true);
+  assert.equal(request.gasCellEosProducerRetainedSourceReady, true);
+  assert.equal(request.gasCellEosProducerStageResult.gasCellFieldSnapshot, gasCellField);
+  assert.deepEqual(request.retainedGasPressureBufferRefs, ['resident-gas-pressure-cells-buffer']);
+  assert.deepEqual(request.workerRetainedGasPressureBufferRefs, ['worker:resident-gas-pressure-cells-buffer']);
+  assert.equal(request.spatialGasSpeciesLedgerCellCount, 1);
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField: {
+      schema: 'peercompute.ulg.sph-material-interface-field.v0',
+      status: 'material-interface-field-ready',
+      readySurfaceCount: 0,
+      totalSurfaceAreaM2: 0,
+      elementCount: 0,
+      elements: []
+    },
+    gasPressureSummary,
+    gasCellEosProducerStageRequest: request
+  });
+  assert.equal(state.gasCellEosProducerStageRequestStatus, 'gas-cell-eos-producer-stage-result-ready');
+  assert.equal(state.gasCellEosProducerStageResultReady, true);
+  assert.equal(state.gasCellEosProducerRetainedSourceReady, true);
+  assert.equal(state.gasCellEosProducerStageSpatialLedgerCellCount, 1);
 });
 
 test('SPH resident pressure interface state blocks force-row upload without grid admission', () => {

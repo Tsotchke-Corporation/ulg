@@ -1,5 +1,44 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Mounted Gas-Cell EOS Hot Loop
+
+The current slice wires the mounted resident pressure-interface refresh to
+request `gasCellEosProducer` through the resident authority host when a ready
+spatial gas species ledger exists. The scene remains a requester and telemetry
+surface: blocked requests report missing ledgers or missing host submitters,
+ready submissions feed the existing host-published gas-cell admission/import
+helper, and resident pressure-interface state exposes request status, blocker,
+retained source readiness, and spatial ledger cell count.
+
+Focused checks:
+
+- Syntax and whitespace:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check tests/sphPhaseRenderer.test.mjs`, and `git diff --check`
+  passed.
+- Scene gas-cell coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "gas-cell EOS producer|gas-cell import|gas-cell field"`
+  passed `32/32`.
+- Broader pressure/gas coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "gas-cell EOS|pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|gas-cell field import|pressure interface stage compute task can produce force rows|gas-cell EOS producer before pressureInterface"`
+  passed `45/45`.
+- PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "EOS producer|gas-cell field imports|worker-retained pressure/interface"`
+  passed `15/15`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1` in about `1.3m`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mounted-gas-eos-hot-loop-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]` under
+  `/tmp/ulg-visual-sanity-matrix/codex-mounted-gas-eos-hot-loop-20260615`.
+  Manual inspection found bounded nonblank frames, but MLS-MPM H2O remained
+  fragmented and CPU-SPH liquid/solid remained stacked/blob-shaped.
+
 ## Current Focused Result - 2026-06-15 Gas-Cell EOS Stage-Chain Import Wiring
 
 The current slice wires `gasCellEosProducer` into the opt-in ComputeManager

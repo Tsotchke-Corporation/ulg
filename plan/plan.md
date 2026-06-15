@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 AKDT: the visual probe now records connected
+component metrics for MarchingCubes surfaces, but the MLS-MPM H2O/H2O baseline
+shows the current visible water-quality failure is not disconnected fragments.
+`codex-surface-components-h2o-baseline-20260615` passed both short H2O rows
+with `maxVisibleSurfaceComponentCount=1`, `maxVisibleSurfaceSmallComponentCount=0`,
+and `minVisibleSurfaceLargestComponentRatio=1`. A medium MLS-MPM probe
+`codex-mlsmpm-h2o-medium-components-20260615` also reported one connected
+surface with J bounded around `0.95..1.049`, but the captured final frame
+remained a tall/blocky liquid body rather than a plausible settled free
+surface, and compact summaries consumed about `78%` of batch time. Next P0:
+add free-surface/levelness shape metrics and then fix the liquid mechanics
+that keeps water block-like rather than flattening/spreading.
+
 Current checkpoint, 2026-06-15 AKDT: the recurring visual matrix now enforces
 renderer depth/order policy instead of only recording plausible screenshots.
 `scripts/sph-long-horizon-probe.mjs` captures per-surface render layer,

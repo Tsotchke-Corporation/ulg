@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 AKDT: MarchingCubes connected-component
+metrics are now available in the long-horizon probe and visual matrix summary.
+The first baseline did not confirm disconnected fragmentation:
+`codex-surface-components-h2o-baseline-20260615` reported one connected H2O
+surface for both MLS-MPM and CPU-SPH short rows, and medium MLS-MPM probe
+`codex-mlsmpm-h2o-medium-components-20260615` still reported one connected
+surface. The visible problem is now sharper: MLS-MPM liquid remains a tall,
+blocky connected body instead of flattening into a plausible free surface, and
+medium visual validation is expensive because compact summaries dominate batch
+time. Next P0 is a free-surface shape/levelness metric plus the mechanics fix
+that makes liquid spread/settle.
+
 Current routing note, 2026-06-15 AKDT: renderer depth/order visual trust now
 has a recurring matrix gate. The long-horizon probe captures explicit
 render-layer, render-order, depth-write/depth-test, and container grid/wire

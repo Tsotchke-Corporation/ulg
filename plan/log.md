@@ -1,5 +1,60 @@
 # ULG Implementation Log
 
+## 2026-06-15 AKDT - Surface component visual metrics
+
+Summary:
+
+- Added connected-component metrics for active MarchingCubes surface geometry
+  to `scripts/sph-long-horizon-probe.mjs`.
+- Surfaced component metrics in long-horizon analysis and visual matrix rows:
+  `maxVisibleSurfaceComponentCount`, `maxVisibleSurfaceSmallComponentCount`,
+  and `minVisibleSurfaceLargestComponentRatio`.
+- Ran a short H2O MLS-MPM vs CPU-SPH baseline and a medium MLS-MPM probe.
+- Diagnosed that the current MLS-MPM H2O visual quality issue is not
+  disconnected mesh fragmentation: the surface remains one connected component.
+  The visible failure is a tall/blocky connected liquid body that needs
+  free-surface shape/levelness validation and mechanics remediation.
+- Updated `plan/plan.md`, `plan/todo/README.md`, `plan/tests.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and
+  `plan/done/surface-component-visual-metrics-2026-06-15.md`.
+
+Files touched:
+
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/tests.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/log.md`
+- `plan/done/surface-component-visual-metrics-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-visual-sanity-matrix.mjs`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-surface-components-h2o-baseline-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; both rows had H2O component count `1`, small
+  component count `0`, and largest-component ratio `1`.
+- PASS:
+  `codex-mlsmpm-h2o-medium-components-20260615` reported status `good`, J
+  `0.9500000476837158..1.0490002632141113`, max speed about `1.15 m/s`, one
+  connected H2O surface, and eight frames. Manual frame inspection of
+  `/tmp/ulg-frame-check/mlsmpm-h2o-medium-components-20260615/0007-b042-resident-batch.png`
+  showed the remaining liquid-quality failure is blocky/tall shape, not
+  disconnected components.
+
+Open:
+
+- Add free-surface shape/levelness metrics.
+- Fix MLS-MPM/accepted liquid mechanics so water spreads/flattens instead of
+  retaining a block-like shape.
+- Medium-horizon visual validation remains expensive: compact summaries
+  consumed about `78%` of batch time in the MLS-MPM probe.
+
 ## 2026-06-15 AKDT - Render depth/order visual matrix gate
 
 Summary:

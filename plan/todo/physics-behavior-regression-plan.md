@@ -12,6 +12,14 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 AKDT update: connected-component visual metrics are now available
+  for active MarchingCubes surfaces. Short H2O baseline
+  `codex-surface-components-h2o-baseline-20260615` and medium MLS-MPM probe
+  `codex-mlsmpm-h2o-medium-components-20260615` both reported one connected
+  H2O surface with no small components. This means the current MLS-MPM visual
+  failure is not disconnected fragments; it is a connected but blocky/tall
+  liquid body that does not flatten/spread like water. Next validation needs
+  free-surface shape/levelness metrics, not only component counts.
 - 2026-06-15 AKDT update: renderer depth/order visual trust now has a recurring
   visual-matrix gate. The long-horizon probe records per-surface render layer,
   render order/base order, render-order policy, material depth-write/depth-test,

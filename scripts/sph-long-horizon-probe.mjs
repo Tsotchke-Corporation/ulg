@@ -758,12 +758,12 @@ async function runBrowserProbe({
         const min = [Infinity, Infinity, Infinity];
         const max = [-Infinity, -Infinity, -Infinity];
         const elements = node.matrixWorld.elements;
-        const add = (x, y, z) => {
-          const point = [
+        const transform = (x, y, z) => ([
             elements[0] * x + elements[4] * y + elements[8] * z + elements[12],
             elements[1] * x + elements[5] * y + elements[9] * z + elements[13],
             elements[2] * x + elements[6] * y + elements[10] * z + elements[14]
-          ];
+          ]);
+        const add = (point) => {
           for (let axis = 0; axis < 3; axis += 1) {
             min[axis] = Math.min(min[axis], point[axis]);
             max[axis] = Math.max(max[axis], point[axis]);
@@ -771,11 +771,47 @@ async function runBrowserProbe({
         };
         const itemSize = position.itemSize || 3;
         const array = position.array;
+        const transformed = [];
         for (let vertexIndex = drawStart; vertexIndex < drawEnd; vertexIndex += 1) {
           const offset = vertexIndex * itemSize;
-          add(array[offset], array[offset + 1], array[offset + 2]);
+          const point = transform(array[offset], array[offset + 1], array[offset + 2]);
+          transformed.push(point);
+          add(point);
         }
         if (!min.every(Number.isFinite) || !max.every(Number.isFinite)) return null;
+        const parent = Array.from({ length: transformed.length }, (_, index) => index);
+        const find = (index) => {
+          let cursor = index;
+          while (parent[cursor] !== cursor) {
+            parent[cursor] = parent[parent[cursor]];
+            cursor = parent[cursor];
+          }
+          return cursor;
+        };
+        const union = (left, right) => {
+          const a = find(left);
+          const b = find(right);
+          if (a !== b) parent[b] = a;
+        };
+        const quantized = new Map();
+        const quantize = (point) => point.map((value) => Math.round(value * 1e5)).join(',');
+        for (let localIndex = 0; localIndex < transformed.length; localIndex += 1) {
+          const key = quantize(transformed[localIndex]);
+          const previous = quantized.get(key);
+          if (previous != null) union(localIndex, previous);
+          else quantized.set(key, localIndex);
+        }
+        for (let localIndex = 0; localIndex + 2 < transformed.length; localIndex += 3) {
+          union(localIndex, localIndex + 1);
+          union(localIndex, localIndex + 2);
+        }
+        const componentCounts = new Map();
+        for (let localIndex = 0; localIndex < transformed.length; localIndex += 1) {
+          const root = find(localIndex);
+          componentCounts.set(root, (componentCounts.get(root) || 0) + 1);
+        }
+        const componentVertexCounts = [...componentCounts.values()].sort((a, b) => b - a);
+        const largestComponentVertexCount = componentVertexCounts[0] || 0;
         const size = max.map((value, axis) => value - min[axis]);
         return {
           min,
@@ -788,7 +824,14 @@ async function runBrowserProbe({
           drawRange: {
             start: drawStart,
             count: drawEnd - drawStart
-          }
+          },
+          componentCount: componentVertexCounts.length,
+          componentVertexCounts: componentVertexCounts.slice(0, 12),
+          largestComponentVertexCount,
+          largestComponentVertexRatio: transformed.length > 0
+            ? largestComponentVertexCount / transformed.length
+            : null,
+          smallComponentCount: componentVertexCounts.filter((count) => count < Math.max(9, largestComponentVertexCount * 0.05)).length
         };
       };
       const surfaceSnapshot = (sceneApi) => {
@@ -850,6 +893,11 @@ async function runBrowserProbe({
             vertexCount: bounds?.vertexCount ?? 0,
             vertexCapacity: bounds?.vertexCapacity ?? node.geometry?.attributes?.position?.count ?? 0,
             drawRange: bounds?.drawRange ?? null,
+            componentCount: bounds?.componentCount ?? null,
+            componentVertexCounts: bounds?.componentVertexCounts ?? [],
+            largestComponentVertexCount: bounds?.largestComponentVertexCount ?? null,
+            largestComponentVertexRatio: bounds?.largestComponentVertexRatio ?? null,
+            smallComponentCount: bounds?.smallComponentCount ?? null,
             worldBounds: bounds
           });
         });
@@ -2622,6 +2670,9 @@ function analyzeTimeline(timeline, {
   const visualSurfaceIssues = [];
   let maxVisibleSurfaceOutsideM = 0;
   let maxVisibleSurfaceOutsideParticleBoundsM = 0;
+  let maxVisibleSurfaceComponentCount = 0;
+  let maxVisibleSurfaceSmallComponentCount = 0;
+  let minVisibleSurfaceLargestComponentRatio = null;
   if (!directResident) {
     const transparentRenderLayers = new Set(['transmissive-surface', 'vapor-surface', 'alpha-surface']);
     const knownSurfaceRenderLayers = new Set(['opaque-surface', ...transparentRenderLayers]);
@@ -2762,6 +2813,20 @@ function analyzeTimeline(timeline, {
         }
       }
       for (const surface of visibleSurfaces) {
+        const componentCount = finiteMetric(surface.componentCount);
+        const smallComponentCount = finiteMetric(surface.smallComponentCount);
+        const largestComponentRatio = finiteMetric(surface.largestComponentVertexRatio);
+        if (Number.isFinite(componentCount)) {
+          maxVisibleSurfaceComponentCount = Math.max(maxVisibleSurfaceComponentCount, componentCount);
+        }
+        if (Number.isFinite(smallComponentCount)) {
+          maxVisibleSurfaceSmallComponentCount = Math.max(maxVisibleSurfaceSmallComponentCount, smallComponentCount);
+        }
+        if (Number.isFinite(largestComponentRatio)) {
+          minVisibleSurfaceLargestComponentRatio = minVisibleSurfaceLargestComponentRatio == null
+            ? largestComponentRatio
+            : Math.min(minVisibleSurfaceLargestComponentRatio, largestComponentRatio);
+        }
         const renderLayer = String(surface.renderLayer || '');
         const renderOrder = finiteMetric(surface.renderOrder);
         const renderOrderBase = finiteMetric(surface.renderOrderBase);
@@ -3064,6 +3129,9 @@ function analyzeTimeline(timeline, {
     visualSurfaceIssues,
     maxVisibleSurfaceOutsideM,
     maxVisibleSurfaceOutsideParticleBoundsM,
+    maxVisibleSurfaceComponentCount,
+    maxVisibleSurfaceSmallComponentCount,
+    minVisibleSurfaceLargestComponentRatio,
     visibleSurfaceSampleCount,
     h2oVisibleSurfaceSampleCount,
     residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length

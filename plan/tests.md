@@ -1,5 +1,28 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Surface Component Metrics
+
+The visual probe now records connected-component metrics for active
+MarchingCubes geometry: component count, largest component vertex ratio, and
+small-component count. This helps distinguish actual disconnected fragments
+from a single connected but physically wrong free surface.
+
+Focused checks:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs` and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Short H2O baseline:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-surface-components-h2o-baseline-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed both rows with one visible H2O surface, component count `1`, no small
+  components, and largest-component ratio `1`.
+- Medium MLS-MPM H2O probe:
+  `codex-mlsmpm-h2o-medium-components-20260615` passed status `good` with one
+  connected H2O surface and eight frames, but manual inspection of
+  `/tmp/ulg-frame-check/mlsmpm-h2o-medium-components-20260615/0007-b042-resident-batch.png`
+  showed the remaining failure is blocky/tall liquid free-surface shape rather
+  than disconnected mesh pieces.
+
 ## Current Focused Result - 2026-06-15 Render Depth/Order Matrix Gate
 
 The recurring visual sanity matrix now treats renderer depth/order metadata as

@@ -1591,17 +1591,24 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
           return {
             value: {
               ...base,
-              backend: 'cpu-reference',
+              backend: 'webgpu',
               status: 'pressure-interface-stage-solver-ready',
               computeTaskResultSchema: ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
               forceRowCount: 2,
               forceRowByteLength: 128,
               forceRowValues: new Float32Array(32),
+              forceRowsBufferByteLength: 128,
               pressureInterfaceForceRowsRetained: true,
+              pressureInterfaceForceRowsBufferRetained: true,
               pressureInterfaceForceSolver: {
                 schema: 'peercompute.ulg.sph-pressure-interface-force-solver.v0',
+                backend: 'webgpu',
                 status: 'pressure-interface-force-solver-ready',
                 forceRowCount: 2,
+                forceRowStrideFloats: 16,
+                forceRowByteLength: 128,
+                forceRowsBufferByteLength: 128,
+                pressureInterfaceForceRowsBufferRetained: true,
                 conservationStatus: 'pairwise-equal-opposite-force-conservative',
                 conservationResidualMagnitudeN: 0
               },
@@ -1617,7 +1624,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
               }
             },
             retainedBufferRefs: ['pressure-interface-force-rows-buffer', 'ulg-worker:test:pressureInterface:forceRows'],
-            summary: { backend: 'cpu-reference', stage: 'pressureInterface' }
+            summary: { backend: 'webgpu', stage: 'pressureInterface' }
           };
         }
         if (stage.id === 'gridUpdate') {
@@ -1779,7 +1786,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidencePassed.thermalPhase, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.stageTaskEvidencePassed.reactionProduct, true);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.allStageTaskEvidencePassed, true);
-  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.pressureInterface, 'cpu-reference');
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.pressureInterface, 'webgpu');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.thermalPhase, 'webgpu');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskBackends.reactionProduct, 'webgpu');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageTaskExecutionStatuses.pressureInterface, 'pressure-interface-stage-solver-ready');
@@ -3248,6 +3255,19 @@ test('ULG resident authority host admits worker-retained pressure/interface forc
   assert.equal(publication.workerRetainedBufferImport.bufferResidency, 'worker-lane-gpu-buffer-retained');
   assert.equal(publication.workerRetainedBufferImport.consumerAccessProtocol, 'same-worker-lane-retained-buffer-ref');
   assert.equal(publication.workerRetainedBufferImport.gridForceApplicationApproved, false);
+
+  assert.throws(() => host.publishWorkerRetainedPressureInterfaceStageOutput({
+    candidate: {
+      ...candidate,
+      pressureInterfaceForceRowsBufferRetained: false,
+      pressureInterfaceBufferResidency: 'cloneable-force-row-array',
+      pressureInterfaceConsumerAccessProtocol: 'cloneable-force-row-array'
+    },
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:pressure-interface-stage-plan-invalid',
+    sourceStage: 'pressureInterface'
+  }), /requires worker-lane GPU retained force-row buffers/);
 
   const hotRecord = host.stateManager.getHotBuffer(publication.hotBufferKey);
   assert.equal(hotRecord.schema, ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);

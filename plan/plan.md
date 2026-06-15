@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 03:39 AKDT: pressure/interface Worker
+publication now fail-closes on WebGPU-retained force-row descriptors. The
+Worker compact publication candidate no longer treats CPU-reference or
+cloneable force-row arrays as an admissible same-lane pressure output: it
+requires WebGPU backend evidence, no-full readback, worker-ready residency,
+non-mutating pressure authority, retained force-row refs, and an explicit
+retained GPU force-row buffer descriptor. The PeerCompute browser resident
+authority host now rejects pressure/interface publication attempts unless the
+candidate reports `worker-lane-gpu-buffer-retained` plus
+`same-worker-lane-retained-buffer-ref`. Validation passed focused PeerCompute
+integration, resident-step pressure coverage, browser authority-host,
+physics atomics, and the three-scenario visual matrix. Next target: continue
+pressure/readback reduction toward resident gas-cell/local pressure-gradient
+fields and keep the renderer z-buffer/focus follow-up separate.
+
 Current checkpoint, 2026-06-15 03:25 AKDT: the mounted scene now fail-closes
 pressure/interface force-row uploads behind the same admitted grid-force
 descriptor required by grid update. `sphPhaseScene` will keep unapproved

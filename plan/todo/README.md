@@ -35,6 +35,14 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 03:39 AKDT: pressure/interface Worker
+publication is now WebGPU-retained-only. Candidate readiness and NodeKernel/
+StateManager publication reject CPU-reference or cloneable pressure force-row
+arrays for the worker-retained pressure path. Continue pressure/readback
+copy-reduction toward resident gas-cell/local pressure-gradient fields and
+eventual GPU-resident surface extraction; do not treat cloneable pressure
+arrays as an accepted distributed hot-buffer format.
+
 Current routing note, 2026-06-15 03:25 AKDT: scene pressure-row upload
 admission is complete. The browser scene can surface pressure/interface
 candidate force-row telemetry, but it cannot upload or feed those rows into

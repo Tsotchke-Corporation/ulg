@@ -2058,7 +2058,6 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     forceRowByteLength
   )));
   const forceRowsBufferRetained = candidate.pressureInterfaceForceRowsBufferRetained === true
-    || forceRowsBufferByteLength > 0
     || workerRetainedBufferRefs.length > 0;
   const bufferResidency = normalizeString(
     candidate.pressureInterfaceBufferResidency,
@@ -2068,6 +2067,14 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     candidate.pressureInterfaceConsumerAccessProtocol,
     forceRowsBufferRetained ? 'same-worker-lane-retained-buffer-ref' : 'cloneable-force-row-array'
   );
+  if (
+    !forceRowsBufferRetained
+    || forceRowsBufferByteLength <= 0
+    || bufferResidency !== 'worker-lane-gpu-buffer-retained'
+    || consumerAccessProtocol !== 'same-worker-lane-retained-buffer-ref'
+  ) {
+    throw new TypeError('pressure/interface worker retained publication requires worker-lane GPU retained force-row buffers');
+  }
   const committedAt = Date.now();
   const workerRetainedBufferImport = {
     schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,

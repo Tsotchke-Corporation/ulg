@@ -4991,10 +4991,17 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     pressureInterfaceForceRowCount: finiteNumber(result?.forceRowCount ?? result?.pressureInterfaceForceSolver?.forceRowCount, 0),
     pressureInterfaceForceRowStrideFloats: finiteNumber(result?.forceRowStrideFloats ?? result?.pressureInterfaceForceSolver?.forceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     pressureInterfaceForceRowByteLength: finiteNumber(result?.forceRowByteLength ?? result?.pressureInterfaceForceSolver?.forceRowByteLength, 0),
-    pressureInterfaceForceRowsBufferByteLength: finiteNumber(result?.forceRowsBufferByteLength ?? result?.forceRowByteLength, 0),
+    pressureInterfaceForceRowsBufferByteLength: finiteNumber(
+      result?.forceRowsBufferByteLength
+        ?? result?.pressureInterfaceForceRowsBufferByteLength
+        ?? result?.forceRowByteLength,
+      0
+    ),
     pressureInterfaceForceRowsRetained: result?.pressureInterfaceForceRowsRetained === true || (result?.forceRowByteLength ?? 0) > 0,
-    pressureInterfaceForceRowsBufferRetained: Boolean(result?.forceRowsBuffer || result?.pressureInterfaceForceRowsBuffer)
-      || result?.pressureInterfaceForceSolver?.forceRowsBufferRetained === true,
+    pressureInterfaceForceRowsBufferRetained: result?.pressureInterfaceForceRowsBufferRetained === true
+      || Boolean(result?.forceRowsBuffer || result?.pressureInterfaceForceRowsBuffer)
+      || result?.pressureInterfaceForceSolver?.forceRowsBufferRetained === true
+      || result?.pressureInterfaceForceSolver?.pressureInterfaceForceRowsBufferRetained === true,
     pressureInterfaceGridForceAdmissionStatus: result?.pressureInterfaceGridForceAdmissionStatus || null,
     pressureInterfaceGridForceAdmissionApproved: result?.pressureInterfaceGridForceAdmissionApproved ?? false,
     pressureInterfaceGridForceAdmissionSourceHotBufferKey: result?.pressureInterfaceGridForceAdmissionSourceHotBufferKey || null,
@@ -5178,14 +5185,17 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   const forceRowStrideFloats = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowStrideFloats, SPH_PRESSURE_INTERFACE_FORCE_FLOATS));
   const forceRowByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowByteLength, 0));
   const forceRowsBufferByteLength = Math.max(0, finiteNumber(pressureSummary.pressureInterfaceForceRowsBufferByteLength, forceRowByteLength));
-  const forceRowsRetainedOrEmpty = hasPressureRef || forceRowCount === 0;
   const backend = pressureSummary.backend || null;
   const readbackMode = pressureSummary.readbackMode || null;
   const workerResidencyStatus = stageWorkerResidencyStatuses[PRESSURE_INTERFACE_STAGE_ID] || null;
   const solverStatus = pressureSummary.pressureInterfaceForceSolverStatus || null;
   const evidencePassed = pressureSummary.pressureInterfaceEvidencePassed === true;
   const mutationSuppressed = pressureSummary.pressureInterfaceAuthoritativeMutation === false;
-  const backendAllowed = backend === 'webgpu' || backend === 'cpu-reference';
+  const backendAllowed = backend === 'webgpu';
+  const retainedGpuForceRowsProven = backend === 'webgpu'
+    && hasPressureRef
+    && forceRowsBufferByteLength > 0
+    && pressureSummary.pressureInterfaceForceRowsBufferRetained === true;
   const blocker = !workerRunnerSupplied
     ? 'worker-runner-not-supplied'
     : (!pressureStageCompleted
@@ -5193,7 +5203,7 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
       : (workerResidencyStatus !== 'worker-ready'
         ? 'pressure-interface-worker-residency-not-ready'
         : (!backendAllowed
-          ? 'pressure-interface-worker-backend-not-proven'
+          ? 'pressure-interface-worker-webgpu-retained-buffer-required'
           : (readbackMode !== NO_FULL_READBACK_MODE || pressureSummary.normalHotLoopReadbackFree !== true
             ? 'pressure-interface-no-full-readback-required'
             : (!evidencePassed
@@ -5202,8 +5212,8 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
                 ? 'pressure-interface-force-solver-not-ready'
                 : (!mutationSuppressed
                   ? 'pressure-interface-authority-must-remain-non-mutating'
-                  : (!forceRowsRetainedOrEmpty
-                    ? 'pressure-interface-force-row-ref-missing'
+                  : (!retainedGpuForceRowsProven
+                    ? 'pressure-interface-retained-gpu-force-row-buffer-required'
                     : null))))))));
   const candidateReady = !blocker;
   return {
@@ -5220,8 +5230,8 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     publicationReason: candidateReady
       ? 'worker-retained-pressure-interface-force-rows-require-state-manager-admission-before-grid-consumption'
       : blocker,
-    sameDeviceMainThreadHandlesAvailable: backend === 'cpu-reference',
-    workerLocalRetainedRefsOnly: backend !== 'cpu-reference',
+    sameDeviceMainThreadHandlesAvailable: false,
+    workerLocalRetainedRefsOnly: true,
     compactSummaryStatus: readbackMode === NO_FULL_READBACK_MODE && pressureSummary.normalHotLoopReadbackFree === true
       ? 'worker-pressure-interface-compact-summary-required'
       : 'blocked-full-readback-mode',
@@ -5246,10 +5256,10 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
     pressureInterfaceForceRowsBufferRetained: pressureSummary.pressureInterfaceForceRowsBufferRetained === true,
     pressureInterfaceBufferResidency: backend === 'webgpu'
       ? 'worker-lane-gpu-buffer-retained'
-      : 'cpu-reference-force-row-array',
+      : 'blocked-non-webgpu-pressure-interface-output',
     pressureInterfaceConsumerAccessProtocol: backend === 'webgpu'
       ? 'same-worker-lane-retained-buffer-ref'
-      : 'cloneable-force-row-array',
+      : 'blocked-cloneable-pressure-interface-force-row-array',
     retainedBufferRefs,
     retainedPressureBufferRefs,
     workerRetainedBufferRefs,

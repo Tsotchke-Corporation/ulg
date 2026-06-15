@@ -1,6 +1,39 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Scene Pressure-Row Upload Admission
+## Current Focused Result - 2026-06-15 Pressure WebGPU-Retained Publication
+
+The current slice makes the pressure/interface Worker publication path
+WebGPU-retained-only. A pressure compact publication candidate is ready only
+when it proves WebGPU backend execution, no-full readback, worker residency,
+non-mutating pressure authority, retained pressure refs, and a retained GPU
+force-row buffer descriptor. The authority host rejects cloneable/CPU
+force-row-array publication attempts for this worker-retained path.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`, and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- PeerCompute/ULG integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable|worker-retained pressure/interface"`
+  passed `13/13`, including rejection of cloneable pressure-row publication.
+- Resident-step pressure coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface|stage DAG|resident steps"`
+  passed `38/38`.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-publication-webgpu-retained-only-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-publication-webgpu-retained-only-20260615`.
+
+## Prior Focused Result - 2026-06-15 Scene Pressure-Row Upload Admission
 
 The current slice blocks scene-local pressure/interface force-row uploads until
 grid-force consumption is admitted through

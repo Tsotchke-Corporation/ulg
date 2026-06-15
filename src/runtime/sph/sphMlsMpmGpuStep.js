@@ -4109,6 +4109,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentStageWorkerRunner = null,
   gpuHubResidentStageWorkerPolicy = null,
   gpuHubResidentStageWorkerModuleUrl = null,
+  gpuHubResidentStageWorkerOutputPublisher = null,
   gpuResidentLaneId = null,
   gpuResidentLaneStateKey = null,
   gpuResidentLaneDomainKey = null,
@@ -4763,6 +4764,31 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     laneId: laneStagePlanId,
     stateKey: laneStagePlanStateKey
   });
+  let workerCompactPublication = null;
+  if (
+    workerCompactPublicationCandidate?.candidateStatus === 'worker-retained-compact-publication-candidate-ready'
+    && typeof gpuHubResidentStageWorkerOutputPublisher === 'function'
+  ) {
+    try {
+      workerCompactPublication = await gpuHubResidentStageWorkerOutputPublisher({
+        candidate: workerCompactPublicationCandidate,
+        workerRunner: gpuHubResidentStageWorkerRunner,
+        workerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        sourceTaskId: `${taskIdPrefix}:mechanics-stage-plan`,
+        sourceNodeId: 'ulg-mls-mpm-mechanics-law',
+        sourceStage: 'g2p',
+        stageExecution: gpuResidentLaneStagePlanExecution
+      });
+    } catch (error) {
+      workerCompactPublication = {
+        schema: 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0',
+        status: 'worker-retained-mechanics-output-publication-failed',
+        reason: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
   const stageTaskChain = {
     schema: ULG_MLS_MPM_MECHANICS_STAGE_TASK_CHAIN_SCHEMA,
     status: 'compute-manager-stage-task-chain-executed',
@@ -4845,7 +4871,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageRejectedStatus: gpuResidentLaneStagePlanRejected?.status || null,
     workerCompactPublicationCandidate,
     workerCompactPublicationCandidateStatus: workerCompactPublicationCandidate?.candidateStatus || null,
-    workerCompactPublicationStatus: workerCompactPublicationCandidate?.publicationStatus || null,
+    workerCompactPublication,
+    workerCompactPublicationStatus: workerCompactPublication?.status
+      || workerCompactPublicationCandidate?.publicationStatus
+      || null,
+    workerCompactPublicationCommitted: workerCompactPublication?.committed === true,
+    workerCompactPublicationHotBufferKey: workerCompactPublication?.hotBufferKey || null,
+    workerCompactPublicationCommitDeltaTaskId: workerCompactPublication?.commitDeltaTaskId || null,
     workerCompactSummaryStatus: workerCompactPublicationCandidate?.compactSummaryStatus || null,
     workerRetainedBufferRefs: workerCompactPublicationCandidate?.workerRetainedBufferRefs || [],
     workerRetainedBufferRefCount: workerCompactPublicationCandidate?.workerRetainedBufferRefCount ?? 0,

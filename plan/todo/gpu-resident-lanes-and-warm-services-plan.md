@@ -153,6 +153,15 @@ publication-blocked until a Worker-to-NodeKernel/StateManager protocol can
 admit compact summaries and retained-ref descriptors without moving Worker
 `GPUBuffer` handles to the main thread.
 
+Status update, 2026-06-14 admitted Worker-retained publication: ULG now has a
+first StateManager-admitted publication path for Worker-owned mechanics stage
+outputs. The hot record keeps the live Worker backend and worker-local refs;
+the warm delta carries only the serializable retained-ref descriptor. This is
+the correct direction for GPU-resident child workers: retain execution where
+the buffers live, expose descriptors through StateManager/NodeKernel authority,
+and consume those descriptors by scheduling continuation stages on the same
+Worker rather than copying handles back to main.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

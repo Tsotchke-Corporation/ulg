@@ -1,5 +1,50 @@
 # ULG Implementation Log
 
+## 2026-06-14 22:06 AKDT - Admitted worker-retained mechanics publication path
+
+Implemented:
+
+- Added `publishWorkerRetainedMechanicsStageOutput()` on the browser resident
+  authority host.
+- Added
+  `peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0` and
+  `peercompute.ulg.mechanics-worker-retained-buffer-import.v0` descriptors.
+- The publisher stores a StateManager hot record with the live Worker backend
+  plus worker-local retained refs, and commits a serializable warm admission
+  delta. It does not transfer Worker `GPUBuffer` handles to the main thread.
+- The focused browser gate now passes that publisher into
+  `runMechanicsStageTaskChain()`, keeps the Worker backend warm after a
+  committed publication, and asserts the hot record, warm delta, descriptor,
+  and retained-ref counts.
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `1/1`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `git diff --check`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-worker-retained-publication-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Later stages still need to consume this worker-retained descriptor by sending
+  continuation messages to the retained Worker backend rather than asking main
+  for Worker-owned GPU handles.
+- Renderer z-buffer/draw-order regressions remain queued separately.
+
 ## 2026-06-14 21:50 AKDT - Worker WebGPU no-full retained-ref publication candidate
 
 Implemented:

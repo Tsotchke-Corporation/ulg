@@ -35,6 +35,19 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 22:06 AKDT: the Worker-retained mechanics
+stage output now has an admitted publication path. The browser authority host
+exposes `publishWorkerRetainedMechanicsStageOutput()`, which stores a
+StateManager hot record containing the live Worker backend plus worker-local
+retained refs, and commits a serializable warm delta with
+`peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0`. The
+focused browser gate passes a publisher into the stage-chain runner, keeps the
+Worker backend warm when publication commits, and asserts the hot record,
+warm delta, and `peercompute.ulg.mechanics-worker-retained-buffer-import.v0`
+descriptor exist. This still does not transfer Worker `GPUBuffer` handles to
+main; future consumers must address the Worker through the retained-ref
+descriptor or implement a worker-side continuation stage.
+
 Current routing note, 2026-06-14 21:50 AKDT: the Worker WebGPU mechanics
 stage-chain gate now runs `no-full-readback` instead of full parity readback.
 The Worker explicitly waits on its own `queue.onSubmittedWorkDone()` for each
@@ -43,10 +56,8 @@ stage fences while keeping stage buffers worker-local. ULG now surfaces
 `peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`
 on the stage-chain summary: it records worker-retained refs, no-full readback
 mode, WebGPU backends, worker-ready residency, and the deliberate publication
-blocker `blocked-authorized-worker-publication-required`. Next priority:
-implement the worker-to-NodeKernel/StateManager publication protocol that
-admits compact summaries and retained-ref descriptors without transferring
-Worker `GPUBuffer` handles to the main thread.
+blocker `blocked-authorized-worker-publication-required`. Superseded by the
+22:06 admitted worker-retained publication path above.
 
 Current routing note, 2026-06-14 21:36 AKDT: the focused browser authority
 gate now proves real browser Worker WebGPU mechanics stage execution. The

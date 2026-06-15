@@ -52,8 +52,13 @@ Focused checks:
   satisfied after the Worker drains its own WebGPU queue. The same gate now
   asserts
   `peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`
-  is ready as a worker-local retained-ref candidate while publication remains
-  fail-closed with `blocked-authorized-worker-publication-required`.
+  is ready as a worker-local retained-ref candidate. The same gate now supplies
+  `host.publishWorkerRetainedMechanicsStageOutput()` as the worker output
+  publisher and asserts the publication status is
+  `worker-retained-mechanics-output-published`, the StateManager hot record is
+  stored with the live Worker runner, the warm admission delta is present, and
+  the descriptor schema is
+  `peercompute.ulg.mechanics-worker-retained-buffer-import.v0`.
 - Renderer visual correctness debt:
   major z-buffer/draw-order issues are reported in the live visualization,
   including flicker/vanish behavior around visible fluid/solid volumes. Treat
@@ -95,6 +100,8 @@ Focused checks:
   `codex-ulg-mechanics-resident-stage-worker-module-20260614` passed `3/3`.
   The Worker no-full retained-ref candidate matrix
   `codex-worker-no-full-retained-candidate-20260614` passed `3/3`.
+  The Worker retained publication matrix
+  `codex-worker-retained-publication-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

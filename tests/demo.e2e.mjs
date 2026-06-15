@@ -5533,6 +5533,7 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
       };
       const mechanicsStageWorkerRunner = host.createUlgMechanicsResidentStageWorkerRunner({ timeoutMs: 60000 });
       let mechanicsStageTaskChainWorker = null;
+      let disposeMechanicsStageWorkerRunner = true;
       try {
         mechanicsStageTaskChainWorker = await host.runMechanicsStageTaskChain({
           ...mechanicsOnlyChildTaskInput,
@@ -5544,11 +5545,20 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
           gpuResidentLaneId: 'ulg:browser:mechanics-stage-worker-bridge-chain-lane',
           gpuResidentLaneStateKey: 'ulg:browser:mechanics-stage-worker-bridge-chain-state',
           gpuHubResidentStageWorkerRunner: mechanicsStageWorkerRunner,
-          gpuHubResidentStageWorkerModuleUrl: host.ulgMechanicsResidentStageWorkerModulePath
+          gpuHubResidentStageWorkerModuleUrl: host.ulgMechanicsResidentStageWorkerModulePath,
+          gpuHubResidentStageWorkerOutputPublisher: (payload) => host.publishWorkerRetainedMechanicsStageOutput(payload)
         });
+        disposeMechanicsStageWorkerRunner = mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCommitted !== true;
       } finally {
-        mechanicsStageWorkerRunner.dispose?.();
+        if (disposeMechanicsStageWorkerRunner) mechanicsStageWorkerRunner.dispose?.();
       }
+      const workerPublicationHotBufferKey = mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationHotBufferKey || null;
+      const workerPublicationRecord = workerPublicationHotBufferKey
+        ? host.stateManager.getHotBuffer(workerPublicationHotBufferKey)
+        : null;
+      const workerPublicationWarmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-mechanics-publications') || {};
+      const workerPublicationWarmDelta = Object.values(workerPublicationWarmDeltas)
+        .find((entry) => entry?.payload?.hotBufferKey === workerPublicationHotBufferKey) || null;
       const mechanicsStageTaskChainWorkerSummary = {
         schema: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.schema ?? null,
         status: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.status ?? null,
@@ -5566,8 +5576,17 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         stageTaskFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskFenceSatisfied ?? {},
         stageLeaseFenceSatisfied: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageLeaseFenceSatisfied ?? null,
         workerCompactPublicationCandidate: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCandidate ?? null,
+        workerCompactPublication: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublication ?? null,
         workerCompactPublicationCandidateStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCandidateStatus ?? null,
         workerCompactPublicationStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationStatus ?? null,
+        workerCompactPublicationCommitted: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCommitted ?? null,
+        workerCompactPublicationHotBufferKey: workerPublicationHotBufferKey,
+        workerCompactPublicationCommitDeltaTaskId: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactPublicationCommitDeltaTaskId ?? null,
+        workerCompactPublicationHotBufferStored: Boolean(workerPublicationRecord),
+        workerCompactPublicationRecordStatus: workerPublicationRecord?.status ?? null,
+        workerCompactPublicationRecordHasWorkerRunner: Boolean(workerPublicationRecord?.workerRunner),
+        workerCompactPublicationWarmDeltaFound: Boolean(workerPublicationWarmDelta),
+        workerCompactPublicationWarmDeltaStatus: workerPublicationWarmDelta?.payload?.status ?? null,
         workerCompactSummaryStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactSummaryStatus ?? null,
         workerRetainedBufferRefCount: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerRetainedBufferRefCount ?? null
       };
@@ -6183,7 +6202,14 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   });
   expect(result.mechanicsStageTaskChainWorker.stageLeaseFenceSatisfied).toBe(true);
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidateStatus).toBe('worker-retained-compact-publication-candidate-ready');
-  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationStatus).toBe('blocked-authorized-worker-publication-required');
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidate.publicationStatus).toBe('blocked-authorized-worker-publication-required');
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationStatus).toBe('worker-retained-mechanics-output-published');
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCommitted).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationHotBufferStored).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationRecordStatus).toBe('worker-retained-hot-buffer-source-stored');
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationRecordHasWorkerRunner).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationWarmDeltaFound).toBe(true);
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationWarmDeltaStatus).toBe('worker-retained-mechanics-output-admitted');
   expect(result.mechanicsStageTaskChainWorker.workerCompactSummaryStatus).toBe('worker-compact-summary-required');
   expect(result.mechanicsStageTaskChainWorker.workerRetainedBufferRefCount).toBeGreaterThan(0);
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidate).toMatchObject({
@@ -6192,6 +6218,17 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     workerLocalRetainedRefsOnly: true,
     stateManagerAdmissionRequired: true,
     requiredPublicationProtocol: 'worker-posts-compact-summary-and-retained-ref-descriptor-to-nodekernel-state-manager'
+  });
+  expect(result.mechanicsStageTaskChainWorker.workerCompactPublication).toMatchObject({
+    schema: 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0',
+    authority: 'nodekernel-state-manager',
+    workerLocal: true,
+    sameDevice: false,
+    workerRetainedBufferImport: {
+      schema: 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0',
+      workerLocal: true,
+      copyMode: 'zero-copy-worker-retained-ref-descriptor'
+    }
   });
   expect(result.mechanicsChildDryRunTask.schema).toBe('peercompute.ulg.mechanics-child-dry-run-evidence.v0');
   expect(result.mechanicsChildDryRunTask.taskWrapped).toBe(true);

@@ -60,6 +60,8 @@ export const ULG_REMOTE_TASK_GRAPH_COMPACT_LOCAL_REFRESH_CONTRACT_SCHEMA = 'peer
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA = 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 export const ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0';
 export const ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA = 'peercompute.ulg.sph-mls-mpm-same-device-hot-buffer-source-publication.v0';
+export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0';
+export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
 export const ULG_REMOTE_TASK_GRAPH_SPH_MLS_MPM_POST_STAGE_SEED_NODE_SCHEMA = 'peercompute.ulg.remote-task-graph-sph-mls-mpm-post-stage-seed-node.v0';
 export const ULG_RESIDENT_LAW_GRAPH_ID = 'peercompute.ulg.local-sph-law-closure-graph';
 export const ULG_RESIDENT_PASS_DAG_SOLVER_ID = 'ulg-mls-mpm-sph-resident-steps';
@@ -111,6 +113,11 @@ function normalizePositiveInteger(value, fallback, min = 1, max = Number.MAX_SAF
 
 function uniqueStringList(values = []) {
   return Array.from(new Set(normalizeStringList(values)));
+}
+
+function cloneSerializableValue(value) {
+  if (value == null) return value;
+  return JSON.parse(JSON.stringify(value));
 }
 
 function normalizeRemoteSeedPayload(payload = {}) {
@@ -1720,6 +1727,137 @@ export function publishUlgSphMlsMpmSameDeviceHotBufferSource({
     retainedBufferRefs,
     localBufferRefs: retainedBufferRefs,
     sameDeviceRetainedBufferImport
+  };
+}
+
+export function publishUlgMechanicsWorkerRetainedHotBufferSource({
+  stateManager = null,
+  nodeKernel = null,
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  hotBufferKeyPrefix = null,
+  lease = null,
+  candidate = null,
+  workerRunner = null,
+  workerModuleUrl = null,
+  sourceTaskId = null,
+  sourceNodeId = null,
+  sourceStage = 'g2p',
+  scope = 'ulg-worker-retained-mechanics-publications',
+  taskId = null,
+  version = null
+} = {}) {
+  if (!stateManager?.setHotBuffer || !stateManager?.getHotBuffer || !stateManager?.commitDelta) {
+    throw new TypeError('publishUlgMechanicsWorkerRetainedHotBufferSource requires StateManager hot storage and commitDelta');
+  }
+  if (!candidate || typeof candidate !== 'object') {
+    throw new TypeError('worker retained hot-buffer publication requires a compact publication candidate');
+  }
+  const workerRetainedBufferRefs = uniqueStringList(
+    candidate.workerRetainedBufferRefs || candidate.retainedBufferRefs || []
+  );
+  if (workerRetainedBufferRefs.length === 0) {
+    throw new TypeError('worker retained hot-buffer publication requires worker-retained buffer refs');
+  }
+  const resolvedCacheKey = normalizeString(cacheKey, candidate.cacheKey || candidate.laneId || null);
+  const resolvedStateKey = normalizeString(stateKey, candidate.stateKey || null);
+  const resolvedHotBufferKey = makeHotBufferKey({
+    hotBufferKey,
+    hotBufferKeyPrefix: hotBufferKeyPrefix || 'ulg:mechanics-worker-retained-hot-buffer-source',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    lease
+  });
+  const committedAt = Date.now();
+  const workerRetainedBufferImport = {
+    schema: ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
+    status: 'worker-retained-buffer-source-ready',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sameDevice: false,
+    workerLocal: true,
+    sourceMode: 'worker-retained-buffer-refs',
+    sourceSchema: candidate.schema || null,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerModuleUrl || candidate.workerModuleUrl || null,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    localBufferRefs: [],
+    copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    stateManagerAdmissionRequired: true
+  };
+  const hotBufferRecord = {
+    schema: ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'worker-retained-hot-buffer-source-stored',
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceSchema: candidate.schema || null,
+    sourceMode: 'worker-retained-buffer-refs',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    sameDevice: false,
+    workerLocal: true,
+    copyMode: 'zero-copy-worker-retained-ref-descriptor',
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    workerRunner,
+    workerBackend: workerRunner,
+    workerRetainedBufferRefs,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    localBufferRefs: [],
+    compactPublicationCandidate: cloneSerializableValue(candidate),
+    workerRetainedBufferImport
+  };
+  stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
+  const deltaScope = normalizeString(scope, 'ulg-worker-retained-mechanics-publications');
+  const deltaTaskId = normalizeString(
+    taskId,
+    `ulg-worker-retained-mechanics-publication:${resolvedCacheKey || resolvedStateKey || resolvedHotBufferKey}`
+  );
+  const payload = {
+    schema: ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+    status: 'worker-retained-mechanics-output-admitted',
+    authority: nodeKernel ? 'nodekernel-state-manager' : 'state-manager-local-authority',
+    nodeKernelPresent: Boolean(nodeKernel),
+    nodeId: nodeKernel?.nodeId || null,
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    committedAt,
+    sameDevice: false,
+    workerLocal: true,
+    sourceMode: 'worker-retained-buffer-refs',
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    outputFamilies: uniqueStringList(candidate.outputFamilies || ['sph-particle-state', 'mls-mpm-mechanics']),
+    compactPublicationCandidate: cloneSerializableValue(candidate),
+    workerRetainedBufferImport
+  };
+  const commitDelta = {
+    taskId: deltaTaskId,
+    scope: deltaScope,
+    version: version ?? committedAt,
+    timestamp: committedAt,
+    payload
+  };
+  stateManager.commitDelta(commitDelta);
+  return {
+    ...payload,
+    status: 'worker-retained-mechanics-output-published',
+    committed: true,
+    hotBufferStored: Boolean(stateManager.getHotBuffer(resolvedHotBufferKey)),
+    commitDeltaTaskId: deltaTaskId,
+    commitDeltaScope: deltaScope,
+    commitDeltaTimestamp: committedAt
   };
 }
 
@@ -3754,6 +3892,13 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    publishWorkerRetainedMechanicsStageOutput(options = {}) {
+      return publishUlgMechanicsWorkerRetainedHotBufferSource({
+        stateManager,
+        nodeKernel,
+        ...options
+      });
+    },
     async refreshRemoteSeedHotBuffers(cacheKeyOrOptions, options = {}) {
       const source = cacheKeyOrOptions && typeof cacheKeyOrOptions === 'object'
         ? cacheKeyOrOptions
@@ -4418,6 +4563,7 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentMechanicsStageWorkerRunnerFactoryReady: typeof host?.createUlgMechanicsResidentStageWorkerRunner === 'function',
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
+    residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
     residentRemoteSeedHotBufferRefreshReady: typeof host?.refreshRemoteSeedHotBuffers === 'function',
     residentRemoteSeedHotBufferRefreshExecutorReady: typeof host?.createRemoteSeedHotBufferRefreshExecutor === 'function',
     residentTaskGraphSubmitRefreshReady: typeof host?.submitTaskGraphWithRemoteSeedHotBufferRefresh === 'function'

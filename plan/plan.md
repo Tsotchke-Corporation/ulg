@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 22:06 AKDT: ULG now has an admitted
+worker-retained mechanics publication path. The browser authority host exposes
+`publishWorkerRetainedMechanicsStageOutput()`, which writes a StateManager hot
+record containing the live Worker backend and worker-local retained refs, then
+commits a serializable warm delta under
+`peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0`. The
+focused browser gate passes that publisher into
+`runMechanicsStageTaskChain()`, validates
+`peercompute.ulg.mechanics-worker-retained-buffer-import.v0`, and leaves the
+Worker warm when the publication is committed. This is the first actual
+authority-compatible publication step for Worker-owned mechanics buffers; the
+next target is consuming that worker-retained descriptor from later stages
+without falling back to cloned arrays.
+
 Current checkpoint, 2026-06-14 21:50 AKDT: the browser Worker mechanics stage
 chain now runs WebGPU with `no-full-readback`. The Worker drains its own queue
 with `queue.onSubmittedWorkDone()` for each no-full WebGPU stage message before
@@ -10,9 +24,8 @@ fences without full particle arrays. `mechanicsStageTaskChain` now exposes
 `peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0`,
 including worker-retained refs, no-full stage readback modes, WebGPU backends,
 worker-ready residency, and a fail-closed publication status:
-`blocked-authorized-worker-publication-required`. The next target is the
-actual worker-to-NodeKernel/StateManager publication protocol for compact
-summaries and retained-ref descriptors.
+`blocked-authorized-worker-publication-required`. Superseded by the 22:06
+admitted worker-retained publication path above.
 
 Current checkpoint, 2026-06-14 21:36 AKDT: the focused browser authority-host
 gate now validates Worker-local WebGPU mechanics stage execution. The test

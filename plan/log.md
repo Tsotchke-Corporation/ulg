@@ -1,5 +1,69 @@
 # ULG Implementation Log
 
+## 2026-06-15 00:34 AKDT - Pressure/interface Worker stage DAG boundary
+
+Implemented:
+
+- Added `pressureInterface` as a non-authoritative ComputeManager/GPUHub stage
+  boundary around the gas-pressure/material-interface force-row solver.
+- Added `createSphPressureInterfaceStageComputeTask()` and
+  `runSphPressureInterfaceStageComputeTask()` with GPU-lane/fence descriptors,
+  retained `pressure-interface-force-rows-buffer` refs, and explicit
+  `gridForceApplicationApproved=false` authority.
+- Extended the formal stage-plan contract so an opt-in DAG can execute
+  `p2g -> pressureInterface -> gridUpdate -> g2p -> thermalPhase -> reactionProduct`.
+- Extended `src/services/ulgMechanicsResidentStage.worker.js` so the warm
+  resident-stage Worker can run `pressureInterface` and report retained
+  force-row refs.
+- Extended PeerCompute integration coverage so the injected Worker-runner path
+  proves all six stages resolve through GPUHub resident-stage executors and
+  report `worker-ready`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/ulgMechanicsResidentStageWorker.test.mjs`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-interface-worker-stage-dag-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --check tests/ulgMechanicsResidentStageWorker.test.mjs`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage compute task"`
+  reported `35/35`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `4/4`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `12/12`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-interface-stage-dag-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`; artifacts are under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-interface-stage-dag-20260615`.
+
+Open:
+
+- Next implementation slice after commit: pressure/interface retained-ref
+  publication/admission through NodeKernel/StateManager, then explicitly
+  approved grid-update consumption with conservation/impulse evidence.
+
 ## 2026-06-15 00:13 AKDT - Reaction/product Worker publication admission
 
 Prompt context:

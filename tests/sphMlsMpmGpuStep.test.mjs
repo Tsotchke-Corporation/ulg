@@ -25,6 +25,8 @@ import {
   ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
   ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA,
+  ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_REACTION_PRODUCT_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_SPH_THERMAL_PHASE_STAGE_COMPUTE_TASK_SCHEMA,
@@ -33,12 +35,14 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
   createSphThermalPhaseStageComputeTask,
+  createSphPressureInterfaceStageComputeTask,
   createMlsMpmResidentStepComputeTask,
   createMlsMpmResidentStepsComputeTask,
   createMlsMpmResidentStepGpuFenceReport,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   runSphThermalPhaseStageComputeTask,
+  runSphPressureInterfaceStageComputeTask,
   runMlsMpmResidentStepComputeTask,
   runMlsMpmResidentStepsComputeTask,
   runMlsMpmResidentStepsWithOptionalWebGpu,
@@ -1687,6 +1691,100 @@ test('SPH thermal phase stage compute task declares retained thermo lane output 
   assert.equal(result.thermalPhaseStageTaskAuthority.status, 'compute-manager-owned-non-mutating-thermal-phase-stage-task');
   assert.equal(result.thermalPhaseStageTaskAuthority.authoritativeStateMutation, false);
   assert.equal(result.thermalPhaseStageTaskAuthority.commitDeltaSuppressed, true);
+});
+
+test('SPH pressure interface stage compute task declares retained force-row output without authority mutation', async () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [1, 0, 0]
+      },
+      {
+        status: 'interface-element-ready',
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normalAreaVectorM2: [-1, 0, 0]
+      }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'synthetic-pressure',
+    totalPressurePa: 120000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {},
+    strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+  };
+  const task = createSphPressureInterfaceStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:pressure-interface-stage',
+    laneId: 'ulg:test:pressure-interface-lane',
+    stateKey: 'ulg:test:pressure-interface-state',
+    domainKey: 'ulg:test-domain',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    gasPressureSummary,
+    materialInterfaceField
+  });
+
+  assert.equal(task.schema, ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.exportName, 'runSphPressureInterfaceStageComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.suppressCommitDelta, true);
+  assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuFence.laneId, 'ulg:test:pressure-interface-lane');
+  assert.equal(task.gpuResidentLane.owner, 'ulg-pressure-interface-force-law');
+  assert.deepEqual(task.writeFamilies, ['pressure-interface-force-rows']);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, ['pressure-interface-force-rows-buffer']);
+
+  const result = await runSphPressureInterfaceStageComputeTask(task.data);
+
+  assert.equal(result.computeTaskResultSchema, ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.computeTaskId, 'ulg:test:pressure-interface-stage');
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.status, 'pressure-interface-stage-solver-ready');
+  assert.equal(result.pressureInterfaceForcePreview.schema, 'peercompute.ulg.sph-pressure-interface-force-preview.v0');
+  assert.equal(result.pressureInterfaceForceSolver.schema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(result.pressureInterfaceForceSolver.status, 'pressure-interface-force-solver-ready');
+  assert.equal(result.forceRowCount, 2);
+  assert.equal(result.forceRowValues.length, 2 * SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
+  assert.equal(result.pressureInterfaceForceRowsRetained, true);
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.pressureInterfaceStageTaskEvidence.schema, 'peercompute.ulg.pressure-interface-stage-task-evidence.v0');
+  assert.equal(result.pressureInterfaceStageTaskEvidence.passed, true);
+  assert.deepEqual(result.pressureInterfaceStageTaskEvidence.candidateWriteFamilies, ['pressure-interface-force-rows']);
+  assert.ok(result.pressureInterfaceStageTaskEvidence.mustNotWriteFamilies.includes('resident-product-mass'));
+  assert.equal(result.pressureInterfaceStageTaskAuthority.status, 'compute-manager-owned-non-mutating-pressure-interface-stage-task');
+  assert.equal(result.pressureInterfaceStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(result.pressureInterfaceStageTaskAuthority.gridForceApplicationApproved, false);
+  assert.equal(result.pressureInterfaceStageTaskAuthority.commitDeltaSuppressed, true);
 });
 
 test('SPH reaction product stage compute task declares retained product lane output without authority mutation', async () => {

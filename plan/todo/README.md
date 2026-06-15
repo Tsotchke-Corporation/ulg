@@ -35,6 +35,17 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 00:34 AKDT: the first
+pressure/interface force-row producer stage now exists under the formal
+ComputeManager/GPUHub stage DAG. `pressureInterface` runs after `p2g` and
+before `gridUpdate`, reads `resident-gas-pressure` plus
+`sph-material-interface-field`, writes candidate
+`pressure-interface-force-rows`, and remains non-authoritative with grid force
+application explicitly not approved. The next priority is pressure/interface
+retained-ref publication/admission through NodeKernel/StateManager, followed
+by an explicitly approved grid-update consumption slice with conservation and
+impulse evidence.
+
 Current routing note, 2026-06-15 00:13 AKDT: Worker-retained
 reaction/product output now has a NodeKernel/StateManager publication path.
 `reactionProduct` builds a dedicated compact publication candidate, requires

@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 00:34 AKDT: the first pressure/interface
+force-row producer stage now exists under the ComputeManager/GPUHub stage DAG.
+ULG exposes `createSphPressureInterfaceStageComputeTask()` and
+`runSphPressureInterfaceStageComputeTask()`, wrapping the existing
+gas-pressure/material-interface force-row solver as a non-authoritative
+`pressureInterface` stage. The formal opt-in DAG can now execute
+`p2g -> pressureInterface -> gridUpdate -> g2p -> thermalPhase -> reactionProduct`
+through GPUHub resident-stage executors, and the resident Worker accepts
+`pressureInterface` with retained force-row refs. This is producer evidence
+only; the next target is admitted pressure/interface retained-ref publication
+and then explicitly approved grid-update consumption of those rows.
+
 Current checkpoint, 2026-06-15 00:13 AKDT: Worker-retained
 reaction/product output now has a NodeKernel/StateManager publication path.
 ULG builds a dedicated

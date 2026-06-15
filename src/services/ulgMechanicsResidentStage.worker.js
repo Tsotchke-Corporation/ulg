@@ -1,4 +1,5 @@
 import {
+  runSphPressureInterfaceStageComputeTask,
   runSphReactionProductStageComputeTask,
   runSphThermalPhaseStageComputeTask,
   runMlsMpmMechanicsG2pStageComputeTask,
@@ -18,6 +19,7 @@ const GPU_BUFFER_USAGE = {
 
 const STAGE_RUNNERS = {
   p2g: runMlsMpmMechanicsP2gStageComputeTask,
+  pressureInterface: runSphPressureInterfaceStageComputeTask,
   gridUpdate: runMlsMpmMechanicsGridUpdateStageComputeTask,
   g2p: runMlsMpmMechanicsG2pStageComputeTask,
   thermalPhase: runSphThermalPhaseStageComputeTask,
@@ -112,6 +114,13 @@ function retainedRefsForStageResult(stageId, result = {}) {
     || result.updatedGridBufferByteLength > 0
   )) {
     refs.push('mls-mpm-grid-update-buffer');
+  }
+  if (stageId === 'pressureInterface' && (
+    result.pressureInterfaceForceRowsRetained
+    || result.forceRowValues instanceof Float32Array
+    || result.forceRowByteLength > 0
+  )) {
+    refs.push('pressure-interface-force-rows-buffer');
   }
   if (stageId === 'g2p') {
     if (result.stateBuffer || gpuResult.stateBuffer || result.state instanceof Float32Array || result.stateBufferByteLength > 0) {
@@ -412,11 +421,13 @@ function baseStageData(payload = {}) {
     ? ['mls-mpm-p2g-grid-buffer']
     : (stageId === 'gridUpdate'
       ? ['mls-mpm-grid-update-buffer']
-      : (stageId === 'thermalPhase'
-        ? ['sph-state-buffer', 'sph-thermo-buffer']
-        : (stageId === 'reactionProduct'
-          ? ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer']
-          : ['sph-state-buffer', 'mls-mpm-mechanics-buffer'])));
+      : (stageId === 'pressureInterface'
+        ? ['pressure-interface-force-rows-buffer']
+        : (stageId === 'thermalPhase'
+          ? ['sph-state-buffer', 'sph-thermo-buffer']
+          : (stageId === 'reactionProduct'
+            ? ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer']
+            : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']))));
   return {
     ...common,
     ...(context.stageOptions?.[stageId] || {}),

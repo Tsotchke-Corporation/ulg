@@ -1,9 +1,24 @@
 # Implementation Status
 
-Updated: 2026-06-15 reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-15 pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker thermal/phase stage support, thermal/phase stage task boundary, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added the first pressure/interface Worker stage DAG boundary.
+  `createSphPressureInterfaceStageComputeTask()` and
+  `runSphPressureInterfaceStageComputeTask()` wrap the gas-pressure/material
+  interface force-row solver as a non-mutating `pressureInterface` stage.
+  The formal DAG can now run
+  `p2g -> pressureInterface -> gridUpdate -> g2p -> thermalPhase -> reactionProduct`
+  through GPUHub resident-stage executors; the resident Worker accepts
+  `pressureInterface` and reports retained force-row refs. Grid force
+  application remains explicitly unapproved until the next consumption slice.
+  Validation so far passed syntax checks, pressure stage unit coverage
+  `35/35`, Worker unit `4/4`, focused PeerCompute/ULG integration `12/12`,
+  focused browser authority-host Playwright `1/1`, physics atomics `7` with
+  `1` expected skip, and visual matrix
+  `codex-pressure-interface-stage-dag-20260615` `3/3` with two captured frames
+  per scenario.
 - Added reaction/product Worker publication admission. The formal
   `reactionProduct` stage now builds a dedicated compact publication candidate
   from Worker-ready WebGPU no-full execution, retained product refs, and

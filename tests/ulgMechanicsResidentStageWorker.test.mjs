@@ -131,6 +131,81 @@ test('ULG mechanics resident stage worker runs P2G, grid update, and G2P through
   assert.ok(g2p.retainedBufferRefs.includes('mls-mpm-mechanics-buffer'));
 });
 
+test('ULG resident stage worker can run pressure interface force-row stage', async () => {
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:pressure-interface-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      boxDimsM: [2, 2, 2],
+      gasPressureSummary: {
+        schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+        status: 'synthetic-pressure',
+        totalPressurePa: 120000,
+        boxVolumeM3: 8,
+        boxDimsM: [2, 2, 2],
+        bySpecies: {},
+        strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] }
+      },
+      materialInterfaceField: {
+        schema: 'peercompute.ulg.sph-material-interface-field.v0',
+        status: 'material-interface-field-ready',
+        surfaceCount: 1,
+        readySurfaceCount: 1,
+        totalSurfaceAreaM2: 2,
+        elementCount: 2,
+        elements: [
+          {
+            status: 'interface-element-ready',
+            surfaceIndex: 0,
+            surfaceKey: 'h2o|liquid',
+            material: 'h2o',
+            phase: 'liquid',
+            materialId: 1,
+            phaseId: 2,
+            axisId: 0,
+            centroidM: [0.5, 1, 1],
+            areaM2: 1,
+            normalAreaVectorM2: [1, 0, 0]
+          },
+          {
+            status: 'interface-element-ready',
+            surfaceIndex: 0,
+            surfaceKey: 'h2o|liquid',
+            material: 'h2o',
+            phase: 'liquid',
+            materialId: 1,
+            phaseId: 2,
+            axisId: 0,
+            centroidM: [1.5, 1, 1],
+            areaM2: 1,
+            normalAreaVectorM2: [-1, 0, 0]
+          }
+        ]
+      }
+    }
+  };
+
+  const pressure = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('pressureInterface', ['resident-gas-pressure', 'sph-material-interface-field'], ['pressure-interface-force-rows']),
+    context,
+    null,
+    {
+      laneId: 'ulg:test:pressure-interface-worker-lane',
+      stateKey: 'ulg:test:pressure-interface-worker-state'
+    }
+  ));
+
+  assert.equal(pressure.value.workerResidentStage.stageId, 'pressureInterface');
+  assert.equal(pressure.value.computeTaskId, 'ulg:test:pressure-interface-worker:pressureInterface');
+  assert.equal(pressure.value.pressureInterfaceStageTaskEvidence.passed, true);
+  assert.equal(pressure.value.pressureInterfaceStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(pressure.value.pressureInterfaceStageTaskAuthority.gridForceApplicationApproved, false);
+  assert.equal(pressure.value.pressureInterfaceForceSolver.forceRowCount, 2);
+  assert.ok(pressure.retainedBufferRefs.includes('pressure-interface-force-rows-buffer'));
+});
+
 test('ULG resident stage worker can run thermal phase stage and adopt retained thermo output', async () => {
   const buffers = manualBuffers();
   const sourceStateBuffer = { label: 'worker-g2p-state' };

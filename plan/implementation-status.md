@@ -1,9 +1,22 @@
 # Implementation Status
 
-Updated: 2026-06-14 PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Wired the existing ULG mechanics P2G -> grid-update -> G2P stage-chain
+  helper to the PeerCompute GPU resident lane stage-plan boundary as
+  non-authoritative evidence. The helper now builds
+  `peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0`, acquires a
+  `ComputeManager` GPU resident lane lease, runs
+  `executeGpuResidentLaneStagePlan()` against the native CPU-oracle stage
+  graph results, completes the lane fence, and records the stage-plan schema,
+  contract schema, execution schema/status, completed stage count, execution
+  order, and fence evidence on `mechanicsStageTaskChain` and the split-path
+  summary. Validation passed syntax checks, focused cross-repo PeerCompute
+  integration `11/11`, physics atomics `7` with `1` expected skip, and visual
+  matrix `codex-mechanics-stage-lane-plan-20260614` `3/3` with two captured
+  frames per scenario.
 - Added the first PeerCompute-side resident lane stage-plan executor boundary
   for the ULG sequence contract. Sibling PeerCompute now preserves
   `residentSequenceLaneContract` through `ComputeManager` normalization,

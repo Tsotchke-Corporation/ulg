@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 19:28 AKDT: ULG's mechanics stage-chain helper
+now consumes actual P2G -> grid-update -> G2P stage outputs through the
+PeerCompute GPU resident lane stage-plan boundary. The path builds
+`peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0`, acquires a
+ComputeManager GPU resident lane lease, runs
+`executeGpuResidentLaneStagePlan()` over the native CPU-oracle stage graph
+results, completes the lane fence, and records stage-plan schema/status,
+execution status, completed stage count, execution order, and fence evidence
+on `mechanicsStageTaskChain` and the compact split-path summary. This remains
+non-authoritative and `defaultEnabled=false`; it is evidence that the
+mechanics stages can sit behind the PeerCompute lane boundary before actual
+WebGPU stage mutation is promoted.
+
 Current checkpoint, 2026-06-14 19:13 AKDT: PeerCompute's
 `GpuResidentLaneManager` now consumes the ULG resident sequence lane contract
 as a first-class lane stage plan. `ComputeManager` preserves

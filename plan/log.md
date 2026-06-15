@@ -20778,3 +20778,54 @@ Open:
   stage executor passes CPU/reference parity, StateManager admission, GPU
   fence/retained-ref checks, and broader pressure/thermal/reaction/long-liquid
   visual gates.
+
+## 2026-06-14 19:28 AKDT - Mechanics stage-chain lane-plan evidence
+
+Prompt context:
+
+- Continued after committing PeerCompute `c0ba8ba4` and ULG `a1d1753`. The
+  next todo priority was to make a real ULG mechanics consumer use the new
+  PeerCompute GPU resident lane stage-plan boundary while preserving
+  CPU/reference oracle behavior and default-off mutation.
+
+Implemented:
+
+- Added `peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0`.
+- Added helpers to build the mechanics stage lane contract and summarize
+  retained refs from P2G, grid-update, and G2P stage results.
+- Updated `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()`
+  to acquire a ComputeManager GPU resident lane lease, run
+  `executeGpuResidentLaneStagePlan()` over the existing native CPU-oracle
+  stage graph results, complete the lane fence, and record stage-plan
+  schema/status, contract schema, execution schema/status, completed stage
+  count, execution order, lease id, and fence status.
+- Extended the cross-repo integration test so the mechanics stage-chain path
+  must report a completed three-stage lane execution with
+  `defaultEnabled=false`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG plan/status/todo/test/log documentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-mechanics-stage-lane-plan-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- This consumes existing native CPU-oracle stage outputs through the lane-plan
+  boundary. The next promotion step is to execute the actual WebGPU mechanics
+  stage work inside the lane executor and then repeat the pattern for
+  pressure, thermal/phase, and reaction/product stages.

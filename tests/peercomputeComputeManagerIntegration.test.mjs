@@ -1023,6 +1023,28 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     scheduledStageChainStep.mechanicsStageTaskChain.nativeTaskGraphAuthorityPath,
     'node-kernel-submit-task-graph'
   );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlanSchema,
+    'peercompute.compute.gpu-resident-lane-stage-plan.v0'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlanContractSchema,
+    'peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0'
+  );
+  assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlanStatus, 'contract-stage-plan-ready');
+  assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlanDefaultEnabled, false);
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionSchema,
+    'peercompute.compute.gpu-resident-lane-stage-execution.v0'
+  );
+  assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStatus, 'completed');
+  assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 3);
+  assert.deepEqual(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
+    ['p2g', 'gridUpdate', 'g2p']
+  );
+  assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageLeaseFenceStatus, 'queue-work-completed');
+  assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageLeaseFenceSatisfied, true);
   assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.computeManagerOwned, true);
   assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.nodeKernelOwned, true);
   assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.authoritativeStateMutation, false);

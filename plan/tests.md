@@ -5,6 +5,12 @@
 The first PeerCompute-side lane executor boundary for this contract is now
 covered. Focused checks:
 
+- ULG mechanics stage-chain lane-plan evidence:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  passed `11/11`, including the assertion that the mechanics P2G ->
+  grid-update -> G2P native stage graph outputs are consumed through
+  `ComputeManager.executeGpuResidentLaneStagePlan()` and report a completed
+  three-stage lane execution with `defaultEnabled=false`.
 - PeerCompute lane manager:
   `EMSDK_QUIET=1 node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
   from `/home/cos/projects/peercompute` passed `6/6`.
@@ -19,9 +25,11 @@ covered. Focused checks:
   contract reaches the ComputeManager execution envelope as a derived stage
   plan with `defaultEnabled=false`.
 - Physics and visual gates stayed green:
-  `npm run test:physics-atomics` passed `7` with `1` expected skip, and visual
-  matrix `codex-lane-stage-plan-executor-20260614` passed `3/3` with two
-  captured frames per scenario.
+  `npm run test:physics-atomics` passed `7` with `1` expected skip. Visual
+  matrix `codex-lane-stage-plan-executor-20260614` passed `3/3`, and the
+  newer mechanics stage-chain lane-plan matrix
+  `codex-mechanics-stage-lane-plan-20260614` also passed `3/3`; both captured
+  two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind
 `fuseNoFullResidentMechanicsActiveGrid` and

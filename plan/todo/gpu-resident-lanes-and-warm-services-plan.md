@@ -195,6 +195,19 @@ default-off here until actual mechanics/pressure/thermal/reaction stages are
 promoted one family at a time with CPU oracle, StateManager admission, GPU
 fence, and visual gates.
 
+Status update, 2026-06-14 mechanics stage-chain lane-plan evidence: ULG now
+has a first mechanics consumer of the PeerCompute lane stage-plan executor.
+`runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` builds
+`peercompute.ulg.mls-mpm-mechanics-stage-lane-contract.v0`, acquires a
+ComputeManager GPU resident lane lease, runs
+`executeGpuResidentLaneStagePlan()` over the existing P2G -> grid-update ->
+G2P native CPU-oracle stage graph results, completes the lane fence, and
+records the stage-plan contract/execution/fence evidence on
+`mechanicsStageTaskChain`. This is intentionally non-authoritative and does
+not yet move actual WebGPU mutation into the lane executor; it proves the
+mechanics law stage outputs can be represented behind the PeerCompute lane
+contract before promotion.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

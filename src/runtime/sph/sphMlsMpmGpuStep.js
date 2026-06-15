@@ -242,6 +242,32 @@ function normalizePressureInterfaceGasCellFieldImport(importValue = null) {
   };
 }
 
+function pressureInterfaceLocalGasCellFieldReadyFromOptions(options = {}) {
+  const pressureInterfaceGasCellFieldImport = normalizePressureInterfaceGasCellFieldImport(
+    options.pressureInterfaceGasCellFieldImport
+      || options.gasCellFieldImport
+      || null
+  );
+  if (pressureInterfaceGasCellFieldImport.localPressureGradientReady === true) return true;
+  const gasCellField = options.pressureFeedback?.gasCellField
+    || options.gasPressureSummary?.gasCellField
+    || options.pressureSummary?.gasCellField
+    || options.gasCellField
+    || null;
+  return gasCellField?.localPressureGradientReady === true
+    && Array.isArray(gasCellField?.cells)
+    && gasCellField.cells.length > 0;
+}
+
+function pressureInterfaceStageRetainedBufferRefs(retainedBufferRefs = [], stageOptions = {}) {
+  return uniqueNonEmptyStrings([
+    ...(Array.isArray(retainedBufferRefs) ? retainedBufferRefs : []),
+    ...(pressureInterfaceLocalGasCellFieldReadyFromOptions(stageOptions)
+      ? ['resident-gas-pressure-cells-buffer']
+      : [])
+  ]);
+}
+
 function pressureFeedbackWithImportedGasCellField(pressureFeedback = null, importResult = null) {
   if (!pressureFeedback || importResult?.importReady !== true || !importResult.gasCellField) return pressureFeedback;
   const gasCellField = importResult.gasCellField;
@@ -4083,6 +4109,7 @@ export function createSphPressureInterfaceStageComputeTask({
     ...taskStageOptions
   } = stageOptions;
   const readbackMode = taskStageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const resolvedRetainedBufferRefs = pressureInterfaceStageRetainedBufferRefs(retainedBufferRefs, taskStageOptions);
   const requiresGpuLane = taskStageOptions.preferWebGpu === true
     || readbackMode === NO_FULL_READBACK_MODE
     || taskStageOptions.materialInterfaceField?.sourceRenderFieldReadback === false;
@@ -4105,7 +4132,7 @@ export function createSphPressureInterfaceStageComputeTask({
         laneId,
         stateKey,
         queueFencePolicy,
-        retainedBufferRefs,
+        retainedBufferRefs: resolvedRetainedBufferRefs,
         source: 'ulg-sph-pressure-interface-stage-compute-task',
         required: true
       })
@@ -4120,7 +4147,7 @@ export function createSphPressureInterfaceStageComputeTask({
         localExecution,
         readFamilies,
         writeFamilies,
-        retainedBufferRefs,
+        retainedBufferRefs: resolvedRetainedBufferRefs,
         queueFencePolicy,
         copyBudget: computeResidentLaneTaskCopyBudget({
           ...taskStageOptions,
@@ -4153,7 +4180,7 @@ export function createSphPressureInterfaceStageComputeTask({
         stateKey,
         domainKey,
         queueFencePolicy,
-        retainedBufferRefs: [...retainedBufferRefs],
+        retainedBufferRefs: [...resolvedRetainedBufferRefs],
         copyBudget: { ...gpuResidentLane.copyBudget }
       },
       gpuFence,
@@ -5084,6 +5111,27 @@ function retainedBufferRefsForMechanicsStageResult(stageId, result = {}) {
   return refs;
 }
 
+function isPressureInterfaceGasPressureRef(ref) {
+  const text = String(ref || '').toLowerCase();
+  const squashed = text.replace(/[^a-z0-9]/g, '');
+  return text.includes('gas-pressure')
+    || text.includes('gas-cells')
+    || squashed.includes('gaspressure')
+    || squashed.includes('gascells');
+}
+
+function isPressureInterfaceForceRowRef(ref) {
+  const text = String(ref || '').toLowerCase();
+  const squashed = text.replace(/[^a-z0-9]/g, '');
+  return text.includes('pressure-interface-force-rows')
+    || text.includes('force-rows')
+    || squashed.includes('forcerows');
+}
+
+function isWorkerRetainedRef(ref) {
+  return String(ref || '').startsWith('ulg-worker:');
+}
+
 function resolveMechanicsStageGpuHub(computeManager) {
   const laneManager = typeof computeManager?.getGpuResidentLaneManager === 'function'
     ? computeManager.getGpuResidentLaneManager()
@@ -5383,22 +5431,16 @@ function buildPressureInterfaceWorkerCompactPublicationCandidate({
   const retainedBufferRefs = retainedRefsFromStageExecution(stageExecution, [PRESSURE_INTERFACE_STAGE_ID]);
   const workerRetainedBufferRefs = workerRetainedRefsFromStageExecution(stageExecution, [PRESSURE_INTERFACE_STAGE_ID]);
   const workerRetainedPressureBufferRefs = uniqueNonEmptyStrings(
-    workerRetainedBufferRefs.filter((ref) => {
-      const text = String(ref || '').toLowerCase();
-      return text.includes('pressure') || text.includes('forcerows') || text.includes('force-rows');
-    })
+    workerRetainedBufferRefs.filter(isPressureInterfaceForceRowRef)
   );
   const workerRetainedGasPressureBufferRefs = uniqueNonEmptyStrings(
-    workerRetainedBufferRefs.filter((ref) => {
-      const text = String(ref || '').toLowerCase();
-      return text.includes('gas-pressure') || text.includes('gas-cells');
-    })
+    workerRetainedBufferRefs.filter(isPressureInterfaceGasPressureRef)
   );
   const retainedPressureBufferRefs = uniqueNonEmptyStrings(
-    retainedBufferRefs.filter((ref) => String(ref || '').includes('pressure-interface-force-rows'))
+    retainedBufferRefs.filter((ref) => !isWorkerRetainedRef(ref) && isPressureInterfaceForceRowRef(ref))
   );
   const retainedGasPressureBufferRefs = uniqueNonEmptyStrings(
-    retainedBufferRefs.filter((ref) => String(ref || '').includes('resident-gas-pressure-cells'))
+    retainedBufferRefs.filter((ref) => !isWorkerRetainedRef(ref) && isPressureInterfaceGasPressureRef(ref))
   );
   const hasPressureRef = workerRetainedPressureBufferRefs.length > 0 || retainedPressureBufferRefs.length > 0;
   const hasGasPressureRef = workerRetainedGasPressureBufferRefs.length > 0 || retainedGasPressureBufferRefs.length > 0;

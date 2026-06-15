@@ -1,6 +1,44 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-15 Scene Gas-Cell Import Host Wiring
+## Current Focused Result - 2026-06-15 Pressure Gas-Cell Retained Ref Wiring
+
+The current slice fixes retained-buffer evidence for local gas-cell pressure
+fields. A pressureInterface stage task now declares gas-cell buffer retention
+when local gas-cell pressure data is present, and worker-generated
+`gasPressureCellsBuffer` refs are classified as gas-cell refs instead of being
+lost or counted as pressure force-row refs.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/services/ulgMechanicsResidentStage.worker.js`,
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`, and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- Pressure stage retained gas-cell coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|pressure interface stage compute task can produce force rows with WebGPU|pressure interface stage compute task declares retained"`
+  passed `43/43`.
+- PeerCompute pressure publication coverage:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained pressure/interface|mechanics-stage-gpuhub-worker-ready|resident pass-DAG task runs through real PeerCompute GPU lane authority|gas-cell field imports"`
+  passed `14/14`.
+- Resident-stage Worker coverage:
+  `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` passed `4/4`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Browser PeerCompute resident authority-host gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  passed `1/1`.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-gas-cell-retained-ref-wire-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`,
+  `visualSurfaceIssues=[]`, and two captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-gas-cell-retained-ref-wire-20260615`.
+  Manual inspection found final frames nonblank and bounded. MLS-MPM remains
+  fragmented, and CPU SPH liquid/solid still show the known unphysical
+  stacked/blob shape.
+
+## Prior Focused Result - 2026-06-15 Scene Gas-Cell Import Host Wiring
 
 The current slice wires the live scene/stage path to the browser resident
 authority host for pressure/interface gas-cell field imports. Scene code can

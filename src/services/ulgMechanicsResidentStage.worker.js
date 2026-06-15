@@ -175,6 +175,20 @@ function retainedWorkerRefs(value = {}, out = []) {
   return out;
 }
 
+function pressureInterfaceLocalGasCellFieldReadyFromOptions(options = {}) {
+  const importValue = options.pressureInterfaceGasCellFieldImport || options.gasCellFieldImport || null;
+  const importedField = importValue?.gasCellFieldSnapshot || importValue?.gasCellField || null;
+  const gasCellField = importedField
+    || options.pressureFeedback?.gasCellField
+    || options.gasPressureSummary?.gasCellField
+    || options.pressureSummary?.gasCellField
+    || options.gasCellField
+    || null;
+  return gasCellField?.localPressureGradientReady === true
+    && Array.isArray(gasCellField?.cells)
+    && gasCellField.cells.length > 0;
+}
+
 function workerContext(payload = {}) {
   return payload.context?.ulgMechanicsResidentStageWorker
     || payload.context?.mechanicsResidentStageWorker
@@ -414,6 +428,8 @@ function baseStageData(payload = {}) {
   const context = workerContext(payload);
   const common = context.common || {};
   const stageId = normalizeString(payload.stage?.id, null);
+  const stageSpecificOptions = context.stageOptions?.[stageId] || {};
+  const stageOptionSnapshot = { ...common, ...stageSpecificOptions };
   const laneId = normalizeString(payload.lease?.laneId ?? payload.lane?.laneId, null);
   const stateKey = normalizeString(payload.lease?.stateKey ?? payload.lane?.stateKey, null);
   const domainKey = normalizeString(payload.lease?.domainKey ?? payload.lane?.domainKey, null);
@@ -422,7 +438,12 @@ function baseStageData(payload = {}) {
     : (stageId === 'gridUpdate'
       ? ['mls-mpm-grid-update-buffer']
       : (stageId === 'pressureInterface'
-        ? ['pressure-interface-force-rows-buffer']
+        ? [
+            'pressure-interface-force-rows-buffer',
+            ...(pressureInterfaceLocalGasCellFieldReadyFromOptions(stageOptionSnapshot)
+              ? ['resident-gas-pressure-cells-buffer']
+              : [])
+          ]
         : (stageId === 'thermalPhase'
           ? ['sph-state-buffer', 'sph-thermo-buffer']
           : (stageId === 'reactionProduct'
@@ -430,7 +451,7 @@ function baseStageData(payload = {}) {
             : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']))));
   return {
     ...common,
-    ...(context.stageOptions?.[stageId] || {}),
+    ...stageSpecificOptions,
     preferWebGpu: context.preferWebGpu === true || common.preferWebGpu === true,
     readbackMode: context.readbackMode || common.readbackMode || 'full-parity-readback',
     useWorkerRetainedG2pInput: context.useWorkerRetainedG2pInput === true

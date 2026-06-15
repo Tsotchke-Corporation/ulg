@@ -23098,3 +23098,94 @@ Open:
 - Phone focus flash/disappear and remaining z-buffer/draw-order problems remain
   open renderer visual-correctness blockers. Visual captures remain sanity
   evidence, not final physics acceptance, until those are closed.
+
+## 2026-06-15 05:47 AKDT - Pressure gas-cell retained-ref wiring
+
+Prompt context:
+
+- Continued the pressure/readback reduction path after committing scene
+  gas-cell import host wiring. This slice focused on retained gas-cell buffer
+  evidence in pressureInterface Worker publication, not on liquid-settling
+  behavior or renderer draw-order fixes.
+
+Implemented:
+
+- Added pressureInterface task retained-ref expansion so
+  `createSphPressureInterfaceStageComputeTask()` declares
+  `resident-gas-pressure-cells-buffer` in the GPU fence, resident lane
+  descriptor, and `webgpu.retainedBufferRefs` when a local gas-cell field or
+  admitted local gas-cell import is present.
+- Mirrored the same retained-ref declaration in
+  `src/services/ulgMechanicsResidentStage.worker.js` when Worker stage options
+  include a local gas-cell field/import.
+- Fixed publication-candidate classification so worker-generated refs like
+  `ulg-worker:...:result.gasPressureCellsBuffer:...` are recognized as
+  gas-cell refs, while pressure force-row refs are matched only by force-row
+  naming. This prevents gas-pressure refs from being lost and also prevents
+  them from being double-counted as pressure force-row refs.
+- Added test coverage proving local gas-cell imports expand pressureInterface
+  retained refs and that PeerCompute worker publication candidates carry
+  worker-retained gas-cell refs separately from force-row refs.
+- Added `plan/done/pressure-gas-cell-retained-ref-wiring-2026-06-15.md` and
+  updated plan/status/todo/test docs.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/services/ulgMechanicsResidentStage.worker.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/pressure-gas-cell-retained-ref-wiring-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage .*gas-cell|pressure interface stage declares retained gas-cell|pressure interface stage compute task can produce force rows with WebGPU|pressure interface stage compute task declares retained"`
+  reported `43/43`.
+- Initial PeerCompute focused run failed in
+  `ULG resident solver descriptors publish executable pass-DAG plus metadata
+  law-family nodes`: a gas-pressure worker ref was also counted as a pressure
+  force-row ref because the pressure filter matched the word `pressure`. Fixed
+  by splitting force-row and gas-pressure ref predicates and excluding
+  `ulg-worker:` refs from generic retained-ref arrays.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained pressure/interface|mechanics-stage-gpuhub-worker-ready|resident pass-DAG task runs through real PeerCompute GPU lane authority|gas-cell field imports"`
+  reported `14/14`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs` reported
+  `4/4`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-gas-cell-retained-ref-wire-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, no issues, no visual-surface issues, and two
+  captured frames per scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-gas-cell-retained-ref-wire-20260615`.
+- Manual frame inspection:
+  - `liquid-liquid-h2o-mlsmpm` final frame was nonblank and bounded but still
+    fragmented.
+  - `liquid-liquid-h2o-cpu-sph` final frame was nonblank and bounded but still
+    showed the known unphysical stacked/blob shape.
+  - `solid-h2o-cpu-sph` final frame was nonblank and bounded but still showed
+    the same unacceptable stacked/blob behavior.
+
+Open:
+
+- Real resident local gas-cell pressure-gradient derivation from EOS/species/
+  material state remains the next pressure architecture slice.
+- Long-horizon liquid settling, CPU SPH liquid shape, ice/solid rigidity,
+  volume pulsation/blinking, and MLS-MPM fragmentation remain open physics
+  behavior blockers.
+- Phone focus flash/disappear and remaining z-buffer/draw-order problems remain
+  open renderer visual-correctness blockers.

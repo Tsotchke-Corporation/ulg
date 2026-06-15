@@ -1604,15 +1604,39 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
               forceRowsBufferByteLength: 128,
               pressureInterfaceForceRowsRetained: true,
               pressureInterfaceForceRowsBufferRetained: true,
+              gasPressureCellRowCount: 2,
+              gasPressureCellRowStrideFloats: 12,
+              gasPressureCellRowByteLength: 96,
+              gasPressureCellRowsBufferRetained: true,
+              pressureInterfaceGasCellFieldAdmission: {
+                schema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+                status: 'pressure-interface-gas-cell-field-consumption-approved',
+                gasCellFieldConsumptionApproved: true,
+                sourceHotBufferKey: 'ulg:test:pressure-interface-local-gas-cells',
+                retainedGasPressureBufferRefs: ['resident-gas-pressure-cells-buffer'],
+                workerRetainedGasPressureBufferRefs: ['ulg-worker:test:pressureInterface:result.gasPressureCellsBuffer:2']
+              },
+              pressureInterfaceGasCellFieldAdmissionSchema: ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
+              pressureInterfaceGasCellFieldAdmissionStatus: 'pressure-interface-gas-cell-field-consumption-approved',
+              pressureInterfaceGasCellFieldAdmissionApproved: true,
+              pressureInterfaceGasCellFieldConsumerStatus: 'admitted-local-gas-cell-field-consumer-ready',
               pressureInterfaceForceSolver: {
                 schema: 'peercompute.ulg.sph-pressure-interface-force-solver.v0',
                 backend: 'webgpu',
                 status: 'pressure-interface-force-solver-ready',
+                pressureFieldMode: 'local-gas-cell-pressure-gradient',
+                pressureFieldResolution: 'structured-gas-cell-grid',
+                localPressureGradientReady: true,
+                localPressureGradientStatus: 'local-pressure-gradient-field-ready',
+                localPressureGradientForceCouplingStatus: 'local-pressure-gradient-force-coupling-ready',
                 forceRowCount: 2,
                 forceRowStrideFloats: 16,
                 forceRowByteLength: 128,
                 forceRowsBufferByteLength: 128,
                 pressureInterfaceForceRowsBufferRetained: true,
+                gasPressureCellRowCount: 2,
+                gasPressureCellRowStrideFloats: 12,
+                gasPressureCellRowsBufferRetained: true,
                 conservationStatus: 'pairwise-equal-opposite-force-conservative',
                 conservationResidualMagnitudeN: 0
               },
@@ -1627,7 +1651,12 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
                 gridForceApplicationApproved: false
               }
             },
-            retainedBufferRefs: ['pressure-interface-force-rows-buffer', 'ulg-worker:test:pressureInterface:forceRows'],
+            retainedBufferRefs: [
+              'pressure-interface-force-rows-buffer',
+              'resident-gas-pressure-cells-buffer',
+              'ulg-worker:test:pressureInterface:forceRows',
+              'ulg-worker:test:pressureInterface:result.gasPressureCellsBuffer:2'
+            ],
             summary: { backend: 'webgpu', stage: 'pressureInterface' }
           };
         }
@@ -1831,6 +1860,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfacePublishedForceRowCount, 2);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceRetainedPressureBufferRefCount, 1);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerRetainedPressureBufferRefCount, 1);
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.workerRetainedGasPressureBufferRefs,
+    ['ulg-worker:test:pressureInterface:result.gasPressureCellsBuffer:2']
+  );
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.pressureInterfaceWorkerCompactPublicationCandidate.retainedGasPressureBufferRefs,
+    ['resident-gas-pressure-cells-buffer']
+  );
   assert.equal(pressureInterfaceStagePublicationPayloads.length, 1);
   assert.equal(pressureInterfaceStagePublicationPayloads[0].sourceStage, 'pressureInterface');
   assert.equal(pressureInterfaceStagePublicationPayloads[0].sameFrameConsumerStage, 'gridUpdate');
@@ -1839,6 +1876,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(pressureInterfaceStagePublicationPayloads[0].candidate.pressureInterfaceForceRowCount, 2);
   assert.deepEqual(pressureInterfaceStagePublicationPayloads[0].candidate.retainedPressureBufferRefs, ['pressure-interface-force-rows-buffer']);
   assert.deepEqual(pressureInterfaceStagePublicationPayloads[0].candidate.workerRetainedPressureBufferRefs, ['ulg-worker:test:pressureInterface:forceRows']);
+  assert.deepEqual(
+    pressureInterfaceStagePublicationPayloads[0].candidate.workerRetainedGasPressureBufferRefs,
+    ['ulg-worker:test:pressureInterface:result.gasPressureCellsBuffer:2']
+  );
+  assert.deepEqual(
+    pressureInterfaceStagePublicationPayloads[0].candidate.retainedGasPressureBufferRefs,
+    ['resident-gas-pressure-cells-buffer']
+  );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCandidateStatus, 'worker-retained-thermal-phase-publication-candidate-ready');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationStatus, 'worker-retained-thermal-phase-output-published');
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.thermalWorkerCompactPublicationCommitted, true);

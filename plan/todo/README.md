@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 05:47 AKDT: retained gas-cell buffer refs are
+now separated from pressure force-row refs in the pressureInterface worker
+publication path. `createSphPressureInterfaceStageComputeTask()` and the
+resident Worker declare `resident-gas-pressure-cells-buffer` retention when a
+local gas-cell field/import is present, and the publication candidate now
+recognizes worker refs shaped like `result.gasPressureCellsBuffer` as gas-cell
+refs without double-counting them as force-row refs. Next priority: build the
+actual resident local gas-cell pressure-gradient producer from EOS/species/
+material state, publish its admitted retained refs through StateManager, and
+then feed that import through the scene/stage path completed in the previous
+slice.
+
 Current routing note, 2026-06-15 05:28 AKDT: the live scene/stage path now
 uses the resident authority host as the publication boundary for pressure/
 interface gas-cell imports. The scene may derive a candidate from resident

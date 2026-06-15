@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 05:47 AKDT: pressureInterface retained gas-cell
+buffer refs are now classified and declared separately from pressure force-row
+refs. The pressureInterface stage task adds
+`resident-gas-pressure-cells-buffer` to its GPU fence/lane retained refs when
+an admitted local gas-cell import or local gas-cell field is present, and the
+mechanics resident Worker mirrors that declaration for Worker execution. The
+Worker publication candidate now recognizes worker-generated camelCase refs
+such as `result.gasPressureCellsBuffer` as gas-cell refs without also counting
+them as pressure force-row refs. This lets admitted local gas-cell WebGPU
+pressure stages carry worker-retained gas-cell evidence through the
+ComputeManager/GPUHub publication candidate into NodeKernel/StateManager
+admission. Validation passed syntax checks, focused pressure stage coverage,
+PeerCompute integration, resident-stage Worker tests, physics atomics, the
+browser authority-host gate, and the three-scenario visual matrix
+`codex-pressure-gas-cell-retained-ref-wire-20260615` with inspected frames.
+Next target: derive and admit a real resident local gas-cell pressure-gradient
+field from EOS/species/material state instead of relying on synthetic/imported
+local fields.
+
 Current checkpoint, 2026-06-15 05:28 AKDT: the live browser scene/stage path
 now requests pressure/interface gas-cell field imports from the resident
 authority host instead of treating caller-built imports as the only route.

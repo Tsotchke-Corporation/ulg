@@ -21070,3 +21070,63 @@ Open:
 - Major z-buffer/draw-order issues are noted for the renderer pass. The fix
   needs explicit transparent/opaque depth policy, nested-surface ordering, and
   browser coverage that fails on wrong draw order.
+
+## 2026-06-14 20:41 AKDT - GPUHub worker policy evidence
+
+Prompt context:
+
+- Continued from the GPUHub resident stage executor chain. The next routed
+  item was supervised GPUHub/ComputeManager worker residency for the same
+  P2G -> grid-update -> G2P stage chain.
+- The safe first step was to expose worker-residency policy and fallback
+  status rather than pretending `GPUBuffer` handles can be moved from the
+  main-thread GPUHub into arbitrary child workers.
+
+Implemented:
+
+- Sibling PeerCompute commit `313b388e Add GPUHub stage worker residency
+  policy` added `peercompute.gpu.resident-stage-worker-policy.v0` descriptors
+  to GPUHub stage executor registrations and per-stage lane execution results.
+- ULG mechanics stage-chain registration now requests dedicated worker
+  residency for P2G, grid-update, and G2P GPUHub stage executors.
+- `mechanicsStageTaskChain` now exposes
+  `gpuResidentLaneStageExecutionWorkerResidency`,
+  `gpuResidentLaneStageExecutionWorkerResidencyStatuses`, and
+  `gpuResidentLaneStageExecutionRequestedWorkerResidency`.
+- Focused Node and browser tests assert the current truthful status:
+  `blocked-worker-backend-missing` for all three mechanics stages.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `tests/demo.e2e.mjs`
+- ULG plan/status/todo/test/log/done documentation.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-gpuhub-worker-policy-evidence-20260614`
+  reported `failedCount=0` for `3` filtered scenarios with two captured
+  frames each: `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- Next implementation step is a real supervised worker-owned GPU backend for
+  this same stage chain. It must create/own its own device and retained
+  buffers or otherwise maintain one same-device lane; it must not transfer
+  main-thread `GPUBuffer` handles or split one hot state family across
+  arbitrary child workers.
+- The reported z-buffer/draw-order blocker remains queued for the renderer
+  pass.

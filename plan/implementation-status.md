@@ -1,9 +1,22 @@
 # Implementation Status
 
-Updated: 2026-06-14 GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
+Updated: 2026-06-14 GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Added ULG-facing worker-residency policy evidence for the mechanics stage
+  chain. P2G, grid-update, and G2P GPUHub stage registrations now request
+  dedicated worker residency while PeerCompute reports
+  `peercompute.gpu.resident-stage-worker-policy.v0` per stage. Because no
+  worker-owned WebGPU device/buffer backend exists yet, focused Node and
+  browser gates assert the truthful fallback status
+  `blocked-worker-backend-missing` for all three stages. The stage-chain
+  evidence now exposes worker-residency objects, status maps, and requested
+  worker-residency flags. Validation passed syntax checks, focused cross-repo
+  integration `11/11`, focused browser authority-host Playwright `1/1`,
+  physics atomics `7` with `1` expected skip, and visual matrix
+  `codex-gpuhub-worker-policy-evidence-20260614` `3/3` with two captured
+  frames per scenario.
 - Routed ULG mechanics stage-chain execution through the PeerCompute/GPUHub
   resident stage executor registry. The helper registers P2G, grid-update, and
   G2P handlers on the ComputeManager-attached GPUHub, then runs

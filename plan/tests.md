@@ -1,9 +1,10 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 GPUHub Resident Stage Executor Chain
+## Current Focused Result - 2026-06-14 GPUHub Worker Policy Evidence
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
-PeerCompute/GPUHub resident stage executor registry. Focused checks:
+PeerCompute/GPUHub resident stage executor registry and requests dedicated
+worker residency without overclaiming live worker execution. Focused checks:
 
 - ULG mechanics stage-chain lane-plan evidence:
   `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
@@ -13,7 +14,10 @@ PeerCompute/GPUHub resident stage executor registry. Focused checks:
   graph path lets the lane executor submit the actual three stage tasks. The
   same focused gate now gives ComputeManager a real sibling `GPUHubManager`
   and asserts the stage execution source map is
-  `gpu-hub-resident-stage-executor` for P2G, grid-update, and G2P.
+  `gpu-hub-resident-stage-executor` for P2G, grid-update, and G2P. It now
+  also asserts all three stage worker-residency statuses are
+  `blocked-worker-backend-missing`, which is the expected fallback until a
+  worker-owned GPU backend exists.
 - Browser same-lane WebGPU stage-chain validation:
   `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
   passed `1/1`. The gate now runs `host.runMechanicsStageTaskChain()` with
@@ -23,6 +27,9 @@ PeerCompute/GPUHub resident stage executor registry. Focused checks:
   same parent lane/state key, completed stage-plan execution, satisfied
   fences, GPUHub executor registration, and
   `gpu-hub-resident-stage-executor` sources for all three mechanics stages.
+  It also checks the serialized browser evidence reports requested worker
+  residency with `blocked-worker-backend-missing` for P2G, grid-update, and
+  G2P.
   This is inline browser authority-host execution through GPUHub's registry;
   separate GPUHub worker residency remains open.
 - PeerCompute lane manager:
@@ -50,7 +57,9 @@ PeerCompute/GPUHub resident stage executor registry. Focused checks:
   same-lane WebGPU stage-chain matrix
   `codex-browser-same-lane-webgpu-stage-chain-20260614` passed `3/3`. The
   GPUHub resident stage executor chain matrix
-  `codex-gpuhub-stage-executor-chain-20260614` passed `3/3`.
+  `codex-gpuhub-stage-executor-chain-20260614` passed `3/3`. The GPUHub
+  worker-policy evidence matrix
+  `codex-gpuhub-worker-policy-evidence-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

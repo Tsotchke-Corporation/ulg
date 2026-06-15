@@ -237,6 +237,15 @@ validates the browser inline authority host. The remaining step is to put
 those same stage handlers behind supervised GPUHub/ComputeManager worker
 residency without broad readback/reupload loops.
 
+Status update, 2026-06-14 GPUHub worker policy evidence: PeerCompute now
+attaches `peercompute.gpu.resident-stage-worker-policy.v0` to GPUHub resident
+stage executor descriptors and lane execution results. ULG requests dedicated
+worker residency for mechanics P2G, grid-update, and G2P stages, while tests
+assert the current truthful status is `blocked-worker-backend-missing` with
+inline fallback. This is not live worker execution yet; it is the acceptance
+surface for adding a worker-owned WebGPU device/buffer backend without
+transferring main-thread `GPUBuffer` handles.
+
 ## Purpose
 
 Address the copying concern without creating a second scheduler. ULG needs

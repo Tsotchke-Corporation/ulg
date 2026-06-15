@@ -1254,6 +1254,12 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     g2p: 'gpu-hub-resident-stage-executor'
   });
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionRequestedWorkerResidency, true);
+  assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses, {
+    p2g: 'blocked-worker-backend-missing',
+    gridUpdate: 'blocked-worker-backend-missing',
+    g2p: 'blocked-worker-backend-missing'
+  });
   assert.deepEqual(new Set(gpuHub.listResidentStageExecutors().map((entry) => entry.stageId)), new Set(['p2g', 'gridUpdate', 'g2p']));
   assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.stageTaskBoundaries, {
     p2g: true,
@@ -1306,6 +1312,11 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     g2p: 'gpu-hub-resident-stage-executor'
   });
   assert.equal(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors, true);
+  assert.deepEqual(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses, {
+    p2g: 'blocked-worker-backend-missing',
+    gridUpdate: 'blocked-worker-backend-missing',
+    g2p: 'blocked-worker-backend-missing'
+  });
   assert.ok(laneExecutedWebGpuRequestedStageChainStep.mechanicsStageTaskChain.submittedStageTasks.every((task) => (
     task.gpuResidentLaneLaneId === 'ulg:test:mechanics-stage-lane-executor-webgpu-requested'
     && task.gpuResidentLaneStateKey === 'ulg:test:mechanics-stage-lane-executor-webgpu-requested-state'

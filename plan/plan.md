@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 20:41 AKDT: ULG mechanics stage-chain
+registration now requests dedicated worker residency for P2G, grid-update, and
+G2P GPUHub stage executors while truthfully reporting fallback. PeerCompute's
+stage results carry `peercompute.gpu.resident-stage-worker-policy.v0`, and ULG
+now exposes per-stage worker-residency objects/statuses on
+`mechanicsStageTaskChain`. Focused Node and browser gates assert all three
+mechanics stages currently report `blocked-worker-backend-missing`, which is
+the correct non-overclaiming status until a real worker-owned WebGPU
+device/buffer backend exists. Next is that backend: supervised
+GPUHub/ComputeManager worker execution for the same stage chain without
+transferring main-thread `GPUBuffer` handles or splitting one hot state family
+across arbitrary workers.
+
 Current checkpoint, 2026-06-14 20:23 AKDT: ULG mechanics stage-chain
 execution now passes through the PeerCompute/GPUHub resident stage executor
 registry. The helper registers P2G, grid-update, and G2P handlers on the

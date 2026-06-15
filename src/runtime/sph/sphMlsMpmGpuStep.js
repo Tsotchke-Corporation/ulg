@@ -3946,6 +3946,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   useNativeTaskGraph = true,
   useGpuResidentLaneStagePlan = true,
   useGpuHubResidentStageExecutors = true,
+  requestGpuHubWorkerResidency = true,
   gpuResidentLaneId = null,
   gpuResidentLaneStateKey = null,
   gpuResidentLaneDomainKey = null,
@@ -4363,6 +4364,22 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         runtimeTarget: stepOptions.preferWebGpu === true
           ? 'webgpu-compute-manager-stage-task'
           : 'cpu-compute-manager-stage-task',
+        workerPolicy: requestGpuHubWorkerResidency !== false
+          ? {
+            mode: 'dedicated-worker',
+            workerType: stepOptions.preferWebGpu === true
+              ? 'webgpu-compute-worker'
+              : 'cpu-compute-worker',
+            startupMode: 'warm-on-first-use',
+            idleTtlMs: 60000,
+            sameDeviceRequired: stepOptions.preferWebGpu === true,
+            bufferTransferPolicy: stepOptions.preferWebGpu === true
+              ? 'worker-owns-device-and-retained-buffers-required'
+              : 'worker-local-cpu-state-required'
+          }
+          : {
+            mode: 'inline'
+          },
         metadata: {
           source: 'ulg-mechanics-stage-task-chain',
           taskIdPrefix,
@@ -4511,6 +4528,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     (gpuResidentLaneStagePlanExecution?.stageResults || [])
       .map((entry) => [entry.stageId, entry.executorSource || null])
   );
+  const stageExecutionWorkerResidency = Object.fromEntries(
+    (gpuResidentLaneStagePlanExecution?.stageResults || [])
+      .map((entry) => [entry.stageId, entry.workerResidency || null])
+  );
+  const stageExecutionWorkerResidencyStatuses = Object.fromEntries(
+    Object.entries(stageExecutionWorkerResidency)
+      .map(([stageId, workerResidency]) => [stageId, workerResidency?.status || null])
+  );
   const laneTaskSummaries = Object.values(stageLaneSummaries).filter((summary) => summary.laneId || summary.stateKey);
   const allStageTaskLaneIdsMatchPlan = laneTaskSummaries.length > 0
     ? laneTaskSummaries.every((summary) => summary.laneId === laneStagePlanId && summary.stateKey === laneStagePlanStateKey)
@@ -4574,6 +4599,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageExecutionUsedGpuHubExecutors: Object.values(stageExecutionExecutorSources).length > 0
       ? Object.values(stageExecutionExecutorSources).every((source) => source === 'gpu-hub-resident-stage-executor')
       : false,
+    gpuResidentLaneStageExecutionWorkerResidency: stageExecutionWorkerResidency,
+    gpuResidentLaneStageExecutionWorkerResidencyStatuses: stageExecutionWorkerResidencyStatuses,
+    gpuResidentLaneStageExecutionRequestedWorkerResidency: requestGpuHubWorkerResidency !== false,
     gpuHubResidentStageExecutorMode,
     gpuHubResidentStageExecutorRegisteredCount: gpuHubResidentStageExecutorRegistrations.length,
     gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),
@@ -4648,6 +4676,9 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       gpuResidentLaneStageExecutionStageOrder: [...stageTaskChain.gpuResidentLaneStageExecutionStageOrder],
       gpuResidentLaneStageExecutionExecutorSources: { ...stageTaskChain.gpuResidentLaneStageExecutionExecutorSources },
       gpuResidentLaneStageExecutionUsedGpuHubExecutors: stageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors,
+      gpuResidentLaneStageExecutionWorkerResidency: { ...stageTaskChain.gpuResidentLaneStageExecutionWorkerResidency },
+      gpuResidentLaneStageExecutionWorkerResidencyStatuses: { ...stageTaskChain.gpuResidentLaneStageExecutionWorkerResidencyStatuses },
+      gpuResidentLaneStageExecutionRequestedWorkerResidency: stageTaskChain.gpuResidentLaneStageExecutionRequestedWorkerResidency,
       gpuHubResidentStageExecutorMode: stageTaskChain.gpuHubResidentStageExecutorMode,
       gpuHubResidentStageExecutorRegisteredCount: stageTaskChain.gpuHubResidentStageExecutorRegisteredCount,
       gpuHubResidentStageExecutorStageIds: [...stageTaskChain.gpuHubResidentStageExecutorStageIds],

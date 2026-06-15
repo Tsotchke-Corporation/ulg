@@ -5509,6 +5509,8 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         stageExecutionStageOrder: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionStageOrder ?? [],
         stageExecutionExecutorSources: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionExecutorSources ?? {},
         stageExecutionUsedGpuHubExecutors: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionUsedGpuHubExecutors ?? null,
+        stageExecutionWorkerResidencyStatuses: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionWorkerResidencyStatuses ?? {},
+        stageExecutionRequestedWorkerResidency: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuResidentLaneStageExecutionRequestedWorkerResidency ?? null,
         gpuHubResidentStageExecutorMode: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuHubResidentStageExecutorMode ?? null,
         gpuHubResidentStageExecutorRegisteredCount: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuHubResidentStageExecutorRegisteredCount ?? null,
         gpuHubResidentStageExecutorStageIds: mechanicsStageTaskChainWebGpu?.mechanicsStageTaskChain?.gpuHubResidentStageExecutorStageIds ?? [],
@@ -6048,6 +6050,12 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     g2p: 'gpu-hub-resident-stage-executor'
   });
   expect(result.mechanicsStageTaskChainWebGpu.stageExecutionUsedGpuHubExecutors).toBe(true);
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionRequestedWorkerResidency).toBe(true);
+  expect(result.mechanicsStageTaskChainWebGpu.stageExecutionWorkerResidencyStatuses).toEqual({
+    p2g: 'blocked-worker-backend-missing',
+    gridUpdate: 'blocked-worker-backend-missing',
+    g2p: 'blocked-worker-backend-missing'
+  });
   expect(result.mechanicsStageTaskChainWebGpu.gpuHubResidentStageExecutorMode).toBe('registered');
   expect(result.mechanicsStageTaskChainWebGpu.gpuHubResidentStageExecutorRegisteredCount).toBe(3);
   expect(new Set(result.mechanicsStageTaskChainWebGpu.gpuHubResidentStageExecutorStageIds)).toEqual(new Set(['p2g', 'gridUpdate', 'g2p']));

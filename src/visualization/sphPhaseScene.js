@@ -342,6 +342,144 @@ function gasCellEosProducerResultFromSubmission(submission = null) {
     || null;
 }
 
+function spatialGasLedgerProducerResultFromSubmission(submission = null) {
+  return submission?.result
+    || submission?.taskResult
+    || submission?.execution
+    || submission?.value
+    || submission
+    || null;
+}
+
+export async function submitSceneSpatialGasLedgerProducerStageForPressureInterface({
+  residentAuthorityHost = null,
+  gasPressureSummary = null,
+  residentProductMass = null,
+  reactionSummary = null,
+  reactionTable = null,
+  preferWebGpu = true,
+  navigatorRef = null,
+  device = null,
+  deviceResult = null,
+  readbackMode = RESIDENT_NO_FULL_READBACK_MODE,
+  cacheKey = null,
+  stateKey = null,
+  source = 'resident-pressure-interface-physics-refresh',
+  sourceCadence = null,
+  sourceTaskId = null,
+  sourceStage = 'residentProductMass',
+  boxDimsM = null
+} = {}) {
+  const existingLedger = pressureInterfaceSpatialGasSpeciesLedgerFromSummary(gasPressureSummary);
+  const productEventRowCount = Math.max(0, Math.round(Number(
+    residentProductMass?.productEventRowCount ?? reactionSummary?.productEventRowCount
+  ) || 0));
+  const productEventBufferRetained = residentProductMass?.productEventBufferRetained === true
+    || reactionSummary?.productEventBufferRetained === true;
+  const taskId = sourceTaskId || cacheKey || `ulg:scene-spatial-gas-ledger-producer:${source}:${stateKey || 'active'}`;
+  const base = {
+    schema: 'peercompute.ulg.sph-scene-spatial-gas-ledger-producer-stage-request.v0',
+    source,
+    sourceCadence,
+    sourceStage,
+    sourceTaskId: taskId,
+    stateKey,
+    gasPressureSummarySchema: gasPressureSummary?.schema || null,
+    gasPressureSummaryStatus: gasPressureSummary?.status || null,
+    existingSpatialGasSpeciesLedgerSchema: existingLedger?.schema || null,
+    existingSpatialGasSpeciesLedgerStatus: existingLedger?.status || null,
+    existingSpatialGasSpeciesLedgerCellCount: Array.isArray(existingLedger?.cells) ? existingLedger.cells.length : 0,
+    productEventRowCount,
+    productEventBufferRetained,
+    spatialGasLedgerProducerStageResult: null,
+    spatialGasLedgerProducerStageResultReady: false,
+    spatialGasLedgerProducerRetainedSourceReady: false,
+    spatialGasSpeciesLedger: null
+  };
+  if (pressureInterfaceSpatialGasSpeciesLedgerReady(existingLedger)) {
+    return {
+      ...base,
+      status: 'spatial-gas-ledger-already-ready',
+      blocker: null,
+      spatialGasLedgerProducerStageResultReady: true,
+      spatialGasSpeciesLedger: existingLedger,
+      spatialGasSpeciesLedgerCellCount: Array.isArray(existingLedger.cells) ? existingLedger.cells.length : 0
+    };
+  }
+  if (!productEventRowCount || !productEventBufferRetained) {
+    return {
+      ...base,
+      status: 'blocked-retained-product-event-buffer-required',
+      blocker: 'retained-product-event-buffer-with-rows-required'
+    };
+  }
+  const submitter = residentAuthorityHost?.submitSpatialGasLedgerProducerStageTask;
+  if (typeof submitter !== 'function') {
+    return {
+      ...base,
+      status: 'blocked-resident-authority-host-spatial-gas-ledger-producer-submit-required',
+      blocker: 'resident-authority-host-spatial-gas-ledger-producer-submit-required'
+    };
+  }
+  try {
+    const submission = await submitter.call(residentAuthorityHost, {
+      taskId,
+      gasPressureSummary,
+      residentProductMass,
+      reactionSummary,
+      reactionTable,
+      productEventBuffer: residentProductMass?.productEventBuffer || reactionSummary?.productEventBuffer || null,
+      productEventRowCount,
+      productEventStrideFloats: residentProductMass?.productEventStrideFloats
+        ?? reactionSummary?.productEvents?.rowStrideFloats
+        ?? undefined,
+      boxDimsM: boxDimsM || gasPressureSummary?.boxDimsM || null,
+      preferWebGpu,
+      navigatorRef,
+      device,
+      deviceResult,
+      readbackMode,
+      stateKey,
+      laneId: stateKey ? `ulg:scene-spatial-gas-ledger-producer:${stateKey}` : undefined,
+      source: 'scene-mounted-pressure-interface-spatial-gas-ledger-producer'
+    });
+    const result = spatialGasLedgerProducerResultFromSubmission(submission);
+    const spatialGasSpeciesLedger = result?.spatialGasSpeciesLedger || null;
+    const resultReady = pressureInterfaceSpatialGasSpeciesLedgerReady(spatialGasSpeciesLedger);
+    return {
+      ...base,
+      status: resultReady
+        ? 'spatial-gas-ledger-producer-stage-result-ready'
+        : (result?.status || 'spatial-gas-ledger-producer-stage-result-blocked'),
+      blocker: resultReady ? null : (result?.reason || 'spatial-gas-ledger-producer-stage-result-not-ready'),
+      submissionStatus: submission?.status || null,
+      spatialGasLedgerProducerStageResult: result,
+      spatialGasLedgerProducerStageResultReady: resultReady,
+      spatialGasLedgerProducerRetainedSourceReady: result?.retainedSpatialGasLedgerSourceReady === true,
+      spatialGasSpeciesLedger,
+      spatialGasSpeciesLedgerCellCount: Array.isArray(spatialGasSpeciesLedger?.cells)
+        ? spatialGasSpeciesLedger.cells.length
+        : 0,
+      aggregateSpatialGasLedgerFallbackUsed: result?.aggregateSpatialGasLedgerFallbackUsed === true,
+      spatialGasLedgerDerivation: result?.spatialGasLedgerDerivation
+        || spatialGasSpeciesLedger?.spatialGasLedgerDerivation
+        || null,
+      spatialGasPositionSource: result?.spatialGasPositionSource
+        || spatialGasSpeciesLedger?.spatialGasPositionSource
+        || null,
+      compactSpatialGasRowCount: result?.compactSpatialGasRowCount ?? 0,
+      compactSpatialGasReadbackByteLength: result?.compactSpatialGasReadbackByteLength ?? 0,
+      fullProductEventReadbackPerformed: result?.fullProductEventReadbackPerformed === true
+    };
+  } catch (error) {
+    return {
+      ...base,
+      status: 'spatial-gas-ledger-producer-stage-submit-error',
+      blocker: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 export async function submitSceneGasCellEosProducerStageForPressureInterface({
   residentAuthorityHost = null,
   gasPressureSummary = null,
@@ -758,6 +896,7 @@ export function buildSphResidentPressureInterfaceStateSummary({
   pressureInterfaceForceRowsUpload = null,
   pressureInterfaceGridForceAdmission = null,
   pressureInterfaceGasCellFieldImportPublication = null,
+  spatialGasLedgerProducerStageRequest = null,
   gasCellEosProducerStageRequest = null,
   source = 'resident-pressure-interface-state',
   sourceCadence = null
@@ -870,6 +1009,23 @@ export function buildSphResidentPressureInterfaceStateSummary({
     pressureInterfaceGasCellFieldWorkerRetainedGasPressureBufferRefs: [
       ...(pressureInterfaceGasCellFieldImportPublication?.workerRetainedGasPressureBufferRefs || [])
     ],
+    spatialGasLedgerProducerStageRequest,
+    spatialGasLedgerProducerStageRequestSchema: spatialGasLedgerProducerStageRequest?.schema ?? null,
+    spatialGasLedgerProducerStageRequestStatus: spatialGasLedgerProducerStageRequest?.status ?? null,
+    spatialGasLedgerProducerStageRequestBlocker: spatialGasLedgerProducerStageRequest?.blocker ?? null,
+    spatialGasLedgerProducerStageResultReady: spatialGasLedgerProducerStageRequest?.spatialGasLedgerProducerStageResultReady === true,
+    spatialGasLedgerProducerRetainedSourceReady: spatialGasLedgerProducerStageRequest?.spatialGasLedgerProducerRetainedSourceReady === true,
+    spatialGasLedgerProducerStageSpatialLedgerCellCount: spatialGasLedgerProducerStageRequest?.spatialGasSpeciesLedgerCellCount ?? 0,
+    spatialGasLedgerProducerAggregateFallbackUsed: spatialGasLedgerProducerStageRequest?.aggregateSpatialGasLedgerFallbackUsed === true,
+    spatialGasLedgerProducerSpatialGasLedgerDerivation: spatialGasLedgerProducerStageRequest?.spatialGasLedgerDerivation
+      ?? spatialGasLedgerProducerStageRequest?.spatialGasSpeciesLedger?.spatialGasLedgerDerivation
+      ?? null,
+    spatialGasLedgerProducerSpatialGasPositionSource: spatialGasLedgerProducerStageRequest?.spatialGasPositionSource
+      ?? spatialGasLedgerProducerStageRequest?.spatialGasSpeciesLedger?.spatialGasPositionSource
+      ?? null,
+    spatialGasLedgerProducerCompactSpatialGasRowCount: spatialGasLedgerProducerStageRequest?.compactSpatialGasRowCount ?? 0,
+    spatialGasLedgerProducerCompactSpatialGasReadbackByteLength: spatialGasLedgerProducerStageRequest?.compactSpatialGasReadbackByteLength ?? 0,
+    spatialGasLedgerProducerFullProductEventReadbackPerformed: spatialGasLedgerProducerStageRequest?.fullProductEventReadbackPerformed === true,
     gasCellEosProducerStageRequest,
     gasCellEosProducerStageRequestSchema: gasCellEosProducerStageRequest?.schema ?? null,
     gasCellEosProducerStageRequestStatus: gasCellEosProducerStageRequest?.status ?? null,
@@ -2302,6 +2458,7 @@ export function createSphPhaseScene(container, {
   preserveDrawingBuffer = false,
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
+  residentAuthorityHost = null,
   navigatorRef = globalThis.navigator
 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
@@ -2322,6 +2479,16 @@ export function createSphPhaseScene(container, {
   let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
   let currentWallTemperaturesK = null;
   const scene = new THREE.Scene();
+  let sceneResidentAuthorityHost = residentAuthorityHost || null;
+  scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
+  function setResidentAuthorityHost(host = null) {
+    sceneResidentAuthorityHost = host || null;
+    scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
+    return sceneResidentAuthorityHost;
+  }
+  function resolveSceneResidentAuthorityHost(host = null) {
+    return host || sceneResidentAuthorityHost || globalThis.__ulgResidentAuthorityHost || null;
+  }
   // A dark slate background rather than near-black: the ice/water surfaces are physically
   // transmissive (clear), so they take their look from what is behind them — a pure-black void made
   // them read dark. Transmission samples the background render, so lifting it brightens the glassy
@@ -3383,6 +3550,9 @@ export function createSphPhaseScene(container, {
     pressureInterfaceGridForceAdmission = currentPressureInterfaceGridForceAdmission(),
     pressureInterfaceGasCellFieldAdmission = null,
     pressureInterfaceGasCellFieldImport = null,
+    residentProductMass = null,
+    reactionSummary = null,
+    reactionTable = sphReactionTable,
     gasCellEosProducerStageResult = null,
     residentAuthorityHost = null,
     pressureInterfaceGasCellFieldImportSourceTaskId = null,
@@ -3390,14 +3560,54 @@ export function createSphPhaseScene(container, {
     source = 'resident-pressure-interface-physics-refresh',
     sourceCadence = null
   } = {}) {
+    const effectiveResidentAuthorityHost = resolveSceneResidentAuthorityHost(residentAuthorityHost);
     const suppliedImportReady = pressureInterfaceGasCellFieldImport?.schema === ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA
       && pressureInterfaceGasCellFieldImport?.status === 'pressure-interface-gas-cell-field-import-ready';
+    let effectiveGasPressureSummaryForProducer = gasPressureSummary;
+    let spatialGasLedgerProducerStageRequest = null;
+    if (
+      !suppliedImportReady
+      && !gasCellEosProducerStageResult
+      && !pressureInterfaceSpatialGasSpeciesLedgerReady(pressureInterfaceSpatialGasSpeciesLedgerFromSummary(effectiveGasPressureSummaryForProducer))
+    ) {
+      spatialGasLedgerProducerStageRequest = await submitSceneSpatialGasLedgerProducerStageForPressureInterface({
+        residentAuthorityHost: effectiveResidentAuthorityHost,
+        gasPressureSummary,
+        residentProductMass,
+        reactionSummary,
+        reactionTable,
+        preferWebGpu,
+        navigatorRef: overrideNavigatorRef,
+        device,
+        deviceResult,
+        cacheKey: pressureInterfaceGasCellFieldImportSourceTaskId
+          || `ulg:scene-spatial-gas-ledger-producer:${source}:${pressureInterfaceGasCellFieldImportStateKey || 'active'}`,
+        stateKey: pressureInterfaceGasCellFieldImportStateKey,
+        source,
+        sourceCadence,
+        sourceTaskId: pressureInterfaceGasCellFieldImportSourceTaskId,
+        sourceStage: 'residentProductMass',
+        boxDimsM: gasPressureSummary?.boxDimsM || dims
+      });
+      if (pressureInterfaceSpatialGasSpeciesLedgerReady(spatialGasLedgerProducerStageRequest?.spatialGasSpeciesLedger)) {
+        effectiveGasPressureSummaryForProducer = {
+          ...(gasPressureSummary || {}),
+          schema: gasPressureSummary?.schema || 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+          status: gasPressureSummary?.status || 'spatial-gas-ledger-producer-pressure-summary-local',
+          source: gasPressureSummary?.source || 'spatial-gas-ledger-producer-stage',
+          spatialGasSpeciesLedger: spatialGasLedgerProducerStageRequest.spatialGasSpeciesLedger,
+          spatialGasSpeciesLedgerSchema: spatialGasLedgerProducerStageRequest.spatialGasSpeciesLedger.schema,
+          spatialGasSpeciesLedgerStatus: spatialGasLedgerProducerStageRequest.spatialGasSpeciesLedger.status,
+          residentSpatialGasSpeciesLedgerStatus: 'resident-spatial-gas-species-ledger-available'
+        };
+      }
+    }
     let effectiveGasCellEosProducerStageResult = gasCellEosProducerStageResult;
     let gasCellEosProducerStageRequest = null;
     if (!suppliedImportReady && !effectiveGasCellEosProducerStageResult) {
       gasCellEosProducerStageRequest = await submitSceneGasCellEosProducerStageForPressureInterface({
-        residentAuthorityHost,
-        gasPressureSummary,
+        residentAuthorityHost: effectiveResidentAuthorityHost,
+        gasPressureSummary: effectiveGasPressureSummaryForProducer,
         preferWebGpu,
         navigatorRef: overrideNavigatorRef,
         device,
@@ -3444,8 +3654,8 @@ export function createSphPhaseScene(container, {
           fullPhysicsValidation: false
         }
       : publishScenePressureInterfaceGasCellFieldImportSource({
-          residentAuthorityHost,
-          gasPressureSummary,
+          residentAuthorityHost: effectiveResidentAuthorityHost,
+          gasPressureSummary: effectiveGasPressureSummaryForProducer,
           gasCellEosProducerStageResult: effectiveGasCellEosProducerStageResult,
           pressureInterfaceGasCellFieldAdmission,
           cacheKey: pressureInterfaceGasCellFieldImportSourceTaskId
@@ -3461,18 +3671,18 @@ export function createSphPhaseScene(container, {
       ?.pressureInterfaceGasCellFieldImportReady
       ? pressureInterfaceGasCellFieldImportPublication.pressureInterfaceGasCellFieldImport
       : null;
-    const effectiveGasPressureSummary = effectivePressureInterfaceGasCellFieldImport?.gasCellFieldSnapshot && gasPressureSummary
+    const effectiveGasPressureSummary = effectivePressureInterfaceGasCellFieldImport?.gasCellFieldSnapshot && effectiveGasPressureSummaryForProducer
       ? {
-          ...gasPressureSummary,
+          ...effectiveGasPressureSummaryForProducer,
           gasCellField: effectivePressureInterfaceGasCellFieldImport.gasCellFieldSnapshot,
-          pressureFeedback: gasPressureSummary.pressureFeedback
+          pressureFeedback: effectiveGasPressureSummaryForProducer.pressureFeedback
             ? {
-                ...gasPressureSummary.pressureFeedback,
+                ...effectiveGasPressureSummaryForProducer.pressureFeedback,
                 gasCellField: effectivePressureInterfaceGasCellFieldImport.gasCellFieldSnapshot
               }
-            : gasPressureSummary.pressureFeedback
+            : effectiveGasPressureSummaryForProducer.pressureFeedback
         }
-      : gasPressureSummary;
+      : effectiveGasPressureSummaryForProducer;
     const pressureFeedback = pressureFeedbackFromGasPressureSummary(effectiveGasPressureSummary);
     const pressureInterfaceCoupling = gasPressureInterfaceCouplingSummary({
       pressureFeedback,
@@ -3505,6 +3715,7 @@ export function createSphPhaseScene(container, {
       pressureInterfaceForceRowsUpload: pressureInterfaceForceRowsUploadForState,
       pressureInterfaceGridForceAdmission,
       pressureInterfaceGasCellFieldImportPublication,
+      spatialGasLedgerProducerStageRequest,
       gasCellEosProducerStageRequest,
       source,
       sourceCadence
@@ -7541,6 +7752,7 @@ export function createSphPhaseScene(container, {
     pressureInterfaceGasCellFieldImportStateKey = null,
     skipPressureInterfaceRefresh = false
   } = {}) {
+    const effectiveResidentAuthorityHost = resolveSceneResidentAuthorityHost(residentAuthorityHost);
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
     const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
@@ -8259,7 +8471,10 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult,
           materialInterfaceField,
           gasPressureSummary,
-          residentAuthorityHost,
+          residentProductMass,
+          reactionSummary,
+          reactionTable: sphReactionTable,
+          residentAuthorityHost: effectiveResidentAuthorityHost,
           pressureInterfaceGasCellFieldAdmission,
           pressureInterfaceGasCellFieldImport,
           pressureInterfaceGasCellFieldImportStateKey,
@@ -8781,6 +8996,10 @@ export function createSphPhaseScene(container, {
     getSphResidentSurfaceDrawOverlayPolicy() {
       return resolveSceneResidentSurfaceDrawOverlayPolicy();
     },
+    getResidentAuthorityHost() {
+      return resolveSceneResidentAuthorityHost();
+    },
+    setResidentAuthorityHost,
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,

@@ -2,6 +2,28 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 09:57 AKDT: the mounted no-full Na/H2O path now
+gets past the retained product-event row gap without fabricating local plume
+geometry. `spatialGasLedgerProducer` first uses positioned compact product-
+event rows when they exist; when compact rows are inactive/positionless but the
+resident aggregate gas species ledger is ready, it emits an explicit
+single-cell sealed-box spatial ledger with provenance
+`aggregate-gas-ledger-single-cell-sealed-box` and
+`aggregate-gas-ledger-no-positioned-product-events`. The mounted pressure-
+interface state exposes that fallback provenance, and the Na/H2O browser gate
+now proves `spatialGasLedgerProducer -> gasCellEosProducer -> admitted
+gas-cell import` completes without full product-event readback. This is an
+honest bridge, not the final gas plume model. Validation passed syntax checks,
+focused SPH stage coverage `47/47`, scene gas-cell coverage `34/34`, mounted
+Na/H2O browser gate `1/1`, physics atomics `7` with `1` expected opt-in skip,
+and visual matrix `codex-spatial-gas-ledger-producer-20260615` `3/3` with
+inspected nonblank bounded frames. The public UI defaults now start at plain
+SPH CPU reference, sodium over water, both `293.15 K`, blob size `1`, and
+`npm run build:pages` produced the GitHub Pages artifact in `docs/`. Next
+target: replace the sealed-box fallback with a true GPU/worker positioned
+spatial-gas ledger from retained product-event buffers, then promote EOS math
+from CPU/oracle derivation plus row upload into WGSL.
+
 Current checkpoint, 2026-06-15 09:18 AKDT: resident product-mass handles now
 preserve compact product-event and product-inventory records when those records
 exist, and `gasPressureSummaryFromResidentReaction()` can derive a spatial gas

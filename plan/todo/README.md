@@ -35,6 +35,22 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 09:57 AKDT: the no-full mounted Na/H2O path
+now runs the resident spatial-gas producer, gas-cell EOS producer, and admitted
+gas-cell import path without full product-event readback. This uses a strictly
+provenanced bridge: positioned compact rows win, but if retained compact rows
+are inactive/positionless and the aggregate gas species ledger is ready, the
+producer emits a one-cell sealed-box spatial ledger labelled
+`aggregate-gas-ledger-single-cell-sealed-box` with position source
+`aggregate-gas-ledger-no-positioned-product-events`. Treat this as a temporary
+correctness bridge only. The next priority remains a true GPU/worker positioned
+spatial-gas ledger producer from retained product-event buffers, followed by a
+WGSL EOS producer. The public demo defaults are now plain SPH, sodium over
+water, both `293.15 K`, blob size `1`, and the latest GitHub Pages build is in
+`docs/`. Keep MLS-MPM fragmentation, CPU-SPH stacked/blob behavior, long-
+horizon/free-surface quality, ice/solid rigidity, volume pulsing/blinking, and
+renderer z-buffer/focus visual trust open.
+
 Current routing note, 2026-06-15 09:18 AKDT: resident product-mass handles now
 preserve positioned product-event records when records are available, and the
 preferred resident product-mass gas-ledger pressure path can derive a spatial

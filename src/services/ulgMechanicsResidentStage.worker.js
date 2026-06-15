@@ -1,4 +1,5 @@
 import {
+  runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
   runSphReactionProductStageComputeTask,
@@ -20,6 +21,7 @@ const GPU_BUFFER_USAGE = {
 
 const STAGE_RUNNERS = {
   p2g: runMlsMpmMechanicsP2gStageComputeTask,
+  spatialGasLedgerProducer: runSphSpatialGasLedgerProducerStageComputeTask,
   gasCellEosProducer: runSphGasCellEosProducerStageComputeTask,
   pressureInterface: runSphPressureInterfaceStageComputeTask,
   gridUpdate: runMlsMpmMechanicsGridUpdateStageComputeTask,
@@ -123,6 +125,12 @@ function retainedRefsForStageResult(stageId, result = {}) {
     || result.forceRowByteLength > 0
   )) {
     refs.push('pressure-interface-force-rows-buffer');
+  }
+  if (stageId === 'spatialGasLedgerProducer' && (
+    result.spatialGasLedgerRowsBufferRetained
+    || result.spatialGasLedgerRowsBuffer
+  )) {
+    refs.push('resident-spatial-gas-species-ledger-buffer');
   }
   if (stageId === 'gasCellEosProducer' && (
     result.gasPressureCellRowsBufferRetained
@@ -499,9 +507,11 @@ function baseStageData(payload = {}) {
           ? ['sph-state-buffer', 'sph-thermo-buffer']
           : (stageId === 'reactionProduct'
             ? ['sph-state-buffer', 'sph-thermo-buffer', 'mls-mpm-mechanics-buffer', 'resident-product-mass-buffer']
-            : (stageId === 'gasCellEosProducer'
+            : (stageId === 'spatialGasLedgerProducer'
+              ? ['resident-spatial-gas-species-ledger-buffer']
+              : (stageId === 'gasCellEosProducer'
               ? ['resident-gas-pressure-cells-buffer']
-              : ['sph-state-buffer', 'mls-mpm-mechanics-buffer'])))));
+              : ['sph-state-buffer', 'mls-mpm-mechanics-buffer']))))));
   return {
     ...common,
     ...stageSpecificOptions,
@@ -565,6 +575,23 @@ function stageDataForPayload(payload = {}, record) {
     if (gasCellField?.localPressureGradientReady) {
       data.gasPressureSummary = pressureSummaryWithGasCellEosProducer(record, data.gasPressureSummary || data.pressureSummary || null);
       data.pressureFeedback = pressureFeedbackWithGasCellEosProducer(record, data.pressureFeedback || null);
+    }
+  }
+  if (stageId === 'gasCellEosProducer') {
+    const spatialLedger = record.stageResults.spatialGasLedgerProducer?.spatialGasSpeciesLedger || null;
+    if (spatialLedger?.status === 'spatial-gas-species-ledger-ready') {
+      data.spatialGasSpeciesLedger = spatialLedger;
+      const baseSummary = data.gasPressureSummary || data.pressureSummary || {};
+      data.gasPressureSummary = {
+        ...baseSummary,
+        schema: baseSummary.schema || 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+        status: baseSummary.status || 'worker-spatial-gas-ledger-producer-pressure-summary-local',
+        source: baseSummary.source || 'worker-spatial-gas-ledger-producer-stage',
+        spatialGasSpeciesLedger: spatialLedger
+      };
+      data.pressureSummary = data.pressureSummary
+        ? { ...data.pressureSummary, spatialGasSpeciesLedger: spatialLedger }
+        : data.gasPressureSummary;
     }
   }
   if (stageId === 'g2p') {

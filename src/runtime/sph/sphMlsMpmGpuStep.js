@@ -128,6 +128,11 @@ export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-pressure-interface-stage-compute-task-result.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.pressure-interface-stage-task-evidence.v0';
 export const ULG_SPH_PRESSURE_INTERFACE_WORKER_COMPACT_PUBLICATION_CANDIDATE_SCHEMA = 'peercompute.ulg.sph-pressure-interface-worker-compact-publication-candidate.v0';
+export const ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-spatial-gas-ledger-producer-stage-compute-task.v0';
+export const ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-spatial-gas-ledger-producer-stage-compute-task-result.v0';
+export const ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.spatial-gas-ledger-producer-stage-task-evidence.v0';
+export const ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA = 'peercompute.ulg.sph-spatial-gas-species-ledger.v0';
+export const ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA = 'peercompute.ulg.sph-retained-spatial-gas-species-ledger-source.v0';
 export const ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA = 'peercompute.ulg.sph-gas-cell-eos-producer-stage-compute-task.v0';
 export const ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA = 'peercompute.ulg.sph-gas-cell-eos-producer-stage-compute-task-result.v0';
 export const ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_TASK_EVIDENCE_SCHEMA = 'peercompute.ulg.gas-cell-eos-producer-stage-task-evidence.v0';
@@ -156,17 +161,23 @@ const PEERCOMPUTE_GPU_FENCE_REQUIREMENT_SCHEMA = 'peercompute.compute.gpu-fence-
 const PEERCOMPUTE_GPU_RESIDENT_LANE_TASK_SCHEMA = 'peercompute.compute.gpu-resident-lane-task.v0';
 const COMPACT_SUMMARY_READBACK_BYTES = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
 const GPU_BUFFER_USAGE = {
+  MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
+const GPU_MAP_MODE = {
+  READ: globalThis.GPUMapMode?.READ ?? 1
+};
 const DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS = 3;
 const MECHANICS_STAGE_ORDER = Object.freeze(['p2g', 'gridUpdate', 'g2p']);
+const SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID = 'spatialGasLedgerProducer';
 const GAS_CELL_EOS_PRODUCER_STAGE_ID = 'gasCellEosProducer';
 const PRESSURE_INTERFACE_STAGE_ID = 'pressureInterface';
 const THERMAL_PHASE_STAGE_ID = 'thermalPhase';
 const REACTION_PRODUCT_STAGE_ID = 'reactionProduct';
+export const SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS = 12;
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -267,6 +278,42 @@ function gasCellEosProducerResultReady(result = null) {
       && Array.isArray(gasCellField?.cells)
       && gasCellField.cells.length > 0
   );
+}
+
+function spatialGasLedgerProducerResultReady(result = null) {
+  return Boolean(
+    result?.spatialGasSpeciesLedger?.status === 'spatial-gas-species-ledger-ready'
+      && Array.isArray(result.spatialGasSpeciesLedger.cells)
+      && result.spatialGasSpeciesLedger.cells.length > 0
+  );
+}
+
+function spatialGasLedgerFromProducerOrOptions(stageResults = {}, stepOptions = {}) {
+  const produced = stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.spatialGasSpeciesLedger || null;
+  if (produced?.status === 'spatial-gas-species-ledger-ready') return produced;
+  return stepOptions.spatialGasSpeciesLedger
+    || stepOptions.gasPressureSummary?.spatialGasSpeciesLedger
+    || stepOptions.pressureSummary?.spatialGasSpeciesLedger
+    || null;
+}
+
+function pressureSummaryWithSpatialGasLedgerProducerResult(pressureSummary = null, result = null) {
+  const ledger = result?.spatialGasSpeciesLedger || null;
+  if (ledger?.status !== 'spatial-gas-species-ledger-ready') return pressureSummary;
+  const base = pressureSummary && typeof pressureSummary === 'object'
+    ? pressureSummary
+    : {
+        schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+        status: 'spatial-gas-ledger-producer-pressure-summary-local',
+        source: 'spatial-gas-ledger-producer-stage'
+      };
+  return {
+    ...base,
+    spatialGasSpeciesLedger: ledger,
+    spatialGasSpeciesLedgerSchema: ledger.schema,
+    spatialGasSpeciesLedgerStatus: ledger.status,
+    residentSpatialGasSpeciesLedgerStatus: 'resident-spatial-gas-species-ledger-available'
+  };
 }
 
 function pressureSummaryWithGasCellEosProducerResult(pressureSummary = null, result = null) {
@@ -467,6 +514,388 @@ function writeGpuBuffer(device, label, data, usage = GPU_BUFFER_USAGE.STORAGE | 
   const buffer = device.createBuffer({ label, size: byteLength, usage });
   if (data?.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+async function readGpuBuffer(device, sourceBuffer, byteLength, label) {
+  const readback = device.createBuffer({
+    label,
+    size: Math.max(4, byteLength),
+    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(sourceBuffer, 0, readback, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+  await readback.mapAsync(GPU_MAP_MODE.READ);
+  const copy = readback.getMappedRange().slice(0, byteLength);
+  readback.unmap();
+  readback.destroy?.();
+  return copy;
+}
+
+function createSpatialGasLedgerProductEventCompactParams({
+  productEventRowCount,
+  productEventStrideFloats
+} = {}) {
+  const buffer = new ArrayBuffer(16);
+  const view = new DataView(buffer);
+  view.setUint32(0, Math.max(0, Math.floor(finiteNumber(productEventRowCount, 0))), true);
+  view.setUint32(4, Math.max(1, Math.floor(finiteNumber(productEventStrideFloats, SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS))), true);
+  view.setUint32(8, SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS, true);
+  view.setUint32(12, 0, true);
+  return buffer;
+}
+
+function createSpatialGasLedgerProductEventCompactWgsl() {
+  return `
+struct Params {
+  product_event_row_count: u32,
+  product_event_stride_floats: u32,
+  compact_stride_floats: u32,
+  pad0: u32,
+};
+
+@group(0) @binding(0) var<storage, read> product_events: array<f32>;
+@group(0) @binding(1) var<storage, read_write> compact_rows: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let row = global_id.x;
+  if (row >= params.product_event_row_count) {
+    return;
+  }
+  let src = row * params.product_event_stride_floats;
+  let dst = row * params.compact_stride_floats;
+  let status = product_events[src + 18u];
+  let routing = product_events[src + 10u];
+  let moles = product_events[src + 9u];
+  let support_volume = product_events[src + 23u];
+  let is_gas = routing > 0.5 && routing < 1.5;
+  let active = status > 0.5 && is_gas && moles > 0.0 && support_volume > 0.0;
+  if (!active) {
+    for (var i = 0u; i < 12u; i = i + 1u) {
+      compact_rows[dst + i] = 0.0;
+    }
+    return;
+  }
+  compact_rows[dst + 0u] = product_events[src + 0u];
+  compact_rows[dst + 1u] = product_events[src + 1u];
+  compact_rows[dst + 2u] = product_events[src + 2u];
+  compact_rows[dst + 3u] = product_events[src + 4u];
+  compact_rows[dst + 4u] = product_events[src + 3u];
+  compact_rows[dst + 5u] = moles;
+  compact_rows[dst + 6u] = product_events[src + 16u];
+  compact_rows[dst + 7u] = support_volume;
+  compact_rows[dst + 8u] = product_events[src + 5u];
+  compact_rows[dst + 9u] = f32(row);
+  compact_rows[dst + 10u] = 1.0;
+  compact_rows[dst + 11u] = routing;
+}
+`;
+}
+
+function productTermMetadataByIndexForSpatialLedger(reactionTable) {
+  const terms = Array.isArray(reactionTable?.productTermMetadata)
+    ? reactionTable.productTermMetadata
+    : [];
+  return new Map(terms.map((term) => [Math.round(Number(term.productTermIndex) || 0), term]));
+}
+
+function materialForSpatialGasCompactRow(row, terms) {
+  const productTermIndex = Math.round(Number(row.productTermIndex) || 0);
+  const term = terms.get(productTermIndex) || null;
+  return String(term?.material || Math.round(Number(row.materialId) || 0)).toLowerCase();
+}
+
+function spatialGasGridKey(index) {
+  return index.map((value) => Math.round(value)).join(',');
+}
+
+function decodeSpatialGasLedgerCompactRows(values, {
+  productEventRowCount = null,
+  boxDimsM = null,
+  reactionTable = null,
+  source = 'gpu-resident-product-event-compact-spatial-ledger',
+  retainedSpatialGasSourceBufferRefs = [],
+  workerRetainedSpatialGasSourceBufferRefs = [],
+  retainedSpatialGasLedgerBufferRefs = [],
+  workerRetainedSpatialGasLedgerBufferRefs = []
+} = {}) {
+  if (!(values instanceof Float32Array) || values.length % SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS !== 0) {
+    throw new TypeError('decodeSpatialGasLedgerCompactRows requires f32 rows aligned to the compact spatial gas layout');
+  }
+  const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M).map((value) => Math.max(value, 1e-9));
+  const terms = productTermMetadataByIndexForSpatialLedger(reactionTable);
+  const rows = [];
+  const maxRows = productEventRowCount == null
+    ? values.length / SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
+    : Math.min(
+        Math.max(0, Math.floor(finiteNumber(productEventRowCount, 0))),
+        values.length / SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
+      );
+  for (let rowIndex = 0; rowIndex < maxRows; rowIndex += 1) {
+    const offset = rowIndex * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS;
+    const status = values[offset + 10];
+    const moles = finiteNumber(values[offset + 5], 0);
+    const supportVolumeM3 = finiteNumber(values[offset + 7], 0);
+    const positionM = [values[offset], values[offset + 1], values[offset + 2]].map((value) => finiteNumber(value, NaN));
+    if (
+      status <= 0.5
+      || moles <= 0
+      || supportVolumeM3 <= 0
+      || positionM.some((value) => !Number.isFinite(value))
+    ) {
+      continue;
+    }
+    rows.push({
+      positionM,
+      materialId: finiteNumber(values[offset + 3], 0),
+      massKg: finiteNumber(values[offset + 4], 0),
+      moles,
+      temperatureK: finiteNumber(values[offset + 6], 293.15),
+      supportVolumeM3,
+      productTermIndex: Math.round(finiteNumber(values[offset + 8], 0)),
+      sourceRowIndex: Math.round(finiteNumber(values[offset + 9], rowIndex)),
+      routingId: finiteNumber(values[offset + 11], 1),
+      status: 'ready'
+    });
+  }
+  if (!rows.length) return null;
+  const meanSupportVolumeM3 = rows.reduce((sum, row) => sum + row.supportVolumeM3, 0) / rows.length;
+  const supportEdgeM = Math.cbrt(Math.max(meanSupportVolumeM3, 1e-12));
+  const cellDims = dims.map((dim) => Math.max(1, Math.ceil(dim / supportEdgeM)));
+  const buckets = new Map();
+  for (const row of rows) {
+    const gridIndex = row.positionM.map((position, axis) => {
+      const normalized = dims[axis] > 0 ? position / dims[axis] : 0;
+      return Math.max(0, Math.min(cellDims[axis] - 1, Math.floor(normalized * cellDims[axis])));
+    });
+    const key = spatialGasGridKey(gridIndex);
+    const bucket = buckets.get(key) || {
+      index: buckets.size,
+      gridIndex,
+      weightedPositionM: [0, 0, 0],
+      weightMoles: 0,
+      volumeM3: 0,
+      bySpecies: {},
+      sourceEventCount: 0,
+      sourceRowIndices: []
+    };
+    bucket.weightMoles += row.moles;
+    bucket.volumeM3 += row.supportVolumeM3;
+    bucket.weightedPositionM = bucket.weightedPositionM.map((value, axis) => value + row.positionM[axis] * row.moles);
+    bucket.sourceEventCount += 1;
+    bucket.sourceRowIndices.push(row.sourceRowIndex);
+    const material = materialForSpatialGasCompactRow(row, terms);
+    const species = bucket.bySpecies[material] || (bucket.bySpecies[material] = {
+      material,
+      materialId: row.materialId,
+      massKg: 0,
+      moles: 0,
+      temperatureMoleK: 0,
+      eventCount: 0
+    });
+    species.massKg += row.massKg;
+    species.moles += row.moles;
+    species.temperatureMoleK += row.moles * row.temperatureK;
+    species.eventCount += 1;
+    buckets.set(key, bucket);
+  }
+  const cells = [...buckets.values()].map((bucket) => ({
+    index: bucket.index,
+    gridIndex: bucket.gridIndex,
+    centerM: bucket.weightMoles > 0
+      ? bucket.weightedPositionM.map((value) => value / bucket.weightMoles)
+      : bucket.gridIndex.map((value, axis) => (value + 0.5) * (dims[axis] / cellDims[axis])),
+    volumeM3: bucket.volumeM3,
+    sourceEventCount: bucket.sourceEventCount,
+    sourceRowIndices: [...bucket.sourceRowIndices],
+    bySpecies: Object.fromEntries(Object.entries(bucket.bySpecies).map(([material, species]) => [
+      material,
+      {
+        material,
+        materialId: species.materialId,
+        massKg: species.massKg,
+        moles: species.moles,
+        temperatureK: species.moles > 0 ? species.temperatureMoleK / species.moles : 293.15,
+        eventCount: species.eventCount
+      }
+    ]))
+  }));
+  const retainedSourceRefs = uniqueNonEmptyStrings([
+    ...retainedSpatialGasSourceBufferRefs,
+    ...workerRetainedSpatialGasSourceBufferRefs
+  ]);
+  const retainedLedgerRefs = uniqueNonEmptyStrings([
+    ...retainedSpatialGasLedgerBufferRefs,
+    ...workerRetainedSpatialGasLedgerBufferRefs
+  ]);
+  return {
+    schema: ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+    status: 'spatial-gas-species-ledger-ready',
+    source,
+    spatialGasLedgerDerivation: 'positioned-product-event-rows',
+    spatialGasPositionSource: 'resident-product-event-row-positions',
+    retainedSpatialGasSourceBufferRefs: uniqueNonEmptyStrings(retainedSpatialGasSourceBufferRefs),
+    workerRetainedSpatialGasSourceBufferRefs: uniqueNonEmptyStrings(workerRetainedSpatialGasSourceBufferRefs),
+    spatialGasSourceBufferRetained: retainedSourceRefs.length > 0,
+    retainedSpatialGasLedgerBufferRefs: uniqueNonEmptyStrings(retainedSpatialGasLedgerBufferRefs),
+    workerRetainedSpatialGasLedgerBufferRefs: uniqueNonEmptyStrings(workerRetainedSpatialGasLedgerBufferRefs),
+    spatialGasLedgerBufferRetained: retainedLedgerRefs.length > 0,
+    cellDims,
+    cellCount: cells.length,
+    cells,
+    sourceEventRowCount: rows.length,
+    scannedProductEventRowCount: maxRows,
+    pressureClosure: 'ideal-gas-law-per-cell',
+    spatialGasSpeciesLedgerValidation: false,
+    scientificValidation: false,
+    gasValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function aggregateGasRecordsForSpatialLedger(...sources) {
+  const records = [];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    if (Array.isArray(source.gasSpeciesLedger?.records)) records.push(...source.gasSpeciesLedger.records);
+    if (Array.isArray(source.records)) records.push(...source.records);
+    if (source.bySpecies && typeof source.bySpecies === 'object') records.push(...Object.values(source.bySpecies));
+  }
+  const byMaterial = new Map();
+  for (const record of records) {
+    const moles = finiteNumber(record?.moles, 0);
+    const massKg = finiteNumber(record?.massKg, 0);
+    if (!(moles > 0) || !(massKg >= 0)) continue;
+    const material = String(record?.material || Math.round(finiteNumber(record?.materialId, 0))).toLowerCase();
+    const bucket = byMaterial.get(material) || {
+      material,
+      materialId: finiteNumber(record?.materialId, 0),
+      massKg: 0,
+      moles: 0,
+      temperatureMoleK: 0,
+      eventCount: 0
+    };
+    const temperatureK = finiteNumber(record?.temperatureK, 293.15);
+    bucket.massKg += massKg;
+    bucket.moles += moles;
+    bucket.temperatureMoleK += moles * temperatureK;
+    bucket.eventCount += Math.max(0, finiteNumber(record?.eventCount, 0));
+    byMaterial.set(material, bucket);
+  }
+  return [...byMaterial.values()];
+}
+
+function spatialGasLedgerFromAggregateGasLedger({
+  residentProductMass = null,
+  reactionSummary = null,
+  gasPressureSummary = null,
+  boxDimsM = null,
+  source = 'resident-product-mass-aggregate-gas-ledger-uniform-spatial-ledger',
+  retainedSpatialGasSourceBufferRefs = [],
+  workerRetainedSpatialGasSourceBufferRefs = [],
+  retainedSpatialGasLedgerBufferRefs = [],
+  workerRetainedSpatialGasLedgerBufferRefs = []
+} = {}) {
+  const records = aggregateGasRecordsForSpatialLedger(
+    residentProductMass,
+    reactionSummary,
+    gasPressureSummary?.gasSpeciesLedger,
+    gasPressureSummary
+  );
+  if (records.length === 0) return null;
+  const dims = finiteVector3(boxDimsM || gasPressureSummary?.boxDimsM, DEFAULT_BOX_DIMS_M)
+    .map((value) => Math.max(value, 1e-9));
+  const volumeM3 = dims.reduce((product, value) => product * value, 1);
+  const bySpecies = Object.fromEntries(records.map((record) => [
+    record.material,
+    {
+      material: record.material,
+      materialId: record.materialId,
+      massKg: record.massKg,
+      moles: record.moles,
+      temperatureK: record.moles > 0 ? record.temperatureMoleK / record.moles : 293.15,
+      eventCount: record.eventCount
+    }
+  ]));
+  const retainedSourceRefs = uniqueNonEmptyStrings([
+    ...retainedSpatialGasSourceBufferRefs,
+    ...workerRetainedSpatialGasSourceBufferRefs
+  ]);
+  const retainedLedgerRefs = uniqueNonEmptyStrings([
+    ...retainedSpatialGasLedgerBufferRefs,
+    ...workerRetainedSpatialGasLedgerBufferRefs
+  ]);
+  return {
+    schema: ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+    status: 'spatial-gas-species-ledger-ready',
+    source,
+    spatialGasLedgerDerivation: 'aggregate-gas-ledger-single-cell-sealed-box',
+    spatialGasPositionSource: 'aggregate-gas-ledger-no-positioned-product-events',
+    retainedSpatialGasSourceBufferRefs: uniqueNonEmptyStrings(retainedSpatialGasSourceBufferRefs),
+    workerRetainedSpatialGasSourceBufferRefs: uniqueNonEmptyStrings(workerRetainedSpatialGasSourceBufferRefs),
+    spatialGasSourceBufferRetained: retainedSourceRefs.length > 0,
+    retainedSpatialGasLedgerBufferRefs: uniqueNonEmptyStrings(retainedSpatialGasLedgerBufferRefs),
+    workerRetainedSpatialGasLedgerBufferRefs: uniqueNonEmptyStrings(workerRetainedSpatialGasLedgerBufferRefs),
+    spatialGasLedgerBufferRetained: retainedLedgerRefs.length > 0,
+    cellDims: [1, 1, 1],
+    cellCount: 1,
+    cells: [{
+      index: 0,
+      gridIndex: [0, 0, 0],
+      centerM: dims.map((value) => value * 0.5),
+      volumeM3,
+      sourceEventCount: records.reduce((sum, record) => sum + record.eventCount, 0),
+      sourceRowIndices: [],
+      bySpecies
+    }],
+    sourceEventRowCount: 0,
+    sourceAggregateGasRecordCount: records.length,
+    pressureClosure: 'ideal-gas-law-single-cell-sealed-box',
+    spatialGasSpeciesLedgerValidation: false,
+    scientificValidation: false,
+    gasValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function compactSpatialGasRowsFromProductEventRows(productEventRows, {
+  productEventRowCount = null,
+  productEventStrideFloats = SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+} = {}) {
+  if (!(productEventRows instanceof Float32Array)) return null;
+  const stride = Math.max(1, Math.floor(finiteNumber(productEventStrideFloats, SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS)));
+  const rowCount = Math.min(
+    Math.floor(productEventRows.length / stride),
+    productEventRowCount == null
+      ? Math.floor(productEventRows.length / stride)
+      : Math.max(0, Math.floor(finiteNumber(productEventRowCount, 0)))
+  );
+  const compactRows = new Float32Array(rowCount * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS);
+  for (let row = 0; row < rowCount; row += 1) {
+    const src = row * stride;
+    const dst = row * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS;
+    const status = productEventRows[src + 18] ?? 0;
+    const routing = productEventRows[src + 10] ?? 0;
+    const moles = productEventRows[src + 9] ?? 0;
+    const supportVolume = productEventRows[src + 23] ?? 0;
+    const active = status > 0.5 && routing > 0.5 && routing < 1.5 && moles > 0 && supportVolume > 0;
+    if (!active) continue;
+    compactRows[dst] = productEventRows[src] ?? 0;
+    compactRows[dst + 1] = productEventRows[src + 1] ?? 0;
+    compactRows[dst + 2] = productEventRows[src + 2] ?? 0;
+    compactRows[dst + 3] = productEventRows[src + 4] ?? 0;
+    compactRows[dst + 4] = productEventRows[src + 3] ?? 0;
+    compactRows[dst + 5] = moles;
+    compactRows[dst + 6] = productEventRows[src + 16] ?? 293.15;
+    compactRows[dst + 7] = supportVolume;
+    compactRows[dst + 8] = productEventRows[src + 5] ?? 0;
+    compactRows[dst + 9] = row;
+    compactRows[dst + 10] = 1;
+    compactRows[dst + 11] = routing;
+  }
+  return compactRows;
 }
 
 function replaceRequiredWgsl(source, search, replacement, label) {
@@ -4149,6 +4578,559 @@ function estimatedGasCellEosRowCount(stageOptions = {}) {
   return Math.max(0, finiteNumber(ledger?.cellCount ?? ledger?.cells?.length, 0));
 }
 
+function estimatedSpatialGasLedgerProducerRowCount(stageOptions = {}) {
+  const residentProductMass = stageOptions.residentProductMass || stageOptions.reactionSummary?.residentProductMass || null;
+  return Math.max(0, finiteNumber(
+    stageOptions.productEventRowCount
+      ?? residentProductMass?.productEventRowCount
+      ?? stageOptions.reactionSummary?.productEventRowCount,
+    0
+  ));
+}
+
+function createSphSpatialGasLedgerProducerStageTaskEvidence(result = {}, {
+  computeTaskId = null,
+  lawGraphNode = null,
+  gpuFenceRequirement = null
+} = {}) {
+  const acceptedBackend = result?.backend === 'webgpu' || result?.backend === 'cpu-reference';
+  const ledgerReady = result?.spatialGasSpeciesLedger?.status === 'spatial-gas-species-ledger-ready'
+    && Math.max(0, finiteNumber(result?.spatialGasSpeciesLedger?.cellCount, 0)) > 0;
+  const compactRowsReady = Math.max(0, finiteNumber(result?.compactSpatialGasRowCount, 0)) > 0;
+  const noFullProductReadback = result?.fullProductEventReadbackPerformed !== true;
+  const passed = acceptedBackend && ledgerReady && compactRowsReady && noFullProductReadback;
+  return {
+    schema: ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_TASK_EVIDENCE_SCHEMA,
+    passed,
+    status: passed
+      ? 'spatial-gas-ledger-producer-stage-task-evidence-pass'
+      : 'spatial-gas-ledger-producer-stage-task-evidence-fail',
+    reason: passed
+      ? 'resident-product-event-buffer-derived-spatial-gas-ledger'
+      : (!acceptedBackend
+          ? 'spatial-gas-ledger-producer-stage-backend-invalid'
+          : (!noFullProductReadback
+              ? 'full-product-event-readback-performed'
+              : (result?.reason || result?.spatialGasSpeciesLedgerStatus || result?.status || 'spatial-gas-ledger-unavailable'))),
+    computeTaskId,
+    lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-resident-spatial-gas-ledger-law',
+    solverId: lawGraphNode?.solverId || 'ulg-sph-spatial-gas-ledger-producer-stage',
+    stageId: SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID,
+    executionSource: result?.executionSource || null,
+    backend: result?.backend || null,
+    acceptedBackend,
+    executionStatus: result?.status || null,
+    readbackMode: result?.readbackMode || null,
+    fullReadbackPerformed: result?.fullReadbackPerformed === true,
+    fullProductEventReadbackPerformed: result?.fullProductEventReadbackPerformed === true,
+    compactSpatialGasReadbackPerformed: result?.compactSpatialGasReadbackPerformed === true,
+    compactSpatialGasReadbackByteLength: Math.max(0, finiteNumber(result?.compactSpatialGasReadbackByteLength, 0)),
+    compactSpatialGasRowCount: Math.max(0, finiteNumber(result?.compactSpatialGasRowCount, 0)),
+    productEventRowCount: Math.max(0, finiteNumber(result?.productEventRowCount, 0)),
+    productEventStrideFloats: Math.max(0, finiteNumber(result?.productEventStrideFloats, 0)),
+    spatialGasSpeciesLedgerSchema: result?.spatialGasSpeciesLedger?.schema || result?.spatialGasSpeciesLedgerSchema || null,
+    spatialGasSpeciesLedgerStatus: result?.spatialGasSpeciesLedger?.status || result?.spatialGasSpeciesLedgerStatus || null,
+    spatialGasSpeciesLedgerCellCount: Math.max(0, finiteNumber(
+      result?.spatialGasSpeciesLedger?.cellCount ?? result?.spatialGasSpeciesLedgerCellCount,
+      0
+    )),
+    retainedSpatialGasLedgerSourceReady: result?.retainedSpatialGasLedgerSourceReady === true,
+    retainedSpatialGasLedgerSourceStatus: result?.retainedSpatialGasLedgerSourceStatus || null,
+    gpuFenceRequired: gpuFenceRequirement?.required === true,
+    readFamilies: ['resident-product-mass', 'reaction-closure-table'],
+    candidateWriteFamilies: ['resident-spatial-gas-species-ledger'],
+    authoritativeWriteFamilies: [],
+    mustNotWriteFamilies: ['resident-gas-pressure', 'pressure-interface-force-rows', 'sph-particle-state', 'mls-mpm-mechanics', 'sph-thermo-phase'],
+    promotionStatus: 'spatial-gas-ledger-producer-stage-task-evidence-only-not-authoritative',
+    scientificValidation: false,
+    gasValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function createSphSpatialGasLedgerProducerStageGpuFenceReport(result = {}, requirement = {}) {
+  const required = requirement?.required === true;
+  const webgpuCompleted = result?.backend !== 'webgpu'
+    || result?.queueCompletionStatus === 'readback-map-completed'
+    || result?.queueCompletionStatus === 'queue-work-completed';
+  const fenceSatisfied = !required || webgpuCompleted;
+  return {
+    schema: PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA,
+    required,
+    fenceSatisfied,
+    status: fenceSatisfied ? 'gpu-fence-satisfied' : 'gpu-fence-unsatisfied',
+    reason: fenceSatisfied
+      ? (required ? 'spatial-gas-ledger-producer-stage-queue-completion-evidenced' : 'gpu-fence-not-required')
+      : 'spatial-gas-ledger-producer-stage-queue-completion-not-evidenced',
+    laneId: requirement?.laneId || null,
+    stateKey: requirement?.stateKey || null,
+    source: 'ulg-sph-spatial-gas-ledger-producer-stage-compute-task',
+    backend: result?.backend || null,
+    readbackMode: result?.readbackMode || null,
+    fullReadbackPerformed: result?.fullReadbackPerformed === true,
+    queueCompletionStatus: result?.queueCompletionStatus || null,
+    queueCompletionMethod: result?.queueCompletionMethod || null
+  };
+}
+
+export function createSphSpatialGasLedgerProducerStageComputeTask({
+  modulePath,
+  taskId = null,
+  taskFamily = 'ulg-sph-spatial-gas-ledger-producer-stage',
+  solverId = 'ulg-sph-spatial-gas-ledger-producer-stage',
+  owner = 'ulg-resident-spatial-gas-ledger-law',
+  lawGraphId = 'peercompute.ulg.local-sph-law-closure-graph',
+  lawGraphNodeId = 'ulg-resident-spatial-gas-ledger-law',
+  laneId = 'ulg:spatial-gas-ledger-producer-stage:active',
+  stateKey = 'ulg:spatial-gas-ledger-producer-stage-state',
+  domainKey = null,
+  localExecution = 'inline',
+  queueFencePolicy = 'queue.onSubmittedWorkDone-before-admission',
+  readFamilies = ['resident-product-mass', 'reaction-closure-table'],
+  writeFamilies = ['resident-spatial-gas-species-ledger'],
+  retainedBufferRefs = ['resident-spatial-gas-species-ledger-buffer'],
+  returnEnvelope = true,
+  suppressCommitDelta = true,
+  ...stageOptions
+} = {}) {
+  if (typeof modulePath !== 'string' || modulePath.trim() === '') {
+    throw new Error('createSphSpatialGasLedgerProducerStageComputeTask requires a modulePath for the ULG spatial gas ledger producer stage task handler');
+  }
+  const {
+    gpuResidentLaneManager: _ignoredLaneManager,
+    gpuResidentLaneId: _ignoredLaneId,
+    gpuResidentLaneStateKey: _ignoredLaneStateKey,
+    gpuResidentLaneDomainKey: _ignoredLaneDomainKey,
+    ...taskStageOptions
+  } = stageOptions;
+  const readbackMode = taskStageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const estimatedRows = estimatedSpatialGasLedgerProducerRowCount(taskStageOptions);
+  const compactReadbackBytes = estimatedRows * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const residentProductMass = taskStageOptions.residentProductMass || taskStageOptions.reactionSummary?.residentProductMass || null;
+  const requiresGpuLane = taskStageOptions.preferWebGpu === true
+    || readbackMode === NO_FULL_READBACK_MODE
+    || residentProductMass?.productEventBufferRetained === true
+    || taskStageOptions.productEventBufferRetained === true;
+  const lawGraphNode = createResidentLawGraphNodeTaskRef({
+    graphId: lawGraphId,
+    nodeId: lawGraphNodeId,
+    solverId,
+    readFamilies,
+    writeFamilies,
+    requiredClosures: ['reaction-product-event-buffer', 'spatial-gas-species-ledger'],
+    validationGates: [
+      'product-event-buffer-retained-or-rows-supplied',
+      'compact-spatial-gas-readback-not-full-product-events',
+      'gpu-fence-report'
+    ],
+    cachePolicy: 'hot-spatial-gas-ledger-stage-gpu-lane-compact-readback'
+  });
+  const copyBudget = {
+    schema: 'peercompute.compute.gpu-resident-lane-copy-budget.v0',
+    uploadBytes: 0,
+    readbackBytes: compactReadbackBytes,
+    retainedBytes: compactReadbackBytes,
+    compactSummaryBytes: compactReadbackBytes,
+    fullReadbackReason: null
+  };
+  const gpuFence = requiresGpuLane
+    ? createResidentGpuFenceRequirement({
+        laneId,
+        stateKey,
+        queueFencePolicy,
+        retainedBufferRefs,
+        source: 'ulg-sph-spatial-gas-ledger-producer-stage-compute-task',
+        required: true
+      })
+    : null;
+  const gpuResidentLane = requiresGpuLane
+    ? createResidentGpuLaneTaskDescriptor({
+        laneId,
+        stateKey,
+        domainKey,
+        solverId,
+        owner,
+        localExecution,
+        readFamilies,
+        writeFamilies,
+        retainedBufferRefs,
+        queueFencePolicy,
+        copyBudget
+      })
+    : null;
+  const id = taskId || `ulg-sph-spatial-gas-ledger-producer-stage:${finiteNumber(taskStageOptions.sphParticleState?.step, 0)}`;
+  return {
+    schema: ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
+    id,
+    runtime: 'js',
+    taskFamily,
+    solverId,
+    module: modulePath,
+    exportName: 'runSphSpatialGasLedgerProducerStageComputeTask',
+    returnEnvelope,
+    suppressCommitDelta,
+    residency: requiresGpuLane ? 'gpu-lane' : 'cpu-oracle',
+    lawGraphNode,
+    readFamilies: [...readFamilies],
+    writeFamilies: [...writeFamilies],
+    expectedOutputFamilies: [...writeFamilies],
+    ...(requiresGpuLane ? {
+      webgpu: {
+        residency: 'gpu-lane',
+        requiresQueueFence: true,
+        laneId,
+        stateKey,
+        domainKey,
+        queueFencePolicy,
+        retainedBufferRefs: [...retainedBufferRefs],
+        copyBudget: { ...copyBudget }
+      },
+      gpuFence,
+      gpuResidentLane
+    } : {}),
+    data: {
+      ...taskStageOptions,
+      readbackMode,
+      retainSpatialGasLedgerBuffer: taskStageOptions.retainSpatialGasLedgerBuffer ?? true,
+      gpuFenceRequirement: gpuFence,
+      gpuResidentLane,
+      lawGraphNode,
+      computeTaskSchema: ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
+      computeTaskId: id,
+      expectedOutputFamilies: [...writeFamilies],
+      spatialGasLedgerProducerStageTask: true
+    }
+  };
+}
+
+export async function runSphSpatialGasLedgerProducerStageComputeTask(data = {}) {
+  const {
+    gpuResidentLaneManager: _ignoredLaneManager,
+    gpuFenceRequirement = null,
+    gpuResidentLane = null,
+    lawGraphNode = null,
+    computeTaskSchema = ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
+    computeTaskId = null,
+    expectedOutputFamilies = [],
+    spatialGasLedgerProducerStageTask = true,
+    ...stageOptions
+  } = data || {};
+  const readbackMode = stageOptions.readbackMode === NO_FULL_READBACK_MODE ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const residentProductMass = stageOptions.residentProductMass || stageOptions.reactionSummary?.residentProductMass || null;
+  const productEventRowCount = Math.max(0, Math.floor(finiteNumber(
+    stageOptions.productEventRowCount
+      ?? residentProductMass?.productEventRowCount
+      ?? stageOptions.reactionSummary?.productEventRowCount,
+    0
+  )));
+  const productEventStrideFloats = Math.max(1, Math.floor(finiteNumber(
+    stageOptions.productEventStrideFloats
+      ?? residentProductMass?.productEventStrideFloats
+      ?? stageOptions.reactionSummary?.productEvents?.rowStrideFloats,
+    SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
+  )));
+  const retainedSpatialGasSourceBufferRefs = uniqueNonEmptyStrings([
+    ...(stageOptions.retainedSpatialGasSourceBufferRefs || []),
+    ...(residentProductMass?.retainedProductBufferRefs || []),
+    ...(stageOptions.reactionSummary?.retainedProductBufferRefs || []),
+    ...(residentProductMass?.productEventBufferRetained || stageOptions.productEventBufferRetained ? ['resident-product-mass-buffer'] : [])
+  ]);
+  const workerRetainedSpatialGasSourceBufferRefs = uniqueNonEmptyStrings([
+    ...(stageOptions.workerRetainedSpatialGasSourceBufferRefs || []),
+    ...(residentProductMass?.workerRetainedProductBufferRefs || []),
+    ...(stageOptions.reactionSummary?.workerRetainedProductBufferRefs || [])
+  ]);
+  let backend = 'cpu-reference';
+  let webgpuStatus = null;
+  let queueCompletionStatus = 'not-submitted';
+  let queueCompletionMethod = null;
+  let compactRows = null;
+  let compactRowsBuffer = null;
+  let spatialGasLedgerRowsBufferRetained = false;
+  let reason = null;
+  const compactReadbackByteLength = productEventRowCount
+    * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  if (stageOptions.preferWebGpu === true && productEventRowCount > 0) {
+    let deviceResult = stageOptions.deviceResult || null;
+    if (!deviceResult?.device && stageOptions.device?.createBuffer) {
+      deviceResult = { status: 'webgpu-ready-supplied-device', device: stageOptions.device };
+    }
+    if (!deviceResult?.device && (stageOptions.navigatorRef || globalThis.navigator)) {
+      deviceResult = await requestOpticalGpuDevice(stageOptions.navigatorRef || globalThis.navigator);
+    }
+    const device = deviceResult?.device || null;
+    const productEventBuffer = stageOptions.productEventBuffer
+      || residentProductMass?.productEventBuffer
+      || stageOptions.reactionSummary?.productEventBuffer
+      || null;
+    const uploadedProductEventBuffer = !productEventBuffer
+      && device?.createBuffer
+      && stageOptions.productEventRows instanceof Float32Array
+      ? writeGpuBuffer(
+          device,
+          'ulg-sph-spatial-gas-ledger-product-events-in',
+          stageOptions.productEventRows,
+          GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+        )
+      : null;
+    const sourceBuffer = productEventBuffer || uploadedProductEventBuffer;
+    if (device?.createBuffer && device.queue?.writeBuffer && sourceBuffer) {
+      try {
+        compactRowsBuffer = device.createBuffer({
+          label: 'ulg-sph-spatial-gas-ledger-compact-rows-out',
+          size: Math.max(4, compactReadbackByteLength),
+          usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+        });
+        const paramsBuffer = writeGpuBuffer(
+          device,
+          'ulg-sph-spatial-gas-ledger-compact-params',
+          createSpatialGasLedgerProductEventCompactParams({
+            productEventRowCount,
+            productEventStrideFloats
+          }),
+          GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+        );
+        const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+          label: 'ulg-sph-spatial-gas-ledger-product-event-compact',
+          code: createSpatialGasLedgerProductEventCompactWgsl(),
+          entryPoint: 'main',
+          bindings: [
+            computeBufferBinding(0, 'read-only-storage'),
+            computeBufferBinding(1, 'storage'),
+            computeBufferBinding(2, 'uniform')
+          ]
+        });
+        const bindGroup = device.createBindGroup({
+          layout: bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: sourceBuffer } },
+            { binding: 1, resource: { buffer: compactRowsBuffer } },
+            { binding: 2, resource: { buffer: paramsBuffer } }
+          ]
+        });
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.max(1, Math.ceil(productEventRowCount / 64)));
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+        const compactCopy = await readGpuBuffer(
+          device,
+          compactRowsBuffer,
+          compactReadbackByteLength,
+          'ulg-sph-spatial-gas-ledger-compact-readback'
+        );
+        compactRows = new Float32Array(compactCopy);
+        queueCompletionStatus = 'readback-map-completed';
+        queueCompletionMethod = 'mapAsync(compact-spatial-gas-ledger-readback-buffer)';
+        backend = 'webgpu';
+        spatialGasLedgerRowsBufferRetained = stageOptions.retainSpatialGasLedgerBuffer !== false;
+        webgpuStatus = {
+          status: 'webgpu-derived-compact-spatial-gas-ledger-rows',
+          fallback: null,
+          deviceStatus: deviceResult.status || null
+        };
+        paramsBuffer.destroy?.();
+        uploadedProductEventBuffer?.destroy?.();
+        if (!spatialGasLedgerRowsBufferRetained) {
+          compactRowsBuffer.destroy?.();
+          compactRowsBuffer = null;
+        }
+      } catch (error) {
+        compactRowsBuffer?.destroy?.();
+        compactRowsBuffer = null;
+        uploadedProductEventBuffer?.destroy?.();
+        webgpuStatus = {
+          status: 'webgpu-failed',
+          fallback: 'cpu-reference',
+          reason: error?.message || String(error)
+        };
+        queueCompletionStatus = 'not-submitted';
+        queueCompletionMethod = null;
+        backend = 'cpu-reference';
+        reason = error?.message || String(error);
+      }
+    } else {
+      webgpuStatus = {
+        status: 'blocked-webgpu-product-event-buffer-unavailable',
+        fallback: stageOptions.productEventRows instanceof Float32Array ? 'cpu-reference' : null,
+        reason: sourceBuffer ? 'webgpu-device-unavailable' : 'product-event-buffer-unavailable'
+      };
+      reason = webgpuStatus.reason;
+    }
+  }
+  if (!compactRows && stageOptions.productEventCompactRows instanceof Float32Array) {
+    compactRows = stageOptions.productEventCompactRows;
+    reason = null;
+  }
+  if (!compactRows && stageOptions.productEventRows instanceof Float32Array) {
+    compactRows = compactSpatialGasRowsFromProductEventRows(stageOptions.productEventRows, {
+      productEventRowCount,
+      productEventStrideFloats
+    });
+    reason = null;
+  }
+  const retainedSpatialGasLedgerBufferRefs = spatialGasLedgerRowsBufferRetained
+    ? ['resident-spatial-gas-species-ledger-buffer']
+    : [];
+  const workerRetainedSpatialGasLedgerBufferRefs = [];
+  let aggregateSpatialGasLedgerFallbackUsed = false;
+  let spatialGasSpeciesLedger = compactRows
+    ? decodeSpatialGasLedgerCompactRows(compactRows, {
+        productEventRowCount: productEventRowCount || null,
+        boxDimsM: stageOptions.boxDimsM,
+        reactionTable: stageOptions.reactionTable,
+        source: backend === 'webgpu'
+          ? 'gpu-resident-product-event-compact-spatial-ledger'
+          : 'cpu-product-event-compact-spatial-ledger',
+        retainedSpatialGasSourceBufferRefs,
+        workerRetainedSpatialGasSourceBufferRefs,
+        retainedSpatialGasLedgerBufferRefs,
+        workerRetainedSpatialGasLedgerBufferRefs
+      })
+    : null;
+  if (!spatialGasSpeciesLedger) {
+    spatialGasSpeciesLedger = spatialGasLedgerFromAggregateGasLedger({
+      residentProductMass,
+      reactionSummary: stageOptions.reactionSummary,
+      gasPressureSummary: stageOptions.gasPressureSummary || stageOptions.pressureSummary || null,
+      boxDimsM: stageOptions.boxDimsM,
+      retainedSpatialGasSourceBufferRefs,
+      workerRetainedSpatialGasSourceBufferRefs,
+      retainedSpatialGasLedgerBufferRefs,
+      workerRetainedSpatialGasLedgerBufferRefs
+    });
+    aggregateSpatialGasLedgerFallbackUsed = spatialGasSpeciesLedger != null;
+  }
+  const compactSpatialGasRowCount = compactRows
+    ? Math.floor(compactRows.length / SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS)
+    : 0;
+  const ledgerReady = spatialGasSpeciesLedger?.status === 'spatial-gas-species-ledger-ready';
+  const retainedSpatialGasLedgerSourceReady = ledgerReady && spatialGasLedgerRowsBufferRetained;
+  const retainedSpatialGasLedgerSource = retainedSpatialGasLedgerSourceReady
+    ? {
+        schema: ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA,
+        status: 'sph-retained-spatial-gas-species-ledger-source-ready',
+        sourceHotBufferKey: null,
+        sourceTaskId: computeTaskId,
+        sourceStage: SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID,
+        retainedSpatialGasSourceBufferRefs,
+        workerRetainedSpatialGasSourceBufferRefs,
+        retainedSpatialGasLedgerBufferRefs,
+        workerRetainedSpatialGasLedgerBufferRefs,
+        spatialGasSpeciesLedgerSchema: spatialGasSpeciesLedger.schema,
+        spatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger.status,
+        spatialGasSpeciesLedgerCellCount: spatialGasSpeciesLedger.cellCount,
+        compactSpatialGasRowCount,
+        compactSpatialGasRowStrideFloats: SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
+        compactSpatialGasRowByteLength: compactReadbackByteLength,
+        sourceFamilies: ['resident-product-mass'],
+        outputFamilies: ['resident-spatial-gas-species-ledger'],
+        consumerAccessProtocol: aggregateSpatialGasLedgerFallbackUsed
+          ? 'same-device-retained-buffer-ref-plus-aggregate-single-cell-ledger-snapshot'
+          : 'same-device-retained-buffer-ref-plus-compact-ledger-snapshot',
+        stateManagerAdmissionRequired: true
+      }
+    : null;
+  const result = {
+    schema: ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+    backend,
+    status: ledgerReady
+      ? 'spatial-gas-ledger-producer-stage-ready'
+      : 'spatial-gas-ledger-producer-stage-blocked',
+    reason: ledgerReady
+      ? null
+      : (reason || 'spatial-gas-ledger-empty-or-unavailable'),
+    executionSource: aggregateSpatialGasLedgerFallbackUsed
+      ? 'aggregate-gas-ledger-single-cell-spatial-fallback'
+      : (backend === 'webgpu'
+          ? 'webgpu-product-event-buffer-compact-spatial-gas-ledger'
+          : 'cpu-product-event-compact-spatial-gas-ledger'),
+    readbackMode,
+    fullReadbackPerformed: false,
+    fullProductEventReadbackPerformed: false,
+    compactSpatialGasReadbackPerformed: backend === 'webgpu' && compactRows instanceof Float32Array,
+    normalHotLoopReadbackFree: false,
+    webgpuStatus,
+    queueCompletionStatus,
+    queueCompletionMethod,
+    productEventRowCount,
+    productEventStrideFloats,
+    compactSpatialGasRows: compactRows,
+    compactSpatialGasRowCount,
+    compactSpatialGasRowStrideFloats: SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
+    compactSpatialGasReadbackByteLength: backend === 'webgpu' ? compactReadbackByteLength : 0,
+    spatialGasSpeciesLedger,
+    aggregateSpatialGasLedgerFallbackUsed,
+    spatialGasLedgerDerivation: spatialGasSpeciesLedger?.spatialGasLedgerDerivation || null,
+    spatialGasPositionSource: spatialGasSpeciesLedger?.spatialGasPositionSource || null,
+    spatialGasSpeciesLedgerSchema: spatialGasSpeciesLedger?.schema ?? ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+    spatialGasSpeciesLedgerStatus: spatialGasSpeciesLedger?.status ?? 'blocked-spatial-gas-species-ledger-required',
+    spatialGasSpeciesLedgerCellCount: spatialGasSpeciesLedger?.cellCount ?? 0,
+    spatialGasLedgerRowsBuffer: compactRowsBuffer,
+    spatialGasLedgerRowsBufferRetained,
+    retainedSpatialGasSourceBufferRefs,
+    workerRetainedSpatialGasSourceBufferRefs,
+    retainedSpatialGasLedgerBufferRefs,
+    workerRetainedSpatialGasLedgerBufferRefs,
+    retainedSpatialGasLedgerSourceSchema: ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA,
+    retainedSpatialGasLedgerSourceStatus: retainedSpatialGasLedgerSourceReady
+      ? 'sph-retained-spatial-gas-species-ledger-source-ready'
+      : (ledgerReady
+          ? 'blocked-retained-spatial-gas-ledger-buffer-required'
+          : 'blocked-spatial-gas-species-ledger-required'),
+    retainedSpatialGasLedgerSourceReady,
+    retainedSpatialGasLedgerSource,
+    retainedSourceFamilies: retainedSpatialGasLedgerSourceReady ? ['resident-spatial-gas-species-ledger'] : [],
+    destroySpatialGasLedgerRowsBuffer: compactRowsBuffer
+      ? () => compactRowsBuffer?.destroy?.()
+      : null
+  };
+  const fenceRequirement = gpuFenceRequirement || gpuResidentLane || { required: false };
+  const gpuFence = createSphSpatialGasLedgerProducerStageGpuFenceReport(result, fenceRequirement);
+  const spatialGasLedgerProducerStageTaskEvidence = createSphSpatialGasLedgerProducerStageTaskEvidence(result, {
+    computeTaskId,
+    lawGraphNode,
+    gpuFenceRequirement: fenceRequirement
+  });
+  return {
+    ...result,
+    computeTaskResultSchema: ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+    computeTaskSchema,
+    computeTaskId,
+    lawGraphNode,
+    gpuFence,
+    gpuFenceReport: gpuFence,
+    gpuResidentLaneRequirement: gpuResidentLane || null,
+    expectedOutputFamilies: [...expectedOutputFamilies],
+    spatialGasLedgerProducerStageTask: spatialGasLedgerProducerStageTask === true,
+    spatialGasLedgerProducerStageTaskEvidence,
+    spatialGasLedgerProducerStageTaskAuthority: {
+      schema: 'peercompute.ulg.spatial-gas-ledger-producer-stage-task-authority.v0',
+      status: 'compute-manager-owned-non-mutating-spatial-gas-ledger-producer-stage-task',
+      taskId: computeTaskId,
+      lawGraphNodeId: lawGraphNode?.nodeId || 'ulg-resident-spatial-gas-ledger-law',
+      solverId: lawGraphNode?.solverId || 'ulg-sph-spatial-gas-ledger-producer-stage',
+      readFamilies: [...(lawGraphNode?.readFamilies || ['resident-product-mass', 'reaction-closure-table'])],
+      writeFamilies: [...(lawGraphNode?.writeFamilies || ['resident-spatial-gas-species-ledger'])],
+      commitDeltaSuppressed: true,
+      authoritativeStateMutation: false,
+      pressureInterfaceMutationApproved: false,
+      gpuFenceRequired: gpuFenceRequirement?.required === true,
+      gpuFenceSatisfied: gpuFence.fenceSatisfied === true
+    }
+  };
+}
+
+export function submitSphSpatialGasLedgerProducerStageComputeTask({ computeManager, ...taskOptions } = {}) {
+  if (!computeManager || typeof computeManager.submitTask !== 'function') {
+    throw new Error('submitSphSpatialGasLedgerProducerStageComputeTask requires a ComputeManager-compatible submitTask() method');
+  }
+  return computeManager.submitTask(createSphSpatialGasLedgerProducerStageComputeTask(taskOptions));
+}
+
 function createSphGasCellEosProducerStageTaskEvidence(result = {}, {
   computeTaskId = null,
   lawGraphNode = null,
@@ -5527,6 +6509,7 @@ function createMlsMpmMechanicsStageLaneContract({
   readFamilies = ['sph-particle-state', 'mls-mpm-mechanics'],
   writeFamilies = ['sph-particle-state', 'mls-mpm-mechanics'],
   retainedBufferRefs = ['mls-mpm-p2g-grid-buffer', 'mls-mpm-grid-update-buffer', 'sph-state-buffer', 'mls-mpm-mechanics-buffer'],
+  includeSpatialGasLedgerProducerStage = false,
   includeGasCellEosProducerStage = false,
   includePressureInterfaceStage = false,
   includeThermalPhaseStage = false,
@@ -5534,6 +6517,7 @@ function createMlsMpmMechanicsStageLaneContract({
 } = {}) {
   const contractReadFamilies = uniqueNonEmptyStrings([
     ...readFamilies,
+    ...(includeSpatialGasLedgerProducerStage ? ['resident-product-mass', 'reaction-closure-table'] : []),
     ...(includeGasCellEosProducerStage ? ['resident-spatial-gas-species-ledger', 'resident-product-mass'] : []),
     ...(includePressureInterfaceStage ? ['resident-gas-pressure', 'sph-material-interface-field'] : []),
     ...(includeThermalPhaseStage || includeReactionProductStage ? ['sph-thermo-phase'] : []),
@@ -5541,6 +6525,7 @@ function createMlsMpmMechanicsStageLaneContract({
   ]);
   const contractWriteFamilies = uniqueNonEmptyStrings([
     ...writeFamilies,
+    ...(includeSpatialGasLedgerProducerStage ? ['resident-spatial-gas-species-ledger'] : []),
     ...(includeGasCellEosProducerStage ? ['resident-gas-pressure'] : []),
     ...(includePressureInterfaceStage ? ['pressure-interface-force-rows'] : []),
     ...(includeThermalPhaseStage || includeReactionProductStage ? ['sph-thermo-phase'] : []),
@@ -5548,6 +6533,7 @@ function createMlsMpmMechanicsStageLaneContract({
   ]);
   const laneRetainedBufferRefs = uniqueNonEmptyStrings([
     ...retainedBufferRefs,
+    ...(includeSpatialGasLedgerProducerStage ? ['resident-spatial-gas-species-ledger-buffer'] : []),
     ...(includeGasCellEosProducerStage ? ['resident-gas-pressure-cells-buffer'] : []),
     ...(includePressureInterfaceStage ? ['pressure-interface-force-rows-buffer'] : []),
     ...(includeThermalPhaseStage || includeReactionProductStage ? ['sph-thermo-buffer'] : []),
@@ -5561,6 +6547,13 @@ function createMlsMpmMechanicsStageLaneContract({
       reads: ['sph-particle-state', 'mls-mpm-mechanics'],
       writes: ['mls-mpm-grid']
     },
+    ...(includeSpatialGasLedgerProducerStage ? [{
+      id: SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID,
+      lawNodeId: 'ulg-resident-spatial-gas-ledger-law',
+      runtimeTarget: 'compute-manager-stage-task',
+      reads: ['resident-product-mass', 'reaction-closure-table'],
+      writes: ['resident-spatial-gas-species-ledger']
+    }] : []),
     ...(includeGasCellEosProducerStage ? [{
       id: GAS_CELL_EOS_PRODUCER_STAGE_ID,
       lawNodeId: 'ulg-resident-gas-cell-eos-law',
@@ -5608,6 +6601,29 @@ function createMlsMpmMechanicsStageLaneContract({
       writes: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass']
     });
   }
+  const gasEosPrefix = includeSpatialGasLedgerProducerStage
+    ? 'spatial-gas-ledger-eos'
+    : 'gas-eos';
+  let sequenceMode = 'mechanics-stage-task-chain';
+  if (includeReactionProductStage) {
+    sequenceMode = includeGasCellEosProducerStage
+      ? `mechanics-plus-${gasEosPrefix}-pressure-thermal-reaction-product-stage-task-chain`
+      : 'mechanics-plus-thermal-reaction-product-stage-task-chain';
+  } else if (includeThermalPhaseStage) {
+    sequenceMode = includeGasCellEosProducerStage
+      ? `mechanics-plus-${gasEosPrefix}-pressure-thermal-phase-stage-task-chain`
+      : 'mechanics-plus-thermal-phase-stage-task-chain';
+  } else if (includePressureInterfaceStage) {
+    sequenceMode = includeGasCellEosProducerStage
+      ? `mechanics-plus-${gasEosPrefix}-pressure-interface-stage-task-chain`
+      : 'mechanics-plus-pressure-interface-stage-task-chain';
+  } else if (includeGasCellEosProducerStage) {
+    sequenceMode = includeSpatialGasLedgerProducerStage
+      ? 'mechanics-plus-spatial-gas-ledger-eos-stage-task-chain'
+      : 'mechanics-plus-gas-cell-eos-stage-task-chain';
+  } else if (includeSpatialGasLedgerProducerStage) {
+    sequenceMode = 'mechanics-plus-spatial-gas-ledger-stage-task-chain';
+  }
   return {
     schema: ULG_MLS_MPM_MECHANICS_STAGE_LANE_CONTRACT_SCHEMA,
     authority: 'compute-manager-gpuhub-resident-lane-contract',
@@ -5621,21 +6637,7 @@ function createMlsMpmMechanicsStageLaneContract({
     laneMustRetainBuffers: laneRetainedBufferRefs,
     sequenceRequested: true,
     sequenceRunnable: true,
-    sequenceMode: includeReactionProductStage
-      ? (includeGasCellEosProducerStage
-          ? 'mechanics-plus-gas-eos-pressure-thermal-reaction-product-stage-task-chain'
-          : 'mechanics-plus-thermal-reaction-product-stage-task-chain')
-      : (includeThermalPhaseStage
-        ? (includeGasCellEosProducerStage
-            ? 'mechanics-plus-gas-eos-pressure-thermal-phase-stage-task-chain'
-            : 'mechanics-plus-thermal-phase-stage-task-chain')
-        : (includePressureInterfaceStage
-            ? (includeGasCellEosProducerStage
-                ? 'mechanics-plus-gas-eos-pressure-interface-stage-task-chain'
-                : 'mechanics-plus-pressure-interface-stage-task-chain')
-            : (includeGasCellEosProducerStage
-                ? 'mechanics-plus-gas-cell-eos-stage-task-chain'
-                : 'mechanics-stage-task-chain'))),
+    sequenceMode,
     defaultEnabled: false,
     passDagStages,
     ownershipRules: [
@@ -5668,6 +6670,12 @@ function retainedBufferRefsForMechanicsStageResult(stageId, result = {}) {
     || result?.pressureInterfaceForceSolver?.gasPressureCellRowsBufferRetained
   )) {
     refs.push('resident-gas-pressure-cells-buffer');
+  }
+  if (stageId === SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID && (
+    result?.spatialGasLedgerRowsBufferRetained
+    || result?.spatialGasLedgerRowsBuffer
+  )) {
+    refs.push('resident-spatial-gas-species-ledger-buffer');
   }
   if (stageId === GAS_CELL_EOS_PRODUCER_STAGE_ID && (
     result?.gasPressureCellRowsBufferRetained
@@ -5793,6 +6801,28 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     workerRetainedThermoOutputStatus: result?.workerResidentStage?.workerRetainedThermoOutputStatus || null,
     workerRetainedThermoOutput: result?.workerResidentStage?.workerRetainedThermoOutput || null,
     workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || []),
+    spatialGasLedgerProducerEvidencePassed: result?.spatialGasLedgerProducerStageTaskEvidence?.passed === true,
+    spatialGasLedgerProducerAuthoritativeMutation: result?.spatialGasLedgerProducerStageTaskAuthority?.authoritativeStateMutation ?? null,
+    spatialGasLedgerProducerStatus: stageId === SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID ? result?.status || null : null,
+    spatialGasLedgerProducerReady: stageId === SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID
+      ? spatialGasLedgerProducerResultReady(result)
+      : false,
+    spatialGasLedgerProducerCompactRowCount: finiteNumber(result?.compactSpatialGasRowCount, 0),
+    spatialGasLedgerProducerCompactReadbackByteLength: finiteNumber(result?.compactSpatialGasReadbackByteLength, 0),
+    spatialGasLedgerProducerFullProductEventReadbackPerformed: result?.fullProductEventReadbackPerformed === true,
+    spatialGasLedgerProducerRetainedSourceSchema: result?.retainedSpatialGasLedgerSourceSchema
+      || result?.retainedSpatialGasLedgerSource?.schema
+      || null,
+    spatialGasLedgerProducerRetainedSourceStatus: result?.retainedSpatialGasLedgerSourceStatus
+      || result?.retainedSpatialGasLedgerSource?.status
+      || null,
+    spatialGasLedgerProducerRetainedSourceReady: result?.retainedSpatialGasLedgerSourceReady === true,
+    spatialGasLedgerProducerCellCount: finiteNumber(
+      result?.spatialGasSpeciesLedger?.cellCount ?? result?.spatialGasSpeciesLedgerCellCount,
+      0
+    ),
+    spatialGasLedgerProducerRowsBufferRetained: result?.spatialGasLedgerRowsBufferRetained === true
+      || Boolean(result?.spatialGasLedgerRowsBuffer),
     gasCellEosProducerEvidencePassed: result?.gasCellEosProducerStageTaskEvidence?.passed === true,
     gasCellEosProducerAuthoritativeMutation: result?.gasCellEosProducerStageTaskAuthority?.authoritativeStateMutation ?? null,
     gasCellEosProducerStatus: stageId === GAS_CELL_EOS_PRODUCER_STAGE_ID ? result?.status || null : null,
@@ -6484,6 +7514,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentReactionProductStageWorkerOutputPublisher = null,
   gpuHubResidentStageWorkerUseRetainedInput = false,
   residentAuthorityHost = null,
+  includeSpatialGasLedgerProducerStage = false,
   includeGasCellEosProducerStage = false,
   includePressureInterfaceStage = false,
   includeThermalPhaseStage = false,
@@ -6516,6 +7547,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     laneId: laneStagePlanId,
     stateKey: laneStagePlanStateKey,
     domainKey: gpuResidentLaneDomainKey,
+    includeSpatialGasLedgerProducerStage,
     includeGasCellEosProducerStage,
     includePressureInterfaceStage,
     includeThermalPhaseStage,
@@ -6538,6 +7570,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const canUseNativeTaskGraph = useNativeTaskGraph !== false
     && typeof nativeTaskGraphSubmitter.submitTaskGraph === 'function'
     && stepOptions.preferWebGpu !== true
+    && includeSpatialGasLedgerProducerStage !== true
     && includeGasCellEosProducerStage !== true
     && includePressureInterfaceStage !== true
     && includeThermalPhaseStage !== true
@@ -6965,14 +7998,43 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         }
       };
     },
+    [SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]: async () => {
+      const result = await submitStageTask(SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID, createSphSpatialGasLedgerProducerStageComputeTask, {
+        residentProductMass: stepOptions.residentProductMass || stepOptions.gasPressureSummary?.residentProductMass || null,
+        reactionSummary: stepOptions.reactionSummary || null,
+        reactionTable: stepOptions.reactionTable || null,
+        productEventBuffer: stepOptions.productEventBuffer || null,
+        productEventRows: stepOptions.productEventRows || null,
+        productEventCompactRows: stepOptions.productEventCompactRows || null,
+        productEventRowCount: stepOptions.productEventRowCount,
+        productEventStrideFloats: stepOptions.productEventStrideFloats,
+        boxDimsM: dims,
+        laneId: laneStagePlanId,
+        stateKey: laneStagePlanStateKey,
+        domainKey: gpuResidentLaneDomainKey,
+        preferWebGpu: stepOptions.preferWebGpu === true,
+        readbackMode
+      });
+      return {
+        value: result,
+        retainedBufferRefs: retainedBufferRefsForMechanicsStageResult(SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID, result),
+        summary: {
+          computeTaskResultSchema: result?.computeTaskResultSchema || null,
+          evidencePassed: result?.spatialGasLedgerProducerStageTaskEvidence?.passed === true,
+          ...summarizeMechanicsStageLaneResult(SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID, result)
+        }
+      };
+    },
     [GAS_CELL_EOS_PRODUCER_STAGE_ID]: async () => {
+      const producedSpatialLedger = spatialGasLedgerFromProducerOrOptions(stageResults, stepOptions);
+      const producerPressureSummary = pressureSummaryWithSpatialGasLedgerProducerResult(
+        stepOptions.gasPressureSummary || stepOptions.pressureSummary || null,
+        stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID] || null
+      );
       const result = await submitStageTask(GAS_CELL_EOS_PRODUCER_STAGE_ID, createSphGasCellEosProducerStageComputeTask, {
-        gasPressureSummary: stepOptions.gasPressureSummary || null,
-        pressureSummary: stepOptions.pressureSummary || stepOptions.gasPressureSummary || null,
-        spatialGasSpeciesLedger: stepOptions.spatialGasSpeciesLedger
-          || stepOptions.gasPressureSummary?.spatialGasSpeciesLedger
-          || stepOptions.pressureSummary?.spatialGasSpeciesLedger
-          || null,
+        gasPressureSummary: producerPressureSummary || stepOptions.gasPressureSummary || null,
+        pressureSummary: producerPressureSummary || stepOptions.pressureSummary || stepOptions.gasPressureSummary || null,
+        spatialGasSpeciesLedger: producedSpatialLedger,
         boxDimsM: dims,
         laneId: laneStagePlanId,
         stateKey: laneStagePlanStateKey,
@@ -7387,13 +8449,20 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
               laneId: laneStagePlanId,
               stateKey: laneStagePlanStateKey,
               domainKey: gpuResidentLaneDomainKey,
+              ...(includeSpatialGasLedgerProducerStage ? {
+                residentProductMass: stepOptions.residentProductMass || stepOptions.gasPressureSummary?.residentProductMass || null,
+                reactionSummary: stepOptions.reactionSummary || null,
+                reactionTable: stepOptions.reactionTable || null,
+                productEventBuffer: stepOptions.productEventBuffer || null,
+                productEventRows: stepOptions.productEventRows || null,
+                productEventCompactRows: stepOptions.productEventCompactRows || null,
+                productEventRowCount: stepOptions.productEventRowCount,
+                productEventStrideFloats: stepOptions.productEventStrideFloats
+              } : {}),
               ...(includeGasCellEosProducerStage ? {
                 gasPressureSummary: stepOptions.gasPressureSummary || null,
                 pressureSummary: stepOptions.pressureSummary || stepOptions.gasPressureSummary || null,
-                spatialGasSpeciesLedger: stepOptions.spatialGasSpeciesLedger
-                  || stepOptions.gasPressureSummary?.spatialGasSpeciesLedger
-                  || stepOptions.pressureSummary?.spatialGasSpeciesLedger
-                  || null
+                spatialGasSpeciesLedger: spatialGasLedgerFromProducerOrOptions(stageResults, stepOptions)
               } : {}),
               ...(includePressureInterfaceStage ? {
                 pressureFeedback: stepOptions.pressureFeedback || null,
@@ -7501,6 +8570,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     p2g: evidence.p2g || null,
     gridUpdate: evidence.gridUpdate || null,
     g2p: evidence.g2p || null,
+    ...(includeSpatialGasLedgerProducerStage ? {
+      [SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]:
+        stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.spatialGasLedgerProducerStageTaskEvidence || null
+    } : {}),
     ...(includeGasCellEosProducerStage ? {
       [GAS_CELL_EOS_PRODUCER_STAGE_ID]: stageResults[GAS_CELL_EOS_PRODUCER_STAGE_ID]?.gasCellEosProducerStageTaskEvidence || null
     } : {}),
@@ -7514,6 +8587,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       [REACTION_PRODUCT_STAGE_ID]: stageResults[REACTION_PRODUCT_STAGE_ID]?.reactionProductStageTaskEvidence || null
     } : {})
   };
+  if (
+    includeSpatialGasLedgerProducerStage
+    && stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.spatialGasLedgerProducerStageTask === true
+  ) {
+    stageTaskBoundaries[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID] = true;
+  }
   if (includeGasCellEosProducerStage && stageResults[GAS_CELL_EOS_PRODUCER_STAGE_ID]?.gasCellEosProducerStageTask === true) {
     stageTaskBoundaries[GAS_CELL_EOS_PRODUCER_STAGE_ID] = true;
   }
@@ -7837,6 +8916,25 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     pressureInterfaceRetainedSourceFamilies: pressureInterfaceWorkerCompactPublication?.retainedSourceFamilies
       || pressureInterfaceWorkerCompactPublicationCandidate?.retainedSourceFamilies
       || [],
+    spatialGasLedgerProducerStatus: stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.status || null,
+    spatialGasLedgerProducerReady:
+      spatialGasLedgerProducerResultReady(stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]),
+    spatialGasLedgerProducerCellCount:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.spatialGasSpeciesLedger?.cellCount ?? 0,
+    spatialGasLedgerProducerCompactRowCount:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.compactSpatialGasRowCount ?? 0,
+    spatialGasLedgerProducerCompactReadbackByteLength:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.compactSpatialGasReadbackByteLength ?? 0,
+    spatialGasLedgerProducerFullProductEventReadbackPerformed:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.fullProductEventReadbackPerformed === true,
+    spatialGasLedgerProducerRetainedSourceReady:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.retainedSpatialGasLedgerSourceReady === true,
+    spatialGasLedgerProducerRetainedSourceStatus:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.retainedSpatialGasLedgerSourceStatus || null,
+    spatialGasLedgerProducerRetainedSpatialGasLedgerBufferRefs:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.retainedSpatialGasLedgerBufferRefs || [],
+    spatialGasLedgerProducerWorkerRetainedSpatialGasLedgerBufferRefs:
+      stageResults[SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID]?.workerRetainedSpatialGasLedgerBufferRefs || [],
     gasCellEosProducerImportPublication,
     gasCellEosProducerImportPublicationStatus: gasCellEosProducerImportPublication?.status || null,
     gasCellEosProducerImportPublicationBlocker: gasCellEosProducerImportPublication?.blocker || null,
@@ -7965,6 +9063,14 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       pressureInterfaceWorkerCompactPublicationHotBufferKey: stageTaskChain.pressureInterfaceWorkerCompactPublicationHotBufferKey,
       pressureInterfaceWorkerCompactSummaryStatus: stageTaskChain.pressureInterfaceWorkerCompactSummaryStatus,
       pressureInterfacePublishedForceRowCount: stageTaskChain.pressureInterfacePublishedForceRowCount,
+      spatialGasLedgerProducerStatus: stageTaskChain.spatialGasLedgerProducerStatus,
+      spatialGasLedgerProducerReady: stageTaskChain.spatialGasLedgerProducerReady,
+      spatialGasLedgerProducerCellCount: stageTaskChain.spatialGasLedgerProducerCellCount,
+      spatialGasLedgerProducerCompactRowCount: stageTaskChain.spatialGasLedgerProducerCompactRowCount,
+      spatialGasLedgerProducerCompactReadbackByteLength: stageTaskChain.spatialGasLedgerProducerCompactReadbackByteLength,
+      spatialGasLedgerProducerFullProductEventReadbackPerformed: stageTaskChain.spatialGasLedgerProducerFullProductEventReadbackPerformed,
+      spatialGasLedgerProducerRetainedSourceReady: stageTaskChain.spatialGasLedgerProducerRetainedSourceReady,
+      spatialGasLedgerProducerRetainedSourceStatus: stageTaskChain.spatialGasLedgerProducerRetainedSourceStatus,
       gasCellEosProducerImportPublicationStatus: stageTaskChain.gasCellEosProducerImportPublicationStatus,
       gasCellEosProducerImportPublicationBlocker: stageTaskChain.gasCellEosProducerImportPublicationBlocker,
       gasCellEosProducerPressureInterfaceImportReady: stageTaskChain.gasCellEosProducerPressureInterfaceImportReady,

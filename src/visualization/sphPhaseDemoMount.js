@@ -5,7 +5,6 @@
 import {
   SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
-  SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   createSphPhaseScene,
   normalizeResidentSurfaceDrawOverlayMode
 } from './sphPhaseScene.js';
@@ -75,6 +74,9 @@ const MECHANICS_MODE_OPTIONS = Object.freeze([
   ['mlsmpm', 'MLS-MPM resident'],
   ['sph', 'Plain SPH CPU reference']
 ]);
+const MECHANICS_MODE_DEFAULT = 'sph';
+const DROP_MATERIAL_DEFAULT = 'Na';
+const BASE_MATERIAL_DEFAULT = 'h2o';
 const PEER_CLOSURE_CACHE_STORAGE_KEY = 'peercompute.ulg.sph-derived-closure-cache.v1';
 const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v2';
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
@@ -117,14 +119,13 @@ const BOX_DIM_DEFAULTS_M = { x: 5, y: 5, z: 5 };
 // at a smaller edge; base block fills a larger footprint.
 const DROP_PARTICLE_EDGE_DEFAULT = 3;
 const BASE_PARTICLE_EDGE_DEFAULT = 5;
-// Default isosurface blob-size multiplier. Kept conservative for dense material cohorts; the
-// renderer applies a sparse-cohort floor at the default scale so small drops remain visible without
-// bloating the base surface.
-const BLOB_SCALE_DEFAULT = SPH_SURFACE_RADIUS_SCALE_DEFAULT;
-// Default initial temperatures (K): hot drop block (molten iron above its 1811 K liquidus) and cold
-// base block (ice at −40 °F). Editable in the panel.
-const DROP_TEMP_DEFAULT_K = 1850;
-const BASE_TEMP_DEFAULT_K = 233.15;
+// Default isosurface blob-size multiplier. The default UI scenario keeps this at the explicit
+// user-facing scale of 1; targeted tests still override it for smaller diagnostic captures.
+const BLOB_SCALE_DEFAULT = 1;
+// Default initial temperatures (K): room-temperature sodium over room-temperature water.
+// Editable in the panel.
+const DROP_TEMP_DEFAULT_K = 293.15;
+const BASE_TEMP_DEFAULT_K = 293.15;
 const RESIDENT_STEPS_PER_SCHEDULE_FALLBACK = 2;
 const RESIDENT_STEPS_PER_SCHEDULE_MAX = 16;
 const RESIDENT_CONTINUATION_CHAIN_BUDGET = 2;
@@ -1295,6 +1296,13 @@ export function mountSphPhaseDemoOverlay({
   document.body.appendChild(overlay);
   let peerComputeResidentAuthorityHost = residentAuthorityHost || null;
   let peerComputeResidentAuthorityHostPromise = null;
+  function currentResidentAuthorityHostForScene() {
+    return peerComputeResidentAuthorityHost
+      || residentAuthorityHost
+      || runtime?.residentAuthorityHost
+      || globalThis.__ulgResidentAuthorityHost
+      || null;
+  }
 
   const mechanicsModeEl = overlay.querySelector('#sph-mechanics-mode');
   const mechanicsModeSelect = document.createElement('select');
@@ -1304,6 +1312,7 @@ export function mountSphPhaseDemoOverlay({
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
+    if (value === MECHANICS_MODE_DEFAULT) option.selected = true;
     mechanicsModeSelect.appendChild(option);
   }
   mechanicsModeEl.appendChild(mechanicsModeSelect);
@@ -1401,7 +1410,7 @@ export function mountSphPhaseDemoOverlay({
 
   const elementsEl = overlay.querySelector('#sph-elements');
   const elementSelects = {};
-  for (const [role, label, def] of [['drop', 'drop block', 'fe'], ['base', 'base block', 'h2o']]) {
+  for (const [role, label, def] of [['drop', 'drop block', DROP_MATERIAL_DEFAULT], ['base', 'base block', BASE_MATERIAL_DEFAULT]]) {
     const wrap = document.createElement('label');
     wrap.style.cssText = 'font-size:11px;display:flex;flex-direction:column;gap:2px;';
     wrap.textContent = label;
@@ -1562,7 +1571,7 @@ export function mountSphPhaseDemoOverlay({
   function mechanicsModeFromControls() {
     return MECHANICS_MODE_OPTIONS.some(([value]) => value === mechanicsModeSelect.value)
       ? mechanicsModeSelect.value
-      : 'mlsmpm';
+      : MECHANICS_MODE_DEFAULT;
   }
 
   function driverOptionsFromControls() {
@@ -2466,7 +2475,8 @@ export function mountSphPhaseDemoOverlay({
     boxDimsM: sceneBoxDimsM,
     surfaceRadiusScale: blobScaleOf(),
     preserveDrawingBuffer: preserveDrawingBufferForCapture,
-    residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode
+    residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
+    residentAuthorityHost: currentResidentAuthorityHostForScene()
   });
   overlay.__sphScene = scene;
   overlay.__sphDriver = driver;
@@ -2548,7 +2558,10 @@ export function mountSphPhaseDemoOverlay({
 
   function startPeerComputeResidentAuthorityHost() {
     if (!enablePeerComputeResidentHost || peerComputeResidentAuthorityHost || peerComputeResidentAuthorityHostPromise) {
-      if (peerComputeResidentAuthorityHost) publishPeerComputeResidentAuthorityHostStatus('ready');
+      if (peerComputeResidentAuthorityHost) {
+        scene?.setResidentAuthorityHost?.(peerComputeResidentAuthorityHost);
+        publishPeerComputeResidentAuthorityHostStatus('ready');
+      }
       return peerComputeResidentAuthorityHostPromise;
     }
     publishPeerComputeResidentAuthorityHostStatus('initializing');
@@ -2559,6 +2572,7 @@ export function mountSphPhaseDemoOverlay({
       .then((host) => {
         peerComputeResidentAuthorityHost = host;
         globalThis.__ulgResidentAuthorityHost = host;
+        scene?.setResidentAuthorityHost?.(host);
         publishPeerComputeResidentAuthorityHostStatus('ready');
         if (overlay.isConnected) {
           scheduleMlsMpmResidentSteps({ force: true });
@@ -3522,22 +3536,34 @@ export function mountSphPhaseDemoOverlay({
       overlay.__mlsMpmResidentContinuedFromResidentState = Boolean(execution?.continuedFromResidentState);
       overlay.__mlsMpmResidentContinuationAvailable = Boolean(execution?.continuationAvailable);
       updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+      const residentStepForRefresh = overlay.__mlsMpmResidentStep || execution?.finalStep || null;
+      const residentReactionResultForRefresh = residentStepForRefresh?.reactionStep?.result
+        || residentStepForRefresh?.reactionStep
+        || null;
+      const residentReactionSummaryForRefresh = residentReactionResultForRefresh?.reactionSummary || null;
+      const residentProductMassForRefresh = residentStepForRefresh?.residentProductMass
+        || residentReactionResultForRefresh?.residentProductMass
+        || null;
+      const residentGasPressureForRefresh = currentGasPressureSummary(
+        overlay.__sphResidentGasPressureSummary
+          || activeViewStateGasPressure
+          || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+      );
       try {
         overlay.__sphResidentMaterialInterfaceState = await scene.refreshSphResidentMaterialInterfaceState?.({
           preferWebGpu: true,
           residentSteps: execution,
           materialProperties: activeMaterialProperties(),
-          gasPressureSummary: currentGasPressureSummary(
-            activeViewStateGasPressure || (driver?.demo ? gasPressureSummary(driver.demo) : null)
-          ),
+          gasPressureSummary: residentGasPressureForRefresh,
           source: 'resident-physics-loop-material-interface-refresh',
           sourceCadence: 'resident-step-completed'
         });
         overlay.__sphResidentPressureInterfaceState = await scene.refreshSphResidentPressureInterfaceState?.({
           preferWebGpu: true,
-          gasPressureSummary: currentGasPressureSummary(
-            activeViewStateGasPressure || (driver?.demo ? gasPressureSummary(driver.demo) : null)
-          ),
+          gasPressureSummary: residentGasPressureForRefresh,
+          residentProductMass: residentProductMassForRefresh,
+          reactionSummary: residentReactionSummaryForRefresh,
+          reactionTable: scene.getSphReactionTable?.() || null,
           residentAuthorityHost: residentAuthorityHostForSchedule,
           pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
           pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
@@ -3773,6 +3799,7 @@ export function mountSphPhaseDemoOverlay({
   function resetSceneForDimensions(boxDimsM, resetReason) {
     const nextDims = Array.isArray(boxDimsM) ? [...boxDimsM] : boxDimensionsFromControls();
     if (dimensionsEqual(sceneBoxDimsM, nextDims)) {
+      scene.setResidentAuthorityHost?.(currentResidentAuthorityHostForScene());
       scene.setSurfaceRadiusScale(blobScaleOf());
       clearSceneDerivedSignatures();
       resetResidentPerf(`${resetReason}-scene-reused`);
@@ -3791,7 +3818,8 @@ export function mountSphPhaseDemoOverlay({
       boxDimsM: nextDims,
       surfaceRadiusScale: blobScaleOf(),
       preserveDrawingBuffer: preserveDrawingBufferForCapture,
-      residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode
+      residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
+      residentAuthorityHost: currentResidentAuthorityHostForScene()
     });
     overlay.__sphScene = scene;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;

@@ -274,6 +274,58 @@ test('ULG resident stage worker can run gas-cell EOS producer stage', async () =
   assert.equal(eos.value.retainedGasCellFieldSourceReady, false);
 });
 
+test('ULG resident stage worker can run spatial gas ledger producer stage', async () => {
+  const compactRows = new Float32Array([
+    0.5, 1, 1, 7, 0.04, 100, 300, 1, 0, 0, 1, 1,
+    1.5, 1, 1, 7, 0.06, 200, 300, 1, 0, 1, 1, 1
+  ]);
+  const context = {
+    schema: 'peercompute.ulg.mechanics-resident-stage-worker-context.v0',
+    taskIdPrefix: 'ulg:test:spatial-gas-worker',
+    preferWebGpu: false,
+    readbackMode: 'full-parity-readback',
+    common: {
+      boxDimsM: [2, 2, 2],
+      productEventCompactRows: compactRows,
+      productEventRowCount: 2,
+      residentProductMass: {
+        schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+        status: 'resident-product-mass-buffer-retained',
+        productEventBuffer: { label: 'worker-spatial-product-events' },
+        productEventBufferRetained: true,
+        productEventBufferByteLength: 2 * 32 * 4,
+        productEventRowCount: 2,
+        productEventStrideFloats: 32
+      },
+      reactionTable: {
+        schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+        productTermMetadata: [
+          { productTermIndex: 0, material: 'h2', routing: 'gas' }
+        ]
+      }
+    }
+  };
+
+  const spatial = await runUlgMechanicsResidentStageWorkerPayload(payload(
+    stage('spatialGasLedgerProducer', ['resident-product-mass'], ['resident-spatial-gas-species-ledger']),
+    context,
+    null,
+    {
+      laneId: 'ulg:test:spatial-gas-worker-lane',
+      stateKey: 'ulg:test:spatial-gas-worker-state'
+    }
+  ));
+
+  assert.equal(spatial.value.workerResidentStage.stageId, 'spatialGasLedgerProducer');
+  assert.equal(spatial.value.computeTaskId, 'ulg:test:spatial-gas-worker:spatialGasLedgerProducer');
+  assert.equal(spatial.value.spatialGasLedgerProducerStageTaskEvidence.passed, true);
+  assert.equal(spatial.value.spatialGasLedgerProducerStageTaskAuthority.authoritativeStateMutation, false);
+  assert.equal(spatial.value.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
+  assert.equal(spatial.value.spatialGasSpeciesLedger.cellCount, 2);
+  assert.equal(spatial.value.fullProductEventReadbackPerformed, false);
+  assert.equal(spatial.value.retainedSpatialGasLedgerSourceReady, false);
+});
+
 test('ULG resident stage worker can run thermal phase stage and adopt retained thermo output', async () => {
   const buffers = manualBuffers();
   const sourceStateBuffer = { label: 'worker-g2p-state' };

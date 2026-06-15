@@ -12,6 +12,14 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 09:57 AKDT update: the mounted Na/H2O no-full path can now run
+  `spatialGasLedgerProducer -> gasCellEosProducer -> admitted gas-cell import`
+  without full product-event readback by using a labelled one-cell sealed-box
+  aggregate gas fallback when positioned compact product-event rows are absent.
+  This fixes a resident coupling blocker, not liquid/solid visual behavior.
+  The visual matrix remained nonblank and bounded, but MLS-MPM H2O is still
+  fragmented and CPU-SPH liquid/solid are still stacked/blob-shaped in short
+  captures.
 - Reset/playback continuity: reset must not leave stale pressure rows, stale
   render fields, stale resident uploads, or mismatched sequence state that make
   the first post-reset substep diverge from later substeps.

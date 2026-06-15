@@ -4967,6 +4967,13 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
       } : null,
       pressureInterfaceState: pressureInterfaceState ? {
         status: pressureInterfaceState.status ?? null,
+        spatialGasLedgerProducerStageRequestStatus: pressureInterfaceState.spatialGasLedgerProducerStageRequestStatus ?? null,
+        spatialGasLedgerProducerStageSpatialLedgerCellCount: pressureInterfaceState.spatialGasLedgerProducerStageSpatialLedgerCellCount ?? null,
+        spatialGasLedgerProducerAggregateFallbackUsed: pressureInterfaceState.spatialGasLedgerProducerAggregateFallbackUsed ?? null,
+        spatialGasLedgerProducerSpatialGasLedgerDerivation: pressureInterfaceState.spatialGasLedgerProducerSpatialGasLedgerDerivation ?? null,
+        spatialGasLedgerProducerSpatialGasPositionSource: pressureInterfaceState.spatialGasLedgerProducerSpatialGasPositionSource ?? null,
+        spatialGasLedgerProducerCompactSpatialGasReadbackByteLength: pressureInterfaceState.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength ?? null,
+        spatialGasLedgerProducerFullProductEventReadbackPerformed: pressureInterfaceState.spatialGasLedgerProducerFullProductEventReadbackPerformed ?? null,
         gasCellEosProducerStageRequestStatus: pressureInterfaceState.gasCellEosProducerStageRequestStatus ?? null,
         gasCellEosProducerStageSpatialLedgerCellCount: pressureInterfaceState.gasCellEosProducerStageSpatialLedgerCellCount ?? null,
         pressureInterfaceGasCellFieldImportStatus: pressureInterfaceState.pressureInterfaceGasCellFieldImportStatus ?? null,
@@ -5006,10 +5013,19 @@ test('SPH phase mounted resident Na/H2O promotes product gas pressure', async ({
   expect(result.residentGasPressure?.residentSpatialGasSpeciesLedgerStatus).toBe('blocked-resident-spatial-gas-species-ledger-required');
   expect(result.residentGasPressure?.pressureFeedbackGasCellLocalReady).toBe(false);
   expect(result.residentGasPressure?.pressureFeedbackGasCellSpatialStatus).toBe('blocked-resident-spatial-gas-species-ledger-required');
-  expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus).toBe('blocked-spatial-gas-species-ledger-required');
-  expect(result.pressureInterfaceState?.gasCellEosProducerStageSpatialLedgerCellCount).toBe(0);
-  expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus).toBe('blocked-snapshot-gas-cell-import-disabled');
-  expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportReady).toBe(false);
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageRequestStatus).toBe('spatial-gas-ledger-producer-stage-result-ready');
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerAggregateFallbackUsed).toBe(true);
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasLedgerDerivation)
+    .toBe('aggregate-gas-ledger-single-cell-sealed-box');
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerSpatialGasPositionSource)
+    .toBe('aggregate-gas-ledger-no-positioned-product-events');
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength).toBeGreaterThan(0);
+  expect(result.pressureInterfaceState?.spatialGasLedgerProducerFullProductEventReadbackPerformed).toBe(false);
+  expect(result.pressureInterfaceState?.gasCellEosProducerStageRequestStatus).toBe('gas-cell-eos-producer-stage-result-ready');
+  expect(result.pressureInterfaceState?.gasCellEosProducerStageSpatialLedgerCellCount).toBeGreaterThan(0);
+  expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportStatus).toBe('pressure-interface-gas-cell-field-import-ready');
+  expect(result.pressureInterfaceState?.pressureInterfaceGasCellFieldImportReady).toBe(true);
   expect(['resident-gpu-render-field', 'resident-gpu-render-rows']).toContain(result.renderState?.source);
   expect(result.renderState?.backend).toBe('webgpu');
   expect(result.renderState?.gasPressureSummaryStatus).toBe('gpu-resident-reaction-pressure-summary');

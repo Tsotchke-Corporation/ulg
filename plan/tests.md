@@ -1,5 +1,54 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Spatial Gas Ledger Producer Fallback
+
+The current slice makes the mounted no-full Na/H2O pressure path complete
+without full product-event readback by adding an explicit aggregate-gas bridge
+inside `spatialGasLedgerProducer`. Positioned compact product-event rows still
+produce normal spatial gas cells. If compact rows are inactive/positionless but
+the resident aggregate gas species ledger is ready, the producer emits a
+one-cell sealed-box spatial ledger with provenance
+`aggregate-gas-ledger-single-cell-sealed-box` and position source
+`aggregate-gas-ledger-no-positioned-product-events`. The scene pressure-
+interface summary exposes that provenance so browser tests can assert that the
+path is unblocked but not a true local plume.
+
+Focused checks:
+
+- Syntax and whitespace:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check src/visualization/sphPhaseDemoMount.js`,
+  `node --check tests/sphMlsMpmGpuStep.test.mjs`,
+  `node --check tests/demo.e2e.mjs`, and `git diff --check` passed.
+- Focused SPH stage coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "spatial gas ledger|gas-cell EOS producer before pressureInterface|gas-cell EOS producer stage publishes"`
+  passed `47/47`.
+- Focused scene gas-cell coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "spatial gas ledger producer|gas-cell EOS producer|gas-cell import|gas-cell field"`
+  passed `34/34`.
+- Mounted Na/H2O browser gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "mounted resident Na/H2O promotes product gas pressure"`
+  passed `1/1` in about `59s`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `7` checks with `1` expected opt-in
+  long-horizon liquid skip.
+- Post-slice visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-spatial-gas-ledger-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed `3/3` with `failedCount=0`, `issues=[]`, and
+  `visualSurfaceIssues=[]` under
+  `/tmp/ulg-visual-sanity-matrix/codex-spatial-gas-ledger-producer-20260615`.
+  Manual inspection found nonblank bounded frames; MLS-MPM H2O remains
+  fragmented and CPU-SPH liquid/solid remain stacked/blob-shaped.
+- Default UI probe:
+  fresh browser context at `https://127.0.0.1:5173/?sph=1` reported
+  mechanics `sph`, drop `Na`, base `h2o`, drop/base temperatures `293.15`,
+  and blob `1`.
+- GitHub Pages build:
+  `npm run build:pages` passed and produced `docs/index.html`,
+  `docs/assets/pages-vPnFh9Yy.js`, `docs/assets/pages-DwBf2e9n.css`, and
+  `docs/.nojekyll`.
+
 ## Current Focused Result - 2026-06-15 Product-Event Spatial Ledger Source
 
 The current slice preserves compact positioned product-event records on

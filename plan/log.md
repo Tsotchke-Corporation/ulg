@@ -1,5 +1,84 @@
 # ULG Implementation Log
 
+## 2026-06-15 09:57 AKDT - Spatial gas ledger producer aggregate fallback
+
+Implemented:
+
+- Added a strictly labelled aggregate fallback to
+  `runSphSpatialGasLedgerProducerStageComputeTask()`: positioned compact
+  product-event rows remain the preferred source, but inactive/positionless
+  compact rows can now fall back to the resident aggregate gas species ledger as
+  a one-cell sealed-box spatial ledger.
+- Tagged ledger provenance with `spatialGasLedgerDerivation` and
+  `spatialGasPositionSource` so downstream code can distinguish a real
+  positioned product-event ledger from the temporary aggregate bridge.
+- Exposed the fallback/provenance fields through mounted scene pressure-
+  interface state and the Na/H2O browser gate.
+- Added atomic coverage for positionless retained rows plus aggregate H2.
+- Changed public SPH demo defaults to plain SPH CPU reference, sodium over
+  water, both `293.15 K`, and blob size `1`.
+- Built the GitHub Pages artifact into `docs/`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `src/visualization/sphPhaseScene.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `tests/demo.e2e.mjs`
+- `docs/index.html`
+- `docs/assets/pages-vPnFh9Yy.js`
+- `docs/assets/pages-DwBf2e9n.css`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/spatial-gas-ledger-producer-fallback-2026-06-15.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check src/visualization/sphPhaseScene.js`
+- `node --check src/visualization/sphPhaseDemoMount.js`
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+- `node --check tests/demo.e2e.mjs`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "spatial gas ledger|gas-cell EOS producer before pressureInterface|gas-cell EOS producer stage publishes"`
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "spatial gas ledger producer|gas-cell EOS producer|gas-cell import|gas-cell field"`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "mounted resident Na/H2O promotes product gas pressure"`
+- `npm run test:physics-atomics`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-spatial-gas-ledger-producer-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+- Fresh-browser default probe for `https://127.0.0.1:5173/?sph=1`
+- `npm run build:pages`
+- `git diff --check`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/test/demo modules.
+- PASS: focused SPH stage coverage reported `47/47`.
+- PASS: focused scene gas-cell coverage reported `34/34`.
+- PASS: mounted Na/H2O browser gate reported `1/1`.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon liquid skip.
+- PASS: visual matrix
+  `codex-spatial-gas-ledger-producer-20260615` reported `failedCount=0`,
+  `issues=[]`, `visualSurfaceIssues=[]`, and two frames per scenario.
+- PASS: manually inspected final visual frames; they were nonblank and
+  bounded. Known quality blockers remain visible.
+- PASS: default probe reported mechanics `sph`, drop `Na`, base `h2o`,
+  temperatures `293.15`, and blob `1`.
+- PASS: GitHub Pages build produced `docs/index.html` and hashed assets.
+
+Open:
+
+- The aggregate fallback is not a true gas plume. Next slice should produce a
+  positioned spatial gas ledger from retained product-event buffers in a
+  GPU/worker producer without full product-event readback.
+- Gas-cell EOS math is still CPU/oracle derivation plus WebGPU row upload; a
+  WGSL EOS producer remains open.
+- MLS-MPM fragmentation, CPU-SPH stacked/blob behavior, long-horizon/free-
+  surface liquid quality, mounted ice/solid rigidity, volume pulsing/blinking,
+  and renderer z-buffer/focus visual trust remain open.
+
 ## 2026-06-15 05:00 AKDT - StateManager gas-cell import publisher
 
 Implemented:

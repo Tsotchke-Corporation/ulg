@@ -36,12 +36,18 @@ import {
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
+  ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
+  ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA,
+  ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA,
+  SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS,
   ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA,
   ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
   ULG_PRESSURE_INTERFACE_RETAINED_GAS_CELL_FIELD_SOURCE_SCHEMA,
   createSphThermalPhaseStageComputeTask,
+  createSphSpatialGasLedgerProducerStageComputeTask,
   createSphGasCellEosProducerStageComputeTask,
   createSphPressureInterfaceStageComputeTask,
   createMlsMpmMechanicsGridUpdateStageComputeTask,
@@ -51,6 +57,7 @@ import {
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
   runSphThermalPhaseStageComputeTask,
+  runSphSpatialGasLedgerProducerStageComputeTask,
   runSphGasCellEosProducerStageComputeTask,
   runSphPressureInterfaceStageComputeTask,
   runMlsMpmMechanicsGridUpdateStageComputeTask,
@@ -505,6 +512,47 @@ function residentProductMassHandle({
     }
   });
   return handle;
+}
+
+function compactSpatialGasRowsFixture(rows = [
+  {
+    positionM: [0.5, 1, 1],
+    materialId: 7,
+    massKg: 0.04,
+    moles: 100,
+    temperatureK: 300,
+    supportVolumeM3: 1,
+    productTermIndex: 0,
+    sourceRowIndex: 0
+  },
+  {
+    positionM: [1.5, 1, 1],
+    materialId: 7,
+    massKg: 0.06,
+    moles: 200,
+    temperatureK: 300,
+    supportVolumeM3: 1,
+    productTermIndex: 0,
+    sourceRowIndex: 1
+  }
+]) {
+  const values = new Float32Array(rows.length * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS);
+  rows.forEach((row, index) => {
+    const offset = index * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS;
+    values[offset] = row.positionM[0];
+    values[offset + 1] = row.positionM[1];
+    values[offset + 2] = row.positionM[2];
+    values[offset + 3] = row.materialId;
+    values[offset + 4] = row.massKg;
+    values[offset + 5] = row.moles;
+    values[offset + 6] = row.temperatureK;
+    values[offset + 7] = row.supportVolumeM3;
+    values[offset + 8] = row.productTermIndex;
+    values[offset + 9] = row.sourceRowIndex ?? index;
+    values[offset + 10] = row.statusCode ?? 1;
+    values[offset + 11] = row.routingId ?? 1;
+  });
+  return values;
 }
 
 function fakeSummaryDevice(summaryValues) {
@@ -1924,6 +1972,134 @@ test('SPH gas-cell EOS producer stage publishes retained gas pressure cell rows'
   assert.equal(result.gasPressureCellsBuffer.destroyed, true);
 });
 
+test('SPH spatial gas ledger producer stage derives compact ledger from retained product-event rows', async () => {
+  const compactRows = compactSpatialGasRowsFixture();
+  const device = fakeSummaryDevice(compactRows);
+  const residentProductMass = residentProductMassHandle({
+    label: 'resident-product-events',
+    rowCount: 2,
+    byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+  });
+  const reactionTable = {
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    productTermMetadata: [
+      { productTermIndex: 0, material: 'h2', routing: 'gas' }
+    ]
+  };
+  const task = createSphSpatialGasLedgerProducerStageComputeTask({
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:spatial-gas-ledger-producer-stage',
+    laneId: 'ulg:test:spatial-gas-ledger-lane',
+    stateKey: 'ulg:test:spatial-gas-ledger-state',
+    domainKey: 'ulg:test-domain',
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentProductMass,
+    reactionTable,
+    boxDimsM: [2, 2, 2],
+    device
+  });
+
+  assert.equal(task.schema, ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.exportName, 'runSphSpatialGasLedgerProducerStageComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.suppressCommitDelta, true);
+  assert.deepEqual(task.readFamilies, ['resident-product-mass', 'reaction-closure-table']);
+  assert.deepEqual(task.writeFamilies, ['resident-spatial-gas-species-ledger']);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, ['resident-spatial-gas-species-ledger-buffer']);
+  assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuResidentLane.owner, 'ulg-resident-spatial-gas-ledger-law');
+
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask(task.data);
+
+  assert.equal(result.computeTaskResultSchema, ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.computeTaskId, 'ulg:test:spatial-gas-ledger-producer-stage');
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.status, 'spatial-gas-ledger-producer-stage-ready');
+  assert.equal(result.fullProductEventReadbackPerformed, false);
+  assert.equal(result.compactSpatialGasReadbackPerformed, true);
+  assert.equal(result.compactSpatialGasReadbackByteLength, 96);
+  assert.equal(result.compactSpatialGasRowCount, 2);
+  assert.equal(result.spatialGasSpeciesLedger.schema, ULG_SPH_SPATIAL_GAS_SPECIES_LEDGER_SCHEMA);
+  assert.equal(result.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
+  assert.equal(result.spatialGasSpeciesLedger.cellCount, 2);
+  assert.equal(result.aggregateSpatialGasLedgerFallbackUsed, false);
+  assert.equal(result.spatialGasLedgerDerivation, 'positioned-product-event-rows');
+  assert.equal(result.spatialGasPositionSource, 'resident-product-event-row-positions');
+  assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 100);
+  assert.equal(result.spatialGasSpeciesLedger.cells[1].bySpecies.h2.moles, 200);
+  assert.deepEqual(result.retainedSpatialGasSourceBufferRefs, ['resident-product-mass-buffer']);
+  assert.deepEqual(result.retainedSpatialGasLedgerBufferRefs, ['resident-spatial-gas-species-ledger-buffer']);
+  assert.equal(result.retainedSpatialGasLedgerSourceReady, true);
+  assert.equal(result.retainedSpatialGasLedgerSource.schema, ULG_SPH_RETAINED_SPATIAL_GAS_LEDGER_SOURCE_SCHEMA);
+  assert.equal(result.retainedSpatialGasLedgerSource.sourceTaskId, 'ulg:test:spatial-gas-ledger-producer-stage');
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.spatialGasLedgerProducerStageTaskEvidence.schema, 'peercompute.ulg.spatial-gas-ledger-producer-stage-task-evidence.v0');
+  assert.equal(result.spatialGasLedgerProducerStageTaskEvidence.passed, true);
+  assert.deepEqual(result.spatialGasLedgerProducerStageTaskEvidence.candidateWriteFamilies, ['resident-spatial-gas-species-ledger']);
+  assert.ok(result.spatialGasLedgerProducerStageTaskEvidence.mustNotWriteFamilies.includes('resident-gas-pressure'));
+  assert.equal(result.spatialGasLedgerProducerStageTaskAuthority.status, 'compute-manager-owned-non-mutating-spatial-gas-ledger-producer-stage-task');
+  assert.equal(result.spatialGasLedgerProducerStageTaskAuthority.authoritativeStateMutation, false);
+
+  result.destroySpatialGasLedgerRowsBuffer?.();
+  assert.equal(result.spatialGasLedgerRowsBuffer.destroyed, true);
+});
+
+test('SPH spatial gas ledger producer stage falls back to aggregate gas ledger when retained event rows are positionless', async () => {
+  const compactRows = new Float32Array(2 * SPH_SPATIAL_GAS_LEDGER_COMPACT_ROW_FLOATS);
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: false,
+    readbackMode: 'no-full-readback',
+    productEventCompactRows: compactRows,
+    productEventRowCount: 2,
+    productEventStrideFloats: 32,
+    boxDimsM: [4, 4, 4],
+    residentProductMass: {
+      schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+      status: 'resident-product-mass-buffer-retained',
+      productEventBufferRetained: true,
+      productEventRowCount: 2,
+      productEventStrideFloats: 32,
+      gasSpeciesLedger: {
+        schema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
+        status: 'gas-species-resident-ledger-ready',
+        records: [{
+          material: 'h2',
+          materialId: 3022823,
+          massKg: 0.02,
+          moles: 10,
+          temperatureK: 293.15,
+          eventCount: 4,
+          status: 'ready'
+        }]
+      }
+    },
+    gasPressureSummary: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+      status: 'gpu-resident-reaction-pressure-summary',
+      boxDimsM: [4, 4, 4]
+    }
+  });
+
+  assert.equal(result.status, 'spatial-gas-ledger-producer-stage-ready');
+  assert.equal(result.aggregateSpatialGasLedgerFallbackUsed, true);
+  assert.equal(result.executionSource, 'aggregate-gas-ledger-single-cell-spatial-fallback');
+  assert.equal(result.fullProductEventReadbackPerformed, false);
+  assert.equal(result.compactSpatialGasRowCount, 2);
+  assert.equal(result.spatialGasLedgerDerivation, 'aggregate-gas-ledger-single-cell-sealed-box');
+  assert.equal(result.spatialGasPositionSource, 'aggregate-gas-ledger-no-positioned-product-events');
+  assert.equal(result.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
+  assert.equal(result.spatialGasSpeciesLedger.cellCount, 1);
+  assert.deepEqual(result.spatialGasSpeciesLedger.cellDims, [1, 1, 1]);
+  assert.deepEqual(result.spatialGasSpeciesLedger.cells[0].centerM, [2, 2, 2]);
+  assert.equal(result.spatialGasSpeciesLedger.cells[0].volumeM3, 64);
+  assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 10);
+  assert.equal(result.retainedSpatialGasLedgerSourceReady, false);
+});
+
 test('ComputeManager stage chain runs gas-cell EOS producer before pressureInterface import consumption', async () => {
   const buffers = manualBuffers({
     position: [1, 1, 1],
@@ -1932,34 +2108,39 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
     restDensityKgPerM3: 8,
     mechanicsDtS: 1 / 60
   });
-  const device = fakeSummaryDevice(new Float32Array(0));
   const pressureFor = (pressurePa) => (pressurePa * 4) / (8.31446261815324 * 300);
-  const spatialGasSpeciesLedger = {
-    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
-    status: 'spatial-gas-species-ledger-ready',
-    spatialGasSourceBufferRetained: true,
-    retainedSpatialGasSourceBufferRefs: ['resident-product-mass-buffer'],
-    cellDims: [2, 1, 1],
-    cellCount: 2,
-    cells: [
-      {
-        index: 0,
-        gridIndex: [0, 0, 0],
-        centerM: [0.5, 1, 1],
-        volumeM3: 4,
-        bySpecies: {
-          h2: { material: 'h2', massKg: 0.04, moles: pressureFor(120000), temperatureK: 300 }
-        }
-      },
-      {
-        index: 1,
-        gridIndex: [1, 0, 0],
-        centerM: [1.5, 1, 1],
-        volumeM3: 4,
-        bySpecies: {
-          h2: { material: 'h2', massKg: 0.06, moles: pressureFor(180000), temperatureK: 300 }
-        }
-      }
+  const compactRows = compactSpatialGasRowsFixture([
+    {
+      positionM: [0.5, 1, 1],
+      materialId: 7,
+      massKg: 0.04,
+      moles: pressureFor(120000),
+      temperatureK: 300,
+      supportVolumeM3: 4,
+      productTermIndex: 0,
+      sourceRowIndex: 0
+    },
+    {
+      positionM: [1.5, 1, 1],
+      materialId: 7,
+      massKg: 0.06,
+      moles: pressureFor(180000),
+      temperatureK: 300,
+      supportVolumeM3: 4,
+      productTermIndex: 0,
+      sourceRowIndex: 1
+    }
+  ]);
+  const device = fakeSummaryDevice(compactRows);
+  const residentProductMass = residentProductMassHandle({
+    label: 'resident-product-events-for-spatial-ledger',
+    rowCount: 2,
+    byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT
+  });
+  const reactionTable = {
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    productTermMetadata: [
+      { productTermIndex: 0, material: 'h2', routing: 'gas' }
     ]
   };
   const materialInterfaceField = {
@@ -2046,6 +2227,9 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
   const computeManager = {
     submitTask(task) {
       const data = { ...task.data };
+      if (task.exportName === 'runSphSpatialGasLedgerProducerStageComputeTask') {
+        return runSphSpatialGasLedgerProducerStageComputeTask({ ...data, preferWebGpu: true, device });
+      }
       if (task.exportName === 'runSphGasCellEosProducerStageComputeTask') {
         return runSphGasCellEosProducerStageComputeTask({ ...data, preferWebGpu: true, device });
       }
@@ -2143,16 +2327,18 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
     useGpuHubResidentStageExecutors: false,
     preferWebGpu: true,
     readbackMode: 'full-parity-readback',
+    includeSpatialGasLedgerProducerStage: true,
     includeGasCellEosProducerStage: true,
     includePressureInterfaceStage: true,
+    residentProductMass,
+    reactionTable,
     gasPressureSummary: {
       schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
       status: 'gpu-resident-reaction-pressure-summary',
       totalPressurePa: 180000,
       boxVolumeM3: 8,
       boxDimsM: [2, 2, 2],
-      bySpecies: {},
-      spatialGasSpeciesLedger
+      bySpecies: {}
     },
     materialInterfaceField,
     residentAuthorityHost,
@@ -2162,16 +2348,22 @@ test('ComputeManager stage chain runs gas-cell EOS producer before pressureInter
 
   assert.deepEqual(step.mechanicsStageTaskChain.stageOrder, [
     'p2g',
+    'spatialGasLedgerProducer',
     'gasCellEosProducer',
     'pressureInterface',
     'gridUpdate',
     'g2p'
   ]);
-  assert.equal(step.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 5);
+  assert.equal(step.mechanicsStageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount, 6);
+  assert.equal(step.mechanicsStageTaskChain.stageTaskResultSchemas.spatialGasLedgerProducer, ULG_SPH_SPATIAL_GAS_LEDGER_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
   assert.equal(step.mechanicsStageTaskChain.stageTaskResultSchemas.gasCellEosProducer, ULG_SPH_GAS_CELL_EOS_PRODUCER_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
   assert.equal(step.mechanicsStageTaskChain.stageTaskResultSchemas.pressureInterface, ULG_SPH_PRESSURE_INTERFACE_STAGE_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(step.mechanicsStageTaskChain.stageTaskEvidencePassed.spatialGasLedgerProducer, true);
   assert.equal(step.mechanicsStageTaskChain.stageTaskEvidencePassed.gasCellEosProducer, true);
   assert.equal(step.mechanicsStageTaskChain.stageTaskEvidencePassed.pressureInterface, true);
+  assert.equal(step.mechanicsStageTaskChain.spatialGasLedgerProducerReady, true);
+  assert.equal(step.mechanicsStageTaskChain.spatialGasLedgerProducerCellCount, 2);
+  assert.equal(step.mechanicsStageTaskChain.spatialGasLedgerProducerFullProductEventReadbackPerformed, false);
   assert.equal(step.mechanicsStageTaskChain.gasCellEosProducerImportPublicationStatus, 'gas-cell-eos-producer-import-published');
   assert.equal(step.mechanicsStageTaskChain.gasCellEosProducerPressureInterfaceImportReady, true);
   assert.equal(step.mechanicsStageTaskChain.gasCellEosProducerPressureInterfaceAdmissionApproved, true);

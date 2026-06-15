@@ -25,6 +25,7 @@ import {
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   publishScenePressureInterfaceGasCellFieldImportSource,
+  submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
   residentSurfaceBatchIdentitySignature,
   residentRenderFieldReadbackModeForSurfaceOverlay,
@@ -1470,6 +1471,121 @@ test('SPH scene blocks mounted gas-cell EOS producer requests without a spatial 
   assert.equal(request.blocker, 'ready-spatial-gas-species-ledger-required');
   assert.equal(request.gasCellEosProducerStageResultReady, false);
   assert.equal(request.spatialGasSpeciesLedgerCellCount, 0);
+});
+
+test('SPH scene requests spatial gas ledger producer from retained product events before gas-cell EOS', async () => {
+  const spatialGasSpeciesLedger = {
+    schema: 'peercompute.ulg.sph-spatial-gas-species-ledger.v0',
+    status: 'spatial-gas-species-ledger-ready',
+    cellCount: 1,
+    cells: [
+      {
+        index: 0,
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        volumeM3: 4,
+        bySpecies: {
+          h2: { material: 'h2', massKg: 0.04, moles: 100, temperatureK: 300 }
+        }
+      }
+    ]
+  };
+  const residentProductMass = {
+    schema: 'peercompute.ulg.sph-resident-product-mass.v0',
+    status: 'resident-product-mass-buffer-retained',
+    productEventBuffer: { label: 'resident-product-events' },
+    productEventBufferRetained: true,
+    productEventBufferByteLength: 2 * 32 * 4,
+    productEventRowCount: 2,
+    productEventStrideFloats: 32
+  };
+  const reactionSummary = {
+    schema: 'peercompute.ulg.sph-gpu-reaction-summary.v0',
+    productEventBuffer: residentProductMass.productEventBuffer,
+    productEventBufferRetained: true,
+    productEventRowCount: 2
+  };
+  const reactionTable = {
+    schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+    productTermMetadata: [
+      { productTermIndex: 0, material: 'h2', routing: 'gas' }
+    ]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-resident-gas-pressure-summary.v0',
+    status: 'gpu-resident-reaction-pressure-summary',
+    boxDimsM: [2, 2, 2]
+  };
+  const submitCalls = [];
+  const residentAuthorityHost = {
+    async submitSpatialGasLedgerProducerStageTask(options) {
+      submitCalls.push(options);
+      return {
+        status: 'task-execution-completed',
+        result: {
+          schema: 'peercompute.ulg.sph-spatial-gas-ledger-producer-stage-compute-task-result.v0',
+          status: 'spatial-gas-ledger-producer-stage-ready',
+          computeTaskId: options.taskId,
+          spatialGasSpeciesLedger,
+          retainedSpatialGasLedgerSourceReady: true,
+          compactSpatialGasRowCount: 2,
+          compactSpatialGasReadbackByteLength: 96,
+          fullProductEventReadbackPerformed: false
+        }
+      };
+    }
+  };
+
+  const request = await submitSceneSpatialGasLedgerProducerStageForPressureInterface({
+    residentAuthorityHost,
+    gasPressureSummary,
+    residentProductMass,
+    reactionSummary,
+    reactionTable,
+    preferWebGpu: true,
+    stateKey: 'ulg:test:mounted-pressure-interface-state',
+    sourceTaskId: 'ulg:test:mounted-spatial-gas-source',
+    source: 'resident-physics-loop-pressure-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  assert.equal(submitCalls.length, 1);
+  assert.equal(submitCalls[0].taskId, 'ulg:test:mounted-spatial-gas-source');
+  assert.equal(submitCalls[0].residentProductMass, residentProductMass);
+  assert.equal(submitCalls[0].reactionSummary, reactionSummary);
+  assert.equal(submitCalls[0].reactionTable, reactionTable);
+  assert.equal(submitCalls[0].productEventBuffer, residentProductMass.productEventBuffer);
+  assert.equal(submitCalls[0].productEventRowCount, 2);
+  assert.equal(submitCalls[0].productEventStrideFloats, 32);
+  assert.equal(submitCalls[0].source, 'scene-mounted-pressure-interface-spatial-gas-ledger-producer');
+  assert.equal(request.status, 'spatial-gas-ledger-producer-stage-result-ready');
+  assert.equal(request.spatialGasLedgerProducerStageResultReady, true);
+  assert.equal(request.spatialGasLedgerProducerRetainedSourceReady, true);
+  assert.equal(request.spatialGasSpeciesLedger, spatialGasSpeciesLedger);
+  assert.equal(request.spatialGasSpeciesLedgerCellCount, 1);
+  assert.equal(request.fullProductEventReadbackPerformed, false);
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField: {
+      schema: 'peercompute.ulg.sph-material-interface-field.v0',
+      status: 'material-interface-field-ready',
+      readySurfaceCount: 0,
+      totalSurfaceAreaM2: 0,
+      elementCount: 0,
+      elements: []
+    },
+    gasPressureSummary: {
+      ...gasPressureSummary,
+      spatialGasSpeciesLedger
+    },
+    spatialGasLedgerProducerStageRequest: request
+  });
+  assert.equal(state.spatialGasLedgerProducerStageRequestStatus, 'spatial-gas-ledger-producer-stage-result-ready');
+  assert.equal(state.spatialGasLedgerProducerStageResultReady, true);
+  assert.equal(state.spatialGasLedgerProducerRetainedSourceReady, true);
+  assert.equal(state.spatialGasLedgerProducerStageSpatialLedgerCellCount, 1);
+  assert.equal(state.spatialGasLedgerProducerCompactSpatialGasReadbackByteLength, 96);
+  assert.equal(state.spatialGasLedgerProducerFullProductEventReadbackPerformed, false);
 });
 
 test('SPH scene requests mounted gas-cell EOS producer stage through resident authority host', async () => {

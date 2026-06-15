@@ -4,6 +4,17 @@ Updated: 2026-06-14 live same-device source auto-publication, CPU-SPH solid H2O 
 
 ## Done
 
+- Added compact-summary fence attribution telemetry and probe browser launch
+  controls. Resident summary execution now reports internal setup/encode/
+  submit/`mapAsync`/decode timings and the probe analysis reports
+  compact-summary map-wait share separately from coarse compact-summary wall
+  time. A `64`-substep direct-resident H2O/H2O probe shows about `14.49 s` of
+  `mapAsync` wait for a `336` byte summary row; system Chrome/Vulkan stays
+  about the same; thermal/reaction-off mechanics-only stays about `13.50 s`.
+  Current interpretation: the summary readback fence is draining queued
+  resident mechanics command buffers. Remaining P0: implement a fused/sparse
+  resident mechanics lane under ComputeManager/GPU authority so validation does
+  not require hundreds of tiny stage command submissions.
 - Promoted the long-horizon H2O/H2O settle evidence from CPU/reference-only to
   direct-resident no-full telemetry. The
   `/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json`

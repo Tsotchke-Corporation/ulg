@@ -12,6 +12,40 @@ const DEFAULT_IRON_BASE_HEIGHT_M = 2.5;
 const DEFAULT_BOX_DIMS_M = [5, 5, 5];
 const DEFAULT_DROP_PARTICLE_EDGE = 3;
 const DEFAULT_BASE_PARTICLE_EDGE = 5;
+const DEFAULT_CHROMIUM_ARGS = ['--enable-unsafe-webgpu'];
+
+function parseChromiumArgs(value) {
+  return String(value || '')
+    .split(/\s+/)
+    .map((arg) => arg.trim())
+    .filter(Boolean);
+}
+
+function probeChromiumLaunchOptions() {
+  const extraArgs = parseChromiumArgs(process.env.ULG_PROBE_CHROMIUM_ARGS);
+  const args = [...new Set([...DEFAULT_CHROMIUM_ARGS, ...extraArgs])];
+  const channel = String(process.env.ULG_PROBE_CHROMIUM_CHANNEL || '').trim();
+  const executablePath = String(process.env.ULG_PROBE_CHROMIUM_EXECUTABLE || '').trim();
+  return {
+    args,
+    ...(channel ? { channel } : {}),
+    ...(executablePath ? { executablePath } : {})
+  };
+}
+
+function probeChromiumLaunchReport() {
+  const options = probeChromiumLaunchOptions();
+  return {
+    schema: 'peercompute.ulg.sph-probe-browser-launch.v0',
+    channel: options.channel || null,
+    executablePath: options.executablePath || null,
+    args: [...options.args]
+  };
+}
+
+async function launchProbeBrowser() {
+  return chromium.launch(probeChromiumLaunchOptions());
+}
 
 function positiveInteger(value, fallback) {
   const number = Number(value);
@@ -365,7 +399,7 @@ async function runBrowserProbe({
   captureFrameMax,
   initialResidentWaitMs
 }) {
-  const browser = await chromium.launch({ args: ['--enable-unsafe-webgpu'] });
+  const browser = await launchProbeBrowser();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
   const preProbeSnapshots = [];
   const pageConsole = [];
@@ -1286,7 +1320,7 @@ async function runBrowserProbe({
 }
 
 async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches, batchSteps, readbackMode, compactSummaryScope, thermalWallRate }) {
-  const browser = await chromium.launch({ args: ['--enable-unsafe-webgpu'] });
+  const browser = await launchProbeBrowser();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
   try {
     const target = new URL(scenarioUrl || DEFAULT_URL, baseUrl).toString();
@@ -1722,6 +1756,15 @@ async function runDirectResidentProbe({ baseUrl, scenarioUrl, timeoutMs, batches
           totalMs: finiteOrNull(step.stageTiming.totalMs),
           stageMs: { ...(step.stageTiming.stageMs || {}) },
           queueFenceMs: { ...(step.stageTiming.queueFenceMs || {}) },
+          compactSummaryTiming: step.stageTiming.compactSummaryTiming ? {
+            ...step.stageTiming.compactSummaryTiming,
+            totalMs: finiteOrNull(step.stageTiming.compactSummaryTiming.totalMs),
+            setupMs: finiteOrNull(step.stageTiming.compactSummaryTiming.setupMs),
+            encodeMs: finiteOrNull(step.stageTiming.compactSummaryTiming.encodeMs),
+            submitMs: finiteOrNull(step.stageTiming.compactSummaryTiming.submitMs),
+            mapAsyncWaitMs: finiteOrNull(step.stageTiming.compactSummaryTiming.mapAsyncWaitMs),
+            decodeMs: finiteOrNull(step.stageTiming.compactSummaryTiming.decodeMs)
+          } : null,
           requestedReadbackMode: step.stageTiming.requestedReadbackMode ?? null,
           compactSummaryRequested: step.stageTiming.compactSummaryRequested ?? null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null,
@@ -2433,6 +2476,12 @@ function analyzeTimeline(timeline, {
   const compactSummaryMsSeries = metrics
     .map((metric) => finiteMetric(metric.residentStep?.stageTiming?.stageMs?.compactSummary))
     .filter(Number.isFinite);
+  const compactSummaryMapAsyncMsSeries = metrics
+    .map((metric) => finiteMetric(
+      metric.residentStep?.stageTiming?.queueFenceMs?.compactSummaryMapAsync
+      ?? metric.residentStep?.stageTiming?.compactSummaryTiming?.mapAsyncWaitMs
+    ))
+    .filter(Number.isFinite);
   const sumSeries = (series) => series.reduce((sum, value) => sum + value, 0);
   const meanBatchMs = batchMsSeries.length ? sumSeries(batchMsSeries) / batchMsSeries.length : null;
   const maxBatchMs = batchMsSeries.length ? Math.max(...batchMsSeries) : null;
@@ -2440,10 +2489,21 @@ function analyzeTimeline(timeline, {
     ? sumSeries(compactSummaryMsSeries) / compactSummaryMsSeries.length
     : null;
   const maxCompactSummaryMs = compactSummaryMsSeries.length ? Math.max(...compactSummaryMsSeries) : null;
+  const meanCompactSummaryMapAsyncMs = compactSummaryMapAsyncMsSeries.length
+    ? sumSeries(compactSummaryMapAsyncMsSeries) / compactSummaryMapAsyncMsSeries.length
+    : null;
+  const maxCompactSummaryMapAsyncMs = compactSummaryMapAsyncMsSeries.length
+    ? Math.max(...compactSummaryMapAsyncMsSeries)
+    : null;
   const compactSummaryMeanBatchShare = Number.isFinite(meanBatchMs)
     && meanBatchMs > 0
     && Number.isFinite(meanCompactSummaryMs)
     ? meanCompactSummaryMs / meanBatchMs
+    : null;
+  const compactSummaryMapAsyncMeanBatchShare = Number.isFinite(meanBatchMs)
+    && meanBatchMs > 0
+    && Number.isFinite(meanCompactSummaryMapAsyncMs)
+    ? meanCompactSummaryMapAsyncMs / meanBatchMs
     : null;
   const visualSurfaceIssues = [];
   let maxVisibleSurfaceOutsideM = 0;
@@ -2754,7 +2814,10 @@ function analyzeTimeline(timeline, {
     maxBatchMs,
     meanCompactSummaryMs,
     maxCompactSummaryMs,
+    meanCompactSummaryMapAsyncMs,
+    maxCompactSummaryMapAsyncMs,
     compactSummaryMeanBatchShare,
+    compactSummaryMapAsyncMeanBatchShare,
     visualSurfaceIssues,
     maxVisibleSurfaceOutsideM,
     maxVisibleSurfaceOutsideParticleBoundsM,
@@ -2942,6 +3005,7 @@ async function main() {
       packageExists: Boolean(packageStat),
       nodeModules,
       baseUrl: server.baseUrl,
+      browserLaunch: probeChromiumLaunchReport(),
       probeMode,
       scenarioUrl: probeMode === 'direct-resident' ? scenarioUrl : withBrowserProbeParams(scenarioUrl),
       thresholds,

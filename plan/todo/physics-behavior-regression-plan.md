@@ -579,6 +579,13 @@ state that moves on screen is the state the laws actually mutated.
      `0.9500..1.0490`, and pressure impulse `0`. Browser scene/MarchingCubes
      visual settle proof is still open because that run took about `431.4 s`
      with compact summary about `342.7 s`.
+   - fence-attribution update: compact summary is now timed internally. The
+     representative `64`-substep no-full probe spends about `14.49 s` in the
+     final summary `mapAsync` wait for a `336` byte row; Chrome/Vulkan and
+     thermal/reaction-off mechanics-only comparisons stay in the same range.
+     Treat this as queued mechanics pass cost hidden behind the first readback
+     fence. The next implementation item is fused/sparse resident mechanics,
+     not smaller summary metadata.
 
 ## Immediate Work
 

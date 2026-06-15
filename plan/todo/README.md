@@ -619,6 +619,14 @@ still hard-times out before writing a full result.
      `431.4 s`, with compact summary about `342.7 s`, so compact-summary/
      readback throughput is now the immediate P0 before this can be part of
      routine visual validation.
+     2026-06-14 fence-attribution status: compact-summary telemetry now splits
+     setup/encode/submit/`mapAsync`/decode timing. A `64`-substep no-full
+     H2O/H2O probe spends about `14.49 s` in final summary `mapAsync` for a
+     `336` byte row; system Chrome/Vulkan stays about the same; thermal/
+     reaction-off mechanics-only still spends about `13.50 s`. The summary row
+     is not the real cost. The first readback is draining queued resident
+     mechanics command buffers. Prioritize fused/sparse P2G -> grid update ->
+     G2P execution under ComputeManager/GPU lane authority.
    - Rule: architecture plumbing is not done if the demo still behaves
      severely wrong.
 - Recurring evidence gate: after each major todo item, run the visual

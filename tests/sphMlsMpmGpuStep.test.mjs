@@ -828,6 +828,14 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
   assert.equal(summary.compactReadbackFloatCount, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
   assert.equal(summary.queueCompletionStatus, 'readback-map-completed');
   assert.equal(summary.queueCompletionMethod, 'mapAsync(readback-buffer)');
+  assert.equal(summary.timing.schema, 'peercompute.ulg.mls-mpm-resident-summary-timing.v0');
+  assert.equal(summary.timing.queueFenceAttribution, 'mapAsync(readback-buffer)-may-include-prior-queued-resident-work');
+  assert.equal(summary.timing.compactReadbackByteLength, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(summary.timing.summaryKernelDispatchCount, 2);
+  assert.equal(summary.timing.summaryWorkgroupCount, 6);
+  assert.equal(Number.isFinite(summary.timing.mapAsyncWaitMs), true);
+  assert.equal(summary.mapAsyncWaitMs, summary.timing.mapAsyncWaitMs);
+  assert.equal(summary.queueFenceAttribution, summary.timing.queueFenceAttribution);
   assert.equal(summary.sourceStateBufferMode, 'borrowed-webgpu-upload');
   assert.equal(summary.thermoBufferMode, 'retained-thermal-output');
   assert.equal(summary.sourceMechanicsBufferMode, 'borrowed-webgpu-upload');
@@ -972,6 +980,8 @@ test('MLS-MPM resident summary can skip the active-grid scan for particle-visual
   assert.equal(summary.activeGridNodeSummaryStatus, 'active-grid-node-summary-not-requested');
   assert.equal(summary.compactPartialSummaryCount, 1);
   assert.equal(summary.compactPartialSummaryByteLength, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(summary.timing.summaryWorkgroupCount, 2);
+  assert.equal(summary.timing.queueFenceAttribution, 'mapAsync(readback-buffer)-may-include-prior-queued-resident-work');
   assert.equal(summary.massDeltaKg, 0);
   assert.equal(summary.cohortSummaryAvailable, true);
   assert.equal(summary.cohortDiagnostics.base.count, 8);

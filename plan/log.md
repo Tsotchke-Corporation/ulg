@@ -1,5 +1,50 @@
 # ULG Implementation Log
 
+## 2026-06-14 17:42 AKDT - Compact Summary Fence Attribution
+
+- Added internal timing telemetry to
+  `runMlsMpmResidentSummaryWebGpu()`: setup, encode, submit, `mapAsync`
+  wait, decode, summary workgroup count, compact readback bytes, and explicit
+  queue-fence attribution
+  `mapAsync(readback-buffer)-may-include-prior-queued-resident-work`.
+- Propagated the timing into resident step diagnostics/stage timing and into
+  `scripts/sph-long-horizon-probe.mjs` analysis as
+  `meanCompactSummaryMapAsyncMs`, `maxCompactSummaryMapAsyncMs`, and
+  `compactSummaryMapAsyncMeanBatchShare`.
+- Added opt-in probe browser launch controls:
+  `ULG_PROBE_CHROMIUM_CHANNEL`, `ULG_PROBE_CHROMIUM_EXECUTABLE`, and
+  `ULG_PROBE_CHROMIUM_ARGS`. Defaults preserve the old
+  `--enable-unsafe-webgpu` launch behavior.
+- Attribution probe:
+  `/tmp/ulg-history-probes/current-compact-summary-attribution-64-20260614.json`
+  classified `good` for `64` direct-resident no-full substeps. Batch time was
+  about `14.60 s`; coarse compact-summary time was about `14.50 s`; compact
+  summary `mapAsync` wait was about `14.49 s` for a `336` byte readback.
+- System Chrome/Vulkan comparison:
+  `/tmp/ulg-history-probes/current-compact-summary-attribution-64-chrome-20260614.json`
+  stayed essentially the same at about `14.33 s` batch and `14.23 s`
+  `mapAsync` wait. This is not just bundled Chromium.
+- Thermal/reaction-off comparison:
+  `/tmp/ulg-history-probes/current-compact-summary-attribution-64-mechanics-only-20260614.json`
+  still took about `13.57 s` batch and `13.50 s` `mapAsync` wait. Thermal,
+  reaction, and mechanics-refresh passes are not the dominant cost for this
+  same-material H2O/H2O validation case.
+- Current interpretation: the old `compactSummaryMs` number mostly measures
+  the first forced queue drain after many queued resident mechanics command
+  buffers. The next P0 is a fused/sparse resident mechanics lane under
+  ComputeManager/GPU lane authority, not reducing the already-small summary
+  readback row.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuSummary.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident summary|compact GPU summary"` reported `29/29`.
+- PASS: `npm run test:physics-atomics` reported `7` pass and `1` expected
+  opt-in long-horizon liquid skip.
+- PASS: `git diff --check`.
+
 ## 2026-06-14 17:10 AKDT - Direct-Resident No-Full Liquid Settle Probe
 
 - Ran the stronger direct-resident no-full H2O/H2O settle probe after the live

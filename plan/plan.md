@@ -2,6 +2,14 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 17:42 AKDT: compact-summary attribution is now
+instrumented. A `64`-substep direct-resident no-full H2O/H2O probe spends
+about `14.49 s` waiting on the final summary `mapAsync` fence for a `336` byte
+summary row; system Chrome/Vulkan and thermal/reaction-off mechanics-only
+comparisons stay in the same range. Treat this as queued resident mechanics
+work being charged to the first readback fence. The next implementation target
+is a fused/sparse resident mechanics lane, not another summary-row shrink.
+
 Current checkpoint, 2026-06-14 17:10 AKDT: the direct-resident no-full H2O/H2O
 settle probe now passes the declared retained telemetry gate. The
 `/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json`

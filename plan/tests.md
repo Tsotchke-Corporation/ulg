@@ -280,6 +280,22 @@ Verified commands:
     consuming about `342.7 s`. This proves the retained direct-resident liquid
     mechanics can pass the settle threshold, but compact-summary/readback cost
     and a scene-paired visual proof remain open.
+- ULG compact-summary fence attribution probes:
+  - `ULG_PROBE_MODE=direct-resident ... ULG_PROBE_BATCH_STEPS=64 ... npm run probe:sph-long-horizon`
+    wrote
+    `/tmp/ulg-history-probes/current-compact-summary-attribution-64-20260614.json`
+    and classified `good`. Batch time was about `14.60 s`; compact-summary
+    `mapAsync` wait was about `14.49 s` for a `336` byte readback.
+  - `ULG_PROBE_CHROMIUM_CHANNEL=chrome ULG_PROBE_CHROMIUM_ARGS='--enable-features=Vulkan' ...`
+    wrote
+    `/tmp/ulg-history-probes/current-compact-summary-attribution-64-chrome-20260614.json`
+    and stayed about the same: `14.33 s` batch, `14.23 s` `mapAsync` wait.
+  - `lawt=0&lawr=0` mechanics-only comparison wrote
+    `/tmp/ulg-history-probes/current-compact-summary-attribution-64-mechanics-only-20260614.json`
+    and still took about `13.57 s` batch, `13.50 s` `mapAsync` wait.
+  - Interpretation: the first summary readback fence is mostly draining queued
+    resident mechanics command buffers. The next throughput item is fused/
+    sparse mechanics execution, not shrinking the compact summary row.
 - ULG law-isolation visual matrix:
   `ULG_VISUAL_MATRIX_RUN_ID=codex-law-isolation-matrix-20260614 ULG_VISUAL_MATRIX_SCENARIOS=law-static-mechanics-off-fe-h2o,law-static-gravity-off-fe-h2o,law-pressure-off-h2o-mlsmpm,law-eos-off-h2o-mlsmpm,law-thermal-off-hot-h2o,law-reactions-off-na-h2o ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=8 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
   - Passed: `failedCount=0`, `frameCount=3` for all six scenarios.

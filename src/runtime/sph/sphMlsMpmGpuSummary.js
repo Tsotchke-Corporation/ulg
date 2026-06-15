@@ -53,6 +53,12 @@ const GPU_MAP_MODE = {
 const SUMMARY_SCOPE = 'mls-mpm-resident-compact-gpu-summary';
 const SUMMARY_WORKGROUP_SIZE = 32;
 
+function nowMs() {
+  return typeof globalThis.performance?.now === 'function'
+    ? globalThis.performance.now()
+    : Date.now();
+}
+
 export function normalizeMlsMpmResidentSummaryScope(value) {
   const scope = String(value || MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL).trim().toLowerCase();
   if (scope === MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL) {
@@ -315,6 +321,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
   cohortRanges = null,
   summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL
 } = {}) {
+  const summaryTimingStartMs = nowMs();
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmResidentSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -325,6 +332,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
   const gridNodeScanCount = gridNodeScanCountForSummaryScope(resolvedSummaryScope, gridNodeCount);
   const activeGridNodeCountAvailable = resolvedSummaryScope !== MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL;
   const partialCount = Math.max(1, Math.ceil(Math.max(particleCount, gridNodeScanCount) / SUMMARY_WORKGROUP_SIZE));
+  const setupStartMs = nowMs();
   const nextStateBuffer = outputBufferFromG2p(g2pReconstruction, 'stateBuffer');
   const nextMechanicsBuffer = outputBufferFromG2p(g2pReconstruction, 'mechanicsBuffer');
   const retainedReactionThermoBuffer = outputBufferFromStage(reactionStep, 'thermoBuffer');
@@ -493,7 +501,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
         computeBufferBinding(2, 'uniform')
       ]
     });
-    const finalizeBindGroup = device.createBindGroup({
+  const finalizeBindGroup = device.createBindGroup({
       layout: finalizeBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: partialsBuffer } },
@@ -501,6 +509,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
         { binding: 2, resource: { buffer: paramsBuffer } }
       ]
     });
+    const setupMs = Math.max(0, nowMs() - setupStartMs);
+    const encodeStartMs = nowMs();
     const encoder = device.createCommandEncoder();
     const partialsPass = encoder.beginComputePass();
     partialsPass.setPipeline(partialsPipeline);
@@ -513,10 +523,30 @@ export async function runMlsMpmResidentSummaryWebGpu({
     finalizePass.dispatchWorkgroups(1);
     finalizePass.end();
     encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
+    const encodeMs = Math.max(0, nowMs() - encodeStartMs);
+    const submitStartMs = nowMs();
     device.queue.submit([encoder.finish()]);
+    const submitMs = Math.max(0, nowMs() - submitStartMs);
+    const mapAsyncStartMs = nowMs();
     await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+    const mapAsyncWaitMs = Math.max(0, nowMs() - mapAsyncStartMs);
+    const decodeStartMs = nowMs();
     const values = new Float32Array(readBuffer.getMappedRange()).slice(0, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
     readBuffer.unmap();
+    const decodeMs = Math.max(0, nowMs() - decodeStartMs);
+    const timing = {
+      schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
+      totalMs: Math.max(0, nowMs() - summaryTimingStartMs),
+      setupMs,
+      encodeMs,
+      submitMs,
+      mapAsyncWaitMs,
+      decodeMs,
+      queueFenceAttribution: 'mapAsync(readback-buffer)-may-include-prior-queued-resident-work',
+      summaryKernelDispatchCount: 2,
+      summaryWorkgroupCount: partialCount + 1,
+      compactReadbackByteLength: summaryByteLength
+    };
     compactSummaryResult = {
       ...decodeMlsMpmResidentSummaryValues(values, {
         particleCount,
@@ -540,6 +570,9 @@ export async function runMlsMpmResidentSummaryWebGpu({
       compactPartialSummaryCount: partialCount,
       compactPartialSummaryByteLength: partialsByteLength,
       compactReductionWorkgroupSize: SUMMARY_WORKGROUP_SIZE,
+      timing,
+      mapAsyncWaitMs,
+      queueFenceAttribution: timing.queueFenceAttribution,
       sourceStateBufferMode: borrowedSourceStateBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
       thermoBufferMode: nextThermoBufferMode,
       sourceMechanicsBufferMode: borrowedSourceMechanicsBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',

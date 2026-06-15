@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 04:13 AKDT: pressure/interface force rows now
+have a structured local gas-cell pressure field contract. `gasPressureCellFieldSummary()`
+can normalize a ready local gas-cell field with per-cell pressure and
+`pressureGradientPaPerM`; the CPU pressure preview/solver samples nearest-cell
+pressure plus first-order gradient reconstruction at each interface centroid.
+The WebGPU pressure/interface producer now packs the same gas cells into a
+12-float row buffer, expands `PressureInterfaceParams` to 32 bytes, binds the
+cell buffer at slot 3, and runs the same nearest-cell/gradient reconstruction
+in WGSL before writing the existing 16-float force-row ABI. Validation passed
+focused pressure/gas tests, WebGPU producer and ABI guards, resident-stage
+pressure tests, physics atomics, browser authority-host, and the visual matrix.
+Next target: publish/admit resident local gas-cell pressure fields through
+NodeKernel/StateManager and thread retained gas-cell buffers across the
+ComputeManager/GPUHub stage DAG instead of relying on caller-supplied fields.
+
 Current checkpoint, 2026-06-15 03:52 AKDT: pressure/interface force rows now
 carry an explicit pressure-field resolution contract. The sealed-gas pressure
 field still uses a conservative one-cell uniform pressure law, but

@@ -1,5 +1,86 @@
 # ULG Implementation Log
 
+## 2026-06-15 04:13 AKDT - Local gas-cell pressure field contract
+
+Implemented:
+
+- Added structured local gas-cell pressure fields to the pressure feedback
+  path. `gasPressureCellFieldSummary()` now accepts caller-supplied local gas
+  cells with center, grid index, pressure, pressure gradient, volume, and
+  ready status.
+- Updated CPU pressure/interface preview and solver to sample nearest-cell
+  pressure plus first-order pressure-gradient reconstruction at each
+  material-interface centroid.
+- Added WebGPU gas pressure cell packing with a 12-float row layout.
+- Expanded `PressureInterfaceParams` from 16 to 32 bytes and added
+  `gas_pressure_cell_count` plus `pressure_model_id`.
+- Updated `sphPressureInterfaceForceRowsWgsl` to bind gas pressure cells at
+  binding 3 and choose uniform pressure or nearest-cell/gradient local
+  pressure per interface element before writing the existing 16-float force
+  row ABI.
+- Added CPU oracle, WebGPU producer, and ABI tests for local gas-cell pressure
+  rows.
+
+Files touched:
+
+- `src/runtime/sphPhaseDemo.js`
+- `src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- `ulg-gpu-abi/src/wgsl.js`
+- `tests/sphPhaseDemo.test.mjs`
+- `tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `tests/webgpuKernelAbi.test.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/local-gas-cell-pressure-field-contract-2026-06-15.md`
+
+Commands run:
+
+- `date '+%Y-%m-%d %H:%M %Z'`
+- `node --check src/runtime/sphPhaseDemo.js`
+- `node --check src/runtime/sph/sphPressureInterfaceGpuKernel.js`
+- `node --check tests/sphPhaseDemo.test.mjs`
+- `node --check tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `node --check tests/webgpuKernelAbi.test.mjs`
+- `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "sealed gas pressure feedback|gas pressure interface"`
+- `node --test tests/sphPressureInterfaceGpuKernel.test.mjs`
+- `node --test tests/webgpuKernelAbi.test.mjs --test-name-pattern "uniform buffer ABI"`
+- `node --test tests/abi.test.mjs --test-name-pattern "pressure|SPH GPU render field ABI|WebGPU"`
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "pressure interface stage|pressure interface|grid admission|grid force"`
+- `npm run test:physics-atomics`
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-pressure-local-gas-cell-field-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+
+Validation:
+
+- PASS: syntax checks for changed runtime/test modules.
+- PASS: demo pressure/gas contract coverage reported `26/26`.
+- PASS: WebGPU pressure producer coverage reported `3/3`.
+- PASS: WebGPU uniform-buffer ABI reported `1/1`.
+- PASS: ABI pressure/render guard reported `17/17`.
+- PASS: resident pressure/stage coverage reported `38/38`.
+- PASS: physics atomics reported `7` passing checks and `1` expected opt-in
+  long-horizon liquid skip.
+- PASS: focused browser authority-host Playwright reported `1/1`.
+- PASS: visual matrix `codex-pressure-local-gas-cell-field-20260615` reported
+  `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`, and two frames per
+  scenario under
+  `/tmp/ulg-visual-sanity-matrix/codex-pressure-local-gas-cell-field-20260615`.
+- PASS: manually inspected final frames for MLS-MPM H2O/H2O, CPU-SPH
+  H2O/H2O, and solid H2O CPU-SPH. All were nonblank and bounded. MLS-MPM still
+  showed the known short-horizon fragmentation.
+
+Open:
+
+- Local gas-cell fields are now consumable by CPU/WebGPU pressure rows but are
+  still caller-supplied. Next slice should publish/admit retained local
+  gas-cell buffers through NodeKernel/StateManager and consume them inside the
+  ComputeManager/GPUHub DAG.
+- Renderer z-buffer/draw-order and focus-change flash/disappear issues remain
+  separate visual-correctness blockers.
+
 ## 2026-06-15 03:52 AKDT - Pressure local-gradient contract metadata
 
 Prompt:

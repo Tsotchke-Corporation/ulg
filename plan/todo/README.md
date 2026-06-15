@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 04:13 AKDT: the local gas-cell pressure field
+contract has first CPU and WebGPU support. ULG can now represent per-cell gas
+pressure and pressure gradients, sample them at material-interface centroids,
+and produce pressure/interface force rows from either uniform sealed-gas
+pressure or local nearest-cell/gradient reconstruction. Next priority is to
+make those local gas-cell fields resident and admitted: publish retained
+gas-cell pressure buffers through NodeKernel/StateManager, then make the
+pressureInterface stage consume admitted Worker-local gas-cell refs inside the
+ComputeManager/GPUHub DAG.
+
 Current routing note, 2026-06-15 03:52 AKDT: the pressure/interface stage now
 labels its current gas pressure law as uniform single-cell sealed-gas pressure
 and explicitly blocks local pressure-gradient coupling until a resident gas

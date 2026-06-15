@@ -8,12 +8,15 @@ import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmitt
 
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
+export const SPH_GAS_PRESSURE_CELL_FLOATS = 12;
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA = 'peercompute.ulg.sph-local-pressure-gradient-field.v0';
 const UNIFORM_GAS_PRESSURE_FIELD_MODE = 'uniform-single-cell-sealed-gas';
 const UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION = 'lumped-sealed-box';
+const LOCAL_GAS_CELL_PRESSURE_FIELD_MODE = 'local-gas-cell-pressure-gradient';
+const LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION = 'structured-gas-cell-grid';
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -60,6 +63,13 @@ function addVector3(a = [0, 0, 0], b = [0, 0, 0]) {
   ];
 }
 
+function vector3From(value = null, fallback = [0, 0, 0]) {
+  return [0, 1, 2].map((index) => {
+    const number = Number(Array.isArray(value) ? value[index] : undefined);
+    return Number.isFinite(number) ? number : fallback[index];
+  });
+}
+
 function gasPressureFieldResolutionDiagnostics(gasCellField = null) {
   const unavailable = !gasCellField || gasCellField.status === 'gas-cell-pressure-field-unavailable';
   const localPressureGradientReady = gasCellField?.localPressureGradientReady === true;
@@ -67,9 +77,21 @@ function gasPressureFieldResolutionDiagnostics(gasCellField = null) {
     ? [...gasCellField.localPressureGradientBlockers]
     : (localPressureGradientReady ? [] : [...LOCAL_PRESSURE_GRADIENT_BLOCKERS]);
   return {
-    pressureFieldMode: gasCellField?.pressureFieldMode || (unavailable ? 'pressure-field-unavailable' : UNIFORM_GAS_PRESSURE_FIELD_MODE),
-    pressureFieldResolution: gasCellField?.pressureFieldResolution || (unavailable ? 'pressure-field-unavailable' : UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION),
-    pressureGradientStatus: gasCellField?.gradientStatus || (unavailable ? 'pressure-field-unavailable' : 'uniform-sealed-gas-pressure-zero-gradient'),
+    pressureFieldMode: gasCellField?.pressureFieldMode || (
+      localPressureGradientReady
+        ? LOCAL_GAS_CELL_PRESSURE_FIELD_MODE
+        : (unavailable ? 'pressure-field-unavailable' : UNIFORM_GAS_PRESSURE_FIELD_MODE)
+    ),
+    pressureFieldResolution: gasCellField?.pressureFieldResolution || (
+      localPressureGradientReady
+        ? LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION
+        : (unavailable ? 'pressure-field-unavailable' : UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION)
+    ),
+    pressureGradientStatus: gasCellField?.gradientStatus || (
+      localPressureGradientReady
+        ? 'local-pressure-gradient-field-ready'
+        : (unavailable ? 'pressure-field-unavailable' : 'uniform-sealed-gas-pressure-zero-gradient')
+    ),
     localPressureGradientSchema: gasCellField?.localPressureGradientSchema || ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
     localPressureGradientReady,
     localPressureGradientStatus: gasCellField?.localPressureGradientStatus || (
@@ -85,6 +107,83 @@ function gasPressureFieldResolutionDiagnostics(gasCellField = null) {
       : 'blocked-local-pressure-gradient-field-required',
     localPressureGradientValidation: gasCellField?.localPressureGradientValidation === true
   };
+}
+
+function normalizedGasPressureCells(gasCellField = null) {
+  if (gasCellField?.localPressureGradientReady !== true || !Array.isArray(gasCellField?.cells)) return [];
+  const cells = [];
+  for (const [index, cell] of gasCellField.cells.entries()) {
+    const pressurePa = finiteNumber(cell?.pressurePa, Number.NaN);
+    if (!Number.isFinite(pressurePa) || pressurePa < 0) continue;
+    cells.push({
+      index: finiteNumber(cell?.index, index),
+      gridIndex: Array.isArray(cell?.gridIndex)
+        ? cell.gridIndex.map((value) => Math.max(0, Math.round(finiteNumber(value, 0)))).slice(0, 3)
+        : [index, 0, 0],
+      centerM: vector3From(cell?.centerM ?? cell?.centroidM),
+      pressurePa,
+      pressureGradientPaPerM: vector3From(cell?.pressureGradientPaPerM ?? cell?.gradientPaPerM),
+      volumeM3: finiteNumber(cell?.volumeM3, 0),
+      status: cell?.status || 'local-gas-pressure-cell-ready'
+    });
+  }
+  return cells;
+}
+
+export function packGasPressureCellRows(gasCellField = null) {
+  const cells = normalizedGasPressureCells(gasCellField);
+  const rows = new Float32Array(cells.length * SPH_GAS_PRESSURE_CELL_FLOATS);
+  for (const [index, cell] of cells.entries()) {
+    const offset = index * SPH_GAS_PRESSURE_CELL_FLOATS;
+    rows.set([
+      finiteNumber(cell.gridIndex[0], 0),
+      finiteNumber(cell.gridIndex[1], 0),
+      finiteNumber(cell.gridIndex[2], 0),
+      cell.status === 'local-gas-pressure-cell-ready' ? 1 : 0,
+      cell.centerM[0],
+      cell.centerM[1],
+      cell.centerM[2],
+      cell.pressurePa,
+      cell.pressureGradientPaPerM[0],
+      cell.pressureGradientPaPerM[1],
+      cell.pressureGradientPaPerM[2],
+      cell.volumeM3
+    ], offset);
+  }
+  return {
+    cells,
+    rows,
+    rowCount: cells.length,
+    rowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+    rowByteLength: rows.byteLength
+  };
+}
+
+function pressureForElementFromCells(element = {}, cells = [], fallbackPressurePa = 0) {
+  if (!cells.length) return fallbackPressurePa;
+  const centroid = vector3From(element.centroidM);
+  let selected = null;
+  let selectedDistance2 = Number.POSITIVE_INFINITY;
+  for (const cell of cells) {
+    if (cell.status !== 'local-gas-pressure-cell-ready') continue;
+    const dx = centroid[0] - cell.centerM[0];
+    const dy = centroid[1] - cell.centerM[1];
+    const dz = centroid[2] - cell.centerM[2];
+    const distance2 = dx * dx + dy * dy + dz * dz;
+    if (distance2 < selectedDistance2) {
+      selected = { cell, deltaM: [dx, dy, dz] };
+      selectedDistance2 = distance2;
+    }
+  }
+  if (!selected) return fallbackPressurePa;
+  const gradient = selected.cell.pressureGradientPaPerM;
+  return Math.max(
+    0,
+    selected.cell.pressurePa
+      + gradient[0] * selected.deltaM[0]
+      + gradient[1] * selected.deltaM[1]
+      + gradient[2] * selected.deltaM[2]
+  );
 }
 
 function normalAreaVectorForElement(element = {}) {
@@ -153,12 +252,16 @@ export function packMaterialInterfaceElementRows(materialInterfaceField = null) 
 
 export function createPressureInterfaceParamsArray({
   elementCount = 0,
-  pressurePa = 0
+  pressurePa = 0,
+  gasPressureCellCount = 0,
+  pressureModelId = 0
 } = {}) {
-  const buffer = new ArrayBuffer(16);
+  const buffer = new ArrayBuffer(32);
   const view = new DataView(buffer);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(elementCount, 0))), true);
   view.setFloat32(4, finiteNumber(pressurePa, 0), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(gasPressureCellCount, 0))), true);
+  view.setUint32(12, Math.max(0, Math.round(finiteNumber(pressureModelId, 0))), true);
   return buffer;
 }
 
@@ -173,16 +276,22 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function summarizeForceRowsFromElements(elements = [], pressurePa = 0) {
+function summarizeForceRowsFromElements(elements = [], pressurePa = 0, gasCellField = null) {
+  const pressureCells = normalizedGasPressureCells(gasCellField);
   const forceRows = [];
   const forceBySurface = new Map();
   let netMaterialForceN = [0, 0, 0];
   let netGasReactionForceN = [0, 0, 0];
   let totalAbsMaterialForceN = 0;
   let maxPairResidualN = 0;
+  let minInterfacePressurePa = Number.POSITIVE_INFINITY;
+  let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
   for (const element of elements) {
+    const interfacePressurePa = pressureForElementFromCells(element, pressureCells, pressurePa);
+    minInterfacePressurePa = Math.min(minInterfacePressurePa, interfacePressurePa);
+    maxInterfacePressurePa = Math.max(maxInterfacePressurePa, interfacePressurePa);
     const normalArea = normalAreaVectorForElement(element);
-    const materialForceN = cleanVector3(normalArea.map((component) => -pressurePa * component));
+    const materialForceN = cleanVector3(normalArea.map((component) => -interfacePressurePa * component));
     const gasReactionForceN = cleanVector3(materialForceN.map((component) => -component));
     const pairResidualN = cleanVector3(addVector3(materialForceN, gasReactionForceN));
     maxPairResidualN = Math.max(maxPairResidualN, vectorMagnitude3(pairResidualN));
@@ -200,7 +309,7 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0) {
       axisId: finiteNumber(element.axisId, 0),
       centroidM: Array.isArray(element.centroidM) ? [...element.centroidM] : [0, 0, 0],
       areaM2: finiteNumber(element.areaM2, 0),
-      pressurePa,
+      pressurePa: interfacePressurePa,
       materialForceN,
       gasReactionForceN,
       pairResidualN,
@@ -238,7 +347,10 @@ function summarizeForceRowsFromElements(elements = [], pressurePa = 0) {
     netGasReactionForceN,
     conservationResidualN,
     conservationResidualMagnitudeN,
-    maxPairResidualN
+    maxPairResidualN,
+    gasInterfacePressureRangePa: forceRows.length > 0
+      ? [minInterfacePressurePa, maxInterfacePressurePa]
+      : null
   };
 }
 
@@ -260,6 +372,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   );
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
   const packed = packMaterialInterfaceElementRows(materialInterfaceField);
+  const packedGasPressureCells = packGasPressureCellRows(pressureFeedback?.gasCellField || null);
+  const pressureModelId = packedGasPressureCells.rowCount > 0 && pressureFieldResolution.localPressureGradientReady
+    ? 1
+    : 0;
   const canSolve = pressureInterfaceCoupling?.status === 'pressure-interface-coupling-ready-for-solver'
     && Number.isFinite(pressurePa)
     && pressurePa >= 0
@@ -283,6 +399,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
         forceCouplingStatus: pressureInterfaceCoupling?.forceCouplingStatus || null,
         gasInterfacePressurePa: Number.isFinite(pressurePa) ? pressurePa : null,
+        gasInterfacePressureRangePa: null,
         pressureFieldMode: pressureFieldResolution.pressureFieldMode,
         pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
         pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
@@ -291,13 +408,16 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         localPressureGradientStatus: pressureFieldResolution.localPressureGradientStatus,
         localPressureGradientBlockers: pressureFieldResolution.localPressureGradientBlockers,
         localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
+        gasPressureCellRowCount: packedGasPressureCells.rowCount,
+        gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+        pressureModelId,
         sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? 0,
         forceRowCount: 0,
         forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
         forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
         forceRowValues: new Float32Array(0),
-        forceResolution: 'uniform-interface-traction',
-        localPressureGradientValidation: false,
+        forceResolution: pressureModelId === 1 ? 'local-gradient-interface-traction' : 'uniform-interface-traction',
+        localPressureGradientValidation: pressureModelId === 1,
         conservationStatus: 'not-evaluated'
       }
     };
@@ -306,6 +426,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const outputByteLength = packed.rowCount * SPH_PRESSURE_INTERFACE_FORCE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const inputBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-elements-in', packed.rows);
+  const gasPressureCellsBuffer = writeStorageBuffer(device, 'ulg-sph-pressure-interface-gas-cells-in', packedGasPressureCells.rows);
   const forceRowsBuffer = device.createBuffer({
     label: 'ulg-sph-pressure-interface-force-rows-out',
     size: Math.max(4, outputByteLength),
@@ -313,7 +434,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-pressure-interface-force-params',
-    size: 16,
+    size: 32,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   const readBuffer = noFullReadback
@@ -330,7 +451,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createPressureInterfaceParamsArray({
       elementCount: packed.rowCount,
-      pressurePa
+      pressurePa,
+      gasPressureCellCount: packedGasPressureCells.rowCount,
+      pressureModelId
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: 'ulg-sph-pressure-interface-force-rows.v1',
@@ -340,7 +463,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
         computeBufferBinding(1, 'storage'),
-        computeBufferBinding(2, 'uniform')
+        computeBufferBinding(2, 'uniform'),
+        computeBufferBinding(3, 'read-only-storage')
       ]
     });
     const bindGroup = device.createBindGroup({
@@ -348,7 +472,8 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       entries: [
         { binding: 0, resource: { buffer: inputBuffer } },
         { binding: 1, resource: { buffer: forceRowsBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
+        { binding: 2, resource: { buffer: paramsBuffer } },
+        { binding: 3, resource: { buffer: gasPressureCellsBuffer } }
       ]
     });
     const encoder = device.createCommandEncoder();
@@ -380,7 +505,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
         : null;
     }
 
-    const summary = summarizeForceRowsFromElements(packed.elements, pressurePa);
+    const summary = summarizeForceRowsFromElements(packed.elements, pressurePa, pressureFeedback?.gasCellField || null);
     const solver = {
       schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
       status: 'pressure-interface-force-solver-ready',
@@ -389,6 +514,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       pressureInterfaceCouplingStatus: pressureInterfaceCoupling?.status || null,
       forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
       gasInterfacePressurePa: pressurePa,
+      gasInterfacePressureRangePa: summary.gasInterfacePressureRangePa,
       pressureFieldMode: pressureFieldResolution.pressureFieldMode,
       pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
       pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
@@ -397,6 +523,10 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       localPressureGradientStatus: pressureFieldResolution.localPressureGradientStatus,
       localPressureGradientBlockers: pressureFieldResolution.localPressureGradientBlockers,
       localPressureGradientForceCouplingStatus: pressureFieldResolution.localPressureGradientForceCouplingStatus,
+      gasPressureCellRowCount: packedGasPressureCells.rowCount,
+      gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+      gasPressureCellRowsBufferRetained: packedGasPressureCells.rowCount > 0,
+      pressureModelId,
       sourceInterfaceElementCount: materialInterfaceField?.elementCount ?? materialInterfaceField?.elements?.length ?? packed.rowCount,
       forceRowCount: packed.rowCount,
       forceRowLayout: [...SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT],
@@ -416,10 +546,12 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       conservationStatus: summary.maxPairResidualN <= 1e-9
         ? 'pairwise-equal-opposite-force-conservative'
         : 'pairwise-force-residual-nonzero',
-      forceDerivation: 'webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
-      forceResolution: 'uniform-interface-traction',
+      forceDerivation: pressureModelId === 1
+        ? 'webgpu-local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction'
+        : 'webgpu-uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
+      forceResolution: pressureModelId === 1 ? 'local-gradient-interface-traction' : 'uniform-interface-traction',
       forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
-      localPressureGradientValidation: false,
+      localPressureGradientValidation: pressureModelId === 1,
       forceCouplingValidation: false,
       scientificValidation: false,
       gasValidation: false,
@@ -440,6 +572,9 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
       forceRowCount: packed.rowCount,
       forceRowStrideFloats: SPH_PRESSURE_INTERFACE_FORCE_FLOATS,
       forceRowByteLength: outputByteLength,
+      gasPressureCellRowCount: packedGasPressureCells.rowCount,
+      gasPressureCellRowStrideFloats: SPH_GAS_PRESSURE_CELL_FLOATS,
+      gasPressureCellRowByteLength: packedGasPressureCells.rowByteLength,
       forceRowValues,
       pressureInterfaceForceRowsRetained: outputByteLength > 0
     };
@@ -453,6 +588,7 @@ export async function runSphPressureInterfaceForceRowsWebGpu({
   } finally {
     const cleanup = () => {
       inputBuffer.destroy?.();
+      gasPressureCellsBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
       if (!retainForceRowsBuffer || !returnedRetainedForceRowsBuffer) forceRowsBuffer.destroy?.();

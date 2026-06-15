@@ -4689,13 +4689,40 @@ export const sphPressureInterfaceForceRowsWgsl = `
 struct PressureInterfaceParams {
   element_count: u32,
   pressure_pa: f32,
+  gas_pressure_cell_count: u32,
+  pressure_model_id: u32,
   pad0: f32,
   pad1: f32,
+  pad2: f32,
+  pad3: f32,
 };
 
 @group(0) @binding(0) var<storage, read> interface_elements: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> pressure_force_rows: array<vec4<f32>>;
 @group(0) @binding(2) var<uniform> params: PressureInterfaceParams;
+@group(0) @binding(3) var<storage, read> gas_pressure_cells: array<vec4<f32>>;
+
+fn pressure_for_centroid(centroid: vec3<f32>) -> f32 {
+  if (params.pressure_model_id != 1u || params.gas_pressure_cell_count == 0u) {
+    return params.pressure_pa;
+  }
+  var best_pressure = params.pressure_pa;
+  var best_distance2 = 1.0e30;
+  for (var cell_index = 0u; cell_index < params.gas_pressure_cell_count; cell_index = cell_index + 1u) {
+    let row0 = gas_pressure_cells[cell_index * 3u];
+    let row1 = gas_pressure_cells[cell_index * 3u + 1u];
+    let row2 = gas_pressure_cells[cell_index * 3u + 2u];
+    if (row0.w > 0.0 && row1.w >= 0.0) {
+      let delta = centroid - row1.xyz;
+      let distance2 = dot(delta, delta);
+      if (distance2 < best_distance2) {
+        best_distance2 = distance2;
+        best_pressure = max(0.0, row1.w + dot(row2.xyz, delta));
+      }
+    }
+  }
+  return best_pressure;
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -4708,20 +4735,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let row1 = interface_elements[element_index * 4u + 1u];
   let row2 = interface_elements[element_index * 4u + 2u];
   let row3 = interface_elements[element_index * 4u + 3u];
+  let centroid = row1.xyz;
   let area = row1.w;
   let status = row3.w;
+  let pressure_pa = pressure_for_centroid(centroid);
   var normal_area = vec3<f32>(row2.w, row3.x, row3.y);
   if (dot(normal_area, normal_area) <= 1.0e-24) {
     normal_area = row2.xyz * area;
   }
-  let ready = select(0.0, 1.0, status > 0.0 && area > 0.0 && params.pressure_pa >= 0.0);
-  let material_force = -params.pressure_pa * normal_area * ready;
+  let ready = select(0.0, 1.0, status > 0.0 && area > 0.0 && pressure_pa >= 0.0);
+  let material_force = -pressure_pa * normal_area * ready;
   let gas_reaction_force = -material_force;
 
   pressure_force_rows[element_index * 4u] = row0;
   pressure_force_rows[element_index * 4u + 1u] = vec4<f32>(row1.xyz, area);
   pressure_force_rows[element_index * 4u + 2u] = vec4<f32>(material_force, gas_reaction_force.x);
-  pressure_force_rows[element_index * 4u + 3u] = vec4<f32>(gas_reaction_force.y, gas_reaction_force.z, params.pressure_pa, ready);
+  pressure_force_rows[element_index * 4u + 3u] = vec4<f32>(gas_reaction_force.y, gas_reaction_force.z, pressure_pa, ready);
 }
 `;
 

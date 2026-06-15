@@ -69,6 +69,8 @@ const PENDING_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
 const ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA = 'peercompute.ulg.sph-local-pressure-gradient-field.v0';
 const UNIFORM_GAS_PRESSURE_FIELD_MODE = 'uniform-single-cell-sealed-gas';
 const UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION = 'lumped-sealed-box';
+const LOCAL_GAS_CELL_PRESSURE_FIELD_MODE = 'local-gas-cell-pressure-gradient';
+const LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION = 'structured-gas-cell-grid';
 const LOCAL_PRESSURE_GRADIENT_BLOCKERS = Object.freeze([
   'single-cell-uniform-pressure-field',
   'resident-gas-cell-eos-gradient-not-derived'
@@ -663,6 +665,80 @@ function pressureBoxDimensionsM(boxDimsM, boxVolumeM3) {
   return [edge, edge, edge];
 }
 
+function vector3From(value, fallback = [0, 0, 0]) {
+  return [0, 1, 2].map((index) => {
+    const number = Number(Array.isArray(value) ? value[index] : undefined);
+    return Number.isFinite(number) ? number : fallback[index];
+  });
+}
+
+function normalizeLocalGasPressureCells(field = null) {
+  if (!Array.isArray(field?.cells)) return [];
+  const cells = [];
+  for (const [index, cell] of field.cells.entries()) {
+    const pressurePa = Number(cell?.pressurePa ?? cell?.totalPressurePa);
+    if (!Number.isFinite(pressurePa) || pressurePa < 0) continue;
+    cells.push({
+      index: Number.isFinite(Number(cell?.index)) ? Number(cell.index) : index,
+      gridIndex: Array.isArray(cell?.gridIndex)
+        ? cell.gridIndex.map((value) => Math.max(0, Math.round(Number(value) || 0))).slice(0, 3)
+        : [index, 0, 0],
+      centerM: vector3From(cell?.centerM ?? cell?.centroidM),
+      pressurePa,
+      pressureGradientPaPerM: vector3From(cell?.pressureGradientPaPerM ?? cell?.gradientPaPerM),
+      volumeM3: finitePositive(cell?.volumeM3, 0),
+      status: cell?.status || 'local-gas-pressure-cell-ready'
+    });
+  }
+  return cells;
+}
+
+function pressureAtInterfaceCentroid({
+  pressureFeedback = null,
+  centroidM = [0, 0, 0],
+  fallbackPressurePa = Number.NaN
+} = {}) {
+  const gasCellField = pressureFeedback?.gasCellField || null;
+  const localCells = Array.isArray(gasCellField?.cells) ? gasCellField.cells : [];
+  if (gasCellField?.localPressureGradientReady === true && localCells.length > 0) {
+    let selected = null;
+    let selectedDistance2 = Number.POSITIVE_INFINITY;
+    for (const cell of localCells) {
+      if (cell?.status && cell.status !== 'local-gas-pressure-cell-ready') continue;
+      const centerM = vector3From(cell?.centerM);
+      const dx = centroidM[0] - centerM[0];
+      const dy = centroidM[1] - centerM[1];
+      const dz = centroidM[2] - centerM[2];
+      const distance2 = dx * dx + dy * dy + dz * dz;
+      if (distance2 < selectedDistance2) {
+        selected = { cell, centerM, deltaM: [dx, dy, dz] };
+        selectedDistance2 = distance2;
+      }
+    }
+    if (selected) {
+      const gradient = vector3From(selected.cell.pressureGradientPaPerM);
+      const reconstructed = Number(selected.cell.pressurePa)
+        + gradient[0] * selected.deltaM[0]
+        + gradient[1] * selected.deltaM[1]
+        + gradient[2] * selected.deltaM[2];
+      return {
+        pressurePa: Math.max(0, reconstructed),
+        pressureSource: 'local-gas-cell-nearest-gradient-reconstruction',
+        pressureCellIndex: selected.cell.index ?? null,
+        pressureCellCenterM: selected.centerM,
+        pressureGradientPaPerM: gradient
+      };
+    }
+  }
+  return {
+    pressurePa: fallbackPressurePa,
+    pressureSource: 'uniform-sealed-gas-pressure',
+    pressureCellIndex: null,
+    pressureCellCenterM: null,
+    pressureGradientPaPerM: [0, 0, 0]
+  };
+}
+
 function gasPressureFieldResolutionDiagnostics(gasCellField = null) {
   const unavailable = !gasCellField || gasCellField.status !== 'gas-cell-pressure-field-ready';
   const localPressureGradientReady = gasCellField?.localPressureGradientReady === true;
@@ -697,8 +773,13 @@ export function gasPressureCellFieldSummary({
   source = null
 } = {}) {
   const totalPressurePa = Number(pressureSummary?.totalPressurePa);
+  const suppliedField = pressureSummary?.gasCellField || pressureSummary?.localGasCellField || null;
+  const localCells = normalizeLocalGasPressureCells(suppliedField);
   const dims = pressureBoxDimensionsM(boxDimsM || pressureSummary?.boxDimsM, pressureSummary?.boxVolumeM3);
   const usable = Number.isFinite(totalPressurePa) && dims.every((value) => value > 0);
+  const localGradientReady = usable
+    && localCells.length > 0
+    && suppliedField?.localPressureGradientReady === true;
   const pressureGaugePa = usable ? totalPressurePa - finitePositive(externalPressurePa, PHYSICAL_CONSTANTS.standardAtmospherePa) : 0;
   return {
     schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
@@ -707,33 +788,48 @@ export function gasPressureCellFieldSummary({
     totalPressurePa: Number.isFinite(totalPressurePa) ? totalPressurePa : null,
     pressureGaugePa,
     boxDimsM: dims,
-    cellDims: usable ? [1, 1, 1] : [0, 0, 0],
-    cellCount: usable ? 1 : 0,
-    pressureFieldMode: usable ? UNIFORM_GAS_PRESSURE_FIELD_MODE : 'pressure-field-unavailable',
-    pressureFieldResolution: usable ? UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION : 'pressure-field-unavailable',
+    cellDims: localGradientReady && Array.isArray(suppliedField?.cellDims)
+      ? suppliedField.cellDims.map((value) => Math.max(0, Math.round(Number(value) || 0))).slice(0, 3)
+      : (usable ? [1, 1, 1] : [0, 0, 0]),
+    cellCount: localGradientReady ? localCells.length : (usable ? 1 : 0),
+    cells: localGradientReady ? localCells : [],
+    pressureFieldMode: localGradientReady
+      ? LOCAL_GAS_CELL_PRESSURE_FIELD_MODE
+      : (usable ? UNIFORM_GAS_PRESSURE_FIELD_MODE : 'pressure-field-unavailable'),
+    pressureFieldResolution: localGradientReady
+      ? LOCAL_GAS_CELL_PRESSURE_FIELD_RESOLUTION
+      : (usable ? UNIFORM_GAS_PRESSURE_FIELD_RESOLUTION : 'pressure-field-unavailable'),
     pressureFieldCellFamily: 'resident-gas-pressure',
     uniformPressurePa: Number.isFinite(totalPressurePa) ? totalPressurePa : null,
     uniformPressureGaugePa: pressureGaugePa,
-    pressureGradientPaPerM: [0, 0, 0],
-    gradientStatus: usable ? 'uniform-sealed-gas-pressure-zero-gradient' : 'pressure-field-unavailable',
+    pressureGradientPaPerM: localGradientReady
+      ? vector3From(suppliedField?.pressureGradientPaPerM)
+      : [0, 0, 0],
+    gradientStatus: localGradientReady
+      ? 'local-pressure-gradient-field-ready'
+      : (usable ? 'uniform-sealed-gas-pressure-zero-gradient' : 'pressure-field-unavailable'),
     localPressureGradientSchema: ULG_SPH_LOCAL_PRESSURE_GRADIENT_FIELD_SCHEMA,
-    localPressureGradientReady: false,
-    localPressureGradientStatus: usable
-      ? 'blocked-uniform-single-cell-field-has-no-local-gradient'
-      : 'blocked-pressure-field-unavailable',
-    localPressureGradientBlockers: usable
-      ? [...LOCAL_PRESSURE_GRADIENT_BLOCKERS]
-      : ['pressure-field-unavailable'],
-    localPressureGradientForceCouplingStatus: 'blocked-local-pressure-gradient-field-required',
-    gasCellForceCouplingPolicy: usable
-      ? 'uniform-interface-traction-only'
-      : 'blocked-pressure-field-unavailable',
+    localPressureGradientReady: localGradientReady,
+    localPressureGradientStatus: localGradientReady
+      ? 'local-pressure-gradient-field-ready'
+      : (usable
+          ? 'blocked-uniform-single-cell-field-has-no-local-gradient'
+          : 'blocked-pressure-field-unavailable'),
+    localPressureGradientBlockers: localGradientReady
+      ? []
+      : (usable ? [...LOCAL_PRESSURE_GRADIENT_BLOCKERS] : ['pressure-field-unavailable']),
+    localPressureGradientForceCouplingStatus: localGradientReady
+      ? 'local-pressure-gradient-force-coupling-ready'
+      : 'blocked-local-pressure-gradient-field-required',
+    gasCellForceCouplingPolicy: localGradientReady
+      ? 'local-pressure-gradient-interface-traction'
+      : (usable ? 'uniform-interface-traction-only' : 'blocked-pressure-field-unavailable'),
     materialSurfaceCouplingStatus: usable
       ? 'blocked-material-surface-normals-not-resolved'
       : 'blocked-gas-pressure-field-unavailable',
-    localPressureGradientValidation: false,
+    localPressureGradientValidation: localGradientReady,
     residentGasCellGradientCouplingValidation: false,
-    pressureFieldValidation: false,
+    pressureFieldValidation: localGradientReady,
     forceCouplingValidation: false,
     scientificValidation: false,
     gasValidation: false,
@@ -796,9 +892,11 @@ export function gasPressureInterfaceCouplingSummary({
     ],
     uniformPressureForceCouplingStatus: forceCouplingStatus,
     forceResolution: gasReady && interfaceReady && !strictGateBlocked
-      ? 'uniform-interface-traction'
+      ? (pressureFieldResolution.localPressureGradientReady
+          ? 'local-gradient-interface-traction'
+          : 'uniform-interface-traction')
       : 'blocked',
-    localPressureGradientValidation: false,
+    localPressureGradientValidation: pressureFieldResolution.localPressureGradientReady,
     forceCouplingValidation: false,
     scientificValidation: false,
     gasValidation: false,
@@ -833,19 +931,30 @@ export function gasPressureInterfaceForcePreview({
     materialInterfaceField
   });
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
-  const pressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
+  const fallbackPressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
   const canPreview = coupling.status === 'pressure-interface-coupling-ready-for-solver'
-    && Number.isFinite(pressurePa)
-    && pressurePa >= 0
+    && Number.isFinite(fallbackPressurePa)
+    && fallbackPressurePa >= 0
     && Array.isArray(materialInterfaceField?.elements)
     && materialInterfaceField.elements.length > 0;
   const forceBySurface = new Map();
   let netForceN = [0, 0, 0];
   let totalAbsInterfaceForceN = 0;
   let previewedElementCount = 0;
+  let minInterfacePressurePa = Number.POSITIVE_INFINITY;
+  let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
   if (canPreview) {
     for (const element of materialInterfaceField.elements) {
       if (element?.status !== 'interface-element-ready' || !(element.areaM2 > 0)) continue;
+      const centroidM = Array.isArray(element.centroidM) ? element.centroidM : [0, 0, 0];
+      const pressureSample = pressureAtInterfaceCentroid({
+        pressureFeedback,
+        centroidM,
+        fallbackPressurePa
+      });
+      const pressurePa = pressureSample.pressurePa;
+      minInterfacePressurePa = Math.min(minInterfacePressurePa, pressurePa);
+      maxInterfacePressurePa = Math.max(maxInterfacePressurePa, pressurePa);
       const normalArea = Array.isArray(element.normalAreaVectorM2)
         ? element.normalAreaVectorM2
         : (Array.isArray(element.normal)
@@ -879,7 +988,10 @@ export function gasPressureInterfaceForcePreview({
     forceApplicationStatus: 'not-applied-diagnostic-preview',
     pressureInterfaceCouplingStatus: coupling.status,
     forceCouplingStatus: coupling.forceCouplingStatus,
-    gasInterfacePressurePa: Number.isFinite(pressurePa) ? pressurePa : null,
+    gasInterfacePressurePa: Number.isFinite(fallbackPressurePa) ? fallbackPressurePa : null,
+    gasInterfacePressureRangePa: previewedElementCount > 0
+      ? [minInterfacePressurePa, maxInterfacePressurePa]
+      : null,
     pressureFieldMode: pressureFieldResolution.pressureFieldMode,
     pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
     pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
@@ -895,9 +1007,13 @@ export function gasPressureInterfaceForcePreview({
     totalAbsInterfaceForceN,
     netForceN,
     surfaceForces: [...forceBySurface.values()],
-    forceDerivation: 'uniform-gas-pressure-times-interface-normal-area-vector',
-    forceResolution: 'uniform-interface-traction',
-    localPressureGradientValidation: false,
+    forceDerivation: pressureFieldResolution.localPressureGradientReady
+      ? 'local-gas-cell-pressure-gradient-times-interface-normal-area-vector'
+      : 'uniform-gas-pressure-times-interface-normal-area-vector',
+    forceResolution: pressureFieldResolution.localPressureGradientReady
+      ? 'local-gradient-interface-traction'
+      : 'uniform-interface-traction',
+    localPressureGradientValidation: pressureFieldResolution.localPressureGradientReady,
     forceCouplingValidation: false,
     scientificValidation: false,
     gasValidation: false,
@@ -916,10 +1032,10 @@ export function gasPressureInterfaceForceSolver({
     materialInterfaceField
   });
   const pressureFieldResolution = gasPressureFieldResolutionDiagnostics(pressureFeedback?.gasCellField);
-  const pressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
+  const fallbackPressurePa = Number(pressureFeedback?.gasCellField?.uniformPressurePa ?? pressureFeedback?.totalPressurePa);
   const canSolve = coupling.status === 'pressure-interface-coupling-ready-for-solver'
-    && Number.isFinite(pressurePa)
-    && pressurePa >= 0
+    && Number.isFinite(fallbackPressurePa)
+    && fallbackPressurePa >= 0
     && Array.isArray(materialInterfaceField?.elements)
     && materialInterfaceField.elements.length > 0;
   const forceRows = [];
@@ -929,9 +1045,20 @@ export function gasPressureInterfaceForceSolver({
   let netGasReactionForceN = [0, 0, 0];
   let totalAbsMaterialForceN = 0;
   let maxPairResidualN = 0;
+  let minInterfacePressurePa = Number.POSITIVE_INFINITY;
+  let maxInterfacePressurePa = Number.NEGATIVE_INFINITY;
   if (canSolve) {
     for (const element of materialInterfaceField.elements) {
       if (element?.status !== 'interface-element-ready' || !(element.areaM2 > 0)) continue;
+      const centroidM = Array.isArray(element.centroidM) ? element.centroidM : [0, 0, 0];
+      const pressureSample = pressureAtInterfaceCentroid({
+        pressureFeedback,
+        centroidM,
+        fallbackPressurePa
+      });
+      const pressurePa = pressureSample.pressurePa;
+      minInterfacePressurePa = Math.min(minInterfacePressurePa, pressurePa);
+      maxInterfacePressurePa = Math.max(maxInterfacePressurePa, pressurePa);
       const normalArea = Array.isArray(element.normalAreaVectorM2)
         ? element.normalAreaVectorM2
         : (Array.isArray(element.normal)
@@ -953,10 +1080,13 @@ export function gasPressureInterfaceForceSolver({
         materialId: Number.isFinite(element.materialId) ? element.materialId : 0,
         phaseId: Number.isFinite(element.phaseId) ? element.phaseId : 0,
         axisId: Number.isFinite(element.axisId) ? element.axisId : 0,
-        centroidM: Array.isArray(element.centroidM) ? [...element.centroidM] : [0, 0, 0],
+        centroidM: [...centroidM],
         areaM2: element.areaM2,
         pressurePa,
         pressureFieldMode: pressureFieldResolution.pressureFieldMode,
+        pressureSource: pressureSample.pressureSource,
+        pressureCellIndex: pressureSample.pressureCellIndex,
+        pressureGradientPaPerM: pressureSample.pressureGradientPaPerM,
         materialForceN,
         gasReactionForceN,
         pairResidualN,
@@ -1012,7 +1142,10 @@ export function gasPressureInterfaceForceSolver({
     forceCouplingStatus: ready
       ? 'pressure-force-solver-ready-not-applied'
       : coupling.forceCouplingStatus,
-    gasInterfacePressurePa: Number.isFinite(pressurePa) ? pressurePa : null,
+    gasInterfacePressurePa: Number.isFinite(fallbackPressurePa) ? fallbackPressurePa : null,
+    gasInterfacePressureRangePa: ready
+      ? [minInterfacePressurePa, maxInterfacePressurePa]
+      : null,
     pressureFieldMode: pressureFieldResolution.pressureFieldMode,
     pressureFieldResolution: pressureFieldResolution.pressureFieldResolution,
     pressureGradientStatus: pressureFieldResolution.pressureGradientStatus,
@@ -1039,10 +1172,14 @@ export function gasPressureInterfaceForceSolver({
     conservationStatus: ready && maxPairResidualN <= 1e-9
       ? 'pairwise-equal-opposite-force-conservative'
       : (ready ? 'pairwise-force-residual-nonzero' : 'not-evaluated'),
-    forceDerivation: 'uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
-    forceResolution: 'uniform-interface-traction',
+    forceDerivation: pressureFieldResolution.localPressureGradientReady
+      ? 'local-gas-cell-pressure-gradient-interface-normal-area-with-equal-opposite-gas-reaction'
+      : 'uniform-gas-pressure-interface-normal-area-with-equal-opposite-gas-reaction',
+    forceResolution: pressureFieldResolution.localPressureGradientReady
+      ? 'local-gradient-interface-traction'
+      : 'uniform-interface-traction',
     forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
-    localPressureGradientValidation: false,
+    localPressureGradientValidation: pressureFieldResolution.localPressureGradientReady,
     forceCouplingValidation: false,
     scientificValidation: false,
     gasValidation: false,

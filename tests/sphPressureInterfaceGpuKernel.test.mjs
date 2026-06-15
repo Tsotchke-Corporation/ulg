@@ -6,7 +6,9 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import {
   createPressureInterfaceParamsArray,
+  packGasPressureCellRows,
   packMaterialInterfaceElementRows,
+  SPH_GAS_PRESSURE_CELL_FLOATS,
   runSphPressureInterfaceForceRowsWebGpu
 } from '../src/runtime/sph/sphPressureInterfaceGpuKernel.js';
 
@@ -69,7 +71,12 @@ function fakePressureDevice() {
     copies,
     queue: {
       writeBuffer(buffer, offset, data) {
-        writes.push({ label: buffer.label, offset, byteLength: data?.byteLength ?? 0 });
+        const snapshot = data instanceof ArrayBuffer
+          ? data.slice(0)
+          : (ArrayBuffer.isView(data)
+              ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+              : null);
+        writes.push({ label: buffer.label, offset, byteLength: data?.byteLength ?? 0, snapshot });
       },
       submit(commands) {
         submissions.push(commands);
@@ -150,11 +157,38 @@ test('pressure/interface WebGPU producer packs material interface element rows',
     0, 0, 0, 1
   ]);
 
-  const params = createPressureInterfaceParamsArray({ elementCount: 2, pressurePa: 120000 });
+  const gasCells = packGasPressureCellRows({
+    localPressureGradientReady: true,
+    cells: [
+      {
+        gridIndex: [0, 0, 0],
+        centerM: [0.5, 1, 1],
+        pressurePa: 120000,
+        pressureGradientPaPerM: [1000, 0, 0],
+        volumeM3: 1
+      }
+    ]
+  });
+  assert.equal(gasCells.rowCount, 1);
+  assert.equal(gasCells.rowStrideFloats, SPH_GAS_PRESSURE_CELL_FLOATS);
+  assert.deepEqual([...gasCells.rows], [
+    0, 0, 0, 1,
+    0.5, 1, 1, 120000,
+    1000, 0, 0, 1
+  ]);
+
+  const params = createPressureInterfaceParamsArray({
+    elementCount: 2,
+    pressurePa: 120000,
+    gasPressureCellCount: 1,
+    pressureModelId: 1
+  });
   const view = new DataView(params);
-  assert.equal(params.byteLength, 16);
+  assert.equal(params.byteLength, 32);
   assert.equal(view.getUint32(0, true), 2);
   assert.equal(view.getFloat32(4, true), 120000);
+  assert.equal(view.getUint32(8, true), 1);
+  assert.equal(view.getUint32(12, true), 1);
 });
 
 test('pressure/interface WebGPU producer dispatches no-full retained force-row buffer', async () => {
@@ -203,6 +237,65 @@ test('pressure/interface WebGPU producer dispatches no-full retained force-row b
   assert.equal(device.submissions.length, 1);
   assert.equal(device.copies.length, 0);
   assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-elements-in'));
+  assert.ok(device.createdBuffers.some((entry) => entry.label === 'ulg-sph-pressure-interface-gas-cells-in'));
   assert.ok(device.writes.some((entry) => entry.label === 'ulg-sph-pressure-interface-force-params'));
+  assert.equal(device.bindGroups[0].entries.length, 4);
   assert.equal(result.pressureInterfaceForceSolver.conservationStatus, 'pairwise-equal-opposite-force-conservative');
+});
+
+test('pressure/interface WebGPU producer accepts local gas-cell pressure rows', async () => {
+  const device = fakePressureDevice();
+  const result = await runSphPressureInterfaceForceRowsWebGpu({
+    device,
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-sealed-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      totalPressurePa: 120000,
+      gasCellField: {
+        status: 'gas-cell-pressure-field-ready',
+        uniformPressurePa: 120000,
+        pressureFieldMode: 'local-gas-cell-pressure-gradient',
+        pressureFieldResolution: 'structured-gas-cell-grid',
+        gradientStatus: 'local-pressure-gradient-field-ready',
+        localPressureGradientReady: true,
+        localPressureGradientStatus: 'local-pressure-gradient-field-ready',
+        cells: [
+          {
+            gridIndex: [0, 0, 0],
+            centerM: [0.5, 1, 1],
+            pressurePa: 120000,
+            pressureGradientPaPerM: [0, 0, 0],
+            volumeM3: 1
+          },
+          {
+            gridIndex: [1, 0, 0],
+            centerM: [1.5, 1, 1],
+            pressurePa: 180000,
+            pressureGradientPaPerM: [0, 0, 0],
+            volumeM3: 1
+          }
+        ]
+      }
+    },
+    pressureInterfaceCoupling: {
+      schema: 'peercompute.ulg.sph-pressure-interface-coupling.v0',
+      status: 'pressure-interface-coupling-ready-for-solver',
+      forceCouplingStatus: 'pressure-interface-coupling-ready'
+    },
+    materialInterfaceField: interfaceFieldFixture(),
+    retainForceRowsBuffer: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  const paramsWrite = device.writes.find((entry) => entry.label === 'ulg-sph-pressure-interface-force-params');
+  const paramsView = new DataView(paramsWrite.snapshot);
+  assert.equal(paramsView.getUint32(8, true), 2);
+  assert.equal(paramsView.getUint32(12, true), 1);
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(result.pressureInterfaceForceSolver.pressureFieldResolution, 'structured-gas-cell-grid');
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientReady, true);
+  assert.equal(result.pressureInterfaceForceSolver.localPressureGradientValidation, true);
+  assert.equal(result.pressureInterfaceForceSolver.forceResolution, 'local-gradient-interface-traction');
+  assert.equal(result.pressureInterfaceForceSolver.gasPressureCellRowCount, 2);
+  assert.deepEqual(result.pressureInterfaceForceSolver.gasInterfacePressureRangePa, [120000, 180000]);
 });

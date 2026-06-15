@@ -849,6 +849,96 @@ test('gas pressure interface force preview computes tractions without applying t
   assert.equal(blockedSolver.forceRowCount, 0);
 });
 
+test('gas pressure interface solver samples local gas-cell pressure gradients', () => {
+  const pressureSummary = {
+    schema: 'peercompute.ulg.sph-sealed-gas-pressure-summary.v0',
+    status: 'synthetic-pressure',
+    totalPressurePa: 100000,
+    boxVolumeM3: 8,
+    boxDimsM: [2, 2, 2],
+    bySpecies: {},
+    strictReactionGate: { status: 'strict-reaction-gate-pass', blockers: [] },
+    gasCellField: {
+      localPressureGradientReady: true,
+      cellDims: [2, 1, 1],
+      cells: [
+        {
+          gridIndex: [0, 0, 0],
+          centerM: [0.5, 1, 1],
+          pressurePa: 100000,
+          pressureGradientPaPerM: [1000, 0, 0],
+          volumeM3: 4
+        },
+        {
+          gridIndex: [1, 0, 0],
+          centerM: [1.5, 1, 1],
+          pressurePa: 200000,
+          pressureGradientPaPerM: [0, 0, 0],
+          volumeM3: 4
+        }
+      ]
+    }
+  };
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 2,
+    elements: [
+      {
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [0.6, 1, 1],
+        areaM2: 1,
+        normal: [1, 0, 0],
+        normalAreaVectorM2: [1, 0, 0],
+        status: 'interface-element-ready'
+      },
+      {
+        surfaceIndex: 0,
+        surfaceKey: 'h2o|liquid',
+        material: 'h2o',
+        phase: 'liquid',
+        materialId: 1,
+        phaseId: 2,
+        axisId: 0,
+        centroidM: [1.5, 1, 1],
+        areaM2: 1,
+        normal: [-1, 0, 0],
+        normalAreaVectorM2: [-1, 0, 0],
+        status: 'interface-element-ready'
+      }
+    ]
+  };
+  const pressureFeedback = gasPressureFeedbackSummary({ pressureSummary, materialInterfaceField });
+  const solver = gasPressureInterfaceForceSolver({
+    pressureFeedback,
+    materialInterfaceField,
+    pressureInterfaceCoupling: pressureFeedback.pressureInterfaceCoupling
+  });
+
+  assert.equal(pressureFeedback.gasCellField.pressureFieldMode, 'local-gas-cell-pressure-gradient');
+  assert.equal(pressureFeedback.gasCellField.localPressureGradientReady, true);
+  assert.equal(pressureFeedback.gasCellField.cellCount, 2);
+  assert.equal(solver.status, 'pressure-interface-force-solver-ready');
+  assert.equal(solver.forceResolution, 'local-gradient-interface-traction');
+  assert.equal(solver.localPressureGradientValidation, true);
+  assert.deepEqual(solver.gasInterfacePressureRangePa, [100100, 200000]);
+  assert.equal(solver.forceRows[0].pressureSource, 'local-gas-cell-nearest-gradient-reconstruction');
+  assert.equal(solver.forceRows[0].pressurePa, 100100);
+  assert.equal(solver.forceRows[1].pressurePa, 200000);
+  assert.deepEqual(solver.forceRows[0].materialForceN, [-100100, 0, 0]);
+  assert.deepEqual(solver.forceRows[1].materialForceN, [200000, 0, 0]);
+  assert.equal(solver.conservationStatus, 'pairwise-equal-opposite-force-conservative');
+});
+
 test('particle render descriptors preserve simulation material and closure phase', () => {
   const demo = buildSphPhaseDemoState();
   const descriptors = particleRenderDescriptors(demo);

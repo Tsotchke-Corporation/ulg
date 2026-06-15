@@ -175,6 +175,16 @@ Thermo still uploads from CPU for this slice, so the next residency target is
 Worker-retained thermo/thermal/phase output before pressure/interface and
 reaction/product laws are promoted.
 
+Status update, 2026-06-14 Worker-retained thermo input: the mechanics Worker
+lane now seeds and reuses a retained thermo buffer for WebGPU P2G/G2P stages.
+This removes repeated mechanics-stage thermo uploads inside the Worker chain
+and adds the adoption hook needed for true Worker-resident thermal/phase output
+to replace the CPU seed later. Keep this scoped: it is not a new scheduler and
+not yet thermal/phase law promotion. The next authority slice should register
+thermal/phase as a ComputeManager/GPUHub Worker stage that consumes retained
+state/thermo/mechanics refs, emits retained state/thermo output, and lets the
+same Worker lane carry that output into reaction/product and mechanics refresh.
+
 Status update, 2026-06-14 active-grid sequence evidence: the first
 `fuseNoFullResidentMechanicsActiveGrid` slice now uses active-grid P2G and
 grid-update shader variants inside the already gated fused sequence. The

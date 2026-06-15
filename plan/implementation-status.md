@@ -1,9 +1,21 @@
 # Implementation Status
 
-Updated: 2026-06-14 worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
+Updated: 2026-06-14 worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and queued renderer z-buffer/draw-order blocker
 
 ## Done
 
+- Added Worker-retained thermo input for the mechanics Worker lane. WebGPU
+  P2G/G2P now borrow a lane-owned thermo buffer through `sphParticleUpload`
+  instead of independently uploading thermo per stage. The Worker seeds that
+  buffer once from the CPU mirror when no thermo source exists and exposes a
+  generic adoption hook for future thermal/reaction `thermoBuffer` outputs.
+  Browser validation asserts `applied-worker-retained-thermo-input` for P2G and
+  G2P on both the first Worker no-full WebGPU chain and the retained
+  continuation. Validation passed syntax checks, `git diff --check`, Worker
+  unit `1/1`, focused PeerCompute/ULG integration `11/11`, focused browser
+  authority-host Playwright `1/1`, physics atomics `7` with `1` expected skip,
+  and visual matrix `codex-worker-retained-thermo-input-20260614` `3/3` with
+  two captured frames per scenario.
 - Added the first Worker-retained mechanics continuation input path. After an
   admitted no-full WebGPU Worker mechanics publication, the focused browser
   gate keeps the Worker runner warm and runs a second same-lane mechanics stage

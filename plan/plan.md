@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 22:32 AKDT: the Worker mechanics lane now
+retains thermo input alongside state/mechanics. For WebGPU P2G/G2P stages, the
+Worker seeds one retained thermo buffer from the CPU mirror when the lane has
+no thermo source yet, then reuses that buffer through `sphParticleUpload` for
+later P2G/G2P stages and same-Worker continuations. The Worker result summary
+now reports `workerRetainedThermoInputStatus`, and it can adopt future
+thermal/reaction `thermoBuffer` outputs as the lane thermo source. Browser
+validation asserts retained thermo input on the first Worker stage chain and
+the retained continuation. This still keeps the actual thermal/phase law stage
+outside the Worker; the next target is promoting thermal/phase execution under
+the same ComputeManager/GPUHub Worker authority before pressure/interface and
+reaction/product stages.
+
 Current checkpoint, 2026-06-14 22:18 AKDT: the admitted Worker-retained
 mechanics publication path now has its first same-Worker continuation consumer.
 The focused browser authority-host gate keeps the Worker runner warm after the
@@ -10,10 +23,8 @@ stage chain on the same lane with
 `gpuHubResidentStageWorkerUseRetainedInput=true`. P2G consumes the previous
 Worker-retained G2P state/mechanics buffers through the Worker lane record,
 and the test asserts the continuation remains WebGPU/no-full/fence-satisfied
-and republishes a retained mechanics descriptor. Thermo still uploads into a
-Worker-retained storage buffer from the CPU mirror, so the next target is
-Worker-retained thermo/thermal/phase outputs before pressure/interface and
-reaction/product stages follow the same authority pattern. Renderer note:
+and republishes a retained mechanics descriptor. Superseded by the 22:32
+retained-thermo input slice above. Renderer note:
 major z-buffer/draw-order failures remain queued as a P0/P1 visual correctness
 blocker separate from physics-law acceptance.
 

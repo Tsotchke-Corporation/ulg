@@ -1,6 +1,6 @@
 # ULG Test Plan
 
-## Current Focused Result - 2026-06-14 Worker-Retained Continuation Input
+## Current Focused Result - 2026-06-14 Worker-Retained Thermo Input
 
 The mechanics stage-chain now resolves P2G, grid-update, and G2P through the
 PeerCompute/GPUHub resident stage executor registry and requests dedicated
@@ -8,6 +8,8 @@ worker residency. The latest focused browser gate now proves real browser
 Worker WebGPU execution without full readback, publishes the Worker-retained
 mechanics output through StateManager, and runs a second same-Worker/same-lane
 continuation where P2G consumes the prior retained G2P state/mechanics buffers.
+The Worker lane now also seeds one retained thermo buffer and reuses it for
+P2G/G2P in both the first stage chain and the continuation.
 Focused checks:
 
 - ULG mechanics resident-stage Worker module:
@@ -66,7 +68,9 @@ Focused checks:
   status is `compute-manager-stage-task-chain-executed`, P2G/grid-update/G2P
   remain `webgpu`, all continuation fences are satisfied, P2G reports
   `applied-worker-retained-g2p-input`, and the continuation publishes another
-  retained mechanics descriptor.
+  retained mechanics descriptor. The same gate now asserts P2G and G2P report
+  `applied-worker-retained-thermo-input` for the first Worker run and the
+  retained continuation.
 - Renderer visual correctness debt:
   major z-buffer/draw-order issues are reported in the live visualization,
   including flicker/vanish behavior around visible fluid/solid volumes. Treat
@@ -112,6 +116,8 @@ Focused checks:
   `codex-worker-retained-publication-20260614` passed `3/3`.
   The Worker retained continuation matrix
   `codex-worker-retained-continuation-20260614` passed `3/3`.
+  The Worker retained thermo input matrix
+  `codex-worker-retained-thermo-input-20260614` passed `3/3`.
   All captured two frames per scenario.
 
 The opt-in active-grid mechanics sequence is validated behind

@@ -1,5 +1,53 @@
 # ULG Implementation Log
 
+## 2026-06-14 22:32 AKDT - Worker-retained thermo input
+
+Implemented:
+
+- Added a Worker-retained thermo lane buffer for WebGPU mechanics stages.
+  P2G/G2P now borrow the lane thermo buffer through `sphParticleUpload` instead
+  of each stage independently uploading thermo from the CPU mirror.
+- The Worker seeds the thermo buffer once from the CPU mirror if no retained
+  thermo source exists yet.
+- Added a generic Worker adoption hook for future thermal/reaction
+  `thermoBuffer` outputs so later law-stage promotion can replace the CPU seed
+  with true Worker-resident thermal state.
+- Exposed `workerRetainedThermoInputStatus` and
+  `workerRetainedThermoOutputStatus` through Worker and mechanics stage-chain
+  summaries.
+- Extended the focused browser authority-host gate to assert retained thermo
+  input on P2G/G2P for both the first Worker no-full WebGPU run and the
+  retained continuation.
+
+Validation:
+
+- PASS: `node --check src/services/ulgMechanicsResidentStage.worker.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `git diff --check`.
+- PASS: `node --test tests/ulgMechanicsResidentStageWorker.test.mjs`
+  reported `1/1`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  reported `11/11`.
+- PASS:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  reported `1/1`.
+- PASS: `npm run test:physics-atomics` reported `7` passing checks and `1`
+  expected opt-in long-horizon liquid skip.
+- PASS: visual matrix `codex-worker-retained-thermo-input-20260614` reported
+  `failedCount=0` for `3` filtered scenarios with two captured frames each:
+  `liquid-liquid-h2o-mlsmpm`, `solid-h2o-cpu-sph`, and
+  `law-pressure-off-h2o-mlsmpm`.
+
+Open:
+
+- The thermal/phase law stage is not yet a Worker-resident stage. Next slice:
+  promote thermal/phase execution behind the same ComputeManager/GPUHub Worker
+  authority and let its retained `thermoBuffer` replace the CPU-seeded thermo
+  source.
+- Renderer z-buffer/draw-order regressions remain queued separately.
+
 ## 2026-06-14 22:18 AKDT - Worker-retained mechanics continuation input
 
 Implemented:

@@ -35,15 +35,24 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-14 22:32 AKDT: the Worker mechanics lane now
+seeds and reuses a Worker-retained thermo buffer for WebGPU P2G/G2P stages.
+The first Worker WebGPU stage creates the thermo buffer once from the CPU
+mirror, later P2G/G2P stages borrow it through `sphParticleUpload`, and the
+Worker has a generic adoption hook for future thermal/reaction `thermoBuffer`
+outputs. This closes the immediate repeated thermo-upload issue in the
+mechanics Worker chain. It does not yet move the thermal/phase law stage into
+the Worker; next priority is promoting thermal/phase and then pressure/
+interface and reaction/product stages under the same ComputeManager/GPUHub
+worker authority.
+
 Current routing note, 2026-06-14 22:18 AKDT: the Worker-retained mechanics
 stage output can now be consumed by a second mechanics stage-chain run on the
 same warm Worker/lane. When the caller sets
 `gpuHubResidentStageWorkerUseRetainedInput=true`, P2G uses the prior retained
 G2P state/mechanics buffers through the Worker-local lane record instead of
-requiring those hot arrays to return through main. This is still only partial
-copy avoidance: thermo is currently uploaded into a Worker-retained storage
-buffer from the CPU mirror, so the next copy-avoidance slice is to carry
-thermo/thermal/phase outputs in the Worker lane too.
+requiring those hot arrays to return through main. Superseded by the 22:32
+retained-thermo input slice above.
 
 Renderer blocker note, 2026-06-14 22:18 AKDT: user again reports major
 z-buffer/draw-order problems. Keep this as an explicit renderer P0/P1 before

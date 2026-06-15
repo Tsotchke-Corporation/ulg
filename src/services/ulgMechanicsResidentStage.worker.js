@@ -44,6 +44,9 @@ function getLaneRecord(payload = {}) {
       stageResults: {},
       retainedBuffers: new Map(),
       retainedThermoBuffer: null,
+      retainedThermoBufferByteLength: 0,
+      retainedThermoBufferSourceStage: null,
+      retainedThermoBufferSeededFromCpu: false,
       nextBufferOrdinal: 1
     };
     retainedLanes.set(key, record);
@@ -170,6 +173,109 @@ function retainedG2pOutput(record) {
   return source;
 }
 
+function stageUsesSphThermo(stageId) {
+  return stageId === 'p2g' || stageId === 'g2p';
+}
+
+function ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult }) {
+  if (record.retainedThermoBuffer) {
+    return {
+      status: 'worker-retained-thermo-ready',
+      thermoBuffer: record.retainedThermoBuffer,
+      sourceStage: record.retainedThermoBufferSourceStage || 'worker-retained-lane',
+      thermoBufferByteLength: record.retainedThermoBufferByteLength || data?.sphParticleState?.thermo?.byteLength || null,
+      seededFromCpu: record.retainedThermoBufferSeededFromCpu === true
+    };
+  }
+  const uploadedThermoBuffer = data?.sphParticleUpload?.status === 'webgpu-uploaded'
+    ? data.sphParticleUpload.thermoBuffer
+    : null;
+  if (uploadedThermoBuffer) {
+    record.retainedThermoBuffer = uploadedThermoBuffer;
+    record.retainedThermoBufferByteLength = data?.sphParticleState?.thermo?.byteLength || 0;
+    record.retainedThermoBufferSourceStage = 'input-upload';
+    record.retainedThermoBufferSeededFromCpu = false;
+    return {
+      status: 'worker-retained-thermo-ready',
+      thermoBuffer: record.retainedThermoBuffer,
+      sourceStage: record.retainedThermoBufferSourceStage,
+      thermoBufferByteLength: record.retainedThermoBufferByteLength || null,
+      seededFromCpu: false
+    };
+  }
+  const device = workerDeviceResult?.device || data?.deviceResult?.device || null;
+  const thermo = data?.sphParticleState?.thermo;
+  const thermoBuffer = writeWorkerStorageBuffer(
+    device,
+    'ulg-worker-retained-sph-thermo-seed',
+    thermo
+  );
+  if (!thermoBuffer) {
+    return {
+      status: 'blocked-worker-retained-thermo-input-missing',
+      thermoBuffer: null,
+      sourceStage: null,
+      thermoBufferByteLength: thermo?.byteLength || null,
+      seededFromCpu: false
+    };
+  }
+  record.retainedThermoBuffer = thermoBuffer;
+  record.retainedThermoBufferByteLength = thermo?.byteLength || 0;
+  record.retainedThermoBufferSourceStage = 'cpu-seed';
+  record.retainedThermoBufferSeededFromCpu = true;
+  return {
+    status: 'worker-retained-thermo-ready',
+    thermoBuffer: record.retainedThermoBuffer,
+    sourceStage: record.retainedThermoBufferSourceStage,
+    thermoBufferByteLength: record.retainedThermoBufferByteLength || null,
+    seededFromCpu: true
+  };
+}
+
+function applyWorkerRetainedThermoInput({ stageId, data, record, workerDeviceResult }) {
+  if (data?.preferWebGpu !== true || !stageUsesSphThermo(stageId)) return null;
+  const thermo = ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult });
+  if (!thermo.thermoBuffer) {
+    return {
+      status: thermo.status,
+      applied: false,
+      stageId,
+      thermoBufferByteLength: thermo.thermoBufferByteLength,
+      seededFromCpu: false
+    };
+  }
+  data.sphParticleUpload = {
+    ...(data.sphParticleUpload || {}),
+    schema: data.sphParticleUpload?.schema || 'peercompute.ulg.worker-retained-sph-particle-upload.v0',
+    status: 'webgpu-uploaded',
+    workerRetainedThermo: true,
+    thermoBuffer: thermo.thermoBuffer
+  };
+  return {
+    status: 'applied-worker-retained-thermo-input',
+    applied: true,
+    stageId,
+    sourceStage: thermo.sourceStage,
+    thermoBufferByteLength: thermo.thermoBufferByteLength,
+    seededFromCpu: thermo.seededFromCpu
+  };
+}
+
+function recordWorkerRetainedThermoOutput({ stageId, rawResult, record }) {
+  const source = rawResult?.gpuResult || rawResult;
+  if (!source?.thermoBuffer) return null;
+  record.retainedThermoBuffer = source.thermoBuffer;
+  record.retainedThermoBufferByteLength = source.thermoBufferByteLength || record.retainedThermoBufferByteLength || 0;
+  record.retainedThermoBufferSourceStage = stageId;
+  record.retainedThermoBufferSeededFromCpu = false;
+  return {
+    status: 'adopted-worker-retained-thermo-output',
+    stageId,
+    thermoBufferByteLength: record.retainedThermoBufferByteLength || null,
+    seededFromCpu: false
+  };
+}
+
 function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDeviceResult }) {
   const requested = data?.useWorkerRetainedG2pInput === true;
   if (!requested || stageId !== 'p2g') return null;
@@ -181,23 +287,18 @@ function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDev
       sourceStage: 'g2p'
     };
   }
-  const device = workerDeviceResult?.device || data?.deviceResult?.device || null;
-  if (!record.retainedThermoBuffer) {
-    record.retainedThermoBuffer = writeWorkerStorageBuffer(
-      device,
-      'ulg-worker-retained-sph-thermo-continuation',
-      data?.sphParticleState?.thermo
-    );
-  }
-  if (!record.retainedThermoBuffer) {
+  const thermo = ensureWorkerRetainedThermoBuffer({ data, record, workerDeviceResult });
+  if (!thermo.thermoBuffer) {
     return {
       status: 'blocked-worker-retained-thermo-upload-missing',
       requested: true,
-      sourceStage: 'g2p'
+      sourceStage: 'g2p',
+      thermoInputStatus: thermo.status
     };
   }
   data.sphParticleUpload = {
-    schema: 'peercompute.ulg.worker-retained-sph-particle-upload.v0',
+    ...(data.sphParticleUpload || {}),
+    schema: data.sphParticleUpload?.schema || 'peercompute.ulg.worker-retained-sph-particle-upload.v0',
     status: 'webgpu-uploaded',
     workerRetained: true,
     sourceStage: 'g2p',
@@ -219,7 +320,9 @@ function applyWorkerRetainedContinuationInput({ stageId, data, record, workerDev
     sourceStage: 'g2p',
     stateBufferByteLength: source.stateBufferByteLength ?? null,
     mechanicsBufferByteLength: source.mechanicsBufferByteLength ?? null,
-    thermoBufferRetained: true
+    thermoBufferRetained: true,
+    thermoBufferSourceStage: thermo.sourceStage,
+    thermoBufferSeededFromCpu: thermo.seededFromCpu
   };
 }
 
@@ -349,12 +452,23 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     record,
     workerDeviceResult
   });
+  const workerRetainedThermoInput = applyWorkerRetainedThermoInput({
+    stageId,
+    data,
+    record,
+    workerDeviceResult
+  });
   const rawResult = await runner(data);
   const workerQueueFence = await completeWorkerQueueFence({
     stageId,
     data,
     rawResult,
     workerDeviceResult
+  });
+  const workerRetainedThermoOutput = recordWorkerRetainedThermoOutput({
+    stageId,
+    rawResult,
+    record
   });
   record.stageResults[stageId] = rawResult;
   const cloneableResult = cloneableValue(rawResult, record, stageId);
@@ -378,6 +492,10 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
     workerQueueFenceSatisfied: workerQueueFence?.fenceSatisfied === true,
     workerRetainedContinuationInput,
     workerRetainedContinuationInputStatus: workerRetainedContinuationInput?.status || null,
+    workerRetainedThermoInput,
+    workerRetainedThermoInputStatus: workerRetainedThermoInput?.status || null,
+    workerRetainedThermoOutput,
+    workerRetainedThermoOutputStatus: workerRetainedThermoOutput?.status || null,
     workerRetainedBufferRefs,
     cloneableResultReturned: true
   };
@@ -393,6 +511,8 @@ export async function runUlgMechanicsResidentStageWorkerPayload(payload = {}) {
       workerWebGpuStatus: cloneableResult.workerResidentStage.workerWebGpuStatus,
       workerQueueFenceSatisfied: cloneableResult.workerResidentStage.workerQueueFenceSatisfied,
       workerRetainedContinuationInputStatus: cloneableResult.workerResidentStage.workerRetainedContinuationInputStatus,
+      workerRetainedThermoInputStatus: cloneableResult.workerResidentStage.workerRetainedThermoInputStatus,
+      workerRetainedThermoOutputStatus: cloneableResult.workerResidentStage.workerRetainedThermoOutputStatus,
       retainedBufferRefCount: retainedBufferRefs.length,
       workerRetainedBufferRefCount: workerRetainedBufferRefs.length
     }

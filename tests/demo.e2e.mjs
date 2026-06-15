@@ -5609,10 +5609,14 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
         workerCompactPublicationWarmDeltaStatus: workerPublicationWarmDelta?.payload?.status ?? null,
         workerCompactSummaryStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerCompactSummaryStatus ?? null,
         workerRetainedBufferRefCount: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.workerRetainedBufferRefCount ?? null,
+        workerP2gRetainedThermoInputStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.p2g?.workerRetainedThermoInputStatus ?? null,
+        workerG2pRetainedThermoInputStatus: mechanicsStageTaskChainWorker?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.g2p?.workerRetainedThermoInputStatus ?? null,
         workerContinuationStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.status ?? null,
         workerContinuationStageTaskBackends: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskBackends ?? {},
         workerContinuationStageTaskFenceSatisfied: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskFenceSatisfied ?? {},
         workerContinuationP2gRetainedInputStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.p2g?.workerRetainedContinuationInputStatus ?? null,
+        workerContinuationP2gRetainedThermoInputStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.p2g?.workerRetainedThermoInputStatus ?? null,
+        workerContinuationG2pRetainedThermoInputStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.gpuResidentLaneStageTaskLaneSummaries?.g2p?.workerRetainedThermoInputStatus ?? null,
         workerContinuationPublicationStatus: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.workerCompactPublicationStatus ?? null,
         workerContinuationPublicationCommitted: mechanicsStageTaskChainWorkerContinuation?.mechanicsStageTaskChain?.workerCompactPublicationCommitted ?? null
       };
@@ -6238,6 +6242,8 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationWarmDeltaStatus).toBe('worker-retained-mechanics-output-admitted');
   expect(result.mechanicsStageTaskChainWorker.workerCompactSummaryStatus).toBe('worker-compact-summary-required');
   expect(result.mechanicsStageTaskChainWorker.workerRetainedBufferRefCount).toBeGreaterThan(0);
+  expect(result.mechanicsStageTaskChainWorker.workerP2gRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
+  expect(result.mechanicsStageTaskChainWorker.workerG2pRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
   expect(result.mechanicsStageTaskChainWorker.workerCompactPublicationCandidate).toMatchObject({
     schema: 'peercompute.ulg.mls-mpm-mechanics-worker-compact-publication-candidate.v0',
     sameDeviceMainThreadHandlesAvailable: false,
@@ -6268,6 +6274,8 @@ test('SPH phase resident steps can use the real browser PeerCompute resident aut
     g2p: true
   });
   expect(result.mechanicsStageTaskChainWorker.workerContinuationP2gRetainedInputStatus).toBe('applied-worker-retained-g2p-input');
+  expect(result.mechanicsStageTaskChainWorker.workerContinuationP2gRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
+  expect(result.mechanicsStageTaskChainWorker.workerContinuationG2pRetainedThermoInputStatus).toBe('applied-worker-retained-thermo-input');
   expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationStatus).toBe('worker-retained-mechanics-output-published');
   expect(result.mechanicsStageTaskChainWorker.workerContinuationPublicationCommitted).toBe(true);
   expect(result.mechanicsChildDryRunTask.schema).toBe('peercompute.ulg.mechanics-child-dry-run-evidence.v0');

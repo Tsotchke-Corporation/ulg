@@ -3968,6 +3968,10 @@ function summarizeMechanicsStageLaneResult(stageId, result = {}) {
     workerDeviceCached: result?.workerResidentStage?.workerDeviceCached === true,
     workerRetainedContinuationInputStatus: result?.workerResidentStage?.workerRetainedContinuationInputStatus || null,
     workerRetainedContinuationInput: result?.workerResidentStage?.workerRetainedContinuationInput || null,
+    workerRetainedThermoInputStatus: result?.workerResidentStage?.workerRetainedThermoInputStatus || null,
+    workerRetainedThermoInput: result?.workerResidentStage?.workerRetainedThermoInput || null,
+    workerRetainedThermoOutputStatus: result?.workerResidentStage?.workerRetainedThermoOutputStatus || null,
+    workerRetainedThermoOutput: result?.workerResidentStage?.workerRetainedThermoOutput || null,
     workerRetainedBufferRefs: uniqueNonEmptyStrings(result?.workerResidentStage?.workerRetainedBufferRefs || [])
   };
 }

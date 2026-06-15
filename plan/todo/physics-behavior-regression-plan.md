@@ -12,6 +12,18 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-15 AKDT update: free-surface shape/levelness metrics are now
+  available and can be used as an opt-in acceptance gate. The probe records H2O
+  liquid surface height, tallness ratio, and footprint fill ratio, and
+  `ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1` emits
+  `liquid-free-surface-duration`, `liquid-free-surface-tallness`, and
+  `liquid-free-surface-footprint-fill` issues. Focused visual matrix run
+  `codex-free-surface-gate-h2o-short-fixedsummary-20260615` failed both H2O
+  rows with one connected surface but unphysical shape: MLS-MPM last tallness
+  about `1.397` and footprint fill `0.050`; CPU-SPH last tallness about
+  `1.157` and footprint fill `0.108`. This is now the leading liquid behavior
+  gate: fix law-governed liquid mechanics/free-surface constraints so water
+  spreads and settles instead of preserving a block-like connected blob.
 - 2026-06-15 AKDT update: connected-component visual metrics are now available
   for active MarchingCubes surfaces. Short H2O baseline
   `codex-surface-components-h2o-baseline-20260615` and medium MLS-MPM probe

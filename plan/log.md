@@ -24190,6 +24190,71 @@ Open:
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
 
+## 2026-06-15 14:37 AKDT - Free-Surface Shape Visual Gate
+
+Prompt time/date: 2026-06-15 14:37 AKDT, continuing the active goal after the
+previous clean-break stop.
+
+Actions:
+
+- Re-read `/home/cos/projects/AGENTS.md`, the active plan/log context, and the
+  dirty probe diff before continuing.
+- Checked ICC status for `ulg`; the cached index existed but was stale at
+  `4decccf` while the tree was at `0ebbabd`.
+- Finished the free-surface shape telemetry in
+  `scripts/sph-long-horizon-probe.mjs` by recording same-material H2O liquid
+  surface height, tallness ratio, and footprint fill ratio.
+- Added an opt-in liquid-quality gate:
+  `ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1` now emits explicit
+  `liquid-free-surface-*` issues for missing duration, excessive tallness, and
+  insufficient footprint fill.
+- Wired per-scenario free-surface gate settings through
+  `scripts/sph-visual-sanity-matrix.mjs`.
+- Fixed `finiteOrNull()` in the matrix summary helper so unset optional fields
+  remain `null` instead of becoming `0`.
+- Ran a two-row H2O visual sequence with the free-surface gate enabled to
+  prove the current connected-but-blocky water failure is now visible in
+  compact summary evidence.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added
+  `plan/done/free-surface-shape-visual-gate-2026-06-15.md`.
+
+Files touched:
+
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/free-surface-shape-visual-gate-2026-06-15.md`
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-visual-sanity-matrix.mjs`.
+- PASS: `git diff --check`.
+- EXPECTED FAILURES CAPTURED:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-free-surface-gate-h2o-short-fixedsummary-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  completed with `failedCount=2`, `visualSurfaceIssueCounts={}`, and frame
+  artifacts ready for both rows.
+- MLS-MPM H2O/H2O evidence: one connected visible H2O surface, last tallness
+  `1.3969`, last footprint fill `0.0497`, and last surface height `1.5563 m`.
+- CPU-SPH H2O/H2O evidence: one connected visible H2O surface, last tallness
+  `1.1568`, last footprint fill `0.1076`, and last surface height `1.8975 m`.
+
+Open:
+
+- This slice does not fix liquid mechanics. It proves the next P0 behavior
+  failure as a measured free-surface shape problem: water remains too tall and
+  too low-footprint despite being connected and bounded.
+- Next work should use the new gate on longer H2O rows while fixing the
+  law-governed liquid mechanics/free-surface constraints.
+
 ## 2026-06-15 06:57 AKDT - Retained Gas-Cell Field Source Descriptor
 
 Prompt time/date: 2026-06-15 06:57:26 AKDT, continuing the active goal after

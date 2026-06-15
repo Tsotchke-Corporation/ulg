@@ -1,5 +1,29 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-15 Free-Surface Shape Gate
+
+The visual probe now records same-material H2O liquid free-surface shape
+metrics and can turn them into opt-in liquid-quality failures. This catches the
+current "one connected but blocky water blob" failure that component metrics
+alone cannot classify as bad.
+
+Focused checks:
+
+- Syntax:
+  `node --check scripts/sph-long-horizon-probe.mjs` and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Diff whitespace:
+  `git diff --check` passed.
+- Corrected H2O free-surface gate baseline:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-free-surface-gate-h2o-short-fixedsummary-20260615 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  completed with the expected `failedCount=2`. Both rows reported one
+  connected H2O surface and no visual-surface issues, but failed
+  `liquid-free-surface-duration<0.25`,
+  `liquid-free-surface-tallness>0.75`, and
+  `liquid-free-surface-footprint-fill<0.15`. MLS-MPM ended at tallness
+  `1.3969` and footprint fill `0.0497`; CPU-SPH ended at tallness `1.1568`
+  and footprint fill `0.1076`.
+
 ## Current Focused Result - 2026-06-15 Surface Component Metrics
 
 The visual probe now records connected-component metrics for active

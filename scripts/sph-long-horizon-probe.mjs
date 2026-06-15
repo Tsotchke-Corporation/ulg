@@ -2408,9 +2408,14 @@ function analyzeTimeline(timeline, {
   staticMaxCenterOfMassDeltaM = 1e-6,
   expectLiquidMerge = false,
   expectLiquidSettled = false,
+  expectLiquidFreeSurface = false,
   liquidMergeMaxFinalSupportGapM = 0.005,
   liquidSettledMinTimeS = 1,
   liquidSettledMaxFinalDropSpeedMPerS = 0.25,
+  liquidFreeSurfaceMinTimeS = 0.25,
+  liquidFreeSurfaceMaxTallnessRatio = 0.75,
+  liquidFreeSurfaceMinFootprintFillRatio = 0.15,
+  liquidFreeSurfaceMaxHeightM = null,
   expectedH2oVisibleSurfaceCount = null,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   scenarioUrl = DEFAULT_URL,
@@ -2673,6 +2678,12 @@ function analyzeTimeline(timeline, {
   let maxVisibleSurfaceComponentCount = 0;
   let maxVisibleSurfaceSmallComponentCount = 0;
   let minVisibleSurfaceLargestComponentRatio = null;
+  let maxH2oLiquidSurfaceHeightM = null;
+  let maxH2oLiquidSurfaceTallnessRatio = null;
+  let minH2oLiquidSurfaceFootprintFillRatio = null;
+  let lastH2oLiquidSurfaceHeightM = null;
+  let lastH2oLiquidSurfaceTallnessRatio = null;
+  let lastH2oLiquidSurfaceFootprintFillRatio = null;
   if (!directResident) {
     const transparentRenderLayers = new Set(['transmissive-surface', 'vapor-surface', 'alpha-surface']);
     const knownSurfaceRenderLayers = new Set(['opaque-surface', ...transparentRenderLayers]);
@@ -2813,6 +2824,45 @@ function analyzeTimeline(timeline, {
         }
       }
       for (const surface of visibleSurfaces) {
+        const bounds = surface.worldBounds;
+        const isH2oLiquidSurface = String(surface?.materialKey || '').toLowerCase().includes('h2o')
+          && String(surface?.phase || '').toLowerCase() === 'liquid'
+          && bounds?.size;
+        if (isH2oLiquidSurface) {
+          const heightM = finiteMetric(bounds.size?.[1]);
+          const footprintXM = finiteMetric(bounds.size?.[0]);
+          const footprintZM = finiteMetric(bounds.size?.[2]);
+          const footprintAreaM2 = Number.isFinite(footprintXM) && Number.isFinite(footprintZM)
+            ? Math.max(0, footprintXM * footprintZM)
+            : null;
+          const footprintFillRatio = footprintAreaM2 != null
+            ? footprintAreaM2 / Math.max(1e-9, Number(boxDimsM[0]) * Number(boxDimsM[2]))
+            : null;
+          const horizontalExtentM = Math.max(
+            1e-9,
+            Number.isFinite(footprintXM) ? footprintXM : 0,
+            Number.isFinite(footprintZM) ? footprintZM : 0
+          );
+          const tallnessRatio = Number.isFinite(heightM) ? heightM / horizontalExtentM : null;
+          if (Number.isFinite(heightM)) {
+            maxH2oLiquidSurfaceHeightM = maxH2oLiquidSurfaceHeightM == null
+              ? heightM
+              : Math.max(maxH2oLiquidSurfaceHeightM, heightM);
+            lastH2oLiquidSurfaceHeightM = heightM;
+          }
+          if (Number.isFinite(tallnessRatio)) {
+            maxH2oLiquidSurfaceTallnessRatio = maxH2oLiquidSurfaceTallnessRatio == null
+              ? tallnessRatio
+              : Math.max(maxH2oLiquidSurfaceTallnessRatio, tallnessRatio);
+            lastH2oLiquidSurfaceTallnessRatio = tallnessRatio;
+          }
+          if (Number.isFinite(footprintFillRatio)) {
+            minH2oLiquidSurfaceFootprintFillRatio = minH2oLiquidSurfaceFootprintFillRatio == null
+              ? footprintFillRatio
+              : Math.min(minH2oLiquidSurfaceFootprintFillRatio, footprintFillRatio);
+            lastH2oLiquidSurfaceFootprintFillRatio = footprintFillRatio;
+          }
+        }
         const componentCount = finiteMetric(surface.componentCount);
         const smallComponentCount = finiteMetric(surface.smallComponentCount);
         const largestComponentRatio = finiteMetric(surface.largestComponentVertexRatio);
@@ -2861,7 +2911,6 @@ function analyzeTimeline(timeline, {
             pushRenderVisualIssue('render-opaque-surface-unstable-order-policy', metricIndex, surface);
           }
         }
-        const bounds = surface.worldBounds;
         if (!bounds?.min || !bounds?.max || !bounds?.size) continue;
         const outsideAxes = [];
         const oversizedAxes = [];
@@ -3047,6 +3096,30 @@ function analyzeTimeline(timeline, {
       issues.push(`liquid-settle-final-drop-speed>${liquidSettledMaxFinalDropSpeedMPerS}`);
     }
   }
+  if (expectedLiquidH2oSameMaterial && expectLiquidFreeSurface) {
+    if (!Number.isFinite(maxNextTimeS)) {
+      issues.push('liquid-free-surface-missing-sim-time');
+    } else if (maxNextTimeS < liquidFreeSurfaceMinTimeS) {
+      issues.push(`liquid-free-surface-duration<${liquidFreeSurfaceMinTimeS}`);
+    }
+    if (!Number.isFinite(lastH2oLiquidSurfaceTallnessRatio)) {
+      issues.push('liquid-free-surface-missing-tallness');
+    } else if (lastH2oLiquidSurfaceTallnessRatio > liquidFreeSurfaceMaxTallnessRatio) {
+      issues.push(`liquid-free-surface-tallness>${liquidFreeSurfaceMaxTallnessRatio}`);
+    }
+    if (!Number.isFinite(lastH2oLiquidSurfaceFootprintFillRatio)) {
+      issues.push('liquid-free-surface-missing-footprint-fill');
+    } else if (lastH2oLiquidSurfaceFootprintFillRatio < liquidFreeSurfaceMinFootprintFillRatio) {
+      issues.push(`liquid-free-surface-footprint-fill<${liquidFreeSurfaceMinFootprintFillRatio}`);
+    }
+    if (
+      Number.isFinite(liquidFreeSurfaceMaxHeightM)
+      && Number.isFinite(lastH2oLiquidSurfaceHeightM)
+      && lastH2oLiquidSurfaceHeightM > liquidFreeSurfaceMaxHeightM
+    ) {
+      issues.push(`liquid-free-surface-height>${liquidFreeSurfaceMaxHeightM}`);
+    }
+  }
   if (!directResident && visibleSurfaceSampleCount === 0) issues.push('no-visible-surface-samples');
   if (!directResident && h2oVisibleSurfaceSampleCount === 0) issues.push('no-visible-h2o-surface-samples');
   if (visualSurfaceIssues.some((item) => item.issue === 'visible-surface-outside-box')) issues.push('visible-surface-outside-box');
@@ -3075,9 +3148,16 @@ function analyzeTimeline(timeline, {
     staticMaxCenterOfMassDeltaM,
     expectLiquidMerge,
     expectLiquidSettled,
+    expectLiquidFreeSurface,
     liquidMergeMaxFinalSupportGapM,
     liquidSettledMinTimeS,
     liquidSettledMaxFinalDropSpeedMPerS,
+    liquidFreeSurfaceMinTimeS,
+    liquidFreeSurfaceMaxTallnessRatio,
+    liquidFreeSurfaceMinFootprintFillRatio,
+    liquidFreeSurfaceMaxHeightM: Number.isFinite(liquidFreeSurfaceMaxHeightM)
+      ? liquidFreeSurfaceMaxHeightM
+      : null,
     expectedH2oVisibleSurfaceCount: Number.isFinite(expectedH2oVisibleSurfaceCount)
       ? expectedH2oVisibleSurfaceCount
       : null,
@@ -3132,6 +3212,12 @@ function analyzeTimeline(timeline, {
     maxVisibleSurfaceComponentCount,
     maxVisibleSurfaceSmallComponentCount,
     minVisibleSurfaceLargestComponentRatio,
+    maxH2oLiquidSurfaceHeightM,
+    maxH2oLiquidSurfaceTallnessRatio,
+    minH2oLiquidSurfaceFootprintFillRatio,
+    lastH2oLiquidSurfaceHeightM,
+    lastH2oLiquidSurfaceTallnessRatio,
+    lastH2oLiquidSurfaceFootprintFillRatio,
     visibleSurfaceSampleCount,
     h2oVisibleSurfaceSampleCount,
     residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length
@@ -3217,6 +3303,8 @@ async function main() {
   const expectLiquidMerge = process.env.ULG_PROBE_EXPECT_LIQUID_MERGE === '1';
   const expectLiquidSettled = process.env.ULG_PROBE_EXPECT_LIQUID_SETTLE === '1'
     || process.env.ULG_PROBE_EXPECT_LIQUID_SETTLED === '1';
+  const expectLiquidFreeSurface = process.env.ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE === '1'
+    || process.env.ULG_PROBE_EXPECT_LIQUID_LEVEL === '1';
   const liquidMergeMaxFinalSupportGapM = finiteNumber(
     process.env.ULG_PROBE_LIQUID_MERGE_MAX_FINAL_SUPPORT_GAP_M,
     0.005
@@ -3226,6 +3314,21 @@ async function main() {
     process.env.ULG_PROBE_LIQUID_SETTLE_MAX_FINAL_DROP_SPEED,
     0.25
   );
+  const liquidFreeSurfaceMinTimeS = finiteNumber(
+    process.env.ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S,
+    0.25
+  );
+  const liquidFreeSurfaceMaxTallnessRatio = finiteNumber(
+    process.env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_TALLNESS,
+    0.75
+  );
+  const liquidFreeSurfaceMinFootprintFillRatio = finiteNumber(
+    process.env.ULG_PROBE_LIQUID_FREE_SURFACE_MIN_FOOTPRINT_FILL,
+    0.15
+  );
+  const liquidFreeSurfaceMaxHeightM = process.env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_HEIGHT_M == null
+    ? null
+    : finiteNumber(process.env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_HEIGHT_M, null);
   const expectedH2oVisibleSurfaceCount = process.env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT == null
     ? null
     : positiveInteger(process.env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT, null);
@@ -3240,9 +3343,14 @@ async function main() {
     staticMaxCenterOfMassDeltaM,
     expectLiquidMerge,
     expectLiquidSettled,
+    expectLiquidFreeSurface,
     liquidMergeMaxFinalSupportGapM,
     liquidSettledMinTimeS,
     liquidSettledMaxFinalDropSpeedMPerS,
+    liquidFreeSurfaceMinTimeS,
+    liquidFreeSurfaceMaxTallnessRatio,
+    liquidFreeSurfaceMinFootprintFillRatio,
+    liquidFreeSurfaceMaxHeightM,
     expectedH2oVisibleSurfaceCount,
     visibleBoundsToleranceM,
     particleBoundsToleranceM
@@ -3309,9 +3417,14 @@ async function main() {
       staticMaxCenterOfMassDeltaM,
       expectLiquidMerge,
       expectLiquidSettled,
+      expectLiquidFreeSurface,
       liquidMergeMaxFinalSupportGapM,
       liquidSettledMinTimeS,
       liquidSettledMaxFinalDropSpeedMPerS,
+      liquidFreeSurfaceMinTimeS,
+      liquidFreeSurfaceMaxTallnessRatio,
+      liquidFreeSurfaceMinFootprintFillRatio,
+      liquidFreeSurfaceMaxHeightM,
       expectedH2oVisibleSurfaceCount,
       visibleBoundsToleranceM,
       particleBoundsToleranceM,

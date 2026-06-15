@@ -129,6 +129,7 @@ function uniqueStrings(...sources) {
 }
 
 function finiteOrNull(value) {
+  if (value == null || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -324,6 +325,9 @@ function scenarioEnv({
   if (scenario.expectLiquidSettled === true) {
     env.ULG_PROBE_EXPECT_LIQUID_SETTLE = '1';
   }
+  if (scenario.expectLiquidFreeSurface === true) {
+    env.ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE = '1';
+  }
   if (scenario.liquidMergeMaxFinalSupportGapM != null) {
     env.ULG_PROBE_LIQUID_MERGE_MAX_FINAL_SUPPORT_GAP_M = String(scenario.liquidMergeMaxFinalSupportGapM);
   }
@@ -332,6 +336,18 @@ function scenarioEnv({
   }
   if (scenario.liquidSettledMaxFinalDropSpeedMPerS != null) {
     env.ULG_PROBE_LIQUID_SETTLE_MAX_FINAL_DROP_SPEED = String(scenario.liquidSettledMaxFinalDropSpeedMPerS);
+  }
+  if (scenario.liquidFreeSurfaceMinTimeS != null) {
+    env.ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S = String(scenario.liquidFreeSurfaceMinTimeS);
+  }
+  if (scenario.liquidFreeSurfaceMaxTallnessRatio != null) {
+    env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_TALLNESS = String(scenario.liquidFreeSurfaceMaxTallnessRatio);
+  }
+  if (scenario.liquidFreeSurfaceMinFootprintFillRatio != null) {
+    env.ULG_PROBE_LIQUID_FREE_SURFACE_MIN_FOOTPRINT_FILL = String(scenario.liquidFreeSurfaceMinFootprintFillRatio);
+  }
+  if (scenario.liquidFreeSurfaceMaxHeightM != null) {
+    env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_HEIGHT_M = String(scenario.liquidFreeSurfaceMaxHeightM);
   }
   if (process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES === '1') {
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
@@ -445,11 +461,22 @@ async function main() {
       maxVolumeObservedJ: finiteOrNull(analysis.maxVolumeObservedJ),
       maxPressureImpulseNSeconds: finiteOrNull(analysis.maxPressureImpulseNSeconds),
       maxNextTimeS: finiteOrNull(analysis.maxNextTimeS),
+      expectLiquidFreeSurface: analysis.expectLiquidFreeSurface === true,
+      liquidFreeSurfaceMinTimeS: finiteOrNull(analysis.liquidFreeSurfaceMinTimeS),
+      liquidFreeSurfaceMaxTallnessRatio: finiteOrNull(analysis.liquidFreeSurfaceMaxTallnessRatio),
+      liquidFreeSurfaceMinFootprintFillRatio: finiteOrNull(analysis.liquidFreeSurfaceMinFootprintFillRatio),
+      liquidFreeSurfaceMaxHeightM: finiteOrNull(analysis.liquidFreeSurfaceMaxHeightM),
       firstH2oVisibleSurfaceCount: finiteOrNull(analysis.firstH2oVisibleSurfaceCount),
       lastH2oVisibleSurfaceCount: finiteOrNull(analysis.lastH2oVisibleSurfaceCount),
       maxVisibleSurfaceComponentCount: finiteOrNull(analysis.maxVisibleSurfaceComponentCount),
       maxVisibleSurfaceSmallComponentCount: finiteOrNull(analysis.maxVisibleSurfaceSmallComponentCount),
       minVisibleSurfaceLargestComponentRatio: finiteOrNull(analysis.minVisibleSurfaceLargestComponentRatio),
+      maxH2oLiquidSurfaceHeightM: finiteOrNull(analysis.maxH2oLiquidSurfaceHeightM),
+      maxH2oLiquidSurfaceTallnessRatio: finiteOrNull(analysis.maxH2oLiquidSurfaceTallnessRatio),
+      minH2oLiquidSurfaceFootprintFillRatio: finiteOrNull(analysis.minH2oLiquidSurfaceFootprintFillRatio),
+      lastH2oLiquidSurfaceHeightM: finiteOrNull(analysis.lastH2oLiquidSurfaceHeightM),
+      lastH2oLiquidSurfaceTallnessRatio: finiteOrNull(analysis.lastH2oLiquidSurfaceTallnessRatio),
+      lastH2oLiquidSurfaceFootprintFillRatio: finiteOrNull(analysis.lastH2oLiquidSurfaceFootprintFillRatio),
       maxVisibleSurfaceOutsideM: finiteOrNull(analysis.maxVisibleSurfaceOutsideM),
       maxVisibleSurfaceOutsideParticleBoundsM: finiteOrNull(analysis.maxVisibleSurfaceOutsideParticleBoundsM),
       outputPath,

@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-15 AKDT: the free-surface/levelness validation
+gate now exists and currently fails the representative same-material H2O rows.
+`scripts/sph-long-horizon-probe.mjs` reports H2O liquid surface height,
+tallness ratio, and footprint fill ratio; setting
+`ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1` makes the analyzer emit explicit
+`liquid-free-surface-*` issues. Visual matrix run
+`codex-free-surface-gate-h2o-short-fixedsummary-20260615` failed both short
+H2O rows with one connected surface but excessive tallness and insufficient
+footprint fill. Treat this as the active P0 behavior gate before more
+architecture work: liquids must spread/settle through law-governed mechanics,
+not just render as bounded connected blobs.
+
 Current routing note, 2026-06-15 AKDT: MarchingCubes connected-component
 metrics are now available in the long-horizon probe and visual matrix summary.
 The first baseline did not confirm disconnected fragmentation:

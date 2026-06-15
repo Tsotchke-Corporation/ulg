@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-15 AKDT: the visual probe now has an opt-in
+free-surface shape gate for same-material H2O liquid rows. Long-horizon
+analysis records H2O liquid surface height, tallness ratio, and footprint fill
+ratio, and `ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1` turns those into explicit
+`liquid-free-surface-*` issues. Corrected visual matrix summaries preserve the
+gate thresholds without converting unset `null` values to `0`. Focused run
+`codex-free-surface-gate-h2o-short-fixedsummary-20260615` intentionally failed
+both short H2O rows: MLS-MPM last tallness `1.397` with footprint fill `0.050`,
+and CPU-SPH last tallness `1.157` with footprint fill `0.108`, against the
+current acceptance thresholds tallness `<=0.75` and footprint fill `>=0.15`.
+This confirms the P0 failure is connected-but-blocky liquid shape, not
+component fragmentation or renderer bounds. Next P0: use this gate on longer
+rows while fixing liquid mechanics/free-surface constraints.
+
 Current checkpoint, 2026-06-15 AKDT: the visual probe now records connected
 component metrics for MarchingCubes surfaces, but the MLS-MPM H2O/H2O baseline
 shows the current visible water-quality failure is not disconnected fragments.

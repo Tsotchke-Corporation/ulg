@@ -108,6 +108,7 @@ import {
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_COUPLING_SCHEMA,
   ULG_SPH_PRESSURE_INTERFACE_FORCE_PREVIEW_SCHEMA,
@@ -497,6 +498,12 @@ test('SPH GPU reaction table ABI exposes derived reaction and product phase rows
     'soundSpeedMPerS:f32',
     'eosModelId:f32'
   ]);
+  assert.deepEqual(SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT.slice(8, 12), [
+    'solidFlag:f32',
+    'status:f32',
+    'dynamicViscosityPaS:f32',
+    'surfaceTensionNPerM:f32'
+  ]);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(3\) var<storage, read> reaction_records/);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(5\) var<storage, read> phase_response_records/);
   assert.match(sphReactionStepWgsl, /@group\(0\) @binding\(6\) var<storage, read> phase_responses/);
@@ -708,7 +715,7 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
     'restDensityKgPerM3:f32',
     'phaseFractionGas:f32',
     'representedEntityCount:f32',
-    'pad0:f32'
+    'renderDomainId:f32'
   ]);
   assert.match(sphRenderRowsWgsl, /struct RenderRowsParams/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(0\) var<storage, read> sph_state/);
@@ -719,6 +726,10 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
 
 test('SPH GPU render field ABI exposes material-phase surface fields', () => {
   assert.equal(ULG_SPH_GPU_RENDER_FIELD_SCHEMA, 'peercompute.ulg.sph-gpu-render-field.v0');
+  assert.equal(
+    ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
+    'peercompute.ulg.sph-material-interface-source-field.v0'
+  );
   assert.equal(
     ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
     'peercompute.ulg.sph-material-interface-candidate-field.v0'
@@ -786,7 +797,7 @@ test('SPH GPU render field ABI exposes material-phase surface fields', () => {
     'colorLinearR:f32',
     'colorLinearG:f32',
     'colorLinearB:f32',
-    'status:f32',
+    'renderDomainId:f32',
     'opticalStateId:f32',
     'pad1:f32',
     'pad2:f32'
@@ -1002,6 +1013,12 @@ test('MLS-MPM GPU particle buffer ABI exposes f32x4-aligned mechanics rows', () 
     'eosModelId:f32',
     'constitutiveStatus:f32'
   ]);
+  assert.deepEqual(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.slice(28, 32), [
+    'hydrostaticPressurePa:f32',
+    'dynamicViscosityPaS:f32',
+    'surfaceTensionNPerM:f32',
+    'pad3:f32'
+  ]);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
   assert.match(mlsMpmMechanicsPredictWgsl, /var<storage, read_write> out_mls_mechanics: array<vec4<f32>>/);
@@ -1105,13 +1122,56 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
     ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
     'peercompute.ulg.mls-mpm-gpu-resident-summary-execution.v0'
   );
-  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 32);
+  assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length, 84);
   assert.equal(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(0, 4), [
     'particleCount:f32',
     'gridNodeCount:f32',
     'activeGridNodeCount:f32',
     'sourceMassKg:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(32, 38), [
+    'sourceCenterOfMassXM:f32',
+    'sourceCenterOfMassYM:f32',
+    'sourceCenterOfMassZM:f32',
+    'nextCenterOfMassXM:f32',
+    'nextCenterOfMassYM:f32',
+    'nextCenterOfMassZM:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(44, 54), [
+    'nextMinXM:f32',
+    'nextMinYM:f32',
+    'nextMinZM:f32',
+    'nextMaxXM:f32',
+    'nextMaxYM:f32',
+    'nextMaxZM:f32',
+    'sourcePositionBoundsStatus:f32',
+    'nextPositionBoundsStatus:f32',
+    'sourcePositionMassKg:f32',
+    'nextPositionMassKg:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(56, 64), [
+    'cohortSummaryStatus:f32',
+    'baseCohortStartIndex:f32',
+    'baseCohortEndIndex:f32',
+    'dropCohortStartIndex:f32',
+    'dropCohortEndIndex:f32',
+    'baseCohortNextMassKg:f32',
+    'baseCohortNextCenterXM:f32',
+    'baseCohortNextCenterYM:f32'
+  ]);
+  assert.deepEqual(MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT.slice(72, 83), [
+    'dropCohortNextMassKg:f32',
+    'dropCohortNextCenterXM:f32',
+    'dropCohortNextCenterYM:f32',
+    'dropCohortNextCenterZM:f32',
+    'dropCohortNextMinXM:f32',
+    'dropCohortNextMinYM:f32',
+    'dropCohortNextMinZM:f32',
+    'dropCohortNextMaxXM:f32',
+    'dropCohortNextMaxYM:f32',
+    'dropCohortNextMaxZM:f32',
+    'dropCohortMaxSpeedMPerS:f32'
   ]);
   assert.match(mlsMpmResidentSummaryWgsl, /struct ResidentSummaryParams/);
   assert.equal(mlsMpmResidentSummaryWgsl, mlsMpmResidentSummaryPartialsWgsl);
@@ -1123,7 +1183,7 @@ test('MLS-MPM GPU resident summary ABI exposes compact f32x4 diagnostics', () =>
   assert.match(mlsMpmResidentSummaryWgsl, /wg_phase_mass_solid/);
   assert.match(mlsMpmResidentSummaryWgsl, /wg_temperature_mass_sum/);
   assert.match(mlsMpmResidentSummaryWgsl, /var<workgroup> wg_active_grid_nodes/);
-  assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(64\)/);
+  assert.match(mlsMpmResidentSummaryWgsl, /@compute @workgroup_size\(32\)/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read> partial_summaries/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /var<storage, read_write> resident_summary/);
   assert.match(mlsMpmResidentSummaryFinalizeWgsl, /@compute @workgroup_size\(1\)/);

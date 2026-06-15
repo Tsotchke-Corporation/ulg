@@ -1,9 +1,1431 @@
 # Implementation Status
 
-Updated: 2026-06-12 03:15 AKDT
+Updated: 2026-06-14 live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, and direct-resident liquid settle gate
 
 ## Done
 
+- Promoted the long-horizon H2O/H2O settle evidence from CPU/reference-only to
+  direct-resident no-full telemetry. The
+  `/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json`
+  probe classified `good`: `2048` no-full direct-resident substeps reached
+  about `1.024 s`, final drop max speed was about `0.1935 m/s`, support gap
+  ended near `-0.1079 m`, J stayed around `0.9500..1.0490`, and pressure
+  impulse stayed `0`. Remaining P0: the same batch took about `431.4 s`, with
+  compact summary about `342.7 s`, and a browser scene/MarchingCubes visual
+  settle gate still needs to run cheaply enough for routine validation.
+- Clarified and revalidated the opt-in H2O/H2O long-horizon CPU/reference
+  liquid acceptance gate. `npm run test:physics-liquid-atomic` now passes
+  `8/8`; the 1.024 s CPU-driver fixture remains merged, keeps J around
+  `1.046..1.049`, and damps final drop speed to about `0.196 m/s` against the
+  `0.25 m/s` threshold. The test name and skip text now reflect that it is an
+  opt-in acceptance gate, not a known-failing gate.
+- Wired live mounted resident ComputeManager outputs to the same-device
+  hot-buffer source publication surface. `sphPhaseDemoMount` now passes the
+  active resident authority host into `refreshMlsMpmResidentSteps`, and the
+  scene publishes only after ComputeManager ownership, accepted StateManager
+  warm-delta admission, and real WebGPU SPH/MLS-MPM upload handles are present.
+  The execution now reports `sameDeviceHotBufferSourcePublication` and
+  `sameDeviceRetainedBufferImport`; the source record in StateManager hot
+  storage owns the actual same-device handles. The retained import is also
+  bridged onto the final G2P reconstruction metadata, so compact candidate
+  builders can discover the live producer source without a hand-written
+  descriptor. Validation passed: syntax checks, mounted remote-refresh unit
+  `4/4`, focused browser authority-host and auto-scheduler gates `2 passed`,
+  focused PeerCompute/ULG integration `11/11`, physics atomics `7` pass with
+  `1` expected skip, `git diff --check`, and visual matrix
+  `codex-live-source-g2p-bridge-20260614` with
+  `failedCount=0` for five representative scenarios. Remaining architecture:
+  feed these descriptors from admitted compact worker-stage outputs and keep
+  cross-device retained refs metadata-only.
+- Added a same-device hot-buffer source publication surface for compact
+  candidate copy avoidance. The resident authority host now exposes
+  `host.publishSameDeviceHotBufferSource()`, which stores local same-device
+  SPH state, SPH thermo, and MLS-MPM mechanics upload handles in StateManager
+  hot storage and returns a serializable same-device retained-buffer import
+  descriptor. The host summary reports
+  `residentSameDeviceHotBufferSourcePublicationReady`. The focused
+  PeerCompute/ULG integration now feeds compact same-device candidates from a
+  published source record rather than from a hand-written descriptor, and the
+  retained import aliases that source with no new fake GPU buffers or writes.
+  Validation passed: syntax checks, focused integration `11/11`, mounted
+  remote-refresh unit `4/4`, physics atomics `7` pass with `1` expected
+  skip, and visual matrix `codex-same-device-source-publication-20260614` with
+  `failedCount=0` for five representative scenarios. Remaining lane work:
+  wire live ComputeManager/GPUHub worker-stage outputs to call this publication
+  surface automatically when they already own same-device handles.
+- Added explicit law-isolation coverage to the recurring visual sanity matrix.
+  New labels exercise the browser URL law toggles for mechanics-off static,
+  gravity-off static, pressure-off H2O, EOS-off H2O, thermal-off hot H2O, and
+  reactions-off Na/H2O. The matrix can now forward scenario-local max speed,
+  J bounds, static, and future liquid merge/settle thresholds into
+  `scripts/sph-long-horizon-probe.mjs`.
+  Validation passed: `node --check scripts/sph-visual-sanity-matrix.mjs`;
+  `node scripts/sph-visual-sanity-matrix.mjs --list`; `npm run
+  test:physics-atomics` with `7` pass and `1` expected long-horizon skip; and
+  visual matrix `codex-law-isolation-matrix-20260614` with `failedCount=0`
+  and three captured frames for all six law-isolation scenarios. Remaining
+  physics work: this is harness coverage, not completion of liquid H2O
+  settling/free-surface behavior or the all-reactions Na/H2O timeout.
+- Added a non-refreshable compact mechanics-stage seed candidate for no-full
+  remote G2P outputs. Full-readback mechanics G2P arrays still produce the
+  transitional `stateSeedPayload`, but retained/no-full mechanics output now
+  returns
+  `peercompute.ulg.remote-task-graph-sph-mls-mpm-mechanics-stage-compact-seed.v0`
+  with particle count, step/time, output buffer byte evidence, state families,
+  retained refs, GPU-fence status, `admissionRequired=true`, and
+  `localRefreshRequired=true`. It deliberately sets `stateSeedPayload=null`
+  and `refreshableByDefault=false`, so the current NodeKernel hot-buffer
+  refresh path cannot accidentally treat compact remote buffers as local
+  authority. The refresh seed selector also blocks fallback when a caller
+  explicitly requests `preferMechanicsStageSeed` but only the compact
+  no-full candidate exists. The ULG submit wrapper now records the compact
+  candidate through `NodeKernel.commitRemoteTaskGraphCompactCandidate()` and
+  still returns a blocked hot-buffer refresh with no local buffer refs until a
+  retained-lane local refresh executor exists. PeerCompute now also exposes
+  `NodeKernel.refreshRemoteTaskGraphHotBuffersFromCompactCandidate()`, which
+  reads the admitted compact-candidate record, requires a local compact refresh
+  executor, and only completes with executor-returned local refs. Blocked or
+  no-ref executor results now reject the local lane instead of completing it.
+  Compact mechanics candidates now carry
+  `peercompute.ulg.remote-task-graph-compact-local-refresh-contract.v0`, which
+  records required source families/buffers, remote retained refs, and accepted
+  materialization modes before local refresh can proceed.
+  The first materialization mode now exists:
+  `peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0` can carry
+  validated compact SPH state, SPH thermo, and MLS-MPM mechanics rows; ULG can
+  upload those rows directly into local hot buffers and store the handles only
+  in StateManager hot storage.
+  The first zero-copy local materialization mode now also exists:
+  `peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0`
+  aliases an explicit same-device StateManager hot-buffer record, returns the
+  existing local retained refs, and creates no new GPU buffers or writes.
+  Remote retained refs remain metadata-only unless such a local source record
+  already owns the handles. Mechanics G2P stage results can now carry that
+  same-device source descriptor into the compact mechanics candidate; the
+  candidate marks the local refresh contract as
+  `same-device-local-source-ready`, includes the source hot-buffer key in the
+  compact hash, and can be imported without the executor caller manually
+  attaching the descriptor.
+  ULG exposes `refreshRemoteCompactCandidateHotBuffers()`, can opt into
+  `attemptCompactCandidateRefresh`, and now has a default compact executor
+  contract that reports `blocked-compact-candidate-local-source-required`
+  unless an explicit local source seed is attached. Validation passed: syntax
+  checks; PeerCompute NodeKernel unit `7/7`; focused remote seed graph
+  integration `11/11`, including compact no-full candidate admission, blocked
+  compact refresh, compact snapshot upload into local hot buffers, and
+  same-device retained-buffer import plus source-descriptor propagation; mounted
+  remote-refresh unit `4/4`; physics atomics `6` pass with `1` expected
+  long-horizon skip; and visual matrices
+  `codex-compact-snapshot-materialization-20260614` and
+  `codex-same-device-retained-import-20260614`, and
+  `codex-same-device-source-descriptor-20260614`, each with `failedCount=0`
+  and five frames each for H2O/H2O MLS-MPM, H2O/H2O CPU-SPH, solid H2O
+  CPU-SPH, Fe/H2O contact, and hot H2O phase change. Separate open blocker:
+  the default Na/H2O reaction-product visual scenario still times out.
+- Added a CPU-SPH solid H2O phase and support gate for the reported ice-flow
+  regression.
+  Cold H2O solid particles are excluded from liquid pressure/density
+  projection and use solid-group wall clamping, so base/drop internal pair
+  distances stay fixed. The carrier now also resolves solid group support
+  contact, so a solid H2O drop resting on a solid H2O base does not keep
+  falling through it. The
+  new invariant `plain SPH/PBF reference keeps solid H2O from flowing like
+  liquid water` and the newer `plain SPH/PBF reference keeps solid H2O
+  supported under gravity` invariant are part of `npm run test:physics-atomics`,
+  which now passes `7` with `1` expected long-horizon skip. The fixed mounted
+  CPU-SPH probe holds support gap near `1.83e-7 m`, drop COM delta `0`, max
+  drop speed `0`, and two H2O visible surfaces. The recurring visual matrix
+  now includes `solid-h2o-cpu-sph` with expected H2O surface count `2` plus a
+  static/support guard. Remaining physics work: liquid H2O settling/free-
+  surface behavior is still separate and open.
+- Added an optional mechanics-stage seed candidate to the ULG remote seed graph.
+  The graph can now emit
+  `state-seed -> mechanics-p2g -> mechanics-grid-update -> mechanics-g2p ->
+  mechanics-stage-state-seed -> resident-steps -> post-stage-state-seed`.
+  `runUlgRemoteSphMlsMpmMechanicsStageSeedGraphNode()` consumes the G2P result
+  through PeerCompute `resultInputs`, requires full-readback G2P state and
+  mechanics arrays, preserves original thermo/phase rows, and emits
+  `peercompute.ulg.remote-task-graph-sph-mls-mpm-mechanics-stage-seed-node.v0`.
+  Default refresh still prefers the post-stage seed; `preferMechanicsStageSeed:
+  true` explicitly refreshes from the candidate and records
+  `refreshSeedPayloadSource: remote-mechanics-stage-state-seed-node`.
+  Validation passed: syntax checks, focused ULG graph integration `11/11`,
+  mounted remote-refresh unit `4/4`, physics atomics `5` pass with `1`
+  expected long-horizon skip, visual matrix
+  `codex-remote-mechanics-stage-seed-sequence-20260614` with
+  `failedCount=0` and three frames per representative scenario, and ULG
+  `git diff --check` clean; `npm run icc:update` refreshed
+  `indexedFiles=235` and `memoryChunks=1249`. Remaining architecture: replace
+  the full-readback mechanics candidate with compact admitted stage outputs and
+  retained GPU lane refs before making it the default authority path.
+- Added an optional static mechanics stage chain to the ULG remote seed graph.
+  `buildUlgSphMlsMpmRemoteSeedTaskGraph()` can now emit
+  `state-seed -> mechanics-p2g -> mechanics-grid-update -> mechanics-g2p ->
+  resident-steps -> post-stage-state-seed`. The mechanics nodes wrap the
+  existing ComputeManager-owned P2G, grid update, and G2P stage tasks, inject
+  completed upstream stage results through PeerCompute `resultInputs`, and keep
+  commit deltas suppressed. When this chain is enabled, the resident stage
+  depends on G2P completion. Validation passed:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "remote seed graph builder"`
+  with `11/11`; mounted remote-refresh unit `4/4`; PeerCompute task-graph
+  regression `19/19`; PeerCompute NodeKernel `7/7`; GPU lane `5/5`; physics
+  atomics `5` pass with `1` expected long-horizon skip; visual matrix
+  `codex-remote-mechanics-stage-chain-sequence-20260614` with
+  `failedCount=0` and three frames per representative scenario; ULG and
+  PeerCompute `git diff --check` clean; `npm run icc:update` refreshed
+  `indexedFiles=235` and `memoryChunks=1248`. Remaining architecture: make
+  the stage-chain output become the
+  compact admitted seed/retained-lane handoff instead of using the
+  transitional full-readback post-stage seed.
+- Added a post-stage seed node after the remote resident compute stage. ULG's
+  remote graph builder can now emit seed -> resident compute -> post-stage
+  seed. The post-stage node receives the resident task result through
+  PeerCompute `resultInputs`, refuses stale no-full-readback mirrors, derives a
+  compact SPH/MLS-MPM state seed from full-readback next particle/mechanics
+  state, and the ULG host refresh wrapper prefers that post-stage seed for
+  NodeKernel warm-state commit after the remote cache artifact is admitted.
+  Sibling PeerCompute `ComputeManager.submitTaskGraph()` now supports
+  serializable downstream result inputs, and `NodeKernel.commitRemoteTaskGraphStateSeed()`
+  accepts a validated seed override only after the existing remote import
+  policy passes. Validation passed:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "remote seed graph builder"`
+  with `11/11`; PeerCompute task-graph regression
+  `node --test tests/unit/computeManager.commitDelta.test.js --test-name-pattern "task graph"`
+  with `19/19`; mounted prelude unit `4/4`; PeerCompute NodeKernel `7/7`;
+  GPU lane `5/5`; physics atomics `5` pass with `1` expected long-horizon
+  skip; visual matrix `codex-remote-post-stage-seed-sequence-20260614` with
+  `failedCount=0` and three frames per representative scenario; ULG and
+  PeerCompute `git diff --check` clean; `npm run icc:update` refreshed
+  `indexedFiles=235` and `memoryChunks=1245`. Remaining architecture: replace
+  the transitional full-readback post-stage seed with actual remote
+  P2G/grid/G2P/thermal/reaction/pressure/render WebGPU worker stages under
+  ComputeManager/GPUHub lane authority.
+- Added an optional evidence-only resident compute stage to ULG's remote seed
+  graph builder. `buildUlgSphMlsMpmRemoteSeedTaskGraph()` can now emit the
+  serializable state-seed node followed by
+  `ulg-sph-mls-mpm-resident-steps`, which wraps
+  `createMlsMpmResidentStepsComputeTask()` with commit deltas suppressed and
+  explicit evidence-only GPU-fence requirements for CPU-reference fallback.
+  A real responder `ComputeManager` now executes both nodes, preserves the
+  graph-level state seed in the result/cache artifact, and the requester
+  still refreshes local SPH/MLS-MPM hot buffers only after NodeKernel/
+  StateManager admission/import. Validation passed: mounted prelude unit
+  `4/4`; PeerCompute NodeKernel `7/7`; GPU lane `5/5`; PeerCompute
+  ComputeManager state-seed regression `18/18`; physics atomics `5` pass with
+  `1` expected long-horizon skip; visual matrix
+  `codex-remote-resident-stage-sequence-20260614` with `failedCount=0` and
+  three frames per representative scenario; ULG and PeerCompute
+  `git diff --check` clean.
+- Added a real ULG remote seed graph envelope and PeerCompute seed-artifact
+  propagation. Sibling PeerCompute `ComputeManager.submitTaskGraph()` now
+  preserves graph-level `stateSeedPayload` in the result and cache artifact, so
+  real responder-side task graphs can seed local hot-buffer refresh instead of
+  relying on fake responders that manually inject the payload. ULG now exports
+  `buildUlgSphMlsMpmRemoteSeedTaskGraph()` and
+  `runUlgRemoteSphMlsMpmStateSeedGraphNode()` from
+  `src/runtime/peercomputeBrowserResidentHost.js`. The builder creates a
+  cache-admission-aware SPH/MLS-MPM remote seed graph with state-family
+  metadata, retained-buffer refs, GPU lane hints, and a serializable module
+  task. The mounted remote-refresh prelude now uses this builder by default
+  when raw `driver.demo.state.particles` are available, and skips graph
+  creation when only packed worker view state exists. Validation passed:
+  PeerCompute ComputeManager regression `18/18`, ULG PeerCompute integration
+  `11/11` including the real responder ComputeManager seed-node path,
+  mounted prelude unit `4/4`, PeerCompute NodeKernel `7/7`, GPU lane `5/5`,
+  physics atomics `5` pass with `1` expected long-horizon skip, visual matrix
+  `codex-remote-seed-graph-builder-sequence-20260614` with `failedCount=0`
+  and three frames per representative scenario. Remaining: promote the
+  current evidence-only resident-stage node into validated state-seed
+  production and then replace the local CPU-reference fallback with actual
+  remote resident law DAG stages and WebGPU worker placement.
+- Added a default-off mounted resident remote-refresh prelude. The SPH phase
+  mount API now accepts `enableRemoteResidentTaskGraphRefresh`,
+  `remoteResidentTaskGraph`, `remoteResidentTaskGraphFactory`, and
+  `remoteResidentTaskGraphRefreshOptions`. When enabled, the mounted resident
+  scheduler calls the authority host's
+  `submitTaskGraphWithRemoteSeedHotBufferRefresh()` before the local resident
+  step and records compact telemetry on
+  `overlay.__sphRemoteResidentTaskGraphRefresh`; when disabled, no graph
+  factory or authority wrapper is invoked. This is an opt-in bridge into the
+  remote-seed hot-buffer refresh path, not a claim that the full mounted
+  resident pass DAG is remote yet. Validation passed:
+  `node --check src/visualization/sphPhaseDemoMount.js`,
+  `node --check tests/sphPhaseDemoMountRemoteRefresh.test.mjs`, and
+  `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs` with `4/4`;
+  `tests/peercomputeComputeManagerIntegration.test.mjs` still reports `10/10`;
+  PeerCompute NodeKernel focused unit `7/7`; GPU resident lane manager unit
+  `5/5`; `npm run test:physics-atomics` still reports `5` pass and `1`
+  expected opt-in long-horizon skip; visual matrix run
+  `codex-mounted-remote-prelude-sequence-20260614` reports `failedCount=0`
+  and three frames for all four representative scenarios; ULG and PeerCompute
+  `git diff --check` are clean. Remaining: build the actual mounted resident
+  law DAG as a remote task graph and place those stages on PeerCompute WebGPU
+  workers under ComputeManager/GPUHub authority.
+- Added ULG's concrete SPH/MLS-MPM remote-seed hot-buffer refresh executor.
+  `createUlgSphMlsMpmHotBufferRefreshExecutor()` now produces a NodeKernel-
+  compatible local refresh executor, and
+  `refreshUlgSphMlsMpmHotBuffersFromRemoteSeed()` rebuilds real SPH state,
+  SPH thermo, and MLS-MPM mechanics WebGPU buffers from
+  `peercompute.ulg.remote-task-graph-sph-mls-mpm-state-seed.v0`. The actual
+  WebGPU buffer handles are stored only in StateManager hot storage; the
+  NodeKernel refresh result receives serializable local retained-buffer refs
+  and byte/schema evidence. The browser resident authority host now exposes
+  `refreshRemoteSeedHotBuffers()`, which commits an admitted remote seed if
+  needed and invokes the local ULG executor through NodeKernel; host summaries
+  now report refresh readiness. The host also exposes
+  `submitTaskGraphWithRemoteSeedHotBufferRefresh()`, an opt-in NodeKernel graph
+  submit wrapper that auto-refreshes local hot buffers only after the remote
+  cache artifact is admitted/imported; the focused test also proves
+  `reaction-products` is blocked by the default SPH/MLS-MPM state-family
+  policy with zero GPU uploads. Validation passed: ULG syntax checks, the full
+  `tests/peercomputeComputeManagerIntegration.test.mjs` file `10/10`,
+  PeerCompute NodeKernel focused unit `7/7`, GPU resident lane manager unit
+  `5/5`, physics atomics with the expected long-horizon skip, and visual
+  matrix run `codex-auto-refresh-trigger-sequence-20260614` with
+  `failedCount=0` and three frames per scenario. The mounted scheduler now has
+  a default-off caller-supplied prelude for that wrapper; full remote resident
+  pass-DAG placement remains open.
+- Added NodeKernel local hot-buffer refresh from committed remote seeds in
+  sibling PeerCompute.
+  `NodeKernel.refreshRemoteTaskGraphHotBuffersFromSeed()` now emits
+  `peercompute.nodekernel.remote-task-graph-hot-buffer-refresh.v0`, reads the
+  StateManager warm seed, acquires a local ComputeManager GPU resident lane
+  lease, invokes a local refresh executor with the compact seed payload,
+  completes a local fence, and can commit a refresh delta. Remote retained refs
+  remain seed metadata; only executor-returned local refs are retained on the
+  local lane. Validation passed: PeerCompute NodeKernel focused unit `7/7`,
+  GPU resident lane manager unit `5/5`, remote compute regression `8/8`,
+  ComputeManager task-graph cache regression `17/17`, ULG focused integration
+  `7/7`, physics atomics with the expected long-horizon skip, and visual
+  matrix run `codex-hot-buffer-refresh-sequence-20260614` with
+  `failedCount=0` and three frames per scenario. Remaining: connect ULG's real
+  SPH/MLS-MPM resident buffer rebuild to this refresh hook.
+- Added NodeKernel remote-import warm-state seed commits in sibling
+  PeerCompute. `NodeKernel.commitRemoteTaskGraphStateSeed()` now emits
+  `peercompute.nodekernel.remote-task-graph-state-seed-authority.v0` and
+  commits an allowed imported remote graph result into StateManager warm state
+  as a CPU-friendly delta. It requires the ComputeManager state-family policy
+  to be ready, requires an allowed warm-state seed, and requires a compact
+  state seed payload by default. Remote retained GPU refs remain nonlocal; the
+  committed payload records `local-refresh-required` when local hot buffers
+  must be rebuilt. Validation passed: PeerCompute NodeKernel focused unit
+  `7/7`, remote compute regression `8/8`, ComputeManager task-graph cache
+  regression `17/17`, ULG focused integration `7/7`, physics atomics with the
+  expected long-horizon skip, and visual matrix run
+  `codex-state-seed-commit-sequence-20260614` with `failedCount=0` and three
+  frames per scenario. Remaining: implement actual local hot-buffer refresh
+  execution from these warm seed records.
+- Added remote-import state seed/hot-buffer policy reporting in sibling
+  PeerCompute. `ComputeManager.evaluateRemoteTaskGraphStateSeedPolicy()` now
+  emits `peercompute.compute.remote-task-graph-state-seed-policy.v0` for an
+  admitted remote cache import. It requires an admitted remote import, checks
+  declared state families against the caller's allowed-family policy, blocks
+  disallowed families, and reports `local-refresh-required` when remote
+  retained GPU refs exist but cannot be used as local WebGPU leases. Validation
+  passed: PeerCompute NodeKernel focused unit `7/7`, remote compute regression
+  `8/8`, ComputeManager task-graph cache regression `17/17`, ULG focused
+  integration `7/7`, physics atomics with the expected long-horizon skip, and
+  visual matrix run `codex-state-seed-policy-sequence-20260614` with
+  `failedCount=0` and three frames per scenario. Remaining: implement actual
+  local warm-state seed/hot-buffer refresh execution under NodeKernel/
+  StateManager authority.
+- Added admitted remote task-graph cache import in sibling PeerCompute.
+  `ComputeManager.importRemoteTaskGraphCacheResult()` now records an explicitly
+  admitted remote graph result as a local read-through cache entry with
+  `peercompute.compute.remote-task-graph-cache-import.v0`. A later local graph
+  submission with the same admitted cache key can return a cache hit. Remote
+  GPU resident lane/buffer refs are retained as metadata-only nonlocal refs
+  with `usableLocally=false`, so remote device state cannot masquerade as a
+  local GPU lease. Validation passed: PeerCompute NodeKernel focused unit
+  `7/7`, remote compute regression `8/8`, ComputeManager task-graph cache
+  regression `17/17`, ULG focused integration `7/7`, and physics atomics with
+  the expected long-horizon skip; the four-scenario dense visual subset also
+  passed with `failedCount=0` and three frames per scenario. Remaining: define the retained-lane/
+  state-family policy for when imported remote results may seed ULG local
+  hot/warm resident state.
+- Added remote task-graph cache-artifact admission preflight in sibling
+  PeerCompute. Remote graph results that carry cache artifacts now report
+  `peercompute.nodekernel.remote-task-graph-cache-artifact-preflight.v0`.
+  Default status is `remote-cache-artifact-received-not-admitted`; an explicit
+  `admitRemoteTaskGraphCacheArtifact` placement/graph option routes the
+  artifact object through NodeKernel/StateManager admission and reports
+  `admitted-through-node-kernel-state-manager`. Validation passed:
+  PeerCompute NodeKernel focused unit `7/7`, remote compute regression `8/8`,
+  ULG focused integration `7/7`, and physics atomics with the expected
+  long-horizon skip. Remaining: use the admitted remote artifact records for
+  actual distributed cache/result sharing plus retained GPU lane refs.
+- Added the first NodeKernel remote task-graph transport hop in sibling
+  PeerCompute. Non-advisory distributed graph placement still fails closed
+  when no executor exists, but a graph with explicit `targetPeerIds` can now
+  resolve a `network-task-graph:<peer>` executor, send `compute-task-graph`,
+  execute on the responder's `ComputeManager.submitTaskGraph()`, and return
+  `peercompute.nodekernel.remote-task-graph-placement-provenance.v0` without
+  invoking requester-local graph execution. Validation passed: PeerCompute
+  NodeKernel focused unit `6/6`, remote compute regression `8/8`, ULG focused
+  integration `7/7`, physics atomics with the expected long-horizon skip, and
+  the four-scenario dense visual subset with `failedCount=0` and three frames
+  per scenario.
+  Remaining: thread admitted artifact hashes, retained GPU lane refs,
+  distributed cache/result sharing, and StateManager admission through the
+  graph request/result path before moving resident ULG physics remote by
+  default.
+- Added a NodeKernel task-graph placement preflight guardrail in sibling
+  PeerCompute. `NodeKernel.submitTaskGraph()` now records
+  `peercompute.nodekernel.task-graph-placement-preflight.v0`, allows local and
+  advisory distributed graph requests with explicit status, and rejects
+  non-advisory distributed graph placement until a real distributed graph
+  executor exists. ULG carries the preflight schema/status in the mechanics
+  stage-chain artifact, and focused Node/browser tests prove
+  `local-placement-accepted` on the current CPU-oracle mechanics graph.
+  Validation passed: NodeKernel focused unit `5/5`, ULG focused integration
+  `7/7`, browser authority `1/1`, and physics atomics with the expected
+  long-horizon skip. Remaining: implement the actual distributed graph
+  executor and rerun the dense visual subset after any physics/render-facing
+  change.
+- Routed the mechanics stage-chain native DAG through NodeKernel authority when
+  a real kernel is available. PeerCompute now exposes
+  `NodeKernel.submitTaskGraph()` with
+  `peercompute.nodekernel.task-graph-authority.v0`, and ULG's
+  `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()` prefers
+  that wrapper before falling back to direct `ComputeManager.submitTaskGraph()`.
+  The browser resident authority host passes its real NodeKernel into the
+  mechanics stage-chain helper, so mounted authority tests now prove
+  `node-kernel-submit-task-graph` rather than a scene-local graph submission.
+  Validation passed: NodeKernel focused unit `3/3`, ULG focused integration
+  `7/7`, browser authority `1/1`, physics atomics with the expected
+  long-horizon skip, and the four-scenario dense visual subset with
+  `failedCount=0` and three frames per scenario. Remaining: distributed graph
+  placement/execution across peers using admitted hashes and retained GPU lane
+  refs.
+- Landed the first StateManager/NodeKernel cache artifact authority slice in
+  sibling PeerCompute and proved it from ULG. `StateManager` now records
+  admitted and invalidated task-graph cache artifacts in CRDT-backed authority
+  records, `NodeKernel` exposes admission/invalidation as the public authority
+  facade, and `ComputeManager` only marks local read-through artifacts usable
+  after receiving that authority record. ULG's mechanics P2G -> grid-update ->
+  G2P native stage DAG now moves its record-only cache artifact through
+  NodeKernel/StateManager admission and invalidation in the focused integration
+  test. Focused PeerCompute units passed `25/25`; the focused ULG
+  PeerCompute integration gate passed `7/7`; the browser authority gate passed
+  `1/1`; physics atomics passed with the expected long-horizon skip; and the
+  four-scenario dense visual subset passed with `failedCount=0` and three
+  frames per scenario. Remaining: distributed graph placement/execution using
+  admitted artifact hashes and retained GPU lane refs, plus the known Na/H2O
+  visual timeout and long-horizon liquid-quality gates.
+- Added first-class graph cache artifacts and admission metadata to sibling
+  PeerCompute `ComputeManager.submitTaskGraph()`. Content-addressed graph
+  cache writes now produce `peercompute.compute.task-graph-cache-artifact.v0`
+  with result hash, input hash, invalidation refs, result node schemas, and
+  `peercompute.compute.task-graph-cache-admission.v0`. Read-through requires
+  an admitted artifact by default; ULG mechanics stage-chain artifacts are
+  deliberately `recorded-not-admitted`, so no physics output is replayed yet.
+  ULG records artifact schema/status/admitted/result-hash evidence in
+  `peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0`, and the real
+  browser authority host exposes the same fields. Syntax, focused Node and
+  browser authority gates, physics atomics, PeerCompute focused units, and the
+  four-scenario dense visual matrix all pass. Remaining: wire admitted
+  cache artifacts into StateManager/NodeKernel invalidation and distributed
+  graph placement/execution.
+- Added content-addressed graph cache input evidence to sibling PeerCompute
+  `ComputeManager.submitTaskGraph()`. A graph can now declare state refs,
+  closure refs, law ids, invalidation refs, retained-buffer refs, units, and
+  stage node cache inputs; the manager normalizes those inputs, hashes the
+  material into `peercompute.compute.task-graph-cache-inputs.v0`, and derives
+  the local cache key when no explicit key is supplied. ULG's mechanics
+  P2G -> grid-update -> G2P stage-chain helper now supplies those inputs from
+  the CPU-oracle mechanics law graph and records key source, input hash, input
+  schema, key, and cache status in
+  `peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0`. The cache remains
+  record-only for physics outputs until admission/invalidation is stronger.
+  Syntax checks, focused ULG Node and browser authority gates, physics atomics,
+  PeerCompute focused units, and the four-scenario dense visual matrix all
+  pass. Remaining: promote these cache input hashes into shared closure/state
+  cache artifacts and use them for distributed graph placement/execution.
+- Extended sibling PeerCompute `ComputeManager.submitTaskGraph()` with
+  graph-level lifecycle metadata for cache policy, placement policy,
+  cooperative cancellation, active-graph inspection, stats, and optional
+  graph-wide GPU resident lane leases. ULG now passes record-only CPU-oracle
+  cache metadata and local ComputeManager placement intent into the mechanics
+  P2G -> grid-update -> G2P graph, and records cache/placement/cancellation
+  and lease status in `peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0`.
+  The focused Node gate proves lifecycle metadata on the real mechanics DAG,
+  including a graph-wide GPU lane lease on the direct native DAG. The browser
+  authority gate verifies the same stage-chain lifecycle fields from the real
+  mounted authority host. Syntax, Node, browser, and physics atomics pass.
+  The full five-scenario visual matrix still times out on the known
+  Na/H2O reaction-product scenario; the four representative non-Na scenarios
+  passed with three captured frames each. Remaining: make graph cache keys
+  content-addressed, add distributed graph placement/execution, and keep the
+  Na/H2O reaction visual timeout as a P0 reaction/closure harness blocker.
+- Added native PeerCompute `ComputeManager.submitTaskGraph()` support in the
+  sibling PeerCompute checkout and proved it from ULG with the mechanics
+  P2G -> grid-update -> G2P stage DAG. The API records
+  `peercompute.compute.task-graph-result.v0`, validates dependency edges,
+  executes ready nodes in dependency batches, passes completed upstream results
+  into downstream task factories, and returns per-node reports plus results.
+  ULG now gates the native graph by submitting the three mechanics stage tasks
+  through `submitTaskGraph()` and asserting all stage-task evidence artifacts
+  pass. The ULG mechanics stage-chain helper consumes this native graph path
+  directly for CPU-oracle/no-upload requests, and the browser authority gate
+  now executes `runMechanicsStageTaskChain()` successfully. Syntax checks
+  passed for PeerCompute `ComputeManager.js` and ULG tests, the focused ULG
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix
+  classified both scenarios as `good` with two captured frames each.
+  Remaining: add graph-level leases, cancellation, cache keys, placement, and
+  distributed execution semantics.
+- Added a first-class ULG mechanics stage-chain helper:
+  `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()`. It
+  runs one mechanics-only split step while submitting P2G, grid update, and
+  G2P through the active ComputeManager stage tasks, records
+  `peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0`, keeps the child law
+  non-authoritative, and uses native PeerCompute task graphs for the
+  CPU-oracle/no-upload path. The browser resident authority
+  host now exposes `runMechanicsStageTaskChain()` and reports
+  `residentMechanicsStageTaskChainReady`. Syntax checks passed, the focused
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix
+  classified both scenarios as `good` with two captured frames each.
+  Remaining: extend native graph scheduling with explicit leases, placement,
+  cancellation, caching, and distributed execution.
+- Added the mechanics-only split-step replacement seam for
+  ComputeManager-owned stage task. `runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu()`
+  now accepts optional whole-stage runners for P2G, grid update, and G2P while
+  defaulting to the existing raw kernel entrypoints. Focused integration
+  coverage now proves P2G-only replacement, P2G+grid-update replacement, and
+  full P2G+grid-update+G2P replacement through
+  `ulg-mls-mpm-mechanics-{p2g,grid-update,g2p}-stage` tasks. The split-path
+  evidence records `stageTaskBoundaries` plus each
+  `peercompute.ulg.mechanics-*-stage-task-evidence.v0` artifact without
+  making the mechanics child law authoritative. Syntax checks passed, the
+  focused ComputeManager
+  integration file passed `7/7`, the real browser authority Playwright gate
+  passed `1/1`, physics atomics passed with the expected long-horizon skip,
+  and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix classified both
+  scenarios as `good` with two captured frames each. Remaining: promote the
+  hook-based replacement seam into a first-class ComputeManager/NodeKernel
+  stage-chain scheduler with manager-owned dependencies, leases, cancellation,
+  caching, placement, and eventual distributed execution.
+- Added the third ComputeManager-owned mechanics sub-stage task:
+  `ulg-mls-mpm-mechanics-g2p-stage`. The task surface
+  `createMlsMpmMechanicsG2pStageComputeTask()` /
+  `runMlsMpmMechanicsG2pStageComputeTask()` wraps the existing G2P kernel
+  entrypoint, consumes the transient grid-update artifact, suppresses internal
+  pressure-interface impulses for the mechanics-only path, returns candidate
+  particle state plus MLS-MPM mechanics output, suppresses commit deltas, and
+  emits `peercompute.ulg.mechanics-g2p-stage-task-evidence.v0`. The browser
+  resident authority host now exposes `submitMechanicsG2pStageTask()` through
+  its real ComputeManager. Syntax checks passed, the focused ComputeManager
+  integration file passed `7/7`, the real browser authority Playwright gate
+  passed `1/1`, physics atomics passed with the expected long-horizon skip,
+  and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix classified both
+  scenarios as `good` with three captured frames each. Remaining: wire
+  P2G/grid-update/G2P stage replacement into the mechanics child path under
+  CPU oracle, StateManager admission, GPU fence/lease evidence, and visual
+  sanity. This is architecture boundary progress, not final long-horizon
+  liquid-settling validation.
+- Added the second ComputeManager-owned mechanics sub-stage task:
+  `ulg-mls-mpm-mechanics-grid-update-stage`. The task surface
+  `createMlsMpmMechanicsGridUpdateStageComputeTask()` /
+  `runMlsMpmMechanicsGridUpdateStageComputeTask()` wraps the existing grid
+  update kernel entrypoint, consumes transient P2G grid state, suppresses
+  pressure-interface rows for the mechanics-only path, writes only transient
+  updated grid state, suppresses commit deltas, and emits
+  `peercompute.ulg.mechanics-grid-update-stage-task-evidence.v0`. The browser
+  resident authority host now exposes `submitMechanicsGridUpdateStageTask()`
+  through its real ComputeManager. Syntax checks passed, the focused
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix
+  classified both scenarios as `good` with two captured frames each.
+  Remaining: add the matching G2P stage task, then wire stage replacement into
+  the mechanics child path under CPU oracle and visual sanity.
+- Added the first ComputeManager-owned mechanics sub-stage task:
+  `ulg-mls-mpm-mechanics-p2g-stage`. The new task surface
+  `createMlsMpmMechanicsP2gStageComputeTask()` /
+  `runMlsMpmMechanicsP2gStageComputeTask()` wraps the existing P2G kernel
+  entrypoint without changing solver math, suppresses pressure/product inputs
+  for the mechanics-only path, writes only transient `mls-mpm-grid`, suppresses
+  commit deltas, and emits
+  `peercompute.ulg.mechanics-p2g-stage-task-evidence.v0`. CPU-oracle P2G
+  stage tasks remain valid without a GPU fence; WebGPU/no-full-readback paths
+  declare a GPU-lane/fence requirement. The browser resident authority host now
+  exposes `submitMechanicsP2gStageTask()` through its real ComputeManager.
+  Syntax checks passed, the focused ComputeManager integration file passed
+  `7/7`, the real browser authority Playwright gate passed `1/1`, physics
+  atomics passed with the expected long-horizon skip, and the short H2O/H2O
+  MLS-MPM plus CPU-SPH visual matrix classified both scenarios as `good` with
+  two captured frames each. Remaining: use this P2G stage task as the pattern
+  for grid-update and G2P stage tasks, then wire stage replacement into the
+  mechanics child path under CPU oracle and visual sanity.
+- Split G2P out as its own mechanics child stage evidence artifact, completing
+  individually named evidence gates for P2G, grid update, and G2P under the
+  current mechanics child task. Mechanics-only child task results now emit
+  `peercompute.ulg.mechanics-child-g2p-stage-evidence.v0` top-level and under
+  `perStageEvidence.g2p`. The artifact proves G2P executed through the
+  explicit mechanics-only split path, used an accepted backend, suppressed
+  pressure-interface forces, read transient MLS-MPM grid state, wrote only
+  particle state plus MLS-MPM mechanics, and remains
+  `stage-evidence-only-not-authoritative`. Mechanics promotion admission now
+  requires `mechanics-child-g2p-stage-evidence`; child dry-run and promotion
+  evidence validate and record it before mechanics can become an admitted law
+  owner. Syntax checks passed for the touched runtime and tests, the focused
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix
+  classified both scenarios as `good` with two captured frames each.
+  Remaining: use the now-complete P2G/grid-update/G2P evidence set to replace
+  one mechanics kernel at a time under the CPU oracle, StateManager admission,
+  GPU fence/lease evidence, and visual sanity.
+- Split grid update out as its own mechanics child stage evidence artifact.
+  Mechanics-only child task results now emit
+  `peercompute.ulg.mechanics-child-grid-update-stage-evidence.v0` top-level
+  and under `perStageEvidence.gridUpdate`, alongside P2G and the broad stage
+  kernel envelope. The artifact proves grid update executed through the
+  explicit mechanics-only split path, used an accepted backend, suppressed
+  pressure-interface forces, touched only transient MLS-MPM grid state, and
+  remains `stage-evidence-only-not-authoritative`. Mechanics promotion
+  admission now requires `mechanics-child-grid-update-stage-evidence`; child
+  dry-run and promotion evidence validate and record it before mechanics can
+  become an admitted law owner. Syntax checks passed for the touched runtime
+  and tests, the focused ComputeManager integration file passed `7/7`, the
+  real browser authority Playwright gate passed `1/1`, physics atomics passed
+  with the expected long-horizon skip, and the short H2O/H2O MLS-MPM plus
+  CPU-SPH visual matrix classified both scenarios as `good` with two captured
+  frames each. Remaining: add the same individually named gate for G2P before
+  replacing any mechanics kernel.
+- Split P2G out as its own mechanics child stage evidence artifact under the
+  architecture-first promotion path. Mechanics-only child task results now emit
+  both `peercompute.ulg.mechanics-child-stage-kernel-evidence.v0` and
+  `peercompute.ulg.mechanics-child-p2g-stage-evidence.v0`; the P2G artifact is
+  exposed top-level and nested under `perStageEvidence.p2g`. It proves the P2G
+  stage executed through the explicit mechanics-only split path, used an
+  accepted backend, suppressed pressure-interface forces, wrote only transient
+  MLS-MPM grid state, and remains
+  `stage-evidence-only-not-authoritative`. Mechanics promotion admission now
+  requires `mechanics-child-p2g-stage-evidence`; child dry-run and promotion
+  evidence validate and record it before mechanics can become an admitted law
+  owner. Syntax checks passed for the touched runtime and tests, the focused
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix
+  classified both scenarios as `good` with two captured frames each.
+  Remaining: repeat the same per-stage evidence pattern for grid update and
+  G2P before replacing any mechanics kernel.
+- Added stage-level mechanics child kernel evidence under the required
+  ComputeManager task envelope. Mechanics-only child task results now emit
+  `peercompute.ulg.mechanics-child-stage-kernel-evidence.v0`, proving P2G,
+  grid update, and G2P ran in order, forbidden thermal/reaction/mechanics
+  refresh stages stayed skipped, pressure-interface impulses stayed
+  suppressed, and writes remained limited to particle state plus mechanics.
+  The mechanics law-family admission contract now also requires
+  `mechanics-child-stage-kernel-evidence`; child dry-run and promotion
+  evidence validate and record that artifact. Syntax checks passed, the
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix
+  classified both scenarios as `good` with two captured frames each.
+  Diff hygiene passed and ICC was refreshed. Remaining: use this per-stage
+  evidence to replace or promote P2G, grid update, and G2P one at a time
+  against the CPU oracle.
+- Made the mechanics-only child task envelope a required promotion artifact.
+  The mechanics law-family admission contract now requires
+  `mechanics-only-child-task-envelope` in addition to
+  `mechanics-child-dry-run-parity`. `runUlgMechanicsChildDryRunTask()`
+  validates a `peercompute.ulg.mechanics-only-child-task-envelope.v0` report
+  proving the child candidate came from the non-mutating mechanics-only
+  ComputeManager task, used the mechanics law node, suppressed commit deltas,
+  executed at least one mechanics-only step, and satisfied any required GPU
+  fence. The promotion evidence task records the same key before admission.
+  Syntax checks passed, the ComputeManager integration file passed `7/7`, the
+  real browser authority Playwright gate passed `1/1`, physics atomics passed
+  with the expected long-horizon skip, and the short H2O/H2O MLS-MPM plus
+  CPU-SPH visual matrix classified both scenarios as `good` with two captured
+  frames each. Diff hygiene passed and ICC was refreshed. Remaining: replace
+  the underlying mechanics kernels one stage at a time under this required
+  child-task envelope and CPU oracle.
+- Added a ComputeManager-owned mechanics-only resident steps task surface:
+  `createMlsMpmMechanicsOnlyResidentStepsComputeTask()`,
+  `runMlsMpmMechanicsOnlyResidentStepsComputeTask()`, and
+  `submitMlsMpmMechanicsOnlyResidentStepsComputeTask()`. The task is a
+  non-mutating child execution envelope for the mechanics law node, writes only
+  particle state plus MLS-MPM mechanics, suppresses commit deltas by default,
+  and supports CPU-oracle execution without a required GPU fence while still
+  requiring a same-device GPU lane/fence when WebGPU residency is requested.
+  The browser resident authority host now exposes
+  `submitMechanicsOnlyResidentStepsTask()` through its real ComputeManager.
+  Syntax checks passed, the ComputeManager integration file passed `7/7`, and
+  the real browser authority Playwright gate passed `1/1`. Physics atomics
+  passed with the expected long-horizon skip, and the short H2O/H2O MLS-MPM
+  plus CPU-SPH visual matrix classified both scenarios as `good` with two
+  captured frames each. Diff hygiene passed and ICC was refreshed. Remaining:
+  feed this task envelope directly into the mechanics child dry-run/promotion
+  evidence chain as a required artifact before any mechanics child law becomes
+  an admitted current owner, then replace the underlying mechanics kernels one
+  law stage at a time under the CPU oracle.
+- Added a direct mechanics-only single-step split path:
+  `runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu()`. The mechanics-only
+  sequence entrypoint now calls that direct step path for every substep instead
+  of wrapping the generic resident pass-DAG step. The direct path runs only
+  P2G, grid update, G2P, and optional compact summary; it supplies null
+  pressure-interface/product inputs, disables non-mechanics law stages, emits
+  `peercompute.ulg.mls-mpm-mechanics-only-split-step.v0`, and preserves the
+  mechanics-only write contract. Syntax checks passed, the ComputeManager
+  integration file passed `7/7`, the real browser authority Playwright gate
+  passed `1/1`, physics atomics passed with the expected long-horizon skip,
+  diff hygiene passed, and the short H2O/H2O MLS-MPM plus CPU-SPH visual
+  matrix classified both scenarios as `good` with two captured frames each.
+  Remaining: migrate the underlying mechanics-only direct step from CPU
+  reference parity toward a WebGPU child worker owned by ComputeManager.
+- Added the explicit mechanics-only resident execution entrypoint
+  `runMlsMpmMechanicsOnlyResidentStepsWithOptionalWebGpu()`. Mechanics
+  promotion reference and child dry-run evidence now route through that
+  entrypoint instead of calling the generic pass-DAG helper directly. The
+  entrypoint forcibly disables thermal, reaction, mechanics-refresh, and
+  pressure-interface stages, marks the execution path as
+  `mechanics-only-entrypoint-enforced`, and preserves the child write contract
+  of `particle-kinematics` plus `mechanics`. Syntax checks passed, the
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, diff hygiene passed, and the short H2O/H2O MLS-MPM plus
+  CPU-SPH visual matrix classified both scenarios as `good` with two captured
+  frames each. Remaining: replace the current CPU mechanics implementation
+  inside the mechanics-only entrypoint with the eventual split WebGPU/CPU child
+  kernel while keeping the same entrypoint contract.
+- Added explicit mechanics-only stage contract evidence to the child dry-run
+  gate. Measured reference runs and child dry-run results now carry
+  `peercompute.ulg.mechanics-only-stage-contract.v0` / reference contract
+  reports proving that the candidate executed only P2G, grid update, and G2P,
+  skipped thermal/reaction/mechanics-refresh law stages, writes only
+  `particle-kinematics` and `mechanics`, and must not write thermo, reaction,
+  gas, or pressure-interface families. The child parity gate now fails if that
+  mechanics-only contract is not satisfied. Syntax checks passed, the
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, diff hygiene passed, and the short H2O/H2O MLS-MPM plus
+  CPU-SPH visual matrix classified both scenarios as `good` with two captured
+  frames each. Remaining: replace the CPU resident candidate implementation
+  behind this contract with the actual split mechanics kernel path.
+- Added a non-mutating mechanics child dry-run candidate gate. The mechanics
+  admission contract now requires `mechanics-child-dry-run-parity`, and
+  `runUlgMechanicsChildDryRunTask()` runs the child candidate as a
+  module-backed ComputeManager task with `suppressCommitDelta: true`. It
+  compares the candidate CPU resident mechanics dry run against measured
+  reference evidence and emits
+  `peercompute.ulg.mechanics-child-dry-run-evidence.v0`. The existing
+  mechanics promotion evidence task now accepts this child dry-run artifact
+  and forwards `mechanics-child-dry-run-parity` into promotion admission.
+  Syntax checks passed, the ComputeManager integration file passed `7/7`, the
+  real browser authority Playwright gate passed `1/1`, physics atomics passed
+  with the expected long-horizon skip, diff hygiene passed, and the short
+  H2O/H2O MLS-MPM plus CPU-SPH visual matrix classified both scenarios as
+  `good` with two captured frames each. Remaining: make this child dry-run
+  candidate use the actual split mechanics kernel path once mechanics is
+  separated from the parent pass DAG.
+- Added measured mechanics promotion reference evidence. New runtime helper
+  `createUlgMechanicsPromotionReferenceEvidence()` runs actual CPU resident
+  zero-force and gravity-only mechanics probes, measures displacement,
+  velocity, volume ratio, pressure-disabled impulse, and mass conservation,
+  then returns `peercompute.ulg.mechanics-promotion-reference-evidence.v0`.
+  Node and browser authority tests now feed those measured fields into the
+  mechanics promotion evidence task instead of static physics booleans while
+  still supplying live authority/context evidence from the host. Syntax checks
+  passed, the ComputeManager integration file passed `7/7`, the real browser
+  authority Playwright gate passed `1/1`, physics atomics passed with the
+  expected long-horizon skip, diff hygiene passed, and the short H2O/H2O
+  MLS-MPM plus CPU-SPH visual matrix classified both scenarios as `good` with
+  two captured frames each. Remaining: turn this measured reference builder
+  into a true mechanics child dry-run task candidate before allowing mechanics
+  to become an executable current owner.
+- Added a non-mutating mechanics promotion evidence task under the resident
+  authority host. `runUlgMechanicsPromotionEvidenceTask()` validates
+  structured CPU/reference, conservation, volume-stability,
+  pressure-disabled, owner-map, GPU fence, StateManager admission,
+  committed-delta, and visual-sequence evidence. The browser authority host
+  exposes `submitMechanicsPromotionEvidenceTask()` through ComputeManager, and
+  the resulting `peercompute.ulg.mechanics-promotion-evidence.v0` artifact can
+  feed the existing promotion admission task. Child mechanics remains
+  metadata-only and does not own writes. Syntax checks passed, the
+  ComputeManager integration file passed `7/7`, the real browser authority
+  Playwright gate passed `1/1`, physics atomics passed with the expected
+  long-horizon skip, diff hygiene passed, and the short H2O/H2O MLS-MPM plus
+  CPU-SPH visual matrix classified both scenarios as `good` with two captured
+  frames each. Remaining: replace the fixture-shaped structured evidence with
+  measured dry-run/reference artifacts from the actual mechanics child path
+  before allowing independent mechanics mutation.
+- Added a non-mutating ComputeManager task wrapper for law-family promotion
+  admission. `runUlgLawFamilyPromotionAdmissionTask()` is serializable for
+  inline JS execution, and `createUlgLawFamilyPromotionAdmissionComputeTask()`
+  creates local ComputeManager tasks with `suppressCommitDelta: true`. The
+  resident authority host exposes `submitLawFamilyPromotionAdmissionTask()`.
+  Child law descriptors remain metadata-only and non-executable. Syntax
+  checks passed, the ComputeManager integration file passed `7/7`, the real
+  browser authority Playwright gate passed `1/1`, physics atomics passed with
+  the expected long-horizon skip, diff hygiene passed, and the short H2O/H2O
+  MLS-MPM plus CPU-SPH visual matrix classified both scenarios as `good`.
+  Remaining: add mechanics-specific reference/dry-run artifacts before any
+  child mechanics law owns writes.
+- Added a ComputeManager-facing law-family promotion admission gate. The
+  browser resident authority now exposes `ulgLawFamilyPromotionAdmission()` on
+  its ComputeManager and `host.admitLawFamilyPromotion()`. The gate consumes
+  the resident law graph manifest, rejects missing evidence, enforces
+  promotion order, and admits only mechanics families when all required
+  evidence is supplied. Mechanics remains metadata-only; thermal/phase is
+  still blocked by promotion order. Syntax checks passed, the ComputeManager
+  integration file passed `7/7`, the real browser authority Playwright gate
+  passed `1/1`, physics atomics passed with the expected long-horizon skip,
+  diff hygiene passed, and the short H2O/H2O MLS-MPM plus CPU-SPH visual
+  matrix classified both scenarios as `good`. Remaining: decide whether the
+  next slice is a metadata mechanics task wrapper or real mechanics child
+  execution after stronger mechanics-specific reference artifacts.
+- Added resident state-family owner metadata to the law graph descriptors and
+  manifest. The pass DAG is now explicitly the single current owner for
+  admitted `particle-kinematics`, `mechanics`, `thermo-phase`,
+  `reaction-products`, `gas-pressure`, and `pressure-interface` families.
+  Child law-family descriptors declare only prospective ownership; mechanics
+  is the first promotion candidate but remains non-executable. The manifest
+  now exposes current/prospective owner maps, conflict status, first-promotion
+  candidate fields, resident read/write family surfaces, and admission
+  evidence requirements. Syntax checks passed, the ComputeManager integration
+  file passed `7/7`, the real browser authority Playwright gate passed `1/1`,
+  physics atomics passed with the expected long-horizon skip, diff hygiene
+  passed, and the short H2O/H2O MLS-MPM plus CPU-SPH visual matrix classified
+  both scenarios as `good`. Remaining: add a ComputeManager-side promotion
+  admission gate for the mechanics child law before making it executable.
+- Added a resident law graph manifest derived from the registered
+  ComputeManager solver descriptors. The manifest exposes five nodes, seven
+  parent/dependency edges, executable versus metadata-only node IDs, read/write
+  and conserved state families, validation gates, WebGPU residency, warm-delta
+  scopes, and the `metadata-only-until-gated` promotion policy. The browser
+  authority host and summary now expose the manifest. Syntax checks passed,
+  the ComputeManager integration file passed `7/7`, the real browser
+  authority Playwright gate passed `1/1`, physics atomics passed with the
+  expected long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH
+  visual matrix classified both scenarios as `good`. Remaining: choose a first
+  child law family, likely mechanics, and add owner metadata plus
+  execution-admission hooks before independent execution.
+- Published resident law-family descriptors under PeerCompute
+  `ComputeManager` authority without splitting execution yet. The browser
+  authority host now registers the executable
+  `ulg-mls-mpm-sph-resident-steps` pass DAG plus metadata-only child law
+  families for mechanics, thermal/phase, reaction/product/gas, and
+  pressure/interface. The child descriptors carry parent law graph metadata,
+  GPU-lane-child residency metadata, CPU-reference and visual sanity gates,
+  and direct `submitSolverTask()` rejection because they are not yet
+  independently executable. The host summary now reports executable solver
+  IDs, law-family solver IDs, and law graph ID separately. Syntax checks
+  passed, the ComputeManager integration file passed `7/7`, the real browser
+  authority Playwright gate passed `1/1`, physics atomics passed with the
+  expected long-horizon skip, and the short H2O/H2O MLS-MPM plus CPU-SPH visual
+  matrix classified both scenarios as `good`. Remaining: promote one law
+  family at a time to executable GPU/CPU workers only after CPU-oracle,
+  conserved-field, StateManager-admission, and visual sequence gates pass.
+- Added the live browser/libp2p PeerCompute provider transport gate for ULG
+  resident state authority. The focused Playwright test starts a local WSS
+  PeerCompute relay without taking over ULG's HTTPS Vite server, creates two
+  real browser NodeKernel authority hosts, commits a resident warm delta before
+  the second host joins, and proves provider sync replays the preexisting
+  `ulg-sph-resident-pass-dag` entry over real transport. The first failing run
+  exposed a PeerCompute lifecycle bug: provider sync could fire before network
+  connection or before relay/pubsub settlement. PeerCompute `StateManager` now
+  exposes `requestProviderSync()`, `NodeKernel.start()` requests sync after
+  connect and retries briefly with clearable timers, and ULG clears those
+  timers in its network-only stop path. Live provider Playwright passed `1/1`,
+  ULG resident tests passed `35/35`, physics atomics passed with the expected
+  long-horizon skip, PeerCompute focused/unit authority tests passed `27/27`,
+  and the two-scenario H2O/H2O visual matrix classified both MLS-MPM and
+  CPU-SPH as `good`. Remaining: expand more law groups under ComputeManager
+  law-graph descriptors and keep long-horizon liquid settling as the separate
+  physics-quality blocker.
+- Added a PeerComputeProvider initial Yjs sync handshake in sibling
+  PeerCompute and verified it from ULG. Late peers now request sync with a Yjs
+  state vector and existing peers respond with the missing encoded update. ULG
+  now commits a resident warm delta before the replica StateManager joins, then
+  proves the late replica receives and validates that preexisting
+  `ulg-sph-resident-pass-dag` entry through the provider sync response.
+  PeerCompute StateManager tests passed `3/3`, ULG resident tests passed
+  `35/35`, physics atomics passed with the expected long-horizon skip, scoped
+  HTTPS browser authority tests passed `3/3`, and H2O/H2O MLS-MPM visual
+  sanity classified `good`. Remaining: live browser/libp2p NodeKernel
+  transport for the same resident-delta path.
+- Added a PeerComputeProvider warm-delta transport gate for ULG resident state.
+  Two real sibling PeerCompute `StateManager`s now instantiate real
+  `PeerComputeProvider`s, and a minimal in-process NetworkManager shim carries
+  provider `yjs-update` broadcasts between them. A compact ULG resident
+  commit delta written on the source converges into the replica warm state and
+  passes `readResidentStepsCommittedWarmDelta()`. Node resident tests passed
+  `35/35`, physics atomics passed with the expected long-horizon skip, scoped
+  HTTPS browser authority tests passed `3/3`, and H2O/H2O MLS-MPM visual
+  sanity classified `good`. Follow-up at 02:26 adds initial state-vector sync;
+  remaining work is real browser/libp2p provider transport across live
+  NodeKernel peers.
+- Added a replicated StateManager convergence gate to the redundant remote
+  placement smoke. After non-advisory remote resident execution, two-result
+  quorum validation, and requester StateManager admission, the test now encodes
+  the requester's Yjs document and applies it to a second real PeerCompute
+  `StateManager`; the replica reads and validates the same committed
+  `ulg-sph-resident-pass-dag` warm delta. Node resident tests passed `34/34`,
+  physics atomics passed with the expected long-horizon skip, scoped HTTPS
+  browser authority tests passed `3/3`, the live HTTPS Vite server returned
+  `HTTP/2 200`, and H2O/H2O MLS-MPM visual sanity classified `good`.
+  Remaining: real browser/provider transport convergence across live
+  NodeKernel peers and the separate long-horizon liquid-settling acceptance
+  blocker.
+- Added a ULG redundant remote-placement smoke for the resident pass DAG. The
+  integration test builds an in-memory NodeKernel mesh, submits a module-backed
+  ULG resident task with `placementHint.advisoryOnly=false`, runs primary and
+  replica responders through PeerCompute remote placement, validates quorum,
+  and admits the resulting compact delta into the requester's real
+  `StateManager`. Remote responders execute through their `ComputeManager`s but
+  commit no local deltas. Node resident tests passed `34/34`, physics atomics
+  passed with the expected long-horizon skip, and H2O/H2O MLS-MPM visual
+  sanity classified `good`. Follow-up replicated StateManager convergence is
+  now covered by the 02:04 gate; remaining work is real browser-local
+  provider transport and more law groups under ComputeManager law-graph tasks.
+- Added a browser PeerCompute remote-placement gate to the resident authority
+  host. `refreshRemotePlacementGateStatus()`, `configureRemotePlacement()`,
+  and `clearRemotePlacement()` now expose
+  `peercompute.ulg.remote-placement-gate.v0`, wire
+  `NodeKernel.createNetworkPlacementExecutor()` /
+  `createRedundantNetworkPlacementExecutor()` into
+  `ComputeManager.configurePlacementHooks()`, add a ULG placement admission
+  report, and use PeerCompute's existing remote-result quorum validator for
+  redundant placement. The gate reports configured/ready state and keeps
+  networking off until `startNodeKernelNetwork()` is called. Focused HTTPS
+  authority tests passed `7/7`, Node resident tests passed `33/33`, physics
+  atomics passed with the expected long-horizon skip, and H2O/H2O MLS-MPM
+  visual sanity classified `good`. Remaining: actual two-node/browser-local or
+  loopback remote placement smoke with non-advisory placement hints, quorum
+  validation, and StateManager admission evidence.
+- Routed mounted resident SPH/MLS-MPM scheduling through solver-created
+  PeerCompute task envelopes without dropping ULG's root authority metadata.
+  `submitMlsMpmResidentStepsComputeTask()` now uses
+  `SolverRegistry.createTask()` for `ulg-mls-mpm-sph-resident-steps` when a
+  real solver registry is present, then bridges the solver envelope back into
+  the ULG resident pass-DAG task with GPU fence, GPU-resident lane, law-graph,
+  read/write family, return-envelope, and StateManager commit metadata intact.
+  Browser execution now reports
+  `peercompute.ulg.mls-mpm-resident-steps-solver-task-bridge.v0` with
+  `created=true`; focused HTTPS authority tests passed `6/6`, Node resident
+  tests passed `33/33`, physics atomics passed with the expected long-horizon
+  skip, and H2O/H2O MLS-MPM visual sanity classified `good`. Remaining:
+  long-horizon liquid settling/free-surface quality and more law groups under
+  the ComputeManager law graph.
+- Registered the ULG resident SPH/MLS-MPM pass DAG as a real PeerCompute
+  solver descriptor on the browser NodeKernel `ComputeManager`. The default
+  authority host now reports
+  `peercompute.ulg.resident-solver-registration.v0` and registers
+  `ulg-mls-mpm-sph-resident-steps` with JS module/export metadata,
+  GPU-lane residency, read/write fields, warm-delta scope, law-graph node
+  metadata, and validation flags. Focused HTTPS authority tests passed `6/6`,
+  Node resident tests passed `33/33`, physics atomics passed with the expected
+  long-horizon skip, and H2O/H2O MLS-MPM visual sanity classified `good`.
+  Follow-up completed in the 01:28 solver-created resident task bridge slice.
+- Added an explicit NodeKernel network gate to the browser resident authority
+  host. The default path remains local/no-start, but callers can now use
+  `startNodeKernelNetwork()` to deliberately start the real PeerCompute
+  NodeKernel/libp2p network and `stopNodeKernelNetwork()` to disconnect
+  NetworkManager without destroying StateManager. The host reports
+  `peercompute.ulg.nodekernel-network-gate.v0` telemetry plus peer id,
+  connection state, topology, room, and gate status. Focused HTTPS authority
+  tests passed `6/6`, Node resident tests passed `33/33`, physics atomics
+  passed with the expected long-horizon skip, and H2O/H2O MLS-MPM visual
+  sanity classified `good`. Later slices now cover remote placement, quorum
+  validation, and in-memory StateManager convergence; remaining distributed
+  work is real peer/bootstrap configuration and browser/provider transport.
+- Promoted the browser resident authority host from a NodeKernel-shaped facade
+  to a real PeerCompute `NodeKernel` initialized in local/no-start mode. The
+  default host now reports `peercompute-browser-nodekernel-authority-host` and
+  `nodeKernelMode=real-peercompute-nodekernel`; its real `ComputeManager`,
+  `StateManager`, and `GPUHub` own default mounted resident batches and
+  StateManager warm-delta publication. The direct-manager facade remains only
+  as fallback. Focused HTTPS authority tests passed `5/5`, Node resident tests
+  passed `33/33`, physics atomics passed with the expected long-horizon skip,
+  and the H2O/H2O MLS-MPM visual sanity matrix classified `good`. Remaining:
+  explicitly start/connect NodeKernel for distributed placement, add quorum and
+  replicated StateManager gates, and keep long-horizon liquid quality separate.
+- Added a browser-local PeerCompute resident authority host as the default
+  mounted SPH resident route. `src/runtime/peercomputeBrowserResidentHost.js`
+  imports the real sibling PeerCompute `ComputeManager`, `StateManager`, and
+  optional `GPUHubManager`, creates a no-persistence/no-network browser demo
+  authority host, attaches the ULG resident commit bridge, and exposes a
+  NodeKernel-shaped facade. `vite.config.mjs` and the live HTTPS Vite config
+  now allow `/@fs/...` imports from the sibling PeerCompute checkout. The
+  mounted overlay starts this host, uses its ComputeManager/StateManager by
+  default, and keeps explicit/injected ComputeManagers ahead of the default
+  host without borrowing the host StateManager by mistake. Focused browser
+  tests passed `5/5`, resident/ComputeManager unit tests passed `33/33`,
+  physics atomics passed with the expected long-horizon skip, and the H2O/H2O
+  MLS-MPM visual sanity matrix classified `good`. Current priority:
+  architecture authority should lead now that CPU/reference gates exist; the
+  CPU path remains the oracle, and long-horizon liquid quality remains a
+  separate gate.
+- Added a StateManager-backed scene publication gate. The resident commit
+  bridge can now read/validate committed warm entries from a
+  StateManager/DataState-shaped object, and `refreshMlsMpmResidentSteps()`
+  accepts `residentStateManager`. When the resident sequence runs through a
+  ComputeManager and StateManager is supplied, the scene checks the matching
+  warm delta before publishing hot retained-buffer execution artifacts. The
+  execution envelope records `stateManagerCommit` evidence and reports
+  `state-manager-committed-inline-execution-returned` once the warm delta is
+  accepted. The mounted demo resolves StateManager from mount/runtime/global
+  hosts and passes it into the auto scheduler. Focused Node, browser,
+  physics-atomic, visual matrix, and diff hygiene gates passed. Remaining work:
+  instantiate/use the real PeerCompute NodeKernel/StateManager host by default
+  in the browser route and then add distributed/quorum StateManager gates.
+- Added a StateManager admission bridge for resident sequence deltas.
+  `src/runtime/peercomputeResidentCommitBridge.js` validates
+  `peercompute.ulg.mls-mpm-resident-steps-commit-delta.v0` before handing it
+  to a PeerCompute-compatible `StateManager.commitDelta()` handler. The bridge
+  enforces accepted scope, task id, state key, completed-step count, expected
+  payload schema, and satisfied payload GPU-fence evidence. The sibling
+  PeerCompute integration test now proves
+  `ComputeManager.submitTask()` -> GPU resident lane fence ->
+  bridge admission -> real `StateManager`/`DataState` warm delta, plus a
+  rejection case where an unsatisfied committed payload fence blocks state
+  mutation. This makes architecture the current priority without abandoning
+  CPU/reference and visual sanity gates. Remaining work: instantiate the real
+  browser NodeKernel/StateManager host and make scene publication read accepted
+  committed state rather than treating task completion as authority.
+- Added a compact commit-delta envelope to the real resident sequence task
+  handler. `runMlsMpmResidentStepsComputeTask()` now emits
+  `peercompute.ulg.mls-mpm-resident-steps-commit-delta.v0` with a compact
+  `peercompute.ulg.mls-mpm-resident-steps-state-delta.v0` payload carrying
+  state key, law graph node, output families, GPU-fence evidence,
+  retained-buffer refs, final-step summary, and recent step summaries. The
+  payload avoids full typed arrays and GPUBuffer objects so it can be admitted
+  by PeerCompute/StateManager. Focused Node, browser ComputeManager, atomics,
+  and visual sanity gates passed. Remaining work: route this emitted delta
+  through a real StateManager/DataState commit/read path instead of letting the
+  scene publish inline execution as local authority.
+- Wired the mounted SPH phase resident auto scheduler to a provided
+  ComputeManager-compatible lane host. `mountSphPhaseDemoOverlay()` now accepts
+  `residentComputeManager`, also checks `runtime.residentComputeManager`,
+  `runtime.computeManager`, and `globalThis.__ulgResidentComputeManager`, and
+  records `peercompute.ulg.sph-demo-resident-compute-manager.v0` status on the
+  overlay. Automatic resident batches pass that manager into
+  `refreshMlsMpmResidentSteps()` on lane `ulg:sph-resident:demo-auto`, so the
+  normal mounted loop can cross the ComputeManager task boundary when the host
+  provides authority. The focused HTTPS Playwright regression passed, and the
+  post-change visual sanity matrix classified H2O/H2O MLS-MPM as `good`.
+  Remaining work: instantiate/use the real PeerCompute package in the browser
+  route and replace inline scene publication with StateManager committed-delta
+  retrieval.
+- Added the first real PeerCompute contract gate for ULG resident pass-DAG
+  tasks. `tests/peercomputeComputeManagerIntegration.test.mjs` creates a
+  `createMlsMpmResidentStepsComputeTask()` envelope and submits it through the
+  actual sibling PeerCompute `ComputeManager`, verifying GPU resident lane
+  lease acquire/complete, satisfied `peercompute.compute.gpu-fence-report.v0`
+  evidence, `peercompute.compute.task-execution.v0` reporting, and
+  fence-before-commit behavior. The negative case proves a required missing
+  fence rejects with `ERR_COMPUTE_GPU_FENCE_UNSATISFIED`, commits no delta,
+  and releases the lane with a missing-fence report. Remaining architecture
+  work is still the real NodeKernel/StateManager/GPUHub path, but ULG's task
+  envelope is now tested against the real ComputeManager contract rather than
+  only a fake scene submitter.
+- Added the first scene-visible ComputeManager-shaped resident sequence
+  boundary. `src/runtime/sph/sphMlsMpmGpuStep.js` now exposes a sequence-level
+  resident task factory/handler/submit helper that declares GPU-lane residency,
+  law-graph node metadata, state-family read/write contracts, retained-buffer
+  refs, copy budgets, and required GPU-fence evidence. The handler returns the
+  existing resident sequence execution with a satisfied fence report while
+  deliberately leaving lane leasing to ComputeManager. `refreshMlsMpmResidentSteps()`
+  can now accept a ComputeManager-compatible `submitTask()` surface and publish
+  the returned inline execution envelope. This advances the architecture
+  priority: the CPU/reference implementation remains the truth harness, while
+  resident execution starts moving behind the PeerCompute/ComputeManager lane
+  boundary. Remaining architecture work: use a real PeerCompute
+  ComputeManager/GPUHub resident lane host and StateManager commit-delta path,
+  not just the local inline task shape.
+- Added a retained surface-vertex diagnostic checkpoint for the no-full
+  resident render path. The HTTPS Vite server is running on `0.0.0.0:5173`,
+  and the focused Playwright regression now passes against
+  `https://127.0.0.1:5173`. The path completes resident physics, render rows,
+  render field, and retained surface-vertex generation, then reports
+  `resident-surface-vertex-buffers-retained` without entering compact
+  surface-draw metadata/readback when the surface overlay is disabled. This
+  fixes the diagnostic hang enough to keep investigating resident rendering,
+  but it is not a liquid-physics fix. Compact surface-draw metadata/readback
+  still hangs under Chromium/SwiftShader and remains a P0 GPU-resident render
+  blocker. Browser tests that retain WebGPU buffers now explicitly dispose the
+  scene before Playwright teardown.
+- Added a bounded retained surface-draw diagnostic mode. Resident render
+  refresh and the long-horizon probe now accept
+  `surfaceDrawDiagnosticMode=metadata`, and the path is guarded by
+  `surfaceDrawDiagnosticMaxFieldCells` before launching the retained
+  surface-vertex/draw metadata builder. This prevents the current sparse
+  H2O/H2O render fields (`272072` cells) from hanging headless Chromium. The
+  over-budget path reports
+  `resident-surface-draw-diagnostic-skipped` and
+  `surface-draw-diagnostic-field-cell-budget-exceeded` instead of pretending
+  fresh surface-draw evidence exists. Focused Playwright coverage passes, and
+  `/tmp/ulg-history-probes/current-surface-draw-diagnostic-budget-skip-small.json`
+  classifies `good`. Remaining work: reduce or tile the surface-vertex/draw
+  metadata path so representative sparse fields can build under budget.
+- Fixed the first mounted Na/H2O resident orchestration bug. Direct mounted
+  scene/probe resident steps now promote the WebGPU resident product
+  gas-species ledger into the overlay/render gas-pressure summary through
+  `overlay.__sphUpdateResidentGasPressureSummary`, and the long-horizon probe
+  passes that summary into resident render refresh. The mounted Na/H2O scene
+  probe at
+  `/tmp/ulg-history-probes/current-na-h2o-mounted-1x1-promoted-gas.json`
+  classified `good` with total gas pressure `125.9kPa`, H2 partial pressure
+  about `24.6kPa`, WebGPU `reaction-step-executed`, and retained product mass
+  rows plus EOS sidecar ready. The focused Playwright regression
+  `SPH phase mounted resident Na/H2O promotes product gas pressure` passes.
+  Remaining Na/H2O work is repeated-horizon product carry-forward, double-count
+  prevention, visible product/gas presentation, and pressure coupling under the
+  retained GPU authority path.
+- Fixed the catastrophic no-full resident G2P zero-output bug. The immediate
+  root cause was an 80-byte G2P uniform payload being written into a 64-byte
+  WebGPU params buffer after internal-pressure and liquid-wall-damping fields
+  were added. `src/runtime/sph/sphG2pGpuKernel.js` now uses a shared
+  `G2P_PARAMS_BYTES = 80` allocation/write contract, and
+  `tests/sphG2pGpuKernel.test.mjs` has a fake-device regression that catches
+  writeBuffer overruns. `tests/webgpuKernelAbi.test.mjs` now extends that
+  guard across `16` resident params contracts by comparing WGSL scalar param
+  struct size, JS packing size, uniform allocation size, and writeBuffer
+  factory usage. Full-readback parity now reports WebGPU G2P
+  `maxStateAbs ~= 7.45e-9` and `maxMechanicsAbs ~= 4.46e-9`; direct no-full
+  H2O/H2O, no-full thermal, mounted H2O/H2O no-full scene, and mounted CPU-SPH
+  scene probes classify `good` for the short sanity checks. Temporary per-stage
+  queue fences were removed so the fix stays compatible with the
+  GPU-resident/ComputeManager direction. Validation now includes full
+  `npm test` at `496` pass / `1` expected opt-in skip, and ICC is refreshed at
+  `227` indexed files / `1071` memory chunks. Remaining P0: long-horizon
+  liquid quality, cheap no-full visual summaries, retained GPU diagnostic
+  lanes, and longer Na/H2O product/gas horizons.
+- Added a repo-local representative SPH visual sanity matrix runner at
+  `scripts/sph-visual-sanity-matrix.mjs` and package script
+  `npm run probe:sph-visual-matrix`. It wraps the long-horizon browser probe
+  across named scenarios for liquid/liquid, CPU-SPH liquid/liquid,
+  solid/liquid, hot-water phase-change, and Na/H2O reaction-product checks,
+  writing per-scenario JSON/log files plus a summary under
+  `/tmp/ulg-visual-sanity-matrix/<run-id>/`. Smoke validation passed for the
+  CPU-SPH H2O/H2O scenario with `status=good`, `issues=[]`, and
+  `visualSurfaceIssues=[]`. This makes the "run visual sanity after major todo
+  items" instruction executable instead of another manual one-off command.
+- Completed the first explicit liquid-settling remediation slice. The CPU and
+  resident mechanics paths now carry liquid dynamic viscosity through the ABI,
+  mechanics refresh, packed buffers, CPU MLS-MPM carrier, and WGSL P2G stress
+  calculation. The CPU carrier also consumes the hydrostatic-pressure lane that
+  the packed GPU path already used. A floor-only no-slip wall boundary now
+  removes long-lived wall-contact kinetic energy without damping particles near
+  the top/side walls early. The previous opt-in long H2O/H2O atomic gate has
+  moved from failing to passing: `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run
+  test:physics-liquid-atomic` now passes `6/6`. The CPU SPH render path also no
+  longer throws on undefined resident render-field variables, and empty CPU
+  surface batches retain the last valid CPU-particle surface instead of
+  blinking out. Browser probe evidence for `mech=sph` classified `good` with
+  H2O visible in all sampled states and no visual surface issues. Full
+  `npm test` passes `484` tests with `1` skipped. Remaining P0: this is a
+  reduced-demo stabilization, not final multiscale physics; surface tension,
+  broader representative visual sequences, resident throughput, and
+  ComputeManager/GPUHub lane authority remain open.
+- Completed the next P0 law-isolation and visual-bounds slice. Law-group
+  controls now reach `createSphPhaseDemo()` and the direct/plain-SPH probe
+  path, so mechanics, gravity, EOS, pressure, thermal/walls, and reactions can
+  be isolated without deleting laws or leaving stale stage behavior. The
+  no-full-readback cohort diagnostic no longer pretends stale initial CPU
+  cohorts are live motion data; when no full state readback is available, the
+  probe reports resident cohort diagnostics as unavailable instead of claiming
+  the drop is frozen. The visible "nested/pulsing blob" class for valid
+  H2O/H2O was narrowed to render-field extraction: compact particle state and
+  decoded render rows were bounded, but MarchingCubes surfaces overshot the
+  sparse drop domain. The current scene clamps each resident render-field
+  surface to its decoded material/phase/domain bounds plus radius-derived
+  padding before the container clamp, and lowers the default visible surface
+  radius to `0.15`. Probe
+  `/tmp/ulg-history-probes/current-lawmatrix-12-scene-bounds-clipped-5batch.json`
+  is `good` with `issues=[]`, `maxOverflow=0`, H2O visible in all sampled
+  frames, J about `0.997..1.007`, and max speed about `1.026 m/s`.
+  A dense visual sequence also passed and wrote GIF/WebM/timeline artifacts
+  under
+  `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-valid-geometry-bounds-clipped-visual/`.
+  This is still not liquid-settling proof: the capture cadence is slow
+  (`meanIntervalMs ~= 4934` for a `250 ms` target) and the next P0 remains
+  long-horizon same-material merge/settle quality plus faster resident/render
+  validation.
+- Added finite-support gap diagnostics to the long-horizon analyzer. The
+  previous same-material contact guard used center-sample drop/base bounds, so
+  a valid face-contact setup started with an apparent `0.183 m` gap even though
+  the physical particle supports were touching. The analyzer now records the
+  initial center-to-support offset from preflight geometry and reports
+  `firstDropBaseSupportGapM`, `lastDropBaseSupportGapM`, and
+  `dropBaseSupportGapDeltaM`. Long all-laws H2O/H2O live-state evidence at
+  `/tmp/ulg-history-probes/current-lawmatrix-13-direct-long-all-laws-live-cohorts.json`
+  is `good` over `1024` substeps / `0.512 s`: J stays
+  `0.997748..1.009107`, pressure impulse is `0`, live drop COM falls
+  `1.25 -> 0.463889 m`, and center gap shrinks `0.183333 -> 0.034447 m`.
+  The shorter support-gap smoke
+  `/tmp/ulg-history-probes/current-lawmatrix-14-direct-support-gap-smoke.json`
+  verifies finite-support gap `~0 -> -0.01625 m` after `0.128 s`.
+  Remaining P0: this proves live descent/contact and bounded volume, but not a
+  visually validated long-horizon merged/settled free surface.
+- Added compact resident cohort/support diagnostics to the no-full-readback
+  path. The MLS-MPM compact summary ABI now appends optional base/drop cohort
+  rows keyed by initial-order ranges, and the summary shader runs at a 32-lane
+  reduction size to stay under common WebGPU workgroup-storage limits. Resident
+  step diagnostics now expose `cohortDiagnostics` from compact summaries, and
+  the long-horizon probe passes base/drop ranges into resident steps. Probe
+  `/tmp/ulg-history-probes/current-lawmatrix-16-nofull-compact-cohorts-32lane.json`
+  is `good` in no-full mode over `256` substeps / `0.128 s`: compact cohort
+  diagnostics are ready, drop COM moves `1.25 -> 1.159897 m`, support gap
+  moves `~0 -> -0.01625 m`, J stays `0.998833..1.006488`, and pressure impulse
+  is `0`. This removes the need for full particle readback just to know whether
+  the drop/base cohorts are moving, but compact summary timing is still too
+  expensive and must be optimized before it becomes the normal visual matrix.
+- Fixed the valid-geometry H2O/H2O render-field surface expansion bug. The
+  scene probe was clean at the particle/volume level, but the resident
+  render-field MarchingCubes surface for a sparse 27-particle drop was too
+  coarse in the global 5 m field and expanded above particle bounds. Sparse
+  resident render-field surfaces now use resolution `32` and no longer get an
+  extra sparse radius boost beyond the default `0.4` scale. The scene probe
+  `/tmp/ulg-history-probes/current-h2o-face-contact-scene-256-all-laws-valid-geometry-sparse-res-32.json`
+  is `good` with no visual surface issues, visible H2O samples present, and
+  J `0.9988..1.0073`. The visual sequence passed after the test harness was
+  made drawRange-aware; artifacts are under
+  `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-face-contact-valid-geometry-sparse-res-32-drawrange/`.
+- Hardened the plain SPH reference slice enough to separate invalid geometry
+  from real liquid-mechanics failures. `mech=sph` now uses a PBF-style density
+  projection with wall clamping, records `sphDensityProjection*` settings in
+  `gpuMechanics`, and the preflight reports initial block support extents. A
+  URL like `ironh=0.85` is now correctly blocked as
+  `initial-block-geometry-overlap` because the 0.5 m drop overlaps the 1.0 m
+  base by `0.15 m`; the old center-gap metric made that look like a valid
+  contact case. The probe also carries preflight status into analysis and no
+  longer parses missing wall temperatures as `0 K`. Valid face-contact SPH
+  (`ironh=1`) passes a short direct probe:
+  `/tmp/ulg-history-probes/current-h2o-face-contact-plain-sph-reference-pbf-parser-fixed.json`
+  is `good`, walls are `283.15 K`, max speed is `0.08076 m/s`, and the drop
+  moves downward. Overlapped SPH remains `bad` by design at
+  `/tmp/ulg-history-probes/current-h2o-overlap-plain-sph-reference-preflight-blocked-parser-fixed.json`.
+- Added the first plain SPH reference-mode plumbing. The overlay URL/state now
+  accepts `mech=mlsmpm|sph`, status reports the active mechanics mode, and
+  worker-view-state playback no longer routes `mech=sph` into resident MLS-MPM.
+  The standalone long-horizon probe also honors `mech=sph` and emits
+  `peercompute.ulg.plain-sph-cpu-reference-*` diagnostics instead of claiming
+  WebGPU residency. Focused syntax/tests pass and a short H2O/H2O contact probe
+  writes
+  `/tmp/ulg-history-probes/current-h2o-direct-contact-near-plain-sph-reference-smoke-analyzer-fixed.json`.
+  The result is only a diagnostic smoke: current plain SPH reaches high speeds
+  and barely closes the contact gap over the short interval, so P0 still needs
+  wall constraints plus PBF/incompressibility/viscosity/surface-tension before
+  this becomes a real liquid reference.
+- Isolated the current residual water failure below pressure/gas/thermal and
+  below the renderer. The pressure/gas rows in `c81a66a` were a real earlier
+  explosive bug class, but the still-broken liquid behavior now reproduces in
+  a direct WebGPU resident mechanics+gravity-only probe with EOS, pressure,
+  thermal, reactions, and mechanics refresh disabled. Evidence:
+  `/tmp/ulg-history-probes/current-h2o-direct-contact-near-256-mechanics-gravity-only.json`
+  is `bad` with `same-material-contact-gap-not-closing`, gap
+  `0.03333336 -> 0.02995068 m`, base `J` down to about `0.876`, pressure
+  impulse `0`, and no render surface path involved. Hydrostatic base
+  initialization and a hydrostatic pressure lane did not fix this. The active
+  root-cause area is now MLS-MPM P2G/grid-update/G2P mechanics transfer,
+  wall/contact handling, volume preservation, and missing liquid constraints.
+  Added the plain SPH/PBF reference mode to the P0 plan as a diagnostic and
+  fallback lane, not a replacement for ULG laws.
+- Fixed the current high-drop same-material H2O/H2O visible-surface bug enough
+  to restore short-horizon coherence. Pressure-off did not change the failure,
+  and pressure impulse was already zero, so pressure was not the proximate
+  cause. The actual bug chain was missing wall-temperature inputs in the
+  resident path, same-material base/drop render domains being merged, a
+  resident render-row extraction scope error, and a sparse 3x3x3 drop render
+  kernel that fell below the isosurface threshold. The current tree carries
+  wall temperatures in resident signatures, preserves base/drop render-domain
+  ids through render rows/surface tables/render-field splatting, keeps the
+  global default surface scale at `0.4`, and applies a scoped `0.5` radius
+  floor only to default-scale sparse cohorts of `27` particles or fewer.
+  Focused render tests pass `58/58`. Scene probes pass for high-drop H2O/H2O
+  over `1 x 16` and `4 x 64` resident steps with two visible liquid H2O
+  domains, no particle-bound surface inflation, zero pressure impulse, and J
+  near one. Full `npm test` passes `466/466`, and ICC is refreshed at `224`
+  files / `1004` chunks. This is still short-horizon render/diagnostic
+  coherence, not proof of true liquid contact/settling.
+- Added physical law-group controls for isolation debugging. The SPH overlay
+  now exposes default-on checkboxes and URL/hash keys for mechanics, gravity,
+  pressure, thermal/walls, and reactions. The resident loop includes those
+  groups in signatures and disables the corresponding inputs/stages without
+  deleting the laws. The long-horizon probe now has an opt-in static
+  expectation mode for isolation runs; `gravity=off pressure=off` passes with
+  zero displacement and two visible H2O liquid domains under
+  `ULG_PROBE_EXPECT_STATIC=1`.
+- Fixed the first WebGPU resident G2P motion regression. P2G projection,
+  grid-update, and G2P execution envelopes now preserve `gridShift` for
+  downstream consumers. Before this, G2P could receive an execution envelope
+  without the shifted grid origin used by P2G/grid-update, making CPU parity see
+  no active samples while GPU sampled the wrong grid coordinates.
+  Browser/WebGPU probes now pass G2P parity and recover exact short-horizon
+  gravity motion: 8 zero-pressure steps expected `0.0392266 m/s` and observed
+  `0.03922661 m/s`; retained-upload thermal plus mechanics refresh expected
+  `0.0196133 m/s` after 4 steps and observed `0.019613305 m/s`. The focused P0
+  suite passes `74/74`, including a resident-step regression for shifted-grid
+  gravity reconstruction. The visual sequence now shows monotonic resident
+  velocities with zero pressure impulse, and the harness can now be pointed at
+  alternate scenarios through `ULG_SPH_VISUAL_URL` and `ULG_SPH_VISUAL_LABEL`.
+  A contact-near H2O/H2O capture produced one visible merged surface. Capture
+  runs now use `visualCapture=1` to preserve the drawing buffer and write frames
+  through `canvas-to-data-url`, but runtime/render cadence remains slow. This
+  has not yet proven long-horizon water-like settling.
+- Fixed the first resident cadence/synchronization regression created during
+  the WebGPU refactor. The page now honors the MLS-MPM `mechanicalSubsteps`
+  target (`substeps=16 target=16`) instead of capping resident submissions at
+  four substeps, hot resident kernels use cached compute pipelines, no-full
+  mutation passes defer temporary-buffer cleanup behind queue fences instead of
+  blocking after every pass, and scene/probe batches use
+  `compactSummaryMode=final-only`. Direct retained-resident H2O/H2O evidence
+  over `2 x 32` substeps remains compact-stable (`max-v=0.1798196 m/s`,
+  `J=0.998767..0.999974`, pressure rows `0`), and sparse scene evidence
+  improved the corrected 16-substep envelope from roughly `75s` to `11.4s`.
+  This is a throughput/cadence fix, not proof of liquid settling: the direct
+  probe bypasses scene pressure rows and marching-cubes surfaces, and `0.008s`
+  of simulated time per resident envelope is still too short to validate
+  water-like contact/settling.
+- Fixed the first resident motion-diagnostic/render-refresh bug. Compact
+  summaries report final-substep displacement, not total displacement over a
+  retained resident batch. A separated H2O/H2O direct probe over `256` substeps
+  reaches `1.255 m/s` after `0.128s`, matching free-fall scale while keeping J
+  in `0.997750..1.000842`; the old final-substep `maxDisplacementM` alone was
+  only `0.0006275 m`, which could be below visible-refresh thresholds in other
+  batches and produce misleading "below visible threshold" warnings. The demo
+  motion diagnostic now exposes a conservative batch-motion upper-bound
+  estimate and forces render refresh with
+  `resident-batch-motion-estimate-visual-refresh` when that estimate crosses
+  the visible threshold. Sparse scene evidence confirmed the refresh path and
+  exposed the next P0: nonphysical visible H2O render-surface bounds.
+- Fixed the first visible render-field bounds bug. The scene now converts
+  physical blob radii into padded render-field units using the field span
+  instead of making each blob about `1.79x` too large, and it clips generated
+  Three.js MarchingCubes geometry to the sealed container. The long-horizon
+  probe now flags out-of-box visible surfaces as visual failures. The separated
+  H2O/H2O scene probe first caught `visible-surface-outside-box`; after the
+  radius/clip fix the same `1 x 16` scene probe is `good`, with H2O y-min
+  effectively at the floor (`-1.06e-8 m`) and `maxVisibleSurfaceOutsideM=0`.
+  This fixes a visible render coherency bug, not liquid physics validation:
+  the probe now distinguishes active draw vertices from the `72000`-vertex
+  MarchingCubes buffer capacity (`840` active H2O vertices after resident
+  refresh), render-field readback is active, and long-horizon same-material
+  contact/settling remains P0.
+- Tightened the default visible isosurface radius scale. The new
+  `SPH_SURFACE_RADIUS_SCALE_DEFAULT = 0.4` keeps sparse resident particle
+  cohorts from rendering as oversized nested blobs while preserving the live
+  `blob=` override for targeted probes. The standalone scene probe now checks
+  visible surface bounds against compact resident particle AABBs and caught the
+  old default as `visible-surface-expanded-beyond-particle-bounds`. With the
+  default lowered, the contact-near H2O/H2O `1 x 16` scene probe passes without
+  any URL override: pressure rows `0`, pressure impulse `0`, J
+  `0.999490..0.999996`, `maxVisibleSurfaceOutsideM=0`, and
+  `maxVisibleSurfaceOutsideParticleBoundsM=0`. A post-change visual sequence
+  also passed and wrote artifacts under
+  `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-contact-near-default-blob-0p4/`.
+  This fixes a major visible render exaggeration; it still does not prove
+  long-horizon liquid merge/settle behavior.
+- Promoted the remaining same-material liquid/contact failures into the
+  standalone probe. Direct full-readback H2O/H2O contact-near now tracks
+  initial-order base/drop cohorts and fails if a near-contact liquid gap does
+  not close over a long enough resident interval. Contact-gap evidence is still
+  bad:
+  after `256` substeps / `0.128s`, drop COM falls only `0.01955 m` and the
+  drop/base gap changes from `0.03333 m` to `0.03219 m`, so analysis reports
+  `same-material-contact-gap-not-closing`. Scene mode also now fails
+  same-material liquid H2O/H2O when visible resident render surfaces split into
+  inconsistent H2O descriptors. That phase/render split guard caught the stale
+  resident wall-temperature/render-domain bug and should remain as a regression
+  guard; the current high-drop scene probes no longer show the bogus
+  `solid:ice` visible H2O surface.
+- Added explicit resident surface-draw overlay policy and bounded probe
+  diagnostics. The normal demo remains on the safe Three/MarchingCubes visible
+  fallback by default (`surface-draw-overlay-disabled-by-policy`), while
+  `surfaceOverlay=1` can force the raw WebGPU overlay path for targeted work.
+  Forced overlay currently blocks headless Chromium/SwiftShader and now returns
+  bounded `blocked` probe JSON instead of spinning indefinitely. Status text and
+  probe output now show overlay policy/mode, active surface count, vertex count,
+  bridge status, and draw-buffer retention. The default H2O/H2O fallback probe
+  remains `good` with bounded visible H2O geometry, zero pressure impulse, and
+  J near one. Full `npm test` passes `457/457`, build passes with the existing
+  large-chunk warning, and ICC is current at `224` files / `988` chunks.
+  Resident GPU surface draw is still not ready to default on.
+- Rechecked the user-reported pressure/gas regression window with temporary
+  worktrees and the standalone scene probe. The comparable separated H2O/H2O
+  run at `c81a66a` is still bad after `1 x 16` resident steps: pressure rows
+  reach `302`, the grid consumer is
+  `grid-momentum-impulse-submitted-unverified-no-full-readback`, max speed is
+  `20.7157 m/s`, J spreads to `0.509843..1.372338`, and the visible H2O surface
+  extends below the box by about `1.31 m`. The current dirty tree passes the
+  same probe with pressure rows `0`, consumer
+  `blocked-pressure-force-rows-unavailable`, max speed `0.156908 m/s`, J
+  `0.999495..1.0`, active nodes `280`, and `maxVisibleSurfaceOutsideM=0`.
+  `f0d101f` is not a clean visual comparator for this exact URL because that
+  older page path maps the same controls into an Fe/H2O case.
+- Extended the resident compact summary with no-full-readback settling
+  diagnostics: source/next center of mass and source/next particle bounds. The
+  compact readback is now `224` bytes instead of `128`, still diagnostic-only.
+  Focused resident-step tests pass, and real WebGPU probes show the fields in
+  both direct and scene mode. The updated scene H2O/H2O `1 x 16` probe remains
+  `good` with pressure rows blocked and visible geometry bounded; its analysis
+  now reports COM Y movement and next-position Y bounds, giving future
+  long-horizon settling probes a compact signal beyond final-substep
+  displacement. The live HTTPS derived-material e2e now passes with the `224`
+  byte compact summary, COM/AABB diagnostics, the refreshed-mechanics
+  next-buffer mode, and the explicit
+  `surface-draw-overlay-disabled-by-policy` bridge status. A post-change visual
+  sequence artifact for separated H2O/H2O also passed and wrote PNG/GIF/WebM
+  outputs under
+  `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-separated-current-com-bounds/`.
+- Added a standalone history/long-horizon SPH probe:
+  `npm run probe:sph-long-horizon`. It can serve any checkout specified by
+  `ULG_PROBE_REPO_DIR`, run retained resident WebGPU batches in the browser,
+  and emit JSON compact diagnostics plus visible surface bounds. It confirmed
+  the pressure/gas regression boundary: `f0d101f` is sane for contact-near
+  H2O/H2O (`max-v=0.012864 m/s`, `J=0.999677..1.000018`, active nodes `248`),
+  while `c81a66a` spikes to `max-v=303.441 m/s` and `J=0.1..8.343449` after
+  unverified pressure-interface rows become grid momentum consumers. The
+  current dirty tree passes the same probe with pressure rows blocked
+  (`max-v=0.140798 m/s`, `J=0.999399..1.0`, applied pressure impulse `0`).
+- Added the first resident mechanics/constitutive refresh stage after thermal
+  state updates. ULG now builds an MLS-MPM material/phase mechanics table from
+  material properties, has CPU and WebGPU refresh paths, threads the refresh
+  through resident P2G/grid/G2P/thermal/reaction ordering, carries the refreshed
+  mechanics buffer into the next retained upload, cleans it up correctly, and
+  records `mechanics-constitutive-refresh` as the mechanics authority owner when
+  it runs. Focused validation passed `64/64` across EOS, P2G, G2P, resident
+  step, mechanics refresh, summary, and resident authority tests. The required
+  post-item visual sanity check also ran: mechanics refresh is active in the
+  H2O/H2O path, but the visible surface still stacks into a nonphysical blob
+  and later jumps to `max-v=140.18 m/s`; same-material H2O/H2O settling and
+  visible liquid/contact behavior remain P0 broken.
+- Added and corrected the P0 H2O/H2O visual validation harness. The current
+  long-horizon Playwright path can force validation render-field readback,
+  disable the resident overlay for that validation refresh, timeout render
+  refreshes, write PNG/GIF/WebM plus JSON timelines, and measure only drawn
+  MarchingCubes vertices through `geometry.drawRange` instead of the fixed
+  `72000`-vertex buffer capacity. Corrected high-drop evidence shows `5` fresh
+  render-field readbacks, `5` frames, and
+  `maxVisibleSurfaceCenterMotionM=0.0098805`; contact-near evidence shows `7`
+  readbacks, `7` frames, and
+  `maxVisibleSurfaceCenterMotionM=0.0047826`. This makes the visual sequence
+  harness trustworthy enough for recurring sanity checks, but it is still
+  short-horizon evidence, not proof of water-like settling.
+- Fixed the pressure/gas regression slice inside `c81a66a` that made the user
+  screenshots look frozen, delayed, or explosive. Condensed Tait pressure is
+  signed again in CPU and WGSL P2G while gas pressure remains nonnegative,
+  hidden condensed-liquid affine damping has been removed from CPU/WGSL G2P,
+  and finite-volume particles now clamp at wall clearance
+  `0.5 * cbrt(restVolume)` instead of acting as dimensionless points at the
+  sealed walls. Focused mechanics/render tests pass, and direct resident
+  H2O/H2O high-drop over `256` substeps is coherent: drop COM
+  `2.75 -> 2.669350 m`, final drop velocity `-1.25525 m/s`, pressure impulse
+  `0`, and J `0.998292..1.000527`. Remaining P0 work is not more pressure
+  clamping; it is true same-material liquid contact/settling, phase/wall
+  consistency, incompressible/viscous/surface-tension law stages, and faster
+  resident execution for longer visual horizons.
 - Read `agents.md`, `/home/cos/projects/AGENTS.md`, and the ULG v0.5 PDF.
 - Completed the first cold-start cache/performance slice for the SPH demo.
   `discoverReactions()` now keeps material-property-backed reactions cacheable
@@ -48,7 +1470,8 @@ Updated: 2026-06-12 03:15 AKDT
   product-inventory and atom-residual row counts. Remaining reaction work:
   strict validity gates using the residuals/energetics, pressure feedback into
   forces and wall ledgers, and dynamic/renderable product storage.
-- Reprioritized cold-start work per `plan/todo/reprioritize.md`. Cache
+- Reprioritized cold-start work per
+  `plan/done/reprioritize-cold-start-work-2026-06-11.md`. Cache
   correctness remains active, but cold/warm timing polish, stale-record browser
   probes, and GPU warmup persistence are deferred until reaction, pressure,
   steam, hot-loop, and material-resolver schemas stabilize. Worker static-table
@@ -3043,3 +4466,165 @@ Remaining work:
   architecture gap;
 - the demo still needs stronger phase-change progression evidence after the
   hot-loop and thermodynamic coupling work advances.
+
+## 2026-06-13 Status Update - P0 Physics Regression Narrowed
+
+Current state:
+
+- Same-material H2O/H2O liquid mechanics and CPU-SPH render disappearance have
+  first-pass fixes and passing atomic/browser probes.
+- Hot H2O/H2O phase-change instability is now pinned to thermal conduction and
+  phase/eos coupling, not pressure rows. The thermal pass has pair and
+  aggregate overshoot limiters plus a conservative default conduction rate.
+- Fe/H2O solid/liquid contact no longer spuriously cools Fe through a two-point
+  Debye graph or reacts as zero-barrier active metal/water. Debye thermal
+  graphs use 32 samples, and active-metal water reactions are scoped to the
+  intended reactive metal classes.
+- The long-horizon probe and visual matrix can now write close-spaced PNG frame
+  sequences with resident diagnostics by setting `ULG_PROBE_CAPTURE_FRAMES=1`
+  or `ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1`.
+
+Validation completed in this slice:
+
+- focused thermal/phase tests passed `35/35`;
+- chemistry reaction-candidate and reaction-discovery tests passed `24/24`;
+- direct resident hot H2O/H2O and Fe/H2O probes are stable;
+- frame-capture probe smoke wrote three valid `1280x800` PNGs under
+  `/tmp/ulg-frame-check/frames/`;
+- one-scenario matrix frame-capture smoke passed with `failedCount=0` under
+  `/tmp/ulg-visual-sanity-matrix/codex-frame-smoke/`.
+
+Still open:
+
+- Na/H2O direct resident works, but the mounted scene matrix case still timed
+  out in the last representative run. Treat this as a reactive
+  product-closure/render orchestration gate.
+- The user's phone CPU-SPH report, where surfaces appear only after switching
+  apps and then flash/disappear, is not reproduced by desktop probes. Add a
+  mobile/page-visibility render lifecycle probe.
+- Surface tension/free-surface behavior, cheaper resident visual horizons, and
+  moving the accepted law DAG behind ComputeManager/GPUHub remain active P0/P1
+  work.
+
+## 2026-06-13 Status Update - Atomic J Regression Fixed
+
+Current state:
+
+- `npm run test:physics-atomics` is passing again (`5` pass, `1` skipped).
+- H2O/H2O EOS-on contact no longer starts from a badly compressed liquid base:
+  hydrostatic initialization now uses raw closure bulk modulus for initial
+  volume strain and keeps hydrostatic pressure as an explicit support term.
+- CPU, JS resident fallback, and WGSL G2P now share the same condensed-phase
+  weak-incompressibility guard. The internal upper clamp is `1.049`, below the
+  public `J <= 1.05` acceptance threshold.
+- Direct resident WebGPU H2O/H2O mechanics with thermal/reactions disabled and
+  liquid wall boundary classified `good` with
+  `J=0.999991..1.049000`, drop COM moving downward by about `0.0505 m`, and
+  zero pressure impulse.
+
+Still open:
+
+- Compact summary/readback is still too slow for routine long visual horizons.
+  The latest direct no-full correctness probe spent about `51.7s` in compact
+  summary for `256` substeps.
+- Na/H2O mounted scene timeout and the mobile CPU-SPH visibility lifecycle bug
+  remain the next representative validation blockers.
+
+## 2026-06-13 Status Update - Mounted CPU-SPH And Long Liquid Gate Stabilized
+
+Current state:
+
+- The opt-in long-horizon liquid atomic gate is passing again with the wall
+  damping/viscosity slice enabled. This is a small explicit support-wall
+  viscosity law, gated by the viscosity law group, not a removal of pressure,
+  EOS, or mechanics laws.
+- The mounted `mech=sph` browser probe now exercises the actual CPU-SPH scene
+  stepping path instead of accidentally validating resident WebGPU MLS-MPM.
+- CPU MarchingCubes rendering now has a CPU-only alias-safe raster radius floor
+  and resolution floors, which fixes the blank/flash behavior for sparse CPU
+  SPH surfaces without changing physical particle radii.
+- Mounted H2O/H2O CPU-SPH frame validation and MLS-MPM full-readback validation
+  both classify `good` with bounded `J`, visible H2O, and no visual surface
+  issues.
+
+Still open:
+
+- No-full resident render validation still lacks fresh cheap visual summaries;
+  full-readback probes are the current correctness path until the GPU-resident
+  render/diagnostic lane lands.
+- The first mounted Na/H2O gas-promotion blocker is fixed; repeated-horizon
+  product carry-forward and visible product/gas presentation remain open.
+- Surface tension/free-surface quality and longer multiscale validation remain
+  open law work.
+
+## 2026-06-13 Status Update - Compact Summary Scope Split
+
+Current state:
+
+- No-full resident compact summaries now support `compactSummaryScope=particle-visual`.
+  This keeps resident particle/cohort/thermal/COM/AABB/J evidence while
+  explicitly skipping the active-grid-node scan.
+- The skipped scan is represented as `activeGridNodeCount=null`,
+  `activeGridNodeCountAvailable=false`, and `gridNodeScanCount=0`; full active
+  grid evidence remains available with `compactSummaryScope=full`.
+- Scene resident refreshes and the long-horizon probe can request the cheaper
+  scope. Strict probes can force `ULG_PROBE_COMPACT_SUMMARY_SCOPE=full`.
+
+Validation:
+
+- Focused resident-step tests pass `26/26`.
+- Focused resident ABI/render suite passes `92/92`.
+- Direct H2O/H2O no-full `2 x 1` particle-visual probe classified `good`, with
+  compact summary around `3026 ms` cold and `230 ms` warm.
+- Direct H2O/H2O no-full `2 x 1` full-scope comparison classified `good`, with
+  compact summary around `3248 ms` cold and `295 ms` warm.
+
+Still open:
+
+- The remaining cost is the readback/map fence and cold-start latency, not just
+  active-grid scanning. Move routine visual validation to retained GPU
+  diagnostic/render lanes with sparse admitted readbacks.
+- Longer Na/H2O product/gas horizons, mobile CPU-SPH real-device reproduction
+  if needed, and free-surface/surface-tension quality remain active follow-ups.
+
+## 2026-06-13 Status Update - CPU-SPH Lifecycle Refresh
+
+Current state:
+
+- CPU-SPH surface sync now forces a viewport refresh burst after applying CPU
+  MarchingCubes surfaces: one immediate render plus two RAF renders.
+- `visibilitychange` and `pageshow` resume use the same burst path.
+- The focused mobile-sized Playwright test for H2O/H2O `mech=sph` now steps the
+  CPU-SPH scene, dispatches page lifecycle events, and verifies visible
+  CPU-particle surfaces with completed refresh-burst telemetry.
+
+Still open:
+
+- This is synthetic lifecycle coverage. If the user's phone still blanks or
+  flashes, add real-device visual sequence capture plus canvas/context-loss
+  diagnostics.
+- No-full resident readback cost, longer Na/H2O product/gas horizons, and
+  free-surface/surface-tension quality remain open.
+
+## 2026-06-13 Status Update - No-Full Surface Summary Skip
+
+Current state:
+
+- Resident render refresh now supports `renderFieldSurfaceSummaryMode`:
+  `auto`, `readback`, or `skip`.
+- In no-full `skip` mode, render rows stay GPU-resident, render fields stay
+  GPU-resident, and the compact surface-summary readback is skipped with
+  explicit telemetry. This avoids a `mapAsync` fence for routine diagnostic
+  frames that do not need fresh visual-surface activity proof.
+- The long-horizon probe can request this with
+  `ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip`.
+
+Still open:
+
+- This does not produce fresh no-full visible surfaces when the raw WebGPU
+  overlay is disabled. It only makes skipped summary evidence truthful and
+  cheaper.
+- Strict visual validation and default mounted playback still need readback or
+  a retained GPU draw/summary lane.
+- The first mounted Na/H2O gas-promotion slice is complete; repeated-horizon
+  product/gas orchestration remains open.

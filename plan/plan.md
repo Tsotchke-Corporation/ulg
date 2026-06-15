@@ -2,6 +2,365 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-14 17:10 AKDT: the direct-resident no-full H2O/H2O
+settle probe now passes the declared retained telemetry gate. The
+`/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json`
+run reached about `1.024 s` over `2048` resident substeps, final drop max
+speed was about `0.1935 m/s`, support gap ended near `-0.1079 m`, J stayed
+bounded around `0.9500..1.0490`, and pressure impulse stayed `0`. This does
+not make the current browser visual loop cheap or fully validated: the batch
+took about `431.4 s`, compact summary took about `342.7 s`, and a scene-paired
+visual settle gate remains open.
+
+Current checkpoint, 2026-06-14 16:42 AKDT: the opt-in H2O/H2O
+CPU/reference long-horizon liquid acceptance now passes in the current tree.
+`npm run test:physics-liquid-atomic` reports `8/8`; the measured CPU-driver
+fixture reaches about `1.024 s`, stays merged, keeps J around `1.046..1.049`,
+and damps final drop speed to about `0.196 m/s` against the `0.25 m/s`
+threshold. This updates stale notes that described the node-level gate as
+currently failing.
+
+Current checkpoint, 2026-06-14 16:24 AKDT: the mounted resident ComputeManager
+path now auto-publishes same-device hot-buffer sources after StateManager
+admission when the execution already owns real SPH state, SPH thermo, and
+MLS-MPM mechanics WebGPU upload handles. The scene receives the active resident
+authority host from the mount, calls `host.publishSameDeviceHotBufferSource()`,
+and records `sameDeviceHotBufferSourcePublication` plus
+`sameDeviceRetainedBufferImport` on the resident execution. Missing authority,
+missing StateManager admission, or missing handles records a skipped
+publication reason rather than fabricating a source. The same retained import
+is bridged onto final G2P reconstruction metadata so compact candidate builders
+can discover the live producer source. Validation passed syntax checks,
+mounted remote-refresh unit `4/4`, focused browser authority-host and
+auto-scheduler gates `2/2`, focused PeerCompute/ULG integration `11/11`,
+physics atomics `7` pass with `1` expected liquid-settle skip, `git diff
+--check`, and visual matrix `codex-live-source-g2p-bridge-20260614` with
+`failedCount=0`. Next architecture work is to consume/propagate this descriptor
+from admitted compact worker-stage outputs while keeping cross-peer retained
+refs metadata-only.
+
+Current checkpoint, 2026-06-14 07:53 AKDT: sibling PeerCompute
+`ComputeManager.submitTaskGraph()` now carries lifecycle metadata for graph
+cache policy, placement policy, cooperative cancellation, active-graph
+inspection, stats, and optional graph-wide GPU resident lane leases. ULG wires
+those fields through the mechanics P2G -> grid-update -> G2P stage-chain
+artifact while keeping the CPU-oracle graph cache record-only. The next
+architecture slice is content-addressed closure/state cache keys plus
+distributed graph placement/execution semantics. The Na/H2O reaction-product
+visual matrix scenario remains a known hard-timeout blocker and is not counted
+as physics fixed.
+
+Current checkpoint, 2026-06-14 08:16 AKDT: graph cache keys are now derived
+from declared content inputs instead of hand-written strings. PeerCompute
+normalizes graph state refs, closure refs, law ids, invalidation refs,
+retained-buffer refs, units, stable values, and per-node cache inputs into
+`peercompute.compute.task-graph-cache-inputs.v0`, then hashes that material
+into the scoped cache key. ULG's mechanics stage-chain graph now records
+`content-addressed-inputs` key source, input hash, input schema, key, and
+record-only status. The next architecture slice is admitted closure/state
+cache artifacts plus distributed graph placement/execution using those hashes.
+
+Current checkpoint, 2026-06-14 08:43 AKDT: task graph cache writes now produce
+first-class artifacts with admission metadata. PeerCompute records
+`peercompute.compute.task-graph-cache-artifact.v0` and
+`peercompute.compute.task-graph-cache-admission.v0` for graph cache writes,
+including result hash, input hash, invalidation refs, node result schemas, and
+admitted status. Read-through requires an admitted artifact by default. ULG's
+mechanics stage-chain graph remains `recorded-not-admitted`, proving
+provenance without replaying physics outputs. The next architecture slice is
+StateManager/NodeKernel admission and invalidation for these artifacts.
+
+Current checkpoint, 2026-06-14 09:24 AKDT: StateManager/NodeKernel admission
+and invalidation has landed for task-graph cache artifacts. PeerCompute
+`StateManager` now records admitted/invalidated artifact authority in CRDT
+namespaces, `NodeKernel` exposes the facade, and `ComputeManager` only marks
+local cache artifacts admitted after that authority record. ULG's mechanics
+native stage DAG now proves the artifact can move through NodeKernel-owned
+StateManager admission and invalidation. The next architecture slice is
+distributed graph placement/execution using admitted hashes and retained GPU
+lane refs, still guarded by the CPU oracle, physics atomics, and dense visual
+sequence checks.
+
+Current checkpoint, 2026-06-14 10:12 AKDT: mechanics stage-chain task graphs
+now route through NodeKernel authority when a real NodeKernel is present.
+Sibling PeerCompute exposes `NodeKernel.submitTaskGraph()` and annotates
+results with `peercompute.nodekernel.task-graph-authority.v0`; ULG passes the
+browser resident authority host's real NodeKernel into the mechanics
+P2G -> grid-update -> G2P graph helper. The helper still falls back to direct
+ComputeManager graph submission when no kernel wrapper exists, but the default
+browser authority path now reports `node-kernel-submit-task-graph` and
+`nodeKernelOwned=true`. The next architecture slice remains true distributed
+graph placement/execution across peers, using admitted artifact hashes and
+retained GPU lane refs under NodeKernel/StateManager authority.
+
+Current checkpoint, 2026-06-14 10:31 AKDT: NodeKernel task-graph placement now
+fails closed for non-advisory distributed graph requests. PeerCompute emits
+`peercompute.nodekernel.task-graph-placement-preflight.v0`, accepts local and
+advisory distributed graph placement with explicit preflight status, and throws
+`ERR_NODEKERNEL_DISTRIBUTED_TASK_GRAPH_UNAVAILABLE` when a graph asks for
+non-advisory peer/cluster/distributed execution before the distributed graph
+executor exists. ULG carries the preflight status in the mechanics stage-chain
+artifact; the current CPU-oracle graph reports `local-placement-accepted`.
+This prevents false local execution from masquerading as distributed graph
+authority while the real executor is still pending.
+
+Current checkpoint, 2026-06-14 11:05 AKDT: sibling PeerCompute now has the
+first real remote task-graph transport hop. Non-advisory distributed graphs
+still fail closed when no executor exists, but an explicit target peer now
+resolves to `network-task-graph:<peer>`, sends `compute-task-graph`, runs on
+the responder's `ComputeManager.submitTaskGraph()`, and returns
+`peercompute.nodekernel.remote-task-graph-placement-provenance.v0`. The
+requester-local ComputeManager graph path is not invoked for that remote
+graph. This is not yet default remote resident physics: admitted artifact
+hashes, retained GPU lane refs, distributed cache/result sharing, and
+StateManager admission still need to be threaded through the graph
+request/result path before ULG can move real resident workloads across peers
+by default.
+
+Current checkpoint, 2026-06-14 11:24 AKDT: remote task-graph results now carry
+explicit cache-artifact admission preflight. PeerCompute annotates remote
+cache artifacts with
+`peercompute.nodekernel.remote-task-graph-cache-artifact-preflight.v0`;
+default status is `remote-cache-artifact-received-not-admitted`, and explicit
+`admitRemoteTaskGraphCacheArtifact` routes the artifact object through
+NodeKernel/StateManager admission. This keeps distributed result/cache sharing
+honest: remote graph output can be observed and admitted as an authority
+record, but it is not silently trusted or replayed as local physics state.
+Next is to use those admitted remote artifact records with retained GPU lane
+refs and distributed cache/result sharing semantics.
+
+Current checkpoint, 2026-06-14 11:43 AKDT: admitted remote task-graph results
+can now become actual local read-through cache entries. PeerCompute
+`ComputeManager.importRemoteTaskGraphCacheResult()` records
+`peercompute.compute.remote-task-graph-cache-import.v0` only after
+NodeKernel/StateManager admission, and a later local graph with the same
+admitted cache key can return `cacheStatus: hit`. Remote retained GPU lane
+refs remain metadata-only with `usableLocally=false`, so distributed cache
+sharing does not pretend a remote WebGPU buffer is a local lease. The next ULG
+authority step is a retained-lane/state-family policy: decide when an admitted
+remote result may seed local warm state or trigger a local hot-buffer
+refresh, without bypassing StateManager admission and visual/physics gates.
+
+Current checkpoint, 2026-06-14 state-seed policy slice: sibling PeerCompute
+now exposes `ComputeManager.evaluateRemoteTaskGraphStateSeedPolicy()` with
+`peercompute.compute.remote-task-graph-state-seed-policy.v0`. Imported remote
+cache results can be inspected against explicit allowed state families before
+they seed local warm state; disallowed families are blocked. Remote retained
+GPU buffer refs remain metadata-only with `usableLocally=false`, and the
+policy reports `local-refresh-required` when local hot buffers must be rebuilt
+from the admitted remote result. The next architecture step is implementing
+that local warm-state seed/hot-buffer refresh execution path under
+NodeKernel/StateManager authority, still gated by CPU/reference atomics and
+dense visual sequences.
+
+Current checkpoint, 2026-06-14 warm-state seed commit slice: sibling
+PeerCompute now exposes `NodeKernel.commitRemoteTaskGraphStateSeed()` with
+`peercompute.nodekernel.remote-task-graph-state-seed-authority.v0`. An admitted
+remote graph import that passes the allowed state-family policy and carries a
+compact state seed payload can now be recorded as a StateManager warm delta
+under NodeKernel authority. Remote retained GPU refs remain nonlocal; the
+committed seed records `local-refresh-required` when local hot buffers must be
+rebuilt. The next step is the actual local hot-buffer refresh executor that
+consumes these warm seed records and acquires local GPU-resident lane leases.
+
+Current checkpoint, 2026-06-14 hot-buffer refresh slice: sibling PeerCompute
+now exposes `NodeKernel.refreshRemoteTaskGraphHotBuffersFromSeed()` with
+`peercompute.nodekernel.remote-task-graph-hot-buffer-refresh.v0`. The method
+reads a committed remote warm seed, acquires a local ComputeManager GPU
+resident lane lease, invokes a local refresh executor with the compact seed
+payload, completes a local fence, and can commit a refresh delta. Remote
+retained buffer refs remain seed metadata; only executor-returned local refs
+are retained on the local lane.
+
+Current checkpoint, 2026-06-14 ULG hot-buffer refresh executor slice: ULG now
+plugs the real SPH/MLS-MPM buffer rebuild into the NodeKernel refresh hook.
+`peercompute.ulg.remote-task-graph-sph-mls-mpm-state-seed.v0` carries the
+compact state seed; `peercompute.ulg.remote-task-graph-hot-buffer-refresh-result.v0`
+records the local refresh result. The ULG executor rebuilds SPH state, SPH
+thermo, and MLS-MPM mechanics buffers with the existing GPU buffer pack/upload
+helpers, stores the actual WebGPU handles only in local StateManager hot
+storage, and returns local retained-buffer refs to NodeKernel. A focused
+integration test proves an admitted remote graph cache artifact can be
+committed as a warm seed and refreshed into local hot buffers without aliasing
+remote GPU refs. The browser resident authority host now also exposes
+`refreshRemoteSeedHotBuffers()`, which commits an admitted remote seed if
+needed and invokes the ULG executor through NodeKernel, with host summary flags
+showing readiness. ULG now also exposes
+`submitTaskGraphWithRemoteSeedHotBufferRefresh()`, an opt-in browser authority
+wrapper that submits a task graph through NodeKernel and automatically runs the
+local hot-buffer refresh only when the remote cache artifact was admitted and
+imported. A focused in-memory remote task-graph test proves both the allowed
+SPH/MLS-MPM refresh path and the blocked `reaction-products` family path. The
+mounted resident scheduler now has an explicit default-off remote-refresh
+prelude: `enableRemoteResidentTaskGraphRefresh` calls
+`submitTaskGraphWithRemoteSeedHotBufferRefresh()` before the local resident
+step only when a caller supplies a remote task graph or graph factory. The
+default mounted scene stays local. Remaining architecture work is to express
+the real mounted resident pass DAG as a remote graph and place those law
+stages on PeerCompute WebGPU workers under ComputeManager/GPUHub lane
+authority.
+
+Current checkpoint, 2026-06-14 remote seed graph-builder slice: sibling
+PeerCompute `ComputeManager.submitTaskGraph()` now preserves an explicit
+graph-level `stateSeedPayload` in the task-graph result and cache artifact.
+ULG now exposes `buildUlgSphMlsMpmRemoteSeedTaskGraph()`, a default SPH/
+MLS-MPM remote seed graph envelope with cache inputs, StateManager-required
+admission metadata, GPU resident lane hints, and a serializable seed-node task
+(`runUlgRemoteSphMlsMpmStateSeedGraphNode`). The mounted remote-refresh
+prelude uses this builder by default when `driver.demo.state.particles` is
+available; if only packed worker view state is available, it skips graph
+creation rather than fabricating a seed. A focused integration test now proves
+a real responder `ComputeManager` executes the seed-node module, NodeKernel
+admits/imports the remote cache artifact, and ULG refreshes local SPH/MLS-MPM
+hot buffers from the admitted seed. Remaining architecture work is replacing
+the seed-only graph node with the actual remote resident law DAG stages and
+WebGPU worker placement.
+
+Current focus, 2026-06-14 07:07 AKDT: architecture authority is the active
+priority while CPU/reference physics stays the correctness oracle. The browser
+resident route now initializes a real local PeerCompute `NodeKernel` by
+default, routes resident SPH/MLS-MPM through its `ComputeManager` and
+`StateManager`, exposes an explicit NodeKernel network start/stop gate, and
+registers the resident SPH/MLS-MPM pass DAG as a real ComputeManager solver
+descriptor. Mounted resident scheduling now uses solver-created task envelopes
+when a real `SolverRegistry` is available while preserving ULG GPU fence,
+GPU-resident lane, law-graph, and StateManager commit metadata. Remote
+placement is now an explicit ULG gate that can configure NodeKernel network
+placement executors, ComputeManager placement hooks, ULG admission, and
+PeerCompute quorum validation without auto-starting networking or making
+resident physics remote by default. A deterministic in-memory redundant
+NodeKernel smoke now proves non-advisory remote resident execution, two-result
+quorum validation, no responder-side commit, and requester StateManager
+admission. The same smoke now also encodes the requester's Yjs StateManager
+document and applies it to a second real StateManager, proving in-memory
+replicated warm-delta convergence for the admitted resident state. A new
+provider-transport gate now proves fresh resident warm deltas can move through
+real PeerComputeProvider `yjs-update` broadcasts into a replica StateManager.
+The missing initial Yjs state-vector/full-document sync handshake exposed by
+that gate is now implemented in sibling PeerCompute and verified from ULG with
+a late-joining replica that receives a preexisting resident warm delta. The
+live browser/libp2p gate now also passes: ULG starts a local WSS PeerCompute
+relay inside Playwright, boots two real browser NodeKernel authority hosts
+against it, commits a resident warm delta before the second host joins, and
+proves provider sync replays the preexisting delta across the real transport.
+That exposed and fixed a second lifecycle bug in PeerCompute: provider sync
+requests were firing before network/pubsub settlement, so NodeKernel now
+requests sync after connect and retries briefly under a clearable lifecycle
+timer. The next architecture slice now publishes law-family graph nodes under
+ComputeManager authority: the resident host registers metadata-only child
+descriptors for mechanics, thermal/phase, reaction/product/gas, and
+pressure/interface while keeping the pass DAG as the only executable solver.
+These children are visible to authority tests but blocked from direct task
+creation until each family passes CPU-reference, conserved-field,
+StateManager-admission, GPU lease/fence, and visual sequence gates. The host
+now also derives a concrete resident law graph manifest from those descriptors
+with five nodes, seven edges, executable/metadata-only node lists, state-family
+surfaces, and the `metadata-only-until-gated` promotion policy. The manifest
+now also carries resident state-family owner maps: the pass DAG is the only
+current owner for admitted particle, mechanics, thermo/phase, reaction/product,
+gas-pressure, and pressure/interface families; child law nodes are only
+prospective owners, with mechanics recorded as the first promotion candidate.
+The resident ComputeManager now exposes a ULG law-family promotion admission
+gate that rejects missing evidence, enforces promotion order, and admits the
+mechanics families only when the required evidence map is present. The
+admission gate also runs as a local non-mutating ComputeManager task with
+`suppressCommitDelta: true`, so promotion decisions exercise the task system
+without making child law descriptors executable. The current slice adds a
+non-mutating mechanics promotion evidence task that validates structured
+CPU/reference, conserved-field, volume-stability, pressure-disabled,
+owner-map, GPU fence, StateManager admission, committed-delta, and visual
+sequence evidence before feeding the admission task. Those physics/reference
+fields are now generated by actual CPU resident zero-force and gravity-only
+reference runs through `createUlgMechanicsPromotionReferenceEvidence()`, while
+browser authority tests add live host GPU-fence, StateManager, committed-delta,
+and owner-map evidence from the resident step. The first non-mutating child
+gate now exists: `ulg-mechanics-child-dry-run` runs as a ComputeManager
+module task, compares the mechanics child candidate against measured reference
+evidence, and contributes `mechanics-child-dry-run-parity` to promotion
+admission without making the metadata-only mechanics solver executable. That
+candidate now carries an explicit mechanics-only stage contract proving only
+P2G, grid update, and G2P ran; thermal, reaction, and mechanics-refresh stages
+were skipped; and the child writes only `particle-kinematics` plus
+`mechanics`. The mechanics candidate now routes through an explicit
+`runMlsMpmMechanicsOnlyResidentStepsWithOptionalWebGpu()` entrypoint that
+forcibly disables non-mechanics law stages and records
+`mechanics-only-entrypoint-enforced`. The sequence now uses a direct
+`runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu()` split step rather
+than the generic resident pass-DAG step; that direct step runs only P2G, grid
+update, G2P, and optional compact summary. The next authority checkpoint is
+now in place: `ulg-mls-mpm-mechanics-only-resident-steps` is a
+ComputeManager-owned non-mutating WebGPU/CPU child task envelope for the
+mechanics law node. CPU-oracle runs do not require a GPU fence; WebGPU runs use
+the same same-device GPU resident lane/fence contract as the resident pass
+DAG. The browser resident authority host exposes
+`submitMechanicsOnlyResidentStepsTask()` without making the metadata-only
+mechanics solver an admitted current owner. That envelope is now a required
+promotion artifact: mechanics admission requires
+`mechanics-only-child-task-envelope`, the child dry-run validates the envelope,
+and the promotion evidence task records it before admission. The next stage
+gate is also in place: mechanics child task results now emit
+`mechanics-child-stage-kernel-evidence`, and mechanics admission requires that
+artifact so P2G, grid update, and G2P can be replaced or promoted one at a
+time with explicit per-stage evidence. P2G is now the first independently
+named sub-stage artifact: mechanics child task results expose
+`mechanics-child-p2g-stage-evidence` top-level and under
+`perStageEvidence.p2g`, and mechanics admission requires that key before
+promotion. It proves P2G executed through the explicit mechanics-only split
+path, used an accepted backend, suppressed pressure-interface forces, wrote
+only transient MLS-MPM grid state, and remains
+`stage-evidence-only-not-authoritative`. Grid update now has the same
+individual gate: mechanics child task results expose
+`mechanics-child-grid-update-stage-evidence` top-level and under
+`perStageEvidence.gridUpdate`, and mechanics admission requires it before
+promotion. It proves grid update executed through the same split path, used an
+accepted backend, suppressed pressure-interface forces, touched only transient
+MLS-MPM grid state, and remains evidence-only. G2P now completes the
+mechanics sub-stage set: mechanics child task results expose
+`mechanics-child-g2p-stage-evidence` top-level and under
+`perStageEvidence.g2p`, and mechanics admission requires it before promotion.
+It proves G2P executed through the split path, used an accepted backend,
+suppressed pressure-interface forces, read transient MLS-MPM grid state, wrote
+only particle state plus MLS-MPM mechanics, and remains evidence-only. Next:
+the first actual stage task boundary is now in place for P2G:
+`ulg-mls-mpm-mechanics-p2g-stage` runs under ComputeManager, wraps the existing
+P2G kernel entrypoint, suppresses pressure/product inputs, writes only
+transient `mls-mpm-grid`, suppresses commit deltas, and emits
+`mechanics-p2g-stage-task-evidence`. CPU-oracle P2G tasks do not require a GPU
+fence; WebGPU/no-full-readback tasks declare the same lane/fence style as the
+resident path. Grid update now has the matching task boundary:
+`ulg-mls-mpm-mechanics-grid-update-stage` runs under ComputeManager, consumes
+transient P2G grid state, suppresses pressure-interface rows, writes only
+transient updated grid state, suppresses commit deltas, and emits
+`mechanics-grid-update-stage-task-evidence`. G2P now has the matching task
+boundary: `ulg-mls-mpm-mechanics-g2p-stage` runs under ComputeManager,
+consumes transient updated grid state, suppresses internal pressure impulses,
+returns candidate particle state plus MLS-MPM mechanics output, suppresses
+commit deltas, and emits `mechanics-g2p-stage-task-evidence`. The first
+replacement seam is now in the mechanics-only split step: optional whole-stage
+runners can replace raw P2G/grid-update/G2P calls while preserving the default
+raw kernel path, and the focused gate proves P2G-only, P2G+grid-update, and
+full P2G+grid-update+G2P replacement through the ComputeManager-owned stage
+tasks. A first-class ULG helper now wraps that seam as
+`runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()`: it submits
+all three stage tasks through the active ComputeManager, records
+`peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0`, and is exposed by the
+browser resident authority host as `runMechanicsStageTaskChain()`. The first
+native PeerCompute scheduler primitive now exists: sibling PeerCompute
+`ComputeManager.submitTaskGraph()` records
+`peercompute.compute.task-graph-result.v0`, validates dependency edges,
+executes ready dependency batches, and passes completed upstream results into
+downstream task factories. ULG proves it with the mechanics
+P2G -> grid-update -> G2P stage DAG. The ULG helper now consumes this native
+graph path directly for CPU-oracle/no-upload stage chains, and the browser
+authority gate executes `runMechanicsStageTaskChain()` successfully. Next: add
+graph-level leases, placement, cancellation, caching, and distributed
+execution under the required child-task envelope,
+P2G/grid-update/G2P evidence, and CPU oracle. Continue deepening GPU resident
+lanes/warm service residency and long-horizon liquid/free-surface quality
+fixes under the CPU oracle. Keep
+`npm run test:physics-atomics`, scoped browser authority checks, and the
+representative visual sanity matrix as required gates after each major slice.
+
 Build the Milestone 0.6 and 0.7 foundation from the v0.5 spec before deeper
 physics work:
 
@@ -170,10 +529,250 @@ physics work:
   when compact resident diagnostics cross the visible-motion threshold.
 - [x] Fix resident MLS-MPM reset-path physics continuity: multi-substep
   GPU-resident runs now use sequence-owned pressure-interface force buffers,
-  skip no-op reaction output buffers, and keep G2P as the authoritative
-  mechanical state across thermo-only passes. Post-reset browser evidence now
-  shows all four continued substeps with active grid nodes and visible
-  displacement instead of substep 1+ collapsing to zero.
+  skip no-op reaction output buffers, and avoid zeroing post-reset continuation
+  substeps. Post-reset browser evidence showed continued substeps with active
+  grid nodes and visible displacement instead of substep 1+ collapsing to zero.
+- [ ] Implement `plan/todo/physics-behavior-regression-plan.md`: treat current
+  severely broken visible/local physics behavior as the P0 gate. Restore
+  coherent reset/playback continuity, stage order, pressure/interface force
+  application, reaction/product/gas carry-forward, thermal/phase continuity,
+  stale mirror rejection, and truthful diagnostics before counting additional
+  WebGPU/PeerCompute migration as complete.
+  - 2026-06-12 slice: resident no-full-readback steps now carry post-thermal
+    SPH state forward instead of dropping `specificInternalEnergy` updates when
+    reaction emits no particle mutation. Remaining P0: add a GPU resident
+    mechanics/constitutive refresh from post-thermal phase/EOS state before the
+    next P2G.
+  - 2026-06-13 slice: physical law-group controls now reach runtime/probe
+    execution, no-full cohort diagnostics no longer report stale CPU mirrors as
+    live motion, and resident render-field MarchingCubes surfaces are clamped to
+    decoded material/phase/domain bounds plus padding. The valid-geometry
+    H2O/H2O bounds-clipped scene probe and dense visual sequence pass. Remaining
+    P0: long-horizon liquid merge/settle quality, faster visual cadence, and
+    admitted live-state cohort checkpoints.
+  - 2026-06-13 live-cohort slice: long all-laws valid-geometry direct resident
+    probing now shows live drop descent/contact with bounded J and zero
+    pressure impulse, and the analyzer reports finite-support gap separately
+    from center-bound gap. Remaining P0 is visually validated merged/settled
+    liquid behavior plus compact resident cohort/support summaries so this can
+    run without full particle readback.
+  - 2026-06-13 compact-cohort slice: no-full resident compact summaries now
+    include optional base/drop cohort COM/AABB/max-speed diagnostics and the
+    probe consumes them as live cohort evidence. Remaining P0 is optimizing the
+    summary stage and pairing compact live-state evidence with scene/visual
+    free-surface validation.
+  - 2026-06-13 liquid-stability slice: the first opt-in long-horizon H2O/H2O
+    atomic gate now passes after adding explicit liquid viscosity lanes,
+    consuming hydrostatic pressure consistently in the CPU carrier, and using a
+    floor-only no-slip wall boundary in CPU/WGSL grid updates. The CPU SPH
+    render path no longer disappears on empty batches or undefined resident
+    render-field variables; the `mech=sph` browser probe is `good` with H2O
+    visible in all samples. Remaining P0 is representative visual-sequence
+    coverage, surface tension/free-surface quality, resident throughput, and
+    ComputeManager/GPUHub authority for the full law DAG.
+  - 2026-06-13 G2P ABI slice: the latest no-full resident zero-output collapse
+    was an 80-byte G2P uniform payload written into a 64-byte WebGPU params
+    buffer. G2P now shares `G2P_PARAMS_BYTES = 80` between JS packing and GPU
+    allocation, and the focused fake-device regression catches future
+    `writeBuffer` overruns. Full-readback WebGPU parity passes at
+    `~1e-8` scale, short no-full and CPU-SPH mounted probes classify `good`,
+    and temporary per-stage queue fences were removed. A follow-up source-level
+    guard now covers `16` resident scalar params contracts by comparing WGSL
+    struct size, JS packing size, uniform allocation size, and writeBuffer
+    factory usage. Remaining P0 is cheap no-full visual summaries,
+    long-horizon water quality, Na/H2O mounted orchestration, and mobile render
+    lifecycle validation.
+  - 2026-06-13 compact-summary scope slice: no-full resident summaries now
+    support `compactSummaryScope=particle-visual`, which keeps particle,
+    cohort, thermal, COM/AABB, and J diagnostics while explicitly skipping the
+    active-grid-node scan. Strict probes keep `compactSummaryScope=full`.
+    Direct H2O/H2O `2 x 1` no-full comparison probes classify `good`; warm
+    compact summary time was about `230 ms` for particle-visual versus
+    `295 ms` for full-grid on the same `13824`-node scenario. Remaining P0 is
+    the readback/map fence and cold-start cost, which should move into retained
+    GPU diagnostic/render lanes with sparse admitted readbacks.
+  - 2026-06-13 CPU-SPH lifecycle slice: CPU-SPH `setParticles()` now forces a
+    viewport refresh burst after CPU MarchingCubes surfaces are applied, and
+    `visibilitychange`/`pageshow` use the same immediate-plus-two-RAF refresh
+    path. The mobile-sized H2O/H2O `mech=sph` Playwright test passes and
+    verifies visible CPU-particle surfaces after a CPU step and synthetic page
+    lifecycle events. If the real phone still blanks/flashes, escalate this to
+    device visual sequence capture and canvas/context-loss diagnostics.
+  - 2026-06-13 no-full surface-summary skip slice: resident render refresh and
+    the long-horizon probe now expose `renderFieldSurfaceSummaryMode=skip`.
+    No-full H2O/H2O mounted evidence shows render rows, render field, and
+    compact surface-summary readbacks all disabled with explicit skipped
+    telemetry. This is cheaper routine diagnostic evidence, not fresh visual
+    correctness; strict checkpoints still need readback or the retained GPU
+    draw/summary lane.
+- [ ] Implement `plan/todo/peercompute-law-graph-authority-plan.md`: make
+  PeerCompute NodeKernel, ComputeManager, and StateManager the long-term
+  authority path for distributed ULG law execution, worker leases, closure
+  artifact caches, validation, and accepted compact state deltas.
+  - 2026-06-14 slice: the browser resident authority host now initializes a
+    real sibling PeerCompute `NodeKernel` in local/no-start mode by default,
+    uses its real `ComputeManager`, `StateManager`, and `GPUHub`, validates
+    resident warm-delta publication, and exposes explicit
+    `startNodeKernelNetwork()` / `stopNodeKernelNetwork()` telemetry. This is a
+    local browser libp2p gate, not distributed physics yet. Later slices now
+    cover remote placement, quorum validation, and in-memory replicated
+    StateManager convergence; peer/bootstrap and real browser/provider
+    transport remain open.
+  - 2026-06-14 solver slice: the same host now registers
+    `ulg-mls-mpm-sph-resident-steps` in the real ComputeManager
+    `SolverRegistry` with module/export, GPU-lane, warm-delta, read/write
+    field, and law-graph metadata.
+  - 2026-06-14 solver-created task bridge slice: mounted resident scheduling
+    now uses `SolverRegistry.createTask()` when the real solver registry is
+    present and bridges the solver-created envelope back into ULG's resident
+    pass-DAG task without losing GPU fence, GPU-resident lane, law-graph,
+    read/write family, return-envelope, or StateManager commit evidence. Next
+    authority work is real peer/bootstrap configuration, live provider
+    transport, and more law groups under the ComputeManager law graph.
+  - 2026-06-14 remote placement gate slice: the resident authority host now
+    configures NodeKernel network placement executors, ComputeManager
+    placement hooks, ULG admission, and PeerCompute quorum validation behind
+    `peercompute.ulg.remote-placement-gate.v0`. The gate is explicit and does
+    not auto-start networking or send resident physics remote by default. Next
+    distributed work is a real two-node/browser-local or loopback placement
+    smoke with non-advisory placement hints and StateManager admission
+    evidence.
+  - 2026-06-14 remote placement smoke slice: ULG now has an in-memory
+    redundant NodeKernel remote-placement smoke for the resident pass DAG. A
+    module-backed ULG resident task runs with `placementHint.advisoryOnly=false`,
+    primary and replica responders execute through their ComputeManagers,
+    PeerCompute quorum accepts the matching results, responders commit no local
+    deltas, and the requester StateManager admits the compact resident delta.
+  - 2026-06-14 replicated StateManager convergence slice: the remote placement
+    smoke now encodes the requester's Yjs StateManager document, applies it to
+    a second real StateManager, and validates the same committed warm resident
+    delta on the replica. Next distributed work is real browser/provider
+    transport across live NodeKernel peers.
+  - 2026-06-14 provider-transport slice: two real PeerCompute `StateManager`s
+    with real `PeerComputeProvider`s now transport a fresh ULG resident warm
+    delta over provider `yjs-update` broadcasts through an in-process
+    NetworkManager shim. This proves the provider update path for fresh
+    resident deltas and exposes the missing initial state-vector/full-doc sync
+    handshake as the next PeerCompute prerequisite before live provider
+    transport can be trusted for long-lived distributed state.
+  - 2026-06-14 provider initial-sync slice: sibling PeerComputeProvider now
+    handles `yjs-sync-request`/`yjs-sync-response` using Yjs state vectors and
+    encoded diff updates. The ULG integration gate commits a resident warm
+    delta before the replica StateManager joins and proves the late replica
+    receives that preexisting delta through the provider sync response. Next
+    distributed work is the same path over live browser/libp2p NodeKernel
+    peers.
+- [ ] Implement `plan/todo/resident-state-authority-contract-plan.md`: add a
+  resident state authority ledger so every WebGPU/CPU law stage declares read
+  families, authoritative writes, no-op families, borrowed buffers, destruction
+  rules, validation status, and next consumers.
+  - 2026-06-12 slice: `src/runtime/residentStateAuthority.js` now records and
+    summarizes MLS-MPM resident-step family owners; the resident step envelope
+    exposes the ledger, compact owner map, and diagnostics fields.
+  - 2026-06-12 slice: `src/runtime/residentBufferLease.js` now records
+    retained resident buffer resources and guards explicit product-event
+    preserve handles during cleanup; pressure/render lease enforcement remains
+    open.
+  - 2026-06-12 slice: retained surface-draw buffers and pressure-interface
+    force-row uploads now publish lease ledgers and use guarded release paths;
+    stale CPU mirrors are rejected unless retained GPU uploads own the resident
+    step.
+  - 2026-06-12 slice: `sphResidentPressureInterfaceState` now owns pressure
+    coupling/solver/force-row upload metadata, MLS-MPM defaults read pressure
+    rows from that state instead of render state, and the playback loop refreshes
+    pressure rows after resident physics steps even when visible render refresh
+    is skipped.
+  - 2026-06-12 slice: retained pressure-interface force rows now get transient
+    consumer leases when scene-level MLS-MPM grid/resident-step callers borrow
+    the pressure-state buffer; local grid/resident-step queue evidence now
+    exists, while distributed worker fences remain open.
+  - 2026-06-12 slice: retained render-field and surface-vertex buffers now use
+    lease ledgers and guarded destroy; the scene bridge releases them after
+    surface-draw metadata production.
+  - 2026-06-12 slice: compact summary temporary GPU buffers now publish a
+    cleaned diagnostics-only lease ledger after readback.
+  - 2026-06-12 slice: grid-update, render-field, surface-vertex, surface-draw,
+    compact-summary, and product-event merge/copy WebGPU paths now publish
+    explicit `queueCompletionStatus`/`queueCompletionMethod` or product-event
+    merge queue evidence from readback maps or queue fences. Remaining fence
+    work is ULG SPH resident-lane task submission through PeerCompute, not the
+    local WebGPU helper calls.
+  - 2026-06-12 slice: scene-level pressure force-row uploads now publish
+    `queue.writeBuffer` ordering evidence, borrow/release consumer queue
+    evidence, and guarded temporary-upload destroy summaries after grid/resident
+    consumers complete.
+  - 2026-06-12 PeerCompute slice: `/home/cos/projects/peercompute` now has a
+    `peercompute.compute.gpu-fence-report.v0` admission contract in
+    `ComputeManager`. Remote task packets can require GPU fence evidence, and
+    remote placement verification rejects missing or unsatisfied GPU fence
+    reports before `commitDelta`.
+  - 2026-06-12 PeerCompute/Multiscale slice: the `ulg-runtime` solver
+    descriptor now declares a queue-fence-required WebGPU task, `stepUlgRuntime`
+    emits a `peercompute.compute.gpu-fence-report.v0` after
+    `queue.onSubmittedWorkDone()`/readback ordering, and loopback
+    non-advisory remote placement accepts the result only after ComputeManager
+    verifies the satisfied fence. Remaining work is to route this repo's SPH
+    resident physics lanes through an actual ComputeManager/GPUHub resident lane
+    backend and then wire NodeKernel network responders to the same evidence.
+  - 2026-06-12 PeerCompute lane slice: `/home/cos/projects/peercompute` now has
+    `GpuResidentLaneManager`, a narrow passive lane contract under
+    `ComputeManager` with state-keyed leases, retained-buffer refs, copy-budget
+    counters, same-lane state-key conflict rejection, lane stats, and GPU fence
+    reports. It does not yet schedule ULG SPH; next work is to wrap SPH
+    P2G/grid/G2P/thermal/reaction/pressure/render passes in those lane leases.
+  - 2026-06-12 ULG lane-adapter slice:
+    `runMlsMpmResidentStepWithOptionalWebGpu()` can now acquire a compatible
+    GPU resident lane lease, report packed upload/readback/retained byte
+    budgets, complete the lease with local queue-fence evidence and retained
+    buffer refs, mirror the fence into diagnostics and sequence summaries, and
+    reject the lease if WebGPU device acquisition fails. Remaining work is to
+    move the whole SPH pass DAG behind a real ComputeManager/GPUHub lane task
+    instead of using an optional local adapter.
+  - 2026-06-12 PeerCompute ComputeManager lane-wrapper slice:
+    `/home/cos/projects/peercompute` now wraps declared inline GPU-resident lane
+    tasks in `GpuResidentLaneManager` leases before local commit. The wrapper
+    derives lane metadata from task/WebGPU residency hints, acquires/completes/
+    rejects leases, injects fence/lane execution into task envelopes, and
+    throws `ERR_COMPUTE_GPU_FENCE_UNSATISFIED` before `commitDelta` when a
+    required GPU fence is missing or unsatisfied. Remaining work is still a
+    real ULG SPH ComputeManager/GPUHub pass-DAG task.
+  - 2026-06-12 ULG ComputeManager task-bridge slice:
+    `createMlsMpmResidentStepComputeTask()`,
+    `runMlsMpmResidentStepComputeTask()`, and
+    `submitMlsMpmResidentStepComputeTask()` now package the resident
+    MLS-MPM/SPH step as a ComputeManager-compatible JS task with GPU-lane
+    residency, required GPU fence metadata, and explicit fence reports from the
+    task handler. The handler intentionally does not double-lease locally when
+    ComputeManager owns the lane lease.
+  - 2026-06-12 slice: `buildSphPhysicsMaterialInterfaceFieldWebGpu()` and
+    `sphResidentMaterialInterfaceState` now make material-interface extraction a
+    pressure/physics-stage state refreshed after resident MLS-MPM steps and
+    before pressure force rows. It still reuses the existing scalar field kernel
+    and candidate-row readback; the remaining work is source shader renaming/
+    ownership, GPU-side compaction, and distributed fence metadata.
+  - 2026-06-12 slice: `peercompute.ulg.sph-material-interface-source-field.v0`
+    now wraps the retained scalar field buffers for pressure-only
+    material-interface extraction, so the pressure path no longer advertises
+    only a render-field source. Remaining work is to move the source shader fully
+    out of render naming and compact candidate/interface rows on GPU.
+- [ ] Implement `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`: add a
+  ComputeManager-owned GPU resident lane plan for copy avoidance and warm
+  Eshkol/MoonLab service residency so heavy closure/response services are not
+  recreated when scenario latency matters.
+  - 2026-06-12 slice: PeerCompute now exposes a passive
+    `GpuResidentLaneManager` through `ComputeManager`; ULG SPH hot-buffer pass
+    wiring and warm Eshkol/MoonLab residency remain open.
+  - 2026-06-12 slice: ULG resident MLS-MPM/SPH steps now expose the first
+    shape-compatible lane adapter for that manager, including copy budgets,
+    retained-buffer refs, queue fence status, and rejection on setup failure.
+    The adapter is not yet a distributed scheduler or pass-DAG backend.
+  - 2026-06-12 slice: PeerCompute `ComputeManager` now actively wraps declared
+    inline GPU-lane tasks in lane leases and blocks unsatisfied required fence
+    commits, so the next ULG step can target a scheduled lane task instead of
+    another local adapter.
+  - 2026-06-12 slice: ULG now has that scheduled lane task shape for the
+    resident MLS-MPM/SPH step. Scene/NodeKernel integration and behavior
+    remediation remain open.
 - [ ] Implement `plan/todo/reaction-stoichiometry-energetics-plan.md`: strict
   first-principles reaction energetics, balanced multi-product CPU/WebGPU
   reaction execution, gas byproduct routing, sealed-box pressure coupling, and
@@ -222,6 +821,10 @@ physics work:
   pressure when support volume is present. Remaining: validated gas-cell or
   pressure-gradient force coupling and GPU append/compaction for multiple
   generations of unplaced resident products.
+- [ ] Implement `plan/todo/sedenion-reaction-scoping-plan.md`: use the sedenion
+  periodic-table reference as a symbolic reaction-channel prefilter and
+  candidate-priority signal while keeping stoichiometry, energetics, kinetics,
+  and validation under the ordinary first-principles closure chain.
 - [ ] Implement `plan/todo/phase-resolved-steam-optics-plan.md`: phase/state
   keyed optical closures, H2O vapor vs condensed-droplet steam scattering,
   state-bucketed optical cache invalidation, and GPU-resident optical lookup
@@ -246,15 +849,15 @@ physics work:
   `src/runtime/material/materialResolverManifest.js` scaffold now enumerates
   the resolver family inventory, CPU anchors/status, WebGPU residency targets,
   cache key ingredients, status labels, and explicit false validation flags.
-- [ ] Follow `plan/todo/overarching-completion-plan.md` as the active ordering
+- [ ] Follow `plan/todo/README.md` and `plan/todo/overarching-completion-plan.md`
+  as the active ordering
   plan for the remaining ULG, SPH, material resolver, performance, reaction,
   steam/gas, nuclear/radiation, PeerCompute, Eshkol, MoonLab, and tooling todo
   items.
-- [ ] Add the hot-loop WebGPU-Ocean/marching-cubes performance slice from
-  `plan/todo/perf-upgrade.md`: fixed-point/tiled GPU P2G where appropriate,
-  GPU cell/neighbor structures, and GPU-resident marching cubes for continuous
-  material volumes after pressure/steam contracts stabilize and before
-  returning to cold-start timing polish.
+- [ ] Implement `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`: build a
+  WebGPU-Ocean-style high-performance MLS-MPM simulator path with
+  fixed-point/tiled P2G where appropriate, GPU cell/neighbor structures,
+  resident gas/product/phase dynamics, and GPU-resident continuous surfaces.
 - [ ] Replace provisional candidate energetics and heavy product-closure
   derivations with cached worker/WebGPU-resident lower-level solvers for the
   full element/compound reaction space.
@@ -454,6 +1057,24 @@ physics work:
   so future sessions can trigger the ICC workflow from skill metadata.
 - [x] Write the 2026-06-12 repo-root todo handoff at `todo-handoff-6-12.md`.
 - [ ] Use swarm lightly for status/context until a ULG-specific profile exists.
+
+### Current SPH/P0 Status - 2026-06-13 20:31 AKDT
+
+- [x] Fixed the first mounted Na/H2O resident gas-promotion path. WebGPU
+  resident product gas ledgers now feed the mounted overlay/render
+  gas-pressure summary during direct scene/probe resident execution, and the
+  focused mounted Playwright regression passes.
+- [x] Added a bounded retained surface-draw diagnostic mode so over-budget
+  no-full surface metadata construction reports a structured skip instead of
+  hanging the browser.
+- [ ] Reduce or tile retained surface-vertex/draw metadata so no-full resident
+  visual correctness can produce fresh surface evidence without routine CPU
+  readback.
+- [ ] Continue long-horizon liquid/free-surface quality work, including
+  explicit surface tension and representative visual sequence gates.
+- [ ] Extend Na/H2O beyond the one-step mounted gas-promotion proof to repeated
+  horizons with product carry-forward, no double counting, visible product/gas
+  evidence, and accepted pressure coupling.
 
 ## Integration Rule
 

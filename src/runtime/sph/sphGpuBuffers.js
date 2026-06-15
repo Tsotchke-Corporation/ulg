@@ -34,6 +34,7 @@ const AVOGADRO = 6.02214076e23;
 const R_GAS = 8.314462618;
 const DEFAULT_SOUND_SPEED_SCALE = 1;
 const DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S = 40;
+const DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA = 0.04;
 const PHASE_FRACTION_ORDER = ['solid', 'liquid', 'gas', 'plasma'];
 const MLS_MPM_EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
@@ -125,9 +126,16 @@ function phasePropertiesFor(properties, phase) {
 
 function mechanicsScaleOptions(state, {
   soundSpeedScale,
-  minGasSoundSpeedMPerS
+  minGasSoundSpeedMPerS,
+  viscosityEnabled,
+  mlsMpmArtificialViscosityAlpha,
+  viscosityLengthM,
+  liquidWallDampingAlpha,
+  liquidWallDampingDistanceM
 } = {}) {
   const stateParams = state?.gpuMechanics || {};
+  const lawGroups = state?.physicalLawGroups || stateParams.physicalLawGroups || {};
+  const viscosityActive = Boolean(viscosityEnabled ?? lawGroups.viscosity);
   return {
     soundSpeedScale: finiteNumber(
       soundSpeedScale ?? stateParams.soundSpeedScale,
@@ -136,6 +144,25 @@ function mechanicsScaleOptions(state, {
     minGasSoundSpeedMPerS: finiteNumber(
       minGasSoundSpeedMPerS ?? stateParams.minGasSoundSpeedMPerS,
       DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S
+    ),
+    viscosityEnabled: viscosityActive,
+    mlsMpmArtificialViscosityAlpha: finiteNumber(
+      mlsMpmArtificialViscosityAlpha ?? stateParams.mlsMpmArtificialViscosityAlpha,
+      DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA
+    ),
+    viscosityLengthM: finiteNumber(
+      viscosityLengthM ?? stateParams.gridSpacingM ?? state?.smoothingLengthM,
+      0
+    ),
+    liquidWallDampingAlpha: viscosityActive
+      ? finiteNumber(
+        liquidWallDampingAlpha ?? stateParams.mlsMpmLiquidWallDampingAlpha,
+        0
+      )
+      : 0,
+    liquidWallDampingDistanceM: finiteNumber(
+      liquidWallDampingDistanceM ?? stateParams.mlsMpmLiquidWallDampingDistanceM,
+      0
     )
   };
 }
@@ -150,6 +177,27 @@ function gasSoundSpeedMPerS(properties, phaseProperties, temperatureK, soundSpee
   return Math.max(realSoundSpeed * soundSpeedScale, minGasSoundSpeedMPerS);
 }
 
+function dynamicViscosityPaSForPhase(phase, phaseProperties, {
+  restDensityKgPerM3,
+  soundSpeedMPerS,
+  viscosityEnabled,
+  mlsMpmArtificialViscosityAlpha,
+  viscosityLengthM
+} = {}) {
+  if (!viscosityEnabled) return 0;
+  const closureViscosityPaS = Math.max(finiteNumber(phaseProperties?.dynamicViscosityPaS, 0), 0);
+  const artificialViscosityPaS = phase === 'liquid'
+    ? Math.max(
+      finiteNumber(restDensityKgPerM3, 0)
+        * finiteNumber(soundSpeedMPerS, 0)
+        * finiteNumber(viscosityLengthM, 0)
+        * finiteNumber(mlsMpmArtificialViscosityAlpha, DEFAULT_MLS_MPM_ARTIFICIAL_VISCOSITY_ALPHA),
+      0
+    )
+    : 0;
+  return closureViscosityPaS + artificialViscosityPaS;
+}
+
 function constitutivePropertiesFor(particle, properties, eq, options) {
   if (!properties) {
     return {
@@ -159,7 +207,9 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
       lameLambdaPa: 0,
       soundSpeedMPerS: 0,
       eosModelId: MLS_MPM_EOS_MODEL_IDS.disabled,
-      constitutiveStatus: SPH_GPU_PARTICLE_STATUS.missingMaterialProperties
+      constitutiveStatus: SPH_GPU_PARTICLE_STATUS.missingMaterialProperties,
+      dynamicViscosityPaS: 0,
+      surfaceTensionNPerM: 0
     };
   }
   const phase = eq?.stablePhase || 'liquid';
@@ -183,23 +233,48 @@ function constitutivePropertiesFor(particle, properties, eq, options) {
         finiteNumber(options.minGasSoundSpeedMPerS, DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S)
       ),
       eosModelId: MLS_MPM_EOS_MODEL_IDS.gasLinearized,
-      constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready
+      constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready,
+      dynamicViscosityPaS: dynamicViscosityPaSForPhase(phase, ph, {
+        restDensityKgPerM3: restDensity,
+        soundSpeedMPerS: gasSoundSpeedMPerS(
+          properties,
+          ph,
+          finiteNumber(eq?.temperatureK, 0),
+          soundSpeedScale,
+          finiteNumber(options.minGasSoundSpeedMPerS, DEFAULT_MIN_GAS_SOUND_SPEED_M_PER_S)
+        ),
+        viscosityEnabled: options.viscosityEnabled,
+        mlsMpmArtificialViscosityAlpha: options.mlsMpmArtificialViscosityAlpha,
+        viscosityLengthM: options.viscosityLengthM
+      }),
+      surfaceTensionNPerM: 0
     };
   }
   const effectiveBulkModulusPa = bulkRaw * modulusScale;
   const shearModulusPa = shearRaw * modulusScale;
+  const soundSpeedMPerS = restDensity > 0 && effectiveBulkModulusPa > 0
+    ? Math.sqrt(effectiveBulkModulusPa / restDensity)
+    : 0;
   return {
     solid: phase === 'solid' && shearModulusPa > 0,
     effectiveBulkModulusPa,
     shearModulusPa,
     lameLambdaPa: phase === 'solid' ? Math.max((bulkRaw - (2 / 3) * shearRaw) * modulusScale, 0) : 0,
-    soundSpeedMPerS: restDensity > 0 && effectiveBulkModulusPa > 0
-      ? Math.sqrt(effectiveBulkModulusPa / restDensity)
-      : 0,
+    soundSpeedMPerS,
     eosModelId: effectiveBulkModulusPa > 0
       ? MLS_MPM_EOS_MODEL_IDS.taitCondensed
       : MLS_MPM_EOS_MODEL_IDS.disabled,
-    constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready
+    constitutiveStatus: SPH_GPU_PARTICLE_STATUS.ready,
+    dynamicViscosityPaS: dynamicViscosityPaSForPhase(phase, ph, {
+      restDensityKgPerM3: restDensity,
+      soundSpeedMPerS,
+      viscosityEnabled: options.viscosityEnabled,
+      mlsMpmArtificialViscosityAlpha: options.mlsMpmArtificialViscosityAlpha,
+      viscosityLengthM: options.viscosityLengthM
+    }),
+    surfaceTensionNPerM: options.surfaceTensionEnabled
+      ? Math.max(finiteNumber(ph?.surfaceTensionNPerM, 0), 0)
+      : 0
   };
 }
 
@@ -354,7 +429,9 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       constitutive.soundSpeedMPerS,
       constitutive.eosModelId,
       constitutive.constitutiveStatus,
-      0,
+      Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
+      constitutive.dynamicViscosityPaS,
+      constitutive.surfaceTensionNPerM,
       0
     ], offset);
     metadata.push({
@@ -367,7 +444,10 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
       shearModulusPa: constitutive.shearModulusPa,
       lameLambdaPa: constitutive.lameLambdaPa,
       soundSpeedMPerS: constitutive.soundSpeedMPerS,
-      eosModelId: constitutive.eosModelId
+      eosModelId: constitutive.eosModelId,
+      hydrostaticPressurePa: Math.max(finiteNumber(particle.hydrostaticPressurePa, 0), 0),
+      dynamicViscosityPaS: constitutive.dynamicViscosityPaS,
+      surfaceTensionNPerM: constitutive.surfaceTensionNPerM
     });
   }
   return {
@@ -381,6 +461,11 @@ export function buildMlsMpmGpuParticleBuffers(state, options = {}) {
     mechanicsStrideBytes: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     soundSpeedScale: scaleOptions.soundSpeedScale,
     minGasSoundSpeedMPerS: scaleOptions.minGasSoundSpeedMPerS,
+    viscosityEnabled: scaleOptions.viscosityEnabled,
+    mlsMpmArtificialViscosityAlpha: scaleOptions.mlsMpmArtificialViscosityAlpha,
+    viscosityLengthM: scaleOptions.viscosityLengthM,
+    liquidWallDampingAlpha: scaleOptions.liquidWallDampingAlpha,
+    liquidWallDampingDistanceM: scaleOptions.liquidWallDampingDistanceM,
     mechanicsDtS: finiteNumber(state.gpuMechanics?.dt, 0),
     mechanicalSubsteps: Math.max(1, Math.round(finiteNumber(state.gpuMechanics?.mechanicalSubsteps, 1))),
     gridCflFactor: finiteNumber(state.gpuMechanics?.gridCflFactor, 0),
@@ -511,7 +596,10 @@ export function decodeMlsMpmGpuParticleRows(packed) {
       lameLambdaPa: packed.mechanics[offset + 24],
       soundSpeedMPerS: packed.mechanics[offset + 25],
       eosModelId: packed.mechanics[offset + 26],
-      constitutiveStatus: packed.mechanics[offset + 27]
+      constitutiveStatus: packed.mechanics[offset + 27],
+      hydrostaticPressurePa: packed.mechanics[offset + 28],
+      dynamicViscosityPaS: packed.mechanics[offset + 29],
+      surfaceTensionNPerM: packed.mechanics[offset + 30]
     });
   }
   return rows;

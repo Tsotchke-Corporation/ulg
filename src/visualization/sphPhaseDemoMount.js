@@ -2,7 +2,13 @@
 // retro-terminal control panel (six wall temperatures + reduced-resolution controls), and live
 // status rows. Also exposes a headless API on window.__ulgDemo for e2e/status checks.
 
-import { SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT, createSphPhaseScene } from './sphPhaseScene.js';
+import {
+  SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+  SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
+  SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  createSphPhaseScene,
+  normalizeResidentSurfaceDrawOverlayMode
+} from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
 import {
@@ -17,6 +23,11 @@ import {
   clearReactionDiscoveryCache,
   createReactionDiscoveryCacheKey
 } from '../runtime/sph/reactionDiscovery.js';
+import {
+  buildUlgSphMlsMpmRemoteSeedTaskGraph,
+  ensurePeerComputeResidentAuthorityHost,
+  summarizePeerComputeResidentAuthorityHost
+} from '../runtime/peercomputeBrowserResidentHost.js';
 import {
   SPH_COLD_START_CACHE_SCHEMA,
   SPH_COLD_START_CACHE_STORAGE_KEY,
@@ -50,6 +61,20 @@ import {
 import { materialDerivationSummary } from '../runtime/material/propertyProvenance.js';
 
 const WALL_FACES = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
+const PHYSICAL_LAW_GROUPS = Object.freeze([
+  ['mechanics', 'MLS-MPM mechanics', true],
+  ['gravity', 'gravity', true],
+  ['eos', 'material EOS pressure', true],
+  ['pressure', 'gas/pressure coupling', true],
+  ['thermal', 'thermal/walls', true],
+  ['reactions', 'reactions', true],
+  ['viscosity', 'viscosity', true],
+  ['surfaceTension', 'surface tension (pending)', false]
+]);
+const MECHANICS_MODE_OPTIONS = Object.freeze([
+  ['mlsmpm', 'MLS-MPM resident'],
+  ['sph', 'Plain SPH CPU reference']
+]);
 const PEER_CLOSURE_CACHE_STORAGE_KEY = 'peercompute.ulg.sph-derived-closure-cache.v1';
 const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v2';
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
@@ -74,8 +99,10 @@ const PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR = Object.freeze({
 const PEER_CLOSURE_CACHE_GENERATOR_FINGERPRINT = hashPayload(PEER_CLOSURE_CACHE_GENERATOR_DESCRIPTOR);
 const ICE_TEMP_K = 233.15;
 const IRON_TEMP_K = 1850;
-// Default wall reservoir temperature: 50 °F = 283.15 K (a mild room — melts ice, doesn't boil it).
-const WALL_DEFAULT_K = 283.15;
+// Default wall reservoir temperature: 20 °C. This stays above the current derived H2O
+// liquidus (~286 K) as well as the reference 273.15 K melt point, so the default
+// "water/water" controls do not silently freeze wall-adjacent particles.
+const WALL_DEFAULT_K = 293.15;
 // Default starting elevations (m) of each block's bottom face: ice on the floor, iron a clear gap
 // above it so the drop is visible. Both editable in the panel.
 const ICE_BASE_DEFAULT_M = 0;
@@ -90,15 +117,16 @@ const BOX_DIM_DEFAULTS_M = { x: 5, y: 5, z: 5 };
 // at a smaller edge; base block fills a larger footprint.
 const DROP_PARTICLE_EDGE_DEFAULT = 3;
 const BASE_PARTICLE_EDGE_DEFAULT = 5;
-// Default isosurface blob-size multiplier (1 = the auto estimate from particle spacing). Decoupled
-// from container size so resizing the box doesn't change how big the rendered blobs look.
-const BLOB_SCALE_DEFAULT = 1;
+// Default isosurface blob-size multiplier. Kept conservative for dense material cohorts; the
+// renderer applies a sparse-cohort floor at the default scale so small drops remain visible without
+// bloating the base surface.
+const BLOB_SCALE_DEFAULT = SPH_SURFACE_RADIUS_SCALE_DEFAULT;
 // Default initial temperatures (K): hot drop block (molten iron above its 1811 K liquidus) and cold
 // base block (ice at −40 °F). Editable in the panel.
 const DROP_TEMP_DEFAULT_K = 1850;
 const BASE_TEMP_DEFAULT_K = 233.15;
 const RESIDENT_STEPS_PER_SCHEDULE_FALLBACK = 2;
-const RESIDENT_STEPS_PER_SCHEDULE_MAX = 4;
+const RESIDENT_STEPS_PER_SCHEDULE_MAX = 16;
 const RESIDENT_CONTINUATION_CHAIN_BUDGET = 2;
 const RESIDENT_RENDER_READBACK_CADENCE = 3;
 const RESIDENT_PENDING_SLOW_NOTICE_MS = 20_000;
@@ -106,6 +134,8 @@ const RESIDENT_PENDING_WATCHDOG_MS = 120_000;
 const RESIDENT_VISIBLE_MOTION_THRESHOLD_FRACTION = 1e-3;
 const RESIDENT_VISIBLE_MOTION_THRESHOLD_MIN_M = 1e-6;
 const STANDALONE_MECHANICS_PREDICTION_DEFAULT = false;
+export const SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA =
+  'peercompute.ulg.sph-demo-remote-resident-task-graph-refresh.v0';
 export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'sph',
   'sphPhase',
@@ -126,7 +156,17 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'boxz',
   'dropn',
   'basen',
-  'blob'
+  'mech',
+  'lawmech',
+  'lawg',
+  'laweos',
+  'lawp',
+  'lawt',
+  'lawr',
+  'lawv',
+  'lawst',
+  'blob',
+  'residentAuto'
 ]);
 
 function fmt(n, digits = 2) {
@@ -141,7 +181,7 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(value) ? Number(value) : null;
 }
 
-function residentMotionDiagnostic({
+export function residentMotionDiagnostic({
   residentStep = null,
   residentSteps = null,
   gridSpacingM = null
@@ -149,6 +189,31 @@ function residentMotionDiagnostic({
   const diagnostics = residentStep?.diagnostics || residentSteps?.finalStep?.diagnostics || null;
   const maxDisplacementM = finiteNumberOrNull(diagnostics?.maxDisplacementM);
   const maxSpeedMPerS = finiteNumberOrNull(diagnostics?.maxSpeedMPerS);
+  const residentSequenceIndex = Number(residentStep?.sequenceIndex);
+  const residentSequenceStepCount = Number.isFinite(residentSequenceIndex)
+    ? residentSequenceIndex + 1
+    : null;
+  const completedStepCount = Math.max(
+    1,
+    Math.round(Number(
+      residentSteps?.completedStepCount
+        ?? residentSteps?.stepCount
+        ?? residentSequenceStepCount
+        ?? 1
+    ) || 1)
+  );
+  const stepDtS = finiteNumberOrNull(
+    residentStep?.dt
+      ?? residentSteps?.finalStep?.dt
+      ?? residentStep?.particlePingPong?.dt
+      ?? null
+  );
+  const estimatedBatchTimeS = Number.isFinite(stepDtS) ? completedStepCount * stepDtS : null;
+  const estimatedBatchDisplacementUpperBoundM = (
+    Number.isFinite(maxSpeedMPerS) && Number.isFinite(estimatedBatchTimeS)
+  )
+    ? Math.max(0, maxSpeedMPerS * estimatedBatchTimeS)
+    : null;
   const pressureImpulseNSeconds = finiteNumberOrNull(
     diagnostics?.pressureInterfaceAppliedImpulseMagnitudeNSeconds
       ?? residentStep?.pressureInterfaceAppliedImpulseMagnitudeNSeconds
@@ -162,11 +227,15 @@ function residentMotionDiagnostic({
   );
   const hasExecution = Boolean(residentStep?.schema || residentSteps?.schema);
   const compactGpuSummaryAvailable = Boolean(diagnostics?.compactGpuSummaryAvailable);
+  const batchMotionEstimateVisible = Number.isFinite(estimatedBatchDisplacementUpperBoundM)
+    && estimatedBatchDisplacementUpperBoundM >= visibleThresholdM;
   let status = 'resident-execution-pending';
   if (hasExecution && maxDisplacementM == null) {
     status = compactGpuSummaryAvailable ? 'motion-unknown' : 'motion-unknown-no-compact-summary';
   } else if (hasExecution && maxDisplacementM >= visibleThresholdM) {
     status = 'motion-proven';
+  } else if (hasExecution && batchMotionEstimateVisible) {
+    status = 'batch-motion-estimate-visible';
   } else if (hasExecution) {
     status = 'motion-below-visible-threshold';
   }
@@ -177,12 +246,121 @@ function residentMotionDiagnostic({
     maxSpeedMPerS,
     pressureImpulseNSeconds,
     visibleThresholdM,
+    completedStepCount,
+    stepDtS,
+    estimatedBatchTimeS,
+    estimatedBatchDisplacementUpperBoundM,
+    batchMotionEstimateVisible,
     compactGpuSummaryAvailable,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
+}
+
+function nowMs() {
+  return typeof performance?.now === 'function' ? performance.now() : Date.now();
+}
+
+function remoteResidentTaskGraphRefreshTelemetry(status, extra = {}) {
+  return {
+    schema: SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA,
+    status,
+    enabled: false,
+    submitted: false,
+    refreshed: false,
+    updatedAtMs: nowMs(),
+    ...extra
+  };
+}
+
+function compactRemoteResidentTaskGraphRefreshReport(report, graph) {
+  const hotBufferRefresh = report?.hotBufferRefresh || report?.refresh || null;
+  const seedPolicy = report?.seedPolicy || report?.stateSeedPolicy || null;
+  const localRefs = Array.isArray(hotBufferRefresh?.localRefs)
+    ? hotBufferRefresh.localRefs
+    : Array.isArray(report?.localRefs)
+    ? report.localRefs
+    : [];
+  return {
+    reportSchema: report?.schema || null,
+    reportStatus: report?.status || null,
+    graphId: graph?.id || graph?.graphId || null,
+    graphSchema: graph?.schema || null,
+    remoteCacheArtifactStatus: report?.remoteTaskGraphCacheArtifactPreflight?.status
+      || report?.cacheArtifactPreflight?.status
+      || null,
+    hotBufferRefreshStatus: hotBufferRefresh?.status || null,
+    hotBufferKey: hotBufferRefresh?.hotBufferKey || report?.hotBufferKey || null,
+    localRefCount: localRefs.length,
+    localRefs,
+    seedPolicyStatus: seedPolicy?.status || null,
+    blockedStateFamilies: Array.isArray(seedPolicy?.disallowedStateFamilies)
+      ? [...seedPolicy.disallowedStateFamilies]
+      : Array.isArray(seedPolicy?.blockedStateFamilies)
+      ? [...seedPolicy.blockedStateFamilies]
+      : []
+  };
+}
+
+export async function runRemoteResidentTaskGraphRefreshPrelude({
+  enabled = false,
+  host = null,
+  graph = null,
+  graphFactory = null,
+  refreshOptions = null,
+  context = {}
+} = {}) {
+  if (!enabled) {
+    return remoteResidentTaskGraphRefreshTelemetry('disabled');
+  }
+  const startedAtMs = nowMs();
+  if (typeof host?.submitTaskGraphWithRemoteSeedHotBufferRefresh !== 'function') {
+    return remoteResidentTaskGraphRefreshTelemetry('unavailable-host-method-missing', {
+      enabled: true,
+      startedAtMs,
+      elapsedMs: nowMs() - startedAtMs
+    });
+  }
+  try {
+    const resolvedGraph = typeof graphFactory === 'function'
+      ? await graphFactory(context)
+      : graph;
+    if (!resolvedGraph) {
+      return remoteResidentTaskGraphRefreshTelemetry('skipped-no-task-graph', {
+        enabled: true,
+        startedAtMs,
+        elapsedMs: nowMs() - startedAtMs
+      });
+    }
+    const resolvedRefreshOptions = typeof refreshOptions === 'function'
+      ? await refreshOptions({ ...context, graph: resolvedGraph })
+      : (refreshOptions || {});
+    const report = await host.submitTaskGraphWithRemoteSeedHotBufferRefresh(
+      resolvedGraph,
+      resolvedRefreshOptions
+    );
+    const compact = compactRemoteResidentTaskGraphRefreshReport(report, resolvedGraph);
+    return remoteResidentTaskGraphRefreshTelemetry(report?.status || 'submitted', {
+      enabled: true,
+      submitted: true,
+      refreshed: compact.hotBufferRefreshStatus === 'refreshed-local-hot-buffers'
+        || compact.hotBufferRefreshStatus === 'remote-seed-hot-buffer-refresh-complete'
+        || report?.status === 'task-graph-submitted-remote-seed-hot-buffer-refreshed',
+      startedAtMs,
+      elapsedMs: nowMs() - startedAtMs,
+      ...compact,
+      report
+    });
+  } catch (error) {
+    return remoteResidentTaskGraphRefreshTelemetry('error-local-resident-continued', {
+      enabled: true,
+      startedAtMs,
+      elapsedMs: nowMs() - startedAtMs,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 function formatMaterialPhaseMasses(byMaterialPhase = {}) {
@@ -935,6 +1113,10 @@ function buildOverlayShell() {
         <button id="sph-reset" type="button">Reset</button>
         <button id="sph-clear-cache" type="button">Clear Cache</button>
       </div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">mechanics integrator — auto-applies</div>
+      <div id="sph-mechanics-mode" style="display:grid;grid-template-columns:1fr;gap:6px;margin:4px 0 8px 0;"></div>
+      <div style="font-size:11px;color:#75c7f7;margin-top:6px;">physical law groups — auto-applies</div>
+      <div id="sph-laws" style="display:grid;grid-template-columns:1fr;gap:4px;margin:4px 0 8px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">wall temperatures (K)</div>
       <div id="sph-walls" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:4px 0;"></div>
       <div style="font-size:11px;color:#75c7f7;margin-top:6px;">materials — auto-applies</div>
@@ -1096,12 +1278,53 @@ function openElementPicker({ overlay, select, roleLabel }) {
 export function mountSphPhaseDemoOverlay({
   autoStart = false,
   hideMenu = false,
-  runtime = null
+  runtime = null,
+  residentComputeManager = null,
+  residentStateManager = null,
+  residentAuthorityHost = null,
+  enablePeerComputeResidentHost = true,
+  peercomputeModuleUrl = undefined,
+  residentComputeTaskModulePath = undefined,
+  enableRemoteResidentTaskGraphRefresh = false,
+  remoteResidentTaskGraph = null,
+  remoteResidentTaskGraphFactory = null,
+  remoteResidentTaskGraphOptions = null,
+  remoteResidentTaskGraphRefreshOptions = null
 } = {}) {
   const overlay = buildOverlayShell();
   document.body.appendChild(overlay);
+  let peerComputeResidentAuthorityHost = residentAuthorityHost || null;
+  let peerComputeResidentAuthorityHostPromise = null;
+
+  const mechanicsModeEl = overlay.querySelector('#sph-mechanics-mode');
+  const mechanicsModeSelect = document.createElement('select');
+  mechanicsModeSelect.title = 'Choose the mechanical integrator';
+  mechanicsModeSelect.setAttribute('aria-label', 'Choose mechanics integrator');
+  for (const [value, label] of MECHANICS_MODE_OPTIONS) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    mechanicsModeSelect.appendChild(option);
+  }
+  mechanicsModeEl.appendChild(mechanicsModeSelect);
 
   const wallsEl = overlay.querySelector('#sph-walls');
+  const lawsEl = overlay.querySelector('#sph-laws');
+  const lawInputs = {};
+  for (const [key, label, defaultEnabled = true] of PHYSICAL_LAW_GROUPS) {
+    const wrap = document.createElement('label');
+    wrap.style.cssText = 'font-size:11px;display:flex;align-items:center;gap:8px;min-height:28px;';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = defaultEnabled !== false;
+    input.style.cssText = 'width:16px;height:16px;accent-color:#1d8b6d;';
+    const text = document.createElement('span');
+    text.textContent = label;
+    wrap.append(input, text);
+    lawsEl.appendChild(wrap);
+    lawInputs[key] = input;
+  }
+
   const wallInputs = {};
   for (const face of WALL_FACES) {
     const wrap = document.createElement('label');
@@ -1236,19 +1459,55 @@ export function mountSphPhaseDemoOverlay({
     iceh: heightInputs.ice, ironh: heightInputs.iron,
     boxx: boxInputs.x, boxy: boxInputs.y, boxz: boxInputs.z,
     dropn: countInputs.drop, basen: countInputs.base,
+    mech: mechanicsModeSelect,
+    lawmech: lawInputs.mechanics,
+    lawg: lawInputs.gravity,
+    laweos: lawInputs.eos,
+    lawp: lawInputs.pressure,
+    lawt: lawInputs.thermal,
+    lawr: lawInputs.reactions,
+    lawv: lawInputs.viscosity,
+    lawst: lawInputs.surfaceTension,
     blob: blobInput
   };
+  function urlValueForControl(el) {
+    return el?.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value;
+  }
+  function applyUrlValueToControl(key, el, value) {
+    if (el?.type === 'checkbox') {
+      el.checked = !['0', 'false', 'off', 'no'].includes(String(value).toLowerCase());
+      return;
+    }
+    el.value = normalizeUrlControlValue(key, value);
+  }
   function applyUrlToControls() {
     const query = new URLSearchParams(window.location.search);
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     for (const [key, el] of Object.entries(urlControls)) {
       const v = hash.get(key) ?? query.get(key);
-      if (v != null && v !== '') el.value = normalizeUrlControlValue(key, v);
+      if (v != null && v !== '') applyUrlValueToControl(key, el, v);
     }
   }
+  const initialQuery = new URLSearchParams(window.location.search);
+  const initialHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const preserveDrawingBufferForCapture = ['1', 'true', 'yes'].includes(
+    String(initialHash.get('visualCapture') ?? initialQuery.get('visualCapture') ?? '').toLowerCase()
+  );
+  const initialResidentAutoParam = String(
+    initialHash.get('residentAuto')
+      ?? initialQuery.get('residentAuto')
+      ?? '1'
+  ).toLowerCase();
+  const initialResidentAutoEnabled = !['0', 'false', 'off', 'no', 'manual'].includes(initialResidentAutoParam);
+  const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
+    initialHash.get('surfaceOverlay')
+      ?? initialQuery.get('surfaceOverlay')
+      ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT
+  );
+  const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
   function syncUrlFromControls() {
     const q = new URLSearchParams();
-    for (const [key, el] of Object.entries(urlControls)) q.set(key, el.value);
+    for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(el));
     window.history.replaceState(null, '', `#${q.toString()}`);
   }
   applyUrlToControls(); // restore from the URL before the first build
@@ -1263,6 +1522,16 @@ export function mountSphPhaseDemoOverlay({
     const wallFaces = {};
     for (const face of WALL_FACES) wallFaces[face] = Number(wallInputs[face].value) || WALL_DEFAULT_K;
     return createSphPhaseScenario({ wallFaces, boxDimensionsM: boxDimensionsFromControls() });
+  }
+
+  function physicalLawGroupsFromControls() {
+    return Object.fromEntries(PHYSICAL_LAW_GROUPS.map(([key]) => [key, lawInputs[key]?.checked !== false]));
+  }
+
+  function mechanicsModeFromControls() {
+    return MECHANICS_MODE_OPTIONS.some(([value]) => value === mechanicsModeSelect.value)
+      ? mechanicsModeSelect.value
+      : 'mlsmpm';
   }
 
   function driverOptionsFromControls() {
@@ -1281,7 +1550,9 @@ export function mountSphPhaseDemoOverlay({
       iceBaseHeightM: Number.isFinite(iceBaseHeightM) ? iceBaseHeightM : ICE_BASE_DEFAULT_M,
       ironBaseHeightM: Number.isFinite(ironBaseHeightM) ? ironBaseHeightM : IRON_BASE_DEFAULT_M,
       dropParticleEdge: Number.isFinite(dropEdge) && dropEdge >= 1 ? dropEdge : DROP_PARTICLE_EDGE_DEFAULT,
-      baseParticleEdge: Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT
+      baseParticleEdge: Number.isFinite(baseEdge) && baseEdge >= 1 ? baseEdge : BASE_PARTICLE_EDGE_DEFAULT,
+      mechanics: mechanicsModeFromControls(),
+      physicalLawGroups: physicalLawGroupsFromControls()
     };
   }
 
@@ -2143,16 +2414,24 @@ export function mountSphPhaseDemoOverlay({
     driver = createDriverFromControls();
   }
   let sceneBoxDimsM = driver?.demo.box.dimensionsM ?? boxDimensionsFromControls();
-  let scene = createSphPhaseScene(sceneContainer, { boxDimsM: sceneBoxDimsM, surfaceRadiusScale: blobScaleOf() });
+  let scene = createSphPhaseScene(sceneContainer, {
+    boxDimsM: sceneBoxDimsM,
+    surfaceRadiusScale: blobScaleOf(),
+    preserveDrawingBuffer: preserveDrawingBufferForCapture,
+    residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode
+  });
   overlay.__sphScene = scene;
   overlay.__sphDriver = driver;
   overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
   overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
   overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
   overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
+  overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
   overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+  overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
   overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
   overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
+  startPeerComputeResidentAuthorityHost();
   overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
   overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
   overlay.__mlsMpmMechanicsPrediction = scene.getMlsMpmMechanicsPrediction?.() || null;
@@ -2162,6 +2441,10 @@ export function mountSphPhaseDemoOverlay({
   overlay.__mlsMpmResidentStep = scene.getMlsMpmResidentStep?.() || null;
   overlay.__mlsMpmResidentSteps = scene.getMlsMpmResidentSteps?.() || null;
   overlay.__mlsMpmResidentRequestedReadbackMode = scene.getMlsMpmResidentRequestedReadbackMode?.() || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+  overlay.__sphRemoteResidentTaskGraphRefresh = remoteResidentTaskGraphRefreshTelemetry(
+    enableRemoteResidentTaskGraphRefresh ? 'configured-waiting-for-resident-schedule' : 'disabled',
+    { enabled: Boolean(enableRemoteResidentTaskGraphRefresh) }
+  );
   overlay.__sphStandaloneMechanicsPredictionEnabled = STANDALONE_MECHANICS_PREDICTION_DEFAULT;
   let rebuildTimer = null;
   let pendingOpticalLookupSignature = null;
@@ -2204,6 +2487,158 @@ export function mountSphPhaseDemoOverlay({
   overlay.__sphPerformanceTrace = sphPerformanceTrace;
   overlay.__sphCpuClosureTask = cpuClosureTask;
   overlay.__sphFrameCounters = frameCounters;
+  overlay.__sphUpdateResidentGasPressureSummary = updateResidentGasPressureSummary;
+
+  function publishPeerComputeResidentAuthorityHostStatus(status, extra = {}) {
+    overlay.__sphPeerComputeResidentAuthorityHost = {
+      ...summarizePeerComputeResidentAuthorityHost(peerComputeResidentAuthorityHost),
+      status,
+      updatedAtMs: performance.now(),
+      ...extra
+    };
+  }
+
+  function startPeerComputeResidentAuthorityHost() {
+    if (!enablePeerComputeResidentHost || peerComputeResidentAuthorityHost || peerComputeResidentAuthorityHostPromise) {
+      if (peerComputeResidentAuthorityHost) publishPeerComputeResidentAuthorityHostStatus('ready');
+      return peerComputeResidentAuthorityHostPromise;
+    }
+    publishPeerComputeResidentAuthorityHostStatus('initializing');
+    peerComputeResidentAuthorityHostPromise = ensurePeerComputeResidentAuthorityHost({
+      peercomputeModuleUrl,
+      computeTaskModulePath: residentComputeTaskModulePath
+    })
+      .then((host) => {
+        peerComputeResidentAuthorityHost = host;
+        globalThis.__ulgResidentAuthorityHost = host;
+        publishPeerComputeResidentAuthorityHostStatus('ready');
+        if (overlay.isConnected) {
+          scheduleMlsMpmResidentSteps({ force: true });
+        }
+        return host;
+      })
+      .catch((error) => {
+        publishPeerComputeResidentAuthorityHostStatus('unavailable', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return null;
+      })
+      .finally(() => {
+        peerComputeResidentAuthorityHostPromise = null;
+      });
+    return peerComputeResidentAuthorityHostPromise;
+  }
+
+  function resolveResidentComputeManager() {
+    const candidates = [
+      ['residentAuthorityHost.computeManager', residentAuthorityHost?.computeManager],
+      ['runtime.residentAuthorityHost.computeManager', runtime?.residentAuthorityHost?.computeManager],
+      ['mount-option', residentComputeManager],
+      ['runtime.residentComputeManager', runtime?.residentComputeManager],
+      ['runtime.computeManager', runtime?.computeManager],
+      ['runtime.nodeKernel.computeManager', runtime?.nodeKernel?.computeManager],
+      ['runtime.nodeKernel.getComputeManager', runtime?.nodeKernel?.getComputeManager?.()],
+      ['global.__ulgResidentComputeManager', globalThis.__ulgResidentComputeManager],
+      ['peercompute-resident-authority-host', peerComputeResidentAuthorityHost?.computeManager],
+      ['global.__ulgResidentAuthorityHost.computeManager', globalThis.__ulgResidentAuthorityHost?.computeManager]
+    ];
+    for (const [source, value] of candidates) {
+      let candidate = value;
+      if (typeof candidate === 'function') {
+        try {
+          candidate = candidate({ overlay, scene, runtime });
+        } catch (error) {
+          overlay.__sphResidentComputeManager = {
+            schema: 'peercompute.ulg.sph-demo-resident-compute-manager.v0',
+            status: 'resolver-error',
+            source,
+            error: error instanceof Error ? error.message : String(error),
+            updatedAtMs: performance.now()
+          };
+          continue;
+        }
+      }
+      if (candidate && typeof candidate.submitTask === 'function') {
+        overlay.__sphResidentComputeManager = {
+          schema: 'peercompute.ulg.sph-demo-resident-compute-manager.v0',
+          status: 'available',
+          source,
+          submitTask: true,
+          updatedAtMs: performance.now()
+        };
+        return candidate;
+      }
+    }
+    overlay.__sphResidentComputeManager = {
+      schema: 'peercompute.ulg.sph-demo-resident-compute-manager.v0',
+      status: 'not-configured',
+      source: null,
+      submitTask: false,
+      updatedAtMs: performance.now()
+    };
+    return null;
+  }
+
+  function resolveResidentStateManager({ allowPeerComputeAuthorityHost = true } = {}) {
+    const candidates = [
+      ['residentAuthorityHost.stateManager', residentAuthorityHost?.stateManager],
+      ['runtime.residentAuthorityHost.stateManager', runtime?.residentAuthorityHost?.stateManager],
+      ['mount-option', residentStateManager],
+      ['runtime.residentStateManager', runtime?.residentStateManager],
+      ['runtime.stateManager', runtime?.stateManager],
+      ['runtime.nodeKernel.stateManager', runtime?.nodeKernel?.stateManager],
+      ['runtime.nodeKernel.getStateManager', runtime?.nodeKernel?.getStateManager?.()],
+      ['global.__ulgResidentStateManager', globalThis.__ulgResidentStateManager],
+      ...(allowPeerComputeAuthorityHost
+        ? [
+          ['peercompute-resident-authority-host', peerComputeResidentAuthorityHost?.stateManager],
+          ['global.__ulgResidentAuthorityHost.stateManager', globalThis.__ulgResidentAuthorityHost?.stateManager]
+        ]
+        : [])
+    ];
+    for (const [source, value] of candidates) {
+      let candidate = value;
+      if (typeof candidate === 'function') {
+        try {
+          candidate = candidate({ overlay, scene, runtime });
+        } catch (error) {
+          overlay.__sphResidentStateManager = {
+            schema: 'peercompute.ulg.sph-demo-resident-state-manager.v0',
+            status: 'resolver-error',
+            source,
+            error: error instanceof Error ? error.message : String(error),
+            updatedAtMs: performance.now()
+          };
+          continue;
+        }
+      }
+      const canReadWarm = typeof candidate?.getWarmDeltas === 'function'
+        || typeof candidate?.readWarm === 'function'
+        || typeof candidate?.getDataState === 'function';
+      if (candidate && canReadWarm) {
+        overlay.__sphResidentStateManager = {
+          schema: 'peercompute.ulg.sph-demo-resident-state-manager.v0',
+          status: 'available',
+          source,
+          getWarmDeltas: typeof candidate.getWarmDeltas === 'function',
+          readWarm: typeof candidate.readWarm === 'function',
+          getDataState: typeof candidate.getDataState === 'function',
+          updatedAtMs: performance.now()
+        };
+        return candidate;
+      }
+    }
+    overlay.__sphResidentStateManager = {
+      schema: 'peercompute.ulg.sph-demo-resident-state-manager.v0',
+      status: 'not-configured',
+      source: null,
+      getWarmDeltas: false,
+      readWarm: false,
+      getDataState: false,
+      updatedAtMs: performance.now()
+    };
+    return null;
+  }
 
   function recordPhysicsFrame(count = 1) {
     frameCounters.physicsFrames += Math.max(1, count);
@@ -2377,7 +2812,8 @@ export function mountSphPhaseDemoOverlay({
     const cadenceDue = !continueFromResidentState
       || !hasRenderedState
       || ((residentRenderReadbackSequence - 1) % RESIDENT_RENDER_READBACK_CADENCE === 0);
-    const due = !suppressDue && (Boolean(forceDue) || cadenceDue);
+    const due = Boolean(forceDue) || cadenceDue;
+    const suppressed = Boolean(suppressDue && !due);
     return {
       schema: 'peercompute.ulg.sph-demo-render-readback-cadence.v0',
       cadence: RESIDENT_RENDER_READBACK_CADENCE,
@@ -2386,10 +2822,12 @@ export function mountSphPhaseDemoOverlay({
       due,
       skipped: !due,
       forced: Boolean(forceDue),
-      suppressed: Boolean(suppressDue),
+      suppressed,
+      suppressionCandidate: Boolean(suppressDue),
+      suppressionPolicy: 'subvisible-motion-cannot-suppress-cadence-refresh',
       skippedCount: residentRenderReadbackSkippedCount,
       renderReadbackCount: residentRenderReadbackCount,
-      reason: suppressDue ? suppressReason : (forceDue ? forceReason : (cadenceDue ? 'cadence-due' : 'cadence-skip')),
+      reason: forceDue ? forceReason : (cadenceDue ? 'cadence-due' : (suppressed ? suppressReason : 'cadence-skip')),
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -2509,6 +2947,27 @@ export function mountSphPhaseDemoOverlay({
   }
 
   function scheduleInitialMlsMpmResidentSteps({ generation = particleSyncGeneration } = {}) {
+    if (!initialResidentAutoEnabled) {
+      overlay.__mlsMpmResidentAutoSchedule = {
+        schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+        status: 'disabled-by-url-residentAuto',
+        residentAuto: false,
+        generation,
+        updatedAtMs: performance.now()
+      };
+      updateResidentPerf({
+        residentStepsPerSchedule: currentResidentStepsPerSchedule(),
+        residentAutoScheduleStatus: 'disabled-by-url-residentAuto'
+      });
+      return;
+    }
+    overlay.__mlsMpmResidentAutoSchedule = {
+      schema: 'peercompute.ulg.sph-demo-resident-auto-schedule.v0',
+      status: 'resident-auto-schedule-enabled',
+      residentAuto: true,
+      generation,
+      updatedAtMs: performance.now()
+    };
     const prereqs = [
       scheduleSphGpuParticleUpload(),
       scheduleMlsMpmGpuParticleUpload(),
@@ -2651,7 +3110,8 @@ export function mountSphPhaseDemoOverlay({
       (mls?.gravityMPerS2 ?? [0, -9.80665, 0]).join(','),
       mls?.gridCflFactor ?? 0.6,
       Math.max(1, Math.round(Number(stepCount) || 1)),
-      readbackMode
+      readbackMode,
+      Object.entries(physicalLawGroupsFromControls()).map(([key, enabled]) => `${key}:${enabled ? 1 : 0}`).join(',')
     ].join('|');
   }
 
@@ -2711,6 +3171,29 @@ export function mountSphPhaseDemoOverlay({
       accumulatedMotionVisible: motion?.status === 'motion-below-visible-threshold'
         && residentAccumulatedSubvisibleMotionM >= (motion?.visibleThresholdM ?? Number.POSITIVE_INFINITY)
     };
+  }
+
+  async function buildDefaultRemoteResidentTaskGraph(context = {}) {
+    const rawState = driver?.demo?.state?.particles ? driver.demo.state : null;
+    if (!rawState) return null;
+    const optionSource = typeof remoteResidentTaskGraphOptions === 'function'
+      ? await remoteResidentTaskGraphOptions({ ...context, state: rawState })
+      : (remoteResidentTaskGraphOptions || {});
+    return buildUlgSphMlsMpmRemoteSeedTaskGraph({
+      ...optionSource,
+      state: optionSource?.state || rawState,
+      materialProperties: optionSource?.materialProperties || activeMaterialProperties(),
+      extraCacheValues: {
+        source: 'mounted-sph-phase-resident-scheduler',
+        signature: context.signature || null,
+        scheduleToken: context.scheduleToken || null,
+        stepCount: context.stepCount || null,
+        readbackMode: context.readbackMode || null,
+        ...(optionSource?.extraCacheValues && typeof optionSource.extraCacheValues === 'object'
+          ? optionSource.extraCacheValues
+          : {})
+      }
+    });
   }
 
   function scheduleMlsMpmResidentSteps({
@@ -2815,13 +3298,85 @@ export function mountSphPhaseDemoOverlay({
         force: true
       });
     }, RESIDENT_PENDING_WATCHDOG_MS);
-    scene.refreshMlsMpmResidentSteps?.({
+    const residentComputeManagerForSchedule = resolveResidentComputeManager();
+    const residentComputeManagerSource = overlay.__sphResidentComputeManager?.source || null;
+    const allowPeerComputeStateManagerForSchedule =
+      !residentComputeManagerForSchedule
+      || residentComputeManagerSource === 'peercompute-resident-authority-host'
+      || residentComputeManagerSource === 'residentAuthorityHost.computeManager'
+      || residentComputeManagerSource === 'runtime.residentAuthorityHost.computeManager'
+      || residentComputeManagerSource === 'global.__ulgResidentAuthorityHost.computeManager';
+    const residentStateManagerForSchedule = resolveResidentStateManager({
+      allowPeerComputeAuthorityHost: allowPeerComputeStateManagerForSchedule
+    });
+    const computeTaskModulePathForSchedule = residentComputeTaskModulePath
+      || peerComputeResidentAuthorityHost?.computeTaskModulePath
+      || residentComputeManagerForSchedule?.ulgResidentComputeTaskModulePath
+      || undefined;
+    const residentAuthorityHostForSchedule = peerComputeResidentAuthorityHost
+      || residentAuthorityHost
+      || runtime?.residentAuthorityHost
+      || globalThis.__ulgResidentAuthorityHost
+      || null;
+    let remoteRefreshPreludePromise = Promise.resolve(null);
+    if (enableRemoteResidentTaskGraphRefresh) {
+      overlay.__sphRemoteResidentTaskGraphRefresh = remoteResidentTaskGraphRefreshTelemetry('pending', {
+        enabled: true,
+        signature,
+        scheduleToken,
+        stepCount: normalizedStepCount,
+        readbackMode,
+        continueFromResidentState: Boolean(continueFromResidentState),
+        generation
+      });
+      remoteRefreshPreludePromise = runRemoteResidentTaskGraphRefreshPrelude({
+        enabled: true,
+        host: residentAuthorityHostForSchedule,
+        graph: remoteResidentTaskGraph,
+        graphFactory: remoteResidentTaskGraphFactory || (remoteResidentTaskGraph ? null : buildDefaultRemoteResidentTaskGraph),
+        refreshOptions: remoteResidentTaskGraphRefreshOptions,
+        context: {
+          overlay,
+          scene,
+          runtime,
+          signature,
+          scheduleToken,
+          stepCount: normalizedStepCount,
+          readbackMode,
+          continueFromResidentState: Boolean(continueFromResidentState),
+          continuationBudget,
+          generation,
+          force: Boolean(force || continueFromResidentState),
+          computeManager: residentComputeManagerForSchedule,
+          residentStateManager: residentStateManagerForSchedule,
+          computeTaskModulePath: computeTaskModulePathForSchedule
+        }
+      }).then((report) => {
+        overlay.__sphRemoteResidentTaskGraphRefresh = {
+          ...report,
+          signature,
+          scheduleToken,
+          stepCount: normalizedStepCount,
+          readbackMode,
+          continueFromResidentState: Boolean(continueFromResidentState),
+          generation
+        };
+        return report;
+      });
+    }
+    remoteRefreshPreludePromise.then(() => scene.refreshMlsMpmResidentSteps?.({
       preferWebGpu: true,
+      computeManager: residentComputeManagerForSchedule,
+      residentStateManager: residentStateManagerForSchedule,
+      residentAuthorityHost: residentAuthorityHostForSchedule,
+      computeTaskModulePath: computeTaskModulePathForSchedule,
+      computeTaskLaneId: 'ulg:sph-resident:demo-auto',
+      computeTaskDomainKey: 'sph-phase-demo',
       stepCount: normalizedStepCount,
       readbackMode,
       continueFromResidentState,
       force: Boolean(force || continueFromResidentState)
-    }).then(async (execution) => {
+    })).then(async (execution) => {
       const residentMs = performance.now() - residentStartMs;
       if (!execution?.schema) {
         overlay.__mlsMpmResidentStepsError = 'resident execution did not produce a step envelope';
@@ -2894,6 +3449,32 @@ export function mountSphPhaseDemoOverlay({
       overlay.__mlsMpmResidentContinuedFromResidentState = Boolean(execution?.continuedFromResidentState);
       overlay.__mlsMpmResidentContinuationAvailable = Boolean(execution?.continuationAvailable);
       updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+      try {
+        overlay.__sphResidentMaterialInterfaceState = await scene.refreshSphResidentMaterialInterfaceState?.({
+          preferWebGpu: true,
+          residentSteps: execution,
+          materialProperties: activeMaterialProperties(),
+          gasPressureSummary: currentGasPressureSummary(
+            activeViewStateGasPressure || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+          ),
+          source: 'resident-physics-loop-material-interface-refresh',
+          sourceCadence: 'resident-step-completed'
+        });
+        overlay.__sphResidentPressureInterfaceState = await scene.refreshSphResidentPressureInterfaceState?.({
+          preferWebGpu: true,
+          gasPressureSummary: currentGasPressureSummary(
+            activeViewStateGasPressure || (driver?.demo ? gasPressureSummary(driver.demo) : null)
+          ),
+          source: 'resident-physics-loop-pressure-interface-refresh',
+          sourceCadence: 'resident-step-completed'
+        });
+        overlay.__sphResidentMaterialInterfaceStateError = null;
+        overlay.__sphResidentPressureInterfaceStateError = null;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        overlay.__sphResidentMaterialInterfaceStateError = message;
+        overlay.__sphResidentPressureInterfaceStateError = message;
+      }
       scheduleContinuation = Boolean(
         execution?.continuationAvailable
         && execution?.readbackMode === 'no-full-readback'
@@ -2907,7 +3488,10 @@ export function mountSphPhaseDemoOverlay({
         gridSpacingM: scene.getSphGpuParticleState?.()?.smoothingLengthM
       });
       const accumulatedMotion = accumulateResidentSubvisibleMotion(renderMotion);
-      const pressureForceRowsReady = Boolean(scene.getSphResidentRenderState?.()?.pressureInterfaceForceRowsBufferRetained);
+      const pressureForceRowsReady = Boolean(
+        scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceForceRowsBufferRetained
+        || scene.getSphResidentRenderState?.()?.pressureInterfaceForceRowsBufferRetained
+      );
       const suppressSubvisiblePlaybackRender = Boolean(
         renderMotion.status === 'motion-below-visible-threshold'
         && !accumulatedMotion.accumulatedMotionVisible
@@ -2923,12 +3507,18 @@ export function mountSphPhaseDemoOverlay({
       if (execution?.backend === 'webgpu') {
         const hasResidentRenderState = Boolean(scene.getSphResidentRenderState?.()?.schema);
         const forceMotionProvenRefresh = renderMotion.status === 'motion-proven';
+        const forceBatchMotionEstimateRefresh = renderMotion.batchMotionEstimateVisible === true;
         const forceAccumulatedMotionRefresh = accumulatedMotion.accumulatedMotionVisible;
         const cadence = residentRenderReadbackDecision({
           continueFromResidentState,
-          forceDue: (playing && !hasResidentRenderState) || forceMotionProvenRefresh || forceAccumulatedMotionRefresh,
+          forceDue: (playing && !hasResidentRenderState)
+            || forceMotionProvenRefresh
+            || forceBatchMotionEstimateRefresh
+            || forceAccumulatedMotionRefresh,
           forceReason: forceMotionProvenRefresh
             ? 'resident-motion-proven-visual-refresh'
+            : forceBatchMotionEstimateRefresh
+            ? 'resident-batch-motion-estimate-visual-refresh'
             : forceAccumulatedMotionRefresh
             ? 'resident-accumulated-motion-visual-refresh'
             : 'playback-initial-visual-refresh',
@@ -2938,6 +3528,9 @@ export function mountSphPhaseDemoOverlay({
         cadence.motionStatus = renderMotion.status;
         cadence.maxDisplacementM = renderMotion.maxDisplacementM;
         cadence.visibleThresholdM = renderMotion.visibleThresholdM;
+        cadence.estimatedBatchTimeS = renderMotion.estimatedBatchTimeS;
+        cadence.estimatedBatchDisplacementUpperBoundM = renderMotion.estimatedBatchDisplacementUpperBoundM;
+        cadence.batchMotionEstimateVisible = renderMotion.batchMotionEstimateVisible;
         cadence.accumulatedSubvisibleMotionM = accumulatedMotion.accumulatedSubvisibleMotionM;
         cadence.subvisibleMotionBurstCount = accumulatedMotion.subvisibleMotionBurstCount;
         cadence.accumulatedMotionVisible = accumulatedMotion.accumulatedMotionVisible;
@@ -2953,6 +3546,8 @@ export function mountSphPhaseDemoOverlay({
                 || (driver?.demo ? gasPressureSummary(driver.demo) : null)
             });
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+            overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+            overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
             residentRenderReadbackCount += 1;
             residentAccumulatedSubvisibleMotionM = 0;
             residentSubvisibleMotionBurstCount = 0;
@@ -2987,6 +3582,12 @@ export function mountSphPhaseDemoOverlay({
               }
             );
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+            overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
+              || overlay.__sphResidentSurfaceDrawOverlayPolicy
+              || null;
+            overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.()
+              || overlay.__sphResidentPressureInterfaceState
+              || null;
             updateResidentPerf({
               residentStepsPerSchedule: normalizedStepCount,
               renderReadbacks: residentRenderReadbackCount,
@@ -3003,7 +3604,9 @@ export function mountSphPhaseDemoOverlay({
         }
       } else {
         overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
+        overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
         overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+        overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
       }
       renderStatus();
       updateWarningBanner();
@@ -3100,13 +3703,20 @@ export function mountSphPhaseDemoOverlay({
     }
     scene.dispose();
     sceneBoxDimsM = nextDims;
-    scene = createSphPhaseScene(sceneContainer, { boxDimsM: nextDims, surfaceRadiusScale: blobScaleOf() });
+    scene = createSphPhaseScene(sceneContainer, {
+      boxDimsM: nextDims,
+      surfaceRadiusScale: blobScaleOf(),
+      preserveDrawingBuffer: preserveDrawingBufferForCapture,
+      residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode
+    });
     overlay.__sphScene = scene;
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
     overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
+    overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+    overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
@@ -3232,6 +3842,7 @@ export function mountSphPhaseDemoOverlay({
     }
     driver = null;
     activeViewStatePreflight = result?.preflight || outputs.preflight || null;
+    overlay.__sphPhasePreflight = activeViewStatePreflight;
     activeViewStateTotals = result?.totals || outputs.totals || viewState.totals || null;
     activeViewStatePhaseSummary = result?.phaseMassSummary || outputs.phaseMassSummary || viewState.phaseMassSummary || null;
     activeViewStateGasPressure = result?.gasPressureSummary || outputs.gasPressureSummary || viewState.gasPressureSummary || null;
@@ -3267,7 +3878,7 @@ export function mountSphPhaseDemoOverlay({
     syncParticles(viewState, 'peercompute-worker-packed-state');
     renderStatus();
     updateWarningBanner();
-    if (autoStart) startWorkerResidentPlayback();
+    if (residentAutoStartEnabled) startWorkerResidentPlayback();
     return true;
   }
 
@@ -3475,10 +4086,14 @@ export function mountSphPhaseDemoOverlay({
         positionsM: new Float32Array(0),
         colorsRgb: new Float32Array(0),
         materials: [],
-        reactions: []
+        reactions: [],
+        physicalLawGroups: physicalLawGroupsFromControls()
       });
+      overlay.__sphPhysicalLawGroups = physicalLawGroupsFromControls();
       overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
+      overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
       overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+      overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
       return;
     }
     activeViewState = viewState;
@@ -3499,13 +4114,19 @@ export function mountSphPhaseDemoOverlay({
       reactionContactRadiusM: viewState.reactionContactRadiusM,
       sphGpuParticleState: viewState.sphGpuParticleState,
       mlsMpmGpuParticleState: viewState.mlsMpmGpuParticleState,
+      renderDomainCounts: viewState.counts,
+      physicalLawGroups: physicalLawGroupsFromControls(),
+      wallTemperaturesK: viewState.wallTemperaturesK || viewState.scenario?.walls?.faces || null,
       staticTableCache
     });
+    overlay.__sphPhysicalLawGroups = physicalLawGroupsFromControls();
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;
     overlay.__sphReactionTable = scene.getSphReactionTable?.() || null;
     overlay.__sphResidentRenderState = scene.getSphResidentRenderState?.() || null;
+    overlay.__sphResidentPressureInterfaceState = scene.getSphResidentPressureInterfaceState?.() || null;
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+    overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
     overlay.__sphGpuParticleState = scene.getSphGpuParticleState?.() || null;
     overlay.__mlsMpmGpuParticleState = scene.getMlsMpmGpuParticleState?.() || null;
     overlay.__mlsMpmGridUpdate = scene.getMlsMpmGridUpdate?.() || null;
@@ -3558,6 +4179,12 @@ export function mountSphPhaseDemoOverlay({
   }
   overlay.__sphStep = stepDemoForVisualTest;
 
+  function lawGroupStatusText() {
+    return Object.entries(physicalLawGroupsFromControls())
+      .map(([key, enabled]) => `${key}=${enabled ? 'on' : 'off'}`)
+      .join(' ');
+  }
+
   function renderStatus() {
     if (!driver && activeViewState) {
       const pre = activeViewStatePreflight || {};
@@ -3573,6 +4200,9 @@ export function mountSphPhaseDemoOverlay({
       const gridUpdate = scene.getMlsMpmGridUpdate?.() || overlay.__mlsMpmGridUpdate || null;
       const residentRenderState = scene.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
       const residentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+      const residentSurfaceOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
+        || overlay.__sphResidentSurfaceDrawOverlayPolicy
+        || null;
       const reactionTable = scene.getSphReactionTable?.() || overlay.__sphReactionTable || null;
       const residentRequestedReadback = residentSteps?.requestedReadbackMode
         || residentStep?.requestedReadbackMode
@@ -3584,6 +4214,7 @@ export function mountSphPhaseDemoOverlay({
       const gridNodeCount = gridUpdate?.gridNodeCount || p2gProjection?.gridNodeCount || residentStep?.gridNodeCount || 0;
       const gridSpacingM = gridUpdate?.gridSpacingM || p2gProjection?.gridSpacingM || activeViewState.gpuMechanics?.gridSpacingM || null;
       const residentPerfSummary = overlay.__sphResidentPerf || residentPerf;
+      const residentAutoSchedule = overlay.__mlsMpmResidentAutoSchedule || null;
       const residentStageTiming = residentStep?.stageTiming
         || residentSteps?.finalStep?.stageTiming
         || residentPerfSummary?.lastResidentStageTiming
@@ -3599,6 +4230,10 @@ export function mountSphPhaseDemoOverlay({
         || overlay.__sphResidentRenderReadbackCadence
         || null;
       const residentRenderError = overlay.__sphResidentRenderStateError || null;
+      const residentMaterialInterfaceState = scene.getSphResidentMaterialInterfaceState?.()
+        || overlay.__sphResidentMaterialInterfaceState
+        || residentRenderState?.materialInterfaceField
+        || null;
       const residentProductMass = residentStep?.residentProductMass || residentSteps?.finalStep?.residentProductMass || null;
       const workerTiming = overlay.__sphPhaseWorkerTiming || overlay.__sphPhaseRebuildWorker?.timing || null;
       statusEl.textContent = [
@@ -3614,15 +4249,18 @@ export function mountSphPhaseDemoOverlay({
         `total energy     : ${fmt(totals.totalEnergyJ)} J`,
         `momentum |p|     : ${fmt(totals.momentumMagnitudeKgMPerS)} kg·m/s`,
         `view state       : ${activeViewStateSource}`,
+        `law groups       : ${lawGroupStatusText()}`,
+        `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
         `resident backend : ${residentBackend}`,
         `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
         `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
-        `resident motion  : status=${residentMotion.status} max-dx=${Number.isFinite(residentMotion.maxDisplacementM) ? fmt(residentMotion.maxDisplacementM, 6) : 'pending'}m max-v=${Number.isFinite(residentMotion.maxSpeedMPerS) ? fmt(residentMotion.maxSpeedMPerS, 6) : 'pending'}m/s threshold=${fmt(residentMotion.visibleThresholdM, 6)}m accumulated=${fmt(renderCadence?.accumulatedSubvisibleMotionM ?? residentPerfSummary?.accumulatedSubvisibleMotionM ?? 0, 6)}m bursts=${renderCadence?.subvisibleMotionBurstCount ?? residentPerfSummary?.subvisibleMotionBurstCount ?? 0} pressure-impulse=${Number.isFinite(residentMotion.pressureImpulseNSeconds) ? fmt(residentMotion.pressureImpulseNSeconds, 6) : 'pending'}N*s`,
+        `resident motion  : status=${residentMotion.status} max-dx=${Number.isFinite(residentMotion.maxDisplacementM) ? fmt(residentMotion.maxDisplacementM, 6) : 'pending'}m max-v=${Number.isFinite(residentMotion.maxSpeedMPerS) ? fmt(residentMotion.maxSpeedMPerS, 6) : 'pending'}m/s threshold=${fmt(residentMotion.visibleThresholdM, 6)}m batch-est=${Number.isFinite(residentMotion.estimatedBatchDisplacementUpperBoundM) ? fmt(residentMotion.estimatedBatchDisplacementUpperBoundM, 6) : 'pending'}m accumulated=${fmt(renderCadence?.accumulatedSubvisibleMotionM ?? residentPerfSummary?.accumulatedSubvisibleMotionM ?? 0, 6)}m bursts=${renderCadence?.subvisibleMotionBurstCount ?? residentPerfSummary?.subvisibleMotionBurstCount ?? 0} pressure-impulse=${Number.isFinite(residentMotion.pressureImpulseNSeconds) ? fmt(residentMotion.pressureImpulseNSeconds, 6) : 'pending'}N*s`,
         `resident reaction: status=${residentStep?.stageStatus?.reaction || (reactionTable?.reactionCount > 0 ? 'pending' : 'no-derived-reactions')} backend=${residentStep?.stageBackends?.reaction || 'pending'} reactions=${reactionTable?.reactionCount ?? 0}`,
         `resident product : status=${residentProductMass?.status || 'pending'} rows=${residentProductMass?.productEventRowCount ?? 0} unplaced=${Number.isFinite(residentProductMass?.unplacedProductMassKg) ? fmt(residentProductMass.unplacedProductMassKg) : 'pending'}kg eos=${residentProductMass?.eosCouplingStatus || 'pending'}`,
+        `material iface  : owner=${residentMaterialInterfaceState?.authority || 'pending'} source=${residentMaterialInterfaceState?.source || 'pending'} status=${residentMaterialInterfaceState?.status || 'pending'} ready=${residentMaterialInterfaceState?.readySurfaceCount ?? 0}/${residentMaterialInterfaceState?.surfaceCount ?? 0} source-field=${residentMaterialInterfaceState?.interfaceSourceFieldSchema || residentMaterialInterfaceState?.sourceFieldSchema || 'pending'} candidate-readback=${Boolean(residentMaterialInterfaceState?.candidateReadback)}`,
         `render source    : ${residentRenderState?.source || 'cpu-particles'} status=${residentRenderState?.status || 'pending'} backend=${residentRenderState?.backend || 'pending'} rows=${residentRenderState?.particleCount ?? 0} field-cells=${residentRenderState?.renderFieldTotalCells ?? 0} field-readback=${Boolean(residentRenderState?.renderFieldReadback)}`,
         `render error     : ${residentRenderError || 'none'}`,
-        `surface draw     : status=${residentSurfaceDraw?.status || residentRenderState?.surfaceDrawStatus || 'pending'} draw-retained=${Boolean(residentSurfaceDraw?.drawRowsBufferRetained ?? residentRenderState?.surfaceDrawRowsBufferRetained)} indirect-retained=${Boolean(residentSurfaceDraw?.drawIndirectRowsBufferRetained ?? residentRenderState?.surfaceDrawIndirectRowsBufferRetained)} compact-retained=${Boolean(residentSurfaceDraw?.compactedVertexRowsBufferRetained ?? residentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained)} readback=${Boolean(residentSurfaceDraw?.surfaceDrawReadback ?? residentRenderState?.surfaceDrawReadback)} bridge=${residentSurfaceDraw?.visibleRendererBridge || residentRenderState?.surfaceDrawVisibleRendererBridge || 'pending'} depth=${residentSurfaceDraw?.renderBridgeDepthPolicy || residentRenderState?.surfaceDrawRenderBridgeDepthPolicy || 'pending'} depth-ready=${Boolean(residentSurfaceDraw?.renderBridgeDepthAttachmentReady ?? residentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady)} transparent=${residentSurfaceDraw?.renderBridgeTransparencyCompositeMode || residentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode || 'pending'} optics=${residentSurfaceDraw?.renderBridgeOpticalRenderSource || residentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource || 'pending'} records=${residentSurfaceDraw?.renderBridgeOpticalRecordCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount ?? 0} spectra=${residentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount ?? 0} swap=${residentSurfaceDraw?.renderBridgeTemporalSwapPolicy || residentRenderState?.surfaceDrawRenderBridgeTemporalSwapPolicy || 'pending'} retained=${Boolean(residentSurfaceDraw?.renderBridgeRetainedPreviousOverlay ?? residentRenderState?.surfaceDrawRenderBridgeRetainedPreviousOverlay)}`,
+        `surface draw     : status=${residentSurfaceDraw?.status || residentRenderState?.surfaceDrawStatus || 'pending'} policy=${residentSurfaceDraw?.overlayPolicyStatus || residentRenderState?.surfaceDrawOverlayPolicyStatus || residentSurfaceOverlayPolicy?.status || 'pending'} mode=${residentSurfaceDraw?.overlayPolicyMode || residentRenderState?.surfaceDrawOverlayPolicyMode || residentSurfaceOverlayPolicy?.mode || 'pending'} active=${residentSurfaceDraw?.activeSurfaceCount ?? residentRenderState?.surfaceDrawActiveSurfaceCount ?? 0} vertices=${residentSurfaceDraw?.vertexCount ?? residentRenderState?.surfaceDrawVertexCount ?? 0} draw-retained=${Boolean(residentSurfaceDraw?.drawRowsBufferRetained ?? residentRenderState?.surfaceDrawRowsBufferRetained)} indirect-retained=${Boolean(residentSurfaceDraw?.drawIndirectRowsBufferRetained ?? residentRenderState?.surfaceDrawIndirectRowsBufferRetained)} compact-retained=${Boolean(residentSurfaceDraw?.compactedVertexRowsBufferRetained ?? residentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained)} readback=${Boolean(residentSurfaceDraw?.surfaceDrawReadback ?? residentRenderState?.surfaceDrawReadback)} bridge=${residentSurfaceDraw?.visibleRendererBridge || residentRenderState?.surfaceDrawVisibleRendererBridge || 'pending'} depth=${residentSurfaceDraw?.renderBridgeDepthPolicy || residentRenderState?.surfaceDrawRenderBridgeDepthPolicy || 'pending'} depth-ready=${Boolean(residentSurfaceDraw?.renderBridgeDepthAttachmentReady ?? residentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady)} transparent=${residentSurfaceDraw?.renderBridgeTransparencyCompositeMode || residentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode || 'pending'} optics=${residentSurfaceDraw?.renderBridgeOpticalRenderSource || residentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource || 'pending'} records=${residentSurfaceDraw?.renderBridgeOpticalRecordCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount ?? 0} spectra=${residentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount ?? 0} swap=${residentSurfaceDraw?.renderBridgeTemporalSwapPolicy || residentRenderState?.surfaceDrawRenderBridgeTemporalSwapPolicy || 'pending'} retained=${Boolean(residentSurfaceDraw?.renderBridgeRetainedPreviousOverlay ?? residentRenderState?.surfaceDrawRenderBridgeRetainedPreviousOverlay)}`,
         `render pressure  : source=${renderPressureSource} optical-state=${Boolean(renderPressureOpticalState)}`,
         `render cadence   : every=${renderCadence?.cadence ?? RESIDENT_RENDER_READBACK_CADENCE} effective=${renderCadence?.effectiveCadence ?? residentPerfSummary?.effectiveRenderReadbackCadence ?? RESIDENT_RENDER_READBACK_CADENCE} forced=${Boolean(renderCadence?.forced ?? residentPerfSummary?.playbackVisualRefreshForced)} reason=${renderCadence?.reason || 'pending'} sequence=${renderCadence?.sequence ?? 0} skipped=${renderCadence?.skippedCount ?? 0} last-skipped=${Boolean(renderCadence?.skipped)}`,
         `resident profile : submissions=${residentPerfSummary?.residentSubmissions ?? 0} stale=${residentPerfSummary?.staleResidentSubmissions ?? 0} substeps=${residentPerfSummary?.residentStepsPerSchedule ?? currentResidentStepsPerSchedule()} target=${currentResidentTargetSubsteps()} step-ms=${fmt(residentPerfSummary?.lastResidentMs, 1)} render-ms=${fmt(residentPerfSummary?.lastRenderReadbackMs, 1)}`,
@@ -3671,6 +4309,7 @@ export function mountSphPhaseDemoOverlay({
       return;
     }
     const pre = driver.preflight();
+    overlay.__sphPhasePreflight = pre;
     const totals = sphTotals(driver.demo.state);
     const phase = phaseMassSummary(driver.demo);
     const gasPressure = currentGasPressureSummary(gasPressureSummary(driver.demo));
@@ -3775,6 +4414,9 @@ export function mountSphPhaseDemoOverlay({
     const renderFieldCells = residentRenderState?.renderFieldTotalCells ?? 0;
     const renderFieldReadback = residentRenderState?.renderFieldReadback ?? false;
     const residentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+    const residentSurfaceOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.()
+      || overlay.__sphResidentSurfaceDrawOverlayPolicy
+      || null;
     const renderPressureSource = residentRenderState?.gasPressureSummarySource
       || overlay.__sphResidentGasPressureSummary?.source
       || gasPressure?.source
@@ -3783,9 +4425,14 @@ export function mountSphPhaseDemoOverlay({
     const renderCadence = residentRenderState?.renderReadbackCadence
       || overlay.__sphResidentRenderReadbackCadence
       || null;
+    const residentMaterialInterfaceState = scene.getSphResidentMaterialInterfaceState?.()
+      || overlay.__sphResidentMaterialInterfaceState
+      || residentRenderState?.materialInterfaceField
+      || null;
     const residentRenderError = overlay.__sphResidentRenderStateError || null;
     const renderAuthoritative = Boolean(residentRenderState?.gpuAuthoritativeState);
     const residentPerfSummary = overlay.__sphResidentPerf || residentPerf;
+    const residentAutoSchedule = overlay.__mlsMpmResidentAutoSchedule || null;
     const residentStageTiming = residentStep?.stageTiming
       || residentSteps?.finalStep?.stageTiming
       || residentPerfSummary?.lastResidentStageTiming
@@ -3811,11 +4458,13 @@ export function mountSphPhaseDemoOverlay({
       `solid fractions  : ${solidFractions || '—'}`,
       `total energy     : ${fmt(totals.totalEnergyJ)} J`,
       `momentum |p|     : ${fmt(totals.momentumMagnitudeKgMPerS)} kg·m/s`,
+      `law groups       : ${lawGroupStatusText()}`,
+      `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
       `resident backend : ${residentBackend}`,
       `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,
       `resident readback: requested=${residentRequestedReadback} actual=${residentActualReadback}`,
       `resident source  : ${residentSourceMode} continued=${Boolean(residentContinued)} next=${Boolean(residentContinuationAvailable)}`,
-      `resident motion  : status=${residentMotion.status} max-dx=${Number.isFinite(residentMotion.maxDisplacementM) ? fmt(residentMotion.maxDisplacementM, 6) : 'pending'}m max-v=${Number.isFinite(residentMotion.maxSpeedMPerS) ? fmt(residentMotion.maxSpeedMPerS, 6) : 'pending'}m/s threshold=${fmt(residentMotion.visibleThresholdM, 6)}m accumulated=${fmt(renderCadence?.accumulatedSubvisibleMotionM ?? residentPerfSummary?.accumulatedSubvisibleMotionM ?? 0, 6)}m bursts=${renderCadence?.subvisibleMotionBurstCount ?? residentPerfSummary?.subvisibleMotionBurstCount ?? 0} pressure-impulse=${Number.isFinite(residentMotion.pressureImpulseNSeconds) ? fmt(residentMotion.pressureImpulseNSeconds, 6) : 'pending'}N*s`,
+      `resident motion  : status=${residentMotion.status} max-dx=${Number.isFinite(residentMotion.maxDisplacementM) ? fmt(residentMotion.maxDisplacementM, 6) : 'pending'}m max-v=${Number.isFinite(residentMotion.maxSpeedMPerS) ? fmt(residentMotion.maxSpeedMPerS, 6) : 'pending'}m/s threshold=${fmt(residentMotion.visibleThresholdM, 6)}m batch-est=${Number.isFinite(residentMotion.estimatedBatchDisplacementUpperBoundM) ? fmt(residentMotion.estimatedBatchDisplacementUpperBoundM, 6) : 'pending'}m accumulated=${fmt(renderCadence?.accumulatedSubvisibleMotionM ?? residentPerfSummary?.accumulatedSubvisibleMotionM ?? 0, 6)}m bursts=${renderCadence?.subvisibleMotionBurstCount ?? residentPerfSummary?.subvisibleMotionBurstCount ?? 0} pressure-impulse=${Number.isFinite(residentMotion.pressureImpulseNSeconds) ? fmt(residentMotion.pressureImpulseNSeconds, 6) : 'pending'}N*s`,
       `compact summary  : status=${compactStatus} mode=${compactMode} reduction=${compactReduction}`,
       `thermal summary  : mean=${Number.isFinite(thermalMeanK) ? fmt(thermalMeanK) : 'pending'}K min=${Number.isFinite(thermalMinK) ? fmt(thermalMinK) : 'pending'}K max=${Number.isFinite(thermalMaxK) ? fmt(thermalMaxK) : 'pending'}K solid=${fmt(thermalPhaseMassKg.solid ?? 0)}kg liquid=${fmt(thermalPhaseMassKg.liquid ?? 0)}kg gas=${fmt(thermalPhaseMassKg.gas ?? 0)}kg plasma=${fmt(thermalPhaseMassKg.plasma ?? 0)}kg problem=${thermalProblemCount ?? 'pending'}`,
       `thermal graph gpu: status=${thermalResponseGraphUpload?.status || 'pending'} responses=${thermalResponseGraphUpload?.responseCount ?? 0} graphs=${thermalResponseGraphUpload?.graphCount ?? 0} bytes=${thermalResponseGraphUpload?.responseBufferByteLength ?? 0}`,
@@ -3825,9 +4474,10 @@ export function mountSphPhaseDemoOverlay({
 	      `reaction ledger : events=${reactionLedgerEvents ?? 'pending'} gate=${reactionStrictGateStatus || 'pending'} inventory=${reactionProductInventoryCount ?? 'pending'} inventory-bytes=${reactionProductInventoryBytes ?? 0} product-event-rows=${reactionProductEventRows ?? 'pending'} product-event-active=${reactionProductEventActive ?? 'pending'} product-event-buffer=${reactionProductEventBufferBytes ?? 0} product-event-readback=${reactionProductEventReadbackBytes ?? 0} product-event-retained=${Boolean(reactionProductEventRetained)} atom-residuals=${reactionAtomResidualCount ?? 'pending'} atom-bytes=${reactionAtomResidualBytes ?? 0} species=${reactionGasSpeciesCount ?? 'pending'} species-bytes=${reactionGasSpeciesBytes ?? 0} unplaced=${Number.isFinite(reactionLedgerUnplacedKg) ? fmt(reactionLedgerUnplacedKg) : 'pending'}kg gas=${Number.isFinite(reactionLedgerGasKg) ? fmt(reactionLedgerGasKg) : 'pending'}kg unplaced-gas=${Number.isFinite(reactionLedgerUnplacedGasKg) ? fmt(reactionLedgerUnplacedGasKg) : 'pending'}kg gas-mol=${Number.isFinite(reactionLedgerGasMoles) ? fmt(reactionLedgerGasMoles) : 'pending'} heat=${Number.isFinite(reactionHeatJ) ? fmt(reactionHeatJ) : 'pending'}J residual=${Number.isFinite(reactionLedgerResidualKg) ? fmt(reactionLedgerResidualKg) : 'pending'}kg`,
       `resident product : status=${reactionResidentProductMassStatus} rows=${reactionResidentProductMassRows} unplaced=${Number.isFinite(reactionResidentProductMassUnplacedKg) ? fmt(reactionResidentProductMassUnplacedKg) : 'pending'}kg eos=${reactionResidentProductMassEosStatus}`,
       `render readback  : available=${renderStateReadbackAvailable == null ? 'pending' : String(renderStateReadbackAvailable)} hot-loop-no-full=${Boolean(normalHotLoopReadbackFree)}`,
+      `material iface  : owner=${residentMaterialInterfaceState?.authority || 'pending'} source=${residentMaterialInterfaceState?.source || 'pending'} status=${residentMaterialInterfaceState?.status || 'pending'} ready=${residentMaterialInterfaceState?.readySurfaceCount ?? 0}/${residentMaterialInterfaceState?.surfaceCount ?? 0} source-field=${residentMaterialInterfaceState?.interfaceSourceFieldSchema || residentMaterialInterfaceState?.sourceFieldSchema || 'pending'} candidate-readback=${Boolean(residentMaterialInterfaceState?.candidateReadback)}`,
       `render source    : ${renderSource} status=${renderRowsStatus} backend=${renderRowsBackend} rows=${renderRowsCount} field-cells=${renderFieldCells} field-readback=${Boolean(renderFieldReadback)}`,
       `render error     : ${residentRenderError || 'none'}`,
-      `surface draw     : status=${residentSurfaceDraw?.status || residentRenderState?.surfaceDrawStatus || 'pending'} draw-retained=${Boolean(residentSurfaceDraw?.drawRowsBufferRetained ?? residentRenderState?.surfaceDrawRowsBufferRetained)} indirect-retained=${Boolean(residentSurfaceDraw?.drawIndirectRowsBufferRetained ?? residentRenderState?.surfaceDrawIndirectRowsBufferRetained)} compact-retained=${Boolean(residentSurfaceDraw?.compactedVertexRowsBufferRetained ?? residentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained)} readback=${Boolean(residentSurfaceDraw?.surfaceDrawReadback ?? residentRenderState?.surfaceDrawReadback)} bridge=${residentSurfaceDraw?.visibleRendererBridge || residentRenderState?.surfaceDrawVisibleRendererBridge || 'pending'} depth=${residentSurfaceDraw?.renderBridgeDepthPolicy || residentRenderState?.surfaceDrawRenderBridgeDepthPolicy || 'pending'} depth-ready=${Boolean(residentSurfaceDraw?.renderBridgeDepthAttachmentReady ?? residentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady)} transparent=${residentSurfaceDraw?.renderBridgeTransparencyCompositeMode || residentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode || 'pending'} optics=${residentSurfaceDraw?.renderBridgeOpticalRenderSource || residentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource || 'pending'} records=${residentSurfaceDraw?.renderBridgeOpticalRecordCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount ?? 0} spectra=${residentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount ?? 0} swap=${residentSurfaceDraw?.renderBridgeTemporalSwapPolicy || residentRenderState?.surfaceDrawRenderBridgeTemporalSwapPolicy || 'pending'} retained=${Boolean(residentSurfaceDraw?.renderBridgeRetainedPreviousOverlay ?? residentRenderState?.surfaceDrawRenderBridgeRetainedPreviousOverlay)}`,
+      `surface draw     : status=${residentSurfaceDraw?.status || residentRenderState?.surfaceDrawStatus || 'pending'} policy=${residentSurfaceDraw?.overlayPolicyStatus || residentRenderState?.surfaceDrawOverlayPolicyStatus || residentSurfaceOverlayPolicy?.status || 'pending'} mode=${residentSurfaceDraw?.overlayPolicyMode || residentRenderState?.surfaceDrawOverlayPolicyMode || residentSurfaceOverlayPolicy?.mode || 'pending'} active=${residentSurfaceDraw?.activeSurfaceCount ?? residentRenderState?.surfaceDrawActiveSurfaceCount ?? 0} vertices=${residentSurfaceDraw?.vertexCount ?? residentRenderState?.surfaceDrawVertexCount ?? 0} draw-retained=${Boolean(residentSurfaceDraw?.drawRowsBufferRetained ?? residentRenderState?.surfaceDrawRowsBufferRetained)} indirect-retained=${Boolean(residentSurfaceDraw?.drawIndirectRowsBufferRetained ?? residentRenderState?.surfaceDrawIndirectRowsBufferRetained)} compact-retained=${Boolean(residentSurfaceDraw?.compactedVertexRowsBufferRetained ?? residentRenderState?.surfaceDrawCompactedVertexRowsBufferRetained)} readback=${Boolean(residentSurfaceDraw?.surfaceDrawReadback ?? residentRenderState?.surfaceDrawReadback)} bridge=${residentSurfaceDraw?.visibleRendererBridge || residentRenderState?.surfaceDrawVisibleRendererBridge || 'pending'} depth=${residentSurfaceDraw?.renderBridgeDepthPolicy || residentRenderState?.surfaceDrawRenderBridgeDepthPolicy || 'pending'} depth-ready=${Boolean(residentSurfaceDraw?.renderBridgeDepthAttachmentReady ?? residentRenderState?.surfaceDrawRenderBridgeDepthAttachmentReady)} transparent=${residentSurfaceDraw?.renderBridgeTransparencyCompositeMode || residentRenderState?.surfaceDrawRenderBridgeTransparencyCompositeMode || 'pending'} optics=${residentSurfaceDraw?.renderBridgeOpticalRenderSource || residentRenderState?.surfaceDrawRenderBridgeOpticalRenderSource || 'pending'} records=${residentSurfaceDraw?.renderBridgeOpticalRecordCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalRecordCount ?? 0} spectra=${residentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? residentRenderState?.surfaceDrawRenderBridgeOpticalSpectralSampleCount ?? 0} swap=${residentSurfaceDraw?.renderBridgeTemporalSwapPolicy || residentRenderState?.surfaceDrawRenderBridgeTemporalSwapPolicy || 'pending'} retained=${Boolean(residentSurfaceDraw?.renderBridgeRetainedPreviousOverlay ?? residentRenderState?.surfaceDrawRenderBridgeRetainedPreviousOverlay)}`,
       `render pressure  : source=${renderPressureSource} optical-state=${Boolean(renderPressureOpticalState)}`,
       `render cadence   : every=${renderCadence?.cadence ?? RESIDENT_RENDER_READBACK_CADENCE} effective=${renderCadence?.effectiveCadence ?? residentPerfSummary?.effectiveRenderReadbackCadence ?? RESIDENT_RENDER_READBACK_CADENCE} forced=${Boolean(renderCadence?.forced ?? residentPerfSummary?.playbackVisualRefreshForced)} reason=${renderCadence?.reason || 'pending'} sequence=${renderCadence?.sequence ?? 0} skipped=${renderCadence?.skippedCount ?? 0} last-skipped=${Boolean(renderCadence?.skipped)}`,
       `resident profile : submissions=${residentPerfSummary?.residentSubmissions ?? 0} stale=${residentPerfSummary?.staleResidentSubmissions ?? 0} substeps=${residentPerfSummary?.residentStepsPerSchedule ?? currentResidentStepsPerSchedule()} target=${currentResidentTargetSubsteps()} step-ms=${fmt(residentPerfSummary?.lastResidentMs, 1)} render-ms=${fmt(residentPerfSummary?.lastRenderReadbackMs, 1)}`,
@@ -3841,6 +4491,7 @@ export function mountSphPhaseDemoOverlay({
       `cache clear      : ${cacheClearStatusText()}`,
       `perf trace       : ${performanceTraceStatusText()}`,
       `cpu closure task : ${cpuClosureTask?.active ? `${cpuClosureTask.label} (${cpuClosureTask.location})` : 'idle'}`,
+      `mechanics mode   : ${driver?.demo?.gpuMechanics?.integrator || activeViewState?.gpuMechanics?.integrator || mechanicsModeFromControls()}`,
       `standalone mech  : ${standaloneMechanics?.status || 'pending'} backend=${standaloneMechanics?.backend || 'pending'}`,
       `render authoritative: ${renderAuthoritative}`,
       `gpu authoritative: ${Boolean(gpuAuthoritativeState)}`,
@@ -3861,6 +4512,17 @@ export function mountSphPhaseDemoOverlay({
 
   function startWorkerResidentPlayback({ force = false } = {}) {
     if (driver || !activeViewState) return false;
+    if (activeViewState.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
+      driver = createDriverFromControls({ preferActiveViewStateCache: true });
+      if (!driver) return false;
+      syncParticles();
+      playing = true;
+      overlay.querySelector('#sph-play').textContent = 'Pause';
+      requestPlaybackTick();
+      renderStatus();
+      updateWarningBanner();
+      return true;
+    }
     if (playing && !force) return true;
     playing = true;
     overlay.querySelector('#sph-play').textContent = 'Pause';
@@ -3899,6 +4561,17 @@ export function mountSphPhaseDemoOverlay({
   overlay.querySelector('#sph-preflight').addEventListener('click', renderStatus);
   overlay.querySelector('#sph-step').addEventListener('click', () => {
     if (!driver) {
+      if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
+        driver = createDriverFromControls({ preferActiveViewStateCache: true });
+        if (driver) {
+          driver.step();
+          recordPhysicsFrame(1);
+          syncParticles();
+        }
+        renderStatus();
+        updateWarningBanner();
+        return;
+      }
       if (activeViewState) {
         scheduleMlsMpmResidentSteps({
           continueFromResidentState: residentGpuContinuationReady()
@@ -3912,6 +4585,21 @@ export function mountSphPhaseDemoOverlay({
   });
   overlay.querySelector('#sph-play').addEventListener('click', (e) => {
     if (!driver) {
+      if (activeViewState?.gpuMechanics?.integrator && activeViewState.gpuMechanics.integrator !== 'mlsmpm') {
+        driver = createDriverFromControls({ preferActiveViewStateCache: true });
+        if (driver) {
+          syncParticles();
+          playing = !playing;
+          e.target.textContent = playing ? 'Pause' : 'Play';
+          if (playing) requestPlaybackTick();
+        } else {
+          playing = false;
+          e.target.textContent = 'Play';
+        }
+        renderStatus();
+        updateWarningBanner();
+        return;
+      }
       if (activeViewState) {
         playing = !playing;
         e.target.textContent = playing ? 'Pause' : 'Play';
@@ -4032,11 +4720,11 @@ export function mountSphPhaseDemoOverlay({
     syncParticles();
     renderStatus();
   }
-  if (autoStart && driver) {
+  if (residentAutoStartEnabled && driver) {
     playing = true;
     overlay.querySelector('#sph-play').textContent = 'Pause';
     requestPlaybackTick();
-  } else if (autoStart) {
+  } else if (residentAutoStartEnabled) {
     startWorkerResidentPlayback();
   }
   return { close, overlay };

@@ -25,7 +25,7 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
-import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 
 export {
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -881,10 +881,10 @@ export async function runSphReactionSummaryWebGpu({
       partialCount,
       hasProposals: borrowedProposalBuffer
     }));
-    const partialsModule = device.createShaderModule({ code: sphReactionSummaryPartialsWgsl });
-    const { pipeline: partialsPipeline, bindGroupLayout: partialsBindGroupLayout } = createExplicitComputePipeline(device, {
+    const { pipeline: partialsPipeline, bindGroupLayout: partialsBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-sph-reaction-summary-partials',
       label: 'ulg-sph-reaction-summary-partials',
-      module: partialsModule,
+      code: sphReactionSummaryPartialsWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -910,10 +910,10 @@ export async function runSphReactionSummaryWebGpu({
         { binding: 7, resource: { buffer: proposalsBuffer } }
       ]
     });
-    const finalizeModule = device.createShaderModule({ code: sphReactionSummaryFinalizeWgsl });
-    const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createExplicitComputePipeline(device, {
+    const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-sph-reaction-summary-finalize',
       label: 'ulg-sph-reaction-summary-finalize',
-      module: finalizeModule,
+      code: sphReactionSummaryFinalizeWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -938,10 +938,10 @@ export async function runSphReactionSummaryWebGpu({
     let atomResidualPipeline = null;
     let atomResidualBindGroup = null;
     if (productInventoryCount > 0) {
-      const productInventoryModule = device.createShaderModule({ code: sphReactionProductInventoryWgsl });
-      const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-product-inventory',
         label: 'ulg-sph-reaction-product-inventory',
-        module: productInventoryModule,
+        code: sphReactionProductInventoryWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -970,10 +970,10 @@ export async function runSphReactionSummaryWebGpu({
       });
     }
     if (useProductEventBuffer) {
-      const productEventModule = device.createShaderModule({ code: sphReactionProductEventWgsl });
-      const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-product-event',
         label: 'ulg-sph-reaction-product-event',
-        module: productEventModule,
+        code: sphReactionProductEventWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -1002,10 +1002,10 @@ export async function runSphReactionSummaryWebGpu({
       });
     }
     if (atomResidualCount > 0) {
-      const atomResidualModule = device.createShaderModule({ code: sphReactionAtomResidualWgsl });
-      const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-atom-residual',
         label: 'ulg-sph-reaction-atom-residual',
-        module: atomResidualModule,
+        code: sphReactionAtomResidualWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),
@@ -1030,10 +1030,10 @@ export async function runSphReactionSummaryWebGpu({
       });
     }
     if (gasSpeciesCount > 0) {
-      const gasSpeciesModule = device.createShaderModule({ code: sphReactionGasSpeciesSummaryWgsl });
-      const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+      const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-gas-species-summary',
         label: 'ulg-sph-reaction-gas-species-summary',
-        module: gasSpeciesModule,
+        code: sphReactionGasSpeciesSummaryWgsl,
         entryPoint: 'main',
         bindings: [
           computeBufferBinding(0, 'read-only-storage'),

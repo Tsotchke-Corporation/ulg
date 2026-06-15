@@ -9,7 +9,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { mlsMpmP2gGridProjectionWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { requestOpticalGpuDevice } from '../material/opticalGpuBuffers.js';
-import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -182,18 +182,38 @@ function pressureFromPackedParticle({
   densityKgPerM3,
   restDensityKgPerM3,
   soundSpeedMPerS,
-  eosModelId
+  eosModelId,
+  internalPressureScale = 1
 }) {
   if (!(densityKgPerM3 > 0) || !(restDensityKgPerM3 > 0) || !(soundSpeedMPerS > 0)) return 0;
+  const pressureScale = finiteNumber(internalPressureScale, 1);
+  if (pressureScale === 0) return 0;
   if (Math.round(eosModelId) === EOS_MODEL_IDS.gasLinearized) {
-    return Math.max(0, soundSpeedMPerS * soundSpeedMPerS * (densityKgPerM3 - restDensityKgPerM3));
+    return pressureScale * Math.max(0, soundSpeedMPerS * soundSpeedMPerS * (densityKgPerM3 - restDensityKgPerM3));
   }
   if (Math.round(eosModelId) === EOS_MODEL_IDS.taitCondensed) {
     const ratio = densityKgPerM3 / Math.max(restDensityKgPerM3, 1e-9);
-    return (restDensityKgPerM3 * soundSpeedMPerS * soundSpeedMPerS / TAIT_EXPONENT)
+    const pressurePa = (restDensityKgPerM3 * soundSpeedMPerS * soundSpeedMPerS / TAIT_EXPONENT)
       * (ratio ** TAIT_EXPONENT - 1);
+    return pressureScale * pressurePa;
   }
   return 0;
+}
+
+function addNewtonianViscousStress(stress, C, dynamicViscosityPaS) {
+  const mu = Math.max(finiteNumber(dynamicViscosityPaS, 0), 0);
+  if (!(mu > 0)) return stress;
+  const divThird = (C[0] + C[4] + C[8]) / 3;
+  stress[0] += 2 * mu * (C[0] - divThird);
+  stress[4] += 2 * mu * (C[4] - divThird);
+  stress[8] += 2 * mu * (C[8] - divThird);
+  const s01 = mu * (C[1] + C[3]);
+  const s02 = mu * (C[2] + C[6]);
+  const s12 = mu * (C[5] + C[7]);
+  stress[1] += s01; stress[3] += s01;
+  stress[2] += s02; stress[6] += s02;
+  stress[5] += s12; stress[7] += s12;
+  return stress;
 }
 
 function stressTensorForPackedParticle({
@@ -201,7 +221,8 @@ function stressTensorForPackedParticle({
   mlsMpmParticleState,
   stateOffset,
   thermoOffset,
-  mechanicsOffset
+  mechanicsOffset,
+  internalPressureScale = 1
 }) {
   const F = [
     mlsMpmParticleState.mechanics[mechanicsOffset],
@@ -229,9 +250,17 @@ function stressTensorForPackedParticle({
     densityKgPerM3,
     restDensityKgPerM3,
     soundSpeedMPerS: mlsMpmParticleState.mechanics[mechanicsOffset + 25],
-    eosModelId: mlsMpmParticleState.mechanics[mechanicsOffset + 26]
-  });
-  return [-pressurePa, 0, 0, 0, -pressurePa, 0, 0, 0, -pressurePa];
+    eosModelId: mlsMpmParticleState.mechanics[mechanicsOffset + 26],
+    internalPressureScale
+  }) + finiteNumber(internalPressureScale, 1) * Math.max(
+    finiteNumber(mlsMpmParticleState.mechanics[mechanicsOffset + 28], 0),
+    0
+  );
+  return addNewtonianViscousStress(
+    [-pressurePa, 0, 0, 0, -pressurePa, 0, 0, 0, -pressurePa],
+    Array.from(mlsMpmParticleState.mechanics.slice(mechanicsOffset + 9, mechanicsOffset + 18)),
+    mlsMpmParticleState.mechanics[mechanicsOffset + 29]
+  );
 }
 
 function productEventRowsFromResidentProductMass(residentProductMass) {
@@ -281,6 +310,7 @@ function splatProductMassPointToGrid({
   restDensityKgPerM3 = 0,
   soundSpeedMPerS = 0,
   eosModelId = 0,
+  internalPressureScale = 1,
   dtSeconds = 0,
   gridSpec,
   gridNodes,
@@ -292,7 +322,8 @@ function splatProductMassPointToGrid({
       densityKgPerM3: massKg / Math.max(supportVolumeM3, 1e-30),
       restDensityKgPerM3,
       soundSpeedMPerS,
-      eosModelId
+      eosModelId,
+      internalPressureScale
     })
     : 0;
   const diagonalAffine = pressurePa !== 0
@@ -341,7 +372,8 @@ function splatResidentProductMassToGridCpu({
   gridSpec,
   gridNodes,
   activateNode,
-  dtSeconds = 0
+  dtSeconds = 0,
+  internalPressureScale = 1
 }) {
   if (!residentProductMass) {
     return {
@@ -378,6 +410,7 @@ function splatResidentProductMassToGridCpu({
         restDensityKgPerM3: productEventRows[offset + 17],
         soundSpeedMPerS: productEventRows[offset + 27],
         eosModelId: productEventRows[offset + 28],
+        internalPressureScale,
         dtSeconds,
         gridSpec,
         gridNodes,
@@ -413,6 +446,7 @@ function splatResidentProductMassToGridCpu({
         restDensityKgPerM3: finiteNumber(record?.restDensityKgPerM3, 0),
         soundSpeedMPerS: finiteNumber(record?.soundSpeedMPerS, 0),
         eosModelId: finiteNumber(record?.eosModelId, 0),
+        internalPressureScale,
         dtSeconds,
         gridSpec,
         gridNodes,
@@ -437,6 +471,7 @@ function outputEnvelope({
   gridSpec,
   gridNodes,
   dt = 0,
+  internalPressureScale = 1,
   readbackMode = FULL_READBACK_MODE,
   residentProductMass = null,
   residentProductMassProductEventCount = 0,
@@ -465,6 +500,7 @@ function outputEnvelope({
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
     gridNodeStrideBytes: MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     gridNodes,
+    internalPressureScale,
     readbackMode,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
@@ -497,7 +533,8 @@ export function projectMlsMpmP2gGridCpu({
   gridSpacingM = sphParticleState?.smoothingLengthM,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
-  residentProductMass = null
+  residentProductMass = null,
+  internalPressureScale = 1
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const gridSpec = createMlsMpmGridSpec({ boxDimsM, gridSpacingM });
@@ -555,7 +592,8 @@ export function projectMlsMpmP2gGridCpu({
         mlsMpmParticleState,
         stateOffset,
         thermoOffset,
-        mechanicsOffset
+        mechanicsOffset,
+        internalPressureScale
       })
       : null;
     const stressScale = -dtSeconds * volumeM3 * 4 * gridSpec.invGridSpacingM * gridSpec.invGridSpacingM;
@@ -603,7 +641,8 @@ export function projectMlsMpmP2gGridCpu({
     gridSpec,
     gridNodes,
     activateNode,
-    dtSeconds
+    dtSeconds,
+    internalPressureScale
   });
 
   for (const nodeIndex of activeNodeIndices) {
@@ -618,6 +657,7 @@ export function projectMlsMpmP2gGridCpu({
     gridSpec,
     gridNodes,
     dt: dtSeconds,
+    internalPressureScale,
     residentProductMass,
     residentProductMassProductEventCount: productMassContribution.productEventCount,
     residentProductMassCoupledEventCount: productMassContribution.coupledEventCount,
@@ -636,7 +676,7 @@ function writeStorageBuffer(device, label, data) {
   return buffer;
 }
 
-function createProjectionParamsArray(gridSpec, particleCount, dt, productEventCount = 0) {
+function createProjectionParamsArray(gridSpec, particleCount, dt, productEventCount = 0, internalPressureScale = 1) {
   const buffer = new ArrayBuffer(48);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
@@ -649,6 +689,7 @@ function createProjectionParamsArray(gridSpec, particleCount, dt, productEventCo
   view.setFloat32(28, gridSpec.invGridSpacingM, true);
   view.setFloat32(32, finiteNumber(dt, 0), true);
   view.setUint32(36, Math.max(0, Math.round(finiteNumber(productEventCount, 0))), true);
+  view.setFloat32(40, finiteNumber(internalPressureScale, 1), true);
   return buffer;
 }
 
@@ -662,6 +703,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
+  internalPressureScale = 1,
   retainGridBuffer = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -713,11 +755,17 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   let returnedRetainedGridBuffer = false;
 
   try {
-    device.queue.writeBuffer(paramsBuffer, 0, createProjectionParamsArray(gridSpec, sphParticleState.particleCount, dt, productEventCount));
-    const module = device.createShaderModule({ code: mlsMpmP2gGridProjectionWgsl });
-    const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    device.queue.writeBuffer(paramsBuffer, 0, createProjectionParamsArray(
+      gridSpec,
+      sphParticleState.particleCount,
+      dt,
+      productEventCount,
+      internalPressureScale
+    ));
+    const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.v2',
       label: 'ulg-mls-mpm-p2g-grid-projection',
-      module,
+      code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -754,8 +802,6 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       await readBuffer.mapAsync(GPU_MAP_MODE.READ);
       gridNodes = new Float32Array(readBuffer.getMappedRange()).slice(0, gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS);
       readBuffer.unmap();
-    } else if (device.queue?.onSubmittedWorkDone) {
-      await device.queue.onSubmittedWorkDone();
     }
     const projection = outputEnvelope({
       backend: 'webgpu',
@@ -764,6 +810,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       gridSpec,
       gridNodes,
       dt,
+      internalPressureScale,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
       residentProductMass,
       residentProductMassProductEventCount: productEventCount,
@@ -782,13 +829,20 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
     }
     return projection;
   } finally {
-    if (!borrowedStateBuffer) stateBuffer.destroy?.();
-    if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-    if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
-    if (!borrowedProductEventBuffer) productEventBuffer.destroy?.();
-    if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
-    paramsBuffer.destroy?.();
-    readBuffer?.destroy?.();
+    const cleanup = () => {
+      if (!borrowedStateBuffer) stateBuffer.destroy?.();
+      if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
+      if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
+      if (!borrowedProductEventBuffer) productEventBuffer.destroy?.();
+      if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
+      paramsBuffer.destroy?.();
+      readBuffer?.destroy?.();
+    };
+    if (noFullReadback) {
+      deferSubmittedWorkCleanup(device, cleanup);
+    } else {
+      cleanup();
+    }
   }
 }
 
@@ -828,8 +882,22 @@ export function createMlsMpmP2gGridProjectionParityReport({ cpuReference, gpuRes
   }
   const comparisonCount = Math.min(cpuGrid.length, gpuGrid.length);
   let maxGridAbs = 0;
+  let ignoredInactivePositionMaxAbs = 0;
+  let ignoredInactivePositionCount = 0;
   for (let index = 0; index < comparisonCount; index += 1) {
-    maxGridAbs = Math.max(maxGridAbs, Math.abs(cpuGrid[index] - gpuGrid[index]));
+    const field = index % MLS_MPM_GPU_GRID_NODE_FLOATS;
+    const rowOffset = index - field;
+    const inactiveInBoth = (cpuGrid[rowOffset] ?? 0) === 0
+      && (gpuGrid[rowOffset] ?? 0) === 0
+      && (cpuGrid[rowOffset + 7] ?? 0) === 0
+      && (gpuGrid[rowOffset + 7] ?? 0) === 0;
+    const diff = Math.abs(cpuGrid[index] - gpuGrid[index]);
+    if (inactiveInBoth && field >= 4 && field <= 6) {
+      ignoredInactivePositionMaxAbs = Math.max(ignoredInactivePositionMaxAbs, diff);
+      if (diff > tolerance) ignoredInactivePositionCount += 1;
+      continue;
+    }
+    maxGridAbs = Math.max(maxGridAbs, diff);
   }
   const lengthMismatch = cpuGrid.length !== gpuGrid.length;
   const passed = !lengthMismatch && maxGridAbs <= tolerance;
@@ -839,6 +907,8 @@ export function createMlsMpmP2gGridProjectionParityReport({ cpuReference, gpuRes
     tolerance,
     maxGridAbs,
     lengthMismatch,
+    ignoredInactivePositionMaxAbs,
+    ignoredInactivePositionCount,
     gridNodeCount: cpuReference?.gridNodeCount ?? gpuResult?.gridNodeCount ?? 0,
     cpuBackend: cpuReference.backend,
     gpuBackend: gpuResult.backend,
@@ -866,8 +936,10 @@ function executionFromProjection(projection, {
     gridSpacingM: projection?.gridSpacingM ?? 0,
     gridDims: projection?.gridDims ?? [],
     gridNodeCount: projection?.gridNodeCount ?? 0,
+    gridShift: projection?.gridShift ?? 1,
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_NODE_FLOATS,
     gridNodes: projection?.gridNodes ?? new Float32Array(),
+    internalPressureScale: projection?.internalPressureScale ?? 1,
     readbackMode: projection?.readbackMode ?? FULL_READBACK_MODE,
     fullReadbackPerformed: projection?.fullReadbackPerformed ?? true,
     normalHotLoopReadbackFree: projection?.normalHotLoopReadbackFree ?? false,
@@ -912,6 +984,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
   boxDimsM = DEFAULT_BOX_DIMS_M,
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   residentProductMass = null,
+  internalPressureScale = 1,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -932,7 +1005,8 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
         gridSpacingM,
         boxDimsM,
         dt,
-        residentProductMass
+        residentProductMass,
+        internalPressureScale
       });
     }
     return cpuReference;
@@ -996,6 +1070,7 @@ export async function runMlsMpmP2gGridProjectionWithOptionalWebGpu({
       boxDimsM,
       dt,
       residentProductMass,
+      internalPressureScale,
       retainGridBuffer,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });

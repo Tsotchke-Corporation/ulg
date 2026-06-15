@@ -1,5 +1,8 @@
 # Reprioritize Cold-Start Work
 
+Completed routing note: moved from `plan/todo/` to `plan/done/` on
+2026-06-14 after the active priority index absorbed this ordering.
+
 Date: 2026-06-11 AKDT
 
 ## Recommendation

@@ -21,7 +21,7 @@ test('active metal + water is discovered as exothermic, with a derived hydroxide
   assert.equal(rx.stoichiometry.provisionalEnergeticsStatus, 'provisional-heuristic-not-scientifically-validated');
   assert.ok(rx.specificEnthalpyJPerKg < 0, 'must be exothermic');
   assert.equal(rx.activationTemperatureK, 0);
-  assert.equal(rx.activationModel, 'barrier-not-yet-derived-reacts-on-exothermic-contact-with-liquid-water');
+  assert.equal(rx.activationModel, 'barrier-not-yet-derived-alkali-metal-water-reactive-reacts-on-exothermic-contact-with-liquid-water');
   assert.deepEqual(rx.phaseRequirements, { h2o: ['liquid', 'gas'] });
   // Order of magnitude (light-element RHF/STO-3G; sign + scale, not a validated value).
   assert.ok(rx.specificEnthalpyJPerKg < -1e6 && rx.specificEnthalpyJPerKg > -40e6);
@@ -106,7 +106,7 @@ test('strict energetics rejects provisional candidate signs but keeps derived fa
   assert.match(salt.note, /strict energetics rejects provisional/);
 });
 
-test('heavy-element reactions switch to the all-element molecular solver instead of a basis blocker', () => {
+test('heavy-element oxygen reactions switch to the all-element molecular solver while Fe water is blocked', () => {
   const oxide = discoverReactions('fe', 'o2');
   assert.equal(oxide.reactions.length, 1);
   assert.equal(oxide.reactions[0].product, 'feo');
@@ -116,10 +116,8 @@ test('heavy-element reactions switch to the all-element molecular solver instead
   assert.equal(materialDerivationSummary(oxide.productClosures.feo.properties).fullyLowerLevelDerived, true);
 
   const water = discoverReactions('fe', 'h2o');
-  assert.equal(water.reactions.length, 1);
-  assert.equal(water.reactions[0].product, 'feoh2');
-  assert.equal(water.reactions[0].stoichiometry.equation, 'Fe + 2 H2O -> Fe(OH)2 + H2');
-  assert.equal(water.reactions[0].energyModel, 'atomic-kohn-sham-tight-binding-v0');
+  assert.equal(water.reactions.length, 0);
+  assert.match(water.note, /no reaction family or candidate/);
   assert.doesNotMatch(water.note, /basis|Z/);
 });
 

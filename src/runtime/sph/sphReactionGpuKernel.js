@@ -20,7 +20,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import { sphReactionStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { GPU_PHASE_IDS, gpuPhaseId, requestOpticalGpuDevice, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
 import {
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
@@ -329,6 +329,13 @@ function phaseMechanicsRecord(material, properties, phase, options) {
   const soundSpeed = gas
     ? gasSoundSpeedMPerS(properties, phase, options)
     : (restDensity > 0 && bulk > 0 ? Math.sqrt(bulk / restDensity) : 0);
+  const viscosityEnabled = Boolean(options.viscosityEnabled);
+  const dynamicViscosityPaS = viscosityEnabled
+    ? Math.max(finiteNumber(phase?.dynamicViscosityPaS, 0), 0)
+    : 0;
+  const surfaceTensionNPerM = options.surfaceTensionEnabled
+    ? Math.max(finiteNumber(phase?.surfaceTensionNPerM, 0), 0)
+    : 0;
   const eosModelId = gas
     ? MLS_MPM_EOS_MODEL_IDS.gasLinearized
     : (bulk > 0 ? MLS_MPM_EOS_MODEL_IDS.taitCondensed : MLS_MPM_EOS_MODEL_IDS.disabled);
@@ -343,8 +350,8 @@ function phaseMechanicsRecord(material, properties, phase, options) {
     eosModelId,
     phase?.name === 'solid' && shear > 0 ? 1 : 0,
     PRODUCT_PHASE_STATUS.ready,
-    0,
-    0
+    dynamicViscosityPaS,
+    surfaceTensionNPerM
   ];
 }
 
@@ -1679,7 +1686,6 @@ export async function runSphReactionStepWebGpu({
     resetMechanics
   }));
 
-  const module = device.createShaderModule({ label: 'ulg-sph-reaction-step', code: sphReactionStepWgsl });
   const packBindings = [
     computeBufferBinding(1, 'read-only-storage'),
     computeBufferBinding(4, 'read-only-storage'),
@@ -1712,28 +1718,32 @@ export async function runSphReactionStepWebGpu({
     computeBufferBinding(11, 'uniform')
   ];
   const packPipelineInfo = sourceUsesBorrowedGpuBuffers
-    ? createExplicitComputePipeline(device, {
+    ? createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-sph-reaction-step',
       label: 'ulg-sph-reaction-pack-source',
-      module,
+      code: sphReactionStepWgsl,
       entryPoint: 'pack_source',
       bindings: packBindings
     })
     : null;
-  const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createExplicitComputePipeline(device, {
+  const { pipeline: proposePipeline, bindGroupLayout: proposeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-reaction-step',
     label: 'ulg-sph-reaction-propose',
-    module,
+    code: sphReactionStepWgsl,
     entryPoint: 'propose',
     bindings: reactionBindings
   });
-  const { pipeline: resolvePipeline, bindGroupLayout: resolveBindGroupLayout } = createExplicitComputePipeline(device, {
+  const { pipeline: resolvePipeline, bindGroupLayout: resolveBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-reaction-step',
     label: 'ulg-sph-reaction-resolve',
-    module,
+    code: sphReactionStepWgsl,
     entryPoint: 'resolve',
     bindings: reactionResolveBindings
   });
-  const { pipeline: unpackPipeline, bindGroupLayout: unpackBindGroupLayout } = createExplicitComputePipeline(device, {
+  const { pipeline: unpackPipeline, bindGroupLayout: unpackBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-reaction-step',
     label: 'ulg-sph-reaction-unpack',
-    module,
+    code: sphReactionStepWgsl,
     entryPoint: 'unpack',
     bindings: unpackBindings
   });

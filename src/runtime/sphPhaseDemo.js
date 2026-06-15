@@ -49,6 +49,22 @@ const ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA = 'peercompute.ulg.sph-cpu-driver-st
 const H2O_VAPOR_OPTICAL_STATE_MODEL = 'h2o-vapor-condensation-optical-state-v0';
 const H2O_VAPOR_OPTICAL_STATE_GENERATOR = `${WATER_DROPLET_OPTICAL_MICROPHYSICS_MODEL}:sealed-box-gas-summary-v0`;
 const REDUCED_H2O_DROPLET_RADIUS_M = 1e-6;
+const AVOGADRO_R = 8.314462618;
+const TAIT_EXPONENT = 7;
+const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
+  mechanics: true,
+  gravity: true,
+  eos: true,
+  pressure: true,
+  thermal: true,
+  reactions: true,
+  viscosity: true,
+  surfaceTension: false
+});
+
+const PENDING_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
+  surfaceTension: 'surface-tension curvature solver is not implemented yet'
+});
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -69,7 +85,34 @@ function positiveOrNull(value) {
   return Number.isFinite(number) && number > 0 ? number : null;
 }
 
-function fillCube({ material, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
+function lawGroupEnabled(value, fallback = true) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  return !/^(0|false|off|no)$/i.test(String(value).trim());
+}
+
+export function normalizeSphPhysicalLawGroups(groups = null) {
+  return Object.fromEntries(
+    Object.entries(DEFAULT_SPH_PHYSICAL_LAW_GROUPS).map(([key, fallback]) => [
+      key,
+      lawGroupEnabled(groups?.[key], fallback)
+    ])
+  );
+}
+
+export function pendingSphPhysicalLawGroups(groups = null) {
+  const normalized = normalizeSphPhysicalLawGroups(groups);
+  return Object.entries(PENDING_SPH_PHYSICAL_LAW_GROUPS)
+    .filter(([key]) => normalized[key])
+    .map(([key, reason]) => ({
+      key,
+      status: 'pending-unimplemented-physical-law-group',
+      reason
+    }));
+}
+
+function fillCube({ material, role = null, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
   const particles = [];
   // particlesPerEdge sets the resolution directly (N -> N^3 particles); else derive from spacing.
   const n = Math.max(1, particlesPerEdge != null ? Math.round(particlesPerEdge) : Math.round(size / spacing));
@@ -82,6 +125,7 @@ function fillCube({ material, min, size, spacing, particlesPerEdge, temperatureK
       for (let k = 0; k < n; k += 1) {
         particles.push({
           material,
+          role,
           x: [min[0] + (i + 0.5) * step, min[1] + (j + 0.5) * step, min[2] + (k + 0.5) * step],
           v: [0, 0, 0],
           massKg,
@@ -115,6 +159,124 @@ function densityAtTemperatureKgPerM3(props, temperatureK) {
   const phase = equilibriumFromSpecificEnergy(props, u).stablePhase;
   const ph = props.phases.find((p) => p.name === phase) || props.phases[0];
   return ph.densityKgPerM3;
+}
+
+function phasePropertiesFromParticle(properties, particle) {
+  if (!properties?.phases?.length) return null;
+  const phase = stablePhaseFromSpecificEnergy(properties, particle.specificInternalEnergyJPerKg);
+  return properties.phases.find((candidate) => candidate.name === phase) || properties.phases[0];
+}
+
+function representativePhaseTemperatureK(phase) {
+  if (Number.isFinite(phase?.temperatureK)) return phase.temperatureK;
+  if (Array.isArray(phase?.temperatureRange) && phase.temperatureRange.length >= 2) {
+    const lo = Number(phase.temperatureRange[0]);
+    const hi = Number(phase.temperatureRange[1]);
+    if (Number.isFinite(lo) && Number.isFinite(hi)) return (lo + hi) / 2;
+    if (Number.isFinite(lo)) return lo;
+    if (Number.isFinite(hi)) return hi;
+  }
+  return 293.15;
+}
+
+function realPhaseSoundSpeedMPerS(properties, phase) {
+  const phaseName = String(phase?.name || '').toLowerCase();
+  if (phaseName === 'gas') {
+    const molarMassKgPerMol = Number(properties?.molarMassKgPerMol);
+    if (!(molarMassKgPerMol > 0)) return 0;
+    const specificGasConstant = AVOGADRO_R / molarMassKgPerMol;
+    const cp = Number(phase?.cpJPerKgK);
+    const gamma = Number.isFinite(cp) && cp > specificGasConstant
+      ? cp / (cp - specificGasConstant)
+      : 1.33;
+    return Math.sqrt(Math.max(gamma * specificGasConstant * representativePhaseTemperatureK(phase), 0));
+  }
+  const bulk = Number(phase?.bulkModulusPa);
+  const density = Number(phase?.densityKgPerM3);
+  return bulk > 0 && density > 0 ? Math.sqrt(bulk / density) : 0;
+}
+
+function isotropicMpmFForJ(volumeRatioJ) {
+  const s = Math.cbrt(Math.max(Number(volumeRatioJ) || 1, 1e-12));
+  return new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]);
+}
+
+function initializeSupportedHydrostaticMpmState(demo, {
+  gravityMPerS2 = [0, -9.80665, 0],
+  modulusScale = 1,
+  enabled = true
+} = {}) {
+  if (!enabled || !demo?.state?.particles?.length) {
+    return { status: 'hydrostatic-initialization-disabled', initializedParticleCount: 0 };
+  }
+  const gY = Number(gravityMPerS2?.[1]);
+  const gravityMagnitude = Number.isFinite(gY) ? Math.max(0, -gY) : 0;
+  if (!(gravityMagnitude > 0)) {
+    return { status: 'hydrostatic-initialization-zero-gravity', initializedParticleCount: 0 };
+  }
+  const groups = new Map();
+  for (const particle of demo.state.particles) {
+    const role = particle.role || 'unassigned';
+    if (!groups.has(role)) groups.set(role, []);
+    groups.get(role).push(particle);
+  }
+
+  let initializedParticleCount = 0;
+  const initializedRoles = [];
+  for (const [role, particles] of groups.entries()) {
+    let lowerSurfaceY = Number.POSITIVE_INFINITY;
+    let upperSurfaceY = Number.NEGATIVE_INFINITY;
+    const particleRecords = [];
+    for (const particle of particles) {
+      const properties = demo.materialProperties[particle.material];
+      const phase = phasePropertiesFromParticle(properties, particle);
+      if (!phase || phase.name === 'gas') continue;
+      const restDensity = Number(phase.densityKgPerM3 ?? particle.restDensityKgPerM3);
+      const bulkRaw = Number(phase.bulkModulusPa);
+      const massKg = Number(particle.massKg);
+      if (!(restDensity > 0) || !(bulkRaw > 0) || !(massKg > 0)) continue;
+      const restVolumeM3 = massKg / restDensity;
+      const halfCellM = 0.5 * Math.cbrt(restVolumeM3);
+      lowerSurfaceY = Math.min(lowerSurfaceY, particle.x[1] - halfCellM);
+      upperSurfaceY = Math.max(upperSurfaceY, particle.x[1] + halfCellM);
+      particleRecords.push({ particle, restDensity, restVolumeM3, halfCellM, hydrostaticBulkModulusPa: bulkRaw });
+    }
+    if (!particleRecords.length || !(lowerSurfaceY <= 1e-6)) continue;
+    for (const record of particleRecords) {
+      const { particle, restDensity, restVolumeM3, hydrostaticBulkModulusPa } = record;
+      if (!(hydrostaticBulkModulusPa > 0)) continue;
+      const depthM = Math.max(0, upperSurfaceY - particle.x[1]);
+      const pressurePa = restDensity * gravityMagnitude * depthM;
+      const volumeRatioJ = (pressurePa > 0)
+        ? (1 + TAIT_EXPONENT * pressurePa / hydrostaticBulkModulusPa) ** (-1 / TAIT_EXPONENT)
+        : 1;
+      particle.mpmVolume0 = restVolumeM3;
+      particle.mpmJ = volumeRatioJ;
+      particle.mpmF = isotropicMpmFForJ(volumeRatioJ);
+      particle.mpmC = new Float64Array(9);
+      particle.hydrostaticPressurePa = pressurePa;
+      particle.hydrostaticInitialization = {
+        schema: 'peercompute.ulg.sph-initial-hydrostatic-state.v0',
+        status: 'initialized-supported-condensed-block',
+        role,
+        depthM,
+        pressurePa,
+        volumeRatioJ,
+        volumeRatioModel: 'raw-closure-bulk-modulus'
+      };
+      initializedParticleCount += 1;
+    }
+    initializedRoles.push(role);
+  }
+
+  return {
+    schema: 'peercompute.ulg.sph-initial-hydrostatic-summary.v0',
+    status: initializedParticleCount > 0
+      ? 'hydrostatic-initialization-applied'
+      : 'hydrostatic-initialization-no-supported-condensed-blocks',
+    initializedParticleCount,
+    initializedRoles
+  };
 }
 
 function resolveSingleMaterialClosure(key, { allowFixtureMaterialProperties = false } = {}) {
@@ -211,6 +373,7 @@ export function buildSphPhaseDemoState({
 
   const dropParticles = fillCube({
     material: dropMaterial,
+    role: 'drop',
     min: [cx - ironEdge / 2, ironBase, cz - ironEdge / 2],
     size: ironEdge,
     particlesPerEdge: dropParticleEdge,
@@ -220,6 +383,7 @@ export function buildSphPhaseDemoState({
   });
   const baseParticles = fillCube({
     material: baseMaterial,
+    role: 'base',
     min: [cx - iceEdge / 2, iceBase, cz - iceEdge / 2],
     size: iceEdge,
     particlesPerEdge: baseParticleEdge,
@@ -234,6 +398,7 @@ export function buildSphPhaseDemoState({
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
     p.material = all[index].material;
+    p.role = all[index].role;
     p.temperatureK = all[index].temperatureK;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
   });
@@ -1283,6 +1448,85 @@ function materialEntities(material, massKg, properties, macroParticleCount) {
   };
 }
 
+function particleSupportRadiusM(particle) {
+  const massKg = Number(particle.massKg);
+  const restDensityKgPerM3 = Number(particle.restDensityKgPerM3);
+  if (!(massKg > 0) || !(restDensityKgPerM3 > 0)) return 0;
+  return 0.5 * Math.cbrt(massKg / restDensityKgPerM3);
+}
+
+function initialBlockGeometrySummary(demo) {
+  const roles = {};
+  for (const particle of demo.state.particles) {
+    const role = particle.role || 'unassigned';
+    const radius = particleSupportRadiusM(particle);
+    const entry = roles[role] || {
+      role,
+      material: particle.material,
+      count: 0,
+      centerBoundsM: {
+        min: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+        max: [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY]
+      },
+      supportBoundsM: {
+        min: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+        max: [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY]
+      }
+    };
+    entry.count += 1;
+    entry.material = entry.material || particle.material;
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = Number(particle.x?.[axis]);
+      if (!Number.isFinite(value)) continue;
+      entry.centerBoundsM.min[axis] = Math.min(entry.centerBoundsM.min[axis], value);
+      entry.centerBoundsM.max[axis] = Math.max(entry.centerBoundsM.max[axis], value);
+      entry.supportBoundsM.min[axis] = Math.min(entry.supportBoundsM.min[axis], value - radius);
+      entry.supportBoundsM.max[axis] = Math.max(entry.supportBoundsM.max[axis], value + radius);
+    }
+    roles[role] = entry;
+  }
+
+  const roleList = Object.values(roles);
+  const pairs = [];
+  const blockers = [];
+  for (let i = 0; i < roleList.length; i += 1) {
+    for (let j = i + 1; j < roleList.length; j += 1) {
+      const a = roleList[i];
+      const b = roleList[j];
+      const supportA = a.supportBoundsM;
+      const supportB = b.supportBoundsM;
+      const xzOverlap = [0, 2].every((axis) => (
+        Math.min(supportA.max[axis], supportB.max[axis]) - Math.max(supportA.min[axis], supportB.min[axis])
+      ) > 0);
+      const yOverlapM = Math.max(0, Math.min(supportA.max[1], supportB.max[1]) - Math.max(supportA.min[1], supportB.min[1]));
+      const yGapM = yOverlapM > 0
+        ? -yOverlapM
+        : Math.max(0, Math.max(supportA.min[1], supportB.min[1]) - Math.min(supportA.max[1], supportB.max[1]));
+      const pair = {
+        roles: [a.role, b.role],
+        materials: [a.material, b.material],
+        xzOverlap,
+        supportGapYM: yGapM,
+        supportOverlapYM: yOverlapM,
+        centerGapYM: Math.max(0, Math.max(a.centerBoundsM.min[1], b.centerBoundsM.min[1]) - Math.min(a.centerBoundsM.max[1], b.centerBoundsM.max[1])),
+        status: xzOverlap && yOverlapM > 1e-9
+          ? 'initial-blocks-overlap'
+          : (xzOverlap && yGapM <= 1e-9 ? 'initial-blocks-touching' : 'initial-blocks-separated')
+      };
+      if (pair.status === 'initial-blocks-overlap') blockers.push('initial-block-geometry-overlap');
+      pairs.push(pair);
+    }
+  }
+
+  return {
+    schema: 'peercompute.ulg.initial-block-geometry-summary.v0',
+    status: blockers.length > 0 ? 'blocked-initial-block-geometry-overlap' : 'initial-block-geometry-ok',
+    roles,
+    pairs,
+    blockers: [...new Set(blockers)]
+  };
+}
+
 function solveClosureEquilibriumK(parts) {
   const total = (t) => parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, t), 0);
   const target = parts.reduce((sum, p) => sum + p.massKg * specificInternalEnergyJPerKg(p.properties, p.initialTemperatureK), 0);
@@ -1335,7 +1579,10 @@ function computeDerivedDemoPreflight(demo) {
   const heatExportedToWallsJ = adiabatic ? 0 : initialEnergyJ - finalEnergyJ;
   const finalBasePhase = equilibriumFromSpecificEnergy(baseProps, specificInternalEnergyJPerKg(baseProps, bindingInteriorTempK)).stablePhase;
   const finalDropPhase = equilibriumFromSpecificEnergy(dropProps, specificInternalEnergyJPerKg(dropProps, bindingInteriorTempK)).stablePhase;
-  const feasible = finalBasePhase === 'solid' && finalDropPhase === 'solid';
+  const thermodynamicFeasible = Boolean(finalBasePhase && finalDropPhase);
+  const initialGeometry = initialBlockGeometrySummary(demo);
+  const geometryBlocked = initialGeometry.blockers.length > 0;
+  const feasible = thermodynamicFeasible && !geometryBlocked;
   const sinkFaceCount = heatExportedToWallsJ > 0 ? wallTemps.length : 0;
   const wallLedger = Object.entries(scenario.walls.faces).map(([faceId, temperatureK]) => ({
     faceId,
@@ -1366,7 +1613,9 @@ function computeDerivedDemoPreflight(demo) {
   };
   return {
     scenarioId: scenario.scenarioId,
-    status: feasible ? 'preflight-feasible-derived-closures' : 'preflight-infeasible-derived-closures',
+    status: geometryBlocked
+      ? 'preflight-blocked-initial-geometry'
+      : (thermodynamicFeasible ? 'preflight-feasible-derived-closures' : 'preflight-infeasible-derived-closures'),
     materials: {
       drop: demo.dropMaterial,
       base: demo.baseMaterial,
@@ -1394,16 +1643,21 @@ function computeDerivedDemoPreflight(demo) {
       asymptoticInteriorTempK,
       adiabaticEquilibriumK
     },
+    initialGeometry,
     feasibility: {
       feasible,
+      thermodynamicFeasible,
+      geometryBlocked,
       bindingInteriorTempK,
       finalH2oPhase: demo.baseMaterial === 'h2o' ? finalBasePhase : null,
       finalFePhase: demo.dropMaterial === 'fe' ? finalDropPhase : null,
       finalBasePhase,
       finalDropPhase,
       reason: feasible
-        ? 'closure-derived wall equilibrium leaves both demo materials in their solid phase'
-        : 'closure-derived wall equilibrium does not leave both demo materials solid'
+        ? `closure-derived wall equilibrium resolves stable phases: base=${finalBasePhase}, drop=${finalDropPhase}`
+        : (geometryBlocked
+            ? 'initial block support extents overlap; lower or raise a block before interpreting contact physics'
+            : 'closure-derived wall equilibrium did not resolve stable phases for both demo materials')
     },
     particleResolution: {
       h2o: particleResolution.h2o || particleResolution[demo.baseMaterial],
@@ -1418,7 +1672,7 @@ function computeDerivedDemoPreflight(demo) {
     eosValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
-    blockers: ['derived-material-models-unvalidated']
+    blockers: [...new Set(['derived-material-models-unvalidated', ...initialGeometry.blockers])]
   };
 }
 
@@ -1430,6 +1684,12 @@ export function createSphPhaseDemo(options = {}) {
   if (!demo.allowFixtureMaterialProperties) {
     requireFirstPrinciplesMaterialMap(demo.materialProperties, { context: 'createSphPhaseDemo.initial-materials' });
   }
+  const physicalLawGroups = normalizeSphPhysicalLawGroups(options.physicalLawGroups);
+  const pendingPhysicalLawGroups = pendingSphPhysicalLawGroups(physicalLawGroups);
+  demo.physicalLawGroups = physicalLawGroups;
+  demo.pendingPhysicalLawGroups = pendingPhysicalLawGroups;
+  demo.state.physicalLawGroups = physicalLawGroups;
+  demo.state.pendingPhysicalLawGroups = pendingPhysicalLawGroups;
   // Per-face cumulative heat ledger (J exchanged with each fixed-temperature wall reservoir).
   demo.wallHeatLedgerJ = { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 };
   const gasDensity = demo.materialProperties.h2o.phases.find((p) => p.name === 'gas').densityKgPerM3;
@@ -1459,18 +1719,42 @@ export function createSphPhaseDemo(options = {}) {
   // stiffer, less weakly-compressible (more accurate) material, converging to the real moduli as
   // dt → 0 (soundSpeedScale → 1). One global factor → relative stiffnesses (iron > ice > water) stay
   // physical; only the absolute compressibility is the (dt-controlled) approximation.
-  const realSoundSpeed = (ph) => (ph.bulkModulusPa && ph.densityKgPerM3 ? Math.sqrt(ph.bulkModulusPa / ph.densityKgPerM3) : 0);
   let maxRealSoundSpeed = 0;
   for (const props of Object.values(demo.materialProperties)) {
-    for (const ph of props.phases || []) maxRealSoundSpeed = Math.max(maxRealSoundSpeed, realSoundSpeed(ph));
+    for (const ph of props.phases || []) {
+      maxRealSoundSpeed = Math.max(maxRealSoundSpeed, realPhaseSoundSpeedMPerS(props, ph));
+    }
   }
   const cflSafety = options.cflSafety ?? 0.4;
   const gridCflFactor = options.gridCflFactor ?? 0.6;
-  const gravityMPerS2 = options.gravity ?? [0, -9.80665, 0];
+  const mlsMpmArtificialViscosityAlpha = options.mlsMpmArtificialViscosityAlpha ?? 0.04;
+  const mlsMpmLiquidVelocityDiffusionAlpha = options.mlsMpmLiquidVelocityDiffusionAlpha ?? 0;
+  const mlsMpmLiquidVelocityDiffusionRadiusM = options.mlsMpmLiquidVelocityDiffusionRadiusM ?? (2 * gridSpacingM);
+  const mlsMpmLiquidWallDampingAlpha = options.mlsMpmLiquidWallDampingAlpha ?? 0.2;
+  const mlsMpmLiquidWallDampingDistanceM = options.mlsMpmLiquidWallDampingDistanceM ?? (1.5 * gridSpacingM);
+  const requestedGravityMPerS2 = options.gravity ?? [0, -9.80665, 0];
+  const gravityMPerS2 = physicalLawGroups.gravity ? requestedGravityMPerS2 : [0, 0, 0];
   const cflMaxSoundSpeedMPerS = (cflSafety * mechLengthM) / carrierDt;
   const soundSpeedScale = Math.min(1, maxRealSoundSpeed > 0 ? cflMaxSoundSpeedMPerS / maxRealSoundSpeed : 1);
   const modulusScale = soundSpeedScale * soundSpeedScale; // moduli scale as c^2
-  const minGasSoundSpeedMPerS = options.minGasSoundSpeedMPerS ?? 40;
+  const requestedMinGasSoundSpeedMPerS = options.minGasSoundSpeedMPerS ?? 40;
+  const minGasSoundSpeedMPerS = Math.min(
+    Math.max(Number(requestedMinGasSoundSpeedMPerS) || 0, 0),
+    cflMaxSoundSpeedMPerS
+  );
+  const hydrostaticInitializationEnabled = options.hydrostaticInitialization !== false
+    && physicalLawGroups.mechanics
+    && physicalLawGroups.gravity
+    && physicalLawGroups.eos;
+  const sphCavitationPressureFloorPa = mechanics === 'sph'
+    ? (options.sphCavitationPressureFloorPa ?? 0)
+    : null;
+  const sphDensityProjectionIterations = mechanics === 'sph'
+    ? Math.max(0, Math.round(Number(options.sphDensityProjectionIterations ?? 3) || 0))
+    : 0;
+  const sphDensityProjectionRelaxation = mechanics === 'sph'
+    ? Math.min(Math.max(Number(options.sphDensityProjectionRelaxation ?? 0.5) || 0, 0), 1)
+    : 0;
   const gpuMechanics = {
     integrator: mechanics,
     gridSpacingM,
@@ -1479,13 +1763,42 @@ export function createSphPhaseDemo(options = {}) {
     soundSpeedScale,
     modulusScale,
     minGasSoundSpeedMPerS,
+    requestedMinGasSoundSpeedMPerS,
+    maxRealSoundSpeedMPerS: maxRealSoundSpeed,
+    cflMaxSoundSpeedMPerS,
     cflSafety,
     gridCflFactor,
-    gravityMPerS2
+    mlsMpmArtificialViscosityAlpha,
+    mlsMpmLiquidVelocityDiffusionAlpha,
+    mlsMpmLiquidVelocityDiffusionRadiusM,
+    mlsMpmLiquidWallDampingAlpha,
+    mlsMpmLiquidWallDampingDistanceM,
+    gravityMPerS2,
+    hydrostaticInitialization: hydrostaticInitializationEnabled,
+    sphCavitationPressureFloorPa,
+    sphDensityProjectionIterations,
+    sphDensityProjectionRelaxation,
+    physicalLawGroups,
+    pendingPhysicalLawGroups
   };
   demo.gpuMechanics = gpuMechanics;
   demo.state.gpuMechanics = gpuMechanics;
-  const eos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS });
+  const phaseAwareEos = createPhaseAwareEos(demo.materialProperties, { soundSpeedScale, minGasSoundSpeedMPerS });
+  const eos = (args) => {
+    const result = phaseAwareEos(args);
+    if (physicalLawGroups.eos) return result;
+    return {
+      ...result,
+      pressurePa: 0,
+      soundSpeedMPerS: 0,
+      disabledByPhysicalLawGroup: 'eos'
+    };
+  };
+  demo.initialHydrostaticState = initializeSupportedHydrostaticMpmState(demo, {
+    gravityMPerS2,
+    modulusScale,
+    enabled: hydrostaticInitializationEnabled
+  });
 
   let carrier;
   if (mechanics === 'mlsmpm') {
@@ -1498,10 +1811,25 @@ export function createSphPhaseDemo(options = {}) {
       const props = demo.materialProperties[p.material];
       const phase = stablePhaseFromSpecificEnergy(props, p.specificInternalEnergyJPerKg);
       const ph = props.phases.find((q) => q.name === phase);
-      if (phase !== 'solid' || !ph || !(ph.shearModulusPa > 0)) return { solid: false };
+      const condensed = phase !== 'gas';
+      const restDensity = Number(ph?.densityKgPerM3) || Number(p.restDensityKgPerM3) || 0;
+      const effectiveBulkModulusPa = Math.max((Number(ph?.bulkModulusPa) || 0) * modulusScale, 0);
+      const soundSpeedMPerS = restDensity > 0 && effectiveBulkModulusPa > 0
+        ? Math.sqrt(effectiveBulkModulusPa / restDensity)
+        : 0;
+      const closureViscosityPaS = Math.max(Number(ph?.dynamicViscosityPaS) || 0, 0);
+      const artificialViscosityPaS = physicalLawGroups.viscosity && phase === 'liquid'
+        ? Math.max(restDensity * soundSpeedMPerS * gridSpacingM * mlsMpmArtificialViscosityAlpha, 0)
+        : 0;
+      const dynamicViscosityPaS = physicalLawGroups.viscosity
+        ? closureViscosityPaS + artificialViscosityPaS
+        : 0;
+      if (phase !== 'solid' || !ph || !(ph.shearModulusPa > 0)) {
+        return { solid: false, condensed, dynamicViscosityPaS };
+      }
       const mu = ph.shearModulusPa * modulusScale;
       const lambda = Math.max((ph.bulkModulusPa - (2 / 3) * ph.shearModulusPa) * modulusScale, 0);
-      return { solid: true, shearModulusPa: mu, lambdaPa: lambda };
+      return { solid: true, condensed, shearModulusPa: mu, lambdaPa: lambda, dynamicViscosityPaS: 0 };
     };
     carrier = createMlsMpmCarrier({
       gridSpacingM,
@@ -1512,9 +1840,30 @@ export function createSphPhaseDemo(options = {}) {
       eos,
       restDensityOf: (p) => p.restDensityKgPerM3 || demo.materialProperties[p.material].phases[0].densityKgPerM3,
       constitutiveOf,
+      trackFluidVolume: physicalLawGroups.eos,
+      liquidVelocityDiffusionAlpha: physicalLawGroups.viscosity ? mlsMpmLiquidVelocityDiffusionAlpha : 0,
+      liquidVelocityDiffusionRadiusM: mlsMpmLiquidVelocityDiffusionRadiusM,
+      liquidWallDampingAlpha: physicalLawGroups.viscosity ? mlsMpmLiquidWallDampingAlpha : 0,
+      liquidWallDampingDistanceM: mlsMpmLiquidWallDampingDistanceM,
       cflFactor: gridCflFactor
     });
   } else {
+    const sphReferenceEos = (args) => {
+      const result = eos(args);
+      const particle = args?.particle;
+      const props = demo.materialProperties[particle?.material];
+      const phase = props && particle
+        ? stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg)
+        : null;
+      if (phase && phase !== 'gas' && Number.isFinite(sphCavitationPressureFloorPa)) {
+        return {
+          ...result,
+          pressurePa: Math.max(result.pressurePa, sphCavitationPressureFloorPa),
+          cavitationPressureFloorPa: sphCavitationPressureFloorPa
+        };
+      }
+      return result;
+    };
     carrier = createSphPhaseCarrier({
       dimension: 3,
       gamma: options.gamma ?? 1.4,
@@ -1522,7 +1871,19 @@ export function createSphPhaseDemo(options = {}) {
       alpha: options.alpha ?? 1.0,
       beta: options.beta ?? 2.0,
       dt: carrierDt,
-      eos
+      eos: sphReferenceEos,
+      boxDimsM: demo.box.dimensionsM,
+      densityProjectionIterations: sphDensityProjectionIterations,
+      densityProjectionRelaxation: sphDensityProjectionRelaxation,
+      densityProjectionEpsilon: options.sphDensityProjectionEpsilon ?? 1e-5,
+      solidPredicate: (particle) => {
+        const props = demo.materialProperties[particle?.material];
+        return Boolean(
+          props
+            && particle
+            && stablePhaseFromSpecificEnergy(props, particle.specificInternalEnergyJPerKg) === 'solid'
+        );
+      }
     });
   }
   const dtStepS = mechanicalSubsteps * carrierDt; // sim-time advanced per driver.step
@@ -1542,7 +1903,7 @@ export function createSphPhaseDemo(options = {}) {
     allowFixtureMaterialProperties: demo.allowFixtureMaterialProperties,
     allowReducedProductProperties: demo.allowFixtureMaterialProperties
   });
-  const reactions = discovery.reactions;
+  const discoveredReactions = discovery.reactions;
   for (const [key, closure] of Object.entries(discovery.productClosures)) {
     if (!demo.allowFixtureMaterialProperties) {
       requireFirstPrinciplesMaterialProperties(closure.properties, {
@@ -1565,6 +1926,7 @@ export function createSphPhaseDemo(options = {}) {
     p,
     p.specificInternalEnergyJPerKg
   ).temperatureK;
+  const reactions = physicalLawGroups.reactions ? discoveredReactions : [];
   demo.reactions = reactions;
   demo.reactionContactRadiusM = reactionContactRadiusM;
 
@@ -1589,29 +1951,38 @@ export function createSphPhaseDemo(options = {}) {
       let mechanicsActiveGridNodeSteps = 0;
       let mechanicsActiveGridNodesSum = 0;
       let mechanicsActiveGridNodesMax = 0;
-      for (let s = 0; s < mechanicalSubsteps; s += 1) {
-        const result = carrier.step(demo.state);
-        demo.state = result.state;
-        demo.state.gpuMechanics = gpuMechanics;
-        if (Number.isFinite(result.activeGridNodes)) {
-          mechanicsActiveGridNodeSteps += 1;
-          mechanicsActiveGridNodesSum += result.activeGridNodes;
-          mechanicsActiveGridNodesMax = Math.max(mechanicsActiveGridNodesMax, result.activeGridNodes);
+      if (physicalLawGroups.mechanics) {
+        for (let s = 0; s < mechanicalSubsteps; s += 1) {
+          const result = carrier.step(demo.state);
+          demo.state = result.state;
+          demo.state.gpuMechanics = gpuMechanics;
+          demo.state.physicalLawGroups = physicalLawGroups;
+          demo.state.pendingPhysicalLawGroups = pendingPhysicalLawGroups;
+          if (Number.isFinite(result.activeGridNodes)) {
+            mechanicsActiveGridNodeSteps += 1;
+            mechanicsActiveGridNodesSum += result.activeGridNodes;
+            mechanicsActiveGridNodesMax = Math.max(mechanicsActiveGridNodesMax, result.activeGridNodes);
+          }
         }
       }
       stageMs.mechanics = Math.max(0, nowMs() - stageStartMs);
 
       // P5: evolve energy by conduction + six-wall heat flux over the SAME sim-time as the mechanics.
       stageStartMs = nowMs();
-      const { wallHeatJ, thermal } = thermalStep(demo.state, {
-        materialProperties: demo.materialProperties,
-        wallTemperaturesK: demo.scenario.walls.faces,
-        boxEdgeM: demo.box.edgeM,
-        boxDimsM: demo.box.dimensionsM,
-        dtS: dtStepS,
-        conductionRate: options.conductionRate,
-        wallRate: options.wallRate
-      });
+      const { wallHeatJ, thermal } = physicalLawGroups.thermal
+        ? thermalStep(demo.state, {
+            materialProperties: demo.materialProperties,
+            wallTemperaturesK: demo.scenario.walls.faces,
+            boxEdgeM: demo.box.edgeM,
+            boxDimsM: demo.box.dimensionsM,
+            dtS: dtStepS,
+            conductionRate: options.conductionRate,
+            wallRate: options.wallRate
+          })
+        : {
+            wallHeatJ: { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 },
+            thermal: particleThermalState(demo)
+          };
       stageMs.thermal = Math.max(0, nowMs() - stageStartMs);
       stageStartMs = nowMs();
       for (const face of Object.keys(demo.wallHeatLedgerJ)) demo.wallHeatLedgerJ[face] += wallHeatJ[face];
@@ -1621,16 +1992,18 @@ export function createSphPhaseDemo(options = {}) {
       // phases the thermal step already computed), over the same sim-time.
       stageStartMs = nowMs();
       const steamBuoyancy = Math.min(buoyancyCap, buoyancyAccelerationMPerS2(gasDensity, liquidDensity));
-      demo.state.particles.forEach((p, i) => {
-        if (p.material === 'h2o' && thermal[i].phase === 'gas') p.v[1] += steamBuoyancy * dtStepS;
-      });
+      if (physicalLawGroups.thermal && physicalLawGroups.gravity) {
+        demo.state.particles.forEach((p, i) => {
+          if (p.material === 'h2o' && thermal[i].phase === 'gas') p.v[1] += steamBuoyancy * dtStepS;
+        });
+      }
       stageMs.buoyancy = Math.max(0, nowMs() - stageStartMs);
 
       // Reactive chemistry: reactant particles in contact above the activation temperature react,
       // becoming product and releasing the derived reaction enthalpy as heat.
       let reactionEvents = 0;
       stageStartMs = nowMs();
-      if (reactions.length) {
+      if (physicalLawGroups.reactions && reactions.length) {
         reactionEvents = reactiveStep(demo.state, { reactions, materialProperties: demo.materialProperties, contactRadiusM: reactionContactRadiusM, temperatureOf: reactionTemperatureOf });
       }
       stageMs.reaction = Math.max(0, nowMs() - stageStartMs);
@@ -1653,6 +2026,8 @@ export function createSphPhaseDemo(options = {}) {
       }
       stageMs.wallClamp = Math.max(0, nowMs() - stageStartMs);
       demo.state.gpuMechanics = gpuMechanics;
+      demo.state.physicalLawGroups = physicalLawGroups;
+      demo.state.pendingPhysicalLawGroups = pendingPhysicalLawGroups;
       demo.lastStepTiming = {
         schema: ULG_SPH_CPU_DRIVER_STEP_TIMING_SCHEMA,
         totalMs: Math.max(0, nowMs() - startedAtMs),
@@ -1669,6 +2044,9 @@ export function createSphPhaseDemo(options = {}) {
         dtStepS,
         reactionCount: reactions.length,
         reactionEvents,
+        physicalLawGroups,
+        pendingPhysicalLawGroups,
+        unsupportedPhysicalLawGroups: pendingPhysicalLawGroups,
         backend: 'cpu-reference',
         scientificValidation: false,
         sphValidation: false,

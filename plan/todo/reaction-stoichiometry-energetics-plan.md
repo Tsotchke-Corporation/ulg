@@ -304,6 +304,21 @@ Reaction discovery should produce a `reactionClosure` object:
 Runtime chemistry should consume that same closure without reducing it to a
 single product.
 
+## Sedenion Reaction Scoping
+
+Current answer: ULG is not yet using the sedenion periodic-table reference in
+runtime reaction discovery. This plan now treats it as an explicit symbolic
+prefilter through `plan/todo/sedenion-reaction-scoping-plan.md`.
+
+Reference:
+
+- `/home/cos/projects/peercompute/plan/refs/sedenion periodic table.pdf`
+
+Use it only to scope and prioritize candidate reaction channels. Do not use it
+as final stoichiometry, energetics, kinetics, product topology, or scientific
+validation. Every scoped candidate still needs balancing, first-principles
+closure derivation, cache/provenance records, and strict validation gates.
+
 ## Implementation Plan
 
 ### 1. Balanced Reaction ABI

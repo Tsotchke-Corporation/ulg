@@ -46,6 +46,11 @@ test('Li, Na, and Cs water reactions are discovered by the same hydroxide family
   assert.deepEqual([...familyIds], ['active-metal-water-hydroxide']);
 });
 
+test('iron is not scoped as a zero-barrier active-metal water candidate', () => {
+  const result = discoverReactionCandidates('Fe', 'H2O');
+  assert.equal(result.candidates.filter((candidate) => candidate.familyId === 'active-metal-water-hydroxide').length, 0);
+});
+
 test('Na + Cl and Na + Cl2 are parsed and balanced as the same binary ionic family', () => {
   const atomChlorine = onlyCandidate(discoverReactionCandidates('Na', 'Cl'), 'binary-ionic-synthesis');
   assert.equal(atomChlorine.productFormula, 'NaCl');

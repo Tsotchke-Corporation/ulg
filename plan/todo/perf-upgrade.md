@@ -37,6 +37,28 @@ simulation. Readback should be limited to diagnostics such as pressure,
 conservation residuals, phase mass totals, wall heat ledgers, closure status,
 and readiness blockers.
 
+Architecture correction, 2026-06-12 AKDT:
+
+- The GPU-resident hot loop should be packaged as ComputeManager-compatible law
+  workers, not as a demo-local scheduler.
+- NodeKernel/ComputeManager/StateManager remain the long-term authority path for
+  distributed law execution and accepted state mutation.
+- Every hot-loop stage must declare read families, authoritative write families,
+  borrowed buffers, lease/lifetime requirements, cache behavior, and validation
+  gates.
+- WebGPU workers can own hot buffers while leased, but accepted state must move
+  as compact deltas, retained-buffer refs, or closure artifacts through the
+  PeerCompute admission path.
+- Rendering may consume resident physics outputs, but pressure/interface,
+  gas/product, phase, wall-heat, and closure updates must not depend on render
+  cadence.
+- Avoid a broad sibling `GPUComputeManager` for now. Add a focused
+  ComputeManager-owned GPU resident lane layer so one hot state key can keep its
+  pass DAG and buffers on the same device.
+- Keep heavy Eshkol and MoonLab service hosts warm when scenario latency needs
+  them. Their warm state is service readiness/cache state, not direct state
+  mutation authority.
+
 ## Current Gap
 
 The current implementation is not yet this architecture:
@@ -48,6 +70,9 @@ The current implementation is not yet this architecture:
   handling are mostly JavaScript/CPU control-plane code.
 - Simulation layers are not yet persistent WebGPU systems passing buffers
   directly between SPH, EOS, phase, gas, wall, and renderer kernels.
+- GPU worker spawning exists through supervised child leases, but child-worker
+  spawning is not enough to avoid copies unless the hot state remains on the
+  same GPU device/lane or has explicit domain partitioning.
 
 This performance plan is therefore a significant implementation upgrade, but it
 is not a conceptual pivot. It is the natural next stage if ULG is expected to
@@ -217,7 +242,12 @@ Required behavior:
 
 User-provided reference:
 
+- Website/demo: `https://webgpu-ocean.netlify.app/`
 - `https://github.com/matsuoka-601/WebGPU-Ocean`
+
+Dedicated todo:
+
+- `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
 
 Initial decision:
 

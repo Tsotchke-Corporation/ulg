@@ -31,14 +31,24 @@ export function createSphPhaseViewState(driver) {
   const positionsM = new Float32Array(n * 3);
   const colorsRgb = new Float32Array(n * 3);
   const materials = new Array(n);
+  const baseCount = Math.max(0, Math.round(Number(demo.counts?.base) || 0));
+  const dropCount = Math.max(0, Math.round(Number(demo.counts?.drop) || 0));
   demo.state.particles.forEach((p, i) => {
+    const renderDomainId = baseCount > 0 && i < baseCount
+      ? 1
+      : (dropCount > 0 && i >= baseCount && i < baseCount + dropCount ? 2 : 0);
+    const renderDomainKey = renderDomainId === 1 ? 'base' : (renderDomainId === 2 ? 'drop' : null);
     positionsM[i * 3] = p.x[0];
     positionsM[i * 3 + 1] = p.x[1];
     positionsM[i * 3 + 2] = p.x[2];
     colorsRgb[i * 3] = colors[i].rgb[0];
     colorsRgb[i * 3 + 1] = colors[i].rgb[1];
     colorsRgb[i * 3 + 2] = colors[i].rgb[2];
-    materials[i] = renderDescriptors[i];
+    materials[i] = {
+      ...renderDescriptors[i],
+      renderDomainId,
+      renderDomainKey
+    };
   });
   return {
     schema: ULG_SPH_PHASE_VIEW_STATE_SCHEMA,
@@ -60,11 +70,22 @@ export function createSphPhaseViewState(driver) {
     gasPressureSummary: pressureSummary,
     gasPressureFeedback: pressureSummary.pressureFeedback || null,
     counts: { ...demo.counts },
+    scenario: {
+      walls: {
+        model: demo.scenario?.walls?.model ?? null,
+        faces: { ...(demo.scenario?.walls?.faces || {}) }
+      }
+    },
+    wallTemperaturesK: { ...(demo.scenario?.walls?.faces || {}) },
     box: {
       edgeM: demo.box.edgeM,
       dimensionsM: [...demo.box.dimensionsM]
     },
+    physicalLawGroups: { ...(demo.physicalLawGroups || demo.state?.physicalLawGroups || {}) },
+    pendingPhysicalLawGroups: (demo.pendingPhysicalLawGroups || demo.state?.pendingPhysicalLawGroups || [])
+      .map((group) => ({ ...group })),
     gpuMechanics: { ...demo.gpuMechanics },
+    initialHydrostaticState: demo.initialHydrostaticState ? { ...demo.initialHydrostaticState } : null,
     reactionNote: demo.reactionNote || null,
     dropMaterial: demo.dropMaterial,
     baseMaterial: demo.baseMaterial,

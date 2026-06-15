@@ -33,6 +33,9 @@ export const ULG_SPH_GPU_RENDER_ROWS_SCHEMA = 'peercompute.ulg.sph-gpu-render-ro
 export const ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-rows-execution.v0';
 export const ULG_SPH_GPU_RENDER_FIELD_SCHEMA = 'peercompute.ulg.sph-gpu-render-field.v0';
 export const ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-execution.v0';
+export const ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-surface-summary.v0';
+export const ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA = 'peercompute.ulg.sph-gpu-render-field-surface-summary-execution.v0';
+export const ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA = 'peercompute.ulg.sph-material-interface-source-field.v0';
 export const ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA = 'peercompute.ulg.sph-material-interface-candidate-field.v0';
 export const ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA = 'peercompute.ulg.sph-material-interface-candidate-field-execution.v0';
 export const ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA = 'peercompute.ulg.sph-gpu-render-marching-cube-cells.v0';
@@ -349,8 +352,8 @@ export const SPH_GPU_REACTION_PRODUCT_PHASE_ROW_LAYOUT = Object.freeze([
   'eosModelId:f32',
   'solidFlag:f32',
   'status:f32',
-  'pad0:f32',
-  'pad1:f32'
+  'dynamicViscosityPaS:f32',
+  'surfaceTensionNPerM:f32'
 ]);
 export const SPH_GPU_RENDER_ROW_LAYOUT = Object.freeze([
   'positionXM:f32',
@@ -364,7 +367,7 @@ export const SPH_GPU_RENDER_ROW_LAYOUT = Object.freeze([
   'restDensityKgPerM3:f32',
   'phaseFractionGas:f32',
   'representedEntityCount:f32',
-  'pad0:f32'
+  'renderDomainId:f32'
 ]);
 export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'materialId:f32',
@@ -379,7 +382,7 @@ export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'colorLinearR:f32',
   'colorLinearG:f32',
   'colorLinearB:f32',
-  'status:f32',
+  'renderDomainId:f32',
   'opticalStateId:f32',
   'pad1:f32',
   'pad2:f32'
@@ -425,6 +428,28 @@ export const SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT = Object.freeze([
   'normalAreaZM2:f32',
   'crossingSign:f32',
   'status:f32'
+]);
+export const SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT = Object.freeze([
+  'surfaceIndex:f32',
+  'materialId:f32',
+  'phaseId:f32',
+  'opticalStateId:f32',
+  'activeCellCount:f32',
+  'crossingCellCount:f32',
+  'maxDensity:f32',
+  'isolation:f32',
+  'minActiveXM:f32',
+  'minActiveYM:f32',
+  'minActiveZM:f32',
+  'status:f32',
+  'maxActiveXM:f32',
+  'maxActiveYM:f32',
+  'maxActiveZM:f32',
+  'cellSizeM:f32',
+  'boundsCenterXM:f32',
+  'boundsCenterYM:f32',
+  'boundsCenterZM:f32',
+  'boundsRadiusM:f32'
 ]);
 export const SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT = Object.freeze([
   'surfaceIndex:f32',
@@ -533,9 +558,9 @@ export const MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT = Object.freeze([
   'soundSpeedMPerS:f32',
   'eosModelId:f32',
   'constitutiveStatus:f32',
-  'pad0:f32',
-  'pad1:f32',
-  'pad2:f32',
+  'hydrostaticPressurePa:f32',
+  'dynamicViscosityPaS:f32',
+  'surfaceTensionNPerM:f32',
   'pad3:f32'
 ]);
 export const MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT = Object.freeze([
@@ -590,7 +615,59 @@ export const MLS_MPM_GPU_RESIDENT_SUMMARY_ROW_LAYOUT = Object.freeze([
   'thermalProblemCount:f32',
   'finiteTemperatureCount:f32',
   'phaseMassTotalKg:f32',
-  'thermalStatus:f32'
+  'thermalStatus:f32',
+  'sourceCenterOfMassXM:f32',
+  'sourceCenterOfMassYM:f32',
+  'sourceCenterOfMassZM:f32',
+  'nextCenterOfMassXM:f32',
+  'nextCenterOfMassYM:f32',
+  'nextCenterOfMassZM:f32',
+  'sourceMinXM:f32',
+  'sourceMinYM:f32',
+  'sourceMinZM:f32',
+  'sourceMaxXM:f32',
+  'sourceMaxYM:f32',
+  'sourceMaxZM:f32',
+  'nextMinXM:f32',
+  'nextMinYM:f32',
+  'nextMinZM:f32',
+  'nextMaxXM:f32',
+  'nextMaxYM:f32',
+  'nextMaxZM:f32',
+  'sourcePositionBoundsStatus:f32',
+  'nextPositionBoundsStatus:f32',
+  'sourcePositionMassKg:f32',
+  'nextPositionMassKg:f32',
+  'positionBoundsPad0:f32',
+  'positionBoundsPad1:f32',
+  'cohortSummaryStatus:f32',
+  'baseCohortStartIndex:f32',
+  'baseCohortEndIndex:f32',
+  'dropCohortStartIndex:f32',
+  'dropCohortEndIndex:f32',
+  'baseCohortNextMassKg:f32',
+  'baseCohortNextCenterXM:f32',
+  'baseCohortNextCenterYM:f32',
+  'baseCohortNextCenterZM:f32',
+  'baseCohortNextMinXM:f32',
+  'baseCohortNextMinYM:f32',
+  'baseCohortNextMinZM:f32',
+  'baseCohortNextMaxXM:f32',
+  'baseCohortNextMaxYM:f32',
+  'baseCohortNextMaxZM:f32',
+  'baseCohortMaxSpeedMPerS:f32',
+  'dropCohortNextMassKg:f32',
+  'dropCohortNextCenterXM:f32',
+  'dropCohortNextCenterYM:f32',
+  'dropCohortNextCenterZM:f32',
+  'dropCohortNextMinXM:f32',
+  'dropCohortNextMinYM:f32',
+  'dropCohortNextMinZM:f32',
+  'dropCohortNextMaxXM:f32',
+  'dropCohortNextMaxYM:f32',
+  'dropCohortNextMaxZM:f32',
+  'dropCohortMaxSpeedMPerS:f32',
+  'cohortSummaryPad0:f32'
 ]);
 export const SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT = Object.freeze([
   'particleCount:f32',

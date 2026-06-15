@@ -24,6 +24,13 @@ test('compressing condensed water raises pressure steeply (Tait)', () => {
   assert.ok(p.pressurePa > 1e6); // 5% compression -> strong restoring pressure
 });
 
+test('expanded condensed water carries signed restoring tensile pressure', () => {
+  const p = eos({ density: 900, specificInternalEnergyJPerKg: liquidWaterU, particle: { material: 'h2o' } });
+  assert.ok(p.pressurePa < 0);
+  assert.ok(Number.isFinite(p.pressurePa));
+  assert.ok(p.soundSpeedMPerS > 0);
+});
+
 test('molten iron is pinned near its liquid rest density, not puffed up like a gas', () => {
   const atRest = eos({ density: 7000, specificInternalEnergyJPerKg: moltenIronU, particle: { material: 'fe' } });
   assert.ok(Math.abs(atRest.pressurePa) < 1e3); // huge internal energy does NOT create gas-like pressure

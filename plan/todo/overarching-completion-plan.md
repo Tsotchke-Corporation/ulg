@@ -1,6 +1,6 @@
 # Overarching Remaining Todo Completion Plan
 
-Date: 2026-06-11 AKDT
+Date: 2026-06-12 AKDT
 
 ## Purpose
 
@@ -9,34 +9,85 @@ one implementation order. The goal is to finish the core technology path without
 material-specific patches, while keeping the demo usable, measurable, and honest
 about validation.
 
+2026-06-12 realignment: the active ordering now starts with authority and state
+ownership. The physics-law todo files stay active; this reorganizes where the
+laws run, who owns state mutation, and how WebGPU/CPU/WASM workers are managed.
+
 Active inputs examined:
 
+- `plan/todo/README.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/todo/resident-state-authority-contract-plan.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/physics-loop-authority-diagrams.md`
 - `plan/todo/cold-start-cache-performance-plan.md`
 - `plan/todo/reaction-stoichiometry-energetics-plan.md`
+- `plan/todo/sedenion-reaction-scoping-plan.md`
 - `plan/todo/phase-resolved-steam-optics-plan.md`
 - `plan/todo/webgpu-material-property-resolvers-plan.md`
+- `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
 - `plan/todo/perf-upgrade.md`
 - `plan/todo/sphphasedemo.md`
 - `plan/todo/frontier-todo.md`
 - unchecked ULG, PeerCompute, Eshkol, MoonLab, and tooling items in
   `plan/plan.md`
 
+## Active Priority Order
+
+Use this order unless the user redirects:
+
+1. Establish PeerCompute law graph authority and the ULG resident state
+   authority contract.
+2. Fix resident-loop ownership bugs: no-op law overwrites, render/physics
+   coupling, buffer lifetime, and stale CPU mirrors.
+3. Finish reaction/product/gas pressure coupling through the general balanced
+   closure path, with sedenion/Fano reaction scope used only as a symbolic
+   prefilter for expensive lower-level derivation.
+4. Finish steam/water/phase/optics and the iron-on-ice controls.
+5. Move the hot loop to ComputeManager-compatible GPU resident lanes with
+   resident particle/grid/gas/product/phase/surface buffers and declared copy
+   budgets.
+6. Move material and closure resolvers into CPU/WASM/WebGPU workers with
+   content-addressed provenance and strict validation flags.
+7. Add frontier laws as law graph nodes: radiation, nuclear, Cherenkov,
+   gravity, MHD/PIC, quantum response, relativistic, and astrophysical paths.
+8. Integrate PeerCompute, Eshkol, and MoonLab service hosts under the same law
+   graph, worker lease, warm-residency, artifact cache, and admission model.
+9. Polish cold-start persistence and timing after schemas stabilize.
+10. Run final validation, profiling, overclaim checks, and packaging.
+11. Stand up the full local distributed PeerCompute network stack after the
+    above contracts stabilize: WSS relay plus STUN/TURN/ICE configuration for
+    multi-window and multi-computer acceptance testing.
+
+See `plan/todo/README.md` for the routing index and cache/scale rules.
+
 ## Ordering Rules
 
-1. Keep cache schemas, provenance, invalidation, worker boundaries, and visible
+1. Keep physics laws first-class. The reorg changes authority and scheduling;
+   it does not prune laws.
+2. Keep PeerCompute as the orchestration authority. ULG should not grow a
+   parallel distributed scheduler.
+3. After every resident stage, exactly one producer is authoritative for each
+   mutable state family.
+4. Physics cadence must not depend on render cadence.
+5. Law workers should be ComputeManager-compatible CPU/WASM/WebGPU tasks with
+   declared read/write families, leases, validation gates, and compact deltas.
+6. Hot GPU mutation chains should stay on ComputeManager-owned resident lanes
+   until explicit domain partitioning exists.
+7. Keep heavy Eshkol/MoonLab services warm when latency matters, but treat warm
+   state as cache/readiness state rather than authority.
+8. Keep cache schemas, provenance, invalidation, worker boundaries, and visible
    CPU/WebGPU warnings correct, but defer cold/warm timing polish until core
    physics schemas stop moving.
-2. Lock CPU-reference behavior before porting it to WebGPU.
-3. Make schemas, cache keys, and provenance stable before persisting artifacts.
-4. Move runtime hot-loop work to WebGPU before moving full electronic-structure
+9. Make schemas, cache keys, validity domains, and provenance stable before
+   persisting artifacts.
+10. Move runtime hot-loop work to WebGPU before moving full electronic-structure
    solvers to WebGPU.
-5. Incorporate WebGPU-Ocean lessons in the hot-loop phase: fixed-point atomic
+11. Incorporate WebGPU-Ocean lessons in the hot-loop phase: fixed-point atomic
    scatter where needed, GPU-side grid/neighbor structures, and fluid surface
    rendering, including a WebGPU marching-cubes path.
-6. Keep PeerCompute as the orchestration authority; ULG should not grow a
-   parallel scheduler.
-7. Treat every cached value as derived evidence with invalidation, never as a
-   hand-authored material constant.
+12. Treat every cached value as derived evidence with invalidation, never as a
+    hand-authored material constant.
 
 ## Phase 0 - Baseline And Plan Hygiene
 
@@ -95,7 +146,8 @@ Primary plans:
 
 Why limited now:
 
-- `plan/todo/reprioritize.md` moves cold-start timing polish toward the end.
+- `plan/done/reprioritize-cold-start-work-2026-06-11.md` moved cold-start
+  timing polish toward the end; cache correctness remains active.
 - Reaction, product, thermal, optical, and static-table caches still need
   correct schemas, provenance, invalidation, and worker boundaries because later
   reaction, steam, and material-resolver work will reuse them.
@@ -334,6 +386,16 @@ Why fifth:
   current reaction inventory/residual/pressure/steam contracts, but they should
   land before cold-start timing polish and before large WebGPU material solver
   migration.
+
+Status on 2026-06-12 AKDT:
+
+- PeerCompute now exposes a passive `GpuResidentLaneManager`, and ULG resident
+  MLS-MPM/SPH steps can acquire/complete/reject compatible lane leases locally
+  with copy budgets, retained-buffer refs, and queue-fence evidence.
+  PeerCompute `ComputeManager` can also wrap declared inline GPU-lane tasks in
+  those leases before local commit and block unsatisfied required fences. The
+  remaining hot-loop architecture work is a real ComputeManager/GPUHub
+  resident-lane task for the full pass DAG.
 
 Work:
 
@@ -577,6 +639,26 @@ Completion gate:
 - Performance bottlenecks are measured with profiler evidence before each major
   optimization.
 
+## Phase 11 - Full Distributed PeerCompute Stack
+
+Purpose: prove the runtime across real browser peers after the single-node
+authority and worker-stage contracts are stable.
+
+Work:
+
+- Follow `plan/todo/distributed-peercompute-network-stack-plan.md`.
+- Stand up this machine as the local WSS/STUN/TURN/ICE test environment.
+- Connect three browser windows across two computers with explicit requester,
+  responder, and observer roles.
+- Prove distributed graph placement, StateManager sync, cache admission,
+  remote state-seed hot-buffer refresh, and GPU-fence gated mutation.
+
+Completion gate:
+
+- Representative ULG visual scenarios pass with distributed execution enabled.
+- No remote result can mutate authoritative state without NodeKernel/
+  StateManager admission and matching GPU fence/lease evidence.
+
 ## Immediate Next Work Item
 
 Continue Phase 2 before moving to Phase 3/5:
@@ -620,7 +702,8 @@ uniform sealed-gas interface force rows into the resident grid impulse path.
    bridge into resident per-cell/per-particle state and gate vapor surfaces
    from derived optical depth/scattering rather than render labels.
 4. Start the WebGPU-Ocean hot-loop slice before cold-start timing polish:
-   fixed-point/tiled P2G scatter where useful, GPU cell/neighbor structures,
-   and GPU-resident marching cubes for continuous material volumes.
+   follow `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md` for fixed-point or
+   tiled P2G scatter where useful, GPU cell/neighbor structures, resident
+   gas/product/phase dynamics, and GPU-resident continuous surfaces.
 5. Return to cold/warm/clear timing probes and GPU warmup persistence after
    reaction, pressure, steam, and hot-loop schemas stabilize.

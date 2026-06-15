@@ -1,0 +1,155 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
+import {
+  buildMlsMpmMechanicsMaterialTable,
+  findMechanicsMaterialPhaseRecord,
+  MLS_MPM_EOS_MODEL_IDS
+} from '../src/runtime/sph/sphMechanicsMaterialTable.js';
+import { refreshMlsMpmMechanicsCpu } from '../src/runtime/sph/sphMechanicsRefreshGpuKernel.js';
+import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT,
+  SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT,
+  ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+  ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
+} from '../ulg-gpu-abi/src/index.js';
+import { mlsMpmMechanicsRefreshWgsl } from '../ulg-gpu-abi/src/wgsl.js';
+
+function nearlyEqual(actual, expected, tolerance = 1e-6) {
+  assert.ok(
+    Math.abs(actual - expected) <= tolerance,
+    `expected ${actual} to be within ${tolerance} of ${expected}`
+  );
+}
+
+test('MLS-MPM mechanics material table packs phase mechanics for condensed and gas phases', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 997, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] },
+        { name: 'gas', densityKgPerM3: 0.6, bulkModulusPa: null, shearModulusPa: 0, cpJPerKgK: 2010, temperatureRange: [373.15, 1000] }
+      ]
+    }
+  }, { soundSpeedScale: 0.5 });
+
+  assert.equal(table.schema, 'peercompute.ulg.mls-mpm-mechanics-material-table.v0');
+  assert.equal(table.phaseRecordCount, 2);
+  const liquid = findMechanicsMaterialPhaseRecord(table, stableOpticalMaterialId('h2o'), 2);
+  assert.equal(liquid.restDensityKgPerM3, 997);
+  nearlyEqual(liquid.effectiveBulkModulusPa, 2.2e9 * 0.25, 128);
+  assert.equal(liquid.eosModelId, MLS_MPM_EOS_MODEL_IDS.taitCondensed);
+  assert.equal(liquid.solidFlag, 0);
+  const gas = findMechanicsMaterialPhaseRecord(table, stableOpticalMaterialId('h2o'), 3);
+  assert.equal(gas.effectiveBulkModulusPa, 0);
+  assert.equal(gas.eosModelId, MLS_MPM_EOS_MODEL_IDS.gasLinearized);
+  assert.ok(gas.soundSpeedMPerS >= 40);
+});
+
+test('CPU mechanics refresh updates constitutive fields from current thermo phase', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        { name: 'solid', densityKgPerM3: 917, bulkModulusPa: 8.8e9, shearModulusPa: 3.5e9, cpJPerKgK: 2100, temperatureRange: [0, 273.15] },
+        { name: 'liquid', densityKgPerM3: 997, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15], dynamicViscosityPaS: 0.001, surfaceTensionNPerM: 0.072 }
+      ]
+    }
+  }, { viscosityEnabled: true, viscosityLengthM: 0.05, surfaceTensionEnabled: true });
+  const state = new Float32Array([0, 0, 0, 9.17, 0, 0, 0, 300]);
+  const thermo = new Float32Array(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
+  thermo[0] = stableOpticalMaterialId('h2o');
+  thermo[1] = GPU_PHASE_IDS.liquid;
+  thermo[3] = 917;
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  mechanics[18] = 1;
+  mechanics[19] = 1;
+  mechanics[20] = 0;
+  mechanics[22] = 2.2e9;
+  mechanics[28] = 1234;
+  const result = refreshMlsMpmMechanicsCpu({
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      state,
+      thermo
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      mechanics
+    },
+    mechanicsMaterialTable: table
+  });
+
+  assert.equal(result.status, 'mechanics-constitutive-refresh-executed');
+  nearlyEqual(result.mechanics[19], 9.17 / 917);
+  assert.equal(result.mechanics[20], 0);
+  nearlyEqual(result.mechanics[22], 2.2e9, 1024);
+  nearlyEqual(result.mechanics[23], 0, 1e-6);
+  assert.equal(result.mechanics[26], MLS_MPM_EOS_MODEL_IDS.taitCondensed);
+  assert.equal(result.mechanics[28], 1234);
+  assert.ok(result.mechanics[29] > 0.001);
+  nearlyEqual(result.mechanics[30], 0.072, 1e-6);
+});
+
+test('CPU mechanics refresh resets deformation history on large gas to condensed phase change', () => {
+  const table = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018015,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 997, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] },
+        { name: 'gas', densityKgPerM3: 0.6, bulkModulusPa: null, shearModulusPa: 0, cpJPerKgK: 2010, temperatureRange: [373.15, 1000] }
+      ]
+    }
+  });
+  const state = new Float32Array([0, 0, 0, 0.6, 0, 0, 0, 300]);
+  const thermo = new Float32Array(SPH_GPU_PARTICLE_THERMO_ROW_LAYOUT.length);
+  thermo[0] = stableOpticalMaterialId('h2o');
+  thermo[1] = GPU_PHASE_IDS.liquid;
+  thermo[3] = 997;
+  const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
+  mechanics.set([2, 0.1, 0, 0.2, 2, 0, 0, 0.3, 2], 0);
+  mechanics.set([4, 5, 6, 7, 8, 9, 10, 11, 12], 9);
+  mechanics[18] = 8;
+  mechanics[19] = 1;
+  mechanics[20] = 0;
+  mechanics[26] = MLS_MPM_EOS_MODEL_IDS.gasLinearized;
+  const result = refreshMlsMpmMechanicsCpu({
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      state,
+      thermo
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 1,
+      mechanics
+    },
+    mechanicsMaterialTable: table
+  });
+
+  nearlyEqual(result.mechanics[0], 1);
+  nearlyEqual(result.mechanics[4], 1);
+  nearlyEqual(result.mechanics[8], 1);
+  for (let index = 1; index < 9; index += 1) {
+    if (index === 4 || index === 8) continue;
+    nearlyEqual(result.mechanics[index], 0);
+  }
+  for (let index = 9; index <= 17; index += 1) nearlyEqual(result.mechanics[index], 0);
+  nearlyEqual(result.mechanics[18], 1);
+  nearlyEqual(result.mechanics[19], 0.6 / 997, 1e-9);
+  assert.equal(result.mechanics[26], MLS_MPM_EOS_MODEL_IDS.taitCondensed);
+});
+
+test('WGSL mechanics refresh updates rest volume and constitutive rows without state readback', () => {
+  assert.match(mlsMpmMechanicsRefreshWgsl, /fn find_phase_mechanics/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /mechanics_refresh_should_reset/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /rest_ratio >= 2\.0/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /out_mechanics\[mechanics_base \+ 4u\]/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /out_mechanics\[mechanics_base \+ 5u\]/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /out_mechanics\[mechanics_base \+ 6u\]/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /row2\.z/);
+  assert.match(mlsMpmMechanicsRefreshWgsl, /row2\.w/);
+});

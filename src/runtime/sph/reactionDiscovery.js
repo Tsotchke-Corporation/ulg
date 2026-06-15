@@ -24,7 +24,8 @@ import {
   PROVISIONAL_ENERGETICS_STATUS,
   commonAnionChargeMagnitude,
   commonCationCharge,
-  discoverReactionCandidates
+  discoverReactionCandidates,
+  waterReactiveMetalClass
 } from '../chemistry/reactionCandidates.js';
 import { deriveElementProperties } from '../material/elementClosures.js';
 import { deriveCompoundClosure } from '../material/compoundClosure.js';
@@ -442,6 +443,12 @@ function waterKeyForCandidate(candidate, keyA, ca, keyB, cb) {
   return candidate.reactants.find((reactant) => sameAtomCounts(reactant.atomCounts, { 1: 2, 8: 1 }))?.formula?.toLowerCase() || 'h2o';
 }
 
+function waterReactiveClassForCandidate(candidate, ca, cb) {
+  if (candidate.familyId !== 'active-metal-water-hydroxide') return null;
+  const metalComp = sameAtomCounts(ca.elements, { 1: 2, 8: 1 }) ? cb : ca;
+  return waterReactiveMetalClass(metalComp.Z) || null;
+}
+
 function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   const discovery = discoverReactionCandidates(keyA, keyB, options);
   const candidate = discovery.candidates.find((item) => item.atomBalance?.balanced === true) || null;
@@ -517,6 +524,7 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
   const phaseRequirements = candidate.familyId === 'active-metal-water-hydroxide'
     ? { [waterKeyForCandidate(candidate, keyA, ca, keyB, cb)]: waterPhases.length ? waterPhases : ['liquid', 'gas'] }
     : null;
+  const waterReactiveClass = waterReactiveClassForCandidate(candidate, ca, cb);
   return {
     dHHa: useDerivedEnergy
       ? dHHa
@@ -529,7 +537,7 @@ function stoichiometricCandidateReaction(keyA, ca, keyB, cb, options = {}) {
     partner: keyB,
     activationTemperatureK: candidate.familyId === 'active-metal-water-hydroxide' ? 0 : undefined,
     activationModel: candidate.familyId === 'active-metal-water-hydroxide'
-      ? 'barrier-not-yet-derived-reacts-on-exothermic-contact-with-liquid-water'
+      ? `barrier-not-yet-derived-${waterReactiveClass || 'water-reactive-metal'}-reacts-on-exothermic-contact-with-liquid-water`
       : 'stoichiometric-reaction-candidate-derived-energy-pending-derived-barrier',
     phaseRequirements,
     stoichiometry: {
@@ -561,6 +569,8 @@ function derivedStoichiometryFromStrictBlocker(blocker) {
 // Active metal + water → metal hydroxide + hydrogen:  M + H2O → MOH + ½ H2 (monohydroxide unit).
 function metalWaterReaction(metalKey, metalComp, waterComp, options = {}) {
   const Z = metalComp.Z;
+  const waterReactiveClass = waterReactiveMetalClass(Z);
+  if (!waterReactiveClass) return null;
   const geometry = hydroxideGeometry(Z);
   const hydroxide = { atoms: geometry, multiplicity: multiplicityForElectrons(Z + 8 + 1) };
   const model = energyModelForSpecies(hydroxide, metalComp.species, waterComp.species, H2);
@@ -591,7 +601,7 @@ function metalWaterReaction(metalKey, metalComp, waterComp, options = {}) {
     reactant: metalKey,
     partner: 'h2o',
     activationTemperatureK: 0,
-    activationModel: 'barrier-not-yet-derived-reacts-on-exothermic-contact-with-liquid-water',
+    activationModel: `barrier-not-yet-derived-${waterReactiveClass}-reacts-on-exothermic-contact-with-liquid-water`,
     phaseRequirements: { h2o: waterComp.reactivePhases?.length ? waterComp.reactivePhases : ['liquid', 'gas'] }
   };
 }

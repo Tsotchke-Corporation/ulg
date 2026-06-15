@@ -20,8 +20,12 @@ import {
 import { sphThermalStepWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { evaluateClosureLawGraphCpu } from '../closureLawGraph.js';
 import { GPU_PHASE_IDS, gpuPhaseId, stableOpticalMaterialId } from '../material/opticalGpuBuffers.js';
-import { orderedSegments } from '../material/thermoState.js';
-import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  orderedSegments,
+  segmentEnergyAbove,
+  segmentTemperatureFromEnergyAbove
+} from '../material/thermoState.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -58,6 +62,8 @@ export const SPH_THERMAL_STABLE_PHASE_POLICY_IDS = Object.freeze({
 const THERMAL_SCOPE = 'sph-thermal-closure-table-conduction-walls';
 const THERMAL_SEGMENT_TYPES = Object.freeze({ phase: 1, plateau: 2 });
 const THERMAL_STATUS = Object.freeze({ ready: 1, missingMaterial: 255 });
+const PAIR_CONDUCTION_RELAXATION_LIMIT = 0.25;
+const THERMAL_DEBYE_GRAPH_SAMPLE_COUNT = 32;
 const FACE_IDS = ['xMin', 'xMax', 'yMin', 'yMax', 'zMin', 'zMax'];
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -120,11 +126,19 @@ export function buildSphThermalMaterialTable(materialProperties = {}) {
   const records = [];
   const segments = [];
   const metadata = [];
+  const segmentMetadata = [];
   for (const [material, properties] of sortedMaterialEntries(materialProperties)) {
     const materialId = stableOpticalMaterialId(material);
     const materialSegments = orderedSegments(properties);
     const segmentOffset = segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS;
     for (const segment of materialSegments) {
+      const segmentIndex = segments.length / SPH_THERMAL_PHASE_SEGMENT_FLOATS;
+      segmentMetadata[segmentIndex] = {
+        ...segment,
+        material,
+        materialId,
+        segmentIndex
+      };
       if (segment.type === 'phase') {
         const phaseId = gpuPhaseId(segment.phase);
         segments.push(
@@ -179,6 +193,7 @@ export function buildSphThermalMaterialTable(materialProperties = {}) {
     records: new Float32Array(records),
     segments: new Float32Array(segments),
     metadata,
+    segmentMetadata,
     scientificValidation: false,
     materialValidation: false,
     phaseChangeValidation: false,
@@ -199,7 +214,58 @@ function segmentTypeName(segmentType) {
   return Math.round(segmentType) === THERMAL_SEGMENT_TYPES.plateau ? 'plateau' : 'phase';
 }
 
-function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMetadata }) {
+function sampleDerivative(samples, index) {
+  const left = samples[Math.max(0, index - 1)];
+  const right = samples[Math.min(samples.length - 1, index + 1)];
+  if (!left || !right || right.axis === left.axis) return 0;
+  return (right.value - left.value) / (right.axis - left.axis);
+}
+
+function graphSamplesForThermalSegment(segment, sourceSegment = null) {
+  const energyStart = finiteNumber(segment.energyStartJPerKg);
+  const energyEnd = finiteNumber(segment.energyEndJPerKg);
+  const temperatureStart = finiteNumber(segment.temperatureStartK);
+  const temperatureEnd = finiteNumber(segment.temperatureEndK);
+  const fallbackSlope = (temperatureEnd - temperatureStart) / Math.max(1e-30, energyEnd - energyStart);
+  if (
+    sourceSegment?.type !== 'phase'
+    || !sourceSegment.debyeTemperatureK
+    || !(energyEnd > energyStart)
+    || !(sourceSegment.tHi > sourceSegment.tLo)
+  ) {
+    return [
+      { axis: energyStart, value: temperatureStart, derivative: fallbackSlope },
+      { axis: energyEnd, value: temperatureEnd, derivative: fallbackSlope }
+    ];
+  }
+
+  const samples = [];
+  for (let index = 0; index < THERMAL_DEBYE_GRAPH_SAMPLE_COUNT; index += 1) {
+    const alpha = index / (THERMAL_DEBYE_GRAPH_SAMPLE_COUNT - 1);
+    const temperatureK = sourceSegment.tLo + alpha * (sourceSegment.tHi - sourceSegment.tLo);
+    const axis = sourceSegment.eStart + segmentEnergyAbove(sourceSegment, temperatureK);
+    if (samples.length && axis <= samples[samples.length - 1].axis) continue;
+    samples.push({ axis, value: temperatureK, derivative: 0 });
+  }
+  if (samples.length < 2 || samples[samples.length - 1].axis < energyEnd) {
+    if (samples.length && energyEnd <= samples[samples.length - 1].axis) samples.pop();
+    samples.push({ axis: energyEnd, value: temperatureEnd, derivative: 0 });
+  }
+  if (samples[0]?.axis > energyStart) {
+    samples.unshift({ axis: energyStart, value: temperatureStart, derivative: 0 });
+  }
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index].derivative = sampleDerivative(samples, index);
+  }
+  return samples.length >= 2
+    ? samples
+    : [
+        { axis: energyStart, value: temperatureStart, derivative: fallbackSlope },
+        { axis: energyEnd, value: temperatureEnd, derivative: fallbackSlope }
+      ];
+}
+
+function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMetadata, sourceSegment = null }) {
   const energyStart = finiteNumber(segment.energyStartJPerKg);
   const energyEnd = finiteNumber(segment.energyEndJPerKg);
   if (!(energyEnd > energyStart)) {
@@ -207,8 +273,8 @@ function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMe
   }
   const temperatureStart = finiteNumber(segment.temperatureStartK);
   const temperatureEnd = finiteNumber(segment.temperatureEndK);
-  const slope = (temperatureEnd - temperatureStart) / (energyEnd - energyStart);
   const materialName = materialMetadata?.material || `material-${Math.round(segment.materialId)}`;
+  const samples = graphSamplesForThermalSegment(segment, sourceSegment);
   const graph = createClosureLawGraphBuffers({
     graphId: `sph-thermal:${materialName}:${Math.round(segment.materialId)}:segment-${segmentIndex}:temperature-vs-energy`,
     nodes: [{
@@ -217,7 +283,7 @@ function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMe
       outputSlot: SPH_THERMAL_CLOSURE_GRAPH_SLOTS.temperatureK,
       derivativeSlot: SPH_THERMAL_CLOSURE_GRAPH_SLOTS.dTemperatureKdSpecificInternalEnergyJPerKg,
       sampleOffset: 0,
-      sampleCount: 2,
+      sampleCount: samples.length,
       domainMin: energyStart,
       domainMax: energyEnd,
       interpolation: 'linear',
@@ -227,10 +293,7 @@ function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMe
       phaseId: segment.phaseFromId
     }],
     edges: [],
-    samples: [
-      { axis: energyStart, value: temperatureStart, derivative: slope },
-      { axis: energyEnd, value: temperatureEnd, derivative: slope }
-    ],
+    samples,
     slotCount: 3,
     initialSlots: { 0: energyStart },
     statusCount: 1,
@@ -245,6 +308,7 @@ function buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMe
     sourceMaterialId: segment.materialId,
     sourcePhaseFromId: segment.phaseFromId,
     sourcePhaseToId: segment.phaseToId,
+    sourceSegment,
     axisName: 'specificInternalEnergyJPerKg',
     outputName: 'temperatureK',
     outputSlots: { ...SPH_THERMAL_CLOSURE_GRAPH_SLOTS },
@@ -352,7 +416,13 @@ export function buildSphThermalClosureGraphBuffers(materialPropertiesOrTable = {
   for (let segmentIndex = 0; segmentIndex < table.segmentCount; segmentIndex += 1) {
     const segment = segmentRows(table, segmentIndex);
     const material = materialMetadata.get(segment.materialId) || null;
-    const graph = buildThermalSegmentTemperatureGraph({ segment, segmentIndex, materialMetadata: material });
+    const sourceSegment = table.segmentMetadata?.[segmentIndex] || null;
+    const graph = buildThermalSegmentTemperatureGraph({
+      segment,
+      segmentIndex,
+      materialMetadata: material,
+      sourceSegment
+    });
     if (!graph) {
       skippedSegments.push({
         segmentIndex,
@@ -378,6 +448,9 @@ export function buildSphThermalClosureGraphBuffers(materialPropertiesOrTable = {
       energyEndJPerKg: segment.energyEndJPerKg,
       temperatureStartK: segment.temperatureStartK,
       temperatureEndK: segment.temperatureEndK,
+      sourceSegmentType: sourceSegment?.type || null,
+      sourceSegmentDebyeTemperatureK: sourceSegment?.debyeTemperatureK || null,
+      graphSampleCount: graph.sampleCount,
       derivativeKdPerJPerKg: (segment.temperatureEndK - segment.temperatureStartK)
         / (segment.energyEndJPerKg - segment.energyStartJPerKg),
       graphSchema: graph.schema,
@@ -618,6 +691,38 @@ function addFractions(left, right) {
   };
 }
 
+function temperatureFromPackedSegmentEnergy(table, segmentIndex, segment, specificInternalEnergyJPerKg) {
+  const sourceSegment = table.segmentMetadata?.[segmentIndex] || null;
+  if (sourceSegment?.type === 'phase' && sourceSegment.debyeTemperatureK) {
+    const energyAbove = Math.min(
+      sourceSegment.eEnd - sourceSegment.eStart,
+      Math.max(0, specificInternalEnergyJPerKg - sourceSegment.eStart)
+    );
+    return segmentTemperatureFromEnergyAbove(sourceSegment, energyAbove);
+  }
+  const alpha = Math.min(1, Math.max(0, (
+    specificInternalEnergyJPerKg - segment.energyStartJPerKg
+  ) / Math.max(1e-12, segment.energyEndJPerKg - segment.energyStartJPerKg)));
+  return segment.temperatureStartK + alpha * (segment.temperatureEndK - segment.temperatureStartK);
+}
+
+function temperatureSlopeFromPackedSegmentEnergy(table, segmentIndex, segment, specificInternalEnergyJPerKg) {
+  const sourceSegment = table.segmentMetadata?.[segmentIndex] || null;
+  const energySpan = segment.energyEndJPerKg - segment.energyStartJPerKg;
+  if (!(energySpan > 0)) return 0;
+  if (sourceSegment?.type !== 'phase' || !sourceSegment.debyeTemperatureK) {
+    return (segment.temperatureEndK - segment.temperatureStartK) / energySpan;
+  }
+  const clampedEnergy = Math.min(segment.energyEndJPerKg, Math.max(segment.energyStartJPerKg, specificInternalEnergyJPerKg));
+  const delta = Math.max(1e-3, energySpan * 1e-4);
+  const lo = Math.max(segment.energyStartJPerKg, clampedEnergy - delta);
+  const hi = Math.min(segment.energyEndJPerKg, clampedEnergy + delta);
+  if (!(hi > lo)) return (segment.temperatureEndK - segment.temperatureStartK) / energySpan;
+  const tLo = temperatureFromPackedSegmentEnergy(table, segmentIndex, segment, lo);
+  const tHi = temperatureFromPackedSegmentEnergy(table, segmentIndex, segment, hi);
+  return (tHi - tLo) / (hi - lo);
+}
+
 export function resolveThermalStateFromTable(table, materialId, specificInternalEnergyJPerKg) {
   assertPackedSphThermalMaterialTable(table);
   for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
@@ -648,7 +753,7 @@ export function resolveThermalStateFromTable(table, materialId, specificInternal
       };
     }
     return {
-      temperatureK: segment.temperatureStartK + alpha * (segment.temperatureEndK - segment.temperatureStartK),
+      temperatureK: temperatureFromPackedSegmentEnergy(table, selected, segment, specificInternalEnergyJPerKg),
       phaseId: segment.phaseFromId,
       restDensityKgPerM3: segment.densityFromKgPerM3,
       phaseFractions: phaseFractionsFor(segment.phaseFromId, 1),
@@ -717,6 +822,74 @@ function wallDistance(position, boxDimsM, faceIndex) {
   if (faceIndex === 3) return boxDimsM[1] - position[1];
   if (faceIndex === 4) return position[2];
   return boxDimsM[2] - position[2];
+}
+
+function thermalTemperatureSlopeFromTable(table, materialId, specificInternalEnergyJPerKg) {
+  for (let recordIndex = 0; recordIndex < table.materialCount; recordIndex += 1) {
+    const recordOffset = recordIndex * SPH_THERMAL_MATERIAL_RECORD_FLOATS;
+    if (table.records[recordOffset] !== materialId) continue;
+    const segmentOffset = table.records[recordOffset + 1];
+    const segmentCount = table.records[recordOffset + 2];
+    let selected = segmentOffset;
+    for (let local = 0; local < segmentCount; local += 1) {
+      const candidate = segmentOffset + local;
+      const segment = segmentRows(table, candidate);
+      selected = candidate;
+      if (specificInternalEnergyJPerKg <= segment.energyEndJPerKg || local + 1 === segmentCount) break;
+    }
+    const segment = segmentRows(table, selected);
+    return temperatureSlopeFromPackedSegmentEnergy(table, selected, segment, specificInternalEnergyJPerKg);
+  }
+  return 0;
+}
+
+function clampWallSpecificEnergyDelta({ dUSpecific, temperatureK, wallTemperatureK, temperatureSlopeKdPerJPerKg }) {
+  if (!(temperatureSlopeKdPerJPerKg > 0)) return dUSpecific;
+  if (!Number.isFinite(dUSpecific) || !Number.isFinite(temperatureK) || !Number.isFinite(wallTemperatureK)) return dUSpecific;
+  const nextTemperatureK = temperatureK + dUSpecific * temperatureSlopeKdPerJPerKg;
+  const crossesColdWall = temperatureK > wallTemperatureK && nextTemperatureK < wallTemperatureK;
+  const crossesHotWall = temperatureK < wallTemperatureK && nextTemperatureK > wallTemperatureK;
+  if (!crossesColdWall && !crossesHotWall) return dUSpecific;
+  return (wallTemperatureK - temperatureK) / temperatureSlopeKdPerJPerKg;
+}
+
+function clampPairConductionEnergy({
+  dE,
+  temperatureK,
+  otherTemperatureK,
+  temperatureSlopeKdPerJPerKg,
+  otherTemperatureSlopeKdPerJPerKg,
+  massKg,
+  otherMassKg
+}) {
+  if (!Number.isFinite(dE) || dE === 0) return 0;
+  const gapK = otherTemperatureK - temperatureK;
+  if (!Number.isFinite(gapK) || gapK === 0 || Math.sign(dE) !== Math.sign(gapK)) return dE;
+  const responsePerJ = (temperatureSlopeKdPerJPerKg / Math.max(massKg, 1e-30))
+    + (otherTemperatureSlopeKdPerJPerKg / Math.max(otherMassKg, 1e-30));
+  if (!(responsePerJ > 0)) return dE;
+  const equalizingEnergyJ = Math.abs(gapK) / responsePerJ;
+  const limitJ = equalizingEnergyJ * PAIR_CONDUCTION_RELAXATION_LIMIT;
+  return Math.sign(dE) * Math.min(Math.abs(dE), limitJ);
+}
+
+function clampSpecificEnergyDeltaToTemperatureRange({
+  dUSpecific,
+  temperatureK,
+  temperatureSlopeKdPerJPerKg,
+  minTemperatureK,
+  maxTemperatureK
+}) {
+  if (!(temperatureSlopeKdPerJPerKg > 0)) return dUSpecific;
+  if (!Number.isFinite(dUSpecific) || dUSpecific === 0 || !Number.isFinite(temperatureK)) return dUSpecific;
+  const nextTemperatureK = temperatureK + dUSpecific * temperatureSlopeKdPerJPerKg;
+  if (Number.isFinite(minTemperatureK) && nextTemperatureK < minTemperatureK) {
+    return (minTemperatureK - temperatureK) / temperatureSlopeKdPerJPerKg;
+  }
+  if (Number.isFinite(maxTemperatureK) && nextTemperatureK > maxTemperatureK) {
+    return (maxTemperatureK - temperatureK) / temperatureSlopeKdPerJPerKg;
+  }
+  return dUSpecific;
 }
 
 function writeResolvedThermoRow(thermo, index, materialId, resolved, sourceThermo2) {
@@ -819,7 +992,7 @@ export function runSphThermalStepCpu({
   wallTemperaturesK = {},
   boxDimsM = [5, 5, 5],
   dtS = 0,
-  conductionRate = 1.5e4,
+  conductionRate = 15,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM
 } = {}) {
@@ -843,6 +1016,15 @@ export function runSphThermalStepCpu({
     const ti = i * SPH_GPU_PARTICLE_THERMO_FLOATS;
     const mass = Math.max(finiteNumber(sphParticleState.state[oi + 3], 0), 1e-30);
     const temperature = finiteNumber(sphParticleState.thermo[ti + 2], 0);
+    const materialId = sphParticleState.thermo[ti];
+    const temperatureSlope = thermalTemperatureSlopeFromTable(
+      thermalMaterialTable,
+      materialId,
+      finiteNumber(sphParticleState.state[oi + 7], 0)
+    );
+    let conductionDUSpecific = 0;
+    let neighborMinTemperatureK = temperature;
+    let neighborMaxTemperatureK = temperature;
     for (let j = 0; j < particleCount; j += 1) {
       if (i === j) continue;
       const oj = j * SPH_GPU_PARTICLE_STATE_FLOATS;
@@ -853,9 +1035,35 @@ export function runSphThermalStepCpu({
       if (r >= support) continue;
       const tj = j * SPH_GPU_PARTICLE_THERMO_FLOATS;
       const weight = 1 - r / support;
-      const dE = conductionRate * (finiteNumber(sphParticleState.thermo[tj + 2], 0) - temperature) * weight * dt;
-      du[i] += dE / mass;
+      const otherTemperature = finiteNumber(sphParticleState.thermo[tj + 2], 0);
+      neighborMinTemperatureK = Math.min(neighborMinTemperatureK, otherTemperature);
+      neighborMaxTemperatureK = Math.max(neighborMaxTemperatureK, otherTemperature);
+      const otherMass = Math.max(finiteNumber(sphParticleState.state[oj + 3], 0), 1e-30);
+      const otherTemperatureSlope = thermalTemperatureSlopeFromTable(
+        thermalMaterialTable,
+        sphParticleState.thermo[tj],
+        finiteNumber(sphParticleState.state[oj + 7], 0)
+      );
+      const rawDE = conductionRate * (otherTemperature - temperature) * weight * dt;
+      const dE = clampPairConductionEnergy({
+        dE: rawDE,
+        temperatureK: temperature,
+        otherTemperatureK: otherTemperature,
+        temperatureSlopeKdPerJPerKg: temperatureSlope,
+        otherTemperatureSlopeKdPerJPerKg: otherTemperatureSlope,
+        massKg: mass,
+        otherMassKg: otherMass
+      });
+      conductionDUSpecific += dE / mass;
     }
+    const clampedConductionDUSpecific = clampSpecificEnergyDeltaToTemperatureRange({
+      dUSpecific: conductionDUSpecific,
+      temperatureK: temperature,
+      temperatureSlopeKdPerJPerKg: temperatureSlope,
+      minTemperatureK: neighborMinTemperatureK,
+      maxTemperatureK: neighborMaxTemperatureK
+    });
+    du[i] += clampedConductionDUSpecific;
     const position = [
       sphParticleState.state[oi],
       sphParticleState.state[oi + 1],
@@ -864,9 +1072,17 @@ export function runSphThermalStepCpu({
     for (let faceIndex = 0; faceIndex < FACE_IDS.length; faceIndex += 1) {
       const distance = wallDistance(position, dims, faceIndex);
       if (distance >= layer) continue;
-      const dE = wallRate * (wallTemp(wallTemperaturesK, FACE_IDS[faceIndex]) - temperature) * (1 - distance / layer) * dt;
-      du[i] += dE / mass;
-      wallHeatJ[FACE_IDS[faceIndex]] += dE;
+      const faceWallTempK = wallTemp(wallTemperaturesK, FACE_IDS[faceIndex]);
+      const currentTemperatureK = temperature + du[i] * temperatureSlope;
+      const rawDUSpecific = wallRate * (faceWallTempK - currentTemperatureK) * (1 - distance / layer) * dt / mass;
+      const dUSpecific = clampWallSpecificEnergyDelta({
+        dUSpecific: rawDUSpecific,
+        temperatureK: currentTemperatureK,
+        wallTemperatureK: faceWallTempK,
+        temperatureSlopeKdPerJPerKg: temperatureSlope
+      });
+      du[i] += dUSpecific;
+      wallHeatJ[FACE_IDS[faceIndex]] += dUSpecific * mass;
     }
   }
 
@@ -1085,7 +1301,7 @@ export async function runSphThermalStepWebGpu({
   wallTemperaturesK = {},
   boxDimsM = [5, 5, 5],
   dtS = 0,
-  conductionRate = 1.5e4,
+  conductionRate = 15,
   wallRate = 6e4,
   wallLayerM = sphParticleState?.smoothingLengthM,
   retainOutputParticleBuffers = false,
@@ -1142,10 +1358,10 @@ export async function runSphThermalStepWebGpu({
     wallTemperaturesK
   }));
 
-  const module = device.createShaderModule({ label: 'ulg-sph-thermal-step', code: sphThermalStepWgsl });
-  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+  const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-thermal-step.v1',
     label: 'ulg-sph-thermal-step',
-    module,
+    code: sphThermalStepWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -1190,16 +1406,21 @@ export async function runSphThermalStepWebGpu({
     ]);
     state = new Float32Array(stateBytes);
     thermo = new Float32Array(thermoBytes);
-  } else if (device.queue?.onSubmittedWorkDone) {
-    await device.queue.onSubmittedWorkDone();
   }
-  if (!borrowedStateBuffer) stateBuffer.destroy?.();
-  if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
-  if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
-  paramsBuffer.destroy?.();
-  if (!retainOutputParticleBuffers) {
-    outStateBuffer.destroy?.();
-    outThermoBuffer.destroy?.();
+  const cleanup = () => {
+    if (!borrowedStateBuffer) stateBuffer.destroy?.();
+    if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
+    if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
+    paramsBuffer.destroy?.();
+    if (!retainOutputParticleBuffers) {
+      outStateBuffer.destroy?.();
+      outThermoBuffer.destroy?.();
+    }
+  };
+  if (noFullReadback) {
+    deferSubmittedWorkCleanup(device, cleanup);
+  } else {
+    cleanup();
   }
   return outputEnvelope({
     backend: 'webgpu',

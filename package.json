@@ -10,8 +10,13 @@
     "icc:update": "node scripts/update-icc.mjs",
     "stage:service-assets": "node scripts/stage-service-assets.mjs",
     "status:live": "node scripts/live-status.mjs",
+    "probe:sph-long-horizon": "node scripts/sph-long-horizon-probe.mjs",
+    "probe:sph-visual-matrix": "node scripts/sph-visual-sanity-matrix.mjs",
     "test": "node --test tests/*.test.mjs",
-    "test:e2e": "playwright test --config tests/playwright.config.mjs"
+    "test:e2e": "playwright test --config tests/playwright.config.mjs",
+    "test:sph-visual": "ULG_SPH_VISUAL_CAPTURE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 playwright test --config tests/playwright.config.mjs --grep \"SPH phase visual sequence\"",
+    "test:physics-atomics": "node --test tests/physicsBehaviorInvariants.test.mjs",
+    "test:physics-liquid-atomic": "ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test tests/physicsBehaviorInvariants.test.mjs"
   },
   "dependencies": {
     "ajv": "^8.20.0",

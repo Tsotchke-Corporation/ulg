@@ -50,7 +50,9 @@ function pressureInterfaceForceSolverFixture({
   force = [8, 0, 0],
   reactionForce = [-8, 0, 0],
   pressurePa = 100000,
-  status = 1
+  status = 1,
+  forceApplicationStatus = 'solver-ready-not-applied',
+  gridForceApplicationApproved = false
 } = {}) {
   const forceRowValues = new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
   forceRowValues.set([
@@ -64,7 +66,8 @@ function pressureInterfaceForceSolverFixture({
     schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
     status: 'pressure-interface-force-solver-ready',
     forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
-    forceApplicationStatus: 'solver-ready-not-applied',
+    forceApplicationStatus,
+    gridForceApplicationApproved,
     forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
     forceRowCount: 1,
     forceRowValues
@@ -160,12 +163,12 @@ test('MLS-MPM grid update WGSL declares grid update bindings', () => {
 });
 
 test('CPU MLS-MPM grid update converts momentum to velocity and applies gravity', () => {
-  const p2gGridProjection = manualP2gProjection();
+  const p2gGridProjection = manualP2gProjection({ nodePosition: [2, 2, 2] });
   const update = updateMlsMpmGridCpu({
     p2gGridProjection,
     dt: 0.1,
     gravityMPerS2: [0, -10, 0],
-    boxDimsM: [3, 3, 3],
+    boxDimsM: [5, 5, 5],
     cflFactor: 10
   });
 
@@ -183,24 +186,46 @@ test('CPU MLS-MPM grid update converts momentum to velocity and applies gravity'
   assert.equal(update.fullPhysicsValidation, false);
 });
 
-test('CPU MLS-MPM grid update applies CFL clamp and sealed-wall normal clamp', () => {
+test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => {
   const cfl = updateMlsMpmGridCpu({
-    p2gGridProjection: manualP2gProjection({ momentum: [100, 0, 0] }),
+    p2gGridProjection: manualP2gProjection({ momentum: [100, 0, 0], nodePosition: [2, 2, 2] }),
     dt: 0.1,
     gravityMPerS2: [0, 0, 0],
-    boxDimsM: [3, 3, 3],
+    boxDimsM: [5, 5, 5],
     cflFactor: 0.2
   });
   nearlyEqual(cfl.updatedGridNodes[1], 2);
 
   const wall = updateMlsMpmGridCpu({
-    p2gGridProjection: manualP2gProjection({ momentum: [-4, 0, 0], nodePosition: [0, 1, 1] }),
+    p2gGridProjection: manualP2gProjection({ momentum: [3, -4, 5], nodePosition: [2, 1, 2] }),
     dt: 0.1,
     gravityMPerS2: [0, 0, 0],
-    boxDimsM: [3, 3, 3],
+    boxDimsM: [5, 5, 5],
     cflFactor: 10
   });
   nearlyEqual(wall.updatedGridNodes[1], 0);
+  nearlyEqual(wall.updatedGridNodes[2], 0);
+  nearlyEqual(wall.updatedGridNodes[3], 0);
+});
+
+test('CPU MLS-MPM grid update clamps exactly one-cell wall boundary nodes', () => {
+  const lower = updateMlsMpmGridCpu({
+    p2gGridProjection: manualP2gProjection({ momentum: [0, -4, 0], nodePosition: [2, 1, 2] }),
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [5, 5, 5],
+    cflFactor: 10
+  });
+  const upper = updateMlsMpmGridCpu({
+    p2gGridProjection: manualP2gProjection({ momentum: [0, 4, 0], nodePosition: [2, 4, 2] }),
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [5, 5, 5],
+    cflFactor: 10
+  });
+
+  nearlyEqual(lower.updatedGridNodes[2], 0);
+  nearlyEqual(upper.updatedGridNodes[2], 0);
 });
 
 test('optional MLS-MPM grid update returns CPU reference when WebGPU is not requested', async () => {
@@ -218,6 +243,7 @@ test('optional MLS-MPM grid update returns CPU reference when WebGPU is not requ
 
   assert.equal(execution.schema, ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA);
   assert.equal(execution.backend, 'cpu-reference');
+  assert.equal(execution.gridShift, 1);
   assert.equal(execution.webgpuStatus.status, 'not-requested');
   assert.equal(execution.fullPhysicsValidation, false);
 });
@@ -247,6 +273,8 @@ test('WebGPU MLS-MPM grid update binds a full pressure-force row for zero-force 
 
   assert.equal(update.backend, 'webgpu');
   assert.equal(update.readbackMode, 'no-full-readback');
+  assert.equal(update.queueCompletionStatus, 'queue-submitted-cleanup-deferred');
+  assert.equal(update.queueCompletionMethod, 'deferred queue.onSubmittedWorkDone cleanup');
   assert.equal(update.pressureInterfaceForceRowCount, 0);
   assert.ok(pressureForceBuffer);
   assert.equal(
@@ -255,7 +283,7 @@ test('WebGPU MLS-MPM grid update binds a full pressure-force row for zero-force 
   );
 });
 
-test('WebGPU MLS-MPM grid update marks no-readback pressure impulse as submitted but unverified', async () => {
+test('WebGPU MLS-MPM grid update blocks ready-but-not-applied pressure rows by default', async () => {
   const device = fakeGridUpdateDevice();
   const update = await runMlsMpmGridUpdateWebGpu({
     device,
@@ -267,6 +295,33 @@ test('WebGPU MLS-MPM grid update marks no-readback pressure impulse as submitted
 
   assert.equal(update.backend, 'webgpu');
   assert.equal(update.readbackMode, 'no-full-readback');
+  assert.equal(update.queueCompletionStatus, 'queue-submitted-cleanup-deferred');
+  assert.equal(update.queueCompletionMethod, 'deferred queue.onSubmittedWorkDone cleanup');
+  assert.equal(update.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
+  assert.equal(update.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-blocked-not-approved');
+  assert.equal(update.pressureInterfaceForceConsumerStatus, 'blocked-pressure-force-solver-not-approved-for-grid-application');
+  assert.equal(update.pressureInterfaceAppliedImpulseSource, 'not-applied-solver-ready-not-approved');
+  assert.equal(update.pressureInterfaceImpulseProofStatus, 'solver-force-application-status-not-approved');
+  assert.equal(update.pressureInterfaceForceRowCount, 0);
+  nearlyEqual(update.pressureInterfaceAppliedImpulseMagnitudeNSeconds, 0, 1e-9);
+});
+
+test('WebGPU MLS-MPM grid update marks approved no-readback pressure impulse as submitted but unverified', async () => {
+  const device = fakeGridUpdateDevice();
+  const update = await runMlsMpmGridUpdateWebGpu({
+    device,
+    p2gGridProjection: manualP2gProjection(),
+    pressureInterfaceForceSolver: pressureInterfaceForceSolverFixture({
+      forceApplicationStatus: 'apply-to-mls-mpm-grid'
+    }),
+    dt: 0.25,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(update.backend, 'webgpu');
+  assert.equal(update.readbackMode, 'no-full-readback');
+  assert.equal(update.queueCompletionStatus, 'queue-submitted-cleanup-deferred');
+  assert.equal(update.queueCompletionMethod, 'deferred queue.onSubmittedWorkDone cleanup');
   assert.equal(update.pressureInterfaceForceSolverSchema, ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA);
   assert.equal(update.pressureInterfaceForceApplicationStatus, 'pressure-interface-grid-force-consumer-submitted-unverified');
   assert.equal(update.pressureInterfaceForceConsumerStatus, 'grid-momentum-impulse-submitted-unverified-no-full-readback');

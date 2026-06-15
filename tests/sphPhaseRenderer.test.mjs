@@ -9,24 +9,40 @@ import {
   SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
+  SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
+  SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
+  SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
+  SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES,
+  SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
+  SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   createContinuousSurfaceBatches,
+  cpuMarchingCubesRadiusFloorM,
   createOpticalGpuLookupForSurfaceBatches,
   createOpticalGpuTableForSurfaceBatches,
   createProductEventSurfaceBatches,
+  buildSphResidentPressureInterfaceStateSummary,
   hideRenderFieldSurfaceAfterGrace,
+  mergeSameMaterialPhaseSurfaceBatchesForRenderField,
+  normalizeResidentSurfaceDrawOverlayMode,
   residentSurfaceBatchIdentitySignature,
+  residentRenderFieldReadbackModeForSurfaceOverlay,
+  resolveResidentSurfaceDrawOverlayPolicy,
   renderAlphaFromOpticalResponse,
   renderDepthWriteFromOpticalResponse,
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
+  normalizeSurfaceRadiusForRenderField,
   residentSurfaceDrawOrder,
   residentSurfaceDrawPipelineKey,
   resolveRenderFieldSurfaceVisibility,
   resolveOpticalSurfaceVisibility,
   shouldRetainResidentSurfaceDrawOverlay,
   SPH_SURFACE_INACTIVE_GRACE_FRAMES,
+  surfaceRadiusScaleForRenderBatch,
+  surfaceRadiusMetersFromRenderFieldRadius,
   stableSurfaceRenderOrder
 } from '../src/visualization/sphPhaseScene.js';
+import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
 import { createMlsMpmGridSpec } from '../src/runtime/sph/sphGridGpuKernel.js';
 
 test('SPH phase renderer batches particles into continuous material surfaces', () => {
@@ -57,6 +73,39 @@ test('SPH phase renderer batches particles into continuous material surfaces', (
   assert.ok(fe.surfaceRadiusM > 0);
   assert.ok(h2o.normalizedPositions.every((value) => value > 0 && value < 1));
   assert.ok(fe.normalizedPositions.every((value) => value > 0 && value < 1));
+});
+
+test('resident motion diagnostic treats batch-visible motion as a refresh trigger', () => {
+  const residentStep = {
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-step-execution.v0',
+    dt: 0.0005,
+    diagnostics: {
+      compactGpuSummaryAvailable: true,
+      maxDisplacementM: 0.0001,
+      maxSpeedMPerS: 1.25,
+      pressureInterfaceAppliedImpulseMagnitudeNSeconds: 0
+    }
+  };
+  const residentSteps = {
+    schema: 'peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0',
+    completedStepCount: 256,
+    finalStep: residentStep
+  };
+
+  const diagnostic = residentMotionDiagnostic({
+    residentStep,
+    residentSteps,
+    gridSpacingM: 0.26666666666666666
+  });
+
+  assert.equal(diagnostic.status, 'batch-motion-estimate-visible');
+  assert.equal(diagnostic.batchMotionEstimateVisible, true);
+  assert.equal(diagnostic.completedStepCount, 256);
+  assert.equal(diagnostic.stepDtS, 0.0005);
+  assert.ok(diagnostic.maxDisplacementM < diagnostic.visibleThresholdM);
+  assert.ok(diagnostic.estimatedBatchDisplacementUpperBoundM > diagnostic.visibleThresholdM);
+  assert.equal(diagnostic.scientificValidation, false);
+  assert.equal(diagnostic.fullPhysicsValidation, false);
 });
 
 test('SPH phase renderer preserves material and phase descriptors for optical closures', () => {
@@ -118,6 +167,79 @@ test('SPH phase renderer does not collapse arbitrary selected elements to the la
   const summary = Object.fromEntries(batches.map((batch) => [batch.material, batch.count]));
   assert.deepEqual(summary, { Na: 2, Au: 2 });
   assert.deepEqual(batches.map((batch) => batch.surfaceKey).sort(), ['Au|Au|liquid', 'Na|Na|solid']);
+});
+
+test('SPH phase renderer preserves same-material render domains as separate surfaces', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 0.4, 2.6,
+      2.4, 2.8, 2.4,
+      2.6, 2.8, 2.6
+    ]),
+    colorsRgb: new Float32Array([
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' }
+    ]
+  });
+
+  assert.equal(batches.length, 2);
+  assert.deepEqual(
+    batches.map((batch) => [batch.surfaceKey, batch.renderDomainId, batch.count]).sort(),
+    [
+      ['h2o|h2o|liquid|domain:base', 1, 2],
+      ['h2o|h2o|liquid|domain:drop', 2, 2]
+    ]
+  );
+});
+
+test('SPH resident render fields merge same-material domains into one visible material field', () => {
+  const batches = createContinuousSurfaceBatches({
+    boxEdgeM: 5,
+    positionsM: new Float32Array([
+      2.4, 0.4, 2.4,
+      2.6, 0.4, 2.6,
+      2.4, 1.1, 2.4,
+      2.6, 1.1, 2.6
+    ]),
+    colorsRgb: new Float32Array([
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1,
+      0.2, 0.35, 1
+    ]),
+    materials: [
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 1, renderDomainKey: 'base' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' },
+      { material: 'h2o', phase: 'liquid', renderKey: 'h2o', renderDomainId: 2, renderDomainKey: 'drop' }
+    ]
+  });
+
+  const [merged] = mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches);
+
+  assert.equal(merged.surfaceKey, 'h2o|h2o|liquid');
+  assert.equal(merged.renderDomainId, 0);
+  assert.equal(merged.renderDomainKey, null);
+  assert.equal(merged.count, 4);
+  assert.equal(merged.positionsM.length, 12);
+  assert.equal(merged.normalizedPositions.length, 12);
+  assert.deepEqual(
+    merged.mergedRenderDomains.map((domain) => [domain.renderDomainId, domain.renderDomainKey, domain.count]),
+    [
+      [1, 'base', 2],
+      [2, 'drop', 2]
+    ]
+  );
 });
 
 test('SPH phase renderer creates event-only product surfaces from reaction inventory', () => {
@@ -226,6 +348,34 @@ test('SPH surface radius is independent of box size while the MLS-MPM grid grows
   const largeGrid = createMlsMpmGridSpec({ boxDimsM: [10, 10, 10], gridSpacingM: 0.32 });
   assert.ok(largeGrid.gridDims.every((dim, index) => dim > smallGrid.gridDims[index]));
   assert.ok(largeGrid.gridNodeCount > smallGrid.gridNodeCount);
+});
+
+test('SPH renderer converts physical blob radius into padded render-field units', () => {
+  const radiusM = 0.4266666667;
+  const refEdgeM = 5;
+  const fieldPadding = 0.22;
+  const fieldSpan = 1 - 2 * fieldPadding;
+  const radiusNorm = normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM, fieldPadding);
+
+  assert.ok(Math.abs(radiusNorm - ((radiusM / refEdgeM) * fieldSpan)) < 1e-12);
+  assert.ok(Math.abs(surfaceRadiusMetersFromRenderFieldRadius(radiusNorm, refEdgeM, fieldPadding) - radiusM) < 1e-12);
+  assert.ok(radiusNorm < radiusM / refEdgeM);
+});
+
+test('SPH renderer defaults to a bounded isosurface radius scale', () => {
+  assert.equal(SPH_SURFACE_RADIUS_SCALE_DEFAULT, 0.15);
+  assert.ok(SPH_SURFACE_RADIUS_SCALE_DEFAULT > 0);
+  assert.ok(SPH_SURFACE_RADIUS_SCALE_DEFAULT <= 0.5);
+  assert.equal(SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN, 0.2);
+  assert.equal(SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES, 27);
+  assert.equal(SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN, 64);
+  assert.equal(SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN, 32);
+  assert.equal(SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS, 0.5);
+  assert.equal(surfaceRadiusScaleForRenderBatch({ count: 27 }, SPH_SURFACE_RADIUS_SCALE_DEFAULT), 0.2);
+  assert.equal(surfaceRadiusScaleForRenderBatch({ count: 28 }, SPH_SURFACE_RADIUS_SCALE_DEFAULT), 0.15);
+  assert.equal(surfaceRadiusScaleForRenderBatch({ count: 27 }, 0.3), 0.3);
+  assert.ok(cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN) < 0.15);
+  assert.ok(cpuMarchingCubesRadiusFloorM(5, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN) < cpuMarchingCubesRadiusFloorM(5, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN));
 });
 
 test('SPH phase renderer derives a packed optical GPU table from surface batches', () => {
@@ -494,6 +644,35 @@ test('SPH resident render fields retain previous mesh during inactive grace fram
   assert.equal(calls.update, 1);
 });
 
+test('SPH resident render fields hide empty surfaces without stale grace retention', () => {
+  const calls = { reset: 0, update: 0 };
+  const surface = {
+    inactiveFrameCount: 0,
+    config: { isolation: 80 },
+    mesh: {
+      visible: true,
+      isolation: 74,
+      userData: {},
+      reset() {
+        calls.reset += 1;
+      },
+      update() {
+        calls.update += 1;
+      }
+    }
+  };
+
+  assert.equal(
+    hideRenderFieldSurfaceAfterGrace(surface, 'resident-gpu-render-field', { immediate: true }),
+    true
+  );
+  assert.equal(surface.mesh.visible, false);
+  assert.equal(surface.mesh.isolation, 80);
+  assert.equal(surface.mesh.userData.surfaceInactiveFrameCount, 1);
+  assert.equal(calls.reset, 1);
+  assert.equal(calls.update, 1);
+});
+
 test('SPH renderer gives surfaces stable intra-layer render order', () => {
   const baseOrder = SPH_PHASE_RENDER_ORDER.transmissiveSurface;
   const waterOrder = stableSurfaceRenderOrder(baseOrder, 'h2o|h2o|liquid');
@@ -520,6 +699,54 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT, 'depth24plus');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT, 'rgba16float');
   assert.equal(SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT, 'rgba8unorm');
+});
+
+test('SPH resident overlay policy chooses no-full-readback only when overlay is available', () => {
+  assert.equal(normalizeResidentSurfaceDrawOverlayMode('1'), 'enabled');
+  assert.equal(normalizeResidentSurfaceDrawOverlayMode('three'), 'disabled');
+  assert.equal(normalizeResidentSurfaceDrawOverlayMode('wat'), 'auto');
+
+  const availableContainer = {
+    ownerDocument: {
+      createElement: () => ({
+        getContext: (name) => (name === 'webgpu' ? {} : null)
+      })
+    }
+  };
+  const unavailableContainer = {
+    ownerDocument: {
+      createElement: () => ({
+        getContext: () => null
+      })
+    }
+  };
+  const navigatorRef = { gpu: { getPreferredCanvasFormat: () => 'rgba8unorm' } };
+
+  const autoReady = resolveResidentSurfaceDrawOverlayPolicy({
+    mode: 'auto',
+    container: availableContainer,
+    navigatorRef
+  });
+  assert.equal(autoReady.enabled, true);
+  assert.equal(autoReady.status, 'surface-draw-overlay-auto-ready');
+  assert.equal(residentRenderFieldReadbackModeForSurfaceOverlay(autoReady.enabled), 'no-full-readback');
+
+  const autoUnavailable = resolveResidentSurfaceDrawOverlayPolicy({
+    mode: 'auto',
+    container: unavailableContainer,
+    navigatorRef
+  });
+  assert.equal(autoUnavailable.enabled, false);
+  assert.equal(autoUnavailable.status, 'surface-draw-overlay-auto-unavailable');
+  assert.equal(residentRenderFieldReadbackModeForSurfaceOverlay(autoUnavailable.enabled), 'full-parity-readback');
+
+  const disabled = resolveResidentSurfaceDrawOverlayPolicy({
+    mode: '0',
+    container: availableContainer,
+    navigatorRef
+  });
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.status, 'surface-draw-overlay-disabled-by-policy');
 });
 
 test('SPH resident overlay retains the last draw buffers across same-surface refreshes', () => {
@@ -678,4 +905,87 @@ test('SPH renderer orders transparent surfaces and disables their depth writes',
   assert.equal(renderDepthWriteFromOpticalResponse(alphaSurface, alphaSurface), false);
   assert.equal(renderLayerFromOpticalResponse(alphaSurface, alphaSurface), 'alpha-surface');
   assert.equal(renderOrderFromOpticalResponse(alphaSurface, alphaSurface), SPH_PHASE_RENDER_ORDER.alphaSurface);
+});
+
+test('SPH resident pressure interface state owns retained force rows outside render cadence', () => {
+  const materialInterfaceField = {
+    schema: 'peercompute.ulg.sph-material-interface-field.v0',
+    status: 'material-interface-field-ready',
+    surfaceCount: 1,
+    readySurfaceCount: 1,
+    totalSurfaceAreaM2: 2,
+    elementCount: 1,
+    elements: [{
+      status: 'interface-element-ready',
+      surfaceIndex: 0,
+      surfaceKey: 'h2o|h2o|liquid',
+      material: 'h2o',
+      phase: 'liquid',
+      materialId: 1,
+      phaseId: 2,
+      axisId: 1,
+      centroidM: [0.5, 0.5, 0.5],
+      normalAreaVectorM2: [0, 2, 0],
+      areaM2: 2
+    }]
+  };
+  const gasPressureSummary = {
+    schema: 'peercompute.ulg.sph-resident-gas-pressure-summary.v0',
+    status: 'gpu-resident-gas-pressure-summary-ready',
+    source: 'gpu-resident-product-mass',
+    pressureFeedback: {
+      schema: 'peercompute.ulg.sph-gas-pressure-feedback.v0',
+      status: 'wall-pressure-ledger-ready',
+      pressureGaugePa: 10,
+      gasCellField: {
+        schema: 'peercompute.ulg.sph-sealed-gas-pressure-cell-field.v0',
+        status: 'gas-cell-pressure-field-ready',
+        uniformPressurePa: 10
+      }
+    }
+  };
+  const forceRowsUpload = {
+    status: 'webgpu-pressure-interface-force-rows-uploaded',
+    bufferRetained: true,
+    forceRowByteLength: 64,
+    signature: 'solver-signature',
+    pressureInterfaceForceRowsUploadQueueCompletionStatus: 'ordered-before-consumer-queue-completed',
+    pressureInterfaceForceRowsUploadQueueCompletionMethod: 'queue.writeBuffer -> queue.onSubmittedWorkDone',
+    pressureInterfaceForceRowsConsumerQueueCompletionStatus: 'queue-work-completed',
+    pressureInterfaceForceRowsConsumerQueueCompletionMethod: 'queue.onSubmittedWorkDone',
+    pressureInterfaceForceRowsUploadCleanupStatus: 'destroyed',
+    pressureInterfaceForceRowsUploadDestroyStatus: 'destroyed',
+    residentBufferLeaseLedgerStatus: 'active',
+    residentBufferLeaseResourceCount: 1,
+    residentBufferLeaseActiveLeaseCount: 1,
+    residentBufferLeaseSummary: { status: 'active', activeLeaseCount: 1 }
+  };
+
+  const state = buildSphResidentPressureInterfaceStateSummary({
+    materialInterfaceField,
+    gasPressureSummary,
+    pressureInterfaceForceRowsUpload: forceRowsUpload,
+    source: 'resident-physics-loop-pressure-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  assert.equal(state.schema, 'peercompute.ulg.sph-resident-pressure-interface-state.v0');
+  assert.equal(state.status, 'resident-pressure-interface-force-rows-ready');
+  assert.equal(state.pressureAuthority, 'resident-pressure-interface-state');
+  assert.equal(state.source, 'resident-physics-loop-pressure-interface-refresh');
+  assert.equal(state.sourceCadence, 'resident-step-completed');
+  assert.equal(state.pressureInterfaceCouplingStatus, 'pressure-interface-coupling-ready-for-solver');
+  assert.equal(state.pressureInterfaceForceSolverStatus, 'pressure-interface-force-solver-ready');
+  assert.equal(state.pressureInterfaceSolverForceRowCount, 1);
+  assert.equal(state.pressureInterfaceForceRowsBufferRetained, true);
+  assert.equal(state.pressureInterfaceForceRowsBufferByteLength, 64);
+  assert.equal(state.pressureInterfaceForceRowsUploadQueueCompletionStatus, 'ordered-before-consumer-queue-completed');
+  assert.equal(state.pressureInterfaceForceRowsUploadQueueCompletionMethod, 'queue.writeBuffer -> queue.onSubmittedWorkDone');
+  assert.equal(state.pressureInterfaceForceRowsConsumerQueueCompletionStatus, 'queue-work-completed');
+  assert.equal(state.pressureInterfaceForceRowsConsumerQueueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.equal(state.pressureInterfaceForceRowsUploadCleanupStatus, 'destroyed');
+  assert.equal(state.pressureInterfaceForceRowsUploadDestroyStatus, 'destroyed');
+  assert.equal(state.pressureInterfaceForceRowsLeaseStatus, 'active');
+  assert.equal(state.pressureInterfaceForceRowsLeaseActiveCount, 1);
+  assert.equal(state.gpuAuthoritativeState, true);
 });

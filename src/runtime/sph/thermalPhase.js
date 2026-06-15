@@ -6,9 +6,8 @@
 //
 // Energy-conserving pairwise SPH conduction (interior) + Dirichlet wall flux (exchanged with the
 // reservoirs, tracked per face for the energy ledger). Phase comes from the same
-// equilibriumFromSpecificEnergy the colour uses. Rates are accelerated for interactive
-// visualization (labelled), but the structure — conduction, wall flux, latent-heat plateaus — is
-// physical.
+// equilibriumFromSpecificEnergy the colour uses. The default rates are deliberately conservative for
+// macro-particle stability; higher rates belong in explicit stress tests or validated closures.
 
 import {
   cachedParticleEquilibriumFromSpecificEnergy,
@@ -48,7 +47,7 @@ export function thermalStep(state, {
   boxEdgeM,
   boxDimsM, // [Lx, Ly, Lz]; falls back to a cube of boxEdgeM
   dtS,
-  conductionRate = 1.5e4,
+	  conductionRate = 15,
   wallRate = 6e4,
   wallLayerM = null
 } = {}) {

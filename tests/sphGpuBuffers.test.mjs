@@ -173,7 +173,10 @@ test('SPH GPU particle buffer destroy honors ownership flags for borrowed buffer
 test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first step', () => {
   const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
   const packed = buildMlsMpmGpuParticleBuffers(demo.state, {
-    materialProperties: demo.materialProperties
+    materialProperties: demo.materialProperties,
+    viscosityEnabled: true,
+    mlsMpmArtificialViscosityAlpha: 0.04,
+    viscosityLengthM: demo.state.smoothingLengthM
   });
   const rows = decodeMlsMpmGpuParticleRows(packed);
   const h2o = rows.find((row) => row.metadata.material === 'h2o');
@@ -198,6 +201,13 @@ test('MLS-MPM GPU mechanics buffer packs identity mechanics before the first ste
   assert.equal(fe.lameLambdaPa, 0);
   assert.ok(fe.soundSpeedMPerS > 0);
   assert.equal(fe.eosModelId, 1);
+  assert.equal(h2o.dynamicViscosityPaS, 0);
+  assert.equal(h2o.surfaceTensionNPerM, 0);
+  assert.ok(fe.dynamicViscosityPaS > 0);
+  assert.equal(fe.surfaceTensionNPerM, 0);
+  assert.ok(packed.viscosityEnabled);
+  assert.ok(packed.mlsMpmArtificialViscosityAlpha > 0);
+  assert.ok(packed.viscosityLengthM > 0);
 });
 
 test('MLS-MPM GPU mechanics buffer preserves carrier-updated F, C, J, and V0', () => {

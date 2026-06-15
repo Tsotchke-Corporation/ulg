@@ -22,6 +22,10 @@ const FAMILY_BINARY_IONIC = 'binary-ionic-synthesis';
 
 const ALKALI_METALS = new Set([3, 11, 19, 37, 55, 87]);
 const ALKALINE_EARTH_METALS = new Set([4, 12, 20, 38, 56, 88]);
+const ROOM_TEMPERATURE_WATER_REACTIVE_METALS = new Set([
+  ...ALKALI_METALS,
+  20, 38, 56, 88
+]);
 const COMMON_CATION_CHARGES = new Map([
   [13, 3], // Al
   [21, 3], [22, 4], [23, 5], [24, 3], [25, 2], [26, 2], [27, 2], [28, 2], [29, 1], [30, 2],
@@ -64,6 +68,12 @@ export function commonCationCharge(Z) {
 
 export function commonAnionChargeMagnitude(Z) {
   return COMMON_ANION_CHARGES.get(Z) ?? null;
+}
+
+export function waterReactiveMetalClass(Z) {
+  if (ALKALI_METALS.has(Z)) return 'alkali-metal-water-reactive';
+  if (ROOM_TEMPERATURE_WATER_REACTIVE_METALS.has(Z)) return 'alkaline-earth-water-reactive';
+  return null;
 }
 
 function term(coefficient, speciesOrFormula, atomCounts = null) {
@@ -160,6 +170,8 @@ function hydroxideAtomCounts(metalZ, charge) {
 function metalWaterCandidate(metalSpecies, waterSpecies) {
   const metal = singleElement(metalSpecies);
   if (!metal) return null;
+  const waterReactiveClass = waterReactiveMetalClass(metal.Z);
+  if (!waterReactiveClass) return null;
   const charge = commonCationCharge(metal.Z);
   if (!charge) return null;
 
@@ -193,12 +205,14 @@ function metalWaterCandidate(metalSpecies, waterSpecies) {
       productAtomCounts,
       notes: [
         'Stoichiometry is charge-balanced by common cation charge and exact atom conservation.',
-        'Heat release is a provisional heuristic for ranking/contact gating only; it is not validated thermochemistry.'
+        'Heat release is a provisional heuristic for ranking/contact gating only; it is not validated thermochemistry.',
+        `Room-temperature water reactivity class: ${waterReactiveClass}.`
       ]
     }),
     limitations: [
       'Common ion charge is a first-pass heuristic; oxidation state selection is not yet solved from electronic structure.',
-      'Activation barriers and aqueous solvation are not derived in this layer.'
+      'Activation barriers and aqueous solvation are not derived in this layer.',
+      'The zero-barrier water family is restricted to metals with a conservative room-temperature water-reactivity class.'
     ]
   });
 }

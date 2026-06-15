@@ -18,13 +18,27 @@ import {
   SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT
 } from '../ulg-gpu-abi/src/index.js';
 import {
+  ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA,
+  ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_RESULT_SCHEMA,
+  ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA,
+  ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA,
+  ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA,
+  ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA,
+  ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEP_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA,
+  createMlsMpmResidentStepComputeTask,
+  createMlsMpmResidentStepsComputeTask,
+  createMlsMpmResidentStepGpuFenceReport,
   destroyMlsMpmResidentStepBuffers,
   destroyMlsMpmResidentStepsBuffers,
+  runMlsMpmResidentStepComputeTask,
+  runMlsMpmResidentStepsComputeTask,
   runMlsMpmResidentStepsWithOptionalWebGpu,
-  runMlsMpmResidentStepWithOptionalWebGpu
+  runMlsMpmResidentStepWithOptionalWebGpu,
+  submitMlsMpmResidentStepComputeTask,
+  submitMlsMpmResidentStepsComputeTask
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import { projectMlsMpmP2gGridCpu } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
@@ -32,8 +46,16 @@ import {
   updateMlsMpmGridCpu
 } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
 import { reconstructMlsMpmG2pCpu } from '../src/runtime/sph/sphG2pGpuKernel.js';
-import { runMlsMpmResidentSummaryWebGpu } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
+import {
+  MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS,
+  runMlsMpmResidentSummaryWebGpu
+} from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
 import { ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA } from '../src/runtime/sph/sphReactionGpuSummary.js';
+import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
+import {
+  RESIDENT_STATE_FAMILIES,
+  ULG_RESIDENT_STATE_AUTHORITY_LEDGER_SCHEMA
+} from '../src/runtime/residentStateAuthority.js';
 
 function manualBuffers({
   position = [1.25, 1.25, 1.25],
@@ -85,6 +107,8 @@ function nearlyEqual(actual, expected, tolerance = 1e-6) {
   );
 }
 
+const MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+
 function nodeOffset(gridSpec, nodeI, nodeJ, nodeK, strideFloats) {
   const [, gny, gnz] = gridSpec.gridDims;
   return (((nodeI + gridSpec.gridShift) * gny + (nodeJ + gridSpec.gridShift)) * gnz + (nodeK + gridSpec.gridShift))
@@ -96,7 +120,9 @@ function pressureInterfaceForceSolverFixture({
   force = [8, 0, 0],
   reactionForce = [-8, 0, 0],
   pressurePa = 100000,
-  status = 1
+  status = 1,
+  forceApplicationStatus = 'solver-ready-not-applied',
+  gridForceApplicationApproved = false
 } = {}) {
   const forceRowValues = new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length);
   forceRowValues.set([
@@ -110,7 +136,8 @@ function pressureInterfaceForceSolverFixture({
     schema: ULG_SPH_PRESSURE_INTERFACE_FORCE_SOLVER_SCHEMA,
     status: 'pressure-interface-force-solver-ready',
     forceCouplingStatus: 'pressure-force-solver-ready-not-applied',
-    forceApplicationStatus: 'solver-ready-not-applied',
+    forceApplicationStatus,
+    gridForceApplicationApproved,
     forceApplicationTarget: 'pending-mls-mpm-grid-force-consumer',
     forceRowCount: 1,
     forceRowValues
@@ -143,6 +170,201 @@ function fakeBufferTracker() {
       };
     }
   };
+}
+
+function fakeGpuResidentLaneManager() {
+  const activeLeases = new Map();
+  const calls = {
+    acquire: [],
+    complete: [],
+    reject: []
+  };
+  let leaseOrdinal = 0;
+  const fenceSatisfied = (status) => [
+    'gpu-fence-completed',
+    'queue-work-completed',
+    'readback-map-completed',
+    'ordered-before-consumer-queue-completed'
+  ].includes(String(status || ''));
+  return {
+    calls,
+    get activeLeaseCount() {
+      return activeLeases.size;
+    },
+    acquireLease(spec) {
+      const leaseId = `${spec.laneId || 'gpu-lane'}:lease:${++leaseOrdinal}`;
+      const lease = {
+        schema: 'peercompute.compute.gpu-resident-lane-lease.v0',
+        leaseId,
+        laneId: spec.laneId,
+        stateKey: spec.stateKey,
+        domainKey: spec.domainKey,
+        solverId: spec.solverId,
+        taskId: spec.taskId,
+        owner: spec.owner,
+        readFamilies: [...(spec.readFamilies || [])],
+        writeFamilies: [...(spec.writeFamilies || [])],
+        retainedBufferRefs: [...(spec.retainedBufferRefs || [])],
+        queueFencePolicy: spec.queueFencePolicy,
+        copyBudget: { ...(spec.copyBudget || {}) },
+        status: 'active'
+      };
+      activeLeases.set(leaseId, lease);
+      calls.acquire.push({ spec: { ...spec, copyBudget: { ...(spec.copyBudget || {}) } }, lease });
+      return { ...lease, readFamilies: [...lease.readFamilies], writeFamilies: [...lease.writeFamilies], retainedBufferRefs: [...lease.retainedBufferRefs] };
+    },
+    completeLease(leaseId, options = {}) {
+      const lease = activeLeases.get(leaseId);
+      if (!lease) throw new Error(`unknown fake GPU resident lane lease: ${leaseId}`);
+      const retainedBufferRefs = [...(options.retainedBufferRefs || lease.retainedBufferRefs || [])];
+      const gpuFence = {
+        schema: 'peercompute.compute.gpu-fence-report.v0',
+        status: options.status || options.queueCompletionStatus || 'queue-work-completed',
+        method: options.method || options.queueCompletionMethod || 'queue.onSubmittedWorkDone',
+        fenceSatisfied: fenceSatisfied(options.status || options.queueCompletionStatus || 'queue-work-completed'),
+        required: true,
+        laneId: lease.laneId,
+        stateKey: lease.stateKey,
+        queueFencePolicy: lease.queueFencePolicy,
+        queueCompletionStatus: options.queueCompletionStatus || options.status || null,
+        queueCompletionMethod: options.queueCompletionMethod || options.method || null,
+        retainedBufferRefs,
+        source: options.source || 'fake-gpu-resident-lane-manager'
+      };
+      const completedLease = {
+        ...lease,
+        status: gpuFence.fenceSatisfied ? 'completed' : 'completed-unsatisfied-fence',
+        retainedBufferRefs,
+        gpuFence
+      };
+      const execution = {
+        schema: 'peercompute.compute.gpu-resident-lane-execution.v0',
+        lease: completedLease,
+        gpuFence,
+        lane: {
+          laneId: lease.laneId,
+          stateKey: lease.stateKey,
+          retainedBufferRefs,
+          lastFence: gpuFence
+        }
+      };
+      activeLeases.delete(leaseId);
+      calls.complete.push({ leaseId, options: { ...options, retainedBufferRefs }, execution });
+      return execution;
+    },
+    rejectLease(leaseId, reason) {
+      const lease = activeLeases.get(leaseId);
+      activeLeases.delete(leaseId);
+      calls.reject.push({ leaseId, reason, lease });
+      return {
+        schema: 'peercompute.compute.gpu-resident-lane-execution.v0',
+        lease: lease ? { ...lease, status: 'rejected', releaseReason: reason } : null,
+        gpuFence: null,
+        lane: lease ? { laneId: lease.laneId, stateKey: lease.stateKey } : null
+      };
+    }
+  };
+}
+
+function noFullReadbackResidentStepFixture() {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const options = {
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    p2gRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'projected',
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        gridNodes: new Float32Array(),
+        gridBuffer: tracker.buffer('p2g-grid-unread'),
+        gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+        backend: 'webgpu',
+        status: 'updated',
+        sourceSchema: args.p2gGridProjection.schema,
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        updatedGridNodes: new Float32Array(),
+        updatedGridBuffer: tracker.buffer('updated-grid-unread'),
+        updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        queueCompletionStatus: 'queue-work-completed',
+        queueCompletionMethod: 'queue.onSubmittedWorkDone',
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'reconstructed',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: 512,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridShift: 1,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        mechanicsStrideFloats: 32,
+        state: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('g2p-state-unread'),
+        mechanicsBuffer: tracker.buffer('g2p-mechanics-unread'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    }
+  };
+  return { buffers, tracker, sourceThermoBuffer, options };
 }
 
 function residentProductMassHandle({
@@ -357,6 +579,11 @@ test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not
   assert.equal(step.normalHotLoopReadbackFree, false);
   assert.equal(step.gpuAuthoritativeState, false);
   assert.equal(step.residentBuffersRetained, false);
+  assert.equal(step.residentAuthorityLedger.schema, ULG_RESIDENT_STATE_AUTHORITY_LEDGER_SCHEMA);
+  assert.equal(step.residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
+  assert.equal(step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage, 'g2p');
+  assert.equal(step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].ownerStage, 'g2p');
+  assert.equal(step.diagnostics.residentAuthorityParticleOwner, 'g2p');
   assert.equal(step.diagnostics.particleCount, 1);
   assert.equal(step.diagnostics.sourceMassKg, 8);
   assert.equal(step.diagnostics.massDeltaKg, 0);
@@ -365,28 +592,55 @@ test('MLS-MPM resident step runs the full CPU reference chain when WebGPU is not
   assert.equal(step.fullPhysicsValidation, false);
 });
 
+test('MLS-MPM resident step preserves shifted grid origin into G2P', async () => {
+  const buffers = manualBuffers({
+    position: [2.5, 2.5, 2.5],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 1,
+    mechanicsDtS: 0.01
+  });
+  const gravity = [0, -9.80665, 0];
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    preferWebGpu: false,
+    gridSpacingM: 1,
+    boxDimsM: [5, 5, 5],
+    dt: 0.01,
+    gravityMPerS2: gravity,
+    cflFactor: 10
+  });
+
+  assert.equal(step.gridUpdate.gridShift, 1);
+  assert.equal(step.g2pReconstruction.gridShift, 1);
+  nearlyEqual(step.state[5], gravity[1] * 0.01, 1e-6);
+  nearlyEqual(step.state[1], 2.5 + gravity[1] * 0.01 * 0.01, 1e-6);
+});
+
 test('MLS-MPM grid update consumes pressure-interface force rows as grid impulses', () => {
   const buffers = manualBuffers({
-    position: [1, 1, 1],
+    position: [2, 2, 2],
     velocity: [0, 0, 0],
     mechanicsDtS: 0.25
   });
   const projection = projectMlsMpmP2gGridCpu({
     ...buffers,
     gridSpacingM: 1,
-    boxDimsM: [3, 3, 3]
+    boxDimsM: [5, 5, 5]
   });
-  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture();
+  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
+    centroid: [2, 2, 2],
+    forceApplicationStatus: 'apply-to-mls-mpm-grid'
+  });
   const update = updateMlsMpmGridCpu({
     p2gGridProjection: projection,
     dt: 0.25,
     gravityMPerS2: [0, 0, 0],
-    boxDimsM: [3, 3, 3],
+    boxDimsM: [5, 5, 5],
     cflFactor: 10,
     pressureInterfaceForceSolver
   });
-  const sourceCenterOffset = nodeOffset(projection, 1, 1, 1, projection.gridNodeStrideFloats);
-  const centerOffset = nodeOffset(update, 1, 1, 1, update.gridNodeStrideFloats);
+  const sourceCenterOffset = nodeOffset(projection, 2, 2, 2, projection.gridNodeStrideFloats);
+  const centerOffset = nodeOffset(update, 2, 2, 2, update.gridNodeStrideFloats);
   const centerWeight = 0.75 ** 3;
   const expectedCenterImpulse = 0.25 * 8 * centerWeight;
   const expectedCenterVelocity = expectedCenterImpulse / projection.gridNodes[sourceCenterOffset];
@@ -419,7 +673,9 @@ test('MLS-MPM grid update optional WebGPU path forwards pressure force rows', as
     gridSpacingM: 1,
     boxDimsM: [3, 3, 3]
   });
-  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture();
+  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
+    forceApplicationStatus: 'apply-to-mls-mpm-grid'
+  });
   const pressureInterfaceForceRowsBuffer = { label: 'pressure-interface-force-rows' };
   let runnerCalls = 0;
   const execution = await runMlsMpmGridUpdateWithOptionalWebGpu({
@@ -459,7 +715,9 @@ test('MLS-MPM resident step routes pressure-interface force solver into grid upd
     velocity: [0, 0, 0],
     mechanicsDtS: 0.25
   });
-  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture();
+  const pressureInterfaceForceSolver = pressureInterfaceForceSolverFixture({
+    forceApplicationStatus: 'apply-to-mls-mpm-grid'
+  });
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
     preferWebGpu: false,
@@ -501,7 +759,20 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
     0.125, 0.9, 1.1, 1,
     5, 4, 2, 1,
     450, 273, 900, 65,
-    0, 65, 12, 1
+    0, 65, 12, 1,
+    1, 2, 3, 4,
+    5, 6, -1, -2,
+    -3, 7, 8, 9,
+    0, 0.5, 1, 10,
+    11, 12, 1, 1,
+    12, 12, 0, 0,
+    1, 0, 10, 10,
+    20, 12, 1, 2,
+    3, -1, -2, -3,
+    7, 8, 9, 2.5,
+    4, 4, 5, 6,
+    0, 0.5, 1, 10,
+    11, 12, 1.5, 0
   ]);
   const device = fakeSummaryDevice(summaryValues);
   const tracker = fakeBufferTracker();
@@ -550,17 +821,60 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
 
   assert.equal(summary.status, 'compact-summary-ready');
   assert.equal(summary.reductionStrategy, 'two-pass-workgroup-reduction');
-  assert.equal(summary.compactPartialSummaryCount, 3);
-  assert.equal(summary.compactPartialSummaryByteLength, 384);
-  assert.equal(summary.compactReductionWorkgroupSize, 64);
-  assert.equal(summary.compactReadbackByteLength, 128);
-  assert.equal(summary.compactReadbackFloatCount, 32);
+  assert.equal(summary.compactPartialSummaryCount, 5);
+  assert.equal(summary.compactPartialSummaryByteLength, 5 * MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(summary.compactReductionWorkgroupSize, 32);
+  assert.equal(summary.compactReadbackByteLength, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(summary.compactReadbackFloatCount, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+  assert.equal(summary.queueCompletionStatus, 'readback-map-completed');
+  assert.equal(summary.queueCompletionMethod, 'mapAsync(readback-buffer)');
   assert.equal(summary.sourceStateBufferMode, 'borrowed-webgpu-upload');
   assert.equal(summary.thermoBufferMode, 'retained-thermal-output');
   assert.equal(summary.sourceMechanicsBufferMode, 'borrowed-webgpu-upload');
+  assert.equal(summary.summaryScope, 'full');
+  assert.equal(summary.gridNodeScanCount, gridNodeCount);
+  assert.equal(summary.gridNodeScanSkipped, false);
+  assert.equal(summary.activeGridNodeCountAvailable, true);
+  assert.equal(summary.activeGridNodeSummaryStatus, 'active-grid-node-summary-ready');
   assert.equal(summary.activeGridNodeCount, 17);
   assert.equal(summary.massDeltaKg, 0);
   assert.deepEqual(summary.momentumDeltaKgMPerS, [3, 3, 3]);
+  assert.deepEqual(summary.sourceCenterOfMassM, [1, 2, 3]);
+  assert.deepEqual(summary.nextCenterOfMassM, [4, 5, 6]);
+  assert.deepEqual(summary.centerOfMassDeltaM, [3, 3, 3]);
+  assert.deepEqual(summary.sourcePositionBoundsM, {
+    status: 'position-bounds-ready',
+    min: [-1, -2, -3],
+    max: [7, 8, 9],
+    massKg: 12
+  });
+  assert.deepEqual(summary.nextPositionBoundsM, {
+    status: 'position-bounds-ready',
+    min: [0, 0.5, 1],
+    max: [10, 11, 12],
+    massKg: 12
+  });
+  assert.equal(summary.cohortSummaryAvailable, true);
+  assert.equal(summary.cohortDiagnostics.status, 'cohort-summary-ready');
+  assert.equal(summary.cohortDiagnostics.readbackRequired, false);
+  assert.equal(summary.cohortDiagnostics.base.status, 'cohort-summary-ready');
+  assert.equal(summary.cohortDiagnostics.base.startIndex, 0);
+  assert.equal(summary.cohortDiagnostics.base.endIndex, 10);
+  assert.equal(summary.cohortDiagnostics.base.count, 10);
+  assert.equal(summary.cohortDiagnostics.base.massKg, 12);
+  assert.deepEqual(summary.cohortDiagnostics.base.centerOfMassM, [1, 2, 3]);
+  assert.deepEqual(summary.cohortDiagnostics.base.boundsM.min, [-1, -2, -3]);
+  assert.deepEqual(summary.cohortDiagnostics.base.boundsM.max, [7, 8, 9]);
+  assert.equal(summary.cohortDiagnostics.base.maxSpeedMPerS, 2.5);
+  assert.equal(summary.cohortDiagnostics.drop.status, 'cohort-summary-ready');
+  assert.equal(summary.cohortDiagnostics.drop.startIndex, 10);
+  assert.equal(summary.cohortDiagnostics.drop.endIndex, 20);
+  assert.equal(summary.cohortDiagnostics.drop.count, 10);
+  assert.equal(summary.cohortDiagnostics.drop.massKg, 4);
+  assert.deepEqual(summary.cohortDiagnostics.drop.centerOfMassM, [4, 5, 6]);
+  assert.deepEqual(summary.cohortDiagnostics.drop.boundsM.min, [0, 0.5, 1]);
+  assert.deepEqual(summary.cohortDiagnostics.drop.boundsM.max, [10, 11, 12]);
+  assert.equal(summary.cohortDiagnostics.drop.maxSpeedMPerS, 1.5);
   assert.deepEqual(summary.phaseMassKg, { solid: 5, liquid: 4, gas: 2, plasma: 1 });
   assert.equal(summary.temperatureMassWeightedMeanK, 450);
   assert.equal(summary.minTemperatureK, 273);
@@ -568,15 +882,102 @@ test('MLS-MPM resident summary WebGPU runner uses two-pass compact readback', as
   assert.equal(summary.thermalReadyCount, 65);
   assert.equal(summary.thermalProblemCount, 0);
   assert.equal(summary.thermalPhaseSummaryAvailable, true);
-  assert.deepEqual(device.dispatches.map((entry) => entry.count), [3, 1]);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [5, 1]);
   assert.equal(device.bindGroups.length, 2);
   assert.equal(device.bindGroups[0].entries.length, 8);
   assert.equal(device.bindGroups[1].entries.length, 3);
   assert.equal(device.copies.length, 1);
-  assert.equal(device.copies[0].size, 128);
-  assert.equal(device.writes[0].byteLength, 16);
-  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, 384);
+  assert.equal(device.copies[0].size, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(device.writes[0].byteLength, 32);
+  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, 5 * MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
   assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-readback').unmapped, true);
+  assert.equal(summary.compactSummaryBufferAuthority, 'diagnostics-only');
+  assert.equal(summary.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(summary.residentBufferLeaseResourceCount, 3);
+  assert.equal(summary.residentBufferLeaseActiveLeaseCount, 0);
+  assert.equal(summary.residentBufferLeaseSummary.destroyedResourceCount, 3);
+  assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
+});
+
+test('MLS-MPM resident summary can skip the active-grid scan for particle-visual diagnostics', async () => {
+  const particleCount = 20;
+  const gridNodeCount = 160;
+  const summaryValues = new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+  summaryValues[0] = particleCount;
+  summaryValues[1] = 0;
+  summaryValues[2] = 123;
+  summaryValues[3] = 12;
+  summaryValues[4] = 12;
+  summaryValues[5] = 0;
+  summaryValues[19] = 1;
+  summaryValues[20] = 5;
+  summaryValues[21] = 4;
+  summaryValues[22] = 2;
+  summaryValues[23] = 1;
+  summaryValues[24] = 450;
+  summaryValues[27] = particleCount;
+  summaryValues[30] = 12;
+  summaryValues[31] = 1;
+  summaryValues[50] = 1;
+  summaryValues[51] = 1;
+  summaryValues[52] = 12;
+  summaryValues[53] = 12;
+  summaryValues[56] = 1;
+  summaryValues[57] = 0;
+  summaryValues[58] = 8;
+  summaryValues[59] = 8;
+  summaryValues[60] = 20;
+  summaryValues[61] = 8;
+  summaryValues[72] = 4;
+  const device = fakeSummaryDevice(summaryValues);
+  const tracker = fakeBufferTracker();
+  const summary = await runMlsMpmResidentSummaryWebGpu({
+    device,
+    summaryScope: 'particle-visual',
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      state: new Float32Array(particleCount * 8)
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      mechanics: new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length)
+    },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo')
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics')
+    },
+    gridUpdate: {
+      gridNodeCount,
+      gpuResult: { updatedGridBuffer: tracker.buffer('updated-grid') }
+    },
+    g2pReconstruction: {
+      stateBuffer: tracker.buffer('next-state'),
+      mechanicsBuffer: tracker.buffer('next-mechanics')
+    }
+  });
+
+  assert.equal(summary.summaryScope, 'particle-visual');
+  assert.equal(summary.gridNodeCount, gridNodeCount);
+  assert.equal(summary.gridNodeScanCount, 0);
+  assert.equal(summary.gridNodeScanSkipped, true);
+  assert.equal(summary.activeGridNodeCount, null);
+  assert.equal(summary.activeGridNodeCountAvailable, false);
+  assert.equal(summary.activeGridNodeSummaryStatus, 'active-grid-node-summary-not-requested');
+  assert.equal(summary.compactPartialSummaryCount, 1);
+  assert.equal(summary.compactPartialSummaryByteLength, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(summary.massDeltaKg, 0);
+  assert.equal(summary.cohortSummaryAvailable, true);
+  assert.equal(summary.cohortDiagnostics.base.count, 8);
+  assert.equal(summary.cohortDiagnostics.drop.count, 12);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1]);
+  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-partials').size, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
   assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
 });
 
@@ -681,6 +1082,82 @@ test('MLS-MPM resident step shares retained stage buffers across WebGPU stages',
   assert.equal(tracker.destroyed, 4);
 });
 
+test('MLS-MPM resident step cleanup preserves continuation buffers requested by the next owner', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    readbackMode: 'no-full-readback',
+    boxDimsM: [3, 3, 3],
+    p2gRunner(args) {
+      const projection = projectMlsMpmP2gGridCpu(args);
+      return {
+        ...projection,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        gridBuffer: tracker.buffer('p2g-grid'),
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      const update = updateMlsMpmGridCpu(args);
+      return {
+        ...update,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        updatedGridBuffer: tracker.buffer('updated-grid'),
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner(args) {
+      const reconstruction = reconstructMlsMpmG2pCpu(args);
+      const stateBuffer = tracker.buffer('next-state');
+      const mechanicsBuffer = tracker.buffer('next-mechanics');
+      return {
+        ...reconstruction,
+        backend: 'webgpu',
+        readbackMode: 'no-full-readback',
+        fullReadbackPerformed: false,
+        stateBuffer,
+        mechanicsBuffer,
+        retainedOutputParticleBuffers: true,
+        destroyOutputParticleBuffers() {
+          stateBuffer.destroy();
+          mechanicsBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  const continuationBuffers = [
+    step.nextParticleUploads.sphParticleUpload.stateBuffer,
+    step.nextParticleUploads.sphParticleUpload.thermoBuffer,
+    step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer
+  ];
+  destroyMlsMpmResidentStepBuffers(step, { preserveBuffers: continuationBuffers });
+  assert.equal(tracker.destroyed, 2);
+});
+
 test('MLS-MPM resident step falls forward through CPU stages after a WebGPU parity failure', async () => {
   const buffers = manualBuffers();
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
@@ -709,6 +1186,7 @@ test('MLS-MPM resident step falls forward through CPU stages after a WebGPU pari
 test('MLS-MPM resident step can retain buffers without full readback', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
+  const gpuResidentLaneManager = fakeGpuResidentLaneManager();
   const sourceThermoBuffer = tracker.buffer('source-thermo');
   const p2gInputs = [];
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
@@ -728,6 +1206,10 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
     navigatorRef: webGpuNavigator(),
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
+    gpuResidentLaneManager,
+    gpuResidentLaneId: 'ulg:test:sph-resident',
+    gpuResidentLaneStateKey: 'ulg:test:sph-resident-state',
+    gpuResidentLaneDomainKey: 'ulg:test-domain',
     p2gRunner(args) {
       p2gInputs.push({
         readbackMode: args.readbackMode,
@@ -774,6 +1256,8 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
         updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
         readbackMode: 'no-full-readback',
         normalHotLoopReadbackFree: true,
+        queueCompletionStatus: 'queue-work-completed',
+        queueCompletionMethod: 'queue.onSubmittedWorkDone',
         destroyUpdatedGridBuffer() {
           this.updatedGridBuffer.destroy();
         }
@@ -825,6 +1309,11 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
   assert.equal(step.renderStateReadbackAvailable, false);
   assert.equal(step.gpuAuthoritativeState, false);
   assert.equal(step.residentBuffersRetained, true);
+  assert.equal(step.residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
+  assert.equal(step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage, 'g2p');
+  assert.equal(step.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].ownerStage, 'g2p');
+  assert.ok(step.residentAuthorityWarnings.includes('cpu-mirrors-stale-unless-admitted-readback'));
+  assert.equal(step.diagnostics.residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
   assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
   assert.equal(step.nextParticleStateBufferByteLength, buffers.sphParticleState.state.byteLength);
   assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);
@@ -836,10 +1325,355 @@ test('MLS-MPM resident step can retain buffers without full readback', async () 
   assert.equal(step.diagnostics.activeGridNodeCount, null);
   assert.equal(step.diagnostics.massDeltaKg, null);
   assert.equal(step.diagnostics.compactGpuSummaryAvailable, false);
+  assert.equal(gpuResidentLaneManager.calls.acquire.length, 1);
+  assert.equal(gpuResidentLaneManager.calls.complete.length, 1);
+  assert.equal(gpuResidentLaneManager.calls.reject.length, 0);
+  assert.equal(gpuResidentLaneManager.activeLeaseCount, 0);
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.laneId, 'ulg:test:sph-resident');
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.stateKey, 'ulg:test:sph-resident-state');
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.domainKey, 'ulg:test-domain');
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.copyBudget.uploadBytes, 0);
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.copyBudget.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.copyBudget.retainedBytes, buffers.sphParticleState.state.byteLength + buffers.sphParticleState.thermo.byteLength + buffers.mlsMpmParticleState.mechanics.byteLength);
+  assert.equal(gpuResidentLaneManager.calls.acquire[0].spec.copyBudget.compactSummaryBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(gpuResidentLaneManager.calls.complete[0].options.queueCompletionStatus, 'queue-work-completed');
+  assert.equal(gpuResidentLaneManager.calls.complete[0].options.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.deepEqual(gpuResidentLaneManager.calls.complete[0].options.retainedBufferRefs, [
+    'p2g-grid-buffer',
+    'updated-grid-buffer',
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(step.gpuResidentLane.schema, 'peercompute.ulg.mls-mpm-resident-gpu-lane-adapter.v0');
+  assert.equal(step.gpuResidentLaneStatus, 'gpu-resident-lane-completed');
+  assert.equal(step.gpuResidentLaneLeaseId, gpuResidentLaneManager.calls.acquire[0].lease.leaseId);
+  assert.equal(step.gpuResidentLaneFenceStatus, 'queue-work-completed');
+  assert.equal(step.gpuResidentLaneFenceSatisfied, true);
+  assert.deepEqual(step.gpuResidentLaneRetainedBufferRefs, [
+    'p2g-grid-buffer',
+    'updated-grid-buffer',
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(step.diagnostics.gpuResidentLaneStatus, 'gpu-resident-lane-completed');
+  assert.equal(step.diagnostics.gpuResidentLaneLeaseId, gpuResidentLaneManager.calls.acquire[0].lease.leaseId);
+  assert.equal(step.diagnostics.gpuResidentLaneFenceStatus, 'queue-work-completed');
+  assert.equal(step.diagnostics.gpuResidentLaneFenceSatisfied, true);
+  assert.equal(step.diagnostics.gpuResidentLaneRetainedBufferRefCount, 5);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 4);
+});
+
+test('MLS-MPM resident step rejects a GPU resident lane lease when WebGPU device acquisition fails', async () => {
+  const buffers = manualBuffers();
+  const gpuResidentLaneManager = fakeGpuResidentLaneManager();
+  await assert.rejects(
+    () => runMlsMpmResidentStepWithOptionalWebGpu({
+      ...buffers,
+      preferWebGpu: true,
+      navigatorRef: {
+        gpu: {
+          async requestAdapter() {
+            throw new Error('synthetic adapter failure');
+          }
+        }
+      },
+      gpuResidentLaneManager,
+      gpuResidentLaneId: 'ulg:test:sph-resident-failure',
+      gpuResidentLaneStateKey: 'ulg:test:sph-resident-state'
+    }),
+    /synthetic adapter failure/
+  );
+
+  assert.equal(gpuResidentLaneManager.calls.acquire.length, 1);
+  assert.equal(gpuResidentLaneManager.calls.complete.length, 0);
+  assert.equal(gpuResidentLaneManager.calls.reject.length, 1);
+  assert.equal(gpuResidentLaneManager.calls.reject[0].leaseId, gpuResidentLaneManager.calls.acquire[0].lease.leaseId);
+  assert.equal(gpuResidentLaneManager.calls.reject[0].reason, 'resident-step-error');
+  assert.equal(gpuResidentLaneManager.activeLeaseCount, 0);
+});
+
+test('MLS-MPM resident step compute task declares ComputeManager GPU lane and fence requirements', async () => {
+  const { buffers, options } = noFullReadbackResidentStepFixture();
+  const task = createMlsMpmResidentStepComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-step-task',
+    laneId: 'ulg:test:sph-resident',
+    stateKey: 'ulg:test:sph-state',
+    domainKey: 'ulg:test-domain',
+    retainedBufferRefs: ['sph-state-buffer', 'mls-mpm-mechanics-buffer']
+  });
+
+  assert.equal(task.schema, ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.runtime, 'js');
+  assert.equal(task.module, './sphMlsMpmGpuStep.js');
+  assert.equal(task.exportName, 'runMlsMpmResidentStepComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.returnEnvelope, true);
+  assert.equal(task.gpuFence.schema, 'peercompute.compute.gpu-fence-requirement.v0');
+  assert.equal(task.gpuFence.required, true);
+  assert.equal(task.gpuFence.laneId, 'ulg:test:sph-resident');
+  assert.equal(task.gpuFence.stateKey, 'ulg:test:sph-state');
+  assert.equal(task.gpuResidentLane.schema, 'peercompute.compute.gpu-resident-lane-task.v0');
+  assert.equal(task.gpuResidentLane.localExecution, 'inline');
+  assert.equal(task.gpuResidentLane.laneId, 'ulg:test:sph-resident');
+  assert.equal(task.gpuResidentLane.stateKey, 'ulg:test:sph-state');
+  assert.equal(task.gpuResidentLane.domainKey, 'ulg:test-domain');
+  assert.equal(task.gpuResidentLane.copyBudget.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(task.gpuResidentLane.copyBudget.retainedBytes, buffers.sphParticleState.state.byteLength + buffers.sphParticleState.thermo.byteLength + buffers.mlsMpmParticleState.mechanics.byteLength);
+  assert.deepEqual(task.webgpu.retainedBufferRefs, ['sph-state-buffer', 'mls-mpm-mechanics-buffer']);
+  assert.equal(task.data.gpuResidentLaneManager, undefined);
+  assert.equal(task.data.gpuFenceRequirement.laneId, 'ulg:test:sph-resident');
+  assert.equal(task.data.gpuResidentLane.stateKey, 'ulg:test:sph-state');
+});
+
+test('MLS-MPM resident step compute task handler returns explicit GPU fence evidence without local double leasing', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const ignoredLaneManager = fakeGpuResidentLaneManager();
+  const task = createMlsMpmResidentStepComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    laneId: 'ulg:test:sph-resident',
+    stateKey: 'ulg:test:sph-state',
+    gpuResidentLaneManager: ignoredLaneManager
+  });
+  const result = await runMlsMpmResidentStepComputeTask(task.data);
+
+  assert.equal(result.schema, ULG_MLS_MPM_GPU_RESIDENT_STEP_EXECUTION_SCHEMA);
+  assert.equal(result.computeTaskResultSchema, ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.status, 'resident-step-webgpu-executed');
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.status, 'queue-work-completed');
+  assert.equal(result.gpuFence.method, 'queue.onSubmittedWorkDone');
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.gpuFence.required, true);
+  assert.equal(result.gpuFence.laneId, 'ulg:test:sph-resident');
+  assert.equal(result.gpuFence.stateKey, 'ulg:test:sph-state');
+  assert.deepEqual(result.gpuFence.retainedBufferRefs, [
+    'p2g-grid-buffer',
+    'updated-grid-buffer',
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(result.gpuResidentLaneStatus, undefined);
+  assert.equal(ignoredLaneManager.calls.acquire.length, 0);
+  const directFence = createMlsMpmResidentStepGpuFenceReport(result, task.gpuFence);
+  assert.equal(directFence.fenceSatisfied, true);
+  assert.equal(directFence.laneId, 'ulg:test:sph-resident');
+});
+
+test('MLS-MPM resident step compute task submit helper uses a ComputeManager-compatible submitTask surface', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const submitted = [];
+  const computeManager = {
+    submitTask(task) {
+      submitted.push(task);
+      return Promise.resolve({ acceptedTaskId: task.id, laneId: task.gpuResidentLane?.laneId });
+    }
+  };
+
+  const result = await submitMlsMpmResidentStepComputeTask({
+    computeManager,
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:submit-task',
+    laneId: 'ulg:test:sph-resident-submit',
+    stateKey: 'ulg:test:sph-state-submit'
+  });
+
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].schema, ULG_MLS_MPM_RESIDENT_COMPUTE_TASK_SCHEMA);
+  assert.equal(submitted[0].gpuResidentLane.laneId, 'ulg:test:sph-resident-submit');
+  assert.equal(submitted[0].gpuFence.stateKey, 'ulg:test:sph-state-submit');
+  assert.deepEqual(result, {
+    acceptedTaskId: 'ulg:test:submit-task',
+    laneId: 'ulg:test:sph-resident-submit'
+  });
+});
+
+test('MLS-MPM resident steps compute task declares a ComputeManager GPU lane pass DAG', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    domainKey: 'ulg:test-domain',
+    stepCount: 3,
+    compactSummaryMode: 'final-only'
+  });
+
+  assert.equal(task.schema, ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA);
+  assert.equal(task.runtime, 'js');
+  assert.equal(task.exportName, 'runMlsMpmResidentStepsComputeTask');
+  assert.equal(task.residency, 'gpu-lane');
+  assert.equal(task.gpuResidentLane.schema, 'peercompute.compute.gpu-resident-lane-task.v0');
+  assert.equal(task.gpuResidentLane.laneId, 'ulg:test:sph-resident-steps');
+  assert.equal(task.gpuResidentLane.stateKey, 'ulg:test:sph-state-steps');
+  assert.equal(task.gpuResidentLane.domainKey, 'ulg:test-domain');
+  assert.equal(task.gpuResidentLane.copyBudget.readbackBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(task.gpuResidentLane.copyBudget.compactSummaryBytes, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
+  assert.equal(task.lawGraphNode.schema, 'peercompute.ulg.law-graph-node-task-ref.v0');
+  assert.equal(task.lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
+  assert.equal(task.lawGraphNode.runtimeTarget, 'webgpu-resident-lane');
+  assert.deepEqual(task.readFamilies, task.gpuResidentLane.readFamilies);
+  assert.deepEqual(task.expectedOutputFamilies, task.writeFamilies);
+  assert.equal(task.data.gpuResidentLaneManager, undefined);
+  assert.equal(task.data.stepCount, 3);
+  assert.equal(task.data.lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
+});
+
+test('MLS-MPM resident steps compute task handler returns fence evidence without local double leasing', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const ignoredLaneManager = fakeGpuResidentLaneManager();
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    stepCount: 2,
+    compactSummaryMode: 'final-only',
+    gpuResidentLaneManager: ignoredLaneManager
+  });
+  task.data.peerComputeSolverTask = {
+    schema: ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA,
+    status: 'solver-task-created',
+    created: true,
+    solverTaskSchema: 'peercompute.compute.solver-task.v0',
+    solverId: 'ulg-mls-mpm-sph-resident-steps',
+    taskFamily: 'ulg-mls-mpm-sph-resident-steps',
+    affinityKey: 'ulg-mls-mpm-sph-resident-steps:ulg:test:sph-state-steps',
+    warmDeltaScope: 'ulg-sph-resident-pass-dag'
+  };
+  const result = await runMlsMpmResidentStepsComputeTask(task.data);
+
+  assert.equal(result.schema, ULG_MLS_MPM_GPU_RESIDENT_STEPS_EXECUTION_SCHEMA);
+  assert.equal(result.computeTaskResultSchema, ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_RESULT_SCHEMA);
+  assert.equal(result.computeTaskSchema, ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA);
+  assert.equal(result.peerComputeSolverTask.schema, ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA);
+  assert.equal(result.peerComputeSolverTask.created, true);
+  assert.equal(result.peerComputeSolverTask.solverTaskSchema, 'peercompute.compute.solver-task.v0');
+  assert.equal(result.status, 'resident-steps-executed');
+  assert.equal(result.completedStepCount, 2);
+  assert.equal(result.gpuFence.schema, 'peercompute.compute.gpu-fence-report.v0');
+  assert.equal(result.gpuFence.fenceSatisfied, true);
+  assert.equal(result.gpuFence.laneId, 'ulg:test:sph-resident-steps');
+  assert.equal(result.gpuFence.stateKey, 'ulg:test:sph-state-steps');
+  assert.deepEqual(result.gpuFence.retainedBufferRefs, [
+    'p2g-grid-buffer',
+    'updated-grid-buffer',
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(result.lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
+  assert.equal(result.commitDelta.schema, ULG_MLS_MPM_RESIDENT_STEPS_COMMIT_DELTA_SCHEMA);
+  assert.equal(result.commitDelta.taskId, task.id);
+  assert.equal(result.commitDelta.scope, 'ulg-sph-resident-pass-dag');
+  assert.equal(result.commitDelta.payload.schema, ULG_MLS_MPM_RESIDENT_STEPS_STATE_DELTA_SCHEMA);
+  assert.equal(result.commitDelta.payload.stateKey, 'ulg:test:sph-state-steps');
+  assert.equal(result.commitDelta.payload.completedStepCount, 2);
+  assert.equal(result.commitDelta.payload.lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
+  assert.deepEqual(result.commitDelta.payload.outputFamilies, task.expectedOutputFamilies);
+  assert.equal(result.commitDelta.payload.gpuFence.fenceSatisfied, true);
+  assert.deepEqual(result.commitDelta.payload.retainedBufferRefs, [
+    'p2g-grid-buffer',
+    'updated-grid-buffer',
+    'sph-state-buffer',
+    'sph-thermo-buffer',
+    'mls-mpm-mechanics-buffer'
+  ]);
+  assert.equal(result.commitDelta.payload.finalStep.normalHotLoopReadbackFree, true);
+  assert.equal(result.commitDelta.payload.stepSummaries.length, 2);
+  assert.equal(result.commitDelta.payload.finalStep.diagnostics.gpuResidentLaneFenceSatisfied, false);
+  assert.equal(result.gpuResidentLaneStatus, undefined);
+  assert.equal(ignoredLaneManager.calls.acquire.length, 0);
+  destroyMlsMpmResidentStepsBuffers(result);
+});
+
+test('MLS-MPM resident steps compute task submit helper uses a ComputeManager-compatible submitTask surface', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const submitted = [];
+  const solverCreateCalls = [];
+  const computeManager = {
+    solverRegistry: {
+      createTask(solverId, input = {}) {
+        solverCreateCalls.push({ solverId, input });
+        return {
+          id: input.id,
+          solverId,
+          taskFamily: solverId,
+          runtime: 'js',
+          module: './registered-resident-solver.js',
+          exportName: 'runMlsMpmResidentStepsComputeTask',
+          webgpu: input.webgpu,
+          affinityKey: `${solverId}:${input.stateKey}`,
+          data: {
+            schema: 'peercompute.compute.solver-task.v0',
+            solver: {
+              id: solverId,
+              kind: 'sph-mls-mpm-resident-pass-dag',
+              warmDelta: {
+                scope: input.scope,
+                schema: 'peercompute.ulg.mls-mpm-resident-steps.delta.v0'
+              }
+            },
+            stateKey: input.stateKey,
+            scope: input.scope,
+            input: input.input,
+            ...input.data
+          }
+        };
+      }
+    },
+    submitTask(task) {
+      submitted.push(task);
+      return Promise.resolve({ acceptedTaskId: task.id, laneId: task.gpuResidentLane?.laneId });
+    }
+  };
+
+  const result = await submitMlsMpmResidentStepsComputeTask({
+    computeManager,
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:submit-steps-task',
+    laneId: 'ulg:test:sph-resident-steps-submit',
+    stateKey: 'ulg:test:sph-state-steps-submit',
+    stepCount: 2
+  });
+
+  assert.equal(submitted.length, 1);
+  assert.equal(solverCreateCalls.length, 1);
+  assert.equal(solverCreateCalls[0].solverId, 'ulg-mls-mpm-sph-resident-steps');
+  assert.equal(solverCreateCalls[0].input.id, 'ulg:test:submit-steps-task');
+  assert.equal(solverCreateCalls[0].input.stateKey, 'ulg:test:sph-state-steps-submit');
+  assert.equal(solverCreateCalls[0].input.input.laneId, 'ulg:test:sph-resident-steps-submit');
+  assert.equal(solverCreateCalls[0].input.input.stepCount, 2);
+  assert.equal(submitted[0].schema, ULG_MLS_MPM_RESIDENT_STEPS_COMPUTE_TASK_SCHEMA);
+  assert.equal(submitted[0].module, './registered-resident-solver.js');
+  assert.equal(submitted[0].data.schema, 'peercompute.compute.solver-task.v0');
+  assert.equal(submitted[0].peerComputeSolverTask.schema, ULG_MLS_MPM_RESIDENT_STEPS_SOLVER_TASK_BRIDGE_SCHEMA);
+  assert.equal(submitted[0].peerComputeSolverTask.created, true);
+  assert.equal(submitted[0].peerComputeSolverTask.solverTaskSchema, 'peercompute.compute.solver-task.v0');
+  assert.equal(submitted[0].peerComputeSolverTask.affinityKey, 'ulg-mls-mpm-sph-resident-steps:ulg:test:sph-state-steps-submit');
+  assert.equal(submitted[0].data.peerComputeSolverTask.created, true);
+  assert.equal(submitted[0].gpuResidentLane.laneId, 'ulg:test:sph-resident-steps-submit');
+  assert.equal(submitted[0].gpuFence.stateKey, 'ulg:test:sph-state-steps-submit');
+  assert.equal(submitted[0].lawGraphNode.nodeId, 'ulg-mls-mpm-sph-resident-pass-dag');
+  assert.equal(submitted[0].data.gpuResidentLane.laneId, 'ulg:test:sph-resident-steps-submit');
+  assert.equal(submitted[0].data.gpuFenceRequirement.stateKey, 'ulg:test:sph-state-steps-submit');
+  assert.deepEqual(result, {
+    acceptedTaskId: 'ulg:test:submit-steps-task',
+    laneId: 'ulg:test:sph-resident-steps-submit'
+  });
 });
 
 test('MLS-MPM resident step can attach a compact GPU summary without full state readback', async () => {
@@ -864,6 +1698,7 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
     navigatorRef: webGpuNavigator(),
     boxDimsM: [3, 3, 3],
     readbackMode: 'no-full-readback',
+    compactSummaryScope: 'particle-visual',
     p2gRunner() {
       return {
         schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
@@ -940,6 +1775,7 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
     },
     summaryRunner(args) {
       summaryCalls += 1;
+      assert.equal(args.summaryScope, 'particle-visual');
       assert.equal(args.sphParticleUpload.stateBuffer.label, 'source-state');
       assert.equal(args.mlsMpmParticleUpload.mechanicsBuffer.label, 'source-mechanics');
       assert.equal(args.gridUpdate.gpuResult.updatedGridBuffer.label, 'updated-grid-summary');
@@ -949,9 +1785,14 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
         backend: 'webgpu',
         status: 'compact-summary-ready',
+        summaryScope: 'particle-visual',
         particleCount: 1,
         gridNodeCount: 512,
-        activeGridNodeCount: 7,
+        gridNodeScanCount: 0,
+        gridNodeScanSkipped: true,
+        activeGridNodeCount: null,
+        activeGridNodeCountAvailable: false,
+        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-requested',
         sourceMassKg: 8,
         nextMassKg: 8,
         massDeltaKg: 0,
@@ -974,7 +1815,7 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
         thermalSummaryStatus: 'thermal-phase-summary-ready',
         readbackMode: 'compact-summary-readback',
         compactGpuSummaryAvailable: true,
-        compactReadbackByteLength: 128,
+        compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
         reductionStrategy: 'two-pass-workgroup-reduction',
         scientificValidation: false,
         sphValidation: false,
@@ -988,13 +1829,19 @@ test('MLS-MPM resident step can attach a compact GPU summary without full state 
   assert.equal(step.readbackMode, 'no-full-readback');
   assert.equal(step.state.length, 0);
   assert.equal(step.mechanics.length, 0);
-  assert.equal(step.compactGpuSummary.status, 'compact-summary-ready');
+  assert.equal(step.compactGpuSummary.status, 'compact-summary-ready', step.compactGpuSummary.reason);
   assert.equal(step.diagnostics.compactGpuSummaryAvailable, true);
   assert.equal(step.diagnostics.compactGpuSummaryStatus, 'compact-summary-ready');
   assert.equal(step.diagnostics.compactGpuSummaryReadbackMode, 'compact-summary-readback');
-  assert.equal(step.diagnostics.compactReadbackByteLength, 128);
+  assert.equal(step.diagnostics.compactSummaryScope, 'particle-visual');
+  assert.equal(step.diagnostics.activeGridNodeCountAvailable, false);
+  assert.equal(step.diagnostics.activeGridNodeSummaryStatus, 'active-grid-node-summary-not-requested');
+  assert.equal(step.diagnostics.gridNodeScanCount, 0);
+  assert.equal(step.diagnostics.gridNodeScanSkipped, true);
+  assert.equal(step.diagnostics.compactReadbackByteLength, MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES);
   assert.equal(step.diagnostics.compactSummaryReductionStrategy, 'two-pass-workgroup-reduction');
-  assert.equal(step.diagnostics.activeGridNodeCount, 7);
+  assert.equal(step.diagnostics.activeGridNodeCount, null);
+  assert.equal(step.stageTiming.compactSummaryScope, 'particle-visual');
   assert.equal(step.diagnostics.massDeltaKg, 0);
   assert.equal(step.diagnostics.maxSpeedMPerS, 1.875);
   assert.deepEqual(step.diagnostics.phaseMassKg, { solid: 3, liquid: 4, gas: 1, plasma: 0 });
@@ -1149,11 +1996,14 @@ test('MLS-MPM resident step can refresh SPH state and thermo through a retained 
   assert.equal(thermalCalls, 1);
   assert.equal(step.stageStatus.thermal, 'thermal-step-executed');
   assert.equal(step.stageBackends.thermal, 'webgpu');
-  assert.equal(step.g2pStateBufferReplacedByThermalStep, false);
-  assert.equal(step.thermalStateBufferHandoffStatus, 'thermal-state-buffer-skipped-mechanical-state-from-g2p');
+  assert.equal(step.g2pStateBufferReplacedByThermalStep, true);
+  assert.equal(step.thermalStateBufferHandoffStatus, 'thermal-state-buffer-drives-next-particles');
   assert.equal(step.thermalThermoBufferHandoffStatus, 'thermal-thermo-buffer-drives-next-particles');
+  assert.equal(step.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refresh-pending-after-thermal-state');
+  assert.ok(step.residentAuthorityWarnings.includes('mechanics-constitutive-refresh-pending-after-thermal-state'));
+  assert.equal(step.diagnostics.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refresh-pending-after-thermal-state');
   assert.equal(step.nextParticleBufferMode, 'retained-thermal-output-and-g2p-mechanics-buffers');
-  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'g2p-state-before-thermal');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'thermal-state-after-g2p');
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer.label, 'thermal-thermo-after-g2p');
   assert.equal(step.nextParticleUploads.sphParticleUpload.ownsThermoBuffer, true);
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'g2p-mechanics-after-thermal');
@@ -1161,6 +2011,174 @@ test('MLS-MPM resident step can refresh SPH state and thermo through a retained 
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(tracker.destroyed, 6);
+});
+
+test('MLS-MPM resident step refreshes mechanics after a retained thermal GPU step', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sourceThermoBuffer = tracker.buffer('source-thermo');
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseCount: 3,
+    graphCount: 3
+  };
+  const mechanicsMaterialTable = buildMlsMpmMechanicsMaterialTable({
+    h2o: {
+      molarMassKgPerMol: 0.018,
+      phases: [
+        { name: 'liquid', densityKgPerM3: 1000, bulkModulusPa: 2.2e9, shearModulusPa: 0, cpJPerKgK: 4184, temperatureRange: [273.15, 373.15] }
+      ]
+    }
+  });
+  let mechanicsRefreshCalls = 0;
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: sourceThermoBuffer,
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    mechanicsMaterialTable,
+    thermalStepOptions: {
+      thermalResponseGraphUpload
+    },
+    p2gRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'projected',
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        gridNodes: new Float32Array(),
+        gridBuffer: tracker.buffer('p2g-grid-mechanics-refresh'),
+        gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+        backend: 'webgpu',
+        status: 'updated',
+        sourceSchema: args.p2gGridProjection.schema,
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        updatedGridNodes: new Float32Array(),
+        updatedGridBuffer: tracker.buffer('updated-grid-mechanics-refresh'),
+        updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner() {
+      return {
+        schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'reconstructed',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: 512,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridShift: 1,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        mechanicsStrideFloats: 32,
+        state: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('g2p-state-before-mechanics-refresh'),
+        mechanicsBuffer: tracker.buffer('g2p-mechanics-before-refresh'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true
+      };
+    },
+    thermalStepRunner() {
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer('thermal-state-for-mechanics-refresh'),
+        thermoBuffer: tracker.buffer('thermal-thermo-for-mechanics-refresh'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true
+      };
+    },
+    mechanicsRefreshRunner(args) {
+      mechanicsRefreshCalls += 1;
+      assert.equal(args.sourceStateBuffer.label, 'thermal-state-for-mechanics-refresh');
+      assert.equal(args.sourceThermoBuffer.label, 'thermal-thermo-for-mechanics-refresh');
+      assert.equal(args.sourceMechanicsBuffer.label, 'g2p-mechanics-before-refresh');
+      assert.equal(args.mechanicsMaterialTable, mechanicsMaterialTable);
+      assert.equal(args.readbackMode, 'no-full-readback');
+      assert.equal(args.retainOutputParticleBuffers, true);
+      return {
+        schema: 'peercompute.ulg.mls-mpm-mechanics-refresh.v0',
+        backend: 'webgpu',
+        status: 'mechanics-constitutive-refresh-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        mechanics: new Float32Array(),
+        mechanicsBuffer: tracker.buffer('refreshed-mechanics-after-thermal'),
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true
+      };
+    }
+  });
+
+  assert.equal(mechanicsRefreshCalls, 1);
+  assert.equal(step.stageStatus.mechanicsRefresh, 'mechanics-constitutive-refresh-executed');
+  assert.equal(step.stageBackends.mechanicsRefresh, 'webgpu');
+  assert.equal(step.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refreshed-after-thermal-state');
+  assert.equal(step.diagnostics.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refreshed-after-thermal-state');
+  assert.equal(step.g2pMechanicsBufferReplacedByMechanicsRefresh, true);
+  assert.equal(step.nextParticleBufferMode, 'retained-thermal-output-and-refreshed-mechanics-buffers');
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'refreshed-mechanics-after-thermal');
+  assert.equal(step.residentAuthorityFamilyOwners.mechanics.ownerStage, 'mechanics-constitutive-refresh');
+  assert.equal(step.residentAuthorityFamilyOwners.mechanics.status, 'mechanics-constitutive-refresh-drives-next-particles');
+  assert.equal(step.residentAuthorityWarnings.includes('mechanics-constitutive-refresh-pending-after-thermal-state'), false);
+  assert.equal(step.residentAuthorityWarnings.includes('thermal-stage-not-mechanics-authority'), false);
+  assert.equal(tracker.destroyed, 0);
+  destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(tracker.destroyed, 7);
 });
 
 test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', async () => {
@@ -1638,7 +2656,7 @@ test('MLS-MPM resident no-full step skips no-op reaction output buffers for next
           productEventActiveEventCount: 0,
           compactLedgerAvailable: true,
           readbackMode: 'compact-reaction-summary-readback',
-          compactReadbackByteLength: 128,
+          compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
           reductionStrategy: 'two-pass-workgroup-reduction'
         }
       };
@@ -1649,10 +2667,12 @@ test('MLS-MPM resident no-full step skips no-op reaction output buffers for next
   assert.equal(step.reactionOutputBufferHandoffStatus, 'reaction-output-buffers-skipped-no-particle-mutation');
   assert.equal(step.thermalOutputReplacedByReactionStep, false);
   assert.equal(step.g2pMechanicsBufferReplacedByReactionStep, false);
-  assert.equal(step.thermalStateBufferHandoffStatus, 'thermal-state-buffer-skipped-mechanical-state-from-g2p');
+  assert.equal(step.thermalStateBufferHandoffStatus, 'thermal-state-buffer-drives-next-particles');
   assert.equal(step.thermalThermoBufferHandoffStatus, 'thermal-thermo-buffer-drives-next-particles');
+  assert.equal(step.thermalMechanicsRefreshStatus, 'mechanics-constitutive-refresh-pending-after-thermal-state');
+  assert.ok(step.residentAuthorityWarnings.includes('mechanics-constitutive-refresh-pending-after-thermal-state'));
   assert.equal(step.nextParticleBufferMode, 'retained-thermal-output-and-g2p-mechanics-buffers');
-  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'g2p-state-before-noop-reaction');
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'thermal-state-before-noop-reaction');
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer.label, 'thermal-thermo-before-noop-reaction');
   assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'g2p-mechanics-before-noop-reaction');
   assert.equal(step.diagnostics.reactionSummaryAvailable, true);
@@ -1666,7 +2686,7 @@ test('MLS-MPM resident no-full step skips no-op reaction output buffers for next
 test('MLS-MPM resident step merges carried and emitted product-event buffers on the GPU', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
-  const device = fakeSummaryDevice(new Float32Array(32));
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
   const carriedResidentProductMass = residentProductMassHandle({
     label: 'carried-product-events',
     rowCount: 2,
@@ -1692,6 +2712,10 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
     ]
   });
   const p2gInputs = [];
+  let mergeFenceCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    mergeFenceCount += 1;
+  };
 
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
@@ -1824,6 +2848,10 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(step.emittedResidentProductMassStatus, 'resident-product-mass-buffer-retained');
   assert.equal(step.residentProductMassStatus, 'resident-product-mass-merged-gpu-resident');
   assert.equal(step.residentProductMassMergeStatus, 'resident-product-mass-merged-gpu-resident');
+  assert.equal(step.residentProductMassMergeQueueCompletionStatus, 'queue-work-completed');
+  assert.equal(step.residentProductMassMergeQueueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.equal(step.residentProductMass.productEventMergeQueueCompletionStatus, 'queue-work-completed');
+  assert.equal(step.residentProductMass.productEventMergeQueueCompletionMethod, 'queue.onSubmittedWorkDone');
   assert.equal(step.residentProductMassProductEventRowCount, 5);
   assert.equal(step.mergedResidentProductMassProductEventRowCount, 5);
   assert.equal(step.residentProductMassGenerationCount, 3);
@@ -1842,6 +2870,13 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(step.residentProductMass.mergeSourceProductEventBufferCount, 3);
   assert.deepEqual(step.residentProductMass.mergeSourceProductEventBufferByteLengths, [128, 128, 384]);
   assert.equal(step.nextParticleUploads.residentProductMass, step.residentProductMass);
+  assert.equal(step.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(step.residentBufferLeaseResourceCount, 3);
+  assert.equal(step.residentBufferLeaseActiveLeaseCount, 1);
+  assert.equal(
+    step.residentBufferLeaseSummary.resources['resident-product-mass:ulg-sph-resident-product-mass-merged-product-events:5:640'].activeLeaseCount,
+    1
+  );
   assert.equal(device.copies.length, 2);
   assert.equal(device.copies[0].source, carriedResidentProductMass.productEventBuffer);
   assert.equal(device.copies[0].destination, step.residentProductMass.productEventBuffer);
@@ -1852,6 +2887,7 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(device.copies[1].destinationOffset, 256);
   assert.equal(device.copies[1].size, 384);
   assert.equal(device.submissions.length, 1);
+  assert.equal(mergeFenceCount, 1);
 
   destroyMlsMpmResidentStepBuffers(step);
   assert.equal(carriedResidentProductMass.destroyCalls, 0);
@@ -1859,6 +2895,191 @@ test('MLS-MPM resident step merges carried and emitted product-event buffers on 
   assert.equal(emittedResidentProductMass.destroyCalls, 1);
   assert.equal(emittedResidentProductMass.productEventBuffer.destroyed, true);
   assert.equal(step.residentProductMass.productEventBuffer.destroyed, true);
+  assert.equal(step.residentBufferLeaseCleanupStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(step.residentBufferLeaseCleanup.destroyedResourceCount, 2);
+});
+
+test('MLS-MPM resident step cleanup preserves explicitly leased product-event buffers', () => {
+  const preservedResidentProductMass = residentProductMassHandle({
+    label: 'preserved-product-events',
+    rowCount: 1,
+    byteLength: 128
+  });
+  const step = {
+    particlePingPong: { nextStep: 7, nextTime: 0.7 },
+    residentProductMass: preservedResidentProductMass,
+    nextParticleUploads: {
+      residentProductMass: preservedResidentProductMass,
+      sphParticleUpload: {
+        ownsStateBuffer: false,
+        ownsThermoBuffer: false
+      },
+      mlsMpmParticleUpload: {
+        ownsMechanicsBuffer: false
+      }
+    }
+  };
+
+  destroyMlsMpmResidentStepBuffers(step, {
+    preserveResidentProductMass: preservedResidentProductMass
+  });
+
+  assert.equal(preservedResidentProductMass.destroyCalls, 0);
+  assert.equal(preservedResidentProductMass.productEventBuffer.destroyed, false);
+  assert.equal(step.residentBufferLeaseCleanupStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(step.residentBufferLeaseCleanup.skippedDestroyCount, 1);
+  assert.equal(step.residentBufferLeaseCleanup.events[0].status, 'destroy-skipped-active-lease');
+});
+
+test('MLS-MPM resident step rejects stale CPU mirrors without retained GPU uploads', async () => {
+  const buffers = manualBuffers();
+  await assert.rejects(
+    () => runMlsMpmResidentStepWithOptionalWebGpu({
+      ...buffers,
+      sphParticleState: {
+        ...buffers.sphParticleState,
+        status: 'gpu-resident-unread-ready',
+        cpuStateStale: true
+      },
+      preferWebGpu: false
+    }),
+    /Stale SPH CPU mirror cannot drive/
+  );
+
+  await assert.rejects(
+    () => runMlsMpmResidentStepWithOptionalWebGpu({
+      ...buffers,
+      mlsMpmParticleState: {
+        ...buffers.mlsMpmParticleState,
+        status: 'gpu-resident-unread-ready',
+        cpuStateStale: true
+      },
+      preferWebGpu: false
+    }),
+    /Stale MLS-MPM CPU mirror cannot drive/
+  );
+});
+
+test('MLS-MPM resident step accepts stale CPU mirrors when retained GPU uploads are authoritative', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const sphParticleUpload = {
+    status: 'webgpu-uploaded',
+    stateBuffer: tracker.buffer('authoritative-stale-sph-state'),
+    thermoBuffer: tracker.buffer('authoritative-stale-sph-thermo'),
+    ownsStateBuffer: false,
+    ownsThermoBuffer: false,
+    slot: 1
+  };
+  const mlsMpmParticleUpload = {
+    status: 'webgpu-uploaded',
+    mechanicsBuffer: tracker.buffer('authoritative-stale-mls-mechanics'),
+    ownsMechanicsBuffer: false,
+    slot: 1
+  };
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleState: {
+      ...buffers.sphParticleState,
+      status: 'gpu-resident-unread-ready',
+      cpuStateStale: true
+    },
+    mlsMpmParticleState: {
+      ...buffers.mlsMpmParticleState,
+      status: 'gpu-resident-unread-ready',
+      cpuStateStale: true
+    },
+    sphParticleUpload,
+    mlsMpmParticleUpload,
+    preferWebGpu: true,
+    navigatorRef: webGpuNavigator(),
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    p2gRunner(args) {
+      assert.equal(args.sphParticleUpload.stateBuffer.label, 'authoritative-stale-sph-state');
+      assert.equal(args.mlsMpmParticleUpload.mechanicsBuffer.label, 'authoritative-stale-mls-mechanics');
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'projected',
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        gridNodes: new Float32Array(),
+        gridBuffer: tracker.buffer('stale-guard-p2g-grid'),
+        gridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyGridBuffer() {
+          this.gridBuffer.destroy();
+        }
+      };
+    },
+    gridUpdateRunner(args) {
+      assert.equal(args.p2gGridBuffer.label, 'stale-guard-p2g-grid');
+      return {
+        schema: ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
+        backend: 'webgpu',
+        status: 'updated',
+        sourceSchema: args.p2gGridProjection.schema,
+        particleCount: buffers.sphParticleState.particleCount,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridNodeCount: 512,
+        gridShift: 1,
+        gridNodeStrideFloats: 8,
+        updatedGridNodes: new Float32Array(),
+        updatedGridBuffer: tracker.buffer('stale-guard-updated-grid'),
+        updatedGridBufferByteLength: 512 * 8 * Float32Array.BYTES_PER_ELEMENT,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyUpdatedGridBuffer() {
+          this.updatedGridBuffer.destroy();
+        }
+      };
+    },
+    g2pRunner(args) {
+      assert.equal(args.updatedGridBuffer.label, 'stale-guard-updated-grid');
+      return {
+        schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'reconstructed',
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: 512,
+        gridSpacingM: buffers.sphParticleState.smoothingLengthM,
+        gridDims: [8, 8, 8],
+        gridShift: 1,
+        dt: buffers.mlsMpmParticleState.mechanicsDtS,
+        stateStrideFloats: 8,
+        thermoStrideFloats: 12,
+        mechanicsStrideFloats: 32,
+        state: new Float32Array(),
+        mechanics: new Float32Array(),
+        stateBuffer: tracker.buffer('stale-guard-next-state'),
+        mechanicsBuffer: tracker.buffer('stale-guard-next-mechanics'),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        mechanicsBufferByteLength: buffers.mlsMpmParticleState.mechanics.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: 'no-full-readback',
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.mechanicsBuffer.destroy();
+        }
+      };
+    }
+  });
+
+  assert.equal(step.status, 'resident-step-webgpu-executed');
+  assert.equal(step.readbackMode, 'no-full-readback');
+  assert.equal(step.normalHotLoopReadbackFree, true);
+  assert.equal(step.nextParticleUploads.sphParticleUpload.stateBuffer.label, 'stale-guard-next-state');
+  assert.equal(step.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'stale-guard-next-mechanics');
 });
 
 test('MLS-MPM resident steps ping-pong retained particle buffers across repeated steps', async () => {
@@ -2177,7 +3398,7 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
             strictForceCouplingAllowed: true
           },
           readbackMode: 'compact-reaction-summary-readback',
-          compactReadbackByteLength: 128,
+          compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
           visibleOnly: true,
           unplacedProductInventoryIncluded: true
         },
@@ -2194,6 +3415,9 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
   assert.equal(execution.normalHotLoopReadbackFree, true);
   assert.equal(execution.renderStateReadbackAvailable, false);
   assert.equal(execution.gpuAuthoritativeState, false);
+  assert.equal(execution.residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
+  assert.equal(execution.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage, 'reaction-step');
+  assert.equal(execution.residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.MECHANICS].ownerStage, 'reaction-step');
   assert.equal(execution.finalStep.particlePingPong.sourceSlot, 1);
   assert.equal(execution.finalStep.particlePingPong.nextSlot, 0);
   assert.equal(execution.nextSphParticleState.step, 2);
@@ -2210,6 +3434,9 @@ test('MLS-MPM resident steps ping-pong unread retained buffers across repeated s
   assert.equal(execution.nextParticleUploads.mlsMpmParticleUpload.mechanicsBuffer.label, 'reaction-mechanics-unread-2');
   assert.equal(execution.stepSummaries[0].readbackMode, 'no-full-readback');
   assert.equal(execution.stepSummaries[1].readbackMode, 'no-full-readback');
+  assert.equal(execution.stepSummaries[0].residentAuthorityLedgerStatus, 'resident-authority-ledger-ready');
+  assert.equal(execution.stepSummaries[1].residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.PARTICLE_KINEMATICS].ownerStage, 'reaction-step');
+  assert.equal(execution.stepSummaries[1].residentAuthorityFamilyOwners[RESIDENT_STATE_FAMILIES.REACTION_PRODUCTS].ownerStage, 'resident-product-mass-handle');
   assert.equal(execution.stepSummaries[0].normalHotLoopReadbackFree, true);
   assert.equal(execution.stepSummaries[1].normalHotLoopReadbackFree, true);
   assert.equal(execution.stepSummaries[0].diagnostics.reactionSummaryStatus, 'reaction-compact-summary-ready');

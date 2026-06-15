@@ -101,6 +101,8 @@ test('SPH thermal material table packs closure-derived energy/phase segments', (
   const iceEnergy = specificInternalEnergyJPerKg(materialProperties.h2o, 250);
   const liquidEnergy = specificInternalEnergyJPerKg(materialProperties.h2o, 300);
   const steamEnergy = specificInternalEnergyJPerKg(materialProperties.h2o, 450);
+  const ironId = stableOpticalMaterialId('fe');
+  const ironEnergy = specificInternalEnergyJPerKg(materialProperties.fe, 300);
   assert.equal(resolveThermalStateFromTable(table, waterId, iceEnergy).phaseId, GPU_PHASE_IDS.solid);
   assert.equal(resolveThermalStateFromTable(table, waterId, liquidEnergy).phaseId, GPU_PHASE_IDS.liquid);
   assert.equal(resolveThermalStateFromTable(table, waterId, steamEnergy).phaseId, GPU_PHASE_IDS.gas);
@@ -108,6 +110,11 @@ test('SPH thermal material table packs closure-derived energy/phase segments', (
     resolveThermalStateFromTable(table, waterId, liquidEnergy).temperatureK,
     equilibriumFromSpecificEnergy(materialProperties.h2o, liquidEnergy).temperatureK,
     1e-3
+  );
+  nearlyEqual(
+    resolveThermalStateFromTable(table, ironId, ironEnergy).temperatureK,
+    equilibriumFromSpecificEnergy(materialProperties.fe, ironEnergy).temperatureK,
+    1e-6
   );
 });
 
@@ -124,7 +131,7 @@ test('SPH thermal graph buffer set exports flat energy-temperature segment closu
   assert.equal(graphSet.graphBank.schema, ULG_SPH_GPU_THERMAL_CLOSURE_GRAPH_BANK_SCHEMA);
   assert.equal(graphSet.graphBank.graphCount, graphSet.graphCount);
   assert.equal(graphSet.graphBank.nodeCount, graphSet.graphCount);
-  assert.equal(graphSet.graphBank.sampleCount, graphSet.graphCount * 2);
+  assert.ok(graphSet.graphBank.sampleCount >= graphSet.graphCount * 2);
   assert.equal(graphSet.segmentCount, table.segmentCount);
   assert.equal(graphSet.graphCount, table.segmentCount);
   assert.equal(graphSet.skippedSegmentCount, 0);
@@ -133,6 +140,7 @@ test('SPH thermal graph buffer set exports flat energy-temperature segment closu
   assert.ok(materials.has('h2o'));
   assert.ok(materials.has('fe'));
   assert.ok(materials.has('air'));
+  assert.ok(graphSet.metadata.some((entry) => entry.sourceSegmentDebyeTemperatureK && entry.graphSampleCount > 2));
   assert.equal(responseTable.schema, ULG_SPH_GPU_THERMAL_PHASE_RESPONSE_TABLE_SCHEMA);
   assert.equal(responseTable.status, 'closure-derived-phase-response-table-ready');
   assert.equal(responseTable.responseCount, table.segmentCount);
@@ -156,10 +164,13 @@ test('SPH thermal graph buffer set exports flat energy-temperature segment closu
     assert.equal(graph.outputName, 'temperatureK');
     assert.equal(graph.outputSlots.temperatureK, SPH_THERMAL_CLOSURE_GRAPH_SLOTS.temperatureK);
     assert.equal(graph.slotCount, Object.keys(SPH_THERMAL_CLOSURE_GRAPH_SLOTS).length);
+    const graphTolerance = metadata.sourceSegmentDebyeTemperatureK
+      ? 1.5
+      : Math.max(5e-2, Math.abs(resolved.temperatureK) * 1e-7);
     nearlyEqual(
       execution.slots[SPH_THERMAL_CLOSURE_GRAPH_SLOTS.temperatureK].value,
       resolved.temperatureK,
-      Math.max(5e-2, Math.abs(resolved.temperatureK) * 1e-7)
+      graphTolerance
     );
 
     const response = resolveThermalPhaseResponseFromTable(responseTable, metadata.materialId, midpointEnergy);
@@ -172,7 +183,7 @@ test('SPH thermal graph buffer set exports flat energy-temperature segment closu
     assert.equal(response.temperatureGraphIndex, metadata.graphIndex);
     assert.equal(response.phaseId, resolved.phaseId);
     assert.equal(graphResponse.phaseId, resolved.phaseId);
-    nearlyEqual(graphResponse.temperatureK, resolved.temperatureK, Math.max(5e-2, Math.abs(resolved.temperatureK) * 1e-7));
+    nearlyEqual(graphResponse.temperatureK, resolved.temperatureK, graphTolerance);
     nearlyEqual(graphResponse.restDensityKgPerM3, resolved.restDensityKgPerM3, Math.max(1e-4, Math.abs(resolved.restDensityKgPerM3) * 1e-6));
     nearlyEqual(graphResponse.phaseFractions.solid, resolved.phaseFractions.solid, 1e-6);
     nearlyEqual(graphResponse.phaseFractions.liquid, resolved.phaseFractions.liquid, 1e-6);
@@ -320,6 +331,28 @@ test('SPH thermal CPU table step conserves pair conduction energy and refreshes 
   assert.equal(result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 1], GPU_PHASE_IDS.solid);
 });
 
+test('SPH thermal CPU pair conduction does not overshoot pair equilibrium', () => {
+  const packed = packedTwoWaterParticles(320, 300);
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const result = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    wallTemperaturesK: {},
+    boxDimsM: [5, 5, 5],
+    dtS: 1e-3,
+    conductionRate: 1e12,
+    wallRate: 0
+  });
+  const hotAfter = result.thermo[2];
+  const coldAfter = result.thermo[SPH_GPU_PARTICLE_THERMO_FLOATS + 2];
+
+  assert.ok(hotAfter <= 320);
+  assert.ok(hotAfter >= 300);
+  assert.ok(coldAfter <= 320);
+  assert.ok(coldAfter >= 300);
+  assert.ok(Math.abs(hotAfter - coldAfter) < 20);
+});
+
 test('SPH thermal CPU table step applies wall heat from six explicit wall reservoirs', () => {
   const packed = packedTwoWaterParticles(350, 350);
   const table = buildSphThermalMaterialTable(materialProperties);
@@ -340,6 +373,26 @@ test('SPH thermal CPU table step applies wall heat from six explicit wall reserv
   assert.ok(result.wallHeatJ.xMax > 0);
   assert.ok(result.state[7] < packed.state[7]);
   assert.ok(result.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7] > packed.state[SPH_GPU_PARTICLE_STATE_FLOATS + 7]);
+});
+
+test('SPH thermal CPU wall reservoir does not overshoot wall temperature in one explicit step', () => {
+  const packed = packedTwoWaterParticles(330, 330);
+  const table = buildSphThermalMaterialTable(materialProperties);
+  packed.state[0] = 0.02;
+  packed.state[SPH_GPU_PARTICLE_STATE_FLOATS] = 2.5;
+  const result = runSphThermalStepCpu({
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    wallTemperaturesK: { xMin: 293.15 },
+    boxDimsM: [5, 5, 5],
+    dtS: 1e-4,
+    conductionRate: 0,
+    wallRate: 1e10,
+    wallLayerM: 0.1
+  });
+
+  nearlyEqual(result.thermo[2], 293.15, 2e-3);
+  assert.equal(result.thermo[1], GPU_PHASE_IDS.liquid);
 });
 
 test('SPH thermal optional WebGPU accepts parity-passing thermal runner', async () => {

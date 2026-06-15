@@ -32,8 +32,14 @@ import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.j
 import {
   destroyMlsMpmResidentStepsBuffers,
   runMlsMpmResidentStepWithOptionalWebGpu,
-  runMlsMpmResidentStepsWithOptionalWebGpu
+  runMlsMpmResidentStepsWithOptionalWebGpu,
+  submitMlsMpmResidentStepsComputeTask
 } from '../runtime/sph/sphMlsMpmGpuStep.js';
+import {
+  MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
+  MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL,
+  normalizeMlsMpmResidentSummaryScope
+} from '../runtime/sph/sphMlsMpmGpuSummary.js';
 import {
   ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
   buildSphThermalClosureGraphBuffers,
@@ -43,15 +49,20 @@ import {
   uploadSphThermalResponseGraphBuffers
 } from '../runtime/sph/sphThermalGpuKernel.js';
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
+import { buildMlsMpmMechanicsMaterialTable } from '../runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  buildSphRenderFieldCpu,
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWebGpu,
+  buildSphMaterialInterfaceSourceFieldWebGpu,
+  buildSphPhysicsMaterialInterfaceFieldWebGpu,
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderSurfaceVerticesWebGpu,
-  deriveSphMaterialInterfaceField,
   decodeSphRenderRows,
   extractSphRenderRowsWebGpu,
-  splitSphRenderFieldBySurface
+  splitSphRenderFieldBySurface,
+  summarizeSphResidentParticleUploadWebGpu,
+  summarizeSphRenderFieldSurfacesWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
 import {
   gasPressureInterfaceCouplingSummary,
@@ -59,6 +70,17 @@ import {
   gasPressureInterfaceForceSolver
 } from '../runtime/sphPhaseDemo.js';
 import { opticalRenderParams } from '../runtime/material/opticalClosure.js';
+import {
+  addResidentBufferLease,
+  createResidentBufferLeaseLedger,
+  destroyResidentBufferWithLease,
+  registerResidentBufferResource,
+  releaseResidentBufferLease,
+  summarizeResidentBufferLeaseLedger
+} from '../runtime/residentBufferLease.js';
+import {
+  readResidentStepsCommittedWarmDelta
+} from '../runtime/peercomputeResidentCommitBridge.js';
 
 export const SPH_PHASE_RENDER_MODE = 'continuous-marching-cubes';
 export const SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT = 'no-full-readback';
@@ -71,6 +93,12 @@ export const SPH_PHASE_RENDER_ORDER = Object.freeze({
 });
 export const SPH_RENDER_FIELD_VISIBILITY_HYSTERESIS = 0.92;
 export const SPH_SURFACE_INACTIVE_GRACE_FRAMES = 2;
+export const SPH_SURFACE_RADIUS_SCALE_DEFAULT = 0.15;
+export const SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN = 0.2;
+export const SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES = 27;
+export const SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN = 64;
+export const SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN = 32;
+export const SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS = 0.5;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_SHOW = 1e-2;
 export const SPH_VAPOR_SURFACE_OPTICAL_DEPTH_HIDE = 5e-3;
 export const SPH_VAPOR_SURFACE_SCATTER_SHOW_PER_M = 1e-6;
@@ -78,6 +106,8 @@ export const SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT = 'depth24plus';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT = 'rgba16float';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT = 'rgba8unorm';
 export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overlay-until-replacement-ready';
+export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
+export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -87,11 +117,8 @@ function nowMs() {
 
 const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
 const RESIDENT_NO_FULL_READBACK_MODE = 'no-full-readback';
-const SPH_RAW_WEBGPU_SURFACE_OVERLAY_ENABLED = false;
-const SPH_THREE_VISIBLE_RENDER_FIELD_READBACK_MODE = SPH_RAW_WEBGPU_SURFACE_OVERLAY_ENABLED
-  ? RESIDENT_NO_FULL_READBACK_MODE
-  : RESIDENT_FULL_READBACK_MODE;
-const SPH_THREE_WEBGPU_BINDING_REASON = 'raw WebGPU canvas overlay disabled; awaiting Three WebGPURenderer storage-buffer integration';
+export const SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT = 'disabled';
+const SPH_THREE_WEBGPU_BINDING_REASON = 'raw WebGPU canvas overlay disabled by policy; using Three/MarchingCubes render-field readback';
 const GPU_TEXTURE_USAGE = {
   COPY_SRC: globalThis.GPUTextureUsage?.COPY_SRC ?? 1,
   TEXTURE_BINDING: globalThis.GPUTextureUsage?.TEXTURE_BINDING ?? 4,
@@ -106,6 +133,246 @@ const GPU_SHADER_STAGE = {
   VERTEX: globalThis.GPUShaderStage?.VERTEX ?? 1,
   FRAGMENT: globalThis.GPUShaderStage?.FRAGMENT ?? 2
 };
+
+export function normalizeResidentSurfaceDrawOverlayMode(mode = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT) {
+  const normalized = String(mode ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT).trim().toLowerCase();
+  if (['1', 'true', 'on', 'yes', 'enabled', 'enable', 'webgpu', 'overlay', 'resident'].includes(normalized)) return 'enabled';
+  if (['0', 'false', 'off', 'no', 'disabled', 'disable', 'three', 'marching-cubes', 'readback'].includes(normalized)) return 'disabled';
+  return 'auto';
+}
+
+export function resolveResidentSurfaceDrawOverlayPolicy({
+  mode = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
+  container = null,
+  navigatorRef = globalThis.navigator
+} = {}) {
+  const normalizedMode = normalizeResidentSurfaceDrawOverlayMode(mode);
+  if (normalizedMode === 'disabled') {
+    return {
+      schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+      mode: normalizedMode,
+      enabled: false,
+      status: 'surface-draw-overlay-disabled-by-policy',
+      reason: SPH_THREE_WEBGPU_BINDING_REASON
+    };
+  }
+  if (normalizedMode === 'enabled') {
+    return {
+      schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+      mode: normalizedMode,
+      enabled: true,
+      status: 'surface-draw-overlay-forced',
+      reason: 'raw WebGPU canvas overlay forced by scene option'
+    };
+  }
+  const gpu = navigatorRef?.gpu || globalThis.navigator?.gpu;
+  if (!gpu?.getPreferredCanvasFormat) {
+    return {
+      schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+      mode: normalizedMode,
+      enabled: false,
+      status: 'surface-draw-overlay-auto-unavailable',
+      reason: 'navigator.gpu canvas format support unavailable'
+    };
+  }
+  if (typeof container?.ownerDocument?.createElement !== 'function') {
+    return {
+      schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+      mode: normalizedMode,
+      enabled: false,
+      status: 'surface-draw-overlay-auto-unavailable',
+      reason: 'document canvas creation unavailable'
+    };
+  }
+  try {
+    const probeCanvas = container.ownerDocument.createElement('canvas');
+    if (!probeCanvas?.getContext?.('webgpu')) {
+      return {
+        schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+        mode: normalizedMode,
+        enabled: false,
+        status: 'surface-draw-overlay-auto-unavailable',
+        reason: 'WebGPU canvas context unavailable'
+      };
+    }
+  } catch (error) {
+    return {
+      schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+      mode: normalizedMode,
+      enabled: false,
+      status: 'surface-draw-overlay-auto-unavailable',
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  return {
+    schema: 'peercompute.ulg.sph-resident-surface-draw-overlay-policy.v0',
+    mode: normalizedMode,
+    enabled: true,
+    status: 'surface-draw-overlay-auto-ready',
+    reason: 'WebGPU canvas overlay available'
+  };
+}
+
+export function residentRenderFieldReadbackModeForSurfaceOverlay(enabled) {
+  return enabled ? RESIDENT_NO_FULL_READBACK_MODE : RESIDENT_FULL_READBACK_MODE;
+}
+
+function pressureFeedbackFromGasPressureSummary(gasPressureSummary) {
+  if (!gasPressureSummary) return null;
+  if (gasPressureSummary.pressureFeedback) return gasPressureSummary.pressureFeedback;
+  if (gasPressureSummary.gasCellField || gasPressureSummary.pressureGaugePa != null) return gasPressureSummary;
+  return null;
+}
+
+function pressureInterfaceForceRowsUploadFields(upload = null) {
+  return {
+    pressureInterfaceForceRowsUploadStatus: upload?.status ?? upload?.pressureInterfaceForceRowsUploadStatus ?? null,
+    pressureInterfaceForceRowsBufferRetained: Boolean(
+      upload?.bufferRetained ?? upload?.pressureInterfaceForceRowsBufferRetained
+    ),
+    pressureInterfaceForceRowsBufferByteLength: upload?.forceRowByteLength
+      ?? upload?.pressureInterfaceForceRowsBufferByteLength
+      ?? 0,
+    pressureInterfaceForceRowsUploadSignature: upload?.signature
+      ?? upload?.pressureInterfaceForceRowsUploadSignature
+      ?? null,
+    pressureInterfaceForceRowsUploadQueueCompletionStatus: upload?.pressureInterfaceForceRowsUploadQueueCompletionStatus
+      ?? upload?.queueCompletionStatus
+      ?? null,
+    pressureInterfaceForceRowsUploadQueueCompletionMethod: upload?.pressureInterfaceForceRowsUploadQueueCompletionMethod
+      ?? upload?.queueCompletionMethod
+      ?? null,
+    pressureInterfaceForceRowsConsumerQueueCompletionStatus: upload?.pressureInterfaceForceRowsConsumerQueueCompletionStatus
+      ?? null,
+    pressureInterfaceForceRowsConsumerQueueCompletionMethod: upload?.pressureInterfaceForceRowsConsumerQueueCompletionMethod
+      ?? null,
+    pressureInterfaceForceRowsUploadCleanupStatus: upload?.pressureInterfaceForceRowsUploadCleanupStatus
+      ?? null,
+    pressureInterfaceForceRowsUploadDestroyStatus: upload?.pressureInterfaceForceRowsUploadDestroyStatus
+      ?? null,
+    pressureInterfaceForceRowsLeaseStatus: upload?.residentBufferLeaseLedgerStatus
+      ?? upload?.pressureInterfaceForceRowsLeaseStatus
+      ?? null,
+    pressureInterfaceForceRowsLeaseResourceCount: upload?.residentBufferLeaseResourceCount
+      ?? upload?.pressureInterfaceForceRowsLeaseResourceCount
+      ?? 0,
+    pressureInterfaceForceRowsLeaseActiveCount: upload?.residentBufferLeaseActiveLeaseCount
+      ?? upload?.pressureInterfaceForceRowsLeaseActiveCount
+      ?? 0,
+    pressureInterfaceForceRowsLeaseSummary: upload?.residentBufferLeaseSummary
+      ?? upload?.pressureInterfaceForceRowsLeaseSummary
+      ?? null
+  };
+}
+
+export function buildSphResidentPressureInterfaceStateSummary({
+  materialInterfaceField = null,
+  gasPressureSummary = null,
+  pressureInterfaceCoupling = null,
+  pressureInterfaceForcePreview = null,
+  pressureInterfaceForceSolver = null,
+  pressureInterfaceForceRowsUpload = null,
+  source = 'resident-pressure-interface-state',
+  sourceCadence = null
+} = {}) {
+  const pressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
+  const coupling = pressureInterfaceCoupling || gasPressureInterfaceCouplingSummary({
+    pressureFeedback,
+    materialInterfaceField
+  });
+  const preview = pressureInterfaceForcePreview || gasPressureInterfaceForcePreview({
+    pressureFeedback,
+    materialInterfaceField,
+    pressureInterfaceCoupling: coupling
+  });
+  const solver = pressureInterfaceForceSolver || gasPressureInterfaceForceSolver({
+    pressureFeedback,
+    materialInterfaceField,
+    pressureInterfaceCoupling: coupling
+  });
+  const uploadFields = pressureInterfaceForceRowsUploadFields(pressureInterfaceForceRowsUpload);
+  const solverReady = solver.status === 'pressure-interface-force-solver-ready';
+  const rowsReady = solverReady && uploadFields.pressureInterfaceForceRowsBufferRetained;
+  return {
+    schema: 'peercompute.ulg.sph-resident-pressure-interface-state.v0',
+    status: rowsReady
+      ? 'resident-pressure-interface-force-rows-ready'
+      : (solverReady
+          ? 'resident-pressure-interface-force-solver-ready'
+          : 'resident-pressure-interface-blocked'),
+    source,
+    sourceCadence,
+    pressureAuthority: 'resident-pressure-interface-state',
+    sourceGasPressureSummarySchema: gasPressureSummary?.schema ?? null,
+    sourceGasPressureSummaryStatus: gasPressureSummary?.status ?? null,
+    pressureFeedbackSchema: pressureFeedback?.schema ?? null,
+    pressureFeedbackStatus: pressureFeedback?.status ?? null,
+    materialInterfaceField,
+    materialInterfaceFieldSchema: materialInterfaceField?.schema ?? null,
+    materialInterfaceFieldStatus: materialInterfaceField?.status ?? null,
+    materialInterfaceReadySurfaceCount: materialInterfaceField?.readySurfaceCount ?? 0,
+    materialInterfaceTotalSurfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
+    materialInterfaceForceCouplingStatus: solver.forceCouplingStatus
+      ?? materialInterfaceField?.forceCouplingStatus
+      ?? null,
+    pressureInterfaceCoupling: coupling,
+    pressureInterfaceCouplingSchema: coupling.schema,
+    pressureInterfaceCouplingStatus: coupling.status,
+    pressureInterfaceCouplingPreSolverStatus: coupling.forceCouplingStatus,
+    pressureInterfaceForceCouplingStatus: solver.forceCouplingStatus
+      ?? coupling.forceCouplingStatus,
+    pressureInterfaceForcePreview: preview,
+    pressureInterfaceForcePreviewSchema: preview.schema,
+    pressureInterfaceForcePreviewStatus: preview.status,
+    pressureInterfaceForceApplicationStatus: preview.forceApplicationStatus,
+    pressureInterfacePreviewedElementCount: preview.previewedElementCount,
+    pressureInterfaceTotalAbsForceN: preview.totalAbsInterfaceForceN,
+    pressureInterfaceForceSolver: solver,
+    pressureInterfaceForceSolverSchema: solver.schema,
+    pressureInterfaceForceSolverStatus: solver.status,
+    pressureInterfaceSolverApplicationStatus: solver.forceApplicationStatus,
+    pressureInterfaceSolverForceRowCount: solver.forceRowCount,
+    pressureInterfaceSolverConservationStatus: solver.conservationStatus,
+    pressureInterfaceSolverConservationResidualMagnitudeN: solver.conservationResidualMagnitudeN,
+    ...uploadFields,
+    gpuAuthoritativeState: Boolean(rowsReady || materialInterfaceField?.sourceRenderFieldReadback === false),
+    scientificValidation: false,
+    gasValidation: false,
+    sphValidation: false,
+    pressureInterfaceValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function pressureInterfaceRenderStateFields(pressureState = null) {
+  return {
+    residentPressureInterfaceStateSchema: pressureState?.schema ?? null,
+    residentPressureInterfaceStateStatus: pressureState?.status ?? null,
+    residentPressureInterfaceStateSource: pressureState?.source ?? null,
+    residentPressureInterfaceStateSourceCadence: pressureState?.sourceCadence ?? null,
+    pressureAuthority: pressureState?.pressureAuthority ?? null,
+    materialInterfaceForceCouplingStatus: pressureState?.materialInterfaceForceCouplingStatus ?? null,
+    pressureInterfaceCoupling: pressureState?.pressureInterfaceCoupling ?? null,
+    pressureInterfaceCouplingSchema: pressureState?.pressureInterfaceCouplingSchema ?? null,
+    pressureInterfaceCouplingStatus: pressureState?.pressureInterfaceCouplingStatus ?? null,
+    pressureInterfaceCouplingPreSolverStatus: pressureState?.pressureInterfaceCouplingPreSolverStatus ?? null,
+    pressureInterfaceForceCouplingStatus: pressureState?.pressureInterfaceForceCouplingStatus ?? null,
+    pressureInterfaceForcePreview: pressureState?.pressureInterfaceForcePreview ?? null,
+    pressureInterfaceForcePreviewSchema: pressureState?.pressureInterfaceForcePreviewSchema ?? null,
+    pressureInterfaceForcePreviewStatus: pressureState?.pressureInterfaceForcePreviewStatus ?? null,
+    pressureInterfaceForceApplicationStatus: pressureState?.pressureInterfaceForceApplicationStatus ?? null,
+    pressureInterfacePreviewedElementCount: pressureState?.pressureInterfacePreviewedElementCount ?? 0,
+    pressureInterfaceTotalAbsForceN: pressureState?.pressureInterfaceTotalAbsForceN ?? 0,
+    pressureInterfaceForceSolver: pressureState?.pressureInterfaceForceSolver ?? null,
+    pressureInterfaceForceSolverSchema: pressureState?.pressureInterfaceForceSolverSchema ?? null,
+    pressureInterfaceForceSolverStatus: pressureState?.pressureInterfaceForceSolverStatus ?? null,
+    pressureInterfaceSolverApplicationStatus: pressureState?.pressureInterfaceSolverApplicationStatus ?? null,
+    pressureInterfaceSolverForceRowCount: pressureState?.pressureInterfaceSolverForceRowCount ?? 0,
+    pressureInterfaceSolverConservationStatus: pressureState?.pressureInterfaceSolverConservationStatus ?? null,
+    pressureInterfaceSolverConservationResidualMagnitudeN: pressureState?.pressureInterfaceSolverConservationResidualMagnitudeN ?? 0,
+    ...pressureInterfaceForceRowsUploadFields(pressureState)
+  };
+}
 
 const SURFACE_CONFIG = {
   h2o: {
@@ -464,7 +731,39 @@ function normalizeResidentReadbackMode(value) {
 // padding must exceed that to fully contain the dome. Resolutions are raised to keep box detail
 // since the box now occupies only (1−2·pad) of each field axis.
 const FIELD_PADDING = 0.22;
-const RESIDENT_RENDER_FIELD_MAX_RESOLUTION = 32;
+const RESIDENT_RENDER_FIELD_MAX_RESOLUTION = 64;
+
+export function normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM, fieldPadding = FIELD_PADDING) {
+  const radius = Number.isFinite(radiusM) && radiusM > 0 ? radiusM : 0;
+  const refEdge = Math.max(Number.isFinite(refEdgeM) && refEdgeM > 0 ? refEdgeM : 1, 1e-12);
+  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+  return clamp((radius / refEdge) * span, 0.001, 0.14);
+}
+
+export function surfaceRadiusMetersFromRenderFieldRadius(radiusNorm, refEdgeM, fieldPadding = FIELD_PADDING) {
+  const norm = Number.isFinite(radiusNorm) && radiusNorm > 0 ? radiusNorm : 0;
+  const refEdge = Math.max(Number.isFinite(refEdgeM) && refEdgeM > 0 ? refEdgeM : 1, 1e-12);
+  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+  return norm * refEdge / span;
+}
+
+export function cpuMarchingCubesRadiusFloorM(
+  refEdgeM,
+  resolution,
+  fieldPadding = FIELD_PADDING,
+  floorCells = SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS
+) {
+  const refEdge = Math.max(Number.isFinite(refEdgeM) && refEdgeM > 0 ? refEdgeM : 1, 1e-12);
+  const span = Math.max(1e-12, 1 - 2 * fieldPadding);
+  const res = Math.max(2, Math.round(Number(resolution) || 2));
+  const cells = Math.max(
+    1e-6,
+    Number.isFinite(floorCells) && floorCells > 0
+      ? floorCells
+      : SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS
+  );
+  return (cells / (res - 1)) * (refEdge / span);
+}
 
 function materialKeyOf(value) {
   return typeof value === 'string' && value.length > 0 ? value : 'default';
@@ -472,19 +771,116 @@ function materialKeyOf(value) {
 
 function adaptiveCpuSurfaceConfig(baseConfig, particleCount = Infinity) {
   const count = Number.isFinite(particleCount) ? particleCount : Infinity;
+  if (count > 0 && count <= SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES) {
+    return {
+      ...baseConfig,
+      resolution: Math.max(baseConfig.resolution, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN),
+      maxPolyCount: Math.max(baseConfig.maxPolyCount, 24000)
+    };
+  }
   const adaptive = CPU_SURFACE_ADAPTIVE_RESOLUTION.find((entry) => count <= entry.maxParticles);
-  if (!adaptive) return baseConfig;
+  if (!adaptive) {
+    return {
+      ...baseConfig,
+      resolution: Math.max(baseConfig.resolution, SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN),
+      maxPolyCount: Math.max(baseConfig.maxPolyCount, 48000)
+    };
+  }
   return {
     ...baseConfig,
-    resolution: Math.min(baseConfig.resolution, adaptive.resolution),
-    maxPolyCount: Math.min(baseConfig.maxPolyCount, adaptive.maxPolyCount)
+    resolution: Math.max(
+      Math.min(baseConfig.resolution, adaptive.resolution),
+      SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN
+    ),
+    maxPolyCount: Math.max(
+      Math.min(baseConfig.maxPolyCount, adaptive.maxPolyCount),
+      24000
+    )
   };
 }
 
-function surfaceKeyForDescriptor({ renderKey, material, phase, opticalState = null }) {
+function normalizeRenderDomainId(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
+}
+
+function normalizeRenderDomainCounts(counts = null) {
+  const base = Math.max(0, Math.round(Number(counts?.base) || 0));
+  const drop = Math.max(0, Math.round(Number(counts?.drop) || 0));
+  const total = Math.max(0, Math.round(Number(counts?.total) || (base + drop)));
+  if (base <= 0 && drop <= 0) return null;
+  return { base, drop, total };
+}
+
+function cohortRangesFromRenderDomainCounts(counts = null) {
+  const normalized = normalizeRenderDomainCounts(counts);
+  if (!normalized) return null;
+  return {
+    schema: 'peercompute.ulg.sph-role-cohort-ranges.v0',
+    source: 'initial-particle-order',
+    base: {
+      role: 'base',
+      startIndex: 0,
+      endIndex: normalized.base,
+      count: normalized.base
+    },
+    drop: {
+      role: 'drop',
+      startIndex: normalized.base,
+      endIndex: normalized.base + normalized.drop,
+      count: normalized.drop
+    },
+    total: normalized.total
+  };
+}
+
+function renderDomainExtractionOptions(counts = null) {
+  const normalized = normalizeRenderDomainCounts(counts);
+  return {
+    renderDomainBaseCount: normalized?.base ?? 0,
+    renderDomainDropCount: normalized?.drop ?? 0
+  };
+}
+
+function normalizePhysicalLawGroups(groups = null) {
+  const defaults = {
+    mechanics: true,
+    gravity: true,
+    eos: true,
+    pressure: true,
+    thermal: true,
+    reactions: true,
+    viscosity: true,
+    surfaceTension: false
+  };
+  const normalized = { ...defaults };
+  for (const key of Object.keys(defaults)) {
+    if (groups && Object.prototype.hasOwnProperty.call(groups, key)) normalized[key] = groups[key] !== false;
+  }
+  return normalized;
+}
+
+function physicalLawGroupsSignature(groups = currentPhysicalLawGroups) {
+  const normalized = normalizePhysicalLawGroups(groups);
+  return ['mechanics', 'gravity', 'eos', 'pressure', 'thermal', 'reactions', 'viscosity', 'surfaceTension']
+    .map((key) => `${key}:${normalized[key] ? 1 : 0}`)
+    .join(',');
+}
+
+function renderDomainKeyForId(renderDomainId) {
+  const id = normalizeRenderDomainId(renderDomainId);
+  if (id === 1) return 'base';
+  if (id === 2) return 'drop';
+  return null;
+}
+
+function surfaceKeyForDescriptor({ renderKey, material, phase, opticalState = null, renderDomainId = 0, renderDomainKey = null }) {
   const base = `${renderKey}|${material}|${phase ?? 'phase-unspecified'}`;
   const opticalStateKey = stableOpticalStateKey(opticalState);
-  return opticalStateKey === 'default' ? base : `${base}|opt:${opticalStateKey}`;
+  const opticalKey = opticalStateKey === 'default' ? base : `${base}|opt:${opticalStateKey}`;
+  const domainId = normalizeRenderDomainId(renderDomainId);
+  if (domainId <= 0) return opticalKey;
+  return `${opticalKey}|domain:${renderDomainKey || renderDomainKeyForId(domainId) || domainId}`;
 }
 
 function renderDescriptorOf(value) {
@@ -493,13 +889,17 @@ function renderDescriptorOf(value) {
     const material = materialKeyOf(value.material ?? ((renderKey === 'steam' || renderKey === 'ice') ? 'h2o' : renderKey));
     const phase = value.phase ?? (renderKey === 'steam' ? 'gas' : (renderKey === 'ice' ? 'solid' : null));
     const opticalState = value.opticalState || null;
+    const renderDomainId = normalizeRenderDomainId(value.renderDomainId);
+    const renderDomainKey = value.renderDomainKey || renderDomainKeyForId(renderDomainId);
     return {
       renderKey,
       material,
       phase,
       opticalState,
       opticalStateKey: stableOpticalStateKey(opticalState),
-      surfaceKey: surfaceKeyForDescriptor({ renderKey, material, phase, opticalState })
+      renderDomainId,
+      renderDomainKey,
+      surfaceKey: surfaceKeyForDescriptor({ renderKey, material, phase, opticalState, renderDomainId, renderDomainKey })
     };
   }
   const renderKey = materialKeyOf(value);
@@ -511,6 +911,8 @@ function renderDescriptorOf(value) {
     phase,
     opticalState: null,
     opticalStateKey: 'default',
+    renderDomainId: 0,
+    renderDomainKey: null,
     surfaceKey: surfaceKeyForDescriptor({ renderKey, material, phase })
   };
 }
@@ -620,7 +1022,8 @@ function surfaceRenderOrderKey(descriptorOrRow = {}) {
     descriptorOrRow.renderKey ?? descriptorOrRow.renderMaterialKey ?? '',
     descriptorOrRow.material ?? '',
     descriptorOrRow.phase ?? '',
-    descriptorOrRow.opticalStateKey ?? stableOpticalStateKey(descriptorOrRow.opticalState || null)
+    descriptorOrRow.opticalStateKey ?? stableOpticalStateKey(descriptorOrRow.opticalState || null),
+    normalizeRenderDomainId(descriptorOrRow.renderDomainId)
   ].join('|');
 }
 
@@ -653,11 +1056,13 @@ export function resolveRenderFieldSurfaceVisibility({
   };
 }
 
-export function hideRenderFieldSurfaceAfterGrace(surface, renderSource) {
+export function hideRenderFieldSurfaceAfterGrace(surface, renderSource, {
+  immediate = false
+} = {}) {
   surface.inactiveFrameCount = Math.max(0, surface.inactiveFrameCount || 0) + 1;
   surface.mesh.userData.surfaceInactiveFrameCount = surface.inactiveFrameCount;
   surface.mesh.userData.renderSource = renderSource;
-  if (surface.inactiveFrameCount <= SPH_SURFACE_INACTIVE_GRACE_FRAMES) {
+  if (!immediate && surface.inactiveFrameCount <= SPH_SURFACE_INACTIVE_GRACE_FRAMES) {
     return false;
   }
   surface.mesh.isolation = surface.config.isolation;
@@ -958,6 +1363,8 @@ export function createContinuousSurfaceBatches({
         phase: descriptor.phase,
         opticalState: descriptor.opticalState,
         opticalStateKey: descriptor.opticalStateKey,
+        renderDomainId: descriptor.renderDomainId,
+        renderDomainKey: descriptor.renderDomainKey,
         descriptor,
         positionsM: [],
         normalizedPositions: [],
@@ -993,6 +1400,102 @@ export function createContinuousSurfaceBatches({
     ...batch,
     surfaceRadiusM: estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM)
   }));
+}
+
+export function mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches = []) {
+  if (!Array.isArray(batches) || batches.length === 0) return [];
+  const groupKeyForBatch = (batch) => {
+    if (!batch?.material || !batch?.phase || !batch?.renderKey) return null;
+    if (!(Math.max(0, Math.round(Number(batch.renderDomainId) || 0)) > 0)) return null;
+    const positionCount = Math.floor(Math.max(
+      Number(batch.positionsM?.length) || 0,
+      Number(batch.normalizedPositions?.length) || 0
+    ) / 3);
+    if (positionCount <= 0) return null;
+    return [
+      batch.renderKey,
+      batch.material,
+      batch.phase,
+      batch.opticalStateKey || stableOpticalStateKey(batch.opticalState || batch.descriptor?.opticalState || null)
+    ].join('|');
+  };
+  const groups = new Map();
+  for (const batch of batches) {
+    const key = groupKeyForBatch(batch);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(batch);
+  }
+  const mergedByKey = new Map();
+  for (const [key, group] of groups) {
+    const domains = new Set(group.map((batch) => Math.max(0, Math.round(Number(batch.renderDomainId) || 0))));
+    if (group.length <= 1 || domains.size <= 1) continue;
+    const first = group[0];
+    const descriptor = renderDescriptorOf({
+      renderKey: first.renderKey,
+      material: first.material,
+      phase: first.phase,
+      opticalState: first.opticalState || first.descriptor?.opticalState || null
+    });
+    const positionsM = [];
+    const normalizedPositions = [];
+    const colorsRgb = [];
+    const bounds = emptyBounds();
+    let count = 0;
+    let surfaceRadiusM = 0;
+    for (const batch of group) {
+      for (const value of batch.positionsM || []) positionsM.push(value);
+      for (const value of batch.normalizedPositions || []) normalizedPositions.push(value);
+      for (const value of batch.colorsRgb || []) colorsRgb.push(value);
+      const batchCount = Math.max(0, Math.round(Number(batch.count) || 0));
+      count += batchCount;
+      if (Number.isFinite(batch.surfaceRadiusM) && batch.surfaceRadiusM > surfaceRadiusM) {
+        surfaceRadiusM = batch.surfaceRadiusM;
+      }
+      for (let index = 0; index + 2 < (batch.positionsM?.length || 0); index += 3) {
+        expandBounds(bounds, batch.positionsM[index], batch.positionsM[index + 1], batch.positionsM[index + 2]);
+      }
+    }
+    mergedByKey.set(key, {
+      surfaceKey: descriptor.surfaceKey,
+      renderKey: descriptor.renderKey,
+      material: descriptor.material,
+      phase: descriptor.phase,
+      opticalState: descriptor.opticalState,
+      opticalStateKey: descriptor.opticalStateKey,
+      renderDomainId: 0,
+      renderDomainKey: null,
+      descriptor,
+      positionsM,
+      normalizedPositions,
+      colorsRgb,
+      bounds,
+      count,
+      surfaceRadiusM: surfaceRadiusM > 0 ? surfaceRadiusM : estimateSurfaceRadiusM(bounds, count),
+      source: 'merged-same-material-phase-render-surface',
+      mergedRenderDomains: group.map((batch) => ({
+        renderDomainId: Math.max(0, Math.round(Number(batch.renderDomainId) || 0)),
+        renderDomainKey: batch.renderDomainKey ?? batch.descriptor?.renderDomainKey ?? null,
+        count: Math.max(0, Math.round(Number(batch.count) || 0)),
+        surfaceKey: batch.surfaceKey
+      }))
+    });
+  }
+  const emittedGroups = new Set();
+  const output = [];
+  for (const batch of batches) {
+    const key = groupKeyForBatch(batch);
+    const merged = key ? mergedByKey.get(key) : null;
+    if (merged) {
+      if (!emittedGroups.has(key)) {
+        output.push(merged);
+        emittedGroups.add(key);
+      }
+      continue;
+    }
+    output.push(batch);
+  }
+  return output;
 }
 
 function materialPropertiesLookup(material, materialProperties) {
@@ -1042,6 +1545,9 @@ export function createProductEventSurfaceBatches({
     ? reactionTable.productTermMetadata
     : [];
   const existingKeys = new Set((baseBatches || []).map((batch) => batch.surfaceKey));
+  const existingMaterialPhaseKeys = new Set((baseBatches || [])
+    .filter((batch) => batch?.material && batch?.phase)
+    .map((batch) => `${batch.material}|${batch.phase}`));
   const createdKeys = new Set();
   const batches = [];
   for (const record of records) {
@@ -1053,6 +1559,7 @@ export function createProductEventSurfaceBatches({
     const material = record.material || term?.material || null;
     if (!material) continue;
     const phase = phaseForProductInventoryRecord(record, term, materialProperties);
+    if (existingMaterialPhaseKeys.has(`${material}|${phase}`)) continue;
     const renderKey = renderKeyForMaterialPhase(material, phase);
     const descriptor = renderDescriptorOf({ material, phase, renderKey });
     if (existingKeys.has(descriptor.surfaceKey) || createdKeys.has(descriptor.surfaceKey)) continue;
@@ -1075,6 +1582,8 @@ export function createProductEventSurfaceBatches({
       phase,
       opticalState: descriptor.opticalState,
       opticalStateKey: descriptor.opticalStateKey,
+      renderDomainId: descriptor.renderDomainId,
+      renderDomainKey: descriptor.renderDomainKey,
       descriptor,
       positionsM: [],
       normalizedPositions: [],
@@ -1135,7 +1644,8 @@ export function residentSurfaceBatchIdentitySignature(batches = []) {
         surfaceKey,
         descriptor.renderKey ?? batch?.renderKey ?? 'render-unspecified',
         descriptor.material ?? batch?.material ?? 'material-unspecified',
-        descriptor.phase ?? batch?.phase ?? 'phase-unspecified'
+        descriptor.phase ?? batch?.phase ?? 'phase-unspecified',
+        normalizeRenderDomainId(descriptor.renderDomainId ?? batch?.renderDomainId)
       ].join(':');
     })
     .sort()
@@ -1159,6 +1669,27 @@ export function shouldRetainResidentSurfaceDrawOverlay({
   );
 }
 
+export function surfaceRadiusScaleForRenderBatch(
+  batch,
+  requestedScale = SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  { explicitSurfaceRadius = false } = {}
+) {
+  const scale = Number.isFinite(requestedScale) && requestedScale > 0
+    ? requestedScale
+    : SPH_SURFACE_RADIUS_SCALE_DEFAULT;
+  const count = Math.max(0, Math.round(Number(batch?.count) || 0));
+  const usesDefaultScale = Math.abs(scale - SPH_SURFACE_RADIUS_SCALE_DEFAULT) < 1e-9;
+  if (
+    !explicitSurfaceRadius
+    && usesDefaultScale
+    && count > 0
+    && count <= SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES
+  ) {
+    return Math.max(scale, SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN);
+  }
+  return scale;
+}
+
 function opticalGpuLookupSignature(table, lookup) {
   return [
     table.recordCount,
@@ -1172,13 +1703,29 @@ export function createSphPhaseScene(container, {
   boxEdgeM = 10,
   boxDimsM = null,
   surfaceRadiusM = null,
-  surfaceRadiusScale = 1,
+  surfaceRadiusScale = SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  preserveDrawingBuffer = false,
   preferWebGpuOpticalLookup = true,
+  residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   navigatorRef = globalThis.navigator
 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
+  const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(residentSurfaceDrawOverlay);
+  let residentSurfaceDrawOverlayPolicy = null;
+  function resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh = false } = {}) {
+    if (refresh || !residentSurfaceDrawOverlayPolicy) {
+      residentSurfaceDrawOverlayPolicy = resolveResidentSurfaceDrawOverlayPolicy({
+        mode: residentSurfaceDrawOverlayMode,
+        container,
+        navigatorRef
+      });
+      scene.userData.sphResidentSurfaceDrawOverlayPolicy = residentSurfaceDrawOverlayPolicy;
+    }
+    return residentSurfaceDrawOverlayPolicy;
+  }
   let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
+  let currentWallTemperaturesK = null;
   const scene = new THREE.Scene();
   // A dark slate background rather than near-black: the ice/water surfaces are physically
   // transmissive (clear), so they take their look from what is behind them — a pure-black void made
@@ -1194,13 +1741,14 @@ export function createSphPhaseScene(container, {
   const center = new THREE.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
   camera.position.set(center.x + refEdgeM * 0.85, center.y + refEdgeM * 0.55, center.z + refEdgeM * 1.15);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: false });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: Boolean(preserveDrawingBuffer) });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(width, height);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
   container.appendChild(renderer.domElement);
+  resolveSceneResidentSurfaceDrawOverlayPolicy();
 
   let pmrem = null;
   let environment = null;
@@ -1295,9 +1843,14 @@ export function createSphPhaseScene(container, {
   let sphThermalResponseGraphUpload = null;
   let sphThermalResponseGraphUploadSignature = null;
   let pendingSphThermalResponseGraphUpload = null;
+  let mlsMpmMechanicsMaterialTable = null;
   let sphReactionTable = null;
   let currentMaterialProperties = null;
+  let currentRenderDomainCounts = null;
+  let currentPhysicalLawGroups = null;
+  let sphResidentMaterialInterfaceState = null;
   let sphResidentRenderState = null;
+  let sphResidentPressureInterfaceState = null;
   let sphResidentSurfaceDraw = null;
   let sphResidentSurfaceDrawRenderBridge = null;
   let sphResidentRenderSurfaceState = null;
@@ -1323,8 +1876,13 @@ export function createSphPhaseScene(container, {
   scene.userData.sphThermalClosureGraphBuffers = null;
   scene.userData.sphThermalPhaseResponseTable = null;
   scene.userData.sphThermalResponseGraphUpload = null;
+  scene.userData.mlsMpmMechanicsMaterialTable = null;
   scene.userData.sphReactionTable = null;
+  scene.userData.sphRenderDomainCounts = null;
+  scene.userData.sphPhysicalLawGroups = null;
+  scene.userData.sphResidentMaterialInterfaceState = null;
   scene.userData.sphResidentRenderState = null;
+  scene.userData.sphResidentPressureInterfaceState = null;
   scene.userData.sphResidentSurfaceDraw = null;
   scene.userData.sphResidentSurfaceDrawRenderBridge = null;
   scene.userData.sphResidentRenderSurfaceState = null;
@@ -1335,8 +1893,8 @@ export function createSphPhaseScene(container, {
     surface.mesh.userData.surfaceInactiveFrameCount = 0;
   }
 
-  function hideSurfaceAfterGrace(surface, renderSource) {
-    return hideRenderFieldSurfaceAfterGrace(surface, renderSource);
+  function hideSurfaceAfterGrace(surface, renderSource, options = {}) {
+    return hideRenderFieldSurfaceAfterGrace(surface, renderSource, options);
   }
 
   function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
@@ -1539,8 +2097,89 @@ export function createSphPhaseScene(container, {
     return null;
   }
 
+  function applyPressureInterfaceUploadFields(target, upload = pressureInterfaceForceRowsUpload) {
+    if (!target) return target;
+    Object.assign(target, pressureInterfaceForceRowsUploadFields(upload));
+    return target;
+  }
+
+  function publishSphResidentMaterialInterfaceState(state) {
+    sphResidentMaterialInterfaceState = state || null;
+    scene.userData.sphResidentMaterialInterfaceState = sphResidentMaterialInterfaceState;
+    return sphResidentMaterialInterfaceState;
+  }
+
+  function publishSphResidentPressureInterfaceState(state) {
+    sphResidentPressureInterfaceState = state || null;
+    scene.userData.sphResidentPressureInterfaceState = sphResidentPressureInterfaceState;
+    if (sphResidentRenderState) {
+      Object.assign(sphResidentRenderState, pressureInterfaceRenderStateFields(sphResidentPressureInterfaceState));
+    }
+    return sphResidentPressureInterfaceState;
+  }
+
+  function currentPressureInterfaceForceSolver() {
+    return sphResidentPressureInterfaceState?.pressureInterfaceForceSolver
+      ?? sphResidentRenderState?.pressureInterfaceForceSolver
+      ?? null;
+  }
+
+  function currentPressureInterfaceForceRowsUpload(solver = currentPressureInterfaceForceSolver()) {
+    if (!solver?.schema || !pressureInterfaceForceRowsUpload?.buffer) return null;
+    const signature = pressureInterfaceForceSolverSignature(solver);
+    if (pressureInterfaceForceRowsUploadSignature !== signature) return null;
+    return pressureInterfaceForceRowsUpload;
+  }
+
+  function currentPressureInterfaceForceRowsBuffer(solver = currentPressureInterfaceForceSolver()) {
+    return currentPressureInterfaceForceRowsUpload(solver)?.buffer ?? null;
+  }
+
+  function borrowPressureInterfaceForceRowsForStage({
+    pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
+    pressureInterfaceForceRowsBuffer = null,
+    consumerStage = 'mls-mpm-grid-update',
+    reason = 'pressure-interface-force-rows-consumed'
+  } = {}) {
+    const upload = currentPressureInterfaceForceRowsUpload(pressureInterfaceForceSolver);
+    if (!upload?.buffer || pressureInterfaceForceRowsBuffer !== upload.buffer) return null;
+    const lease = upload.addPressureInterfaceForceRowsConsumerLease?.({
+      consumerStage,
+      reason
+    });
+    if (!lease) return null;
+    publishPressureInterfaceForceRowsUpload(upload);
+    let released = false;
+    return {
+      upload,
+      lease,
+      release(status = 'released-after-grid-update', consumerQueueEvidence = null) {
+        if (released) return null;
+        released = true;
+        applyPressureInterfaceForceRowsConsumerQueueEvidence(upload, consumerQueueEvidence);
+        const releasedLease = upload.releasePressureInterfaceForceRowsLease?.(lease.leaseId, { status });
+        publishPressureInterfaceForceRowsUpload(upload);
+        return {
+          pressureInterfaceForceRowsConsumerLeaseId: lease.leaseId,
+          pressureInterfaceForceRowsConsumerLeaseStatus: releasedLease?.status ?? status,
+          pressureInterfaceForceRowsConsumerStage: lease.consumerStage,
+          pressureInterfaceForceRowsUploadQueueCompletionStatus: upload.pressureInterfaceForceRowsUploadQueueCompletionStatus ?? null,
+          pressureInterfaceForceRowsUploadQueueCompletionMethod: upload.pressureInterfaceForceRowsUploadQueueCompletionMethod ?? null,
+          pressureInterfaceForceRowsConsumerQueueCompletionStatus: upload.pressureInterfaceForceRowsConsumerQueueCompletionStatus ?? null,
+          pressureInterfaceForceRowsConsumerQueueCompletionMethod: upload.pressureInterfaceForceRowsConsumerQueueCompletionMethod ?? null,
+          pressureInterfaceForceRowsLeaseSummary: upload.residentBufferLeaseSummary ?? null,
+          pressureInterfaceForceRowsLeaseActiveCount: upload.residentBufferLeaseActiveLeaseCount ?? 0
+        };
+      }
+    };
+  }
+
   function destroyPressureInterfaceForceRowsUpload() {
-    pressureInterfaceForceRowsUpload?.buffer?.destroy?.();
+    pressureInterfaceForceRowsUpload?.releasePressureInterfaceForceRowsLeases?.();
+    pressureInterfaceForceRowsUpload?.destroy?.({
+      releaseLeases: true,
+      reason: 'pressure-interface-force-rows-upload-replaced'
+    });
     pressureInterfaceForceRowsUpload = null;
     pressureInterfaceForceRowsUploadSignature = null;
     scene.userData.sphPressureInterfaceForceRowsUpload = null;
@@ -1549,20 +2188,92 @@ export function createSphPhaseScene(container, {
       sphResidentRenderState.pressureInterfaceForceRowsBufferRetained = false;
       sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength = 0;
       sphResidentRenderState.pressureInterfaceForceRowsUploadSignature = null;
+      sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionStatus = null;
+      sphResidentRenderState.pressureInterfaceForceRowsUploadQueueCompletionMethod = null;
+      sphResidentRenderState.pressureInterfaceForceRowsConsumerQueueCompletionStatus = null;
+      sphResidentRenderState.pressureInterfaceForceRowsConsumerQueueCompletionMethod = null;
+      sphResidentRenderState.pressureInterfaceForceRowsUploadCleanupStatus = null;
+      sphResidentRenderState.pressureInterfaceForceRowsUploadDestroyStatus = null;
+      sphResidentRenderState.pressureInterfaceForceRowsLeaseStatus = null;
+      sphResidentRenderState.pressureInterfaceForceRowsLeaseResourceCount = 0;
+      sphResidentRenderState.pressureInterfaceForceRowsLeaseActiveCount = 0;
+      sphResidentRenderState.pressureInterfaceForceRowsLeaseSummary = null;
     }
+    applyPressureInterfaceUploadFields(sphResidentPressureInterfaceState, null);
   }
 
   function publishPressureInterfaceForceRowsUpload(upload = pressureInterfaceForceRowsUpload) {
     scene.userData.sphPressureInterfaceForceRowsUpload = upload;
+    applyPressureInterfaceUploadFields(sphResidentPressureInterfaceState, upload);
     if (!sphResidentRenderState) return;
-    sphResidentRenderState.pressureInterfaceForceRowsUploadStatus = upload?.status ?? null;
-    sphResidentRenderState.pressureInterfaceForceRowsBufferRetained = Boolean(upload?.bufferRetained);
-    sphResidentRenderState.pressureInterfaceForceRowsBufferByteLength = upload?.forceRowByteLength ?? 0;
-    sphResidentRenderState.pressureInterfaceForceRowsUploadSignature = upload?.signature ?? null;
+    applyPressureInterfaceUploadFields(sphResidentRenderState, upload);
+  }
+
+  function pressureConsumerQueueEvidenceFromExecution(execution = null) {
+    const candidates = [
+      execution,
+      execution?.gridUpdate,
+      execution?.finalStep,
+      execution?.finalStep?.gridUpdate
+    ];
+    for (const candidate of candidates) {
+      const status = candidate?.queueCompletionStatus ?? null;
+      const method = candidate?.queueCompletionMethod ?? null;
+      if (status || method) return { status, method };
+    }
+    return null;
+  }
+
+  function pressureUploadCompletionStatusFromConsumer(consumerQueueEvidence = null) {
+    const status = consumerQueueEvidence?.status ?? null;
+    if (status === 'queue-work-completed' || status === 'readback-map-completed') {
+      return 'ordered-before-consumer-queue-completed';
+    }
+    if (status) return `ordered-before-consumer-${status}`;
+    return 'queue-write-enqueued-consumer-completion-unavailable';
+  }
+
+  function applyPressureInterfaceForceRowsConsumerQueueEvidence(upload = null, consumerQueueEvidence = null) {
+    if (!upload) return null;
+    const evidence = consumerQueueEvidence || null;
+    upload.pressureInterfaceForceRowsConsumerQueueCompletionStatus = evidence?.status ?? null;
+    upload.pressureInterfaceForceRowsConsumerQueueCompletionMethod = evidence?.method ?? null;
+    upload.pressureInterfaceForceRowsUploadQueueCompletionStatus = pressureUploadCompletionStatusFromConsumer(evidence);
+    upload.pressureInterfaceForceRowsUploadQueueCompletionMethod = evidence?.method
+      ? `queue.writeBuffer -> ${evidence.method}`
+      : 'queue.writeBuffer';
+    upload.queueCompletionStatus = upload.pressureInterfaceForceRowsUploadQueueCompletionStatus;
+    upload.queueCompletionMethod = upload.pressureInterfaceForceRowsUploadQueueCompletionMethod;
+    return upload;
+  }
+
+  function destroyTemporaryPressureInterfaceForceRowsUpload({
+    upload = null,
+    execution = null,
+    reason = 'temporary-pressure-interface-force-rows-cleanup'
+  } = {}) {
+    if (!upload) return null;
+    const consumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
+    applyPressureInterfaceForceRowsConsumerQueueEvidence(upload, consumerQueueEvidence);
+    const destroyEvent = upload.destroy?.({ reason }) ?? null;
+    upload.pressureInterfaceForceRowsUploadCleanupStatus = destroyEvent?.status ?? 'destroy-noop-no-destroy-fn';
+    upload.pressureInterfaceForceRowsUploadDestroyStatus = destroyEvent?.status ?? null;
+    return {
+      pressureInterfaceForceRowsTemporaryUploadStatus: upload.status ?? null,
+      pressureInterfaceForceRowsTemporaryUploadQueueCompletionStatus: upload.pressureInterfaceForceRowsUploadQueueCompletionStatus ?? null,
+      pressureInterfaceForceRowsTemporaryUploadQueueCompletionMethod: upload.pressureInterfaceForceRowsUploadQueueCompletionMethod ?? null,
+      pressureInterfaceForceRowsTemporaryUploadConsumerQueueCompletionStatus: upload.pressureInterfaceForceRowsConsumerQueueCompletionStatus ?? null,
+      pressureInterfaceForceRowsTemporaryUploadConsumerQueueCompletionMethod: upload.pressureInterfaceForceRowsConsumerQueueCompletionMethod ?? null,
+      pressureInterfaceForceRowsTemporaryUploadCleanupStatus: upload.pressureInterfaceForceRowsUploadCleanupStatus ?? null,
+      pressureInterfaceForceRowsTemporaryUploadDestroyStatus: upload.pressureInterfaceForceRowsUploadDestroyStatus ?? null,
+      pressureInterfaceForceRowsTemporaryUploadLeaseStatus: upload.residentBufferLeaseLedgerStatus ?? null,
+      pressureInterfaceForceRowsTemporaryUploadLeaseActiveCount: upload.residentBufferLeaseActiveLeaseCount ?? 0,
+      pressureInterfaceForceRowsTemporaryUploadLeaseSummary: upload.residentBufferLeaseSummary ?? null
+    };
   }
 
   function uploadPressureInterfaceForceRowsBuffer({
-    pressureInterfaceForceSolver = sphResidentRenderState?.pressureInterfaceForceSolver ?? null,
+    pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
     device = null,
     retainInScene = true
   } = {}) {
@@ -1596,6 +2307,41 @@ export function createSphPhaseScene(container, {
       usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
     });
     device.queue.writeBuffer(buffer, 0, rows);
+    const leaseLedger = createResidentBufferLeaseLedger({
+      ledgerId: `sph-pressure-interface-force-rows:${forceRowCount}:${rows.byteLength}`,
+      stateKey: 'sph-pressure-interface-force-rows',
+      scope: 'sph-pressure-interface-force-rows-buffer-leases'
+    });
+    const resourceKey = `pressure-interface-force-rows:${forceRowCount}:${rows.byteLength}`;
+    registerResidentBufferResource(leaseLedger, {
+      resourceKey,
+      resourceKind: 'pressure-interface-force-rows-buffer',
+      stateFamily: 'pressure-interface',
+      ownerStage: 'pressure-interface-force-solver',
+      producerStage: 'pressure-interface-force-solver',
+      source: 'uploadPressureInterfaceForceRowsBuffer',
+      status: 'pressure-interface-force-rows-buffer-retained',
+      retained: true,
+      byteLength: rows.byteLength,
+      rowCount: forceRowCount,
+      bufferLabel: buffer.label,
+      expectedConsumers: ['mls-mpm-grid-update', 'resident-pressure-interface-state', 'resident-render-state']
+    });
+    const leaseIds = retainInScene
+      ? [addResidentBufferLease(leaseLedger, {
+        resourceKey,
+        consumerStage: 'resident-pressure-interface-state',
+        reason: 'retained-pressure-interface-force-rows'
+      }).leaseId]
+      : [];
+    let destroyed = false;
+    const refreshLeaseSummary = (target) => {
+      target.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(leaseLedger);
+      target.residentBufferLeaseLedgerStatus = target.residentBufferLeaseSummary.status;
+      target.residentBufferLeaseResourceCount = target.residentBufferLeaseSummary.resourceCount;
+      target.residentBufferLeaseActiveLeaseCount = target.residentBufferLeaseSummary.activeLeaseCount;
+      return target.residentBufferLeaseSummary;
+    };
     const upload = {
       schema: 'peercompute.ulg.sph-pressure-interface-force-rows-upload.v0',
       status: 'webgpu-pressure-interface-force-rows-uploaded',
@@ -1607,12 +2353,55 @@ export function createSphPhaseScene(container, {
       buffer,
       bufferRetained: true,
       signature,
+      pressureInterfaceForceRowsUploadQueueCompletionStatus: 'queue-write-enqueued',
+      pressureInterfaceForceRowsUploadQueueCompletionMethod: 'queue.writeBuffer',
+      pressureInterfaceForceRowsConsumerQueueCompletionStatus: null,
+      pressureInterfaceForceRowsConsumerQueueCompletionMethod: null,
+      pressureInterfaceForceRowsUploadCleanupStatus: null,
+      pressureInterfaceForceRowsUploadDestroyStatus: null,
+      queueCompletionStatus: 'queue-write-enqueued',
+      queueCompletionMethod: 'queue.writeBuffer',
+      residentBufferLeaseLedger: leaseLedger,
+      residentBufferLeaseSummary: summarizeResidentBufferLeaseLedger(leaseLedger),
+      residentBufferLeaseLedgerStatus: leaseLedger.status,
+      residentBufferLeaseResourceCount: leaseLedger.resourceCount,
+      residentBufferLeaseActiveLeaseCount: leaseLedger.activeLeaseCount,
       scientificValidation: false,
       gasValidation: false,
       sphValidation: false,
       fullPhysicsValidation: false,
-      destroy() {
-        buffer.destroy?.();
+      addPressureInterfaceForceRowsConsumerLease({
+        consumerStage = 'mls-mpm-grid-update',
+        reason = 'pressure-interface-force-rows-consumed'
+      } = {}) {
+        const lease = addResidentBufferLease(leaseLedger, {
+          resourceKey,
+          consumerStage,
+          reason
+        });
+        refreshLeaseSummary(this);
+        return lease;
+      },
+      releasePressureInterfaceForceRowsLease(leaseId, { status = 'released' } = {}) {
+        const lease = releaseResidentBufferLease(leaseLedger, leaseId, { status });
+        refreshLeaseSummary(this);
+        return lease;
+      },
+      releasePressureInterfaceForceRowsLeases({ status = 'released' } = {}) {
+        for (const leaseId of leaseIds) {
+          this.releasePressureInterfaceForceRowsLease(leaseId, { status });
+        }
+        return refreshLeaseSummary(this);
+      },
+      destroy({ force = false, releaseLeases = false, reason = 'pressure-interface-force-rows-cleanup' } = {}) {
+        if (releaseLeases) this.releasePressureInterfaceForceRowsLeases();
+        const event = destroyResidentBufferWithLease(leaseLedger, resourceKey, () => {
+          if (destroyed) return;
+          destroyed = true;
+          buffer.destroy?.();
+        }, { force, reason });
+        refreshLeaseSummary(this);
+        return event;
       }
     };
     if (!retainInScene) return upload;
@@ -1620,6 +2409,255 @@ export function createSphPhaseScene(container, {
     pressureInterfaceForceRowsUploadSignature = signature;
     publishPressureInterfaceForceRowsUpload(pressureInterfaceForceRowsUpload);
     return pressureInterfaceForceRowsUpload;
+  }
+
+  async function refreshSphResidentMaterialInterfaceState({
+    preferWebGpu = true,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    residentSteps = mlsMpmResidentSteps,
+    materialProperties = currentMaterialProperties,
+    gasPressureSummary = null,
+    source = 'resident-physics-material-interface-extractor',
+    sourceCadence = 'resident-step-completed'
+  } = {}) {
+    const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
+    const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
+    const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
+      || finalStep?.nextParticleUploads?.sphParticleUpload
+      || null;
+    if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
+      return publishSphResidentMaterialInterfaceState({
+        schema: 'peercompute.ulg.sph-material-interface-field.v0',
+        status: 'resident-material-interface-source-unavailable',
+        source,
+        sourceCadence,
+        reason: 'retained resident SPH buffers are not available',
+        surfaceCount: 0,
+        readySurfaceCount: 0,
+        totalSurfaceAreaM2: 0,
+        elementCount: 0,
+        elements: [],
+        gpuAuthoritativeState: false,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      });
+    }
+    const resolvedDeviceResult = device
+      ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+      : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
+    if (!resolvedDeviceResult?.device) {
+      return publishSphResidentMaterialInterfaceState({
+        schema: 'peercompute.ulg.sph-material-interface-field.v0',
+        status: 'resident-material-interface-webgpu-unavailable',
+        source,
+        sourceCadence,
+        reason: resolvedDeviceResult?.reason || 'WebGPU material-interface extraction not available',
+        surfaceCount: 0,
+        readySurfaceCount: 0,
+        totalSurfaceAreaM2: 0,
+        elementCount: 0,
+        elements: [],
+        gpuAuthoritativeState: false,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      });
+    }
+
+    let renderRowsExecution = null;
+    let interfaceSourceField = null;
+    try {
+      const reactionResult = finalStep?.reactionStep?.result || finalStep?.reactionStep || null;
+      const reactionSummary = reactionResult?.reactionSummary || null;
+      const residentProductMass = finalStep?.residentProductMass || reactionResult?.residentProductMass || null;
+      const productEventBuffer = residentProductMass?.productEventBuffer || reactionSummary?.productEventBuffer || null;
+      const productEventCount = Math.max(0, Math.round(Number(
+        residentProductMass?.productEventRowCount ?? reactionSummary?.productEventRowCount
+      ) || 0));
+      const needsSurfaceTableSeed = !sphResidentRenderSurfaceState?.surfaceTable?.schema;
+      renderRowsExecution = await extractSphRenderRowsWebGpu({
+        device: resolvedDeviceResult.device,
+        sphParticleState: nextSphParticleState,
+        sphParticleUpload: nextSphUpload,
+        sourceStateBuffer: nextSphUpload.stateBuffer,
+        sourceThermoBuffer: nextSphUpload.thermoBuffer,
+        retainRenderRowsBuffer: true,
+        readbackMode: needsSurfaceTableSeed ? 'full-parity-readback' : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+        ...renderDomainExtractionOptions(currentRenderDomainCounts)
+      });
+      const hasRenderRowsReadback = renderRowsExecution.renderRows instanceof Float32Array
+        && renderRowsExecution.renderRows.length > 0;
+      if (needsSurfaceTableSeed && hasRenderRowsReadback) {
+        const decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
+          materialProperties: materialProperties || {},
+          reactionTable: sphReactionTable,
+          gasPressureSummary
+        });
+        const particleBatches = createContinuousSurfaceBatches({
+          positionsM: decoded.positionsM,
+          colorsRgb: decoded.colorsRgb,
+          materials: decoded.materials,
+          boxEdgeM,
+          boxDimsM: dims,
+          smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
+        });
+        const productEventSurfaceBatches = createProductEventSurfaceBatches({
+          baseBatches: particleBatches,
+          reactionSummary,
+          reactionTable: sphReactionTable,
+          materialProperties,
+          smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
+        });
+        const fieldBatches = createResidentRenderSurfaceBatches({
+          particleBatches,
+          productEventSurfaceBatches,
+          materialProperties,
+          reactionTable: sphReactionTable,
+          smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
+        });
+        rebuildOpticalStateForSurfaceBatches(fieldBatches, { materialProperties });
+        captureResidentRenderSurfaceState({
+          particleBatches,
+          fieldBatches,
+          emissiveByMaterial: decoded.emissiveByMaterial,
+          materialProperties
+        });
+      }
+      const surfaceTable = sphResidentRenderSurfaceState?.surfaceTable;
+      if (!surfaceTable?.schema) {
+        return publishSphResidentMaterialInterfaceState({
+          schema: 'peercompute.ulg.sph-material-interface-field.v0',
+          status: 'resident-material-interface-surface-table-unavailable',
+          source,
+          sourceCadence,
+          reason: 'resident surface table is not available',
+          particleCount: nextSphParticleState.particleCount,
+          renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback),
+          surfaceCount: 0,
+          readySurfaceCount: 0,
+          totalSurfaceAreaM2: 0,
+          elementCount: 0,
+          elements: [],
+          gpuAuthoritativeState: false,
+          scientificValidation: false,
+          sphValidation: false,
+          surfaceExtractionValidation: false,
+          fullPhysicsValidation: false
+        });
+      }
+      interfaceSourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
+        device: resolvedDeviceResult.device,
+        renderRows: renderRowsExecution.renderRows,
+        renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
+        productEventBuffer,
+        productEventCount,
+        surfaceTable,
+        particleCount: renderRowsExecution.particleCount,
+        fieldPadding: FIELD_PADDING,
+        refEdgeM,
+        readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+        source,
+        sourceCadence
+      });
+      const materialInterfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+        device: resolvedDeviceResult.device,
+        renderField: interfaceSourceField,
+        source,
+        sourceCadence
+      });
+      materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
+      materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;
+      materialInterfaceField.interfaceSourceFieldSchema = interfaceSourceField.schema;
+      materialInterfaceField.interfaceSourceFieldStatus = interfaceSourceField.status;
+      materialInterfaceField.interfaceSourceFieldQueueCompletionStatus = interfaceSourceField.queueCompletionStatus ?? null;
+      materialInterfaceField.interfaceSourceFieldQueueCompletionMethod = interfaceSourceField.queueCompletionMethod ?? null;
+      materialInterfaceField.renderFieldReadback = Boolean(interfaceSourceField.sourceRenderFieldReadback);
+      materialInterfaceField.renderFieldReadbackMode = interfaceSourceField.sourceRenderFieldReadbackMode ?? null;
+      materialInterfaceField.renderFieldQueueCompletionStatus = interfaceSourceField.sourceRenderFieldQueueCompletionStatus ?? null;
+      materialInterfaceField.renderFieldQueueCompletionMethod = interfaceSourceField.sourceRenderFieldQueueCompletionMethod ?? null;
+      materialInterfaceField.gpuAuthoritativeState = true;
+      return publishSphResidentMaterialInterfaceState(materialInterfaceField);
+    } catch (error) {
+      return publishSphResidentMaterialInterfaceState({
+        schema: 'peercompute.ulg.sph-material-interface-field.v0',
+        status: 'resident-material-interface-error',
+        source,
+        sourceCadence,
+        reason: error instanceof Error ? error.message : String(error),
+        surfaceCount: 0,
+        readySurfaceCount: 0,
+        totalSurfaceAreaM2: 0,
+        elementCount: 0,
+        elements: [],
+        gpuAuthoritativeState: false,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      });
+    } finally {
+      interfaceSourceField?.releaseMaterialInterfaceSourceFieldLeases?.({
+        status: 'released-after-material-interface-extraction'
+      });
+      interfaceSourceField?.destroyMaterialInterfaceSourceFieldBuffers?.({
+        releaseLeases: true,
+        reason: 'material-interface-extraction-cleanup'
+      });
+      renderRowsExecution?.destroyRenderRowsBuffer?.();
+    }
+  }
+
+  async function refreshSphResidentPressureInterfaceState({
+    preferWebGpu = true,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    materialInterfaceField = sphResidentMaterialInterfaceState
+      ?? sphResidentPressureInterfaceState?.materialInterfaceField
+      ?? sphResidentRenderState?.materialInterfaceField
+      ?? null,
+    gasPressureSummary = null,
+    source = 'resident-pressure-interface-physics-refresh',
+    sourceCadence = null
+  } = {}) {
+    const pressureFeedback = pressureFeedbackFromGasPressureSummary(gasPressureSummary);
+    const pressureInterfaceCoupling = gasPressureInterfaceCouplingSummary({
+      pressureFeedback,
+      materialInterfaceField
+    });
+    const pressureInterfaceForcePreview = gasPressureInterfaceForcePreview({
+      pressureFeedback,
+      materialInterfaceField,
+      pressureInterfaceCoupling
+    });
+    const pressureInterfaceForceSolver = gasPressureInterfaceForceSolver({
+      pressureFeedback,
+      materialInterfaceField,
+      pressureInterfaceCoupling
+    });
+    const resolvedDeviceResult = device
+      ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+      : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
+    const pressureInterfaceForceRowsUploadForState = uploadPressureInterfaceForceRowsBuffer({
+      pressureInterfaceForceSolver,
+      device: device || resolvedDeviceResult?.device || null
+    });
+    const state = buildSphResidentPressureInterfaceStateSummary({
+      materialInterfaceField,
+      gasPressureSummary,
+      pressureInterfaceCoupling,
+      pressureInterfaceForcePreview,
+      pressureInterfaceForceSolver,
+      pressureInterfaceForceRowsUpload: pressureInterfaceForceRowsUploadForState,
+      source,
+      sourceCadence
+    });
+    return publishSphResidentPressureInterfaceState(state);
   }
 
   function sphThermalResponseGraphSignature({
@@ -1665,7 +2703,8 @@ export function createSphPhaseScene(container, {
   function mlsMpmP2gGridProjectionSignatureFor({
     sphParticleState = sphGpuParticleState,
     mlsMpmParticleState = mlsMpmGpuParticleState,
-    gridSpacingM = sphGpuParticleState?.smoothingLengthM ?? 0
+    gridSpacingM = sphGpuParticleState?.smoothingLengthM ?? 0,
+    internalPressureScale = normalizePhysicalLawGroups(currentPhysicalLawGroups).eos ? 1 : 0
   } = {}) {
     const sphSignature = sphGpuParticleSignature(sphParticleState);
     const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
@@ -1674,6 +2713,7 @@ export function createSphPhaseScene(container, {
       sphSignature,
       mlsSignature,
       gridSpacingM,
+      internalPressureScale,
       dims.join(',')
     ].join('|');
   }
@@ -1728,7 +2768,10 @@ export function createSphPhaseScene(container, {
     gravityMPerS2 = mlsMpmParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
     cflFactor = mlsMpmParticleState?.gridCflFactor || 0.6,
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
-    pressureInterfaceForceSolver = null
+    pressureInterfaceForceSolver = null,
+    wallTemperaturesK = currentWallTemperaturesK,
+    physicalLawGroups = currentPhysicalLawGroups,
+    internalPressureScale = normalizePhysicalLawGroups(physicalLawGroups).eos ? 1 : 0
   } = {}) {
     const sphSignature = sphGpuParticleSignature(sphParticleState);
     const mlsSignature = mlsMpmGpuParticleSignature(mlsMpmParticleState);
@@ -1742,6 +2785,9 @@ export function createSphPhaseScene(container, {
       gravityMPerS2.join(','),
       cflFactor,
       normalizedReadbackMode,
+      internalPressureScale,
+      JSON.stringify(wallTemperaturesK || {}),
+      physicalLawGroupsSignature(physicalLawGroups),
       sphReactionTableSignature(),
       pressureInterfaceForceSolverSignature(pressureInterfaceForceSolver),
       dims.join(',')
@@ -1756,6 +2802,7 @@ export function createSphPhaseScene(container, {
   function mlsMpmResidentStepsSignatureFor({
     stepCount = 1,
     retainIntermediateSteps = false,
+    compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
     residentSourceMode = 'cpu-packed-state',
     ...args
   } = {}) {
@@ -1765,18 +2812,35 @@ export function createSphPhaseScene(container, {
       stepSignature,
       normalizeResidentStepCount(stepCount),
       Boolean(retainIntermediateSteps),
+      normalizeMlsMpmResidentSummaryScope(compactSummaryScope),
       residentSourceMode
     ].join('|');
   }
 
-  function clearMlsMpmResidentExecutionArtifacts() {
+  function residentContinuationBuffersFromExecution(execution = null) {
+    return [
+      execution?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
+      execution?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
+      execution?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
+      execution?.finalStep?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
+      execution?.finalStep?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
+      execution?.finalStep?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+    ].filter(Boolean);
+  }
+
+  function clearMlsMpmResidentExecutionArtifacts({ preserveBuffers = [] } = {}) {
     if (mlsMpmResidentSteps) {
-      destroyMlsMpmResidentStepsBuffers(mlsMpmResidentSteps);
+      destroyMlsMpmResidentStepsBuffers(mlsMpmResidentSteps, { preserveBuffers });
     } else {
-      mlsMpmP2gGridProjection?.gpuResult?.destroyGridBuffer?.();
-      mlsMpmP2gGridProjection?.destroyGridBuffer?.();
-      mlsMpmGridUpdate?.gpuResult?.destroyUpdatedGridBuffer?.();
-      mlsMpmGridUpdate?.destroyUpdatedGridBuffer?.();
+      const preserved = new Set((preserveBuffers || []).filter(Boolean));
+      const destroyUnlessPreserved = (buffer) => {
+        if (!buffer || preserved.has(buffer)) return;
+        buffer.destroy?.();
+      };
+      destroyUnlessPreserved(mlsMpmP2gGridProjection?.gpuResult?.gridBuffer);
+      destroyUnlessPreserved(mlsMpmP2gGridProjection?.gridBuffer);
+      destroyUnlessPreserved(mlsMpmGridUpdate?.gpuResult?.updatedGridBuffer);
+      destroyUnlessPreserved(mlsMpmGridUpdate?.updatedGridBuffer);
       if (mlsMpmG2pReconstruction?.destroyOutputParticleBuffers) {
         mlsMpmG2pReconstruction.destroyOutputParticleBuffers();
       } else {
@@ -1829,9 +2893,20 @@ export function createSphPhaseScene(container, {
       if (renderBridge === sphResidentSurfaceDrawRenderBridge) {
         scene.userData.sphResidentSurfaceDrawRenderBridge = renderBridge;
       }
-    }
-    surfaceDraw?.surfaceDraw?.destroySurfaceDrawBuffers?.();
-  }
+	    }
+	    surfaceDraw?.surfaceDraw?.releaseSurfaceDrawBufferLeases?.();
+	    surfaceDraw?.surfaceDraw?.destroySurfaceDrawBuffers?.({
+	      releaseLeases: true,
+	      reason: status
+	    });
+	    surfaceDraw?.surfaceVertices?.releaseSurfaceVertexBufferLeases?.({
+	      status
+	    });
+	    surfaceDraw?.surfaceVertices?.destroySurfaceVertexBuffers?.({
+	      releaseLeases: true,
+	      reason: status
+	    });
+	  }
 
   function releasePreviousSphResidentSurfaceDrawResources(previousSurfaceDraw, previousRenderBridge) {
     if (!previousSurfaceDraw && !previousRenderBridge) return;
@@ -2031,13 +3106,15 @@ export function createSphPhaseScene(container, {
     device,
     surfaceDrawExecution
   } = {}) {
-    if (!SPH_RAW_WEBGPU_SURFACE_OVERLAY_ENABLED) {
+    const overlayPolicy = resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh: true });
+    if (!overlayPolicy.enabled) {
       return {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
-        status: 'surface-draw-overlay-disabled',
-        reason: SPH_THREE_WEBGPU_BINDING_REASON,
+        status: overlayPolicy.status,
+        reason: overlayPolicy.reason,
         rendererBridge: 'pending-three-webgpu-binding',
         visibleRenderSource: 'three-marching-cubes-fallback',
+        overlayPolicy,
         scientificValidation: false,
         sphValidation: false,
         surfaceExtractionValidation: false,
@@ -2251,6 +3328,7 @@ export function createSphPhaseScene(container, {
         status: 'webgpu-storage-indirect-overlay-ready',
         rendererBridge: 'webgpu-storage-indirect-overlay',
         visibleRenderSource: 'resident-surface-draw-buffers',
+        overlayPolicy,
         canvas,
         context,
         device,
@@ -2321,6 +3399,7 @@ export function createSphPhaseScene(container, {
         reason: error instanceof Error ? error.message : String(error),
         rendererBridge: 'pending-three-webgpu-binding',
         visibleRenderSource: 'three-marching-cubes-fallback',
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
         scientificValidation: false,
         sphValidation: false,
         surfaceExtractionValidation: false,
@@ -2881,7 +3960,9 @@ export function createSphPhaseScene(container, {
       scene.userData.mlsMpmP2gGridProjection = null;
       return null;
     }
-    const signature = mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM });
+    const lawGroups = normalizePhysicalLawGroups(currentPhysicalLawGroups);
+    const internalPressureScale = lawGroups.eos ? 1 : 0;
+    const signature = mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM, internalPressureScale });
     if (!force && mlsMpmP2gGridProjectionSignature === signature && mlsMpmP2gGridProjection) {
       return mlsMpmP2gGridProjection;
     }
@@ -2915,6 +3996,7 @@ export function createSphPhaseScene(container, {
         mlsMpmParticleUpload: resolvedMlsUpload,
         gridSpacingM,
         boxDimsM: dims,
+        internalPressureScale,
         preferWebGpu,
         navigatorRef: overrideNavigatorRef,
         device,
@@ -2929,7 +4011,7 @@ export function createSphPhaseScene(container, {
       execution.signature = signature;
       if (
         !running
-        || mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM }) !== signature
+        || mlsMpmP2gGridProjectionSignatureFor({ gridSpacingM, internalPressureScale }) !== signature
       ) {
         return {
           ...execution,
@@ -2960,8 +4042,8 @@ export function createSphPhaseScene(container, {
     gravityMPerS2 = mlsMpmGpuParticleState?.gravityMPerS2 ?? [0, -9.80665, 0],
     cflFactor = mlsMpmGpuParticleState?.gridCflFactor || 0.6,
     parityTolerance = 1e-5,
-    pressureInterfaceForceSolver = sphResidentRenderState?.pressureInterfaceForceSolver ?? null,
-    pressureInterfaceForceRowsBuffer = null,
+    pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
+    pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     webGpuRunner = undefined
   } = {}) {
     if (!p2gGridProjection?.schema) {
@@ -2987,7 +4069,14 @@ export function createSphPhaseScene(container, {
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
         : deviceResult;
       let resolvedPressureForceRowsUpload = null;
+      let pressureForceRowsBorrow = null;
       try {
+        pressureForceRowsBorrow = borrowPressureInterfaceForceRowsForStage({
+          pressureInterfaceForceSolver,
+          pressureInterfaceForceRowsBuffer,
+          consumerStage: 'mls-mpm-grid-update',
+          reason: 'retained-pressure-interface-force-rows-grid-update'
+        });
         resolvedPressureForceRowsUpload = pressureInterfaceForceRowsBuffer
           ? null
           : uploadPressureInterfaceForceRowsBuffer({
@@ -3018,6 +4107,21 @@ export function createSphPhaseScene(container, {
           }
         });
         execution.signature = signature;
+        const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
+        const pressureRowsLeaseEvidence = pressureForceRowsBorrow?.release(
+          'released-after-mls-mpm-grid-update-complete',
+          pressureRowsConsumerQueueEvidence
+        );
+        if (pressureRowsLeaseEvidence) Object.assign(execution, pressureRowsLeaseEvidence);
+        const pressureRowsTemporaryUploadCleanupEvidence = destroyTemporaryPressureInterfaceForceRowsUpload({
+          upload: resolvedPressureForceRowsUpload,
+          execution,
+          reason: 'temporary-pressure-interface-force-rows-grid-update-complete'
+        });
+        if (pressureRowsTemporaryUploadCleanupEvidence) {
+          Object.assign(execution, pressureRowsTemporaryUploadCleanupEvidence);
+          resolvedPressureForceRowsUpload = null;
+        }
         if (
           !running
           || mlsMpmGridUpdateSignatureFor({
@@ -3038,7 +4142,11 @@ export function createSphPhaseScene(container, {
         scene.userData.mlsMpmGridUpdate = execution;
         return execution;
       } finally {
-        resolvedPressureForceRowsUpload?.destroy?.();
+        pressureForceRowsBorrow?.release('released-after-mls-mpm-grid-update-cleanup');
+        destroyTemporaryPressureInterfaceForceRowsUpload({
+          upload: resolvedPressureForceRowsUpload,
+          reason: 'temporary-pressure-interface-force-rows-grid-update-cleanup'
+        });
       }
     })();
     pendingMlsMpmGridUpdate = { signature, promise };
@@ -3143,8 +4251,8 @@ export function createSphPhaseScene(container, {
     cflFactor = mlsMpmGpuParticleState?.gridCflFactor || 0.6,
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     parityTolerances = undefined,
-    pressureInterfaceForceSolver = sphResidentRenderState?.pressureInterfaceForceSolver ?? null,
-    pressureInterfaceForceRowsBuffer = null,
+    pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
+    pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver),
     p2gRunner = undefined,
     gridUpdateRunner = undefined,
     g2pRunner = undefined
@@ -3153,15 +4261,25 @@ export function createSphPhaseScene(container, {
       clearMlsMpmResidentExecutionArtifacts();
       return null;
     }
+    const lawGroups = normalizePhysicalLawGroups(currentPhysicalLawGroups);
+    const effectiveDt = lawGroups.mechanics ? dt : 0;
+    const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
+    const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
+    const effectivePressureInterfaceForceSolver = lawGroups.pressure ? pressureInterfaceForceSolver : null;
+    const effectivePressureInterfaceForceRowsBuffer = lawGroups.pressure ? pressureInterfaceForceRowsBuffer : null;
+    const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
+    const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
     const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     const signature = mlsMpmResidentStepSignatureFor({
       gridSpacingM,
-      dt,
-      gravityMPerS2,
+      dt: effectiveDt,
+      gravityMPerS2: effectiveGravity,
       cflFactor,
       readbackMode: requestedReadbackMode,
-      pressureInterfaceForceSolver
+      pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+      internalPressureScale: effectiveInternalPressureScale,
+      physicalLawGroups: lawGroups
     });
     if (!force && mlsMpmResidentStepSignature === signature && mlsMpmResidentStep) {
       return mlsMpmResidentStep;
@@ -3198,11 +4316,18 @@ export function createSphPhaseScene(container, {
         })
         : sphThermalResponseGraphUpload;
       let resolvedPressureForceRowsUpload = null;
+      let pressureForceRowsBorrow = null;
       try {
-        resolvedPressureForceRowsUpload = pressureInterfaceForceRowsBuffer
+        pressureForceRowsBorrow = borrowPressureInterfaceForceRowsForStage({
+          pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+          pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer,
+          consumerStage: 'mls-mpm-resident-step-grid-update',
+          reason: 'retained-pressure-interface-force-rows-resident-step'
+        });
+        resolvedPressureForceRowsUpload = effectivePressureInterfaceForceRowsBuffer
           ? null
           : uploadPressureInterfaceForceRowsBuffer({
-            pressureInterfaceForceSolver,
+            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
             device: device || resolvedDeviceResult?.device || null,
             retainInScene: false
           });
@@ -3213,32 +4338,35 @@ export function createSphPhaseScene(container, {
           mlsMpmParticleUpload: resolvedMlsUpload,
           gridSpacingM,
           boxDimsM: dims,
-          dt,
-          gravityMPerS2,
+          dt: effectiveDt,
+          gravityMPerS2: effectiveGravity,
+          internalPressureScale: effectiveInternalPressureScale,
           cflFactor,
           preferWebGpu,
-          pressureInterfaceForceRowsBuffer: pressureInterfaceForceRowsBuffer
+          pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer
             ?? resolvedPressureForceRowsUpload?.buffer
             ?? null,
-          pressureInterfaceForceSolver,
+          pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
           readbackMode: requestedReadbackMode,
-          thermalMaterialTable: sphThermalMaterialTable,
+          thermalMaterialTable: effectiveThermalMaterialTable,
+          mechanicsMaterialTable: mlsMpmMechanicsMaterialTable,
           thermalStepOptions: {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
             thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
           },
-          reactionTable: sphReactionTable,
+          reactionTable: effectiveReactionTable,
           reactionStepOptions: {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
             thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
           },
+          cohortRanges: cohortRangesFromRenderDomainCounts(currentRenderDomainCounts),
           parityTolerances,
           p2gRunner,
           gridUpdateRunner,
@@ -3248,16 +4376,34 @@ export function createSphPhaseScene(container, {
           }
         });
         execution.requestedReadbackMode = requestedReadbackMode;
+        execution.physicalLawGroups = { ...lawGroups };
         execution.signature = signature;
+        const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
+        const pressureRowsLeaseEvidence = pressureForceRowsBorrow?.release(
+          'released-after-mls-mpm-resident-step-complete',
+          pressureRowsConsumerQueueEvidence
+        );
+        if (pressureRowsLeaseEvidence) Object.assign(execution, pressureRowsLeaseEvidence);
+        const pressureRowsTemporaryUploadCleanupEvidence = destroyTemporaryPressureInterfaceForceRowsUpload({
+          upload: resolvedPressureForceRowsUpload,
+          execution,
+          reason: 'temporary-pressure-interface-force-rows-resident-step-complete'
+        });
+        if (pressureRowsTemporaryUploadCleanupEvidence) {
+          Object.assign(execution, pressureRowsTemporaryUploadCleanupEvidence);
+          resolvedPressureForceRowsUpload = null;
+        }
         if (
           !running
           || mlsMpmResidentStepSignatureFor({
             gridSpacingM,
-            dt,
-            gravityMPerS2,
+            dt: effectiveDt,
+            gravityMPerS2: effectiveGravity,
             cflFactor,
             readbackMode: requestedReadbackMode,
-            pressureInterfaceForceSolver
+            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+            internalPressureScale: effectiveInternalPressureScale,
+            physicalLawGroups: lawGroups
           }) !== signature
         ) {
           return {
@@ -3265,11 +4411,17 @@ export function createSphPhaseScene(container, {
             stale: true
           };
         }
-        clearMlsMpmResidentExecutionArtifacts();
+        clearMlsMpmResidentExecutionArtifacts({
+          preserveBuffers: residentContinuationBuffersFromExecution(execution)
+        });
         publishMlsMpmResidentStepArtifacts(execution, signature);
         return execution;
       } finally {
-        resolvedPressureForceRowsUpload?.destroy?.();
+        pressureForceRowsBorrow?.release('released-after-mls-mpm-resident-step-cleanup');
+        destroyTemporaryPressureInterfaceForceRowsUpload({
+          upload: resolvedPressureForceRowsUpload,
+          reason: 'temporary-pressure-interface-force-rows-resident-step-cleanup'
+        });
       }
     })();
     pendingMlsMpmResidentStep = { signature, promise };
@@ -3283,6 +4435,16 @@ export function createSphPhaseScene(container, {
   async function refreshMlsMpmResidentSteps({
     preferWebGpu = true,
     force = false,
+    computeManager = null,
+    computeTaskModulePath = null,
+    computeTaskLaneId = 'ulg:sph-resident:scene',
+    computeTaskStateKey = null,
+    computeTaskDomainKey = 'sph-phase-scene',
+    residentStateManager = null,
+    residentAuthorityHost = null,
+    sameDeviceHotBufferPublisher = null,
+    requireSameDeviceHotBufferSourcePublication = false,
+    requireStateManagerCommit = null,
     navigatorRef: overrideNavigatorRef = navigatorRef,
     device = null,
     deviceResult = null,
@@ -3298,15 +4460,32 @@ export function createSphPhaseScene(container, {
     stepCount = 1,
     retainIntermediateSteps = false,
     continueFromResidentState = false,
-    pressureInterfaceForceSolver = sphResidentRenderState?.pressureInterfaceForceSolver ?? null,
-    pressureInterfaceForceRowsBuffer = null
+    compactSummaryScope = null,
+    thermalStepOptions: thermalStepOptionOverrides = null,
+    pressureInterfaceForceSolver = currentPressureInterfaceForceSolver(),
+    pressureInterfaceForceRowsBuffer = currentPressureInterfaceForceRowsBuffer(pressureInterfaceForceSolver)
   } = {}) {
     if (!sphGpuParticleState || !mlsMpmGpuParticleState) {
       clearMlsMpmResidentExecutionArtifacts();
       return null;
     }
+    const lawGroups = normalizePhysicalLawGroups(currentPhysicalLawGroups);
+    const effectiveDt = lawGroups.mechanics ? dt : 0;
+    const effectiveGravity = lawGroups.gravity ? gravityMPerS2 : [0, 0, 0];
+    const effectiveInternalPressureScale = lawGroups.eos ? 1 : 0;
+    const effectivePressureInterfaceForceSolver = lawGroups.pressure ? pressureInterfaceForceSolver : null;
+    const effectivePressureInterfaceForceRowsBuffer = lawGroups.pressure ? pressureInterfaceForceRowsBuffer : null;
+    const effectiveThermalMaterialTable = lawGroups.thermal ? sphThermalMaterialTable : null;
+    const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
     const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+    const requestedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(
+      compactSummaryScope ?? (
+        requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+          ? MLS_MPM_RESIDENT_SUMMARY_SCOPE_PARTICLE_VISUAL
+          : MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL
+      )
+    );
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
     const continuationUploads = mlsMpmResidentSteps?.nextParticleUploads ?? null;
     const continuationAvailable = Boolean(
@@ -3330,25 +4509,59 @@ export function createSphPhaseScene(container, {
       sphParticleState: sourceSphParticleState,
       mlsMpmParticleState: sourceMlsMpmParticleState,
       gridSpacingM,
-      dt,
-      gravityMPerS2,
+      dt: effectiveDt,
+      gravityMPerS2: effectiveGravity,
       cflFactor,
       readbackMode: requestedReadbackMode,
       stepCount: normalizedStepCount,
       retainIntermediateSteps,
+      compactSummaryScope: requestedCompactSummaryScope,
       residentSourceMode,
-      pressureInterfaceForceSolver
+      pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+      internalPressureScale: effectiveInternalPressureScale,
+      physicalLawGroups: lawGroups
     });
+    const markResidentStepsProgress = (status, extra = {}) => {
+      scene.userData.mlsMpmResidentStepsProgress = {
+        schema: 'peercompute.ulg.sph-scene-resident-steps-progress.v0',
+        status,
+        signature,
+        stepCount: normalizedStepCount,
+        readbackMode: requestedReadbackMode,
+        compactSummaryScope: requestedCompactSummaryScope,
+        residentSourceMode,
+        continueFromResidentState: Boolean(continueFromResidentState),
+        updatedAtMs: nowMs(),
+        ...extra
+      };
+      const progressStage = extra.stage || extra.currentStage || extra.innerProgress?.stage || null;
+      const progressStep = extra.stepIndex ?? extra.sequenceIndex ?? extra.innerProgress?.stepIndex ?? extra.innerProgress?.sequenceIndex ?? null;
+      const progressSuffix = [
+        progressStep !== null && progressStep !== undefined ? `step=${progressStep}` : null,
+        progressStage ? `stage=${progressStage}` : null
+      ].filter(Boolean).join(' ');
+      console.debug?.(`[sph-resident-progress] ${status}${progressSuffix ? ` ${progressSuffix}` : ''}`);
+    };
     if (!force && mlsMpmResidentStepsSignature === signature && mlsMpmResidentSteps) {
+      markResidentStepsProgress('resident-steps-cache-hit');
       return mlsMpmResidentSteps;
     }
     if (!force && pendingMlsMpmResidentSteps) {
+      markResidentStepsProgress('resident-steps-joining-pending-promise', {
+        pendingSignature: pendingMlsMpmResidentSteps.signature
+      });
       return pendingMlsMpmResidentSteps.promise;
     }
+    markResidentStepsProgress('resident-steps-submitted');
     const promise = (async () => {
+      markResidentStepsProgress('resident-steps-requesting-device');
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
         : deviceResult;
+      markResidentStepsProgress('resident-steps-device-ready', {
+        deviceStatus: resolvedDeviceResult?.status ?? null,
+        deviceReason: resolvedDeviceResult?.reason ?? null
+      });
       const resolvedSphUpload = continuationAvailable
         ? continuationUploads.sphParticleUpload
         : preferWebGpu
@@ -3359,6 +4572,10 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : sphGpuParticleUpload;
+      markResidentStepsProgress('resident-steps-sph-upload-ready', {
+        uploadStatus: resolvedSphUpload?.status ?? null,
+        particleCount: resolvedSphUpload?.particleCount ?? sourceSphParticleState?.particleCount ?? null
+      });
       const resolvedMlsUpload = continuationAvailable
         ? continuationUploads.mlsMpmParticleUpload
         : preferWebGpu
@@ -3369,6 +4586,9 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : mlsMpmGpuParticleUpload;
+      markResidentStepsProgress('resident-steps-mls-upload-ready', {
+        uploadStatus: resolvedMlsUpload?.status ?? null
+      });
       const resolvedThermalResponseGraphUpload = preferWebGpu
         ? await refreshSphThermalResponseGraphBuffers({
           preferWebGpu,
@@ -3377,81 +4597,234 @@ export function createSphPhaseScene(container, {
           deviceResult: resolvedDeviceResult
         })
         : sphThermalResponseGraphUpload;
+      markResidentStepsProgress('resident-steps-thermal-upload-ready', {
+        uploadStatus: resolvedThermalResponseGraphUpload?.status ?? null,
+        graphCount: resolvedThermalResponseGraphUpload?.graphCount ?? null
+      });
       let resolvedPressureForceRowsUpload = null;
+      let pressureForceRowsBorrow = null;
       try {
-        resolvedPressureForceRowsUpload = pressureInterfaceForceRowsBuffer
+        markResidentStepsProgress('resident-steps-borrowing-pressure-rows', {
+          pressureSolverStatus: effectivePressureInterfaceForceSolver?.status ?? null,
+          pressureRowsRetained: Boolean(effectivePressureInterfaceForceRowsBuffer)
+        });
+        pressureForceRowsBorrow = borrowPressureInterfaceForceRowsForStage({
+          pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+          pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer,
+          consumerStage: 'mls-mpm-resident-steps-grid-update',
+          reason: 'retained-pressure-interface-force-rows-resident-steps'
+        });
+        resolvedPressureForceRowsUpload = effectivePressureInterfaceForceRowsBuffer
           ? null
           : uploadPressureInterfaceForceRowsBuffer({
-            pressureInterfaceForceSolver,
+            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
             device: device || resolvedDeviceResult?.device || null,
             retainInScene: false
           });
-        const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+        markResidentStepsProgress('resident-steps-running-kernels', {
+          pressureRowsUploadStatus: resolvedPressureForceRowsUpload?.status ?? null,
+          pressureRowsRetained: Boolean(effectivePressureInterfaceForceRowsBuffer)
+        });
+        const residentStepsOptions = {
           sphParticleState: sourceSphParticleState,
           mlsMpmParticleState: sourceMlsMpmParticleState,
           sphParticleUpload: resolvedSphUpload,
           mlsMpmParticleUpload: resolvedMlsUpload,
           gridSpacingM,
           boxDimsM: dims,
-          dt,
-          gravityMPerS2,
+          dt: effectiveDt,
+          gravityMPerS2: effectiveGravity,
+          internalPressureScale: effectiveInternalPressureScale,
           cflFactor,
           preferWebGpu,
-          pressureInterfaceForceRowsBuffer: pressureInterfaceForceRowsBuffer
+          pressureInterfaceForceRowsBuffer: effectivePressureInterfaceForceRowsBuffer
             ?? resolvedPressureForceRowsUpload?.buffer
             ?? null,
-          pressureInterfaceForceSolver,
+          pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
           navigatorRef: overrideNavigatorRef,
           device,
           deviceResult: resolvedDeviceResult,
           readbackMode: requestedReadbackMode,
-          thermalMaterialTable: sphThermalMaterialTable,
+          thermalMaterialTable: effectiveThermalMaterialTable,
+          mechanicsMaterialTable: mlsMpmMechanicsMaterialTable,
           thermalStepOptions: {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
-            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
+            thermalResponseGraphUpload: resolvedThermalResponseGraphUpload,
+            wallTemperaturesK: currentWallTemperaturesK || {},
+            ...(thermalStepOptionOverrides || {})
           },
-          reactionTable: sphReactionTable,
+          reactionTable: effectiveReactionTable,
           reactionStepOptions: {
             thermalClosureGraphSet: sphThermalClosureGraphBuffers,
             thermalClosureGraphBank: sphThermalClosureGraphBuffers?.graphBank ?? null,
             thermalPhaseResponseTable: sphThermalPhaseResponseTable,
             thermalResponseGraphUpload: resolvedThermalResponseGraphUpload
           },
+          cohortRanges: cohortRangesFromRenderDomainCounts(currentRenderDomainCounts),
           parityTolerances,
           p2gRunner,
           gridUpdateRunner,
           g2pRunner,
           stepCount: normalizedStepCount,
+          compactSummaryMode: 'final-only',
+          compactSummaryScope: requestedCompactSummaryScope,
           retainIntermediateSteps,
+          onResidentStageProgress(progress = {}) {
+            markResidentStepsProgress(progress.status || 'resident-steps-inner-progress', {
+              innerProgress: progress,
+              currentStage: progress.stage ?? null,
+              stepIndex: progress.stepIndex ?? progress.sequenceIndex ?? null,
+              stageElapsedMs: progress.elapsedMs ?? null
+            });
+          },
           onDeviceLost() {
             opticalGpuDeviceResultPromise = null;
           }
+        };
+        let execution = null;
+        if (computeManager && typeof computeManager.submitTask === 'function') {
+          const taskStateKey = computeTaskStateKey || `ulg:sph-resident-state:${signature}`;
+          const resolvedComputeTaskModulePath = computeTaskModulePath
+            || computeManager.ulgResidentComputeTaskModulePath
+            || 'src/runtime/sph/sphMlsMpmGpuStep.js';
+          markResidentStepsProgress('resident-steps-compute-manager-task-submitted', {
+            laneId: computeTaskLaneId,
+            stateKey: taskStateKey
+          });
+          const submission = await submitMlsMpmResidentStepsComputeTask({
+            computeManager,
+            ...residentStepsOptions,
+            modulePath: resolvedComputeTaskModulePath,
+            taskId: `ulg:sph-resident-steps:${signature}`,
+            laneId: computeTaskLaneId,
+            stateKey: taskStateKey,
+            domainKey: computeTaskDomainKey
+          });
+          execution = submission?.result
+            || submission?.taskResult
+            || submission?.execution
+            || submission?.value
+            || submission;
+          if (!execution?.finalStep) {
+            throw new Error('ComputeManager resident-steps task did not return an inline execution envelope for scene-local publication');
+          }
+          const shouldRequireStateManagerCommit = requireStateManagerCommit ?? Boolean(residentStateManager);
+          let stateManagerCommit = null;
+          if (residentStateManager) {
+            stateManagerCommit = readResidentStepsCommittedWarmDelta(residentStateManager, {
+              delta: execution.commitDelta,
+              taskId: `ulg:sph-resident-steps:${signature}`,
+              scope: execution.commitDelta?.scope || 'ulg-sph-resident-pass-dag'
+            });
+            execution.stateManagerCommit = {
+              ...stateManagerCommit,
+              warmEntry: stateManagerCommit.warmEntry
+                ? {
+                    version: stateManagerCommit.warmEntry.version ?? null,
+                    ts: stateManagerCommit.warmEntry.ts ?? null,
+                    payloadSchema: stateManagerCommit.warmEntry.payload?.schema ?? null,
+                    payloadStateKey: stateManagerCommit.warmEntry.payload?.stateKey ?? null,
+                    payloadCompletedStepCount: stateManagerCommit.warmEntry.payload?.completedStepCount ?? null
+                  }
+                : null
+            };
+            if (!stateManagerCommit.accepted) {
+              markResidentStepsProgress('resident-steps-state-manager-commit-rejected', {
+                reason: stateManagerCommit.reason,
+                issues: stateManagerCommit.issues
+              });
+              if (shouldRequireStateManagerCommit) {
+                throw new Error(`ComputeManager resident-steps StateManager commit was not accepted: ${stateManagerCommit.reason || 'missing-commit'}`);
+              }
+            } else {
+              markResidentStepsProgress('resident-steps-state-manager-commit-accepted', {
+                taskId: stateManagerCommit.taskId,
+                stateKey: stateManagerCommit.stateKey,
+                warmEntryVersion: stateManagerCommit.warmEntryVersion
+              });
+            }
+          } else if (shouldRequireStateManagerCommit) {
+            throw new Error('ComputeManager resident-steps publication requires a StateManager commit, but no residentStateManager was provided');
+          }
+          execution.computeManagerTask = {
+            schema: 'peercompute.ulg.sph-scene-resident-compute-manager-task.v0',
+            status: stateManagerCommit?.accepted
+              ? 'state-manager-committed-inline-execution-returned'
+              : 'inline-execution-returned',
+            laneId: computeTaskLaneId,
+            stateKey: taskStateKey,
+            domainKey: computeTaskDomainKey,
+            submissionStatus: submission?.status ?? null,
+            acceptedTaskId: submission?.acceptedTaskId ?? submission?.taskId ?? null,
+            solverId: execution?.peerComputeSolverTask?.solverId ?? submission?.solverId ?? null,
+            solverTaskCreated: execution?.peerComputeSolverTask?.created === true,
+            solverTaskStatus: execution?.peerComputeSolverTask?.status ?? null,
+            solverTaskSchema: execution?.peerComputeSolverTask?.solverTaskSchema ?? null,
+            solverTaskAffinityKey: execution?.peerComputeSolverTask?.affinityKey ?? null,
+            solverTaskWarmDeltaScope: execution?.peerComputeSolverTask?.warmDeltaScope ?? null,
+            stateManagerCommitAccepted: stateManagerCommit?.accepted ?? false,
+            stateManagerCommitStatus: stateManagerCommit?.status ?? null,
+            stateManagerCommitReason: stateManagerCommit?.reason ?? null
+          };
+          markResidentStepsProgress('resident-steps-compute-manager-task-complete', {
+            backend: execution?.backend ?? null,
+            completedStepCount: execution?.completedStepCount ?? null,
+            laneId: computeTaskLaneId,
+            stateManagerCommitStatus: stateManagerCommit?.status ?? null
+          });
+        } else {
+          execution = await runMlsMpmResidentStepsWithOptionalWebGpu(residentStepsOptions);
+        }
+        markResidentStepsProgress('resident-steps-kernels-complete', {
+          backend: execution?.backend ?? null,
+          completedStepCount: execution?.completedStepCount ?? null,
+          stageTiming: execution?.finalStep?.stageTiming || null
         });
         execution.requestedReadbackMode = requestedReadbackMode;
+        execution.compactSummaryScope = requestedCompactSummaryScope;
         execution.residentSourceMode = residentSourceMode;
         execution.continuedFromResidentState = continuationAvailable;
         execution.continuationAvailable = Boolean(execution.nextParticleUploads);
+        execution.physicalLawGroups = { ...lawGroups };
         if (execution.finalStep) execution.finalStep.requestedReadbackMode = requestedReadbackMode;
         for (const summary of execution.stepSummaries ?? []) {
           summary.requestedReadbackMode = requestedReadbackMode;
         }
         execution.signature = signature;
+        const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
+        const pressureRowsLeaseEvidence = pressureForceRowsBorrow?.release(
+          'released-after-mls-mpm-resident-steps-complete',
+          pressureRowsConsumerQueueEvidence
+        );
+        if (pressureRowsLeaseEvidence) Object.assign(execution, pressureRowsLeaseEvidence);
+        const pressureRowsTemporaryUploadCleanupEvidence = destroyTemporaryPressureInterfaceForceRowsUpload({
+          upload: resolvedPressureForceRowsUpload,
+          execution,
+          reason: 'temporary-pressure-interface-force-rows-resident-steps-complete'
+        });
+        if (pressureRowsTemporaryUploadCleanupEvidence) {
+          Object.assign(execution, pressureRowsTemporaryUploadCleanupEvidence);
+          resolvedPressureForceRowsUpload = null;
+        }
         if (
           !running
           || mlsMpmResidentStepsSignatureFor({
             sphParticleState: sourceSphParticleState,
             mlsMpmParticleState: sourceMlsMpmParticleState,
             gridSpacingM,
-            dt,
-            gravityMPerS2,
+            dt: effectiveDt,
+            gravityMPerS2: effectiveGravity,
             cflFactor,
             readbackMode: requestedReadbackMode,
             stepCount: normalizedStepCount,
             retainIntermediateSteps,
+            compactSummaryScope: requestedCompactSummaryScope,
             residentSourceMode,
-            pressureInterfaceForceSolver
+            pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
+            internalPressureScale: effectiveInternalPressureScale,
+            physicalLawGroups: lawGroups
           }) !== signature
         ) {
           return {
@@ -3459,19 +4832,155 @@ export function createSphPhaseScene(container, {
             stale: true
           };
         }
-        clearMlsMpmResidentExecutionArtifacts();
+        const sameDeviceHotBufferPublisherFn = sameDeviceHotBufferPublisher
+          || residentAuthorityHost?.publishSameDeviceHotBufferSource
+          || null;
+        const sameDevicePublicationStateManagerAccepted = execution?.computeManagerTask?.stateManagerCommitAccepted === true
+          || execution?.stateManagerCommit?.accepted === true
+          || execution?.stateManagerCommit?.status === 'committed';
+        const sameDevicePublicationUploadsReady = Boolean(
+          execution?.nextParticleUploads?.sphParticleUpload?.status === 'webgpu-uploaded'
+          && execution?.nextParticleUploads?.sphParticleUpload?.stateBuffer
+          && execution?.nextParticleUploads?.sphParticleUpload?.thermoBuffer
+          && execution?.nextParticleUploads?.mlsMpmParticleUpload?.status === 'webgpu-uploaded'
+          && execution?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+        );
+        const sameDevicePublicationStatusBase = {
+          schema: 'peercompute.ulg.sph-scene-same-device-hot-buffer-source-publication.v0',
+          sourceStage: 'resident-steps',
+          sourceMode: computeManager
+            ? 'mounted-resident-compute-manager-output'
+            : 'scene-local-resident-output',
+          stateKey: execution?.computeManagerTask?.stateKey || computeTaskStateKey || null,
+          sourceTaskId: execution?.computeManagerTask?.acceptedTaskId
+            || execution?.commitDelta?.taskId
+            || `ulg:sph-resident-steps:${signature}`,
+          sourceNodeId: execution?.lawGraphNode?.nodeId || 'ulg-mls-mpm-sph-resident-pass-dag',
+          uploadsReady: sameDevicePublicationUploadsReady,
+          stateManagerCommitAccepted: sameDevicePublicationStateManagerAccepted,
+          publisherAvailable: typeof sameDeviceHotBufferPublisherFn === 'function',
+          computeManagerOwned: Boolean(computeManager)
+        };
+        let sameDeviceHotBufferSourcePublication = null;
+        if (
+          typeof sameDeviceHotBufferPublisherFn === 'function'
+          && computeManager
+          && sameDevicePublicationStateManagerAccepted
+          && sameDevicePublicationUploadsReady
+        ) {
+          try {
+            sameDeviceHotBufferSourcePublication = sameDeviceHotBufferPublisherFn.call(residentAuthorityHost || null, {
+              cacheKey: `ulg:sph-resident-steps:${signature}`,
+              stateKey: sameDevicePublicationStatusBase.stateKey,
+              hotBufferKeyPrefix: 'ulg:sph-resident-same-device-source',
+              sphPacked: execution.nextSphParticleState,
+              mlsMpmPacked: execution.nextMlsMpmParticleState,
+              sphUpload: execution.nextParticleUploads.sphParticleUpload,
+              mlsMpmUpload: execution.nextParticleUploads.mlsMpmParticleUpload,
+              particleCount: execution.nextSphParticleState?.particleCount
+                ?? execution.nextMlsMpmParticleState?.particleCount
+                ?? execution.nextParticleUploads.sphParticleUpload?.particleCount
+                ?? null,
+              step: execution.nextSphParticleState?.step ?? execution.nextMlsMpmParticleState?.step ?? null,
+              time: execution.nextSphParticleState?.time ?? execution.nextMlsMpmParticleState?.time ?? null,
+              sourceSchema: execution.computeTaskResultSchema || execution.schema || null,
+              sourceMode: sameDevicePublicationStatusBase.sourceMode,
+              sourceTaskId: sameDevicePublicationStatusBase.sourceTaskId,
+              sourceNodeId: sameDevicePublicationStatusBase.sourceNodeId,
+              sourceStage: sameDevicePublicationStatusBase.sourceStage
+            });
+            execution.sameDeviceHotBufferSourcePublication = sameDeviceHotBufferSourcePublication;
+            execution.sameDeviceRetainedBufferImport = sameDeviceHotBufferSourcePublication?.sameDeviceRetainedBufferImport || null;
+            if (execution.finalStep) {
+              execution.finalStep.sameDeviceHotBufferSourcePublication = sameDeviceHotBufferSourcePublication;
+              execution.finalStep.sameDeviceRetainedBufferImport = execution.sameDeviceRetainedBufferImport;
+              if (execution.finalStep.g2pReconstruction && execution.sameDeviceRetainedBufferImport) {
+                execution.finalStep.g2pReconstruction.sameDeviceRetainedBufferImport = {
+                  ...execution.sameDeviceRetainedBufferImport
+                };
+                if (execution.finalStep.g2pReconstruction.gpuResult) {
+                  execution.finalStep.g2pReconstruction.gpuResult.sameDeviceRetainedBufferImport = {
+                    ...execution.sameDeviceRetainedBufferImport
+                  };
+                }
+              }
+            }
+            scene.userData.mlsMpmResidentSameDeviceHotBufferSourcePublication = sameDeviceHotBufferSourcePublication;
+            markResidentStepsProgress('resident-steps-same-device-hot-buffer-source-published', {
+              hotBufferKey: sameDeviceHotBufferSourcePublication?.hotBufferKey ?? null,
+              sourceTaskId: sameDevicePublicationStatusBase.sourceTaskId
+            });
+          } catch (error) {
+            const failure = {
+              ...sameDevicePublicationStatusBase,
+              status: 'same-device-hot-buffer-source-publication-failed',
+              error: error instanceof Error ? error.message : String(error)
+            };
+            execution.sameDeviceHotBufferSourcePublication = failure;
+            scene.userData.mlsMpmResidentSameDeviceHotBufferSourcePublication = failure;
+            markResidentStepsProgress('resident-steps-same-device-hot-buffer-source-publication-failed', {
+              error: failure.error
+            });
+            if (requireSameDeviceHotBufferSourcePublication) throw error;
+          }
+        } else {
+          const skipReason = !sameDevicePublicationStatusBase.publisherAvailable
+            ? 'same-device-publisher-unavailable'
+            : !sameDevicePublicationStatusBase.computeManagerOwned
+            ? 'resident-output-not-compute-manager-owned'
+            : !sameDevicePublicationStatusBase.stateManagerCommitAccepted
+            ? 'state-manager-commit-not-accepted'
+            : !sameDevicePublicationStatusBase.uploadsReady
+            ? 'webgpu-output-handles-unavailable'
+            : 'same-device-publication-not-required';
+          const skipped = {
+            ...sameDevicePublicationStatusBase,
+            status: 'same-device-hot-buffer-source-publication-skipped',
+            reason: skipReason
+          };
+          execution.sameDeviceHotBufferSourcePublication = skipped;
+          scene.userData.mlsMpmResidentSameDeviceHotBufferSourcePublication = skipped;
+          if (requireSameDeviceHotBufferSourcePublication) {
+            throw new Error(`ComputeManager resident-steps same-device source publication skipped: ${skipReason}`);
+          }
+        }
+        clearMlsMpmResidentExecutionArtifacts({
+          preserveBuffers: residentContinuationBuffersFromExecution(execution)
+        });
+        markResidentStepsProgress('resident-steps-publishing-artifacts', {
+          backend: execution?.backend ?? null,
+          completedStepCount: execution?.completedStepCount ?? null
+        });
         publishMlsMpmResidentStepArtifacts(execution.finalStep, signature, {
           stepsExecution: execution,
           stepsSignature: signature
         });
+        markResidentStepsProgress('resident-steps-published', {
+          backend: execution?.backend ?? null,
+          completedStepCount: execution?.completedStepCount ?? null
+        });
         return execution;
       } finally {
-        resolvedPressureForceRowsUpload?.destroy?.();
+        pressureForceRowsBorrow?.release('released-after-mls-mpm-resident-steps-cleanup');
+        destroyTemporaryPressureInterfaceForceRowsUpload({
+          upload: resolvedPressureForceRowsUpload,
+          reason: 'temporary-pressure-interface-force-rows-resident-steps-cleanup'
+        });
       }
     })();
     pendingMlsMpmResidentSteps = { signature, promise };
     try {
-      return await promise;
+      const execution = await promise;
+      markResidentStepsProgress('resident-steps-complete', {
+        backend: execution?.backend ?? null,
+        completedStepCount: execution?.completedStepCount ?? null
+      });
+      return execution;
+    } catch (error) {
+      markResidentStepsProgress('resident-steps-error', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
     } finally {
       if (pendingMlsMpmResidentSteps?.promise === promise) pendingMlsMpmResidentSteps = null;
     }
@@ -3528,6 +5037,169 @@ export function createSphPhaseScene(container, {
     return surface;
   }
 
+  function clampSurfaceMeshToWorldBounds(mesh, {
+    minWorld,
+    maxWorld,
+    insideStatus = 'inside-bounds',
+    clippedStatus = 'clipped-to-bounds'
+  } = {}) {
+    const geometry = mesh?.geometry;
+    const position = geometry?.attributes?.position;
+    const array = position?.array;
+    if (!array || !position.count) {
+      return { status: 'clip-unavailable', clampedVertexCount: 0 };
+    }
+    const drawStart = Math.max(0, Math.round(Number(geometry.drawRange?.start) || 0));
+    const rawDrawCount = Number(geometry.drawRange?.count);
+    const drawCount = Number.isFinite(rawDrawCount) && rawDrawCount >= 0
+      ? Math.min(position.count - drawStart, Math.round(rawDrawCount))
+      : position.count - drawStart;
+    const drawEnd = Math.min(position.count, drawStart + Math.max(0, drawCount));
+    if (drawEnd <= drawStart) {
+      return { status: insideStatus, clampedVertexCount: 0 };
+    }
+    const span = Math.max(1e-12, 1 - 2 * FIELD_PADDING);
+    const localScaleM = refEdgeM / (2 * span);
+    const minLocal = minWorld.map((value) => (value - refEdgeM / 2) / localScaleM);
+    const maxLocal = maxWorld.map((value) => (value - refEdgeM / 2) / localScaleM);
+    const itemSize = position.itemSize || 3;
+    let clampedVertexCount = 0;
+    for (let vertexIndex = drawStart; vertexIndex < drawEnd; vertexIndex += 1) {
+      const offset = vertexIndex * itemSize;
+      let clamped = false;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const source = array[offset + axis];
+        const next = clamp(source, minLocal[axis], maxLocal[axis]);
+        if (next !== source) {
+          array[offset + axis] = next;
+          clamped = true;
+        }
+      }
+      if (clamped) clampedVertexCount += 1;
+    }
+    if (clampedVertexCount > 0) {
+      position.needsUpdate = true;
+      mesh.geometry.computeVertexNormals?.();
+      mesh.geometry.computeBoundingBox?.();
+      mesh.geometry.computeBoundingSphere?.();
+    }
+    const status = clampedVertexCount > 0 ? clippedStatus : insideStatus;
+    return { status, clampedVertexCount };
+  }
+
+  function clampSurfaceMeshToContainer(mesh) {
+    const result = clampSurfaceMeshToWorldBounds(mesh, {
+      minWorld: dims.map(() => 0),
+      maxWorld: dims,
+      insideStatus: 'inside-container',
+      clippedStatus: 'clipped-to-container'
+    });
+    mesh.userData.surfaceBoxClipStatus = result.status;
+    mesh.userData.surfaceBoxClipVertexCount = result.clampedVertexCount;
+    return result;
+  }
+
+  function finiteSurfaceBounds(bounds = null) {
+    if (!bounds?.min || !bounds?.max) return null;
+    const min = bounds.min.map(Number);
+    const max = bounds.max.map(Number);
+    if (!min.every(Number.isFinite) || !max.every(Number.isFinite)) return null;
+    return { min, max };
+  }
+
+  function surfaceMeshWorldBounds(mesh) {
+    const geometry = mesh?.geometry;
+    const position = geometry?.attributes?.position;
+    const array = position?.array;
+    if (!array || !position.count) return null;
+    const drawStart = Math.max(0, Math.round(Number(geometry.drawRange?.start) || 0));
+    const rawDrawCount = Number(geometry.drawRange?.count);
+    const drawCount = Number.isFinite(rawDrawCount) && rawDrawCount >= 0
+      ? Math.min(position.count - drawStart, Math.round(rawDrawCount))
+      : position.count - drawStart;
+    const drawEnd = Math.min(position.count, drawStart + Math.max(0, drawCount));
+    if (drawEnd <= drawStart) return null;
+    const span = Math.max(1e-12, 1 - 2 * FIELD_PADDING);
+    const localScaleM = refEdgeM / (2 * span);
+    const itemSize = position.itemSize || 3;
+    const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+    const max = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+    for (let vertexIndex = drawStart; vertexIndex < drawEnd; vertexIndex += 1) {
+      const offset = vertexIndex * itemSize;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const world = array[offset + axis] * localScaleM + refEdgeM / 2;
+        if (!Number.isFinite(world)) continue;
+        if (world < min[axis]) min[axis] = world;
+        if (world > max[axis]) max[axis] = world;
+      }
+    }
+    if (!min.every(Number.isFinite) || !max.every(Number.isFinite)) return null;
+    return { min, max, vertexCount: drawEnd - drawStart };
+  }
+
+  function retainedSurfaceMeshBoundsStatus(mesh, clip = null) {
+    const bounds = finiteSurfaceBounds(clip?.bounds);
+    const paddingM = Number(clip?.paddingM);
+    if (!bounds || !Number.isFinite(paddingM)) {
+      return {
+        status: 'retention-surface-bounds-unavailable',
+        within: true,
+        maxOutsideM: 0,
+        meshBounds: null
+      };
+    }
+    const meshBounds = surfaceMeshWorldBounds(mesh);
+    if (!meshBounds) {
+      return {
+        status: 'retention-mesh-bounds-unavailable',
+        within: false,
+        maxOutsideM: Number.POSITIVE_INFINITY,
+        meshBounds: null
+      };
+    }
+    const slackM = Math.max(0.005, paddingM * 0.1);
+    const expandedPaddingM = paddingM + slackM;
+    let maxOutsideM = 0;
+    for (let axis = 0; axis < 3; axis += 1) {
+      maxOutsideM = Math.max(maxOutsideM, bounds.min[axis] - expandedPaddingM - meshBounds.min[axis]);
+      maxOutsideM = Math.max(maxOutsideM, meshBounds.max[axis] - (bounds.max[axis] + expandedPaddingM));
+    }
+    return {
+      status: maxOutsideM > 0 ? 'retention-mesh-outside-current-surface-bounds' : 'retention-mesh-inside-current-surface-bounds',
+      within: !(maxOutsideM > 0),
+      maxOutsideM: Number.isFinite(maxOutsideM) ? maxOutsideM : 0,
+      meshBounds,
+      paddingM,
+      slackM
+    };
+  }
+
+  function surfaceBoundsPaddingMForBatch(batch) {
+    const radius = surfaceRadiusMForBatch(batch);
+    return clamp(radius * 3, 0.04, 0.15);
+  }
+
+  function clampSurfaceMeshToSurfaceBounds(mesh, clip = null) {
+    const bounds = finiteSurfaceBounds(clip?.bounds);
+    const paddingM = Number(clip?.paddingM);
+    if (!bounds || !Number.isFinite(paddingM)) {
+      mesh.userData.surfaceBoundsClipStatus = 'surface-bounds-clip-unavailable';
+      mesh.userData.surfaceBoundsClipVertexCount = 0;
+      mesh.userData.surfaceBoundsClipPaddingM = null;
+      return { status: 'surface-bounds-clip-unavailable', clampedVertexCount: 0 };
+    }
+    const result = clampSurfaceMeshToWorldBounds(mesh, {
+      minWorld: bounds.min.map((value) => value - paddingM),
+      maxWorld: bounds.max.map((value) => value + paddingM),
+      insideStatus: 'inside-surface-bounds',
+      clippedStatus: 'clipped-to-surface-bounds'
+    });
+    mesh.userData.surfaceBoundsClipStatus = result.status;
+    mesh.userData.surfaceBoundsClipVertexCount = result.clampedVertexCount;
+    mesh.userData.surfaceBoundsClipPaddingM = paddingM;
+    return result;
+  }
+
   function rebuildOpticalStateForSurfaceBatches(batches, { materialProperties = null } = {}) {
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
@@ -3550,7 +5222,7 @@ export function createSphPhaseScene(container, {
   }
 
   function rebuildOpticalStateForSurfaceBatchesWithCache(batches, {
-    materialProperties = null,
+    materialProperties = currentMaterialProperties,
     cachedOpticalGpuTable = null
   } = {}) {
     if (opticalTableCoversSurfaceBatches(cachedOpticalGpuTable, batches)) {
@@ -3575,6 +5247,7 @@ export function createSphPhaseScene(container, {
     renderSource = 'cpu-particles',
     renderRowsExecution = null
   } = {}) {
+    releaseThreeSurfaceSuppression(renderSource);
     const applyStartMs = nowMs();
     const details = [];
     const totals = {
@@ -3615,8 +5288,12 @@ export function createSphPhaseScene(container, {
       mesh.userData.renderSource = renderSource;
       mesh.userData.renderRowsExecutionSchema = renderRowsExecution?.schema || null;
       mesh.userData.renderRowsBackend = renderRowsExecution?.backend || null;
+      mesh.userData.cpuSurfaceRetainedByGrace = false;
+      mesh.userData.cpuSurfaceRetainRejectedReason = null;
       mesh.userData.opticalState = batch.descriptor?.opticalState || null;
       mesh.userData.opticalStateKey = batch.descriptor?.opticalStateKey || 'default';
+      mesh.userData.renderDomainId = normalizeRenderDomainId(batch.descriptor?.renderDomainId ?? batch.renderDomainId);
+      mesh.userData.renderDomainKey = batch.descriptor?.renderDomainKey ?? batch.renderDomainKey ?? null;
       mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(opticalCoverageKey({
         material: batch.material,
         phase: batch.phase,
@@ -3675,8 +5352,9 @@ export function createSphPhaseScene(container, {
       const resetMs = addTiming('resetMs', resetStartMs);
       // Isosurface (blob) size is decoupled from the container: the auto estimate (from particle
       // spacing) or an explicit override is multiplied by a user-set scale, independent of box size.
-      const radiusM = (Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM) * radiusScale;
-      const radiusNorm = clamp(radiusM / refEdgeM, 0.001, 0.14);
+      const radiusInfo = cpuSurfaceRadiusForBatch(batch, config);
+      const radiusM = radiusInfo.radiusM;
+      const radiusNorm = normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM);
       const strength = (mesh.isolation + config.subtract) * radiusNorm * radiusNorm;
       const addBallStartMs = nowMs();
       for (let i = 0; i < batch.count; i += 1) {
@@ -3696,10 +5374,14 @@ export function createSphPhaseScene(container, {
       const addBallMs = addTiming('addBallMs', addBallStartMs);
       const updateStartMs = nowMs();
       mesh.update();
+      const surfaceClip = clampSurfaceMeshToContainer(mesh);
       const updateMs = addTiming('updateMs', updateStartMs);
       mesh.visible = batch.count > 0;
       mesh.userData.particleCount = batch.count;
       mesh.userData.surfaceRadiusM = radiusM;
+      mesh.userData.requestedSurfaceRadiusM = radiusInfo.requestedRadiusM;
+      mesh.userData.cpuMarchingCubesRadiusFloorM = radiusInfo.floorRadiusM;
+      mesh.userData.cpuMarchingCubesRadiusFloorApplied = radiusInfo.floorApplied;
       mesh.userData.surfaceResolution = mesh.resolution || config.resolution;
       mesh.userData.surfaceMaxPolyCount = config.maxPolyCount;
       markSurfaceActive(surface);
@@ -3718,11 +5400,22 @@ export function createSphPhaseScene(container, {
         materialMs,
         resetMs,
         addBallMs,
-        updateMs
+        updateMs,
+        requestedSurfaceRadiusM: radiusInfo.requestedRadiusM,
+        cpuMarchingCubesRadiusFloorM: radiusInfo.floorRadiusM,
+        cpuMarchingCubesRadiusFloorApplied: radiusInfo.floorApplied,
+        surfaceBoxClipStatus: surfaceClip.status,
+        surfaceBoxClipVertexCount: surfaceClip.clampedVertexCount
       });
     }
     for (const [key, surface] of surfaces) {
       if (!activeKeys.has(key)) {
+        if (batches.length === 0 && renderSource === 'cpu-particles') {
+          surface.mesh.userData.renderSource = renderSource;
+          surface.mesh.userData.cpuSurfaceRetainedByGrace = surface.mesh.visible === true;
+          surface.mesh.userData.cpuSurfaceRetainRejectedReason = 'cpu-surface-batches-empty-retained';
+          continue;
+        }
         const hideStartMs = nowMs();
         hideSurfaceAfterGrace(surface, renderSource);
         addTiming('hideInactiveMs', hideStartMs);
@@ -3754,14 +5447,53 @@ export function createSphPhaseScene(container, {
     return [r / batch.count, g / batch.count, b / batch.count].map((value) => clamp(value, 0, 1));
   }
 
-  function createRenderFieldSurfaceTableForBatches(batches) {
+  function surfaceRadiusMForBatch(batch) {
+    const explicitSurfaceRadius = Number.isFinite(surfaceRadiusM);
+    const baseRadiusM = explicitSurfaceRadius ? surfaceRadiusM : batch.surfaceRadiusM;
+    return baseRadiusM * surfaceRadiusScaleForRenderBatch(batch, radiusScale, {
+      explicitSurfaceRadius
+    });
+  }
+
+  function cpuSurfaceRadiusForBatch(batch, config) {
+    const requestedRadiusM = surfaceRadiusMForBatch(batch);
+    const floorRadiusM = cpuMarchingCubesRadiusFloorM(refEdgeM, config?.resolution ?? SURFACE_CONFIG.default.resolution);
+    const radiusM = Math.max(requestedRadiusM, floorRadiusM);
+    return {
+      requestedRadiusM,
+      floorRadiusM,
+      radiusM,
+      floorApplied: radiusM > requestedRadiusM + 1e-12
+    };
+  }
+
+  function diagnosticRenderFieldResolutionForBudget(surfaceCount, {
+    maxFieldCells = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT,
+    maxResolution = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT
+  } = {}) {
+    const count = Math.max(1, Math.round(Number(surfaceCount) || 1));
+    const budget = Math.max(1, Math.round(Number(maxFieldCells) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT));
+    const budgetResolution = Math.max(2, Math.floor(Math.cbrt(Math.max(1, budget / count))));
+    const requestedMax = Math.max(2, Math.round(Number(maxResolution) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT));
+    return Math.max(2, Math.min(requestedMax, budgetResolution, RESIDENT_RENDER_FIELD_MAX_RESOLUTION));
+  }
+
+  function createRenderFieldSurfaceTableForBatches(batches, {
+    maxResolution = RESIDENT_RENDER_FIELD_MAX_RESOLUTION
+  } = {}) {
+    const resolvedMaxResolution = Math.max(2, Math.round(Number(maxResolution) || RESIDENT_RENDER_FIELD_MAX_RESOLUTION));
     const descriptors = batches.map((batch) => {
-      const config = adaptiveCpuSurfaceConfig(
-        SURFACE_CONFIG[batch.renderKey] || SURFACE_CONFIG.default,
-        batch.count
+      const baseConfig = SURFACE_CONFIG[batch.renderKey] || SURFACE_CONFIG.default;
+      const config = adaptiveCpuSurfaceConfig(baseConfig, batch.count);
+      const needsAliasSafeRenderField = batch.count > 0 && (
+        batch.count <= SPH_SPARSE_SURFACE_RADIUS_SCALE_MAX_PARTICLES
+        || batch.source === 'merged-same-material-phase-render-surface'
       );
-      const radiusM = (Number.isFinite(surfaceRadiusM) ? surfaceRadiusM : batch.surfaceRadiusM) * radiusScale;
-      const radiusNorm = clamp(radiusM / refEdgeM, 0.001, 0.14);
+      const renderFieldResolution = needsAliasSafeRenderField
+        ? Math.max(baseConfig.resolution, SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN)
+        : baseConfig.resolution;
+      const radiusM = surfaceRadiusMForBatch(batch);
+      const radiusNorm = normalizeSurfaceRadiusForRenderField(radiusM, refEdgeM);
       const properties = materialPropertiesForSurfaceDescriptor(batch.descriptor, currentMaterialProperties);
       const optics = opticalParamsFromGpuTableRecord(opticalGpuTable, batch.descriptor)
         || opticalRenderParams(opticalQueryForDescriptor(batch.descriptor, properties));
@@ -3779,12 +5511,14 @@ export function createSphPhaseScene(container, {
         phase: batch.phase,
         opticalState: batch.descriptor?.opticalState || null,
         opticalStateKey: batch.descriptor?.opticalStateKey || 'default',
+        renderDomainId: normalizeRenderDomainId(batch.descriptor?.renderDomainId ?? batch.renderDomainId),
+        renderDomainKey: batch.descriptor?.renderDomainKey ?? batch.renderDomainKey ?? null,
         renderLayer,
         renderOrder,
         depthWriteFlag,
         transparencyClassId,
         renderKey: batch.renderKey,
-        resolution: Math.min(config.resolution, RESIDENT_RENDER_FIELD_MAX_RESOLUTION),
+        resolution: Math.min(renderFieldResolution, RESIDENT_RENDER_FIELD_MAX_RESOLUTION, resolvedMaxResolution),
         isolation: config.isolation,
         subtract: config.subtract,
         radiusNorm,
@@ -3818,6 +5552,112 @@ export function createSphPhaseScene(container, {
     return keys;
   }
 
+  function summarizeDecodedRenderRows(decoded = null) {
+    if (!Array.isArray(decoded?.rows) || decoded.rows.length === 0) return null;
+    const materialPhaseCounts = {};
+    const materialPhaseDomainCounts = {};
+    const materialPhaseDomainBounds = {};
+    for (const row of decoded.rows) {
+      const key = `${row.material ?? 'unknown'}|${row.phase ?? 'unknown'}`;
+      materialPhaseCounts[key] = (materialPhaseCounts[key] || 0) + 1;
+      const domainKey = `${key}|domain:${row.renderDomainKey ?? row.renderDomainId ?? 0}`;
+      materialPhaseDomainCounts[domainKey] = (materialPhaseDomainCounts[domainKey] || 0) + 1;
+      const position = row.positionM;
+      if (Array.isArray(position) && position.length >= 3) {
+        const bounds = materialPhaseDomainBounds[domainKey] || (materialPhaseDomainBounds[domainKey] = {
+          status: 'position-bounds-ready',
+          count: 0,
+          min: [Infinity, Infinity, Infinity],
+          max: [-Infinity, -Infinity, -Infinity]
+        });
+        bounds.count += 1;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const value = Number(position[axis]);
+          if (!Number.isFinite(value)) continue;
+          bounds.min[axis] = Math.min(bounds.min[axis], value);
+          bounds.max[axis] = Math.max(bounds.max[axis], value);
+        }
+      }
+    }
+    for (const bounds of Object.values(materialPhaseDomainBounds)) {
+      bounds.size = bounds.max.map((value, axis) => value - bounds.min[axis]);
+    }
+    const sampleRows = decoded.rows.length <= 12
+      ? decoded.rows
+      : [...decoded.rows.slice(0, 6), ...decoded.rows.slice(-6)];
+    return {
+      schema: 'peercompute.ulg.sph-render-row-decoded-summary.v0',
+      particleCount: decoded.rows.length,
+      materialPhaseCounts,
+      materialPhaseDomainCounts,
+      materialPhaseDomainBounds,
+      sampleRows: sampleRows.map((row) => ({
+        index: row.index,
+        materialId: row.materialId,
+        material: row.material,
+        phaseId: row.phaseId,
+        phase: row.phase,
+        renderDomainId: row.renderDomainId,
+        renderDomainKey: row.renderDomainKey,
+        temperatureK: row.temperatureK,
+        status: row.status,
+        positionM: row.positionM
+      }))
+    };
+  }
+
+  function summarizeRenderFieldCpuParity({ renderRowsExecution, renderFieldExecution, surfaceTable }) {
+    if (
+      !(renderRowsExecution?.renderRows instanceof Float32Array)
+      || !(renderFieldExecution?.fieldRows instanceof Float32Array)
+      || renderRowsExecution.renderRows.length === 0
+      || renderFieldExecution.fieldRows.length === 0
+      || !surfaceTable?.schema
+    ) {
+      return null;
+    }
+    const cpuField = buildSphRenderFieldCpu({
+      renderRows: renderRowsExecution.renderRows,
+      productEventRows: renderFieldExecution.productEventRows || null,
+      surfaceTable,
+      particleCount: renderRowsExecution.particleCount,
+      productEventCount: renderFieldExecution.productEventCount,
+      fieldPadding: FIELD_PADDING,
+      refEdgeM
+    });
+    const cpuSurfaces = splitSphRenderFieldBySurface(cpuField);
+    const gpuSurfaces = splitSphRenderFieldBySurface(renderFieldExecution);
+    const surfaces = cpuSurfaces.map((cpuSurface, index) => {
+      const gpuSurface = gpuSurfaces[index];
+      let cpuMaxDensity = 0;
+      let gpuMaxDensity = 0;
+      for (const value of cpuSurface.field) if (value > cpuMaxDensity) cpuMaxDensity = value;
+      for (const value of gpuSurface?.field || []) if (value > gpuMaxDensity) gpuMaxDensity = value;
+      return {
+        surfaceKey: cpuSurface.surfaceKey,
+        material: cpuSurface.material,
+        phase: cpuSurface.phase,
+        renderDomainId: cpuSurface.renderDomainId,
+        renderDomainKey: cpuSurface.renderDomainKey,
+        resolution: cpuSurface.resolution,
+        isolation: cpuSurface.isolation,
+        subtract: cpuSurface.subtract,
+        radiusNorm: cpuSurface.radiusNorm,
+        strength: cpuSurface.strength,
+        cpuMaxDensity,
+        gpuMaxDensity,
+        maxDensityDelta: Math.abs(cpuMaxDensity - gpuMaxDensity)
+      };
+    });
+    return {
+      schema: 'peercompute.ulg.sph-render-field-cpu-parity-summary.v0',
+      status: 'render-field-cpu-parity-summarized',
+      surfaceCount: surfaces.length,
+      maxDensityDelta: surfaces.reduce((max, surface) => Math.max(max, surface.maxDensityDelta), 0),
+      surfaces
+    };
+  }
+
   function colorForResidentSurfaceDescriptor(descriptor, materialProperties) {
     const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
     const optics = opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
@@ -3834,12 +5674,18 @@ export function createSphPhaseScene(container, {
     const batchesByKey = new Map();
     const countByMaterial = new Map();
     const radiusByMaterial = new Map();
+    const presentMaterialPhaseKeys = new Set();
     const materials = materialKeysFromReactionTable(reactionTable);
-    for (const batch of [...particleBatches, ...productEventSurfaceBatches]) {
+    const renderBatches = mergeSameMaterialPhaseSurfaceBatchesForRenderField([
+      ...particleBatches,
+      ...productEventSurfaceBatches
+    ]);
+    for (const batch of renderBatches) {
       if (!batch?.surfaceKey) continue;
       batchesByKey.set(batch.surfaceKey, batch);
       if (batch.material) {
         materials.add(batch.material);
+        if (batch.phase) presentMaterialPhaseKeys.add(`${batch.material}|${batch.phase}`);
         countByMaterial.set(batch.material, Math.max(
           countByMaterial.get(batch.material) || 0,
           Math.max(0, Math.round(Number(batch.count) || 0))
@@ -3855,6 +5701,7 @@ export function createSphPhaseScene(container, {
       for (const phaseRecord of phases) {
         const phase = phaseRecord?.name;
         if (!phase) continue;
+        if (presentMaterialPhaseKeys.has(`${material}|${phase}`)) continue;
         const renderKey = renderKeyForMaterialPhase(material, phase);
         const descriptor = renderDescriptorOf({ material, phase, renderKey });
         if (batchesByKey.has(descriptor.surfaceKey)) continue;
@@ -3875,6 +5722,8 @@ export function createSphPhaseScene(container, {
           phase,
           opticalState: descriptor.opticalState,
           opticalStateKey: descriptor.opticalStateKey,
+          renderDomainId: descriptor.renderDomainId,
+          renderDomainKey: descriptor.renderDomainKey,
           descriptor,
           positionsM: [],
           normalizedPositions: [],
@@ -3926,20 +5775,27 @@ export function createSphPhaseScene(container, {
     materialProperties = null,
     renderSource = 'resident-gpu-render-field',
     renderRowsExecution = null,
-    renderFieldExecution = null
+    renderFieldExecution = null,
+    surfaceBoundsByKey = null
   } = {}) {
+    releaseThreeSurfaceSuppression(renderSource);
     const activeKeys = new Set();
     const gpuRecordsBySurface = new Map(opticalGpuTable.recordMetadata.map((record) => [
       opticalCoverageKey(record),
       record
     ]));
+    const authoritativeSurfaceFieldRows = surfaceFields.length > 0
+      || renderSource !== 'resident-gpu-render-field'
+      || Boolean(renderFieldExecution?.renderFieldReadback);
     for (const fieldSurface of surfaceFields) {
       scheduleEnvironmentMap();
       const descriptor = renderDescriptorOf({
         material: fieldSurface.material,
         phase: fieldSurface.phase,
         renderKey: fieldSurface.renderKey,
-        opticalState: fieldSurface.opticalState || null
+        opticalState: fieldSurface.opticalState || null,
+        renderDomainId: fieldSurface.renderDomainId,
+        renderDomainKey: fieldSurface.renderDomainKey
       });
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
       const baseConfig = SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
@@ -3978,6 +5834,8 @@ export function createSphPhaseScene(container, {
       mesh.userData.renderFieldInputSource = renderFieldExecution?.renderFieldInputSource || null;
       mesh.userData.opticalState = descriptor.opticalState || null;
       mesh.userData.opticalStateKey = descriptor.opticalStateKey || 'default';
+      mesh.userData.renderDomainId = descriptor.renderDomainId;
+      mesh.userData.renderDomainKey = descriptor.renderDomainKey;
       mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(opticalCoverageKey(descriptor)) || null;
       const emissive = emissiveByMaterial?.[descriptor.material] ?? emissiveByMaterial?.[descriptor.renderKey] ?? null;
       if (emissive) {
@@ -3988,7 +5846,7 @@ export function createSphPhaseScene(container, {
         mesh.material.emissiveIntensity = 0;
       }
       mesh.userData.particleCount = null;
-      mesh.userData.surfaceRadiusM = fieldSurface.radiusNorm * refEdgeM;
+      mesh.userData.surfaceRadiusM = surfaceRadiusMetersFromRenderFieldRadius(fieldSurface.radiusNorm, refEdgeM);
       mesh.userData.renderFieldResolution = fieldSurface.resolution;
       mesh.userData.renderFieldCells = fieldSurface.fieldCellCount;
       mesh.userData.renderFieldMaxDensity = maxDensity;
@@ -4009,8 +5867,21 @@ export function createSphPhaseScene(container, {
       mesh.userData.opticalSurfaceHiddenReason = null;
       mesh.userData.opticalSurfaceRetainedByGrace = false;
       if (!visibility.visible) {
-        const hidden = hideSurfaceAfterGrace(surface, renderSource);
-        mesh.userData.renderFieldRetainedByGrace = !hidden && visibility.retainPreviousSurface;
+        const retentionBounds = retainedSurfaceMeshBoundsStatus(
+          mesh,
+          surfaceBoundsByKey?.get(descriptor.surfaceKey) ?? null
+        );
+        const immediateHide = !(maxDensity > 0) || !retentionBounds.within;
+        const hidden = hideSurfaceAfterGrace(surface, renderSource, { immediate: immediateHide });
+        mesh.userData.renderFieldRetainedByGrace = !hidden && visibility.retainPreviousSurface && retentionBounds.within;
+        mesh.userData.renderFieldRetainBoundsStatus = retentionBounds.status;
+        mesh.userData.renderFieldRetainBoundsMaxOutsideM = Number.isFinite(retentionBounds.maxOutsideM)
+          ? retentionBounds.maxOutsideM
+          : null;
+        mesh.userData.renderFieldRetainBoundsMeshBounds = retentionBounds.meshBounds;
+        mesh.userData.renderFieldRetainRejectedReason = retentionBounds.within
+          ? null
+          : retentionBounds.status;
         activeKeys.add(descriptor.surfaceKey);
         continue;
       }
@@ -4019,16 +5890,68 @@ export function createSphPhaseScene(container, {
       mesh.palette.set(fieldSurface.palette);
       mesh.isolation = visibility.renderIsolation;
       mesh.update();
+      clampSurfaceMeshToSurfaceBounds(mesh, surfaceBoundsByKey?.get(descriptor.surfaceKey) ?? null);
+      clampSurfaceMeshToContainer(mesh);
       mesh.visible = true;
       mesh.userData.renderFieldRetainedByGrace = false;
+      mesh.userData.renderFieldRetainBoundsStatus = 'visible-surface-current';
+      mesh.userData.renderFieldRetainBoundsMaxOutsideM = 0;
+      mesh.userData.renderFieldRetainBoundsMeshBounds = null;
+      mesh.userData.renderFieldRetainRejectedReason = null;
       markSurfaceActive(surface);
       activeKeys.add(descriptor.surfaceKey);
     }
     for (const [key, surface] of surfaces) {
       if (!activeKeys.has(key)) {
-        hideSurfaceAfterGrace(surface, renderSource);
+        if (!authoritativeSurfaceFieldRows) {
+          surface.mesh.userData.renderSource = renderSource;
+          surface.mesh.userData.renderFieldRetainedByGrace = surface.mesh.visible === true;
+          surface.mesh.userData.renderFieldRetainRejectedReason = 'resident-render-field-no-readback-retained';
+          continue;
+        }
+        hideSurfaceAfterGrace(surface, renderSource, {
+          immediate: renderSource === 'resident-gpu-render-field'
+        });
       }
     }
+  }
+
+  function suppressThreeSurfaceMeshesForResidentOverlay(reason = 'resident-surface-draw-overlay-active') {
+    let hiddenCount = 0;
+    for (const surface of surfaces.values()) {
+      if (!surface?.mesh) continue;
+      if (surface.mesh.visible) hiddenCount += 1;
+      surface.mesh.visible = false;
+      surface.mesh.userData.suppressedByResidentSurfaceDrawOverlay = true;
+      surface.mesh.userData.suppressedByResidentSurfaceDrawOverlayReason = reason;
+    }
+    scene.userData.sphThreeSurfaceSuppression = {
+      schema: 'peercompute.ulg.sph-three-surface-suppression.v0',
+      status: 'suppressed-for-resident-surface-draw-overlay',
+      reason,
+      hiddenCount,
+      surfaceCount: surfaces.size
+    };
+    return scene.userData.sphThreeSurfaceSuppression;
+  }
+
+  function releaseThreeSurfaceSuppression(reason = 'three-render-field-readback-active') {
+    let releasedCount = 0;
+    for (const surface of surfaces.values()) {
+      if (surface?.mesh?.userData?.suppressedByResidentSurfaceDrawOverlay) {
+        releasedCount += 1;
+        surface.mesh.userData.suppressedByResidentSurfaceDrawOverlay = false;
+        surface.mesh.userData.suppressedByResidentSurfaceDrawOverlayReason = null;
+      }
+    }
+    scene.userData.sphThreeSurfaceSuppression = {
+      schema: 'peercompute.ulg.sph-three-surface-suppression.v0',
+      status: 'not-suppressed',
+      reason,
+      releasedCount,
+      surfaceCount: surfaces.size
+    };
+    return scene.userData.sphThreeSurfaceSuppression;
   }
 
   // Colours are precomputed by the demo (closure-backed incandescence from the radiation closure
@@ -4044,6 +5967,9 @@ export function createSphPhaseScene(container, {
     reactionContactRadiusM = null,
     sphGpuParticleState: nextSphGpuParticleState = null,
     mlsMpmGpuParticleState: nextMlsMpmGpuParticleState = null,
+    renderDomainCounts = null,
+    physicalLawGroups = null,
+    wallTemperaturesK = null,
     staticTableCache = null
   }) {
     const timingStartMs = nowMs();
@@ -4065,6 +5991,11 @@ export function createSphPhaseScene(container, {
       smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
     }));
     currentMaterialProperties = materialProperties || null;
+    currentRenderDomainCounts = normalizeRenderDomainCounts(renderDomainCounts);
+    currentPhysicalLawGroups = normalizePhysicalLawGroups(physicalLawGroups);
+    currentWallTemperaturesK = wallTemperaturesK ? { ...wallTemperaturesK } : null;
+    scene.userData.sphRenderDomainCounts = currentRenderDomainCounts ? { ...currentRenderDomainCounts } : null;
+    scene.userData.sphPhysicalLawGroups = { ...currentPhysicalLawGroups };
     sphThermalMaterialTable = measure('thermalMaterialTable', () => (
       staticTableCache?.thermalMaterialTable?.schema
         ? staticTableCache.thermalMaterialTable
@@ -4084,6 +6015,20 @@ export function createSphPhaseScene(container, {
         ? staticTableCache.thermalPhaseResponseTable
         : sphThermalMaterialTable && sphThermalClosureGraphBuffers
         ? buildSphThermalPhaseResponseTable(sphThermalMaterialTable, sphThermalClosureGraphBuffers)
+        : null
+    ));
+    mlsMpmMechanicsMaterialTable = measure('mechanicsMaterialTable', () => (
+      materialProperties
+        ? buildMlsMpmMechanicsMaterialTable(materialProperties, {
+          soundSpeedScale: nextMlsMpmGpuParticleState?.soundSpeedScale,
+          minGasSoundSpeedMPerS: nextMlsMpmGpuParticleState?.minGasSoundSpeedMPerS,
+          viscosityEnabled: currentPhysicalLawGroups.viscosity,
+          mlsMpmArtificialViscosityAlpha: nextMlsMpmGpuParticleState?.mlsMpmArtificialViscosityAlpha,
+          viscosityLengthM: nextMlsMpmGpuParticleState?.viscosityLengthM
+            ?? nextMlsMpmGpuParticleState?.gridSpacingM
+            ?? nextSphGpuParticleState?.smoothingLengthM,
+          surfaceTensionEnabled: currentPhysicalLawGroups.surfaceTension
+        })
         : null
     ));
     const nextThermalResponseGraphSignature = sphThermalResponseGraphSignature();
@@ -4129,6 +6074,7 @@ export function createSphPhaseScene(container, {
     scene.userData.sphThermalClosureGraphBuffers = sphThermalClosureGraphBuffers;
     scene.userData.sphThermalPhaseResponseTable = sphThermalPhaseResponseTable;
     scene.userData.sphThermalResponseGraphUpload = sphThermalResponseGraphUpload;
+    scene.userData.mlsMpmMechanicsMaterialTable = mlsMpmMechanicsMaterialTable;
     scene.userData.sphReactionTable = sphReactionTable;
     if (shouldRetainResidentSurfaceDrawOverlay({
       previousSurfaceBatchSignature: currentSurfaceBatchIdentitySignature,
@@ -4141,8 +6087,10 @@ export function createSphPhaseScene(container, {
       clearSphResidentSurfaceDrawArtifacts();
     }
     currentSurfaceBatchIdentitySignature = nextSurfaceBatchIdentitySignature;
+    publishSphResidentMaterialInterfaceState(null);
     sphResidentRenderState = null;
     scene.userData.sphResidentRenderState = null;
+    publishSphResidentPressureInterfaceState(null);
     destroyPressureInterfaceForceRowsUpload();
     if (
       sphGpuParticleUpload?.status === 'webgpu-uploaded'
@@ -4175,6 +6123,10 @@ export function createSphPhaseScene(container, {
       materialProperties,
       renderSource: 'cpu-particles'
     }));
+    const presentationRefresh = forceViewportRefreshBurst({
+      reason: 'set-particles-cpu-surface-apply',
+      frameCount: 2
+    });
     scene.userData.sphSetParticlesTiming = {
       schema: 'peercompute.ulg.sph-scene-set-particles-timing.v0',
       totalMs: Math.max(0, nowMs() - timingStartMs),
@@ -4190,6 +6142,7 @@ export function createSphPhaseScene(container, {
       staticTableCacheStatus: staticTableCache?.status || null,
       staticTableCacheFamilies: staticTableCache?.restoredFamilies || [],
       surfaceApplyTiming: scene.userData.sphSurfaceApplyTiming || null,
+      presentationRefresh,
       scientificValidation: false,
       sphValidation: false,
       phaseChangeValidation: false,
@@ -4199,16 +6152,23 @@ export function createSphPhaseScene(container, {
 
   function residentSurfaceDrawUnavailable(reason, {
     renderFieldExecution = null,
-    surfaceVerticesExecution = null
+    surfaceVerticesExecution = null,
+    overlayPolicy = null
   } = {}) {
     return {
       schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
       status: 'resident-surface-draw-unavailable',
       reason,
+      overlayPolicy: overlayPolicy || resolveSceneResidentSurfaceDrawOverlayPolicy(),
+      overlayPolicyStatus: overlayPolicy?.status ?? resolveSceneResidentSurfaceDrawOverlayPolicy().status,
+      overlayPolicyMode: overlayPolicy?.mode ?? resolveSceneResidentSurfaceDrawOverlayPolicy().mode,
       sourceRenderFieldSchema: renderFieldExecution?.schema ?? null,
       sourceSurfaceVertexSchema: surfaceVerticesExecution?.schema ?? null,
       surfaceDrawSchema: null,
       surfaceCount: renderFieldExecution?.surfaceCount ?? surfaceVerticesExecution?.surfaceCount ?? 0,
+      activeSurfaceCount: 0,
+      vertexCount: 0,
+      triangleCount: 0,
       sourceVertexRowCount: 0,
       drawRowsBufferRetained: false,
       drawRowsBufferByteLength: 0,
@@ -4218,6 +6178,9 @@ export function createSphPhaseScene(container, {
       compactedVertexRowsBufferByteLength: 0,
       readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
       surfaceDrawReadback: false,
+      surfaceDrawSummaryReadback: false,
+      surfaceDrawSummaryReadbackByteLength: 0,
+      fullSurfaceDrawReadback: false,
       compactionMode: null,
       renderFieldBufferMode: 'not-retained',
       surfaceDrawInputBuffersReleased: false,
@@ -4255,13 +6218,41 @@ export function createSphPhaseScene(container, {
     };
   }
 
-  async function buildSphResidentSurfaceDrawBridge({
-    device,
-    renderFieldExecution
-  } = {}) {
-    let surfaceVerticesExecution = null;
-    let surfaceDrawExecution = null;
+  function markSphResidentRenderProgress(status, extra = {}) {
+    const progress = {
+      schema: 'peercompute.ulg.sph-scene-resident-render-progress.v0',
+      status,
+      timestampMs: nowMs(),
+      ...extra
+    };
+    scene.userData.sphResidentRenderProgress = progress;
+    const progressStage = extra.stage || extra.currentStage || null;
+    const progressSuffix = [
+      progressStage ? `stage=${progressStage}` : null,
+      extra.surfaceCount !== undefined ? `surfaces=${extra.surfaceCount}` : null,
+      extra.totalFieldCells !== undefined ? `cells=${extra.totalFieldCells}` : null
+    ].filter(Boolean).join(' ');
+    console.debug?.(`[sph-render-progress] ${status}${progressSuffix ? ` ${progressSuffix}` : ''}`);
+    return progress;
+  }
+
+	  async function buildSphResidentSurfaceDrawBridge({
+	    device,
+	    renderFieldExecution,
+	    buildDrawMetadata = true
+	  } = {}) {
+	    let surfaceVerticesExecution = null;
+	    let surfaceDrawExecution = null;
+	    let retainSurfaceVerticesExecution = false;
     try {
+      markSphResidentRenderProgress('surface-draw-bridge-started', {
+        stage: 'surface-draw-bridge',
+        surfaceCount: renderFieldExecution?.surfaceCount ?? 0,
+        totalFieldCells: renderFieldExecution?.totalFieldCells ?? 0,
+        maxFieldCellCount: renderFieldExecution?.maxFieldCellCount ?? null,
+        renderFieldReadback: Boolean(renderFieldExecution?.renderFieldReadback),
+        readbackMode: renderFieldExecution?.readbackMode ?? null
+      });
       if (
         renderFieldExecution?.schema !== 'peercompute.ulg.sph-gpu-render-field.v0'
         || renderFieldExecution.backend !== 'webgpu'
@@ -4272,33 +6263,186 @@ export function createSphPhaseScene(container, {
           renderFieldExecution
         });
       }
+      markSphResidentRenderProgress('surface-draw-vertices-started', {
+        stage: 'surface-vertices',
+        surfaceCount: renderFieldExecution.surfaceCount,
+        totalFieldCells: renderFieldExecution.totalFieldCells,
+        maxFieldCellCount: renderFieldExecution.maxFieldCellCount ?? null
+      });
       surfaceVerticesExecution = await buildSphRenderSurfaceVerticesWebGpu({
         device,
         renderField: renderFieldExecution,
         fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer,
         surfaceBuffer: renderFieldExecution.surfaceBuffer,
         readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
-        retainVertexRowsBuffer: true
+        retainVertexRowsBuffer: true,
+        waitForQueueCompletion: false,
+        deferCleanup: false,
+        onProgress(progress = {}) {
+          markSphResidentRenderProgress(progress.status || 'surface-vertices-progress', {
+            ...progress,
+            currentStage: progress.stage || 'surface-vertices'
+          });
+        }
+      });
+	      markSphResidentRenderProgress('surface-draw-vertices-complete', {
+	        stage: 'surface-vertices',
+	        surfaceCount: surfaceVerticesExecution.surfaceCount,
+	        totalFieldCells: surfaceVerticesExecution.totalFieldCells,
+	        maxVertexRows: surfaceVerticesExecution.maxVertexRows,
+        fixedSlotVertexRowsByteLength: surfaceVerticesExecution.fixedSlotVertexRowsByteLength,
+	        queueCompletionStatus: surfaceVerticesExecution.queueCompletionStatus ?? null,
+	        queueCompletionMethod: surfaceVerticesExecution.queueCompletionMethod ?? null
+	      });
+	      if (!buildDrawMetadata) {
+	        retainSurfaceVerticesExecution = true;
+	        markSphResidentRenderProgress('surface-draw-metadata-deferred', {
+	          stage: 'surface-draw-metadata',
+	          surfaceCount: surfaceVerticesExecution.surfaceCount,
+	          sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
+	            ?? surfaceVerticesExecution.maxVertexRows
+	            ?? null,
+	          reason: 'diagnostic retained surface vertex buffers without compact draw metadata readback'
+	        });
+	        const overlayPolicy = resolveSceneResidentSurfaceDrawOverlayPolicy();
+	        return {
+	          schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
+	          status: 'resident-surface-vertex-buffers-retained',
+	          reason: 'compact surface-draw metadata/readback deferred for diagnostic-only no-overlay refresh',
+	          overlayPolicy,
+	          overlayPolicyStatus: overlayPolicy?.status ?? null,
+	          overlayPolicyMode: overlayPolicy?.mode ?? null,
+	          sourceRenderFieldSchema: renderFieldExecution.schema,
+	          sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
+	          surfaceDrawSchema: null,
+	          sourceRenderFieldBackend: renderFieldExecution.backend,
+	          sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
+	          surfaceDrawBackend: null,
+	          surfaceCount: surfaceVerticesExecution.surfaceCount,
+	          activeSurfaceCount: 0,
+	          vertexCount: 0,
+	          triangleCount: 0,
+	          sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
+	            ?? surfaceVerticesExecution.maxVertexRows
+	            ?? 0,
+	          surfaceVertexRowsBufferRetained: Boolean(surfaceVerticesExecution.vertexRowsBufferRetained),
+	          surfaceVertexRowsBufferByteLength: surfaceVerticesExecution.vertexRowsBufferByteLength ?? 0,
+	          drawRowsBufferRetained: false,
+	          drawRowsBufferByteLength: 0,
+	          drawIndirectSchema: null,
+	          drawIndirectRowStrideUints: 0,
+	          drawIndirectRowsBufferRetained: false,
+	          drawIndirectRowsBufferByteLength: 0,
+	          compactedVertexRowsBufferRetained: false,
+	          compactedVertexRowsBufferByteLength: 0,
+	          residentBufferLeaseLedgerStatus: surfaceVerticesExecution.residentBufferLeaseLedgerStatus ?? null,
+	          residentBufferLeaseResourceCount: surfaceVerticesExecution.residentBufferLeaseResourceCount ?? 0,
+	          residentBufferLeaseActiveLeaseCount: surfaceVerticesExecution.residentBufferLeaseActiveLeaseCount ?? 0,
+	          residentBufferLeaseSummary: surfaceVerticesExecution.residentBufferLeaseSummary ?? null,
+	          readbackMode: surfaceVerticesExecution.readbackMode,
+	          surfaceDrawReadback: false,
+	          surfaceDrawSummaryReadback: false,
+	          surfaceDrawSummaryReadbackByteLength: 0,
+	          fullSurfaceDrawReadback: false,
+	          compactionMode: surfaceVerticesExecution.compactionMode,
+	          renderFieldBufferMode: 'released-after-surface-vertex-diagnostic',
+	          surfaceVertexBufferMode: 'retained-surface-vertex-diagnostic',
+	          surfaceDrawBufferMode: 'metadata-deferred',
+	          surfaceDrawInputBuffersReleased: true,
+	          visibleRendererBridge: 'diagnostic-vertex-buffers-no-overlay',
+	          visibleRenderSource: 'resident-surface-vertex-diagnostic-buffers',
+	          renderBridgeSchema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
+	          renderBridgeStatus: overlayPolicy?.status ?? null,
+	          renderBridgeReason: overlayPolicy?.reason || SPH_THREE_WEBGPU_BINDING_REASON,
+	          renderBridgeFrameCount: 0,
+	          renderBridgeLastRenderStatus: null,
+	          renderBridgeDrawOrderingPolicy: null,
+	          renderBridgeDrawOrderCount: 0,
+	          renderBridgeDrawOrderSurfaceIndices: [],
+	          renderBridgeDrawOrderIndirectOffsets: [],
+	          renderBridgeDepthPolicy: null,
+	          renderBridgeDepthAttachmentFormat: null,
+	          renderBridgeDepthAttachmentReady: false,
+	          renderBridgeTransparencyCompositeMode: null,
+	          renderBridgeOitAccumFormat: null,
+	          renderBridgeOitRevealFormat: null,
+	          renderBridgeOitTargetsReady: false,
+	          renderBridgeLastOpaqueDrawCount: 0,
+	          renderBridgeLastTransparentDrawCount: 0,
+	          renderBridgeOpticalRenderSource: null,
+	          renderBridgeOpticalRecordCount: 0,
+	          renderBridgeOpticalRecordStrideFloats: 0,
+	          renderBridgeOpticalSpectralSampleCount: 0,
+	          renderBridgeOpticalSpectralSampleStrideFloats: 0,
+	          renderBridgeTemporalSwapPolicy: null,
+	          renderBridgeRetainedPreviousOverlay: false,
+	          surfaceVertices: surfaceVerticesExecution,
+	          surfaceDraw: null,
+	          scientificValidation: false,
+	          sphValidation: false,
+	          surfaceExtractionValidation: false,
+	          fullPhysicsValidation: false
+	        };
+	      }
+	      markSphResidentRenderProgress('surface-draw-metadata-started', {
+        stage: 'surface-draw-metadata',
+        surfaceCount: surfaceVerticesExecution.surfaceCount,
+        sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
+          ?? surfaceVerticesExecution.maxVertexRows
+          ?? null
       });
       surfaceDrawExecution = await buildSphRenderSurfaceDrawMetadataWebGpu({
         device,
         surfaceVertices: surfaceVerticesExecution,
         surfaceBuffer: renderFieldExecution.surfaceBuffer,
         readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+        compactSummaryReadback: true,
         retainDrawRowsBuffer: true,
         retainDrawIndirectRowsBuffer: true,
-        retainCompactedVertexRowsBuffer: true
+        retainCompactedVertexRowsBuffer: true,
+        waitForQueueCompletion: false,
+        onProgress(progress = {}) {
+          markSphResidentRenderProgress(progress.status || 'surface-draw-metadata-progress', {
+            ...progress,
+            currentStage: progress.stage || 'surface-draw-metadata'
+          });
+        }
+      });
+      markSphResidentRenderProgress('surface-draw-metadata-complete', {
+        stage: 'surface-draw-metadata',
+        surfaceCount: surfaceDrawExecution.surfaceCount,
+        sourceVertexRowCount: surfaceDrawExecution.sourceVertexRowCount,
+        activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? null,
+        vertexCount: surfaceDrawExecution.vertexCount ?? null,
+        triangleCount: surfaceDrawExecution.triangleCount ?? null,
+        queueCompletionStatus: surfaceDrawExecution.queueCompletionStatus ?? null,
+        queueCompletionMethod: surfaceDrawExecution.queueCompletionMethod ?? null,
+        compactSummaryReadback: Boolean(surfaceDrawExecution.surfaceDrawSummaryReadback)
+      });
+      markSphResidentRenderProgress('surface-draw-render-bridge-started', {
+        stage: 'surface-draw-render-bridge',
+        surfaceCount: surfaceDrawExecution.surfaceCount
       });
       const renderBridge = createSphResidentSurfaceDrawRenderBridge({
         device,
         surfaceDrawExecution
       });
       const renderBridgeReady = renderBridge?.status === 'webgpu-storage-indirect-overlay-ready';
+      const overlayPolicy = renderBridge?.overlayPolicy || resolveSceneResidentSurfaceDrawOverlayPolicy();
+      markSphResidentRenderProgress('surface-draw-render-bridge-complete', {
+        stage: 'surface-draw-render-bridge',
+        surfaceCount: surfaceDrawExecution.surfaceCount,
+        renderBridgeStatus: renderBridge?.status ?? null,
+        overlayPolicyStatus: overlayPolicy?.status ?? null
+      });
       return {
         schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
         status: surfaceDrawExecution.status === 'surface-draw-resident'
           ? 'resident-surface-draw-buffers-retained'
           : 'resident-surface-draw-built',
+        overlayPolicy,
+        overlayPolicyStatus: overlayPolicy?.status ?? null,
+        overlayPolicyMode: overlayPolicy?.mode ?? null,
         sourceRenderFieldSchema: renderFieldExecution.schema,
         sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
         surfaceDrawSchema: surfaceDrawExecution.schema,
@@ -4306,6 +6450,9 @@ export function createSphPhaseScene(container, {
         sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
         surfaceDrawBackend: surfaceDrawExecution.backend,
         surfaceCount: surfaceDrawExecution.surfaceCount,
+        activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? 0,
+        vertexCount: surfaceDrawExecution.vertexCount ?? 0,
+        triangleCount: surfaceDrawExecution.triangleCount ?? 0,
         sourceVertexRowCount: surfaceDrawExecution.sourceVertexRowCount,
         drawRowsBufferRetained: Boolean(surfaceDrawExecution.drawRowsBufferRetained),
         drawRowsBufferByteLength: surfaceDrawExecution.drawRowsBufferByteLength ?? 0,
@@ -4315,8 +6462,15 @@ export function createSphPhaseScene(container, {
         drawIndirectRowsBufferByteLength: surfaceDrawExecution.drawIndirectRowsBufferByteLength ?? 0,
         compactedVertexRowsBufferRetained: Boolean(surfaceDrawExecution.compactedVertexRowsBufferRetained),
         compactedVertexRowsBufferByteLength: surfaceDrawExecution.compactedVertexRowsBufferByteLength ?? 0,
+        residentBufferLeaseLedgerStatus: surfaceDrawExecution.residentBufferLeaseLedgerStatus ?? null,
+        residentBufferLeaseResourceCount: surfaceDrawExecution.residentBufferLeaseResourceCount ?? 0,
+        residentBufferLeaseActiveLeaseCount: surfaceDrawExecution.residentBufferLeaseActiveLeaseCount ?? 0,
+        residentBufferLeaseSummary: surfaceDrawExecution.residentBufferLeaseSummary ?? null,
         readbackMode: surfaceDrawExecution.readbackMode,
         surfaceDrawReadback: Boolean(surfaceDrawExecution.surfaceDrawReadback),
+        surfaceDrawSummaryReadback: Boolean(surfaceDrawExecution.surfaceDrawSummaryReadback),
+        surfaceDrawSummaryReadbackByteLength: surfaceDrawExecution.surfaceDrawSummaryReadbackByteLength ?? 0,
+        fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
         renderFieldBufferMode: 'released-after-surface-draw',
         surfaceVertexBufferMode: 'released-after-surface-draw',
@@ -4360,14 +6514,44 @@ export function createSphPhaseScene(container, {
         fullPhysicsValidation: false
       };
     } catch (error) {
-      surfaceDrawExecution?.destroySurfaceDrawBuffers?.();
+      markSphResidentRenderProgress('surface-draw-bridge-error', {
+        stage: 'surface-draw-bridge',
+        reason: error instanceof Error ? error.message : String(error),
+        surfaceCount: renderFieldExecution?.surfaceCount ?? 0,
+        totalFieldCells: renderFieldExecution?.totalFieldCells ?? 0
+      });
+      surfaceDrawExecution?.releaseSurfaceDrawBufferLeases?.();
+      surfaceDrawExecution?.destroySurfaceDrawBuffers?.({
+        releaseLeases: true,
+        reason: 'surface-draw-bridge-build-error'
+      });
       return residentSurfaceDrawUnavailable(error instanceof Error ? error.message : String(error), {
         renderFieldExecution,
-        surfaceVerticesExecution
+        surfaceVerticesExecution,
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy()
       });
-    } finally {
-      surfaceVerticesExecution?.destroySurfaceVertexBuffers?.();
-      renderFieldExecution?.destroyRenderFieldBuffers?.();
+	    } finally {
+	      if (!retainSurfaceVerticesExecution) {
+	        surfaceVerticesExecution?.releaseSurfaceVertexBufferLeases?.({
+	          status: 'released-after-surface-draw-metadata'
+	        });
+	        surfaceVerticesExecution?.destroySurfaceVertexBuffers?.({
+	          releaseLeases: true,
+	          reason: 'surface-draw-bridge-input-cleanup'
+	        });
+	      }
+	      renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+	        status: 'released-after-surface-draw-bridge'
+      });
+      renderFieldExecution?.destroyRenderFieldBuffers?.({
+        releaseLeases: true,
+        reason: 'surface-draw-bridge-input-cleanup'
+      });
+      markSphResidentRenderProgress('surface-draw-bridge-cleanup-complete', {
+        stage: 'surface-draw-bridge-cleanup',
+        surfaceCount: renderFieldExecution?.surfaceCount ?? 0,
+        totalFieldCells: renderFieldExecution?.totalFieldCells ?? 0
+      });
     }
   }
 
@@ -4377,8 +6561,16 @@ export function createSphPhaseScene(container, {
     device = null,
     deviceResult = null,
     residentSteps = mlsMpmResidentSteps,
-    materialProperties = null,
-    gasPressureSummary = null
+    materialProperties = currentMaterialProperties,
+    gasPressureSummary = null,
+    renderFieldReadbackMode = null,
+    renderRowsReadbackMode = null,
+    renderFieldSurfaceSummaryMode = 'auto',
+    surfaceDrawDiagnosticMode = 'auto',
+    surfaceDrawDiagnosticMaxFieldCells = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT,
+    surfaceDrawDiagnosticMaxResolution = SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT,
+    surfaceDrawOverlayPolicyOverride = null,
+    skipPressureInterfaceRefresh = false
   } = {}) {
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
@@ -4387,6 +6579,15 @@ export function createSphPhaseScene(container, {
     const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
       || finalStep?.nextParticleUploads?.sphParticleUpload
       || null;
+    markSphResidentRenderProgress('resident-render-refresh-started', {
+      stage: 'resident-render-refresh',
+      particleCount: nextSphParticleState?.particleCount ?? 0,
+      hasResidentUpload: nextSphUpload?.status === 'webgpu-uploaded',
+      renderFieldReadbackMode,
+      renderRowsReadbackMode,
+      renderFieldSurfaceSummaryMode,
+      surfaceDrawDiagnosticMode
+    });
     if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -4407,6 +6608,11 @@ export function createSphPhaseScene(container, {
         fullPhysicsValidation: false
       };
       scene.userData.sphResidentRenderState = sphResidentRenderState;
+      markSphResidentRenderProgress('resident-render-refresh-unavailable', {
+        stage: 'resident-render-refresh',
+        reason: sphResidentRenderState.reason,
+        particleCount: sphResidentRenderState.particleCount
+      });
       return sphResidentRenderState;
     }
     const resolvedDeviceResult = device
@@ -4432,10 +6638,20 @@ export function createSphPhaseScene(container, {
         fullPhysicsValidation: false
       };
       scene.userData.sphResidentRenderState = sphResidentRenderState;
+      markSphResidentRenderProgress('resident-render-refresh-webgpu-unavailable', {
+        stage: 'resident-render-refresh',
+        reason: sphResidentRenderState.reason,
+        particleCount: sphResidentRenderState.particleCount
+      });
       return sphResidentRenderState;
     }
-    let renderRowsExecution = null;
-    try {
+    markSphResidentRenderProgress('resident-render-device-ready', {
+      stage: 'resident-render-refresh',
+      particleCount: nextSphParticleState.particleCount,
+      deviceStatus: resolvedDeviceResult.status ?? null
+    });
+      let renderRowsExecution = null;
+      try {
       const reactionResult = finalStep?.reactionStep?.result || finalStep?.reactionStep || null;
       const reactionSummary = reactionResult?.reactionSummary || null;
       const residentProductMass = finalStep?.residentProductMass || reactionResult?.residentProductMass || null;
@@ -4443,14 +6659,51 @@ export function createSphPhaseScene(container, {
       const productEventCount = Math.max(0, Math.round(Number(
         residentProductMass?.productEventRowCount ?? reactionSummary?.productEventRowCount
       ) || 0));
-      renderRowsExecution = await extractSphRenderRowsWebGpu({
+      const extractRenderRowsForMode = (readbackMode) => extractSphRenderRowsWebGpu({
         device: resolvedDeviceResult.device,
         sphParticleState: nextSphParticleState,
         sphParticleUpload: nextSphUpload,
         sourceStateBuffer: nextSphUpload.stateBuffer,
         sourceThermoBuffer: nextSphUpload.thermoBuffer,
         retainRenderRowsBuffer: true,
-        readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+        readbackMode,
+        ...renderDomainExtractionOptions(currentRenderDomainCounts)
+      });
+      const requestedRenderRowsReadbackMode = renderRowsReadbackMode === 'full-parity-readback'
+        || renderRowsReadbackMode === 'no-full-readback'
+        ? renderRowsReadbackMode
+        : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+      const requestedRenderFieldSurfaceSummaryMode = ['auto', 'readback', 'skip'].includes(
+        String(renderFieldSurfaceSummaryMode || '').toLowerCase()
+      )
+        ? String(renderFieldSurfaceSummaryMode || '').toLowerCase()
+        : 'auto';
+      const requestedSurfaceDrawDiagnosticMode = ['auto', 'metadata', 'off'].includes(
+        String(surfaceDrawDiagnosticMode || '').toLowerCase()
+      )
+        ? String(surfaceDrawDiagnosticMode || '').toLowerCase()
+        : 'auto';
+      const requestedSurfaceDrawDiagnosticMaxFieldCells = Math.max(
+        1,
+        Math.round(Number(surfaceDrawDiagnosticMaxFieldCells) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT)
+      );
+      const requestedSurfaceDrawDiagnosticMaxResolution = Math.max(
+        2,
+        Math.round(Number(surfaceDrawDiagnosticMaxResolution) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT)
+      );
+      markSphResidentRenderProgress('resident-render-rows-started', {
+        stage: 'render-rows',
+        particleCount: nextSphParticleState.particleCount,
+        readbackMode: requestedRenderRowsReadbackMode
+      });
+      renderRowsExecution = await extractRenderRowsForMode(requestedRenderRowsReadbackMode);
+      markSphResidentRenderProgress('resident-render-rows-complete', {
+        stage: 'render-rows',
+        particleCount: renderRowsExecution.particleCount,
+        readbackMode: renderRowsExecution.readbackMode ?? null,
+        renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback),
+        queueCompletionStatus: renderRowsExecution.queueCompletionStatus ?? null,
+        queueCompletionMethod: renderRowsExecution.queueCompletionMethod ?? null
       });
       const hasRenderRowsReadback = renderRowsExecution.renderRows instanceof Float32Array
         && renderRowsExecution.renderRows.length > 0;
@@ -4513,15 +6766,52 @@ export function createSphPhaseScene(container, {
           materialProperties
         });
       }
-      const surfaceTable = canReuseResidentSurfaceTable
+      const residentSurfaceTable = canReuseResidentSurfaceTable
         ? sphResidentRenderSurfaceState.surfaceTable
         : sphResidentRenderSurfaceState.surfaceTable;
+      const useDiagnosticSurfaceTable = requestedSurfaceDrawDiagnosticMode === 'metadata';
+      const diagnosticSurfaceTableMaxResolution = useDiagnosticSurfaceTable
+        ? diagnosticRenderFieldResolutionForBudget(fieldBatches.length, {
+          maxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+          maxResolution: requestedSurfaceDrawDiagnosticMaxResolution
+        })
+        : null;
+      const surfaceTable = useDiagnosticSurfaceTable
+        ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
+          maxResolution: diagnosticSurfaceTableMaxResolution
+        })
+        : residentSurfaceTable;
+      markSphResidentRenderProgress('resident-render-surface-table-ready', {
+        stage: 'surface-table',
+        surfaceCount: surfaceTable.surfaceCount,
+        totalFieldCells: surfaceTable.totalFieldCells,
+        maxFieldCellCount: surfaceTable.maxFieldCellCount,
+        diagnosticMode: requestedSurfaceDrawDiagnosticMode,
+        diagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+        diagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+        diagnosticSurfaceTableMaxResolution
+      });
+      let decodedRenderRowsSummary = summarizeDecodedRenderRows(decoded);
       let renderFieldExecution = null;
       let materialInterfaceField = null;
+      let renderFieldCpuParitySummary = null;
+      let renderFieldSurfaceSummary = null;
+      let renderFieldSurfaceSummarySkipped = null;
       let renderFieldSource = 'resident-gpu-render-field';
       let nextResidentSurfaceDraw = null;
+      const surfaceOverlayPolicy = surfaceDrawOverlayPolicyOverride?.schema
+        ? surfaceDrawOverlayPolicyOverride
+        : resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh: true });
+      const shouldBuildRetainedSurfaceDrawDiagnostics = Boolean(
+        surfaceOverlayPolicy.enabled
+        || requestedSurfaceDrawDiagnosticMode === 'metadata'
+      );
+      const visibleRenderFieldReadbackMode = renderFieldReadbackMode === 'full-parity-readback'
+        || renderFieldReadbackMode === 'no-full-readback'
+        ? renderFieldReadbackMode
+        : residentRenderFieldReadbackModeForSurfaceOverlay(surfaceOverlayPolicy.enabled);
       try {
-        renderFieldExecution = await buildSphRenderFieldWebGpu({
+        const buildRenderFieldForRows = () => buildSphRenderFieldWebGpu({
           device: resolvedDeviceResult.device,
           renderRows: renderRowsExecution.renderRows,
           renderRowsBuffer: renderRowsExecution.renderRowsBuffer || null,
@@ -4531,20 +6821,255 @@ export function createSphPhaseScene(container, {
           particleCount: renderRowsExecution.particleCount,
           fieldPadding: FIELD_PADDING,
           refEdgeM,
-          readbackMode: SPH_THREE_VISIBLE_RENDER_FIELD_READBACK_MODE,
+          readbackMode: visibleRenderFieldReadbackMode,
           retainFieldRowsBuffer: true,
           retainSurfaceBuffer: true
         });
-        if (renderFieldExecution.fieldRows instanceof Float32Array && renderFieldExecution.fieldRows.length > 0) {
-          materialInterfaceField = deriveSphMaterialInterfaceField(renderFieldExecution);
-          const surfaceFields = splitSphRenderFieldBySurface(renderFieldExecution);
-          applySurfaceFields(surfaceFields, {
-            emissiveByMaterial: decoded.emissiveByMaterial,
-            materialProperties,
-            renderSource: renderFieldSource,
-            renderRowsExecution,
-            renderFieldExecution
+        const renderFieldHasPositiveDensity = (execution) => {
+          if (!(execution?.fieldRows instanceof Float32Array) || execution.fieldRows.length === 0) return true;
+          for (let index = 0; index < execution.fieldRows.length; index += 4) {
+            if (execution.fieldRows[index] > 0) return true;
+          }
+          return false;
+        };
+        markSphResidentRenderProgress('resident-render-field-started', {
+          stage: 'render-field',
+          surfaceCount: surfaceTable.surfaceCount,
+          totalFieldCells: surfaceTable.totalFieldCells,
+          maxFieldCellCount: surfaceTable.maxFieldCellCount,
+          readbackMode: visibleRenderFieldReadbackMode
+        });
+        renderFieldExecution = await buildRenderFieldForRows();
+        markSphResidentRenderProgress('resident-render-field-complete', {
+          stage: 'render-field',
+          surfaceCount: renderFieldExecution.surfaceCount,
+          totalFieldCells: renderFieldExecution.totalFieldCells,
+          maxFieldCellCount: renderFieldExecution.maxFieldCellCount ?? null,
+          renderFieldReadback: Boolean(renderFieldExecution.renderFieldReadback),
+          queueCompletionStatus: renderFieldExecution.queueCompletionStatus ?? null,
+          queueCompletionMethod: renderFieldExecution.queueCompletionMethod ?? null
+        });
+        if (
+          !renderFieldHasPositiveDensity(renderFieldExecution)
+          && renderRowsExecution.renderRowsReadback === false
+          && renderRowsExecution.particleCount > 0
+        ) {
+          renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+            status: 'released-before-empty-field-row-readback-retry'
           });
+          renderFieldExecution?.destroyRenderFieldBuffers?.({
+            releaseLeases: true,
+            reason: 'empty-render-field-row-readback-retry'
+          });
+          renderRowsExecution?.destroyRenderRowsBuffer?.();
+          markSphResidentRenderProgress('resident-render-rows-retry-started', {
+            stage: 'render-rows',
+            reason: 'empty-field-after-no-row-readback'
+          });
+          renderRowsExecution = await extractRenderRowsForMode('full-parity-readback');
+          markSphResidentRenderProgress('resident-render-rows-retry-complete', {
+            stage: 'render-rows',
+            particleCount: renderRowsExecution.particleCount,
+            readbackMode: renderRowsExecution.readbackMode ?? null,
+            renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback)
+          });
+          if (renderRowsExecution.renderRows instanceof Float32Array && renderRowsExecution.renderRows.length > 0) {
+            decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
+              materialProperties: materialProperties || {},
+              reactionTable: sphReactionTable,
+              gasPressureSummary
+            });
+            decodedRenderRowsSummary = summarizeDecodedRenderRows(decoded);
+          }
+          markSphResidentRenderProgress('resident-render-field-retry-started', {
+            stage: 'render-field',
+            reason: 'empty-field-after-no-row-readback',
+            surfaceCount: surfaceTable.surfaceCount,
+            totalFieldCells: surfaceTable.totalFieldCells
+          });
+          renderFieldExecution = await buildRenderFieldForRows();
+          markSphResidentRenderProgress('resident-render-field-retry-complete', {
+            stage: 'render-field',
+            surfaceCount: renderFieldExecution.surfaceCount,
+            totalFieldCells: renderFieldExecution.totalFieldCells,
+            renderFieldReadback: Boolean(renderFieldExecution.renderFieldReadback)
+          });
+          renderFieldExecution.emptyFieldRetryReadback = true;
+          renderFieldExecution.emptyFieldRetryReason = 'empty-field-after-no-row-readback';
+        }
+        if (
+          (renderFieldExecution.fieldRows instanceof Float32Array && renderFieldExecution.fieldRows.length > 0)
+          || renderFieldExecution.fieldRowsBuffer
+        ) {
+          renderFieldCpuParitySummary = summarizeRenderFieldCpuParity({
+            renderRowsExecution,
+            renderFieldExecution,
+            surfaceTable
+          });
+          const shouldSkipRenderFieldSurfaceSummary = Boolean(
+            requestedRenderFieldSurfaceSummaryMode === 'skip'
+            && !renderFieldExecution.renderFieldReadback
+          );
+          if (shouldSkipRenderFieldSurfaceSummary) {
+            renderFieldSurfaceSummarySkipped = {
+              schema: 'peercompute.ulg.sph-render-field-surface-summary-skip.v0',
+              status: 'render-field-surface-summary-skipped',
+              mode: requestedRenderFieldSurfaceSummaryMode,
+              reason: 'caller requested no compact surface-summary readback for routine no-full resident render refresh',
+              renderFieldReadback: Boolean(renderFieldExecution.renderFieldReadback),
+              readbackMode: renderFieldExecution.readbackMode ?? null,
+              fieldRowsBufferRetained: Boolean(renderFieldExecution.fieldRowsBuffer),
+              surfaceBufferRetained: Boolean(renderFieldExecution.surfaceBuffer),
+              surfaceCount: surfaceTable.surfaceCount,
+              scientificValidation: false,
+              sphValidation: false,
+              surfaceExtractionValidation: false,
+              fullPhysicsValidation: false
+            };
+          } else if (renderFieldExecution.fieldRowsBuffer) {
+            markSphResidentRenderProgress('resident-render-field-summary-started', {
+              stage: 'render-field-summary',
+              surfaceCount: renderFieldExecution.surfaceCount,
+              totalFieldCells: renderFieldExecution.totalFieldCells
+            });
+            renderFieldSurfaceSummary = await summarizeSphRenderFieldSurfacesWebGpu({
+              device: resolvedDeviceResult.device,
+              renderField: renderFieldExecution,
+              fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer,
+              surfaceBuffer: renderFieldExecution.surfaceBuffer || null
+            });
+            markSphResidentRenderProgress('resident-render-field-summary-complete', {
+              stage: 'render-field-summary',
+              surfaceCount: renderFieldSurfaceSummary?.surfaceCount ?? renderFieldExecution.surfaceCount,
+              activeSurfaceCount: renderFieldSurfaceSummary?.activeSurfaceCount ?? null,
+              activeCellCount: renderFieldSurfaceSummary?.activeCellCount ?? null,
+              queueCompletionStatus: renderFieldSurfaceSummary?.queueCompletionStatus ?? null,
+              queueCompletionMethod: renderFieldSurfaceSummary?.queueCompletionMethod ?? null
+            });
+            if (
+              !renderFieldExecution.renderFieldReadback
+              && renderFieldSurfaceSummary?.activeSurfaceCount === 0
+              && renderRowsExecution.renderRowsReadback === false
+              && renderRowsExecution.particleCount > 0
+            ) {
+              renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+                status: 'released-before-empty-summary-row-readback-retry'
+              });
+              renderFieldExecution?.destroyRenderFieldBuffers?.({
+                releaseLeases: true,
+                reason: 'empty-render-field-summary-row-readback-retry'
+              });
+              renderRowsExecution?.destroyRenderRowsBuffer?.();
+              markSphResidentRenderProgress('resident-render-rows-retry-started', {
+                stage: 'render-rows',
+                reason: 'empty-summary-after-no-row-readback'
+              });
+              renderRowsExecution = await extractRenderRowsForMode('full-parity-readback');
+              markSphResidentRenderProgress('resident-render-rows-retry-complete', {
+                stage: 'render-rows',
+                particleCount: renderRowsExecution.particleCount,
+                readbackMode: renderRowsExecution.readbackMode ?? null,
+                renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback)
+              });
+              if (renderRowsExecution.renderRows instanceof Float32Array && renderRowsExecution.renderRows.length > 0) {
+                decoded = decodeSphRenderRows(renderRowsExecution.renderRows, {
+                  materialProperties: materialProperties || {},
+                  reactionTable: sphReactionTable,
+                  gasPressureSummary
+                });
+                decodedRenderRowsSummary = summarizeDecodedRenderRows(decoded);
+              }
+              markSphResidentRenderProgress('resident-render-field-retry-started', {
+                stage: 'render-field',
+                reason: 'empty-summary-after-no-row-readback',
+                surfaceCount: surfaceTable.surfaceCount,
+                totalFieldCells: surfaceTable.totalFieldCells
+              });
+              renderFieldExecution = await buildRenderFieldForRows();
+              markSphResidentRenderProgress('resident-render-field-retry-complete', {
+                stage: 'render-field',
+                surfaceCount: renderFieldExecution.surfaceCount,
+                totalFieldCells: renderFieldExecution.totalFieldCells,
+                renderFieldReadback: Boolean(renderFieldExecution.renderFieldReadback)
+              });
+              renderFieldExecution.emptyFieldRetryReadback = true;
+              renderFieldExecution.emptyFieldRetryReason = 'empty-summary-after-no-row-readback';
+              renderFieldSurfaceSummary = renderFieldExecution.fieldRowsBuffer
+                ? await summarizeSphRenderFieldSurfacesWebGpu({
+                  device: resolvedDeviceResult.device,
+                  renderField: renderFieldExecution,
+                  fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer,
+                  surfaceBuffer: renderFieldExecution.surfaceBuffer || null
+                })
+                : null;
+            }
+          } else if (renderFieldExecution.fieldRows instanceof Float32Array && renderFieldExecution.fieldRows.length > 0) {
+            renderFieldSurfaceSummary = null;
+          }
+          if (renderFieldExecution.renderFieldReadback) {
+            materialInterfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+              device: resolvedDeviceResult.device,
+              renderField: renderFieldExecution,
+              fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer || null,
+              surfaceBuffer: renderFieldExecution.surfaceBuffer || null,
+              source: 'resident-render-refresh-physics-material-interface-extractor',
+              sourceCadence: 'visual-render-refresh'
+            });
+            materialInterfaceField.renderRowsReadback = Boolean(renderRowsExecution.renderRowsReadback);
+            materialInterfaceField.renderRowsReadbackMode = renderRowsExecution.readbackMode ?? null;
+            materialInterfaceField.renderFieldReadback = Boolean(renderFieldExecution.renderFieldReadback);
+            materialInterfaceField.renderFieldReadbackMode = renderFieldExecution.readbackMode ?? null;
+            materialInterfaceField.renderFieldQueueCompletionStatus = renderFieldExecution.queueCompletionStatus ?? null;
+            materialInterfaceField.renderFieldQueueCompletionMethod = renderFieldExecution.queueCompletionMethod ?? null;
+            materialInterfaceField.gpuAuthoritativeState = true;
+            publishSphResidentMaterialInterfaceState(materialInterfaceField);
+            const surfaceFields = renderFieldExecution.fieldRows instanceof Float32Array && renderFieldExecution.fieldRows.length > 0
+              ? splitSphRenderFieldBySurface(renderFieldExecution)
+              : [];
+            const surfaceBoundsByKey = new Map(fieldBatches.map((batch) => [batch.surfaceKey, {
+              bounds: batch.bounds,
+              paddingM: surfaceBoundsPaddingMForBatch(batch)
+            }]));
+            applySurfaceFields(surfaceFields, {
+              emissiveByMaterial: decoded.emissiveByMaterial,
+              materialProperties,
+              renderSource: renderFieldSource,
+              renderRowsExecution,
+              renderFieldExecution,
+              surfaceBoundsByKey
+            });
+          } else {
+            materialInterfaceField = {
+              schema: 'peercompute.ulg.sph-material-interface-field.v0',
+              status: renderFieldSurfaceSummarySkipped
+                ? 'material-interface-field-gpu-resident-summary-skipped'
+                : 'material-interface-field-gpu-resident-summary-only',
+              reason: renderFieldSurfaceSummarySkipped?.reason
+                || 'no-full render refresh produced compact render-field summary without CPU material-interface readback',
+              sourceRenderFieldSchema: renderFieldExecution.schema,
+              sourceRenderFieldStatus: renderFieldExecution.status,
+              sourceRenderFieldReadback: Boolean(renderFieldExecution.renderFieldReadback),
+              sourceRenderFieldReadbackMode: renderFieldExecution.readbackMode ?? null,
+              renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
+              renderFieldSurfaceSummaryStatus: renderFieldSurfaceSummary?.status ?? null,
+              renderFieldSurfaceSummaryActiveSurfaceCount: renderFieldSurfaceSummary?.activeSurfaceCount ?? 0,
+              renderFieldSurfaceSummaryActiveCellCount: renderFieldSurfaceSummary?.activeCellCount ?? 0,
+              renderFieldSurfaceSummarySkipped: Boolean(renderFieldSurfaceSummarySkipped),
+              renderFieldSurfaceSummarySkipReason: renderFieldSurfaceSummarySkipped?.reason ?? null,
+              surfaceCount: surfaceTable.surfaceCount,
+              readySurfaceCount: renderFieldSurfaceSummary?.activeSurfaceCount ?? 0,
+              totalSurfaceAreaM2: 0,
+              elementCount: 0,
+              elements: [],
+              gpuAuthoritativeState: true,
+              compactRenderReadback: true,
+              scientificValidation: false,
+              sphValidation: false,
+              surfaceExtractionValidation: false,
+              fullPhysicsValidation: false
+            };
+            publishSphResidentMaterialInterfaceState(materialInterfaceField);
+          }
         } else {
           materialInterfaceField = {
             schema: 'peercompute.ulg.sph-material-interface-field.v0',
@@ -4590,23 +7115,144 @@ export function createSphPhaseScene(container, {
         };
       }
       if (renderFieldSource === 'resident-gpu-render-field') {
-        if (SPH_RAW_WEBGPU_SURFACE_OVERLAY_ENABLED) {
-          nextResidentSurfaceDraw = await buildSphResidentSurfaceDrawBridge({
-            device: resolvedDeviceResult.device,
-            renderFieldExecution
+        if (
+          !shouldBuildRetainedSurfaceDrawDiagnostics
+          && !renderFieldExecution?.renderFieldReadback
+          && (renderFieldSurfaceSummary || renderFieldSurfaceSummarySkipped)
+        ) {
+          renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+            status: renderFieldSurfaceSummarySkipped
+              ? 'released-after-render-field-summary-skipped'
+              : 'released-after-render-field-summary'
           });
-        } else {
-          renderFieldExecution?.destroyRenderFieldBuffers?.();
+          renderFieldExecution?.destroyRenderFieldBuffers?.({
+            releaseLeases: true,
+            reason: renderFieldSurfaceSummarySkipped
+              ? 'render-field-summary-skipped-cleanup'
+              : 'render-field-summary-only-cleanup'
+          });
           nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
-            SPH_THREE_WEBGPU_BINDING_REASON,
-            { renderFieldExecution }
+            renderFieldSurfaceSummarySkipped?.reason
+              || 'resident render-field compact summary available; surface vertex overlay deferred',
+            { renderFieldExecution, overlayPolicy: surfaceOverlayPolicy }
+          );
+          nextResidentSurfaceDraw.status = renderFieldSurfaceSummarySkipped
+            ? 'resident-surface-draw-summary-skipped'
+            : 'resident-surface-draw-summary-only';
+          nextResidentSurfaceDraw.activeSurfaceCount = renderFieldSurfaceSummary?.activeSurfaceCount ?? 0;
+          nextResidentSurfaceDraw.vertexCount = 0;
+          nextResidentSurfaceDraw.triangleCount = 0;
+          nextResidentSurfaceDraw.renderFieldBufferMode = renderFieldSurfaceSummarySkipped
+            ? 'released-after-render-field-summary-skipped'
+            : 'released-after-render-field-summary';
+          nextResidentSurfaceDraw.visibleRendererBridge = renderFieldSurfaceSummarySkipped
+            ? 'summary-skipped-no-overlay'
+            : 'summary-only-no-overlay';
+          nextResidentSurfaceDraw.visibleRenderSource = renderFieldSurfaceSummarySkipped
+            ? 'resident-render-field-summary-skipped'
+            : 'resident-render-field-compact-summary';
+          nextResidentSurfaceDraw.surfaceDrawSummaryReadback = Boolean(
+            renderFieldSurfaceSummary?.renderFieldSurfaceSummaryReadback
+          );
+          nextResidentSurfaceDraw.surfaceDrawSummarySkipped = Boolean(renderFieldSurfaceSummarySkipped);
+        } else if (shouldBuildRetainedSurfaceDrawDiagnostics) {
+          const renderFieldTotalCells = Math.max(0, Math.round(Number(
+            renderFieldExecution?.totalFieldCells ?? surfaceTable?.totalFieldCells
+          ) || 0));
+          const diagnosticOverBudget = Boolean(
+            requestedSurfaceDrawDiagnosticMode === 'metadata'
+            && renderFieldTotalCells > requestedSurfaceDrawDiagnosticMaxFieldCells
+          );
+          if (diagnosticOverBudget) {
+            renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+              status: 'released-after-surface-draw-diagnostic-budget-skip'
+            });
+            renderFieldExecution?.destroyRenderFieldBuffers?.({
+              releaseLeases: true,
+              reason: 'surface-draw-diagnostic-field-cell-budget-skip'
+            });
+            nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
+              `surface draw diagnostic metadata skipped: render field has ${renderFieldTotalCells} cells, over budget ${requestedSurfaceDrawDiagnosticMaxFieldCells}`,
+              { renderFieldExecution, overlayPolicy: surfaceOverlayPolicy }
+            );
+            nextResidentSurfaceDraw.status = 'resident-surface-draw-diagnostic-skipped';
+            nextResidentSurfaceDraw.diagnosticOnly = true;
+            nextResidentSurfaceDraw.diagnosticMode = requestedSurfaceDrawDiagnosticMode;
+            nextResidentSurfaceDraw.diagnosticSkipped = true;
+            nextResidentSurfaceDraw.diagnosticSkipReason = 'surface-draw-diagnostic-field-cell-budget-exceeded';
+            nextResidentSurfaceDraw.diagnosticFieldCellCount = renderFieldTotalCells;
+            nextResidentSurfaceDraw.diagnosticMaxFieldCells = requestedSurfaceDrawDiagnosticMaxFieldCells;
+            nextResidentSurfaceDraw.diagnosticMaxResolution = requestedSurfaceDrawDiagnosticMaxResolution;
+            nextResidentSurfaceDraw.diagnosticSurfaceTableMaxResolution = diagnosticSurfaceTableMaxResolution;
+            nextResidentSurfaceDraw.renderFieldBufferMode = 'released-after-surface-draw-diagnostic-budget-skip';
+            nextResidentSurfaceDraw.visibleRendererBridge = 'diagnostic-skipped-no-overlay';
+            nextResidentSurfaceDraw.visibleRenderSource = 'resident-surface-draw-diagnostic-skipped';
+            nextResidentSurfaceDraw.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
+            nextResidentSurfaceDraw.renderBridgeStatus = surfaceOverlayPolicy.status;
+            nextResidentSurfaceDraw.renderBridgeReason = surfaceOverlayPolicy.reason || SPH_THREE_WEBGPU_BINDING_REASON;
+          } else {
+            markSphResidentRenderProgress('resident-render-surface-draw-diagnostic-started', {
+              stage: 'surface-draw-diagnostic',
+              surfaceCount: renderFieldExecution.surfaceCount,
+              totalFieldCells: renderFieldTotalCells,
+              diagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+              diagnosticSurfaceTableMaxResolution
+            });
+	            nextResidentSurfaceDraw = await buildSphResidentSurfaceDrawBridge({
+	              device: resolvedDeviceResult.device,
+	              renderFieldExecution,
+	              buildDrawMetadata: !(
+	                requestedSurfaceDrawDiagnosticMode === 'metadata'
+	                && !surfaceOverlayPolicy.enabled
+	              )
+	            });
+            markSphResidentRenderProgress('resident-render-surface-draw-diagnostic-complete', {
+              stage: 'surface-draw-diagnostic',
+              surfaceCount: nextResidentSurfaceDraw?.surfaceCount ?? 0,
+              activeSurfaceCount: nextResidentSurfaceDraw?.activeSurfaceCount ?? null,
+              vertexCount: nextResidentSurfaceDraw?.vertexCount ?? null,
+              triangleCount: nextResidentSurfaceDraw?.triangleCount ?? null,
+              status: nextResidentSurfaceDraw?.status ?? null
+            });
+            if (
+              requestedSurfaceDrawDiagnosticMode === 'metadata'
+              && !surfaceOverlayPolicy.enabled
+              && nextResidentSurfaceDraw?.status
+              && nextResidentSurfaceDraw.status !== 'resident-surface-draw-unavailable'
+            ) {
+              nextResidentSurfaceDraw.diagnosticOnly = true;
+              nextResidentSurfaceDraw.diagnosticMode = requestedSurfaceDrawDiagnosticMode;
+              nextResidentSurfaceDraw.diagnosticFieldCellCount = renderFieldTotalCells;
+              nextResidentSurfaceDraw.diagnosticMaxFieldCells = requestedSurfaceDrawDiagnosticMaxFieldCells;
+              nextResidentSurfaceDraw.diagnosticMaxResolution = requestedSurfaceDrawDiagnosticMaxResolution;
+              nextResidentSurfaceDraw.diagnosticSurfaceTableMaxResolution = diagnosticSurfaceTableMaxResolution;
+              nextResidentSurfaceDraw.visibleRendererBridge = 'diagnostic-only-no-overlay';
+              nextResidentSurfaceDraw.visibleRenderSource = 'resident-surface-draw-diagnostic-buffers';
+              nextResidentSurfaceDraw.renderBridgeStatus = surfaceOverlayPolicy.status;
+              nextResidentSurfaceDraw.renderBridgeReason = surfaceOverlayPolicy.reason || SPH_THREE_WEBGPU_BINDING_REASON;
+            }
+            if (nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay') {
+              suppressThreeSurfaceMeshesForResidentOverlay('resident-surface-draw-overlay-active');
+            }
+          }
+        } else {
+          renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+            status: 'released-after-three-marching-cubes-readback'
+          });
+          renderFieldExecution?.destroyRenderFieldBuffers?.({
+            releaseLeases: true,
+            reason: 'three-marching-cubes-readback-cleanup'
+          });
+          nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
+            surfaceOverlayPolicy.reason || SPH_THREE_WEBGPU_BINDING_REASON,
+            { renderFieldExecution, overlayPolicy: surfaceOverlayPolicy }
           );
           nextResidentSurfaceDraw.visibleRendererBridge = 'three-marching-cubes';
           nextResidentSurfaceDraw.visibleRenderSource = 'three-managed-render-field-readback';
           nextResidentSurfaceDraw.renderFieldBufferMode = 'released-after-three-marching-cubes-readback';
           nextResidentSurfaceDraw.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
-          nextResidentSurfaceDraw.renderBridgeStatus = 'surface-draw-overlay-disabled';
-          nextResidentSurfaceDraw.renderBridgeReason = SPH_THREE_WEBGPU_BINDING_REASON;
+          nextResidentSurfaceDraw.renderBridgeStatus = surfaceOverlayPolicy.status;
+          nextResidentSurfaceDraw.renderBridgeReason = surfaceOverlayPolicy.reason || SPH_THREE_WEBGPU_BINDING_REASON;
         }
       } else {
         nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
@@ -4614,9 +7260,9 @@ export function createSphPhaseScene(container, {
           { renderFieldExecution }
         );
       }
-      sphResidentSurfaceDraw = nextResidentSurfaceDraw;
-      scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
       if (nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay') {
+        sphResidentSurfaceDraw = nextResidentSurfaceDraw;
+        scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
         releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
       } else {
         clearSphResidentSurfaceDrawArtifacts();
@@ -4629,24 +7275,24 @@ export function createSphPhaseScene(container, {
         device,
         deviceResult: resolvedDeviceResult
       });
-      const pressureInterfaceCoupling = gasPressureInterfaceCouplingSummary({
-        pressureFeedback: gasPressureSummary?.pressureFeedback || null,
-        materialInterfaceField
-      });
-      const pressureInterfaceForcePreview = gasPressureInterfaceForcePreview({
-        pressureFeedback: gasPressureSummary?.pressureFeedback || null,
-        materialInterfaceField,
-        pressureInterfaceCoupling
-      });
-      const pressureInterfaceForceSolver = gasPressureInterfaceForceSolver({
-        pressureFeedback: gasPressureSummary?.pressureFeedback || null,
-        materialInterfaceField,
-        pressureInterfaceCoupling
-      });
-      const pressureInterfaceForceRowsUploadForState = uploadPressureInterfaceForceRowsBuffer({
-        pressureInterfaceForceSolver,
-        device: device || resolvedDeviceResult?.device || null
-      });
+      const pressureInterfaceState = skipPressureInterfaceRefresh
+        ? {
+          schema: 'peercompute.ulg.sph-pressure-interface-state.v0',
+          status: 'pressure-interface-refresh-skipped',
+          source: 'resident-render-validation',
+          sourceCadence: 'visual-render-refresh',
+          reason: 'validation render refresh requested pressure-interface skip'
+        }
+        : await refreshSphResidentPressureInterfaceState({
+          preferWebGpu,
+          navigatorRef: overrideNavigatorRef,
+          device: device || resolvedDeviceResult?.device || null,
+          deviceResult: resolvedDeviceResult,
+          materialInterfaceField,
+          gasPressureSummary,
+          source: 'resident-render-field-pressure-interface-producer',
+          sourceCadence: 'visual-render-refresh'
+        });
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
         status: renderFieldSource === 'resident-gpu-render-field'
@@ -4666,15 +7312,69 @@ export function createSphPhaseScene(container, {
         renderRowsReadbackByteLength: renderRowsExecution.renderRowsReadbackByteLength ?? renderRowsExecution.renderRows?.byteLength ?? 0,
         renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback),
         renderRowsReadbackMode: renderRowsExecution.readbackMode ?? null,
+        renderRowsGpuHandoffCopy: Boolean(renderRowsExecution.renderRowsGpuHandoffCopy),
+        renderRowsHandoffMode: renderRowsExecution.renderRowsHandoffMode ?? null,
+        renderRowsDecodedSummary: decodedRenderRowsSummary,
+        renderRowsDecodedMaterialPhaseCounts: decodedRenderRowsSummary?.materialPhaseCounts ?? null,
+        renderRowsDecodedMaterialPhaseDomainCounts: decodedRenderRowsSummary?.materialPhaseDomainCounts ?? null,
+        renderRowsDecodedMaterialPhaseDomainBounds: decodedRenderRowsSummary?.materialPhaseDomainBounds ?? null,
+        renderRowsDecodedSampleRows: decodedRenderRowsSummary?.sampleRows ?? null,
         renderFieldCellStrideFloats: renderFieldExecution?.rowStrideFloats ?? null,
         renderFieldByteLength: renderFieldExecution?.fieldRowByteLength ?? 0,
         renderFieldReadback: Boolean(renderFieldExecution?.renderFieldReadback),
         renderFieldStatus: renderFieldExecution?.status ?? null,
         renderFieldBackend: renderFieldExecution?.backend ?? null,
         renderFieldInputSource: renderFieldExecution?.renderFieldInputSource ?? null,
+        renderFieldCpuParitySummary,
+        renderFieldEmptyRetryReadback: Boolean(renderFieldExecution?.emptyFieldRetryReadback),
+        renderFieldEmptyRetryReason: renderFieldExecution?.emptyFieldRetryReason ?? null,
         renderFieldSurfaceCount: renderFieldExecution?.surfaceCount ?? surfaceTable.surfaceCount,
         renderFieldTotalCells: renderFieldExecution?.totalFieldCells ?? surfaceTable.totalFieldCells,
+        renderFieldSurfaceSummaryStatus: renderFieldSurfaceSummary?.status ?? null,
+        renderFieldSurfaceSummaryReadback: Boolean(renderFieldSurfaceSummary?.renderFieldSurfaceSummaryReadback),
+        renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
+        renderFieldSurfaceSummarySkipped: Boolean(renderFieldSurfaceSummarySkipped),
+        renderFieldSurfaceSummarySkipReason: renderFieldSurfaceSummarySkipped?.reason ?? null,
+        renderFieldSurfaceSummaryByteLength: renderFieldSurfaceSummary?.summaryRowsByteLength ?? 0,
+        renderFieldSurfaceSummaryActiveSurfaceCount: renderFieldSurfaceSummary?.activeSurfaceCount ?? 0,
+        renderFieldSurfaceSummaryActiveCellCount: renderFieldSurfaceSummary?.activeCellCount ?? 0,
+        renderFieldSurfaceSummaryMaxDensity: renderFieldSurfaceSummary?.maxDensity ?? null,
+        renderFieldSurfaceSummarySurfaces: Array.isArray(renderFieldSurfaceSummary?.surfaces)
+          ? renderFieldSurfaceSummary.surfaces.map((surface) => ({
+            surfaceKey: surface.surfaceKey ?? null,
+            material: surface.material ?? null,
+            phase: surface.phase ?? null,
+            renderKey: surface.renderKey ?? null,
+            surfaceIndex: surface.surfaceIndex ?? null,
+            activeCellCount: surface.activeCellCount ?? 0,
+            maxDensity: surface.maxDensity ?? null,
+            isolation: surface.isolation ?? null,
+            boundsCenterM: surface.boundsCenterM ? [...surface.boundsCenterM] : null,
+            boundsRadiusM: surface.boundsRadiusM ?? null,
+            status: surface.status ?? null
+          }))
+          : [],
+        surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
+        surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+        surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+        surfaceDrawDiagnosticSurfaceTableMaxResolution: diagnosticSurfaceTableMaxResolution,
+        surfaceDrawDiagnosticsBuilt: Boolean(
+          requestedSurfaceDrawDiagnosticMode === 'metadata'
+          && nextResidentSurfaceDraw?.status
+          && nextResidentSurfaceDraw.status !== 'resident-surface-draw-unavailable'
+          && nextResidentSurfaceDraw.status !== 'resident-surface-draw-diagnostic-skipped'
+        ),
+        surfaceDrawDiagnosticsSkipped: Boolean(sphResidentSurfaceDraw?.diagnosticSkipped),
+        surfaceDrawDiagnosticsSkipReason: sphResidentSurfaceDraw?.diagnosticSkipReason ?? null,
+        surfaceDrawDiagnosticFieldCellCount: sphResidentSurfaceDraw?.diagnosticFieldCellCount ?? null,
         renderFieldBufferMode: sphResidentSurfaceDraw?.renderFieldBufferMode ?? null,
+        surfaceDrawOverlayPolicyStatus: sphResidentSurfaceDraw?.overlayPolicyStatus
+          ?? surfaceOverlayPolicy.status
+          ?? null,
+        surfaceDrawOverlayPolicyMode: sphResidentSurfaceDraw?.overlayPolicyMode
+          ?? surfaceOverlayPolicy.mode
+          ?? null,
+        surfaceDrawOverlayPolicyEnabled: Boolean(surfaceOverlayPolicy.enabled),
         surfaceDrawSchema: sphResidentSurfaceDraw?.schema ?? null,
         surfaceDrawStatus: sphResidentSurfaceDraw?.status ?? null,
         surfaceDrawReason: sphResidentSurfaceDraw?.reason ?? null,
@@ -4682,8 +7382,13 @@ export function createSphPhaseScene(container, {
         surfaceDrawSourceSurfaceVertexSchema: sphResidentSurfaceDraw?.sourceSurfaceVertexSchema ?? null,
         surfaceDrawSurfaceDrawSchema: sphResidentSurfaceDraw?.surfaceDrawSchema ?? null,
         surfaceDrawSurfaceCount: sphResidentSurfaceDraw?.surfaceCount ?? 0,
-        surfaceDrawSourceVertexRowCount: sphResidentSurfaceDraw?.sourceVertexRowCount ?? 0,
-        surfaceDrawRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.drawRowsBufferRetained),
+	        surfaceDrawActiveSurfaceCount: sphResidentSurfaceDraw?.activeSurfaceCount ?? 0,
+	        surfaceDrawVertexCount: sphResidentSurfaceDraw?.vertexCount ?? 0,
+	        surfaceDrawTriangleCount: sphResidentSurfaceDraw?.triangleCount ?? 0,
+	        surfaceDrawSourceVertexRowCount: sphResidentSurfaceDraw?.sourceVertexRowCount ?? 0,
+	        surfaceDrawVertexRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.surfaceVertexRowsBufferRetained),
+	        surfaceDrawVertexRowsBufferByteLength: sphResidentSurfaceDraw?.surfaceVertexRowsBufferByteLength ?? 0,
+	        surfaceDrawRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.drawRowsBufferRetained),
         surfaceDrawRowsBufferByteLength: sphResidentSurfaceDraw?.drawRowsBufferByteLength ?? 0,
         surfaceDrawIndirectSchema: sphResidentSurfaceDraw?.drawIndirectSchema ?? null,
         surfaceDrawIndirectRowStrideUints: sphResidentSurfaceDraw?.drawIndirectRowStrideUints ?? 0,
@@ -4691,9 +7396,18 @@ export function createSphPhaseScene(container, {
         surfaceDrawIndirectRowsBufferByteLength: sphResidentSurfaceDraw?.drawIndirectRowsBufferByteLength ?? 0,
         surfaceDrawCompactedVertexRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.compactedVertexRowsBufferRetained),
         surfaceDrawCompactedVertexRowsBufferByteLength: sphResidentSurfaceDraw?.compactedVertexRowsBufferByteLength ?? 0,
+        surfaceDrawLeaseStatus: sphResidentSurfaceDraw?.residentBufferLeaseLedgerStatus ?? null,
+        surfaceDrawLeaseResourceCount: sphResidentSurfaceDraw?.residentBufferLeaseResourceCount ?? 0,
+        surfaceDrawLeaseActiveCount: sphResidentSurfaceDraw?.residentBufferLeaseActiveLeaseCount ?? 0,
+        surfaceDrawLeaseSummary: sphResidentSurfaceDraw?.residentBufferLeaseSummary ?? null,
         surfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawReadback),
+        surfaceDrawSummaryReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawSummaryReadback),
+        surfaceDrawSummaryReadbackByteLength: sphResidentSurfaceDraw?.surfaceDrawSummaryReadbackByteLength ?? 0,
+        fullSurfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.fullSurfaceDrawReadback),
         surfaceDrawReadbackMode: sphResidentSurfaceDraw?.readbackMode ?? null,
         surfaceDrawCompactionMode: sphResidentSurfaceDraw?.compactionMode ?? null,
+        surfaceDrawDiagnosticOnly: Boolean(sphResidentSurfaceDraw?.diagnosticOnly),
+        surfaceDrawDiagnosticOnlyMode: sphResidentSurfaceDraw?.diagnosticMode ?? null,
         surfaceDrawInputBuffersReleased: Boolean(sphResidentSurfaceDraw?.surfaceDrawInputBuffersReleased),
         surfaceDrawVisibleRenderSource: sphResidentSurfaceDraw?.visibleRenderSource ?? null,
         surfaceDrawVisibleRendererBridge: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
@@ -4755,32 +7469,7 @@ export function createSphPhaseScene(container, {
         materialInterfaceFieldStatus: materialInterfaceField?.status ?? null,
         materialInterfaceReadySurfaceCount: materialInterfaceField?.readySurfaceCount ?? 0,
         materialInterfaceTotalSurfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
-        materialInterfaceForceCouplingStatus: pressureInterfaceForceSolver.forceCouplingStatus
-          ?? materialInterfaceField?.forceCouplingStatus
-          ?? null,
-        pressureInterfaceCoupling,
-        pressureInterfaceCouplingSchema: pressureInterfaceCoupling.schema,
-        pressureInterfaceCouplingStatus: pressureInterfaceCoupling.status,
-        pressureInterfaceCouplingPreSolverStatus: pressureInterfaceCoupling.forceCouplingStatus,
-        pressureInterfaceForceCouplingStatus: pressureInterfaceForceSolver.forceCouplingStatus
-          ?? pressureInterfaceCoupling.forceCouplingStatus,
-        pressureInterfaceForcePreview,
-        pressureInterfaceForcePreviewSchema: pressureInterfaceForcePreview.schema,
-        pressureInterfaceForcePreviewStatus: pressureInterfaceForcePreview.status,
-        pressureInterfaceForceApplicationStatus: pressureInterfaceForcePreview.forceApplicationStatus,
-        pressureInterfacePreviewedElementCount: pressureInterfaceForcePreview.previewedElementCount,
-        pressureInterfaceTotalAbsForceN: pressureInterfaceForcePreview.totalAbsInterfaceForceN,
-        pressureInterfaceForceSolver,
-        pressureInterfaceForceSolverSchema: pressureInterfaceForceSolver.schema,
-        pressureInterfaceForceSolverStatus: pressureInterfaceForceSolver.status,
-        pressureInterfaceSolverApplicationStatus: pressureInterfaceForceSolver.forceApplicationStatus,
-        pressureInterfaceSolverForceRowCount: pressureInterfaceForceSolver.forceRowCount,
-        pressureInterfaceSolverConservationStatus: pressureInterfaceForceSolver.conservationStatus,
-        pressureInterfaceSolverConservationResidualMagnitudeN: pressureInterfaceForceSolver.conservationResidualMagnitudeN,
-        pressureInterfaceForceRowsUploadStatus: pressureInterfaceForceRowsUploadForState?.status ?? null,
-        pressureInterfaceForceRowsBufferRetained: Boolean(pressureInterfaceForceRowsUploadForState?.bufferRetained),
-        pressureInterfaceForceRowsBufferByteLength: pressureInterfaceForceRowsUploadForState?.forceRowByteLength ?? 0,
-        pressureInterfaceForceRowsUploadSignature: pressureInterfaceForceRowsUploadForState?.signature ?? null,
+        ...pressureInterfaceRenderStateFields(pressureInterfaceState),
         gpuAuthoritativeState: true,
         scientificValidation: false,
         sphValidation: false,
@@ -4815,6 +7504,59 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function debugSphResidentParticleUpload({
+    preferWebGpu = true,
+    navigatorRef: overrideNavigatorRef = navigatorRef,
+    device = null,
+    deviceResult = null,
+    residentSteps = mlsMpmResidentSteps,
+    includeRenderRows = true
+  } = {}) {
+    const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
+    const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
+    const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
+      || finalStep?.nextParticleUploads?.sphParticleUpload
+      || null;
+    if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
+      return {
+        schema: 'peercompute.ulg.sph-resident-particle-upload-debug.v0',
+        status: 'resident-particle-upload-debug-source-unavailable',
+        reason: 'retained resident SPH buffers are not available',
+        particleCount: nextSphParticleState?.particleCount ?? 0,
+        uploadStatus: nextSphUpload?.status ?? null,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    const resolvedDeviceResult = device
+      ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+      : (deviceResult || (preferWebGpu ? await requestCachedOpticalGpuDevice(overrideNavigatorRef) : null));
+    if (!resolvedDeviceResult?.device) {
+      return {
+        schema: 'peercompute.ulg.sph-resident-particle-upload-debug.v0',
+        status: 'resident-particle-upload-debug-webgpu-unavailable',
+        reason: resolvedDeviceResult?.reason || 'WebGPU debug readback not available',
+        particleCount: nextSphParticleState.particleCount,
+        uploadStatus: nextSphUpload.status,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    return summarizeSphResidentParticleUploadWebGpu({
+      device: resolvedDeviceResult.device,
+      sphParticleState: nextSphParticleState,
+      sphParticleUpload: nextSphUpload,
+      sourceStateBuffer: nextSphUpload.stateBuffer,
+      sourceThermoBuffer: nextSphUpload.thermoBuffer,
+      includeRenderRows,
+      ...renderDomainExtractionOptions(currentRenderDomainCounts)
+    });
+  }
+
   let running = true;
   function animate() {
     if (!running) return;
@@ -4830,14 +7572,124 @@ export function createSphPhaseScene(container, {
     const h = container.clientHeight || height;
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(w, h);
     resizeSphResidentSurfaceDrawOverlayCanvas();
   }
+
+  function refreshViewportAndOverlay({ reason = 'manual-refresh' } = {}) {
+    try {
+      resize();
+      controls.update();
+      renderer.render(scene, camera);
+      renderSphResidentSurfaceDrawOverlay();
+      const status = {
+        schema: 'peercompute.ulg.sph-scene-viewport-refresh.v0',
+        status: 'viewport-refresh-rendered',
+        reason,
+        width: renderer.domElement?.width ?? null,
+        height: renderer.domElement?.height ?? null,
+        overlayCanvasWidth: sphResidentSurfaceDrawRenderBridge?.canvas?.width ?? null,
+        overlayCanvasHeight: sphResidentSurfaceDrawRenderBridge?.canvas?.height ?? null,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      scene.userData.sphViewportRefresh = status;
+      return status;
+    } catch (error) {
+      const status = {
+        schema: 'peercompute.ulg.sph-scene-viewport-refresh.v0',
+        status: 'viewport-refresh-error',
+        reason,
+        error: error instanceof Error ? error.message : String(error),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      scene.userData.sphViewportRefresh = status;
+      return status;
+    }
+  }
+
+  function forceViewportRefreshBurst({ reason = 'manual-refresh-burst', frameCount = 2 } = {}) {
+    const requestedFrames = Math.max(0, Math.round(Number(frameCount) || 0));
+    const baseStatus = {
+      schema: 'peercompute.ulg.sph-scene-viewport-refresh-burst.v0',
+      status: 'viewport-refresh-burst-scheduled',
+      reason,
+      requestedFrameCount: requestedFrames,
+      completedFrameCount: 0,
+      immediateRefresh: null,
+      lastRefresh: null,
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    scene.userData.sphViewportRefreshBurst = baseStatus;
+    if (!running) {
+      scene.userData.sphViewportRefreshBurst = {
+        ...baseStatus,
+        status: 'viewport-refresh-burst-skipped-not-running',
+        updatedAtMs: nowMs()
+      };
+      return scene.userData.sphViewportRefreshBurst;
+    }
+    const immediateRefresh = refreshViewportAndOverlay({ reason: `${reason}:immediate` });
+    scene.userData.sphViewportRefreshBurst = {
+      ...baseStatus,
+      status: requestedFrames > 0 ? 'viewport-refresh-burst-running' : 'viewport-refresh-burst-complete',
+      immediateRefresh,
+      lastRefresh: immediateRefresh,
+      updatedAtMs: nowMs()
+    };
+    const runFrame = (index) => {
+      if (index > requestedFrames) return;
+      requestAnimationFrame(() => {
+        if (!running) return;
+        const refresh = refreshViewportAndOverlay({ reason: `${reason}:raf-${index}` });
+        scene.userData.sphViewportRefreshBurst = {
+          ...baseStatus,
+          status: index >= requestedFrames ? 'viewport-refresh-burst-complete' : 'viewport-refresh-burst-running',
+          immediateRefresh,
+          lastRefresh: refresh,
+          completedFrameCount: index,
+          updatedAtMs: nowMs()
+        };
+        runFrame(index + 1);
+      });
+    };
+    runFrame(1);
+    return scene.userData.sphViewportRefreshBurst;
+  }
+
+  function scheduleVisibilityResumeRefresh(reason) {
+    if (!running) return;
+    forceViewportRefreshBurst({ reason, frameCount: 2 });
+  }
+
+  function handleVisibilityChange() {
+    if (container.ownerDocument?.visibilityState === 'visible') {
+      scheduleVisibilityResumeRefresh('document-visibility-visible');
+    }
+  }
+
+  function handlePageShow() {
+    scheduleVisibilityResumeRefresh('window-pageshow');
+  }
+
   window.addEventListener('resize', resize);
+  container.ownerDocument?.addEventListener?.('visibilitychange', handleVisibilityChange);
+  window.addEventListener('pageshow', handlePageShow);
 
   function dispose() {
     running = false;
     window.removeEventListener('resize', resize);
+    container.ownerDocument?.removeEventListener?.('visibilitychange', handleVisibilityChange);
+    window.removeEventListener('pageshow', handlePageShow);
     controls.dispose();
     for (const { mesh } of surfaces.values()) {
       mesh.geometry.dispose();
@@ -4852,6 +7704,8 @@ export function createSphPhaseScene(container, {
     }
     clearMlsMpmResidentExecutionArtifacts();
     clearSphResidentSurfaceDrawArtifacts();
+    publishSphResidentMaterialInterfaceState(null);
+    publishSphResidentPressureInterfaceState(null);
     destroyPressureInterfaceForceRowsUpload();
     if (sphResidentSurfaceDrawRenderBridge?.canvas?.parentNode) {
       sphResidentSurfaceDrawRenderBridge.canvas.parentNode.removeChild(sphResidentSurfaceDrawRenderBridge.canvas);
@@ -4869,6 +7723,7 @@ export function createSphPhaseScene(container, {
   return {
     setParticles,
     setSurfaceRadiusScale,
+    refreshViewportAndOverlay,
     dispose,
     scene,
     camera,
@@ -4892,6 +7747,9 @@ export function createSphPhaseScene(container, {
     },
     getSphThermalResponseGraphUpload() {
       return sphThermalResponseGraphUpload;
+    },
+    getMlsMpmMechanicsMaterialTable() {
+      return mlsMpmMechanicsMaterialTable;
     },
     getSphReactionTable() {
       return sphReactionTable;
@@ -4935,11 +7793,20 @@ export function createSphPhaseScene(container, {
     getSphResidentRenderState() {
       return sphResidentRenderState;
     },
+    getSphResidentMaterialInterfaceState() {
+      return sphResidentMaterialInterfaceState;
+    },
+    getSphResidentPressureInterfaceState() {
+      return sphResidentPressureInterfaceState;
+    },
     getSphResidentSurfaceDraw() {
       return sphResidentSurfaceDraw;
     },
     getSphResidentSurfaceDrawRenderBridge() {
       return sphResidentSurfaceDrawRenderBridge;
+    },
+    getSphResidentSurfaceDrawOverlayPolicy() {
+      return resolveSceneResidentSurfaceDrawOverlayPolicy();
     },
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
@@ -4950,7 +7817,10 @@ export function createSphPhaseScene(container, {
     refreshMlsMpmG2pReconstruction,
     refreshMlsMpmResidentStep,
     refreshMlsMpmResidentSteps,
+    refreshSphResidentMaterialInterfaceState,
+    refreshSphResidentPressureInterfaceState,
     refreshSphResidentRenderState,
+    debugSphResidentParticleUpload,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice
   };
 }

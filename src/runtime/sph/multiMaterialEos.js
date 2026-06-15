@@ -61,6 +61,11 @@ export function createPhaseAwareEos(materialProperties, { soundSpeedScale = 1, m
     const c = cReal * soundSpeedScale;
     const ratio = density / Math.max(rho0, 1e-9);
     const bulk = (rho0 * c * c) / TAIT_EXPONENT;
-    return { pressurePa: bulk * (ratio ** TAIT_EXPONENT - 1), soundSpeedMPerS: c };
+    const pressurePa = bulk * (ratio ** TAIT_EXPONENT - 1);
+    // Condensed phases need the signed side of the Tait law so the reduced carrier has a restoring
+    // stress on both sides of the rest density. Cavitation/surface tension are still separate laws,
+    // but clamping this to zero removes the liquid's basic volume correction and lets blobs drift
+    // through expanded, underconstrained states.
+    return { pressurePa, soundSpeedMPerS: c };
   };
 }

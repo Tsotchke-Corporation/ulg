@@ -3,6 +3,7 @@ import {
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
+  SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT,
   SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT,
   SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT,
@@ -11,8 +12,11 @@ import {
   SPH_GPU_RENDER_SURFACE_ROW_LAYOUT,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
@@ -27,6 +31,7 @@ import {
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
   sphRenderMarchingCubeCellsWgsl,
+  sphRenderFieldSurfaceSummaryWgsl,
   sphRenderSurfaceDrawWgsl,
   sphRenderSurfaceVerticesWgsl,
   sphMaterialInterfaceCandidatesWgsl,
@@ -43,15 +48,25 @@ import {
 } from '../material/opticalGpuBuffers.js';
 import { opticalRenderParams } from '../material/opticalClosure.js';
 import { incandescentColor } from '../material/radiationClosure.js';
-import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import {
+  addResidentBufferLease,
+  createResidentBufferLeaseLedger,
+  destroyResidentBufferWithLease,
+  registerResidentBufferResource,
+  releaseResidentBufferLease,
+  summarizeResidentBufferLeaseLedger
+} from '../residentBufferLease.js';
 
 export {
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_EXECUTION_SCHEMA,
@@ -61,10 +76,12 @@ export {
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_CANDIDATE_FIELD_SCHEMA,
+  ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
   ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
   sphRenderMarchingCubeCellsWgsl,
+  sphRenderFieldSurfaceSummaryWgsl,
   sphRenderSurfaceDrawWgsl,
   sphRenderSurfaceVerticesWgsl,
   sphMaterialInterfaceCandidatesWgsl,
@@ -77,6 +94,7 @@ export const SPH_GPU_RENDER_SURFACE_ROW_FLOATS = SPH_GPU_RENDER_SURFACE_ROW_LAYO
 export const SPH_GPU_RENDER_FIELD_CELL_FLOATS = SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT.length;
 export const SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS = SPH_GPU_REACTION_PRODUCT_EVENT_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS = SPH_GPU_RENDER_MARCHING_CUBE_CELL_ROW_LAYOUT.length;
+export const SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS = SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS = SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_DRAW_FLOATS = SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length;
 export const SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
@@ -85,6 +103,7 @@ export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEM
 
 const RENDER_SCOPE = 'sph-resident-render-row-extraction';
 const RENDER_FIELD_SCOPE = 'sph-resident-render-field-splat';
+const MATERIAL_INTERFACE_SOURCE_FIELD_SCOPE = 'sph-resident-material-interface-source-field-splat';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const PHASE_NAMES_BY_ID = Object.freeze(Object.fromEntries(
@@ -129,10 +148,23 @@ function renderKeyFor(material, phase) {
   return material || 'unknown';
 }
 
+function renderDomainKeyForId(renderDomainId) {
+  const id = Math.round(finiteNumber(renderDomainId, 0));
+  if (id === 1) return 'base';
+  if (id === 2) return 'drop';
+  return null;
+}
+
+function canonicalRenderMaterialKey(material) {
+  const key = String(material || '').trim();
+  if (!key) return 'unknown';
+  return /^[A-Z][a-z]?$/.test(key) ? key : key.toLowerCase();
+}
+
 export function buildSphRenderMaterialMap(materialProperties = {}, reactionTable = null) {
   const entries = new Map();
   for (const material of Object.keys(materialProperties || {})) {
-    entries.set(stableOpticalMaterialId(material), material);
+    entries.set(stableOpticalMaterialId(material), canonicalRenderMaterialKey(material));
   }
   for (const reaction of reactionTable?.metadata || []) {
     if (reaction.product) entries.set(reaction.productMaterialId, reaction.product);
@@ -223,6 +255,8 @@ export function decodeSphRenderRows(renderRows, {
     const phase = phaseNameForId(phaseId);
     const renderKey = renderKeyFor(material, phase);
     const temperatureK = renderRows[offset + 6];
+    const renderDomainId = Math.max(0, Math.round(finiteNumber(renderRows[offset + 11], 0)));
+    const renderDomainKey = renderDomainKeyForId(renderDomainId);
     const h2oGas = gasPressureSummary?.bySpecies?.h2o || null;
     const opticalState = material === 'h2o' && phase === 'gas' && h2oGas
       ? {
@@ -235,9 +269,14 @@ export function decodeSphRenderRows(renderRows, {
     const rgb = colorFor({ material, phase, temperatureK, materialProperties });
     positionsM.set([renderRows[offset], renderRows[offset + 1], renderRows[offset + 2]], index * 3);
     colorsRgb.set(rgb, index * 3);
-    materials[index] = opticalState
+    const descriptor = opticalState
       ? { material, phase, renderKey, opticalState }
       : { material, phase, renderKey };
+    if (renderDomainId > 0) {
+      descriptor.renderDomainId = renderDomainId;
+      descriptor.renderDomainKey = renderDomainKey;
+    }
+    materials[index] = descriptor;
     rows.push({
       index,
       positionM: [renderRows[offset], renderRows[offset + 1], renderRows[offset + 2]],
@@ -251,6 +290,8 @@ export function decodeSphRenderRows(renderRows, {
       restDensityKgPerM3: renderRows[offset + 8],
       phaseFractionGas: renderRows[offset + 9],
       representedEntityCount: renderRows[offset + 10],
+      renderDomainId,
+      renderDomainKey,
       renderKey,
       opticalState
     });
@@ -272,7 +313,22 @@ export function decodeSphRenderRows(renderRows, {
   };
 }
 
-export function extractSphRenderRowsCpu({ sphParticleState } = {}) {
+function renderDomainIdForParticleIndex(index, {
+  renderDomainBaseCount = 0,
+  renderDomainDropCount = 0
+} = {}) {
+  const baseCount = Math.max(0, Math.round(finiteNumber(renderDomainBaseCount, 0)));
+  const dropCount = Math.max(0, Math.round(finiteNumber(renderDomainDropCount, 0)));
+  if (baseCount > 0 && index < baseCount) return 1;
+  if (dropCount > 0 && index >= baseCount && index < baseCount + dropCount) return 2;
+  return 0;
+}
+
+export function extractSphRenderRowsCpu({
+  sphParticleState,
+  renderDomainBaseCount = 0,
+  renderDomainDropCount = 0
+} = {}) {
   assertPackedSphParticleState(sphParticleState);
   const renderRows = new Float32Array(sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS);
   for (let index = 0; index < sphParticleState.particleCount; index += 1) {
@@ -291,7 +347,7 @@ export function extractSphRenderRowsCpu({ sphParticleState } = {}) {
       sphParticleState.thermo[thermoOffset + 3],
       sphParticleState.thermo[thermoOffset + 6],
       sphParticleState.thermo[thermoOffset + 9],
-      0
+      renderDomainIdForParticleIndex(index, { renderDomainBaseCount, renderDomainDropCount })
     ], renderOffset);
   }
   return {
@@ -322,12 +378,16 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   return buffer;
 }
 
-function createParamsArray(particleCount) {
+function createParamsArray({
+  particleCount,
+  renderDomainBaseCount = 0,
+  renderDomainDropCount = 0
+} = {}) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
-  view.setUint32(4, 0, true);
-  view.setUint32(8, 0, true);
+  view.setUint32(4, Math.max(0, Math.round(finiteNumber(renderDomainBaseCount, 0))), true);
+  view.setUint32(8, Math.max(0, Math.round(finiteNumber(renderDomainDropCount, 0))), true);
   view.setUint32(12, 0, true);
   return buffer;
 }
@@ -413,6 +473,26 @@ function createSurfaceVerticesParamsArray({
   return buffer;
 }
 
+function createRenderFieldSurfaceSummaryParamsArray({
+  surfaceCount,
+  totalFieldCells,
+  fieldPadding,
+  refEdgeM,
+  isolationScale
+}) {
+  const buffer = new ArrayBuffer(32);
+  const view = new DataView(buffer);
+  view.setUint32(0, surfaceCount, true);
+  view.setUint32(4, totalFieldCells, true);
+  view.setUint32(8, 0, true);
+  view.setUint32(12, 0, true);
+  view.setFloat32(16, fieldPadding, true);
+  view.setFloat32(20, refEdgeM, true);
+  view.setFloat32(24, isolationScale, true);
+  view.setFloat32(28, 0, true);
+  return buffer;
+}
+
 function createSurfaceDrawParamsArray({
   surfaceCount,
   sourceVertexRowCount,
@@ -441,6 +521,253 @@ async function readBuffer(device, sourceBuffer, byteLength, label = 'ulg-sph-ren
   readback.unmap();
   readback.destroy?.();
   return copy;
+}
+
+function emptyBounds3() {
+  return {
+    min: [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY],
+    max: [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY]
+  };
+}
+
+function finalizeBounds3(bounds) {
+  if (!bounds) return null;
+  const finite = bounds.min.every(Number.isFinite) && bounds.max.every(Number.isFinite);
+  return finite
+    ? { min: [...bounds.min], max: [...bounds.max] }
+    : null;
+}
+
+function expandBounds3(bounds, point) {
+  for (let axis = 0; axis < 3; axis += 1) {
+    const value = finiteNumber(point?.[axis], NaN);
+    if (!Number.isFinite(value)) continue;
+    bounds.min[axis] = Math.min(bounds.min[axis], value);
+    bounds.max[axis] = Math.max(bounds.max[axis], value);
+  }
+}
+
+function materialPhaseCountKey(materialId, phaseId) {
+  return `${Math.round(finiteNumber(materialId, 0))}:${Math.round(finiteNumber(phaseId, 0))}`;
+}
+
+function summarizePackedSphParticleRows({
+  state,
+  thermo,
+  particleCount,
+  maxSampleRows = 8
+} = {}) {
+  const bounds = emptyBounds3();
+  const materialPhaseCounts = {};
+  const sampleRows = [];
+  let finitePositionCount = 0;
+  let zeroPositionCount = 0;
+  let positiveMassCount = 0;
+  let totalMassKg = 0;
+  let minTemperatureK = Number.POSITIVE_INFINITY;
+  let maxTemperatureK = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < particleCount; index += 1) {
+    const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
+    const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    const positionM = [
+      finiteNumber(state?.[stateOffset], NaN),
+      finiteNumber(state?.[stateOffset + 1], NaN),
+      finiteNumber(state?.[stateOffset + 2], NaN)
+    ];
+    const massKg = finiteNumber(state?.[stateOffset + 3], 0);
+    const materialId = finiteNumber(thermo?.[thermoOffset], 0);
+    const phaseId = finiteNumber(thermo?.[thermoOffset + 1], 0);
+    const temperatureK = finiteNumber(thermo?.[thermoOffset + 2], NaN);
+    const status = finiteNumber(thermo?.[thermoOffset + 10], 0);
+    if (positionM.every(Number.isFinite)) {
+      finitePositionCount += 1;
+      expandBounds3(bounds, positionM);
+      if (positionM.every((value) => Math.abs(value) <= 1e-12)) zeroPositionCount += 1;
+    }
+    if (massKg > 0) {
+      positiveMassCount += 1;
+      totalMassKg += massKg;
+    }
+    if (Number.isFinite(temperatureK)) {
+      minTemperatureK = Math.min(minTemperatureK, temperatureK);
+      maxTemperatureK = Math.max(maxTemperatureK, temperatureK);
+    }
+    const countKey = materialPhaseCountKey(materialId, phaseId);
+    materialPhaseCounts[countKey] = (materialPhaseCounts[countKey] || 0) + 1;
+    if (sampleRows.length < maxSampleRows) {
+      sampleRows.push({
+        index,
+        positionM,
+        massKg,
+        materialId,
+        phaseId,
+        temperatureK: Number.isFinite(temperatureK) ? temperatureK : null,
+        status
+      });
+    }
+  }
+  return {
+    particleCount,
+    finitePositionCount,
+    zeroPositionCount,
+    positiveMassCount,
+    totalMassKg,
+    boundsM: finalizeBounds3(bounds),
+    minTemperatureK: Number.isFinite(minTemperatureK) ? minTemperatureK : null,
+    maxTemperatureK: Number.isFinite(maxTemperatureK) ? maxTemperatureK : null,
+    materialPhaseCounts,
+    sampleRows
+  };
+}
+
+function summarizeSphRenderRowData(renderRows, { maxSampleRows = 8 } = {}) {
+  const particleCount = renderRows instanceof Float32Array
+    ? Math.floor(renderRows.length / SPH_GPU_RENDER_ROW_FLOATS)
+    : 0;
+  const bounds = emptyBounds3();
+  const materialPhaseCounts = {};
+  const sampleRows = [];
+  let finitePositionCount = 0;
+  let zeroPositionCount = 0;
+  let positiveMassCount = 0;
+  let totalMassKg = 0;
+  let minTemperatureK = Number.POSITIVE_INFINITY;
+  let maxTemperatureK = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < particleCount; index += 1) {
+    const offset = index * SPH_GPU_RENDER_ROW_FLOATS;
+    const positionM = [
+      finiteNumber(renderRows[offset], NaN),
+      finiteNumber(renderRows[offset + 1], NaN),
+      finiteNumber(renderRows[offset + 2], NaN)
+    ];
+    const massKg = finiteNumber(renderRows[offset + 3], 0);
+    const materialId = finiteNumber(renderRows[offset + 4], 0);
+    const phaseId = finiteNumber(renderRows[offset + 5], 0);
+    const temperatureK = finiteNumber(renderRows[offset + 6], NaN);
+    const status = finiteNumber(renderRows[offset + 7], 0);
+    if (positionM.every(Number.isFinite)) {
+      finitePositionCount += 1;
+      expandBounds3(bounds, positionM);
+      if (positionM.every((value) => Math.abs(value) <= 1e-12)) zeroPositionCount += 1;
+    }
+    if (massKg > 0) {
+      positiveMassCount += 1;
+      totalMassKg += massKg;
+    }
+    if (Number.isFinite(temperatureK)) {
+      minTemperatureK = Math.min(minTemperatureK, temperatureK);
+      maxTemperatureK = Math.max(maxTemperatureK, temperatureK);
+    }
+    const countKey = materialPhaseCountKey(materialId, phaseId);
+    materialPhaseCounts[countKey] = (materialPhaseCounts[countKey] || 0) + 1;
+    if (sampleRows.length < maxSampleRows) {
+      sampleRows.push({
+        index,
+        positionM,
+        massKg,
+        materialId,
+        phaseId,
+        temperatureK: Number.isFinite(temperatureK) ? temperatureK : null,
+        status
+      });
+    }
+  }
+  return {
+    particleCount,
+    finitePositionCount,
+    zeroPositionCount,
+    positiveMassCount,
+    totalMassKg,
+    boundsM: finalizeBounds3(bounds),
+    minTemperatureK: Number.isFinite(minTemperatureK) ? minTemperatureK : null,
+    maxTemperatureK: Number.isFinite(maxTemperatureK) ? maxTemperatureK : null,
+    materialPhaseCounts,
+    sampleRows
+  };
+}
+
+export async function summarizeSphResidentParticleUploadWebGpu({
+  device,
+  sphParticleState,
+  sphParticleUpload = null,
+  sourceStateBuffer = null,
+  sourceThermoBuffer = null,
+  renderDomainBaseCount = 0,
+  renderDomainDropCount = 0,
+  includeRenderRows = true,
+  maxSampleRows = 8
+} = {}) {
+  assertPackedSphParticleState(sphParticleState);
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('summarizeSphResidentParticleUploadWebGpu requires a WebGPU-like device');
+  }
+  const stateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
+  const thermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
+  if (!stateBuffer || !thermoBuffer) {
+    return {
+      schema: 'peercompute.ulg.sph-resident-particle-upload-debug.v0',
+      status: 'resident-particle-upload-debug-source-unavailable',
+      reason: 'retained state and thermo buffers are required',
+      particleCount: sphParticleState.particleCount,
+      uploadStatus: sphParticleUpload?.status ?? null,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const particleCount = Math.max(0, Math.round(finiteNumber(sphParticleState.particleCount, 0)));
+  const stateByteLength = particleCount * SPH_GPU_PARTICLE_STATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const thermoByteLength = particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const [stateBytes, thermoBytes] = await Promise.all([
+    readBuffer(device, stateBuffer, stateByteLength, 'ulg-sph-resident-debug-state-readback'),
+    readBuffer(device, thermoBuffer, thermoByteLength, 'ulg-sph-resident-debug-thermo-readback')
+  ]);
+  const state = new Float32Array(stateBytes).slice(0, particleCount * SPH_GPU_PARTICLE_STATE_FLOATS);
+  const thermo = new Float32Array(thermoBytes).slice(0, particleCount * SPH_GPU_PARTICLE_THERMO_FLOATS);
+  const particleRows = summarizePackedSphParticleRows({
+    state,
+    thermo,
+    particleCount,
+    maxSampleRows
+  });
+  let renderRows = null;
+  let renderRowsError = null;
+  if (includeRenderRows) {
+    try {
+      const renderRowsExecution = await extractSphRenderRowsWebGpu({
+        device,
+        sphParticleState,
+        sphParticleUpload,
+        sourceStateBuffer: stateBuffer,
+        sourceThermoBuffer: thermoBuffer,
+        readbackMode: FULL_READBACK_MODE,
+        renderDomainBaseCount,
+        renderDomainDropCount
+      });
+      renderRows = summarizeSphRenderRowData(renderRowsExecution.renderRows, { maxSampleRows });
+    } catch (error) {
+      renderRowsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return {
+    schema: 'peercompute.ulg.sph-resident-particle-upload-debug.v0',
+    status: renderRowsError ? 'resident-particle-upload-debug-render-rows-error' : 'resident-particle-upload-debug-ready',
+    uploadStatus: sphParticleUpload?.status ?? null,
+    sourceStep: sphParticleUpload?.step ?? sphParticleState.step ?? null,
+    sourceTime: sphParticleUpload?.time ?? sphParticleState.time ?? null,
+    particleCount,
+    readbackByteLength: stateByteLength + thermoByteLength,
+    stateBufferLabel: stateBuffer?.label ?? null,
+    thermoBufferLabel: thermoBuffer?.label ?? null,
+    particleRows,
+    renderRows,
+    renderRowsError,
+    scientificValidation: false,
+    sphValidation: false,
+    phaseChangeValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
@@ -492,7 +819,7 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       clamp(finiteNumber(color[0], 1), 0, 1),
       clamp(finiteNumber(color[1], 1), 0, 1),
       clamp(finiteNumber(color[2], 1), 0, 1),
-      finiteNumber(descriptor.status, 1),
+      Math.max(0, Math.round(finiteNumber(descriptor.renderDomainId, 0))),
       opticalStateId,
       Number.isFinite(Number(descriptor.transparencyClassId)) ? Number(descriptor.transparencyClassId) : -1,
       Number.isFinite(Number(descriptor.depthWriteFlag)) ? Number(descriptor.depthWriteFlag) : -1
@@ -511,6 +838,8 @@ export function buildSphRenderFieldSurfaceTable(surfaceDescriptors = [], {
       opticalState: opticalState ? { ...opticalState } : null,
       opticalStateKey,
       opticalStateId,
+      renderDomainId: Math.max(0, Math.round(finiteNumber(descriptor.renderDomainId, 0))),
+      renderDomainKey: descriptor.renderDomainKey ?? renderDomainKeyForId(descriptor.renderDomainId),
       renderLayer: descriptor.renderLayer ?? renderPolicy.renderLayer,
       renderOrder: renderPolicy.renderOrder,
       transparencyClassId: renderPolicy.transparencyClassId,
@@ -570,6 +899,12 @@ function normalizedPositionFromRenderRow(renderRows, offset, fieldPadding, refEd
 
 function phaseMatchesEventSurface(eventPhaseId, surfacePhaseId) {
   return !(eventPhaseId > 0) || eventPhaseId === surfacePhaseId;
+}
+
+function renderDomainMatchesSurface(particleRenderDomainId, surfaceRenderDomainId) {
+  const surfaceDomain = Math.max(0, Math.round(finiteNumber(surfaceRenderDomainId, 0)));
+  if (surfaceDomain <= 0) return true;
+  return Math.round(finiteNumber(particleRenderDomainId, 0)) === surfaceDomain;
 }
 
 function accumulateMetaballSample({
@@ -639,7 +974,12 @@ export function buildSphRenderFieldCpu({
         const renderOffset = particleIndex * SPH_GPU_RENDER_ROW_FLOATS;
         const materialId = renderRows[renderOffset + 4];
         const phaseId = renderRows[renderOffset + 5];
-        if (materialId !== surface.materialId || phaseId !== surface.phaseId) continue;
+        const renderDomainId = renderRows[renderOffset + 11];
+        if (
+          materialId !== surface.materialId
+          || phaseId !== surface.phaseId
+          || !renderDomainMatchesSurface(renderDomainId, surface.renderDomainId)
+        ) continue;
         const particle = normalizedPositionFromRenderRow(renderRows, renderOffset, fieldPadding, refEdgeM);
         const accumulated = accumulateMetaballSample({
           cell,
@@ -1035,6 +1375,8 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
     Math.max(1, surfaceCount)
   );
   pass.end();
+  let queueCompletionStatus = 'queue-submitted';
+  let queueCompletionMethod = 'queue.submit';
   device.queue.submit([encoder.finish()]);
   const bytes = await readBuffer(
     device,
@@ -1042,6 +1384,8 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
     candidateCount * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
     'ulg-sph-interface-candidate-readback'
   );
+  queueCompletionStatus = 'readback-map-completed';
+  queueCompletionMethod = 'mapAsync(readback-buffer)';
   const candidateRows = new Float32Array(bytes);
 
   if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
@@ -1069,6 +1413,8 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
     surfaces,
     fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    queueCompletionStatus,
+    queueCompletionMethod,
     candidateReadback: true,
     scientificValidation: false,
     sphValidation: false,
@@ -1930,6 +2276,208 @@ function summarizeSurfaceDrawRows(drawRows, sourceSurfaces = []) {
   return { surfaces, activeSurfaceCount, vertexCount, triangleCount };
 }
 
+function physicalRenderFieldCoordM(coord, resolution, fieldPadding, refEdgeM) {
+  const span = Math.max(1e-12, 1 - 2 * finiteNumber(fieldPadding, 0.22));
+  return (((coord / Math.max(1, resolution)) - finiteNumber(fieldPadding, 0.22)) * Math.max(finiteNumber(refEdgeM, 10), 1e-12)) / span;
+}
+
+function writeRenderFieldSurfaceSummaryRow(rows, offset, {
+  surfaceIndex,
+  materialId,
+  phaseId,
+  opticalStateId = 0,
+  activeCellCount = 0,
+  crossingCellCount = activeCellCount,
+  maxDensity = 0,
+  isolation = 0,
+  minActiveM = [0, 0, 0],
+  maxActiveM = [0, 0, 0],
+  cellSizeM = 0,
+  boundsCenterM = [0, 0, 0],
+  boundsRadiusM = 0,
+  status = 0
+}) {
+  rows.set([
+    surfaceIndex,
+    materialId,
+    phaseId,
+    opticalStateId,
+    activeCellCount,
+    crossingCellCount,
+    maxDensity,
+    isolation,
+    minActiveM[0],
+    minActiveM[1],
+    minActiveM[2],
+    status,
+    maxActiveM[0],
+    maxActiveM[1],
+    maxActiveM[2],
+    cellSizeM,
+    boundsCenterM[0],
+    boundsCenterM[1],
+    boundsCenterM[2],
+    boundsRadiusM
+  ], offset);
+}
+
+function summarizeRenderFieldSurfaceSummaryRows(summaryRows, sourceSurfaces = []) {
+  const surfaceCount = summaryRows.length / SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS;
+  let activeSurfaceCount = 0;
+  let activeCellCount = 0;
+  let maxDensity = 0;
+  const surfaces = [];
+  for (let index = 0; index < surfaceCount; index += 1) {
+    const offset = index * SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS;
+    const sourceSurface = sourceSurfaces[index] || {};
+    const active = summaryRows[offset + 11] > 0;
+    const surfaceActiveCellCount = Math.round(finiteNumber(summaryRows[offset + 4], 0));
+    const surfaceMaxDensity = finiteNumber(summaryRows[offset + 6], 0);
+    if (active) activeSurfaceCount += 1;
+    activeCellCount += surfaceActiveCellCount;
+    maxDensity = Math.max(maxDensity, surfaceMaxDensity);
+    surfaces.push({
+      surfaceKey: sourceSurface.surfaceKey,
+      material: sourceSurface.material,
+      phase: sourceSurface.phase,
+      renderKey: sourceSurface.renderKey,
+      surfaceIndex: Math.round(finiteNumber(summaryRows[offset], index)),
+      materialId: summaryRows[offset + 1],
+      phaseId: summaryRows[offset + 2],
+      opticalStateId: summaryRows[offset + 3],
+      activeCellCount: surfaceActiveCellCount,
+      crossingCellCount: Math.round(finiteNumber(summaryRows[offset + 5], 0)),
+      maxDensity: surfaceMaxDensity,
+      isolation: summaryRows[offset + 7],
+      minActiveM: [summaryRows[offset + 8], summaryRows[offset + 9], summaryRows[offset + 10]],
+      maxActiveM: [summaryRows[offset + 12], summaryRows[offset + 13], summaryRows[offset + 14]],
+      cellSizeM: summaryRows[offset + 15],
+      boundsCenterM: [summaryRows[offset + 16], summaryRows[offset + 17], summaryRows[offset + 18]],
+      boundsRadiusM: summaryRows[offset + 19],
+      status: active ? 'render-field-surface-active' : 'render-field-surface-empty'
+    });
+  }
+  return { surfaces, activeSurfaceCount, activeCellCount, maxDensity };
+}
+
+export function summarizeSphRenderFieldSurfacesCpu(renderField, {
+  isolationScale = 1
+} = {}) {
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA || !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('summarizeSphRenderFieldSurfacesCpu requires a render field with fieldRows');
+  }
+  const metadata = renderField.surfaceTable?.metadata || [];
+  const summaryRows = new Float32Array(metadata.length * SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS);
+  const fieldPadding = finiteNumber(renderField.fieldPadding, 0.22);
+  const refEdgeM = finiteNumber(renderField.refEdgeM, 10);
+  for (const surface of metadata) {
+    const resolution = Math.max(1, Math.round(finiteNumber(surface.resolution, 1)));
+    const boundedCellCount = Math.min(
+      Math.max(0, Math.round(finiteNumber(surface.fieldCellCount, 0))),
+      resolution ** 3
+    );
+    const isolation = finiteNumber(surface.isolation, 0) * finiteNumber(isolationScale, 1);
+    const cellSizeM = Math.max(refEdgeM, 1e-12) / Math.max(1e-12, (1 - 2 * fieldPadding) * resolution);
+    let activeCellCount = 0;
+    let maxDensity = 0;
+    const minActiveM = [Infinity, Infinity, Infinity];
+    const maxActiveM = [-Infinity, -Infinity, -Infinity];
+    for (let cellIndex = 0; cellIndex < boundedCellCount; cellIndex += 1) {
+      const density = renderField.fieldRows[(surface.fieldOffset + cellIndex) * SPH_GPU_RENDER_FIELD_CELL_FLOATS];
+      maxDensity = Math.max(maxDensity, finiteNumber(density, 0));
+      if (!(density >= isolation && density > 0)) continue;
+      const xy = resolution * resolution;
+      const z = Math.floor(cellIndex / xy);
+      const rem = cellIndex - z * xy;
+      const y = Math.floor(rem / resolution);
+      const x = rem - y * resolution;
+      const pos = [
+        physicalRenderFieldCoordM(x, resolution, fieldPadding, refEdgeM),
+        physicalRenderFieldCoordM(y, resolution, fieldPadding, refEdgeM),
+        physicalRenderFieldCoordM(z, resolution, fieldPadding, refEdgeM)
+      ];
+      for (let axis = 0; axis < 3; axis += 1) {
+        minActiveM[axis] = Math.min(minActiveM[axis], pos[axis]);
+        maxActiveM[axis] = Math.max(maxActiveM[axis], pos[axis]);
+      }
+      activeCellCount += 1;
+    }
+    const active = activeCellCount > 0;
+    const resolvedMin = active ? minActiveM : [0, 0, 0];
+    const resolvedMax = active ? maxActiveM : [0, 0, 0];
+    const boundsCenterM = active
+      ? [
+          (resolvedMin[0] + resolvedMax[0]) * 0.5,
+          (resolvedMin[1] + resolvedMax[1]) * 0.5,
+          (resolvedMin[2] + resolvedMax[2]) * 0.5
+        ]
+      : [0, 0, 0];
+    const boundsRadiusM = active
+      ? Math.hypot(
+        resolvedMax[0] - boundsCenterM[0],
+        resolvedMax[1] - boundsCenterM[1],
+        resolvedMax[2] - boundsCenterM[2]
+      )
+      : 0;
+    writeRenderFieldSurfaceSummaryRow(
+      summaryRows,
+      surface.index * SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS,
+      {
+        surfaceIndex: surface.index,
+        materialId: surface.materialId,
+        phaseId: surface.phaseId,
+        opticalStateId: surface.opticalStateId || 0,
+        activeCellCount,
+        crossingCellCount: activeCellCount,
+        maxDensity,
+        isolation,
+        minActiveM: resolvedMin,
+        maxActiveM: resolvedMax,
+        cellSizeM,
+        boundsCenterM,
+        boundsRadiusM,
+        status: active ? 1 : 0
+      }
+    );
+  }
+  const summary = summarizeRenderFieldSurfaceSummaryRows(summaryRows, metadata);
+  return {
+    schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA,
+    backend: 'cpu-reference',
+    status: summary.activeSurfaceCount > 0
+      ? 'render-field-surface-summary-ready'
+      : 'render-field-surface-summary-empty',
+    sourceRenderFieldSchema: renderField.schema,
+    sourceRenderFieldBackend: renderField.backend,
+    surfaceCount: metadata.length,
+    activeSurfaceCount: summary.activeSurfaceCount,
+    activeCellCount: summary.activeCellCount,
+    maxDensity: summary.maxDensity,
+    rowLayout: [...SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS,
+    summaryRows,
+    summaryRowsByteLength: summaryRows.byteLength,
+    renderFieldReadback: Boolean(renderField.renderFieldReadback),
+    surfaces: summary.surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+}
+
+function assertRenderFieldSurfaceSummary(summary) {
+  if (
+    summary?.schema !== ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA
+    || !(summary.summaryRows instanceof Float32Array)
+  ) {
+    throw new TypeError('render field surface summary requires packed summaryRows');
+  }
+  if (summary.summaryRows.length % SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS !== 0) {
+    throw new RangeError('render field surface summary rows must align to the summary row stride');
+  }
+}
+
 function assertMarchingCubeCellField(cellField) {
   if (
     cellField?.schema !== ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA
@@ -1979,6 +2527,267 @@ function summarizeMarchingCubeCellSurfaces(renderField, cellRows, isolationScale
       status: activeCellCount > 0 ? 'marching-cube-cells-active' : 'marching-cube-cells-empty'
     };
   });
+}
+
+export async function summarizeSphRenderFieldSurfacesWebGpu({
+  device,
+  renderField,
+  fieldRowsBuffer = null,
+  surfaceBuffer = null,
+  isolationScale = 1,
+  retainSummaryRowsBuffer = false
+} = {}) {
+  if (!device?.createBuffer || !device.queue?.writeBuffer) {
+    throw new TypeError('summarizeSphRenderFieldSurfacesWebGpu requires a WebGPU-like device');
+  }
+  if (renderField?.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA) {
+    throw new TypeError('summarizeSphRenderFieldSurfacesWebGpu requires an SPH render field');
+  }
+  if (!fieldRowsBuffer && !(renderField.fieldRows instanceof Float32Array)) {
+    throw new TypeError('summarizeSphRenderFieldSurfacesWebGpu requires fieldRows or fieldRowsBuffer');
+  }
+  if (!surfaceBuffer && !(renderField.surfaceTable?.records instanceof Float32Array)) {
+    throw new TypeError('summarizeSphRenderFieldSurfacesWebGpu requires surface table records or surfaceBuffer');
+  }
+  const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
+  const summaryRowsByteLength = surfaceCount
+    * SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
+  const borrowedSurfaceBuffer = surfaceBuffer || null;
+  const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-render-field-summary-source-field',
+    renderField.fieldRows,
+    GPU_BUFFER_USAGE.COPY_SRC
+  );
+  const sourceSurfaceBuffer = borrowedSurfaceBuffer || writeStorageBuffer(
+    device,
+    'ulg-sph-render-field-summary-surfaces',
+    renderField.surfaceTable.records
+  );
+  const summaryRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-render-field-surface-summary',
+    size: Math.max(4, summaryRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  if (summaryRowsByteLength > 0) {
+    device.queue.writeBuffer(summaryRowsBuffer, 0, new Float32Array(surfaceCount * SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS));
+  }
+  const paramsBuffer = device.createBuffer({
+    label: 'ulg-sph-render-field-surface-summary-params',
+    size: 32,
+    usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, createRenderFieldSurfaceSummaryParamsArray({
+    surfaceCount,
+    totalFieldCells: renderField.totalFieldCells ?? 0,
+    fieldPadding: finiteNumber(renderField.fieldPadding, 0.22),
+    refEdgeM: finiteNumber(renderField.refEdgeM, 10),
+    isolationScale: finiteNumber(isolationScale, 1)
+  }));
+
+  const module = device.createShaderModule({ label: 'ulg-sph-render-field-surface-summary', code: sphRenderFieldSurfaceSummaryWgsl });
+  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
+    label: 'ulg-sph-render-field-surface-summary',
+    module,
+    entryPoint: 'main',
+    bindings: [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'storage'),
+      computeBufferBinding(3, 'uniform')
+    ]
+  });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
+      { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
+      { binding: 2, resource: { buffer: summaryRowsBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(Math.max(1, surfaceCount));
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  let queueCompletionStatus = 'queue-submitted';
+  let queueCompletionMethod = 'queue.submit';
+  let summaryRows = new Float32Array();
+  if (summaryRowsByteLength > 0) {
+    const bytes = await readBuffer(
+      device,
+      summaryRowsBuffer,
+      summaryRowsByteLength,
+      'ulg-sph-render-field-surface-summary-readback'
+    );
+    summaryRows = new Float32Array(bytes);
+    queueCompletionStatus = 'compact-summary-readback-map-completed';
+    queueCompletionMethod = 'mapAsync(compact-summary-readback-buffer)';
+  }
+
+  if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
+  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  if (!retainSummaryRowsBuffer) summaryRowsBuffer.destroy?.();
+  paramsBuffer.destroy?.();
+  const summary = summarizeRenderFieldSurfaceSummaryRows(summaryRows, renderField.surfaceTable?.metadata || []);
+  const result = {
+    schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA,
+    backend: 'webgpu',
+    status: summary.activeSurfaceCount > 0
+      ? 'render-field-surface-summary-ready'
+      : 'render-field-surface-summary-empty',
+    sourceRenderFieldSchema: renderField.schema,
+    sourceRenderFieldBackend: renderField.backend,
+    surfaceCount,
+    activeSurfaceCount: summary.activeSurfaceCount,
+    activeCellCount: summary.activeCellCount,
+    maxDensity: summary.maxDensity,
+    rowLayout: [...SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS,
+    summaryRows,
+    summaryRowsByteLength,
+    summaryRowsBufferByteLength: retainSummaryRowsBuffer ? summaryRowsByteLength : 0,
+    summaryRowsBufferRetained: Boolean(retainSummaryRowsBuffer),
+    fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
+    surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
+    queueCompletionStatus,
+    queueCompletionMethod,
+    renderFieldSurfaceSummaryReadback: true,
+    renderFieldReadback: Boolean(renderField.renderFieldReadback),
+    surfaces: summary.surfaces,
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
+  if (retainSummaryRowsBuffer) {
+    result.summaryRowsBuffer = summaryRowsBuffer;
+    result.destroySummaryRowsBuffer = () => summaryRowsBuffer.destroy?.();
+  }
+  return result;
+}
+
+export async function summarizeSphRenderFieldSurfacesWithOptionalWebGpu({
+  renderField,
+  preferWebGpu = false,
+  navigatorRef = globalThis.navigator,
+  device = null,
+  deviceResult = null,
+  webGpuRunner = summarizeSphRenderFieldSurfacesWebGpu,
+  isolationScale = 1,
+  parityTolerance = 1e-5,
+  ...runnerArgs
+} = {}) {
+  const canBuildCpu = renderField?.fieldRows instanceof Float32Array && renderField.fieldRows.length > 0;
+  const cpuReference = canBuildCpu ? summarizeSphRenderFieldSurfacesCpu(renderField, { isolationScale }) : null;
+  if (!preferWebGpu) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'not-requested' },
+      renderFieldSurfaceSummaryReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  const resolvedDeviceResult = device
+    ? { status: 'webgpu-device-ready', device, reason: 'provided device' }
+    : (deviceResult || await requestOpticalGpuDevice(navigatorRef));
+  if (!resolvedDeviceResult?.device) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-unavailable-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: resolvedDeviceResult?.reason || 'webgpu device unavailable' },
+      renderFieldSurfaceSummaryReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
+  try {
+    const webgpu = await webGpuRunner({
+      ...runnerArgs,
+      renderField,
+      isolationScale,
+      device: resolvedDeviceResult.device
+    });
+    assertRenderFieldSurfaceSummary(webgpu);
+    if (cpuReference && webgpu.summaryRows.length > 0) {
+      const parityMaxAbsDiff = maxAbsDiff(cpuReference.summaryRows, webgpu.summaryRows);
+      if (!(parityMaxAbsDiff <= parityTolerance)) {
+        return {
+          schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+          backend: 'cpu-reference',
+          status: 'webgpu-parity-failed-cpu-reference',
+          cpuReference,
+          webgpu,
+          result: cpuReference,
+          webgpuStatus: { status: 'fallback-cpu', reason: 'render-field surface summary parity drift', parityMaxAbsDiff },
+          renderFieldSurfaceSummaryReadback: false,
+          scientificValidation: false,
+          sphValidation: false,
+          surfaceExtractionValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
+      return {
+        schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'webgpu-accepted',
+        cpuReference,
+        webgpu,
+        result: webgpu,
+        webgpuStatus: { status: 'webgpu-executed', parityMaxAbsDiff },
+        renderFieldSurfaceSummaryReadback: true,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    return {
+      schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+      backend: 'webgpu',
+      status: 'webgpu-accepted-compact-summary',
+      cpuReference,
+      webgpu,
+      result: webgpu,
+      webgpuStatus: { status: 'webgpu-executed-compact-summary' },
+      renderFieldSurfaceSummaryReadback: true,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  } catch (error) {
+    return {
+      schema: ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+      backend: 'cpu-reference',
+      status: 'webgpu-error-cpu-reference',
+      cpuReference,
+      result: cpuReference,
+      webgpuStatus: { status: 'fallback-cpu', reason: error instanceof Error ? error.message : String(error) },
+      renderFieldSurfaceSummaryReadback: false,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
 }
 
 export async function buildSphRenderMarchingCubeCellsWebGpu({
@@ -2347,7 +3156,10 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   isolationScale = 1,
   readbackMode = FULL_READBACK_MODE,
   retainVertexRowsBuffer = false,
-  maxVertexRows = null
+  maxVertexRows = null,
+  onProgress = null,
+  waitForQueueCompletion = true,
+  deferCleanup = true
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderSurfaceVerticesWebGpu requires a WebGPU-like device');
@@ -2372,8 +3184,30 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   const fixedSlotVertexRowsByteLength = resolvedMaxVertexRows
     * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const markProgress = typeof onProgress === 'function'
+    ? (status, extra = {}) => {
+      try {
+        onProgress({
+          status,
+          stage: 'surface-vertices',
+          surfaceCount,
+          totalFieldCells,
+          maxFieldCellCount: renderField.maxFieldCellCount ?? null,
+          requiredVertexRows,
+          maxVertexRows: resolvedMaxVertexRows,
+          fixedSlotVertexRowsByteLength,
+          readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+          ...extra
+        });
+      } catch {
+        // Progress hooks are diagnostic-only and must not affect GPU execution.
+      }
+    }
+    : () => {};
+  markProgress('surface-vertices-kernel-started');
   const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
   const borrowedSurfaceBuffer = surfaceBuffer || null;
+  markProgress('surface-vertices-source-buffers-started');
   const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
     device,
     'ulg-sph-surface-vertices-source-render-field',
@@ -2385,14 +3219,23 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     'ulg-sph-surface-vertices-render-surfaces',
     renderField.surfaceTable.records
   );
+  markProgress('surface-vertices-source-buffers-ready', {
+    borrowedFieldRowsBuffer: Boolean(borrowedFieldRowsBuffer),
+    borrowedSurfaceBuffer: Boolean(borrowedSurfaceBuffer)
+  });
+  markProgress('surface-vertices-output-buffer-create-started');
   const vertexRowsBuffer = device.createBuffer({
     label: 'ulg-sph-surface-vertices',
     size: Math.max(4, fixedSlotVertexRowsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
   });
+  markProgress('surface-vertices-output-buffer-create-complete');
   if (fixedSlotVertexRowsByteLength > 0) {
+    markProgress('surface-vertices-output-buffer-zero-started');
     device.queue.writeBuffer(vertexRowsBuffer, 0, new Float32Array(resolvedMaxVertexRows * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS));
+    markProgress('surface-vertices-output-buffer-zero-complete');
   }
+  markProgress('surface-vertices-params-buffer-started');
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-surface-vertex-params',
     size: 32,
@@ -2406,8 +3249,12 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     refEdgeM: finiteNumber(renderField.refEdgeM, 10),
     isolationScale: finiteNumber(isolationScale, 1)
   }));
+  markProgress('surface-vertices-params-buffer-complete');
 
+  markProgress('surface-vertices-shader-module-started');
   const module = device.createShaderModule({ label: 'ulg-sph-surface-vertices', code: sphRenderSurfaceVerticesWgsl });
+  markProgress('surface-vertices-shader-module-complete');
+  markProgress('surface-vertices-pipeline-started');
   const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
     label: 'ulg-sph-surface-vertices',
     module,
@@ -2419,6 +3266,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       computeBufferBinding(3, 'uniform')
     ]
   });
+  markProgress('surface-vertices-pipeline-complete');
+  markProgress('surface-vertices-bind-group-started');
   const bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
@@ -2428,6 +3277,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       { binding: 3, resource: { buffer: paramsBuffer } }
     ]
   });
+  markProgress('surface-vertices-bind-group-complete');
+  markProgress('surface-vertices-command-encode-started');
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
@@ -2437,37 +3288,127 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     Math.max(1, surfaceCount)
   );
   pass.end();
+  markProgress('surface-vertices-command-encode-complete', {
+    workgroupCountX: Math.ceil(Math.max(1, renderField.maxFieldCellCount || 0) / 64),
+    workgroupCountY: Math.max(1, surfaceCount)
+  });
 
   let vertexRows = new Float32Array();
   let vertexCount = null;
   let triangleCount = null;
   let overflowCount = 0;
+  let queueCompletionStatus = 'not-submitted';
+  let queueCompletionMethod = null;
+  let deferNoFullCleanup = false;
   if (!noFullReadback) {
+    markProgress('surface-vertices-queue-submit-started');
     device.queue.submit([encoder.finish()]);
+    queueCompletionStatus = 'queue-submitted';
+    queueCompletionMethod = 'queue.submit';
+    markProgress('surface-vertices-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
     if (resolvedMaxVertexRows > 0) {
+      markProgress('surface-vertices-full-readback-started');
       const vertexBytes = await readBuffer(
         device,
         vertexRowsBuffer,
         fixedSlotVertexRowsByteLength,
         'ulg-sph-surface-vertex-readback'
       );
+      queueCompletionStatus = 'readback-map-completed';
+      queueCompletionMethod = 'mapAsync(readback-buffer)';
       vertexRows = compactSurfaceVertexSlotRows(new Float32Array(vertexBytes));
       vertexCount = vertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
       triangleCount = vertexCount / 3;
+      markProgress('surface-vertices-full-readback-complete', {
+        queueCompletionStatus,
+        queueCompletionMethod,
+        vertexCount,
+        triangleCount
+      });
+    } else {
+      queueCompletionStatus = 'readback-skipped-empty-buffer';
+      queueCompletionMethod = 'queue.submit';
+      markProgress('surface-vertices-full-readback-skipped', { queueCompletionStatus, queueCompletionMethod });
     }
   } else {
-    if (device.queue?.onSubmittedWorkDone) {
+    if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
+      markProgress('surface-vertices-queue-submit-started');
       device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted';
+      queueCompletionMethod = 'queue.submit';
+      markProgress('surface-vertices-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
+      markProgress('surface-vertices-queue-work-wait-started');
       await device.queue.onSubmittedWorkDone();
+      queueCompletionStatus = 'queue-work-completed';
+      queueCompletionMethod = 'queue.onSubmittedWorkDone';
+      markProgress('surface-vertices-queue-work-wait-complete', { queueCompletionStatus, queueCompletionMethod });
     } else {
+      markProgress('surface-vertices-queue-submit-started');
       device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = device.queue?.onSubmittedWorkDone
+        ? 'queue-submitted-cleanup-deferred'
+        : 'queue-submitted-no-explicit-completion';
+      queueCompletionMethod = device.queue?.onSubmittedWorkDone
+        ? 'deferred queue.onSubmittedWorkDone cleanup'
+        : 'queue.submit';
+      deferNoFullCleanup = Boolean(device.queue?.onSubmittedWorkDone && deferCleanup);
+      markProgress('surface-vertices-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
     }
   }
 
-  if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
-  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
-  if (!retainVertexRowsBuffer) vertexRowsBuffer.destroy?.();
-  paramsBuffer.destroy?.();
+  const cleanup = () => {
+    if (!borrowedFieldRowsBuffer) sourceFieldRowsBuffer.destroy?.();
+    if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+    if (!retainVertexRowsBuffer) vertexRowsBuffer.destroy?.();
+    paramsBuffer.destroy?.();
+  };
+  if (deferNoFullCleanup) {
+    markProgress('surface-vertices-cleanup-deferred', { queueCompletionStatus, queueCompletionMethod });
+    deferSubmittedWorkCleanup(device, () => {
+      cleanup();
+      markProgress('surface-vertices-deferred-cleanup-complete', { queueCompletionStatus, queueCompletionMethod });
+    });
+  } else if (noFullReadback && !waitForQueueCompletion && device.queue?.onSubmittedWorkDone && !deferCleanup) {
+    markProgress('surface-vertices-cleanup-retained-for-resident-handoff', {
+      queueCompletionStatus,
+      queueCompletionMethod,
+      reason: 'caller disabled queue-fence cleanup because a same-queue consumer/readback owns the synchronization boundary'
+    });
+  } else {
+    markProgress('surface-vertices-cleanup-started');
+    cleanup();
+    markProgress('surface-vertices-cleanup-complete');
+  }
+
+  const surfaceVertexLeaseLedger = createResidentBufferLeaseLedger({
+    ledgerId: `sph-surface-vertices:${surfaceCount}:${resolvedMaxVertexRows}:buffer-leases`,
+    stateKey: 'sph-surface-vertices',
+    scope: 'sph-surface-vertex-buffer-leases'
+  });
+  const surfaceVertexLeaseIds = [];
+  const vertexRowsResourceKey = `surface-vertices:vertex-rows:${resolvedMaxVertexRows}:${fixedSlotVertexRowsByteLength}`;
+  if (retainVertexRowsBuffer) {
+    registerResidentBufferResource(surfaceVertexLeaseLedger, {
+      resourceKey: vertexRowsResourceKey,
+      resourceKind: 'surface-vertex-rows-buffer',
+      stateFamily: 'render-surface-vertices',
+      ownerStage: 'surface-vertex-builder',
+      producerStage: 'surface-vertex-builder',
+      source: 'buildSphRenderSurfaceVerticesWebGpu',
+      status: 'resident-surface-vertex-buffer-retained',
+      retained: true,
+      byteLength: fixedSlotVertexRowsByteLength,
+      rowCount: resolvedMaxVertexRows,
+      bufferLabel: vertexRowsBuffer?.label,
+      expectedConsumers: ['surface-draw-metadata']
+    });
+    const lease = addResidentBufferLease(surfaceVertexLeaseLedger, {
+      resourceKey: vertexRowsResourceKey,
+      consumerStage: 'surface-draw-metadata',
+      reason: 'retained-surface-vertex-buffer'
+    });
+    surfaceVertexLeaseIds.push(lease.leaseId);
+  }
 
   const surfaces = vertexRows.length
     ? summarizeSurfaceVertexRows(renderField, vertexRows, isolationScale)
@@ -2531,9 +3472,16 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    queueCompletionStatus,
+    queueCompletionMethod,
     surfaceVertexReadback: !noFullReadback,
     renderFieldReadback: Boolean(renderField.renderFieldReadback),
     surfaces,
+    residentBufferLeaseLedger: surfaceVertexLeaseLedger,
+    residentBufferLeaseSummary: summarizeResidentBufferLeaseLedger(surfaceVertexLeaseLedger),
+    residentBufferLeaseLedgerStatus: surfaceVertexLeaseLedger.status,
+    residentBufferLeaseResourceCount: surfaceVertexLeaseLedger.resourceCount,
+    residentBufferLeaseActiveLeaseCount: surfaceVertexLeaseLedger.activeLeaseCount,
     scientificValidation: false,
     sphValidation: false,
     surfaceExtractionValidation: false,
@@ -2541,8 +3489,32 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   };
   if (retainVertexRowsBuffer) {
     result.vertexRowsBuffer = vertexRowsBuffer;
-    result.destroySurfaceVertexBuffers = () => {
-      vertexRowsBuffer.destroy?.();
+    let surfaceVertexBufferDestroyed = false;
+    const refreshSurfaceVertexLeaseSummary = () => {
+      result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(surfaceVertexLeaseLedger);
+      result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
+      result.residentBufferLeaseResourceCount = result.residentBufferLeaseSummary.resourceCount;
+      result.residentBufferLeaseActiveLeaseCount = result.residentBufferLeaseSummary.activeLeaseCount;
+      return result.residentBufferLeaseSummary;
+    };
+    result.releaseSurfaceVertexBufferLeases = ({ status = 'released' } = {}) => {
+      for (const leaseId of surfaceVertexLeaseIds) {
+        releaseResidentBufferLease(surfaceVertexLeaseLedger, leaseId, { status });
+      }
+      return refreshSurfaceVertexLeaseSummary();
+    };
+    result.destroySurfaceVertexBuffers = ({
+      force = false,
+      releaseLeases = false,
+      reason = 'surface-vertex-buffer-cleanup'
+    } = {}) => {
+      if (releaseLeases) result.releaseSurfaceVertexBufferLeases();
+      destroyResidentBufferWithLease(surfaceVertexLeaseLedger, vertexRowsResourceKey, () => {
+        if (surfaceVertexBufferDestroyed) return;
+        surfaceVertexBufferDestroyed = true;
+        vertexRowsBuffer.destroy?.();
+      }, { force, reason });
+      return refreshSurfaceVertexLeaseSummary();
     };
   }
   return result;
@@ -2673,9 +3645,12 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   surfaceVertices,
   surfaceBuffer = null,
   readbackMode = FULL_READBACK_MODE,
+  compactSummaryReadback = false,
   retainDrawRowsBuffer = false,
   retainCompactedVertexRowsBuffer = false,
-  retainDrawIndirectRowsBuffer = false
+  retainDrawIndirectRowsBuffer = false,
+  waitForQueueCompletion = true,
+  onProgress = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderSurfaceDrawMetadataWebGpu requires a WebGPU-like device');
@@ -2712,7 +3687,32 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   const drawIndirectRowsByteLength = surfaceCount
     * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS
     * Uint32Array.BYTES_PER_ELEMENT;
+  const markProgress = typeof onProgress === 'function'
+    ? (status, extra = {}) => {
+      try {
+        onProgress({
+          status,
+          stage: 'surface-draw-metadata',
+          surfaceCount,
+          sourceVertexRowCount,
+          compactedVertexRowsByteLength,
+          drawRowsByteLength,
+          drawIndirectRowsByteLength,
+          readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+          compactSummaryReadback: Boolean(compactSummaryReadback),
+          ...extra
+        });
+      } catch {
+        // Progress hooks are diagnostic-only and must not affect GPU execution.
+      }
+    }
+    : () => {};
+  markProgress('surface-draw-metadata-kernel-started');
   const borrowedSurfaceBuffer = surfaceBuffer || null;
+  markProgress('surface-draw-metadata-source-buffers-started', {
+    hasBorrowedVertexBuffer,
+    borrowedSurfaceBuffer: Boolean(borrowedSurfaceBuffer)
+  });
   const sourceVertexRowsBuffer = hasBorrowedVertexBuffer
     ? surfaceVertices.vertexRowsBuffer
     : writeStorageBuffer(
@@ -2726,6 +3726,11 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     'ulg-sph-surface-draw-surfaces',
     surfaceRecordsFromSurfaceVertexMetadata(surfaceVertices)
   );
+  markProgress('surface-draw-metadata-source-buffers-ready', {
+    hasBorrowedVertexBuffer,
+    borrowedSurfaceBuffer: Boolean(borrowedSurfaceBuffer)
+  });
+  markProgress('surface-draw-metadata-output-buffers-started');
   const compactedVertexRowsBuffer = device.createBuffer({
     label: 'ulg-sph-surface-draw-compacted-vertices',
     size: Math.max(4, compactedVertexRowsByteLength),
@@ -2758,6 +3763,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       new Uint32Array(surfaceCount * SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS)
     );
   }
+  markProgress('surface-draw-metadata-output-buffers-complete');
+  markProgress('surface-draw-metadata-params-buffer-started');
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-surface-draw-params',
     size: 16,
@@ -2768,8 +3775,12 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     sourceVertexRowCount,
     maxCompactVertexRows: sourceVertexRowCount
   }));
+  markProgress('surface-draw-metadata-params-buffer-complete');
 
+  markProgress('surface-draw-metadata-shader-module-started');
   const module = device.createShaderModule({ label: 'ulg-sph-surface-draw', code: sphRenderSurfaceDrawWgsl });
+  markProgress('surface-draw-metadata-shader-module-complete');
+  markProgress('surface-draw-metadata-pipeline-started');
   const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
     label: 'ulg-sph-surface-draw',
     module,
@@ -2783,6 +3794,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       computeBufferBinding(5, 'storage')
     ]
   });
+  markProgress('surface-draw-metadata-pipeline-complete');
+  markProgress('surface-draw-metadata-bind-group-started');
   const bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
@@ -2794,12 +3807,17 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       { binding: 5, resource: { buffer: drawIndirectRowsBuffer } }
     ]
   });
+  markProgress('surface-draw-metadata-bind-group-complete');
+  markProgress('surface-draw-metadata-command-encode-started');
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.max(1, surfaceCount));
   pass.end();
+  markProgress('surface-draw-metadata-command-encode-complete', {
+    workgroupCountX: Math.max(1, surfaceCount)
+  });
 
   let drawRows = new Float32Array();
   let drawIndirectRows = new Uint32Array();
@@ -2808,15 +3826,27 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   let vertexCount = null;
   let triangleCount = null;
   let surfaces;
+  let summaryReadback = false;
+  let summaryReadbackByteLength = 0;
+  let queueCompletionStatus = 'not-submitted';
+  let queueCompletionMethod = null;
+  let deferNoFullCleanup = false;
   if (!noFullReadback) {
+    markProgress('surface-draw-metadata-queue-submit-started');
     device.queue.submit([encoder.finish()]);
+    queueCompletionStatus = 'queue-submitted';
+    queueCompletionMethod = 'queue.submit';
+    markProgress('surface-draw-metadata-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
     if (drawRowsByteLength > 0) {
+      markProgress('surface-draw-metadata-full-readback-started');
       const drawBytes = await readBuffer(
         device,
         drawRowsBuffer,
         drawRowsByteLength,
         'ulg-sph-surface-draw-readback'
       );
+      queueCompletionStatus = 'readback-map-completed';
+      queueCompletionMethod = 'mapAsync(readback-buffer)';
       drawRows = new Float32Array(drawBytes);
       const summary = summarizeSurfaceDrawRows(drawRows, surfaceVertices.surfaces || []);
       surfaces = summary.surfaces;
@@ -2841,19 +3871,46 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
         );
         drawIndirectRows = new Uint32Array(indirectBytes);
       }
+      markProgress('surface-draw-metadata-full-readback-complete', {
+        queueCompletionStatus,
+        queueCompletionMethod,
+        activeSurfaceCount,
+        vertexCount,
+        triangleCount
+      });
     } else {
       surfaces = [];
       activeSurfaceCount = 0;
       vertexCount = 0;
       triangleCount = 0;
       drawIndirectRows = new Uint32Array();
+      queueCompletionStatus = 'readback-skipped-empty-buffer';
+      queueCompletionMethod = 'queue.submit';
+      markProgress('surface-draw-metadata-full-readback-skipped', { queueCompletionStatus, queueCompletionMethod });
     }
   } else {
-    if (device.queue?.onSubmittedWorkDone) {
+    if (waitForQueueCompletion && device.queue?.onSubmittedWorkDone) {
+      markProgress('surface-draw-metadata-queue-submit-started');
       device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted';
+      queueCompletionMethod = 'queue.submit';
+      markProgress('surface-draw-metadata-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
+      markProgress('surface-draw-metadata-queue-work-wait-started');
       await device.queue.onSubmittedWorkDone();
+      queueCompletionStatus = 'queue-work-completed';
+      queueCompletionMethod = 'queue.onSubmittedWorkDone';
+      markProgress('surface-draw-metadata-queue-work-wait-complete', { queueCompletionStatus, queueCompletionMethod });
     } else {
+      markProgress('surface-draw-metadata-queue-submit-started');
       device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = device.queue?.onSubmittedWorkDone && !compactSummaryReadback
+        ? 'queue-submitted-cleanup-deferred'
+        : 'queue-submitted-no-explicit-completion';
+      queueCompletionMethod = device.queue?.onSubmittedWorkDone && !compactSummaryReadback
+        ? 'deferred queue.onSubmittedWorkDone cleanup'
+        : 'queue.submit';
+      deferNoFullCleanup = Boolean(device.queue?.onSubmittedWorkDone && !compactSummaryReadback);
+      markProgress('surface-draw-metadata-queue-submit-complete', { queueCompletionStatus, queueCompletionMethod });
     }
     surfaces = (surfaceVertices.surfaces || []).map((surface, index) => ({
       ...(() => {
@@ -2881,17 +3938,120 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
         };
       })()
     }));
+    if (compactSummaryReadback && drawRowsByteLength > 0) {
+      markProgress('surface-draw-metadata-compact-summary-readback-started');
+      const drawBytes = await readBuffer(
+        device,
+        drawRowsBuffer,
+        drawRowsByteLength,
+        'ulg-sph-surface-draw-compact-summary-readback'
+      );
+      drawRows = new Float32Array(drawBytes);
+      const summary = summarizeSurfaceDrawRows(drawRows, surfaceVertices.surfaces || []);
+      surfaces = summary.surfaces;
+      activeSurfaceCount = summary.activeSurfaceCount;
+      vertexCount = summary.vertexCount;
+      triangleCount = summary.triangleCount;
+      summaryReadback = true;
+      summaryReadbackByteLength = drawRowsByteLength;
+      queueCompletionStatus = 'compact-summary-readback-map-completed';
+      queueCompletionMethod = 'mapAsync(compact-summary-readback-buffer)';
+      markProgress('surface-draw-metadata-compact-summary-readback-complete', {
+        queueCompletionStatus,
+        queueCompletionMethod,
+        activeSurfaceCount,
+        vertexCount,
+        triangleCount
+      });
+    } else {
+      summaryReadback = false;
+      summaryReadbackByteLength = 0;
+    }
   }
 
-  if (!hasBorrowedVertexBuffer) sourceVertexRowsBuffer.destroy?.();
-  if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+  const cleanup = () => {
+    if (!hasBorrowedVertexBuffer) sourceVertexRowsBuffer.destroy?.();
+    if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+    paramsBuffer.destroy?.();
+  };
   const keepDrawRowsBuffer = retainDrawRowsBuffer || noFullReadback;
   const keepCompactedVertexRowsBuffer = retainCompactedVertexRowsBuffer || noFullReadback;
   const keepDrawIndirectRowsBuffer = retainDrawIndirectRowsBuffer || noFullReadback;
   if (!keepDrawRowsBuffer) drawRowsBuffer.destroy?.();
   if (!keepCompactedVertexRowsBuffer) compactedVertexRowsBuffer.destroy?.();
   if (!keepDrawIndirectRowsBuffer) drawIndirectRowsBuffer.destroy?.();
-  paramsBuffer.destroy?.();
+  if (deferNoFullCleanup) {
+    markProgress('surface-draw-metadata-cleanup-deferred', { queueCompletionStatus, queueCompletionMethod });
+    deferSubmittedWorkCleanup(device, () => {
+      cleanup();
+      markProgress('surface-draw-metadata-deferred-cleanup-complete', { queueCompletionStatus, queueCompletionMethod });
+    });
+  } else {
+    markProgress('surface-draw-metadata-cleanup-started');
+    cleanup();
+    markProgress('surface-draw-metadata-cleanup-complete');
+  }
+  const surfaceDrawLeaseLedger = createResidentBufferLeaseLedger({
+    ledgerId: `sph-resident-surface-draw:${surfaceCount}:buffer-leases`,
+    stateKey: 'sph-resident-surface-draw',
+    scope: 'sph-resident-surface-draw-buffer-leases'
+  });
+  const surfaceDrawLeaseIds = [];
+  const registerRetainedSurfaceDrawBuffer = ({
+    resourceKey,
+    resourceKind,
+    buffer,
+    byteLength,
+    rowCount
+  }) => {
+    registerResidentBufferResource(surfaceDrawLeaseLedger, {
+      resourceKey,
+      resourceKind,
+      stateFamily: 'render-surface',
+      ownerStage: 'surface-draw-metadata',
+      producerStage: 'surface-draw-metadata',
+      source: 'buildSphRenderSurfaceDrawMetadataWebGpu',
+      status: 'resident-surface-draw-buffer-retained',
+      retained: true,
+      byteLength,
+      rowCount,
+      bufferLabel: buffer?.label,
+      expectedConsumers: ['resident-surface-draw-overlay', 'diagnostics']
+    });
+    const lease = addResidentBufferLease(surfaceDrawLeaseLedger, {
+      resourceKey,
+      consumerStage: 'resident-surface-draw-overlay',
+      reason: 'retained-overlay-draw-buffer'
+    });
+    surfaceDrawLeaseIds.push(lease.leaseId);
+  };
+  if (keepDrawRowsBuffer) {
+    registerRetainedSurfaceDrawBuffer({
+      resourceKey: `surface-draw:draw-rows:${surfaceCount}:${drawRowsByteLength}`,
+      resourceKind: 'surface-draw-rows-buffer',
+      buffer: drawRowsBuffer,
+      byteLength: drawRowsByteLength,
+      rowCount: surfaceCount
+    });
+  }
+  if (keepDrawIndirectRowsBuffer) {
+    registerRetainedSurfaceDrawBuffer({
+      resourceKey: `surface-draw:draw-indirect:${surfaceCount}:${drawIndirectRowsByteLength}`,
+      resourceKind: 'surface-draw-indirect-buffer',
+      buffer: drawIndirectRowsBuffer,
+      byteLength: drawIndirectRowsByteLength,
+      rowCount: surfaceCount
+    });
+  }
+  if (keepCompactedVertexRowsBuffer) {
+    registerRetainedSurfaceDrawBuffer({
+      resourceKey: `surface-draw:compacted-vertices:${sourceVertexRowCount}:${compactedVertexRowsByteLength}`,
+      resourceKind: 'surface-draw-compacted-vertices-buffer',
+      buffer: compactedVertexRowsBuffer,
+      byteLength: compactedVertexRowsByteLength,
+      rowCount: sourceVertexRowCount
+    });
+  }
 
   const result = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
@@ -2924,9 +4084,19 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     sourceVertexRowsBufferBound: hasBorrowedVertexBuffer,
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    queueCompletionStatus,
+    queueCompletionMethod,
     surfaceDrawReadback: !noFullReadback,
+    surfaceDrawSummaryReadback: summaryReadback,
+    surfaceDrawSummaryReadbackByteLength: summaryReadbackByteLength,
+    fullSurfaceDrawReadback: !noFullReadback,
     compactionMode: 'webgpu-surface-prefix-scan-compact',
     surfaces,
+    residentBufferLeaseLedger: surfaceDrawLeaseLedger,
+    residentBufferLeaseSummary: summarizeResidentBufferLeaseLedger(surfaceDrawLeaseLedger),
+    residentBufferLeaseLedgerStatus: surfaceDrawLeaseLedger.status,
+    residentBufferLeaseResourceCount: surfaceDrawLeaseLedger.resourceCount,
+    residentBufferLeaseActiveLeaseCount: surfaceDrawLeaseLedger.activeLeaseCount,
     scientificValidation: false,
     sphValidation: false,
     surfaceExtractionValidation: false,
@@ -2936,10 +4106,50 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   if (keepDrawIndirectRowsBuffer) result.drawIndirectRowsBuffer = drawIndirectRowsBuffer;
   if (keepCompactedVertexRowsBuffer) result.compactedVertexRowsBuffer = compactedVertexRowsBuffer;
   if (keepDrawRowsBuffer || keepCompactedVertexRowsBuffer || keepDrawIndirectRowsBuffer) {
-    result.destroySurfaceDrawBuffers = () => {
-      if (keepDrawRowsBuffer) drawRowsBuffer.destroy?.();
-      if (keepCompactedVertexRowsBuffer) compactedVertexRowsBuffer.destroy?.();
-      if (keepDrawIndirectRowsBuffer) drawIndirectRowsBuffer.destroy?.();
+    const destroyedSurfaceDrawResourceKeys = new Set();
+    const refreshSurfaceDrawLeaseSummary = () => {
+      result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(surfaceDrawLeaseLedger);
+      result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
+      result.residentBufferLeaseResourceCount = result.residentBufferLeaseSummary.resourceCount;
+      result.residentBufferLeaseActiveLeaseCount = result.residentBufferLeaseSummary.activeLeaseCount;
+      return result.residentBufferLeaseSummary;
+    };
+    result.releaseSurfaceDrawBufferLeases = ({ status = 'released' } = {}) => {
+      for (const leaseId of surfaceDrawLeaseIds) {
+        releaseResidentBufferLease(surfaceDrawLeaseLedger, leaseId, { status });
+      }
+      return refreshSurfaceDrawLeaseSummary();
+    };
+    const destroySurfaceDrawBufferOnce = (resourceKey, buffer) => {
+      if (destroyedSurfaceDrawResourceKeys.has(resourceKey)) return;
+      destroyedSurfaceDrawResourceKeys.add(resourceKey);
+      buffer?.destroy?.();
+    };
+    result.destroySurfaceDrawBuffers = ({
+      force = false,
+      releaseLeases = false,
+      reason = 'surface-draw-buffer-cleanup'
+    } = {}) => {
+      if (releaseLeases) result.releaseSurfaceDrawBufferLeases();
+      if (keepDrawRowsBuffer) {
+        const resourceKey = `surface-draw:draw-rows:${surfaceCount}:${drawRowsByteLength}`;
+        destroyResidentBufferWithLease(surfaceDrawLeaseLedger, resourceKey, () => {
+          destroySurfaceDrawBufferOnce(resourceKey, drawRowsBuffer);
+        }, { force, reason });
+      }
+      if (keepCompactedVertexRowsBuffer) {
+        const resourceKey = `surface-draw:compacted-vertices:${sourceVertexRowCount}:${compactedVertexRowsByteLength}`;
+        destroyResidentBufferWithLease(surfaceDrawLeaseLedger, resourceKey, () => {
+          destroySurfaceDrawBufferOnce(resourceKey, compactedVertexRowsBuffer);
+        }, { force, reason });
+      }
+      if (keepDrawIndirectRowsBuffer) {
+        const resourceKey = `surface-draw:draw-indirect:${surfaceCount}:${drawIndirectRowsByteLength}`;
+        destroyResidentBufferWithLease(surfaceDrawLeaseLedger, resourceKey, () => {
+          destroySurfaceDrawBufferOnce(resourceKey, drawIndirectRowsBuffer);
+        }, { force, reason });
+      }
+      return refreshSurfaceDrawLeaseSummary();
     };
   }
   return result;
@@ -3000,7 +4210,10 @@ export async function deriveSphRenderSurfaceDrawMetadataWithOptionalWebGpu({
       device: resolvedDeviceResult.device
     });
     assertSurfaceDrawMetadata(webgpu);
-    if (cpuReference && webgpu.drawRows.length > 0) {
+    const hasFullDrawRowsReadback = webgpu.drawRows.length > 0
+      && webgpu.readbackMode !== NO_FULL_READBACK_MODE
+      && webgpu.surfaceDrawReadback !== false;
+    if (cpuReference && hasFullDrawRowsReadback) {
       const parityMaxAbsDiff = maxAbsDiff(cpuReference.drawRows, webgpu.drawRows);
       if (!(parityMaxAbsDiff <= parityTolerance)) {
         return {
@@ -3355,6 +4568,54 @@ export function deriveSphMaterialInterfaceField(renderField, {
   return compactSphMaterialInterfaceCandidates(candidateField);
 }
 
+export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
+  device,
+  renderField,
+  fieldRowsBuffer = null,
+  surfaceBuffer = null,
+  isolationScale = 1,
+  source = 'resident-physics-material-interface-extractor',
+  sourceCadence = 'resident-physics-stage'
+} = {}) {
+  const sourceField = renderField?.schema === ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA
+    ? renderField
+    : null;
+  const sourceRenderField = sourceField?.sourceRenderField || renderField;
+  const resolvedFieldRowsBuffer = fieldRowsBuffer || sourceField?.fieldRowsBuffer || null;
+  const resolvedSurfaceBuffer = surfaceBuffer || sourceField?.surfaceBuffer || null;
+  const candidateField = await buildSphMaterialInterfaceCandidateFieldWebGpu({
+    device,
+    renderField: sourceRenderField,
+    fieldRowsBuffer: resolvedFieldRowsBuffer,
+    surfaceBuffer: resolvedSurfaceBuffer,
+    isolationScale
+  });
+  const interfaceField = compactSphMaterialInterfaceCandidates(candidateField);
+  return {
+    ...interfaceField,
+    backend: 'webgpu-candidate-readback',
+    authority: 'resident-physics-material-interface-extractor',
+    source,
+    sourceCadence,
+    sourceFieldSchema: sourceField?.schema ?? null,
+    sourceFieldStatus: sourceField?.status ?? null,
+    sourceFieldBackend: sourceField?.backend ?? null,
+    sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
+    sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
+    sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
+    sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
+    sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
+    candidateBackend: candidateField.backend,
+    candidateReadback: Boolean(candidateField.candidateReadback),
+    queueCompletionStatus: candidateField.queueCompletionStatus ?? null,
+    queueCompletionMethod: candidateField.queueCompletionMethod ?? null,
+    normalDerivation: 'physics-owned-field-cell-crossing-candidates',
+    surfaceAreaDerivation: 'physics-owned-fixed-cell-face-area-sum',
+    physicsStage: 'material-interface-extraction',
+    pressureInterfaceProducer: true
+  };
+}
+
 export async function buildSphRenderFieldWebGpu({
   device,
   renderRows,
@@ -3459,22 +4720,34 @@ export async function buildSphRenderFieldWebGpu({
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(Math.max(1, surfaceTable.maxFieldCellCount) / 64), Math.max(1, surfaceTable.surfaceCount));
   pass.end();
+  let queueCompletionStatus = 'not-submitted';
+  let queueCompletionMethod = null;
   let fieldRows;
   if (!noFullReadback) {
     device.queue.submit([encoder.finish()]);
+    queueCompletionStatus = 'queue-submitted';
+    queueCompletionMethod = 'queue.submit';
     const fieldBytes = await readBuffer(
       device,
       fieldRowsBuffer,
       surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
       'ulg-sph-render-field-readback'
     );
+    queueCompletionStatus = 'readback-map-completed';
+    queueCompletionMethod = 'mapAsync(readback-buffer)';
     fieldRows = new Float32Array(fieldBytes);
   } else {
     if (device.queue?.onSubmittedWorkDone) {
       device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted';
+      queueCompletionMethod = 'queue.submit';
       await device.queue.onSubmittedWorkDone();
+      queueCompletionStatus = 'queue-work-completed';
+      queueCompletionMethod = 'queue.onSubmittedWorkDone';
     } else {
       device.queue.submit([encoder.finish()]);
+      queueCompletionStatus = 'queue-submitted-no-explicit-completion';
+      queueCompletionMethod = 'queue.submit';
     }
     fieldRows = new Float32Array();
   }
@@ -3486,6 +4759,65 @@ export async function buildSphRenderFieldWebGpu({
   paramsBuffer.destroy?.();
 
   const fieldRowByteLength = surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const renderFieldLeaseLedger = createResidentBufferLeaseLedger({
+    ledgerId: `sph-render-field:${surfaceTable.surfaceCount}:${surfaceTable.totalFieldCells}:buffer-leases`,
+    stateKey: 'sph-render-field',
+    scope: 'sph-render-field-buffer-leases'
+  });
+  const renderFieldLeaseIds = [];
+  const registerRetainedRenderFieldBuffer = ({
+    resourceKey,
+    resourceKind,
+    buffer,
+    byteLength,
+    rowCount,
+    expectedConsumers = []
+  }) => {
+    registerResidentBufferResource(renderFieldLeaseLedger, {
+      resourceKey,
+      resourceKind,
+      stateFamily: 'render-field',
+      ownerStage: 'render-field-builder',
+      producerStage: 'render-field-builder',
+      source: 'buildSphRenderFieldWebGpu',
+      status: 'resident-render-field-buffer-retained',
+      retained: true,
+      byteLength,
+      rowCount,
+      bufferLabel: buffer?.label,
+      expectedConsumers
+    });
+    for (const consumerStage of expectedConsumers) {
+      const lease = addResidentBufferLease(renderFieldLeaseLedger, {
+        resourceKey,
+        consumerStage,
+        reason: 'retained-render-field-buffer'
+      });
+      renderFieldLeaseIds.push(lease.leaseId);
+    }
+  };
+  const fieldRowsResourceKey = `render-field:field-rows:${surfaceTable.totalFieldCells}:${fieldRowByteLength}`;
+  const surfaceTableResourceKey = `render-field:surface-table:${surfaceTable.surfaceCount}:${surfaceTable.records.byteLength}`;
+  if (retainFieldRowsBuffer) {
+    registerRetainedRenderFieldBuffer({
+      resourceKey: fieldRowsResourceKey,
+      resourceKind: 'render-field-rows-buffer',
+      buffer: fieldRowsBuffer,
+      byteLength: fieldRowByteLength,
+      rowCount: surfaceTable.totalFieldCells,
+      expectedConsumers: ['material-interface-extraction', 'surface-vertex-extraction']
+    });
+  }
+  if (retainSurfaceBuffer) {
+    registerRetainedRenderFieldBuffer({
+      resourceKey: surfaceTableResourceKey,
+      resourceKind: 'render-field-surface-table-buffer',
+      buffer: surfaceBuffer,
+      byteLength: surfaceTable.records.byteLength,
+      rowCount: surfaceTable.surfaceCount,
+      expectedConsumers: ['surface-vertex-extraction', 'surface-draw-metadata']
+    });
+  }
   const result = {
     schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
     backend: 'webgpu',
@@ -3509,6 +4841,8 @@ export async function buildSphRenderFieldWebGpu({
     refEdgeM,
     renderFieldInputSource,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
+    queueCompletionStatus,
+    queueCompletionMethod,
     renderFieldReadback: !noFullReadback,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
@@ -3516,6 +4850,11 @@ export async function buildSphRenderFieldWebGpu({
     fieldRowsBufferByteLength: retainFieldRowsBuffer ? fieldRowByteLength : 0,
     surfaceBufferRetained: Boolean(retainSurfaceBuffer),
     surfaceBufferByteLength: retainSurfaceBuffer ? surfaceTable.records.byteLength : 0,
+    residentBufferLeaseLedger: renderFieldLeaseLedger,
+    residentBufferLeaseSummary: summarizeResidentBufferLeaseLedger(renderFieldLeaseLedger),
+    residentBufferLeaseLedgerStatus: renderFieldLeaseLedger.status,
+    residentBufferLeaseResourceCount: renderFieldLeaseLedger.resourceCount,
+    residentBufferLeaseActiveLeaseCount: renderFieldLeaseLedger.activeLeaseCount,
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
@@ -3524,12 +4863,124 @@ export async function buildSphRenderFieldWebGpu({
   if (retainFieldRowsBuffer) result.fieldRowsBuffer = fieldRowsBuffer;
   if (retainSurfaceBuffer) result.surfaceBuffer = surfaceBuffer;
   if (retainFieldRowsBuffer || retainSurfaceBuffer) {
-    result.destroyRenderFieldBuffers = () => {
-      if (retainFieldRowsBuffer) fieldRowsBuffer.destroy?.();
-      if (retainSurfaceBuffer) surfaceBuffer.destroy?.();
+    const destroyedRenderFieldResourceKeys = new Set();
+    const refreshRenderFieldLeaseSummary = () => {
+      result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(renderFieldLeaseLedger);
+      result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
+      result.residentBufferLeaseResourceCount = result.residentBufferLeaseSummary.resourceCount;
+      result.residentBufferLeaseActiveLeaseCount = result.residentBufferLeaseSummary.activeLeaseCount;
+      return result.residentBufferLeaseSummary;
+    };
+    result.releaseRenderFieldBufferLeases = ({ status = 'released' } = {}) => {
+      for (const leaseId of renderFieldLeaseIds) {
+        releaseResidentBufferLease(renderFieldLeaseLedger, leaseId, { status });
+      }
+      return refreshRenderFieldLeaseSummary();
+    };
+    const destroyRenderFieldBufferOnce = (resourceKey, buffer) => {
+      if (destroyedRenderFieldResourceKeys.has(resourceKey)) return;
+      destroyedRenderFieldResourceKeys.add(resourceKey);
+      buffer?.destroy?.();
+    };
+    result.destroyRenderFieldBuffers = ({
+      force = false,
+      releaseLeases = false,
+      reason = 'render-field-buffer-cleanup'
+    } = {}) => {
+      if (releaseLeases) result.releaseRenderFieldBufferLeases();
+      if (retainFieldRowsBuffer) {
+        destroyResidentBufferWithLease(renderFieldLeaseLedger, fieldRowsResourceKey, () => {
+          destroyRenderFieldBufferOnce(fieldRowsResourceKey, fieldRowsBuffer);
+        }, { force, reason });
+      }
+      if (retainSurfaceBuffer) {
+        destroyResidentBufferWithLease(renderFieldLeaseLedger, surfaceTableResourceKey, () => {
+          destroyRenderFieldBufferOnce(surfaceTableResourceKey, surfaceBuffer);
+        }, { force, reason });
+      }
+      return refreshRenderFieldLeaseSummary();
     };
   }
   return result;
+}
+
+export async function buildSphMaterialInterfaceSourceFieldWebGpu({
+  retainFieldRowsBuffer = true,
+  retainSurfaceBuffer = true,
+  source = 'resident-physics-material-interface-source-field',
+  sourceCadence = 'resident-physics-stage',
+  ...args
+} = {}) {
+  const sourceRenderField = await buildSphRenderFieldWebGpu({
+    ...args,
+    retainFieldRowsBuffer,
+    retainSurfaceBuffer
+  });
+  return {
+    schema: ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA,
+    backend: sourceRenderField.backend,
+    status: sourceRenderField.status === 'render-field-built'
+      ? 'material-interface-source-field-ready'
+      : sourceRenderField.status,
+    source,
+    sourceCadence,
+    sourceRenderField,
+    sourceRenderFieldSchema: sourceRenderField.schema,
+    sourceRenderFieldBackend: sourceRenderField.backend,
+    sourceRenderFieldStatus: sourceRenderField.status,
+    sourceRenderFieldReadback: Boolean(sourceRenderField.renderFieldReadback),
+    sourceRenderFieldReadbackMode: sourceRenderField.readbackMode ?? null,
+    sourceRenderFieldQueueCompletionStatus: sourceRenderField.queueCompletionStatus ?? null,
+    sourceRenderFieldQueueCompletionMethod: sourceRenderField.queueCompletionMethod ?? null,
+    kernelScope: MATERIAL_INTERFACE_SOURCE_FIELD_SCOPE,
+    particleCount: sourceRenderField.particleCount,
+    productEventCount: sourceRenderField.productEventCount,
+    surfaceCount: sourceRenderField.surfaceCount,
+    totalFieldCells: sourceRenderField.totalFieldCells,
+    maxFieldCellCount: sourceRenderField.maxFieldCellCount,
+    surfaceTable: sourceRenderField.surfaceTable,
+    rowLayout: sourceRenderField.rowLayout,
+    rowStrideFloats: sourceRenderField.rowStrideFloats,
+    fieldRows: sourceRenderField.fieldRows,
+    fieldRowByteLength: sourceRenderField.fieldRowByteLength,
+    fieldPadding: sourceRenderField.fieldPadding,
+    refEdgeM: sourceRenderField.refEdgeM,
+    fieldRowsBuffer: sourceRenderField.fieldRowsBuffer || null,
+    surfaceBuffer: sourceRenderField.surfaceBuffer || null,
+    fieldRowsBufferRetained: Boolean(sourceRenderField.fieldRowsBufferRetained),
+    fieldRowsBufferByteLength: sourceRenderField.fieldRowsBufferByteLength ?? 0,
+    surfaceBufferRetained: Boolean(sourceRenderField.surfaceBufferRetained),
+    surfaceBufferByteLength: sourceRenderField.surfaceBufferByteLength ?? 0,
+    readbackMode: sourceRenderField.readbackMode ?? null,
+    queueCompletionStatus: sourceRenderField.queueCompletionStatus ?? null,
+    queueCompletionMethod: sourceRenderField.queueCompletionMethod ?? null,
+    normalHotLoopReadbackFree: Boolean(sourceRenderField.normalHotLoopReadbackFree),
+    residentBufferLeaseLedger: sourceRenderField.residentBufferLeaseLedger ?? null,
+    residentBufferLeaseSummary: sourceRenderField.residentBufferLeaseSummary ?? null,
+    residentBufferLeaseLedgerStatus: sourceRenderField.residentBufferLeaseLedgerStatus ?? null,
+    residentBufferLeaseResourceCount: sourceRenderField.residentBufferLeaseResourceCount ?? 0,
+    residentBufferLeaseActiveLeaseCount: sourceRenderField.residentBufferLeaseActiveLeaseCount ?? 0,
+    releaseMaterialInterfaceSourceFieldLeases(options) {
+      const summary = sourceRenderField.releaseRenderFieldBufferLeases?.(options) ?? null;
+      this.residentBufferLeaseSummary = sourceRenderField.residentBufferLeaseSummary ?? summary;
+      this.residentBufferLeaseLedgerStatus = sourceRenderField.residentBufferLeaseLedgerStatus ?? summary?.status ?? null;
+      this.residentBufferLeaseResourceCount = sourceRenderField.residentBufferLeaseResourceCount ?? summary?.resourceCount ?? 0;
+      this.residentBufferLeaseActiveLeaseCount = sourceRenderField.residentBufferLeaseActiveLeaseCount ?? summary?.activeLeaseCount ?? 0;
+      return this.residentBufferLeaseSummary;
+    },
+    destroyMaterialInterfaceSourceFieldBuffers(options) {
+      const summary = sourceRenderField.destroyRenderFieldBuffers?.(options) ?? null;
+      this.residentBufferLeaseSummary = sourceRenderField.residentBufferLeaseSummary ?? summary;
+      this.residentBufferLeaseLedgerStatus = sourceRenderField.residentBufferLeaseLedgerStatus ?? summary?.status ?? null;
+      this.residentBufferLeaseResourceCount = sourceRenderField.residentBufferLeaseResourceCount ?? summary?.resourceCount ?? 0;
+      this.residentBufferLeaseActiveLeaseCount = sourceRenderField.residentBufferLeaseActiveLeaseCount ?? summary?.activeLeaseCount ?? 0;
+      return this.residentBufferLeaseSummary;
+    },
+    scientificValidation: false,
+    sphValidation: false,
+    forceCouplingValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 export async function buildSphRenderFieldWithOptionalWebGpu({
@@ -3615,7 +5066,9 @@ export async function extractSphRenderRowsWebGpu({
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
   retainRenderRowsBuffer = false,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  renderDomainBaseCount = 0,
+  renderDomainDropCount = 0
 } = {}) {
   assertPackedSphParticleState(sphParticleState);
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -3632,12 +5085,27 @@ export async function extractSphRenderRowsWebGpu({
     new Float32Array(sphParticleState.particleCount * SPH_GPU_RENDER_ROW_FLOATS),
     GPU_BUFFER_USAGE.COPY_SRC
   );
+  const renderRowsByteLength = sphParticleState.particleCount
+    * SPH_GPU_RENDER_ROW_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const useGpuHandoffBuffer = noFullReadback && retainRenderRowsBuffer && renderRowsByteLength > 0;
+  const retainedRenderRowsBuffer = useGpuHandoffBuffer
+    ? device.createBuffer({
+      label: 'ulg-sph-render-rows-retained-handoff',
+      size: Math.max(4, renderRowsByteLength),
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    })
+    : renderRowsBuffer;
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-render-rows-params',
     size: 16,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
-  device.queue.writeBuffer(paramsBuffer, 0, createParamsArray(sphParticleState.particleCount));
+  device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
+    particleCount: sphParticleState.particleCount,
+    renderDomainBaseCount,
+    renderDomainDropCount
+  }));
 
   const module = device.createShaderModule({ label: 'ulg-sph-render-rows', code: sphRenderRowsWgsl });
   const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
@@ -3666,10 +5134,10 @@ export async function extractSphRenderRowsWebGpu({
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(sphParticleState.particleCount / 64));
   pass.end();
+  if (useGpuHandoffBuffer) {
+    encoder.copyBufferToBuffer(renderRowsBuffer, 0, retainedRenderRowsBuffer, 0, renderRowsByteLength);
+  }
   let renderRows;
-  const renderRowsByteLength = sphParticleState.particleCount
-    * SPH_GPU_RENDER_ROW_FLOATS
-    * Float32Array.BYTES_PER_ELEMENT;
   if (!noFullReadback) {
     device.queue.submit([encoder.finish()]);
     const bytes = await readBuffer(device, renderRowsBuffer, renderRowsByteLength);
@@ -3687,11 +5155,12 @@ export async function extractSphRenderRowsWebGpu({
   const destroyRetainedRenderRowsBuffer = () => {
     if (retainedRowsBufferDestroyed) return;
     retainedRowsBufferDestroyed = true;
-    renderRowsBuffer.destroy?.();
+    retainedRenderRowsBuffer.destroy?.();
   };
 
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
+  if (useGpuHandoffBuffer) renderRowsBuffer.destroy?.();
   if (!retainRenderRowsBuffer) destroyRetainedRenderRowsBuffer();
   paramsBuffer.destroy?.();
 
@@ -3713,13 +5182,15 @@ export async function extractSphRenderRowsWebGpu({
     compactRenderReadback: !noFullReadback,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
+    renderRowsGpuHandoffCopy: useGpuHandoffBuffer,
+    renderRowsHandoffMode: useGpuHandoffBuffer ? 'gpu-copy-barrier' : 'direct-render-row-buffer',
     scientificValidation: false,
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
   };
   if (retainRenderRowsBuffer) {
-    result.renderRowsBuffer = renderRowsBuffer;
+    result.renderRowsBuffer = retainedRenderRowsBuffer;
     result.renderRowsBufferOwned = true;
     result.destroyRenderRowsBuffer = destroyRetainedRenderRowsBuffer;
   }

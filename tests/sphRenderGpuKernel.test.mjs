@@ -9,7 +9,15 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from '../src/runtime/sph/sphGpuBuffers.js';
 import {
+  SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
+  SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
+  SPH_SURFACE_RADIUS_SCALE_DEFAULT,
+  normalizeSurfaceRadiusForRenderField,
+  surfaceRadiusScaleForRenderBatch
+} from '../src/visualization/sphPhaseScene.js';
+import {
   SPH_GPU_RENDER_FIELD_CELL_FLOATS,
+  SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS,
   SPH_GPU_RENDER_MARCHING_CUBE_CELL_FLOATS,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
   SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
@@ -21,6 +29,8 @@ import {
   SPH_GPU_RENDER_SURFACE_ROW_FLOATS,
   ULG_SPH_GPU_RENDER_FIELD_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA,
+  ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_EXECUTION_SCHEMA,
   ULG_SPH_GPU_RENDER_MARCHING_CUBE_CELLS_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_EXECUTION_SCHEMA,
@@ -32,9 +42,13 @@ import {
   ULG_SPH_GPU_RENDER_ROWS_SCHEMA,
   buildSphRenderSurfaceDrawMetadataWebGpu,
   buildSphRenderFieldCpu,
+  buildSphRenderFieldWebGpu,
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWithOptionalWebGpu,
+  buildSphMaterialInterfaceSourceFieldWebGpu,
+  buildSphPhysicsMaterialInterfaceFieldWebGpu,
   buildSphRenderMaterialMap,
+  buildSphRenderSurfaceVerticesWebGpu,
   compactSphMaterialInterfaceCandidates,
   deriveSphRenderMarchingCubeCellsCpu,
   deriveSphRenderMarchingCubeCellsWithOptionalWebGpu,
@@ -49,7 +63,11 @@ import {
   extractSphRenderRowsCpu,
   extractSphRenderRowsWebGpu,
   extractSphRenderRowsWithOptionalWebGpu,
-  splitSphRenderFieldBySurface
+  splitSphRenderFieldBySurface,
+  summarizeSphResidentParticleUploadWebGpu,
+  summarizeSphRenderFieldSurfacesCpu,
+  summarizeSphRenderFieldSurfacesWebGpu,
+  summarizeSphRenderFieldSurfacesWithOptionalWebGpu
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 
 const materialProperties = {
@@ -242,7 +260,14 @@ function centeredSingleSurfaceRenderField() {
   });
 }
 
-function fakeSurfaceDrawDevice({ drawRows, compactedVertexRows, drawIndirectRows = new Uint32Array() }) {
+function fakeSurfaceDrawDevice({
+  drawRows = new Float32Array(),
+  compactedVertexRows = new Float32Array(),
+  drawIndirectRows = new Uint32Array(),
+  summaryRows = null,
+  stateRows = null,
+  thermoRows = null
+}) {
   const shaderModules = [];
   const bindGroups = [];
   const dispatches = [];
@@ -267,7 +292,13 @@ function fakeSurfaceDrawDevice({ drawRows, compactedVertexRows, drawIndirectRows
         destroyed: false,
         async mapAsync() {},
         getMappedRange() {
-          const source = label.includes('compacted-vertex-readback')
+          const source = label.includes('render-field-surface-summary-readback')
+            ? (summaryRows || drawRows)
+            : label.includes('resident-debug-state-readback')
+            ? (stateRows || drawRows)
+            : label.includes('resident-debug-thermo-readback')
+            ? (thermoRows || drawRows)
+            : label.includes('compacted-vertex-readback')
             ? compactedVertexRows
             : label.includes('indirect-readback')
             ? drawIndirectRows
@@ -359,6 +390,32 @@ test('SPH render rows CPU extraction compacts position, thermo, and phase state'
   ]);
 });
 
+test('SPH render rows encode base/drop render domains without changing material identity', () => {
+  const packed = packedRenderParticles();
+  const result = extractSphRenderRowsCpu({
+    sphParticleState: packed,
+    renderDomainBaseCount: 1,
+    renderDomainDropCount: 2
+  });
+  const decoded = decodeSphRenderRows(result.renderRows, {
+    materialProperties,
+    reactionTable
+  });
+
+  assert.equal(result.renderRows[11], 1);
+  assert.equal(result.renderRows[SPH_GPU_RENDER_ROW_FLOATS + 11], 2);
+  assert.equal(result.renderRows[SPH_GPU_RENDER_ROW_FLOATS * 2 + 11], 2);
+  assert.equal(decoded.rows[0].renderDomainKey, 'base');
+  assert.equal(decoded.rows[1].renderDomainKey, 'drop');
+  assert.deepEqual(decoded.materials[0], {
+    material: 'Au',
+    phase: 'solid',
+    renderKey: 'Au',
+    renderDomainId: 1,
+    renderDomainKey: 'base'
+  });
+});
+
 test('SPH render row decoding preserves material identity, phase render keys, and incandescence', () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
@@ -380,6 +437,237 @@ test('SPH render row decoding preserves material identity, phase render keys, an
   assert.ok(decoded.colorsRgb[4] > 0.25);
   assert.ok(decoded.emissiveByMaterial.h2o);
   assert.ok(decoded.emissiveByMaterial.steam);
+});
+
+test('SPH render field CPU splats same-material rows only into matching render domains', () => {
+  const h2oMaterialId = stableOpticalMaterialId('h2o');
+  const renderRows = new Float32Array(2 * SPH_GPU_RENDER_ROW_FLOATS);
+  renderRows.set([
+    1,
+    1,
+    1,
+    1,
+    h2oMaterialId,
+    GPU_PHASE_IDS.liquid,
+    300,
+    1,
+    997,
+    0,
+    1,
+    1
+  ], 0);
+  renderRows.set([
+    4,
+    4,
+    4,
+    1,
+    h2oMaterialId,
+    GPU_PHASE_IDS.liquid,
+    300,
+    1,
+    997,
+    0,
+    1,
+    2
+  ], SPH_GPU_RENDER_ROW_FLOATS);
+  const table = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'h2o|h2o|liquid|domain:base',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 1,
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [0.2, 0.35, 1]
+    },
+    {
+      surfaceKey: 'h2o|h2o|liquid|domain:drop',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 2,
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [0.2, 0.35, 1]
+    },
+    {
+      surfaceKey: 'h2o|h2o|liquid|domain:empty',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 3,
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [0.2, 0.35, 1]
+    }
+  ]);
+  const field = buildSphRenderFieldCpu({
+    renderRows,
+    surfaceTable: table,
+    fieldPadding: 0.22,
+    refEdgeM: 5
+  });
+  const surfaces = splitSphRenderFieldBySurface(field);
+
+  assert.equal(table.metadata[0].renderDomainId, 1);
+  assert.ok(Math.max(...surfaces[0].field) > 20);
+  assert.ok(Math.max(...surfaces[1].field) > 20);
+  assert.equal(Math.max(...surfaces[2].field), 0);
+});
+
+test('SPH render field CPU domain zero splats all same-material render domains', () => {
+  const h2oMaterialId = stableOpticalMaterialId('h2o');
+  const renderRows = new Float32Array(2 * SPH_GPU_RENDER_ROW_FLOATS);
+  renderRows.set([
+    2.5,
+    2.5,
+    2.5,
+    1,
+    h2oMaterialId,
+    GPU_PHASE_IDS.liquid,
+    300,
+    1,
+    997,
+    0,
+    1,
+    1
+  ], 0);
+  renderRows.set([
+    2.5,
+    2.5,
+    2.5,
+    1,
+    h2oMaterialId,
+    GPU_PHASE_IDS.liquid,
+    300,
+    1,
+    997,
+    0,
+    1,
+    2
+  ], SPH_GPU_RENDER_ROW_FLOATS);
+  const splitTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'h2o|h2o|liquid|domain:base',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 1,
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [0.2, 0.35, 1]
+    },
+    {
+      surfaceKey: 'h2o|h2o|liquid|domain:drop',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 2,
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [0.2, 0.35, 1]
+    }
+  ]);
+  const unionTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'h2o|h2o|liquid',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 0,
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [0.2, 0.35, 1]
+    }
+  ]);
+  const splitField = buildSphRenderFieldCpu({
+    renderRows,
+    surfaceTable: splitTable,
+    fieldPadding: 0.22,
+    refEdgeM: 5
+  });
+  const unionField = buildSphRenderFieldCpu({
+    renderRows,
+    surfaceTable: unionTable,
+    fieldPadding: 0.22,
+    refEdgeM: 5
+  });
+  const splitSurfaces = splitSphRenderFieldBySurface(splitField);
+  const [unionSurface] = splitSphRenderFieldBySurface(unionField);
+  const splitMax = Math.max(...splitSurfaces[0].field) + Math.max(...splitSurfaces[1].field);
+  const unionMax = Math.max(...unionSurface.field);
+
+  assert.equal(unionTable.metadata[0].renderDomainId, 0);
+  assert.ok(unionMax > Math.max(...splitSurfaces[0].field));
+  assert.ok(Math.abs(unionMax - splitMax) < 1e-6);
+});
+
+test('SPH render field default surface scale keeps sparse same-material drops visible', () => {
+  const h2oMaterialId = stableOpticalMaterialId('h2o');
+  const renderRows = new Float32Array(27 * SPH_GPU_RENDER_ROW_FLOATS);
+  let rowIndex = 0;
+  for (const x of [2.3333333, 2.5, 2.6666667]) {
+    for (const y of [2.5833333, 2.75, 2.9166667]) {
+      for (const z of [2.3333333, 2.5, 2.6666667]) {
+        renderRows.set([
+          x,
+          y,
+          z,
+          1,
+          h2oMaterialId,
+          GPU_PHASE_IDS.liquid,
+          300,
+          1,
+          997,
+          0,
+          1,
+          2
+        ], rowIndex * SPH_GPU_RENDER_ROW_FLOATS);
+        rowIndex += 1;
+      }
+    }
+  }
+  const sparseScale = surfaceRadiusScaleForRenderBatch({ count: 27 }, SPH_SURFACE_RADIUS_SCALE_DEFAULT);
+  assert.equal(sparseScale, SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN);
+  const surfaceRadiusM = 0.183333420753479 * sparseScale;
+  const radiusNorm = normalizeSurfaceRadiusForRenderField(surfaceRadiusM, 5);
+  const table = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'h2o|h2o|liquid|domain:drop',
+      material: 'h2o',
+      phase: 'liquid',
+      renderKey: 'h2o',
+      renderDomainId: 2,
+      resolution: SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
+      isolation: 80,
+      subtract: 24,
+      radiusNorm,
+      strength: (80 + 24) * radiusNorm * radiusNorm,
+      colorLinear: [0.2, 0.35, 1]
+    }
+  ]);
+  const field = buildSphRenderFieldCpu({
+    renderRows,
+    surfaceTable: table,
+    fieldPadding: 0.22,
+    refEdgeM: 5
+  });
+  const [surface] = splitSphRenderFieldBySurface(field);
+
+  assert.ok(surface.field.reduce((max, value) => Math.max(max, value), 0) > 80);
 });
 
 test('SPH render row decoding applies resident pressure optical state to H2O vapor', () => {
@@ -422,6 +710,13 @@ test('SPH render material map includes derived reaction products', () => {
   assert.equal(map.get(stableOpticalMaterialId('h2o')), 'h2o');
   assert.equal(map.get(stableOpticalMaterialId('naoh')), 'naoh');
   assert.equal(map.get(stableOpticalMaterialId('h2')), 'h2');
+});
+
+test('SPH render material map canonicalizes formula keys for GPU material ids', () => {
+  const map = buildSphRenderMaterialMap({ H2O: materialProperties.h2o });
+
+  assert.equal(map.get(stableOpticalMaterialId('h2o')), 'h2o');
+  assert.equal(map.get(stableOpticalMaterialId('H2O')), 'h2o');
 });
 
 test('SPH render row optional WebGPU accepts an injected compact-row runner', async () => {
@@ -480,13 +775,57 @@ test('SPH render row WebGPU extraction can retain resident rows without full rea
   assert.equal(result.renderRowsReadbackByteLength, 0);
   assert.equal(result.renderRowsBufferRetained, true);
   assert.equal(result.renderRowsBufferByteLength, expectedBytes);
-  assert.equal(result.renderRowsBuffer.label, 'ulg-sph-render-rows');
+  assert.equal(result.renderRowsBuffer.label, 'ulg-sph-render-rows-retained-handoff');
+  assert.equal(result.renderRowsGpuHandoffCopy, true);
+  assert.equal(result.renderRowsHandoffMode, 'gpu-copy-barrier');
   assert.equal(submittedWorkDoneCount, 1);
   assert.equal(dispatches.length, 1);
-  assert.equal(copies.length, 0);
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0].source.label, 'ulg-sph-render-rows');
+  assert.equal(copies[0].destination.label, 'ulg-sph-render-rows-retained-handoff');
+  assert.equal(copies[0].size, expectedBytes);
   assert.equal(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-render-readback'), false);
   result.destroyRenderRowsBuffer();
   assert.equal(result.renderRowsBuffer.destroyed, true);
+});
+
+test('SPH resident particle upload debug summarizes retained GPU buffers and render rows', async () => {
+  const packed = packedRenderParticles();
+  const expectedRenderRows = extractSphRenderRowsCpu({ sphParticleState: packed }).renderRows;
+  const { device, dispatches, copies } = fakeSurfaceDrawDevice({
+    drawRows: expectedRenderRows,
+    stateRows: packed.state,
+    thermoRows: packed.thermo
+  });
+  const summary = await summarizeSphResidentParticleUploadWebGpu({
+    device,
+    sphParticleState: packed,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: { label: 'retained-state' },
+      thermoBuffer: { label: 'retained-thermo' },
+      step: 7,
+      time: 0.35
+    },
+    includeRenderRows: true
+  });
+
+  assert.equal(summary.status, 'resident-particle-upload-debug-ready');
+  assert.equal(summary.sourceStep, 7);
+  assert.equal(summary.sourceTime, 0.35);
+  assert.equal(summary.particleRows.particleCount, 3);
+  assert.equal(summary.particleRows.positiveMassCount, 3);
+  assert.equal(summary.particleRows.zeroPositionCount, 0);
+  assert.deepEqual(summary.particleRows.boundsM.min, [1, 2, 3]);
+  assert.deepEqual(summary.particleRows.boundsM.max, [3, 4, 5]);
+  assert.ok(Math.abs(summary.particleRows.minTemperatureK - 293.15) < 1e-4);
+  assert.equal(summary.particleRows.maxTemperatureK, 1200);
+  assert.equal(summary.renderRows.particleCount, 3);
+  assert.equal(summary.renderRows.positiveMassCount, 3);
+  assert.deepEqual(summary.renderRows.boundsM.min, [1, 2, 3]);
+  assert.deepEqual(summary.renderRows.boundsM.max, [3, 4, 5]);
+  assert.equal(dispatches.length, 1);
+  assert.equal(copies.length, 3);
 });
 
 test('SPH render row optional WebGPU reports resident no-readback rows', async () => {
@@ -728,6 +1067,75 @@ test('SPH material interface field derives surface normals and areas from render
   }
 });
 
+test('SPH physics material interface WebGPU wrapper consumes retained field buffers', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const field = twoSurfaceRenderField();
+  const candidateField = deriveSphMaterialInterfaceCandidateField(field);
+  const { device, bindGroups, dispatches, copies } = fakeSurfaceDrawDevice({
+    drawRows: candidateField.candidateRows,
+    compactedVertexRows: new Float32Array()
+  });
+  const sourceField = await buildSphMaterialInterfaceSourceFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    surfaceTable: field.surfaceTable,
+    particleCount: packed.particleCount,
+    readbackMode: 'no-full-readback',
+    source: 'resident-physics-loop-material-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+    device,
+    renderField: sourceField,
+    source: 'resident-physics-loop-material-interface-refresh',
+    sourceCadence: 'resident-step-completed'
+  });
+
+  assert.equal(sourceField.schema, 'peercompute.ulg.sph-material-interface-source-field.v0');
+  assert.equal(sourceField.status, 'material-interface-source-field-ready');
+  assert.equal(sourceField.sourceRenderFieldSchema, ULG_SPH_GPU_RENDER_FIELD_SCHEMA);
+  assert.equal(sourceField.fieldRowsBufferRetained, true);
+  assert.equal(sourceField.surfaceBufferRetained, true);
+  assert.equal(sourceField.queueCompletionStatus, 'queue-work-completed');
+  assert.equal(sourceField.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.equal(interfaceField.schema, 'peercompute.ulg.sph-material-interface-field.v0');
+  assert.equal(interfaceField.status, 'material-interface-field-ready');
+  assert.equal(interfaceField.backend, 'webgpu-candidate-readback');
+  assert.equal(interfaceField.authority, 'resident-physics-material-interface-extractor');
+  assert.equal(interfaceField.source, 'resident-physics-loop-material-interface-refresh');
+  assert.equal(interfaceField.sourceCadence, 'resident-step-completed');
+  assert.equal(interfaceField.sourceFieldSchema, 'peercompute.ulg.sph-material-interface-source-field.v0');
+  assert.equal(interfaceField.sourceFieldStatus, 'material-interface-source-field-ready');
+  assert.equal(interfaceField.sourceRenderFieldBackend, 'webgpu');
+  assert.equal(interfaceField.sourceRenderFieldReadback, false);
+  assert.equal(interfaceField.sourceFieldRowsBufferBound, true);
+  assert.equal(interfaceField.sourceSurfaceBufferBound, true);
+  assert.equal(interfaceField.candidateBackend, 'webgpu');
+  assert.equal(interfaceField.candidateReadback, true);
+  assert.equal(interfaceField.queueCompletionStatus, 'readback-map-completed');
+  assert.equal(interfaceField.queueCompletionMethod, 'mapAsync(readback-buffer)');
+  assert.equal(interfaceField.pressureInterfaceProducer, true);
+  assert.equal(interfaceField.physicsStage, 'material-interface-extraction');
+  assert.equal(interfaceField.readySurfaceCount, 2);
+  assert.equal(interfaceField.elementCount, candidateField.activeCandidateCount);
+  assert.ok(interfaceField.totalSurfaceAreaM2 > 0);
+  assert.equal(bindGroups.length, 2);
+  assert.equal(bindGroups[1].entries[0].resource.buffer, sourceField.surfaceBuffer);
+  assert.equal(bindGroups[1].entries[1].resource.buffer, sourceField.fieldRowsBuffer);
+  assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [
+    Math.ceil(Math.max(1, field.surfaceTable.maxFieldCellCount) / 64),
+    Math.ceil((field.maxFieldCellCount * 3) / 64)
+  ]);
+  assert.equal(copies.length, 1);
+  sourceField.destroyMaterialInterfaceSourceFieldBuffers();
+  assert.equal(sourceField.residentBufferLeaseSummary.skippedDestroyCount, 2);
+  sourceField.releaseMaterialInterfaceSourceFieldLeases();
+  sourceField.destroyMaterialInterfaceSourceFieldBuffers();
+  assert.equal(sourceField.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+});
+
 test('SPH render field CPU splats only unplaced product-event mass', () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
@@ -917,6 +1325,146 @@ test('SPH render field optional WebGPU can retain resident field buffers without
   execution.result.destroyRenderFieldBuffers();
   assert.equal(retainedFieldRowsBuffer.destroyCount, 1);
   assert.equal(retainedSurfaceBuffer.destroyCount, 1);
+});
+
+test('SPH render field retained buffers use lease guarded cleanup', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'Au|Au|solid',
+      material: 'Au',
+      phase: 'solid',
+      renderKey: 'Au',
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [1, 0.7, 0.1]
+    }
+  ]);
+  const { device } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array(),
+    compactedVertexRows: new Float32Array()
+  });
+
+  const result = await buildSphRenderFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    surfaceTable,
+    particleCount: packed.particleCount,
+    readbackMode: 'no-full-readback',
+    retainFieldRowsBuffer: true,
+    retainSurfaceBuffer: true
+  });
+
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(result.residentBufferLeaseResourceCount, 2);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 4);
+  assert.equal(result.queueCompletionStatus, 'queue-work-completed');
+  assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  result.destroyRenderFieldBuffers();
+  assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 2);
+  assert.equal(result.fieldRowsBuffer.destroyed, false);
+  assert.equal(result.surfaceBuffer.destroyed, false);
+  const released = result.releaseRenderFieldBufferLeases();
+  assert.equal(released.activeLeaseCount, 0);
+  result.destroyRenderFieldBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(result.fieldRowsBuffer.destroyed, true);
+  assert.equal(result.surfaceBuffer.destroyed, true);
+  result.destroyRenderFieldBuffers();
+  assert.equal(result.fieldRowsBuffer.destroyed, true);
+  assert.equal(result.surfaceBuffer.destroyed, true);
+});
+
+test('SPH render field surface summary CPU reports active resident surfaces', () => {
+  const field = twoSurfaceRenderField();
+  const summary = summarizeSphRenderFieldSurfacesCpu(field);
+
+  assert.equal(summary.schema, ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA);
+  assert.equal(summary.backend, 'cpu-reference');
+  assert.equal(summary.rowStrideFloats, SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS);
+  assert.equal(summary.summaryRows.length, field.surfaceCount * SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_FLOATS);
+  assert.ok(summary.activeSurfaceCount > 0);
+  assert.ok(summary.activeCellCount > 0);
+  assert.ok(summary.maxDensity > 0);
+  const activeSurface = summary.surfaces.find((surface) => surface.activeCellCount > 0);
+  assert.ok(activeSurface);
+  assert.ok(activeSurface.boundsRadiusM > 0);
+  assert.ok(activeSurface.boundsCenterM.every((value) => Number.isFinite(value)));
+});
+
+test('SPH render field surface summary WebGPU reads compact summary from retained field buffers', async () => {
+  const field = twoSurfaceRenderField();
+  const cpuSummary = summarizeSphRenderFieldSurfacesCpu(field);
+  const retainedFieldRowsBuffer = { label: 'retained-render-field-rows' };
+  const retainedSurfaceBuffer = { label: 'retained-render-surface-table' };
+  const { device, shaderModules, bindGroups, dispatches, copies } = fakeSurfaceDrawDevice({
+    summaryRows: cpuSummary.summaryRows
+  });
+
+  const summary = await summarizeSphRenderFieldSurfacesWebGpu({
+    device,
+    renderField: field,
+    fieldRowsBuffer: retainedFieldRowsBuffer,
+    surfaceBuffer: retainedSurfaceBuffer,
+    retainSummaryRowsBuffer: true
+  });
+
+  assert.equal(summary.schema, ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_SCHEMA);
+  assert.equal(summary.backend, 'webgpu');
+  assert.equal(summary.status, cpuSummary.status);
+  assert.equal(summary.fieldRowsBufferBound, true);
+  assert.equal(summary.surfaceBufferBound, true);
+  assert.equal(summary.renderFieldSurfaceSummaryReadback, true);
+  assert.equal(summary.summaryRowsBufferRetained, true);
+  assert.equal(summary.summaryRowsByteLength, cpuSummary.summaryRows.byteLength);
+  assert.deepEqual(Array.from(summary.summaryRows), Array.from(cpuSummary.summaryRows));
+  assert.equal(summary.activeSurfaceCount, cpuSummary.activeSurfaceCount);
+  assert.equal(summary.activeCellCount, cpuSummary.activeCellCount);
+  assert.equal(summary.queueCompletionStatus, 'compact-summary-readback-map-completed');
+  assert.equal(summary.queueCompletionMethod, 'mapAsync(compact-summary-readback-buffer)');
+  assert.match(shaderModules[0].code, /sphRenderFieldSurfaceSummary|SurfaceSummaryParams|surface_summary_rows/);
+  assert.equal(bindGroups[0].entries[0].resource.buffer, retainedSurfaceBuffer);
+  assert.equal(bindGroups[0].entries[1].resource.buffer, retainedFieldRowsBuffer);
+  assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [field.surfaceCount]);
+  assert.ok(copies.some((copy) => copy.size === cpuSummary.summaryRows.byteLength));
+});
+
+test('SPH render field surface summary optional WebGPU accepts parity-passing compact summary', async () => {
+  const field = twoSurfaceRenderField();
+  const retainedFieldRowsBuffer = { label: 'retained-render-field-rows' };
+  const retainedSurfaceBuffer = { label: 'retained-render-surface-table' };
+  const execution = await summarizeSphRenderFieldSurfacesWithOptionalWebGpu({
+    renderField: field,
+    fieldRowsBuffer: retainedFieldRowsBuffer,
+    surfaceBuffer: retainedSurfaceBuffer,
+    preferWebGpu: true,
+    device: {},
+    webGpuRunner(args) {
+      assert.equal(args.fieldRowsBuffer, retainedFieldRowsBuffer);
+      assert.equal(args.surfaceBuffer, retainedSurfaceBuffer);
+      return {
+        ...summarizeSphRenderFieldSurfacesCpu(args.renderField, {
+          isolationScale: args.isolationScale
+        }),
+        backend: 'webgpu',
+        fieldRowsBufferBound: Boolean(args.fieldRowsBuffer),
+        surfaceBufferBound: Boolean(args.surfaceBuffer),
+        renderFieldSurfaceSummaryReadback: true
+      };
+    }
+  });
+
+  assert.equal(execution.schema, ULG_SPH_GPU_RENDER_FIELD_SURFACE_SUMMARY_EXECUTION_SCHEMA);
+  assert.equal(execution.backend, 'webgpu');
+  assert.equal(execution.status, 'webgpu-accepted');
+  assert.equal(execution.webgpuStatus.status, 'webgpu-executed');
+  assert.equal(execution.webgpuStatus.parityMaxAbsDiff, 0);
+  assert.equal(execution.result.fieldRowsBufferBound, true);
+  assert.equal(execution.result.surfaceBufferBound, true);
+  assert.equal(execution.renderFieldSurfaceSummaryReadback, true);
 });
 
 test('SPH render marching-cube cells classify fixed render-field voxels', () => {
@@ -1150,6 +1698,72 @@ test('SPH render surface vertices optional WebGPU accepts parity-passing runner'
   assert.equal(execution.surfaceVertexReadback, true);
 });
 
+test('SPH render surface vertices retained buffer uses lease guarded cleanup', async () => {
+  const field = twoSurfaceRenderField();
+  const { device } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array(),
+    compactedVertexRows: new Float32Array()
+  });
+
+  const result = await buildSphRenderSurfaceVerticesWebGpu({
+    device,
+    renderField: field,
+    readbackMode: 'no-full-readback',
+    retainVertexRowsBuffer: true
+  });
+
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(result.residentBufferLeaseResourceCount, 1);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 1);
+  assert.equal(result.queueCompletionStatus, 'queue-work-completed');
+  assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  result.destroySurfaceVertexBuffers();
+  assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 1);
+  assert.equal(result.vertexRowsBuffer.destroyed, false);
+  const released = result.releaseSurfaceVertexBufferLeases();
+  assert.equal(released.activeLeaseCount, 0);
+  result.destroySurfaceVertexBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(result.vertexRowsBuffer.destroyed, true);
+  result.destroySurfaceVertexBuffers();
+  assert.equal(result.vertexRowsBuffer.destroyed, true);
+});
+
+test('SPH render surface vertices can defer no-full queue fence for resident handoff', async () => {
+  const field = twoSurfaceRenderField();
+  const { device } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array(),
+    compactedVertexRows: new Float32Array()
+  });
+  let submittedWorkDoneCount = 0;
+  let resolveSubmittedWorkDone;
+  device.queue.onSubmittedWorkDone = () => {
+    submittedWorkDoneCount += 1;
+    return new Promise((resolve) => {
+      resolveSubmittedWorkDone = resolve;
+    });
+  };
+
+  const result = await buildSphRenderSurfaceVerticesWebGpu({
+    device,
+    renderField: field,
+    readbackMode: 'no-full-readback',
+    retainVertexRowsBuffer: true,
+    waitForQueueCompletion: false
+  });
+
+  assert.equal(result.queueCompletionStatus, 'queue-submitted-cleanup-deferred');
+  assert.equal(result.queueCompletionMethod, 'deferred queue.onSubmittedWorkDone cleanup');
+  assert.equal(submittedWorkDoneCount, 1);
+  assert.equal(result.vertexRowsBufferRetained, true);
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
+  resolveSubmittedWorkDone();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  result.releaseSurfaceVertexBufferLeases();
+  result.destroySurfaceVertexBuffers();
+  assert.equal(result.vertexRowsBuffer.destroyed, true);
+});
+
 test('SPH render surface draw metadata buckets compact vertices by material surface', () => {
   const field = twoSurfaceRenderField();
   const vertices = deriveSphRenderSurfaceVerticesCpu(field);
@@ -1288,6 +1902,9 @@ test('SPH render surface draw WebGPU builder returns compact vertex draw source'
   assert.equal(result.drawRowsBufferRetained, true);
   assert.equal(result.drawIndirectRowsBufferRetained, true);
   assert.equal(result.compactedVertexRowsBufferRetained, true);
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(result.residentBufferLeaseResourceCount, 3);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 3);
   assert.equal(result.drawIndirectSchema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA);
   assert.equal(result.drawIndirectRowStrideUints, SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS);
   assert.equal(result.vertexCount, cpuDraw.vertexCount);
@@ -1309,6 +1926,103 @@ test('SPH render surface draw WebGPU builder returns compact vertex draw source'
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawRows.byteLength));
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawIndirectRows.byteLength));
   assert.ok(copies.some((copy) => copy.size === vertices.vertexRows.byteLength));
+  assert.equal(result.queueCompletionStatus, 'readback-map-completed');
+  assert.equal(result.queueCompletionMethod, 'mapAsync(readback-buffer)');
+  const retainedBuffers = [
+    result.drawRowsBuffer,
+    result.drawIndirectRowsBuffer,
+    result.compactedVertexRowsBuffer
+  ];
+  result.destroySurfaceDrawBuffers();
+  assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 3);
+  assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === false), true);
+  result.releaseSurfaceDrawBufferLeases();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-ready');
+  result.destroySurfaceDrawBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
+  result.destroySurfaceDrawBuffers();
+  assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
+});
+
+test('SPH render surface draw no-full mode can read compact summary without vertex readback', async () => {
+  const field = twoSurfaceRenderField();
+  const vertices = deriveSphRenderSurfaceVerticesCpu(field);
+  const cpuDraw = deriveSphRenderSurfaceDrawMetadataCpu(vertices);
+  const { device, copies } = fakeSurfaceDrawDevice({
+    drawRows: cpuDraw.drawRows,
+    compactedVertexRows: vertices.vertexRows,
+    drawIndirectRows: cpuDraw.drawIndirectRows
+  });
+
+  const result = await buildSphRenderSurfaceDrawMetadataWebGpu({
+    device,
+    surfaceVertices: vertices,
+    readbackMode: 'no-full-readback',
+    compactSummaryReadback: true,
+    retainDrawRowsBuffer: true,
+    retainDrawIndirectRowsBuffer: true,
+    retainCompactedVertexRowsBuffer: true
+  });
+
+  assert.equal(result.status, 'surface-draw-resident');
+  assert.equal(result.readbackMode, 'no-full-readback');
+  assert.equal(result.surfaceDrawReadback, false);
+  assert.equal(result.fullSurfaceDrawReadback, false);
+  assert.equal(result.surfaceDrawSummaryReadback, true);
+  assert.equal(result.surfaceDrawSummaryReadbackByteLength, cpuDraw.drawRows.byteLength);
+  assert.equal(result.activeSurfaceCount, cpuDraw.activeSurfaceCount);
+  assert.equal(result.vertexCount, cpuDraw.vertexCount);
+  assert.equal(result.triangleCount, cpuDraw.triangleCount);
+  assert.deepEqual(Array.from(result.drawRows), Array.from(cpuDraw.drawRows));
+  assert.equal(result.compactedVertexRows.length, 0);
+  assert.equal(result.drawIndirectRows.length, 0);
+  assert.ok(result.drawRowsBufferRetained);
+  assert.ok(result.drawIndirectRowsBufferRetained);
+  assert.ok(result.compactedVertexRowsBufferRetained);
+  assert.ok(copies.some((copy) => copy.size === cpuDraw.drawRows.byteLength));
+  assert.equal(copies.some((copy) => copy.size === vertices.vertexRows.byteLength), false);
+  const activeSurface = result.surfaces.find((surface) => surface.vertexCount > 0);
+  assert.ok(activeSurface);
+  assert.ok(activeSurface.boundsRadiusM > 0);
+});
+
+test('SPH render surface draw compact summary can fence deferred resident metadata', async () => {
+  const field = twoSurfaceRenderField();
+  const vertices = deriveSphRenderSurfaceVerticesCpu(field);
+  const cpuDraw = deriveSphRenderSurfaceDrawMetadataCpu(vertices);
+  const { device } = fakeSurfaceDrawDevice({
+    drawRows: cpuDraw.drawRows,
+    compactedVertexRows: vertices.vertexRows,
+    drawIndirectRows: cpuDraw.drawIndirectRows
+  });
+  let submittedWorkDoneCount = 0;
+  device.queue.onSubmittedWorkDone = () => {
+    submittedWorkDoneCount += 1;
+    return new Promise(() => {});
+  };
+
+  const result = await buildSphRenderSurfaceDrawMetadataWebGpu({
+    device,
+    surfaceVertices: vertices,
+    readbackMode: 'no-full-readback',
+    compactSummaryReadback: true,
+    retainDrawRowsBuffer: true,
+    retainDrawIndirectRowsBuffer: true,
+    retainCompactedVertexRowsBuffer: true,
+    waitForQueueCompletion: false
+  });
+
+  assert.equal(submittedWorkDoneCount, 0);
+  assert.equal(result.queueCompletionStatus, 'compact-summary-readback-map-completed');
+  assert.equal(result.queueCompletionMethod, 'mapAsync(compact-summary-readback-buffer)');
+  assert.equal(result.surfaceDrawSummaryReadback, true);
+  assert.equal(result.activeSurfaceCount, cpuDraw.activeSurfaceCount);
+  assert.equal(result.vertexCount, cpuDraw.vertexCount);
+  assert.equal(result.triangleCount, cpuDraw.triangleCount);
+  result.releaseSurfaceDrawBufferLeases();
+  result.destroySurfaceDrawBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
 });
 
 test('SPH render surface draw metadata optional WebGPU accepts resident no-full-readback buffers', async () => {

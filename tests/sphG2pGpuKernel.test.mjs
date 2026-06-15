@@ -14,6 +14,7 @@ import {
   ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_SCHEMA,
   createMlsMpmG2pParityReport,
   reconstructMlsMpmG2pCpu,
+  runMlsMpmG2pWebGpu,
   runMlsMpmG2pWithOptionalWebGpu
 } from '../src/runtime/sph/sphG2pGpuKernel.js';
 import { MLS_MPM_GPU_GRID_VELOCITY_FLOATS } from '../src/runtime/sph/sphGridUpdateGpuKernel.js';
@@ -30,7 +31,12 @@ function nodeIndex({ gridDims, gridShift }, i, j, k) {
   return ((i + gridShift) * gny + (j + gridShift)) * gnz + (k + gridShift);
 }
 
-function fixture({ position = [1.25, 1.25, 1.25], gridVelocity = [2, 0, 0], dt = 0.1 } = {}) {
+function fixture({
+  position = [1.25, 1.25, 1.25],
+  gridVelocity = [2, 0, 0],
+  dt = 0.1,
+  restVolumeM3 = 1
+} = {}) {
   const state = new Float32Array([
     position[0], position[1], position[2], 8,
     0, 0, 0, 123
@@ -39,7 +45,7 @@ function fixture({ position = [1.25, 1.25, 1.25], gridVelocity = [2, 0, 0], dt =
   const mechanics = new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length);
   mechanics.set([1, 0, 0, 0, 1, 0, 0, 0, 1], 0);
   mechanics[18] = 1;
-  mechanics[19] = 1;
+  mechanics[19] = restVolumeM3;
   mechanics[20] = 1;
   mechanics[21] = 1;
   const gridDims = [7, 7, 7];
@@ -102,12 +108,103 @@ function webGpuNavigator() {
   };
 }
 
+function fakeG2pDevice() {
+  const createdBuffers = [];
+  const writes = [];
+  const submissions = [];
+  const dispatches = [];
+  return {
+    createdBuffers,
+    writes,
+    submissions,
+    dispatches,
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        const byteLength = data?.byteLength ?? 0;
+        if (offset + byteLength > buffer.size) {
+          throw new RangeError(`writeBuffer overflow for ${buffer.label}: ${offset + byteLength} > ${buffer.size}`);
+        }
+        writes.push({ label: buffer.label, offset, byteLength });
+      },
+      submit(commands) {
+        submissions.push(commands);
+      },
+      async onSubmittedWorkDone() {}
+    },
+    createBuffer({ label, size, usage }) {
+      const buffer = {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+      createdBuffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule({ code }) {
+      return { code };
+    },
+    createComputePipeline({ compute }) {
+      return {
+        compute,
+        getBindGroupLayout(index) {
+          return { index, entryPoint: compute.entryPoint };
+        }
+      };
+    },
+    createBindGroup({ layout, entries }) {
+      return { layout, entries };
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline(pipeline) {
+              this.pipeline = pipeline;
+            },
+            setBindGroup(index, bindGroup) {
+              this.bindGroup = { index, bindGroup };
+            },
+            dispatchWorkgroups(count) {
+              dispatches.push({ count, pipeline: this.pipeline, bindGroup: this.bindGroup?.bindGroup });
+            },
+            end() {
+              this.ended = true;
+            }
+          };
+        },
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+          this.copy = { source, sourceOffset, destination, destinationOffset, size };
+        },
+        finish() {
+          return { dispatches: [...dispatches], copy: this.copy || null };
+        }
+      };
+    }
+  };
+}
+
 test('MLS-MPM G2P WGSL declares particle and grid bindings', () => {
   assert.match(mlsMpmG2pReconstructWgsl, /struct G2pParams/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read> updated_grid_nodes/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_sph_state/);
   assert.match(mlsMpmG2pReconstructWgsl, /var<storage, read_write> out_mls_mechanics/);
   assert.match(mlsMpmG2pReconstructWgsl, /g2p_cubic_root_positive/);
+  assert.match(mlsMpmG2pReconstructWgsl, /g2p_particle_wall_clearance/);
+  assert.match(mlsMpmG2pReconstructWgsl, /wall_clearance = g2p_particle_wall_clearance\(row4\.w\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /internal_pressure_scale: f32/);
+  assert.match(mlsMpmG2pReconstructWgsl, /g2p_condensed_target_j/);
+  assert.match(mlsMpmG2pReconstructWgsl, /row6\.z > 0\.5 && row6\.z < 1\.5/);
+  assert.match(mlsMpmG2pReconstructWgsl, /params\.internal_pressure_scale == 0\.0/);
+  assert.match(mlsMpmG2pReconstructWgsl, /if \(condensed\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /g2p_clamp\(previous_j, 0\.95, 1\.049\)/);
+  assert.match(mlsMpmG2pReconstructWgsl, /liquid_wall_damping_alpha: f32/);
+  assert.match(mlsMpmG2pReconstructWgsl, /velocity = velocity \* keep/);
+  assert.match(mlsMpmG2pReconstructWgsl, /if \(!solid\)/);
+  assert.doesNotMatch(mlsMpmG2pReconstructWgsl, /c00 = c00 \* 0\.25/);
   assert.match(mlsMpmG2pReconstructWgsl, /@compute @workgroup_size\(64\)/);
 });
 
@@ -135,11 +232,48 @@ test('CPU MLS-MPM G2P reconstructs velocity and advects without affine strain in
   assert.equal(result.fullPhysicsValidation, false);
 });
 
-test('CPU MLS-MPM G2P clamps particle walls and inward velocity', () => {
+test('WebGPU MLS-MPM G2P params buffer fits the full uniform payload', async () => {
+  const device = fakeG2pDevice();
+  const result = await runMlsMpmG2pWebGpu({
+    ...fixture(),
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback'
+  });
+  const paramsBuffer = device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-g2p-params');
+  const paramsWrite = device.writes.find((write) => write.label === 'ulg-mls-mpm-g2p-params');
+
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(paramsBuffer.size, 80);
+  assert.equal(paramsWrite.byteLength, 80);
+  assert.equal(device.submissions.length, 1);
+});
+
+test('CPU MLS-MPM G2P renormalizes clipped active grid support for constant flow', () => {
+  const { sphParticleState, mlsMpmParticleState, gridUpdate } = fixture({
+    position: [0.1, 1.25, 1.25],
+    gridVelocity: [3, 0, 0],
+    dt: 0.1,
+    restVolumeM3: 0
+  });
+  const result = reconstructMlsMpmG2pCpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    gridUpdate,
+    dt: 0.1,
+    boxDimsM: [5, 5, 5]
+  });
+
+  nearlyEqual(result.state[4], 3, 1e-5);
+  nearlyEqual(result.state[0], 0.4, 1e-5);
+});
+
+test('CPU MLS-MPM G2P clamps finite-volume particle walls and inward velocity', () => {
   const { sphParticleState, mlsMpmParticleState, gridUpdate } = fixture({
     position: [0.05, 1.25, 1.25],
     gridVelocity: [-2, 0, 0],
-    dt: 0.1
+    dt: 0.1,
+    restVolumeM3: 1
   });
   const result = reconstructMlsMpmG2pCpu({
     sphParticleState,
@@ -148,8 +282,142 @@ test('CPU MLS-MPM G2P clamps particle walls and inward velocity', () => {
     boxDimsM: [3, 3, 3]
   });
 
-  assert.equal(result.state[0], 0);
+  assert.equal(result.state[0], 0.5);
   assert.equal(result.state[4], 0);
+});
+
+test('CPU MLS-MPM G2P damps condensed liquid support-wall slosh without damping solids', () => {
+  const liquid = fixture({
+    position: [1.25, 0.15, 1.25],
+    gridVelocity: [2, 0, 0],
+    dt: 0.1,
+    restVolumeM3: 0.008
+  });
+  liquid.mlsMpmParticleState.mechanics[20] = 0;
+  liquid.mlsMpmParticleState.mechanics[26] = 1;
+  const solid = fixture({
+    position: [1.25, 0.15, 1.25],
+    gridVelocity: [2, 0, 0],
+    dt: 0.1,
+    restVolumeM3: 0.008
+  });
+  solid.mlsMpmParticleState.mechanics[20] = 1;
+  solid.mlsMpmParticleState.mechanics[26] = 1;
+
+  const liquidResult = reconstructMlsMpmG2pCpu({
+    ...liquid,
+    boxDimsM: [3, 3, 3],
+    liquidWallDampingAlpha: 0.2,
+    liquidWallDampingDistanceM: 0.2
+  });
+  const solidResult = reconstructMlsMpmG2pCpu({
+    ...solid,
+    boxDimsM: [3, 3, 3],
+    liquidWallDampingAlpha: 0.2,
+    liquidWallDampingDistanceM: 0.2
+  });
+
+  assert.ok(liquidResult.state[4] < 2, `expected liquid wall damping to reduce tangential speed, got ${liquidResult.state[4]}`);
+  nearlyEqual(liquidResult.state[4], 1.775, 1e-5);
+  nearlyEqual(solidResult.state[4], 2, 1e-5);
+});
+
+test('CPU MLS-MPM G2P bounds condensed liquid volume jumps', () => {
+  const args = fixture({ gridVelocity: [0, 0, 0], dt: 0.1 });
+  args.mlsMpmParticleState.mechanics[20] = 0;
+  args.mlsMpmParticleState.mechanics[26] = 1;
+  for (let i = 0; i <= 2; i += 1) for (let j = 0; j <= 2; j += 1) for (let k = 0; k <= 2; k += 1) {
+    const offset = nodeIndex(args.gridUpdate, i, j, k) * MLS_MPM_GPU_GRID_VELOCITY_FLOATS;
+    args.gridUpdate.updatedGridNodes[offset + 1] = 100 * i;
+    args.gridUpdate.updatedGridNodes[offset + 2] = 100 * j;
+    args.gridUpdate.updatedGridNodes[offset + 3] = 100 * k;
+  }
+
+  const result = reconstructMlsMpmG2pCpu({
+    ...args,
+    boxDimsM: [3, 3, 3]
+  });
+
+  nearlyEqual(result.mechanics[18], 1.049, 1e-5);
+  nearlyEqual(result.mechanics[0], Math.cbrt(1.049), 1e-5);
+  nearlyEqual(result.mechanics[4], Math.cbrt(1.049), 1e-5);
+  nearlyEqual(result.mechanics[8], Math.cbrt(1.049), 1e-5);
+});
+
+test('CPU MLS-MPM G2P freezes non-solid deformation when EOS pressure is disabled', () => {
+  const args = fixture({ gridVelocity: [0, 0, 0], dt: 0.1 });
+  args.mlsMpmParticleState.mechanics[20] = 0;
+  args.mlsMpmParticleState.mechanics[26] = 1;
+  for (let i = 0; i <= 2; i += 1) for (let j = 0; j <= 2; j += 1) for (let k = 0; k <= 2; k += 1) {
+    const offset = nodeIndex(args.gridUpdate, i, j, k) * MLS_MPM_GPU_GRID_VELOCITY_FLOATS;
+    args.gridUpdate.updatedGridNodes[offset + 1] = 100 * i;
+    args.gridUpdate.updatedGridNodes[offset + 2] = 100 * j;
+    args.gridUpdate.updatedGridNodes[offset + 3] = 100 * k;
+  }
+
+  const result = reconstructMlsMpmG2pCpu({
+    ...args,
+    boxDimsM: [3, 3, 3],
+    internalPressureScale: 0
+  });
+
+  nearlyEqual(result.mechanics[18], 1, 1e-6);
+  nearlyEqual(result.mechanics[0], 1, 1e-6);
+  nearlyEqual(result.mechanics[4], 1, 1e-6);
+  nearlyEqual(result.mechanics[8], 1, 1e-6);
+  nearlyEqual(result.mechanics[9], 0, 1e-6);
+  nearlyEqual(result.mechanics[13], 0, 1e-6);
+  nearlyEqual(result.mechanics[17], 0, 1e-6);
+});
+
+test('CPU MLS-MPM G2P carries condensed liquid affine strain without hidden damping', () => {
+  const liquid = fixture({ gridVelocity: [0, 0, 0], dt: 0.1 });
+  liquid.mlsMpmParticleState.mechanics[20] = 0;
+  liquid.mlsMpmParticleState.mechanics[26] = 1;
+  const gas = fixture({ gridVelocity: [0, 0, 0], dt: 0.1 });
+  gas.mlsMpmParticleState.mechanics[20] = 0;
+  gas.mlsMpmParticleState.mechanics[26] = 2;
+  for (const args of [liquid, gas]) {
+    for (let i = 0; i <= 2; i += 1) for (let j = 0; j <= 2; j += 1) for (let k = 0; k <= 2; k += 1) {
+      const offset = nodeIndex(args.gridUpdate, i, j, k) * MLS_MPM_GPU_GRID_VELOCITY_FLOATS;
+      args.gridUpdate.updatedGridNodes[offset + 1] = 10 * i;
+      args.gridUpdate.updatedGridNodes[offset + 2] = 10 * j;
+      args.gridUpdate.updatedGridNodes[offset + 3] = 10 * k;
+    }
+  }
+
+  const liquidResult = reconstructMlsMpmG2pCpu({
+    ...liquid,
+    boxDimsM: [3, 3, 3]
+  });
+  const gasResult = reconstructMlsMpmG2pCpu({
+    ...gas,
+    boxDimsM: [3, 3, 3]
+  });
+
+  assert.ok(Math.abs(gasResult.mechanics[9]) > 1e-3, 'fixture should generate affine strain');
+  nearlyEqual(liquidResult.mechanics[9], gasResult.mechanics[9], 1e-5);
+  nearlyEqual(liquidResult.mechanics[13], gasResult.mechanics[13], 1e-5);
+  nearlyEqual(liquidResult.mechanics[17], gasResult.mechanics[17], 1e-5);
+});
+
+test('CPU MLS-MPM G2P bounds solid volume jumps without accepting blink-scale deformation', () => {
+  const args = fixture({ gridVelocity: [0, 0, 0], dt: 0.1 });
+  args.mlsMpmParticleState.mechanics[20] = 1;
+  for (let i = 0; i <= 2; i += 1) for (let j = 0; j <= 2; j += 1) for (let k = 0; k <= 2; k += 1) {
+    const offset = nodeIndex(args.gridUpdate, i, j, k) * MLS_MPM_GPU_GRID_VELOCITY_FLOATS;
+    args.gridUpdate.updatedGridNodes[offset + 1] = 100 * i;
+    args.gridUpdate.updatedGridNodes[offset + 2] = 100 * j;
+    args.gridUpdate.updatedGridNodes[offset + 3] = 100 * k;
+  }
+
+  const result = reconstructMlsMpmG2pCpu({
+    ...args,
+    boxDimsM: [3, 3, 3]
+  });
+
+  nearlyEqual(result.mechanics[18], 1.049, 1e-5);
+  assert.ok(result.mechanics[18] <= 1.05, `solid volume ratio should remain bounded, got ${result.mechanics[18]}`);
 });
 
 test('optional MLS-MPM G2P returns CPU reference when WebGPU is not requested', async () => {

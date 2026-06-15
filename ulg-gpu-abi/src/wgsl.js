@@ -519,6 +519,8 @@ struct ThermalParams {
 @group(0) @binding(7) var<storage, read_write> out_sph_thermo: array<vec4<f32>>;
 @group(0) @binding(8) var<uniform> params: ThermalParams;
 
+const PAIR_CONDUCTION_RELAXATION_LIMIT: f32 = 0.25;
+
 fn state_pos_mass(index: u32) -> vec4<f32> {
   return sph_state[index * 2u];
 }
@@ -587,6 +589,129 @@ fn sample_temperature_from_graph(graph_index: u32, specific_internal_energy: f32
   }
   let t = clamp((x - left.x) / (right.x - left.x), 0.0, 1.0);
   return left.y + t * (right.y - left.y);
+}
+
+fn temperature_slope_from_graph(graph_index: u32, specific_internal_energy: f32) -> f32 {
+  let node1 = graph_node_row1(graph_index);
+  let sample_offset = u32(max(node1.x, 0.0));
+  let sample_count = u32(max(node1.y, 0.0));
+  if (sample_count < 2u) {
+    return 0.0;
+  }
+  let domain_min = node1.z;
+  let domain_max = node1.w;
+  let x = clamp(specific_internal_energy, domain_min, domain_max);
+  var left_index = sample_offset;
+  var right_index = sample_offset + sample_count - 1u;
+  for (var index = sample_offset; index + 1u < sample_offset + sample_count; index = index + 1u) {
+    let left_axis = thermal_graph_samples[index].x;
+    let right_axis = thermal_graph_samples[index + 1u].x;
+    if (x >= left_axis && x <= right_axis) {
+      left_index = index;
+      right_index = index + 1u;
+      break;
+    }
+  }
+  let left = thermal_graph_samples[left_index];
+  let right = thermal_graph_samples[right_index];
+  if (right.x == left.x) {
+    return 0.0;
+  }
+  return (right.y - left.y) / (right.x - left.x);
+}
+
+fn thermal_temperature_slope(material_id: f32, specific_internal_energy: f32) -> f32 {
+  var material_response_offset = 0u;
+  var material_response_count = 0u;
+  var found_material = false;
+  for (var record_index = 0u; record_index < params.material_count; record_index = record_index + 1u) {
+    let record = phase_response_records[record_index];
+    if (record.x == material_id) {
+      material_response_offset = u32(record.y);
+      material_response_count = u32(record.z);
+      found_material = true;
+      break;
+    }
+  }
+
+  if (!found_material || material_response_count == 0u) {
+    return 0.0;
+  }
+
+  var selected = material_response_offset;
+  for (var local = 0u; local < material_response_count; local = local + 1u) {
+    let candidate = material_response_offset + local;
+    let row1 = response_row1(candidate);
+    selected = candidate;
+    if (specific_internal_energy <= row1.y || local + 1u == material_response_count) {
+      break;
+    }
+  }
+
+  let response0 = response_row0(selected);
+  if (response0.w != 1.0 || response0.z < 0.0) {
+    return 0.0;
+  }
+  return temperature_slope_from_graph(u32(response0.z), specific_internal_energy);
+}
+
+fn clamp_wall_du_specific(d_u_specific: f32, temperature_k: f32, wall_temperature_k: f32, temperature_slope: f32) -> f32 {
+  if (temperature_slope <= 0.0) {
+    return d_u_specific;
+  }
+  let next_temperature_k = temperature_k + d_u_specific * temperature_slope;
+  let crosses_cold_wall = temperature_k > wall_temperature_k && next_temperature_k < wall_temperature_k;
+  let crosses_hot_wall = temperature_k < wall_temperature_k && next_temperature_k > wall_temperature_k;
+  if (crosses_cold_wall || crosses_hot_wall) {
+    return (wall_temperature_k - temperature_k) / temperature_slope;
+  }
+  return d_u_specific;
+}
+
+fn clamp_pair_conduction_energy(
+  d_e: f32,
+  temperature_k: f32,
+  other_temperature_k: f32,
+  temperature_slope: f32,
+  other_temperature_slope: f32,
+  mass_kg: f32,
+  other_mass_kg: f32
+) -> f32 {
+  if (d_e == 0.0) {
+    return 0.0;
+  }
+  let gap_k = other_temperature_k - temperature_k;
+  if (gap_k == 0.0 || sign(d_e) != sign(gap_k)) {
+    return d_e;
+  }
+  let response_per_j = temperature_slope / max(mass_kg, 1.0e-30)
+    + other_temperature_slope / max(other_mass_kg, 1.0e-30);
+  if (response_per_j <= 0.0) {
+    return d_e;
+  }
+  let equalizing_energy_j = abs(gap_k) / response_per_j;
+  let limit_j = equalizing_energy_j * PAIR_CONDUCTION_RELAXATION_LIMIT;
+  return sign(d_e) * min(abs(d_e), limit_j);
+}
+
+fn clamp_du_to_temperature_range(
+  d_u_specific: f32,
+  temperature_k: f32,
+  temperature_slope: f32,
+  min_temperature_k: f32,
+  max_temperature_k: f32
+) -> f32 {
+  if (temperature_slope <= 0.0 || d_u_specific == 0.0) {
+    return d_u_specific;
+  }
+  let next_temperature_k = temperature_k + d_u_specific * temperature_slope;
+  if (next_temperature_k < min_temperature_k) {
+    return (min_temperature_k - temperature_k) / temperature_slope;
+  }
+  if (next_temperature_k > max_temperature_k) {
+    return (max_temperature_k - temperature_k) / temperature_slope;
+  }
+  return d_u_specific;
 }
 
 fn phase_fraction(phase_id: f32, solid: f32, liquid: f32, gas: f32, plasma: f32) -> f32 {
@@ -698,32 +823,59 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let position = vec3<f32>(pos_mass.x, pos_mass.y, pos_mass.z);
   let mass = max(pos_mass.w, 1.0e-30);
   let temperature = row0.z;
-  let support = 2.0 * params.smoothing_length_m;
-  var du = 0.0;
+	  let temperature_slope = thermal_temperature_slope(row0.x, vel_u.w);
+	  let support = 2.0 * params.smoothing_length_m;
+	  var du = 0.0;
+	  var conduction_du = 0.0;
+	  var neighbor_min_temperature = temperature;
+	  var neighbor_max_temperature = temperature;
 
-  for (var other = 0u; other < params.particle_count; other = other + 1u) {
-    if (other == particle_index) {
+	  for (var other = 0u; other < params.particle_count; other = other + 1u) {
+	    if (other == particle_index) {
       continue;
     }
-    let other_pos_mass = state_pos_mass(other);
-    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
-    let distance = length(delta);
-    if (distance < support) {
-      let weight = 1.0 - distance / support;
-      let other_temperature = thermo_row0(other).z;
-      let dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
-      du = du + dE / mass;
-    }
-  }
+	    let other_pos_mass = state_pos_mass(other);
+	    let delta = position - vec3<f32>(other_pos_mass.x, other_pos_mass.y, other_pos_mass.z);
+	    let distance = length(delta);
+	    if (distance < support) {
+	      let weight = 1.0 - distance / support;
+	      let other_row0 = thermo_row0(other);
+	      let other_vel_u = state_vel_u(other);
+	      let other_temperature = other_row0.z;
+	      neighbor_min_temperature = min(neighbor_min_temperature, other_temperature);
+	      neighbor_max_temperature = max(neighbor_max_temperature, other_temperature);
+	      let other_temperature_slope = thermal_temperature_slope(other_row0.x, other_vel_u.w);
+	      let raw_dE = params.conduction_rate * (other_temperature - temperature) * weight * params.dt;
+	      let dE = clamp_pair_conduction_energy(
+	        raw_dE,
+	        temperature,
+	        other_temperature,
+	        temperature_slope,
+	        other_temperature_slope,
+	        mass,
+	        other_pos_mass.w
+	      );
+	      conduction_du = conduction_du + dE / mass;
+	    }
+	  }
+	  du = du + clamp_du_to_temperature_range(
+	    conduction_du,
+	    temperature,
+	    temperature_slope,
+	    neighbor_min_temperature,
+	    neighbor_max_temperature
+	  );
 
-  for (var face = 0u; face < 6u; face = face + 1u) {
-    let distance = wall_distance(position, face);
-    if (distance < params.wall_layer_m) {
-      let weight = 1.0 - distance / params.wall_layer_m;
-      let dE = params.wall_rate * (wall_temperature(face) - temperature) * weight * params.dt;
-      du = du + dE / mass;
-    }
-  }
+	  for (var face = 0u; face < 6u; face = face + 1u) {
+	    let distance = wall_distance(position, face);
+	    if (distance < params.wall_layer_m) {
+	      let weight = 1.0 - distance / params.wall_layer_m;
+	      let face_wall_temperature = wall_temperature(face);
+	      let current_temperature = temperature + du * temperature_slope;
+	      let raw_du_specific = params.wall_rate * (face_wall_temperature - current_temperature) * weight * params.dt / mass;
+	      du = du + clamp_wall_du_specific(raw_du_specific, current_temperature, face_wall_temperature, temperature_slope);
+	    }
+	  }
 
   let next_u = vel_u.w + du;
   out_sph_state[particle_index * 2u] = pos_mass;
@@ -2847,8 +2999,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 export const sphRenderRowsWgsl = `
 struct RenderRowsParams {
   particle_count: u32,
-  _pad0: u32,
-  _pad1: u32,
+  render_domain_base_count: u32,
+  render_domain_drop_count: u32,
   _pad2: u32,
 };
 
@@ -2868,9 +3020,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let thermo0 = sph_thermo[particle_index * 3u];
   let thermo1 = sph_thermo[particle_index * 3u + 1u];
   let thermo2 = sph_thermo[particle_index * 3u + 2u];
+  var render_domain_id: f32 = 0.0;
+  if (params.render_domain_base_count > 0u && particle_index < params.render_domain_base_count) {
+    render_domain_id = 1.0;
+  }
+  if (
+    render_domain_id == 0.0
+    && params.render_domain_drop_count > 0u
+    && particle_index >= params.render_domain_base_count
+    && particle_index < params.render_domain_base_count + params.render_domain_drop_count
+  ) {
+    render_domain_id = 2.0;
+  }
   render_rows[particle_index * 3u] = pos_mass;
   render_rows[particle_index * 3u + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
-  render_rows[particle_index * 3u + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, 0.0);
+  render_rows[particle_index * 3u + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, render_domain_id);
 }
 `;
 
@@ -2900,6 +3064,10 @@ fn render_row1(particle_index: u32) -> vec4<f32> {
   return render_rows[particle_index * 3u + 1u];
 }
 
+fn render_row2(particle_index: u32) -> vec4<f32> {
+  return render_rows[particle_index * 3u + 2u];
+}
+
 fn surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
 }
@@ -2910,6 +3078,10 @@ fn surface_row1(surface_index: u32) -> vec4<f32> {
 
 	fn surface_row2(surface_index: u32) -> vec4<f32> {
 	  return render_surfaces[surface_index * 4u + 2u];
+	}
+
+	fn surface_row3(surface_index: u32) -> vec4<f32> {
+	  return render_surfaces[surface_index * 4u + 3u];
 	}
 
 	fn product_event_row0(event_index: u32) -> vec4<f32> {
@@ -2948,6 +3120,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let s0 = surface_row0(surface_index);
   let s1 = surface_row1(surface_index);
   let s2 = surface_row2(surface_index);
+  let s3 = surface_row3(surface_index);
   let field_offset = u32(s0.z);
   let field_cell_count = u32(s0.w);
   if (cell_index >= field_cell_count) {
@@ -2969,6 +3142,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let material_id = s0.x;
   let phase_id = s0.y;
+  let render_domain_id = max(s3.x, 0.0);
   let subtract = max(s1.z, 1.0e-12);
   let strength = s1.w;
   let support_norm = sqrt(abs(strength) / subtract);
@@ -2981,7 +3155,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 	  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
     let row0 = render_row0(particle_index);
     let row1 = render_row1(particle_index);
-    if (row1.x != material_id || row1.y != phase_id) {
+    let row2 = render_row2(particle_index);
+    if (
+      row1.x != material_id
+      || row1.y != phase_id
+      || (render_domain_id > 0.0 && row2.w != render_domain_id)
+    ) {
       continue;
     }
     let particle = vec3<f32>(
@@ -3315,6 +3494,97 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     vec4<f32>(f32(corner_mask), f32(edge_crossing_count), reserved_triangle_count, reserved_vertex_count),
     vec4<f32>(density_min, density_max, isolation, status)
   );
+}
+`;
+
+export const sphRenderFieldSurfaceSummaryWgsl = `
+struct SurfaceSummaryParams {
+  surface_count: u32,
+  total_field_cells: u32,
+  _pad0: u32,
+  _pad1: u32,
+  field_padding: f32,
+  ref_edge_m: f32,
+  isolation_scale: f32,
+  _pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> surface_summary_rows: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: SurfaceSummaryParams;
+
+fn ss_surface_row0(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u];
+}
+
+fn ss_surface_row1(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 1u];
+}
+
+fn ss_surface_row3(surface_index: u32) -> vec4<f32> {
+  return render_surfaces[surface_index * 4u + 3u];
+}
+
+fn ss_field_index_3d(x: u32, y: u32, z: u32, resolution: u32) -> u32 {
+  return z * resolution * resolution + y * resolution + x;
+}
+
+fn ss_physical_coord_m(coord: f32, resolution: u32) -> f32 {
+  let span = max(1.0e-12, 1.0 - 2.0 * params.field_padding);
+  return (((coord / f32(resolution)) - params.field_padding) * max(params.ref_edge_m, 1.0e-12)) / span;
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let surface_index = global_id.x;
+  if (surface_index >= params.surface_count) {
+    return;
+  }
+  let row0 = ss_surface_row0(surface_index);
+  let row1 = ss_surface_row1(surface_index);
+  let row3 = ss_surface_row3(surface_index);
+  let field_offset = u32(max(0.0, round(row0.z)));
+  let field_cell_count = u32(max(0.0, round(row0.w)));
+  let resolution = max(1u, u32(max(1.0, round(row1.x))));
+  let isolation = max(0.0, row1.y * params.isolation_scale);
+  let bounded_cell_count = min(field_cell_count, resolution * resolution * resolution);
+  var active_cell_count = 0u;
+  var max_density = 0.0;
+  var min_pos = vec3<f32>(1.0e30, 1.0e30, 1.0e30);
+  var max_pos = vec3<f32>(-1.0e30, -1.0e30, -1.0e30);
+  for (var cell_index = 0u; cell_index < bounded_cell_count; cell_index = cell_index + 1u) {
+    let density = render_field_cells[field_offset + cell_index].x;
+    max_density = max(max_density, density);
+    if (density >= isolation && density > 0.0) {
+      let xy = resolution * resolution;
+      let z = cell_index / xy;
+      let rem = cell_index - z * xy;
+      let y = rem / resolution;
+      let x = rem - y * resolution;
+      let pos = vec3<f32>(
+        ss_physical_coord_m(f32(x), resolution),
+        ss_physical_coord_m(f32(y), resolution),
+        ss_physical_coord_m(f32(z), resolution)
+      );
+      min_pos = min(min_pos, pos);
+      max_pos = max(max_pos, pos);
+      active_cell_count = active_cell_count + 1u;
+    }
+  }
+  let active = active_cell_count > 0u;
+  let min_active = select(vec3<f32>(0.0, 0.0, 0.0), min_pos, active);
+  let max_active = select(vec3<f32>(0.0, 0.0, 0.0), max_pos, active);
+  let center = select(vec3<f32>(0.0, 0.0, 0.0), (min_active + max_active) * 0.5, active);
+  let radius = select(0.0, length(max_active - center), active);
+  let cell_size_m = max(params.ref_edge_m, 1.0e-12)
+    / max(1.0e-12, (1.0 - 2.0 * params.field_padding) * f32(resolution));
+  let base = surface_index * 5u;
+  surface_summary_rows[base] = vec4<f32>(f32(surface_index), row0.x, row0.y, row3.y);
+  surface_summary_rows[base + 1u] = vec4<f32>(f32(active_cell_count), f32(active_cell_count), max_density, isolation);
+  surface_summary_rows[base + 2u] = vec4<f32>(min_active, select(0.0, 1.0, active));
+  surface_summary_rows[base + 3u] = vec4<f32>(max_active, cell_size_m);
+  surface_summary_rows[base + 4u] = vec4<f32>(center, radius);
 }
 `;
 
@@ -3980,7 +4250,7 @@ struct P2gProjectionParams {
   inv_grid_spacing_m: f32,
   dt: f32,
   resident_product_event_count: u32,
-  pad0: u32,
+  internal_pressure_scale: f32,
   pad1: u32,
 };
 
@@ -4062,8 +4332,9 @@ fn packed_pressure(density_kg_per_m3: f32, rest_density_kg_per_m3: f32, sound_sp
   }
   if (eos_model_id > 0.5 && eos_model_id < 1.5) {
     let ratio = density_kg_per_m3 / max(rest_density_kg_per_m3, 1.0e-9);
-    return (rest_density_kg_per_m3 * sound_speed_m_per_s * sound_speed_m_per_s / 7.0)
+    let pressure = (rest_density_kg_per_m3 * sound_speed_m_per_s * sound_speed_m_per_s / 7.0)
       * (pow(ratio, 7.0) - 1.0);
+    return pressure;
   }
   return 0.0;
 }
@@ -4176,6 +4447,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row4 = mls_mechanics[mechanics_base + 4u];
     let row5 = mls_mechanics[mechanics_base + 5u];
     let row6 = mls_mechanics[mechanics_base + 6u];
+    let row7 = mls_mechanics[mechanics_base + 7u];
     let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
     let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
     let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
@@ -4196,12 +4468,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
       } else {
         let density = pos_mass.w / max(volume, 1.0e-30);
-        let pressure = packed_pressure(density, thermo0.w, row6.y, row6.z);
-        sigma = StressRows(
-          vec3<f32>(-pressure, 0.0, 0.0),
-          vec3<f32>(0.0, -pressure, 0.0),
-          vec3<f32>(0.0, 0.0, -pressure)
+        let pressure = params.internal_pressure_scale * (
+          packed_pressure(density, thermo0.w, row6.y, row6.z) + max(row7.x, 0.0)
         );
+        let dynamic_viscosity = max(row7.y, 0.0);
+        let div_third = (c00 + c11 + c22) / 3.0;
+        let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
+        let visc11 = 2.0 * dynamic_viscosity * (c11 - div_third);
+        let visc22 = 2.0 * dynamic_viscosity * (c22 - div_third);
+        let visc01 = dynamic_viscosity * (c01 + c10);
+        let visc02 = dynamic_viscosity * (c02 + c20);
+        let visc12 = dynamic_viscosity * (c12 + c21);
+	        sigma = StressRows(
+	          vec3<f32>(-pressure + visc00, visc01, visc02),
+	          vec3<f32>(visc01, -pressure + visc11, visc12),
+	          vec3<f32>(visc02, visc12, -pressure + visc22)
+	        );
       }
     }
     let stress_scale = -params.dt * volume * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
@@ -4264,7 +4546,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var pressure_affine = vec3<f32>(0.0);
     if (params.dt != 0.0 && support_volume_m3 > 0.0) {
       let event_density = event_unplaced_mass_kg / max(support_volume_m3, 1.0e-30);
-      let event_pressure = packed_pressure(
+      let event_pressure = params.internal_pressure_scale * packed_pressure(
         event_density,
         rest_density_kg_per_m3,
         sound_speed_m_per_s,
@@ -4382,16 +4664,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (speed2 > vmax * vmax) {
       velocity = velocity * (vmax / sqrt(speed2));
     }
-    let node_pos = row1.xyz;
-    if ((node_pos.x < params.grid_spacing_m && velocity.x < 0.0) || (node_pos.x > params.box_x - params.grid_spacing_m && velocity.x > 0.0)) {
-      velocity.x = 0.0;
-    }
-    if ((node_pos.y < params.grid_spacing_m && velocity.y < 0.0) || (node_pos.y > params.box_y - params.grid_spacing_m && velocity.y > 0.0)) {
-      velocity.y = 0.0;
-    }
-    if ((node_pos.z < params.grid_spacing_m && velocity.z < 0.0) || (node_pos.z > params.box_z - params.grid_spacing_m && velocity.z > 0.0)) {
-      velocity.z = 0.0;
-    }
+	    let node_pos = row1.xyz;
+	    if (node_pos.y <= params.grid_spacing_m) {
+	      velocity = vec3<f32>(0.0);
+	    }
+	    if ((node_pos.x <= params.grid_spacing_m && velocity.x < 0.0) || (node_pos.x >= params.box_x - params.grid_spacing_m && velocity.x > 0.0)) {
+	      velocity.x = 0.0;
+	    }
+	    if (node_pos.y >= params.box_y - params.grid_spacing_m && velocity.y > 0.0) {
+	      velocity.y = 0.0;
+	    }
+	    if ((node_pos.z <= params.grid_spacing_m && velocity.z < 0.0) || (node_pos.z >= params.box_z - params.grid_spacing_m && velocity.z > 0.0)) {
+	      velocity.z = 0.0;
+	    }
     status = 1.0;
   }
 
@@ -4416,8 +4701,11 @@ struct G2pParams {
   box_x: f32,
   box_y: f32,
   box_z: f32,
-  pad0: f32,
+  internal_pressure_scale: f32,
+  liquid_wall_damping_alpha: f32,
+  liquid_wall_damping_distance_m: f32,
   pad1: f32,
+  pad2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
@@ -4454,6 +4742,29 @@ fn g2p_det3(
 
 fn g2p_cubic_root_positive(value: f32) -> f32 {
   return exp(log(max(value, 1.0e-12)) / 3.0);
+}
+
+fn g2p_particle_wall_clearance(rest_volume_m3: f32) -> f32 {
+  if (rest_volume_m3 <= 0.0) {
+    return 0.0;
+  }
+  var clearance = 0.5 * g2p_cubic_root_positive(rest_volume_m3);
+  let min_dim = min(params.box_x, min(params.box_y, params.box_z));
+  if (min_dim > 0.0) {
+    clearance = min(clearance, 0.49 * min_dim);
+  }
+  return clearance;
+}
+
+fn g2p_clamp(value: f32, lower: f32, upper: f32) -> f32 {
+  return min(max(value, lower), upper);
+}
+
+fn g2p_condensed_target_j(raw_next_j: f32, previous_j: f32) -> f32 {
+  let previous_bounded = g2p_clamp(previous_j, 0.95, 1.049);
+  let lower = max(0.95, previous_bounded / 1.5);
+  let upper = min(1.049, previous_bounded * 1.5);
+  return g2p_clamp(raw_next_j, lower, upper);
 }
 
 fn g2p_grid_index(i: i32, j: i32, k: i32) -> u32 {
@@ -4503,6 +4814,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var c00 = 0.0; var c01 = 0.0; var c02 = 0.0;
   var c10 = 0.0; var c11 = 0.0; var c12 = 0.0;
   var c20 = 0.0; var c21 = 0.0; var c22 = 0.0;
+  var sampled_weight = 0.0;
 
   for (var a = 0i; a < 3i; a = a + 1i) {
     for (var b = 0i; b < 3i; b = b + 1i) {
@@ -4519,6 +4831,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         let idx = g2p_grid_index(node_i, node_j, node_k);
         let grid_row = updated_grid_nodes[idx * 2u];
+        let grid_meta = updated_grid_nodes[idx * 2u + 1u];
+        if (!(grid_row.x > 0.0) && !(grid_meta.w > 0.0)) {
+          continue;
+        }
+        sampled_weight = sampled_weight + weight;
         let grid_velocity = grid_row.yzw;
         velocity = velocity + weight * grid_velocity;
         let dpos = (vec3<f32>(f32(node_i), f32(node_j), f32(node_k)) - p_grid) * params.grid_spacing_m;
@@ -4535,18 +4852,45 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       }
     }
   }
+  if (sampled_weight > 1.0e-8 && sampled_weight < 0.999999) {
+    let normalization = 1.0 / sampled_weight;
+    velocity = velocity * normalization;
+    c00 = c00 * normalization; c01 = c01 * normalization; c02 = c02 * normalization;
+    c10 = c10 * normalization; c11 = c11 * normalization; c12 = c12 * normalization;
+    c20 = c20 * normalization; c21 = c21 * normalization; c22 = c22 * normalization;
+  }
 
   var position = pos_mass.xyz + params.dt * velocity;
-  if (position.x < 0.0) { position.x = 0.0; if (velocity.x < 0.0) { velocity.x = 0.0; } }
-  if (position.x > params.box_x) { position.x = params.box_x; if (velocity.x > 0.0) { velocity.x = 0.0; } }
-  if (position.y < 0.0) { position.y = 0.0; if (velocity.y < 0.0) { velocity.y = 0.0; } }
-  if (position.y > params.box_y) { position.y = params.box_y; if (velocity.y > 0.0) { velocity.y = 0.0; } }
-  if (position.z < 0.0) { position.z = 0.0; if (velocity.z < 0.0) { velocity.z = 0.0; } }
-  if (position.z > params.box_z) { position.z = params.box_z; if (velocity.z > 0.0) { velocity.z = 0.0; } }
+  let wall_clearance = g2p_particle_wall_clearance(row4.w);
+  let upper_x = max(wall_clearance, params.box_x - wall_clearance);
+  let upper_y = max(wall_clearance, params.box_y - wall_clearance);
+  let upper_z = max(wall_clearance, params.box_z - wall_clearance);
+  if (position.x < wall_clearance) { position.x = wall_clearance; if (velocity.x < 0.0) { velocity.x = 0.0; } }
+  if (position.x > upper_x) { position.x = upper_x; if (velocity.x > 0.0) { velocity.x = 0.0; } }
+  if (position.y < wall_clearance) { position.y = wall_clearance; if (velocity.y < 0.0) { velocity.y = 0.0; } }
+  if (position.y > upper_y) { position.y = upper_y; if (velocity.y > 0.0) { velocity.y = 0.0; } }
+  if (position.z < wall_clearance) { position.z = wall_clearance; if (velocity.z < 0.0) { velocity.z = 0.0; } }
+  if (position.z > upper_z) { position.z = upper_z; if (velocity.z > 0.0) { velocity.z = 0.0; } }
 
   let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
   let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
   let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
+  let solid = row5.x > 0.5;
+  let condensed = solid || (row6.z > 0.5 && row6.z < 1.5);
+  if (!solid && condensed && params.liquid_wall_damping_alpha > 0.0 && params.liquid_wall_damping_distance_m > 0.0) {
+    let floor_distance = max(position.y - wall_clearance, 0.0);
+    if (floor_distance < params.liquid_wall_damping_distance_m) {
+      let q = 1.0 - floor_distance / params.liquid_wall_damping_distance_m;
+      let keep = g2p_clamp(1.0 - params.liquid_wall_damping_alpha * q * q, 0.0, 1.0);
+      velocity = velocity * keep;
+    }
+  }
+  let deformation_disabled = !solid && (row6.z < 0.5 || params.internal_pressure_scale == 0.0);
+  if (deformation_disabled) {
+    c00 = 0.0; c01 = 0.0; c02 = 0.0;
+    c10 = 0.0; c11 = 0.0; c12 = 0.0;
+    c20 = 0.0; c21 = 0.0; c22 = 0.0;
+  }
   let g00 = 1.0 + params.dt * c00; let g01 = params.dt * c01; let g02 = params.dt * c02;
   let g10 = params.dt * c10; let g11 = 1.0 + params.dt * c11; let g12 = params.dt * c12;
   let g20 = params.dt * c20; let g21 = params.dt * c21; let g22 = 1.0 + params.dt * c22;
@@ -4561,7 +4905,31 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var nf21 = g20 * f01 + g21 * f11 + g22 * f21;
   var nf22 = g20 * f02 + g21 * f12 + g22 * f22;
   var next_j = g2p_det3(nf00, nf01, nf02, nf10, nf11, nf12, nf20, nf21, nf22);
-  if (row5.x < 0.5) {
+  if (deformation_disabled) {
+    nf00 = f00; nf01 = f01; nf02 = f02;
+    nf10 = f10; nf11 = f11; nf12 = f12;
+    nf20 = f20; nf21 = f21; nf22 = f22;
+    next_j = row4.z;
+  } else if (condensed) {
+    let target_j = g2p_condensed_target_j(next_j, row4.z);
+    if (!solid) {
+      let s = g2p_cubic_root_positive(target_j);
+      nf00 = s; nf01 = 0.0; nf02 = 0.0;
+      nf10 = 0.0; nf11 = s; nf12 = 0.0;
+      nf20 = 0.0; nf21 = 0.0; nf22 = s;
+    } else if (next_j > 1.0e-12) {
+      let scale = g2p_cubic_root_positive(target_j / next_j);
+      nf00 = nf00 * scale; nf01 = nf01 * scale; nf02 = nf02 * scale;
+      nf10 = nf10 * scale; nf11 = nf11 * scale; nf12 = nf12 * scale;
+      nf20 = nf20 * scale; nf21 = nf21 * scale; nf22 = nf22 * scale;
+    } else {
+      let s = g2p_cubic_root_positive(target_j);
+      nf00 = s; nf01 = 0.0; nf02 = 0.0;
+      nf10 = 0.0; nf11 = s; nf12 = 0.0;
+      nf20 = 0.0; nf21 = 0.0; nf22 = s;
+    }
+    next_j = target_j;
+  } else if (row5.x < 0.5) {
     next_j = max(next_j, 0.05);
     let s = g2p_cubic_root_positive(next_j);
     nf00 = s; nf01 = 0.0; nf02 = 0.0;
@@ -4590,11 +4958,141 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
+export const mlsMpmMechanicsRefreshWgsl = `
+struct MechanicsRefreshParams {
+  particle_count: u32,
+  phase_record_count: u32,
+  pad0: u32,
+  pad1: u32,
+};
+
+struct PhaseMechanics {
+  rest_density: f32,
+  bulk: f32,
+  shear: f32,
+  lambda: f32,
+  sound_speed: f32,
+  eos_model: f32,
+  solid: f32,
+  status: f32,
+  dynamic_viscosity: f32,
+  surface_tension: f32,
+};
+
+@group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> source_mechanics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> material_phase_records: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> out_mechanics: array<vec4<f32>>;
+@group(0) @binding(5) var<uniform> params: MechanicsRefreshParams;
+
+fn phase_record_row0(record_index: u32) -> vec4<f32> {
+  return material_phase_records[record_index * 3u];
+}
+
+fn phase_record_row1(record_index: u32) -> vec4<f32> {
+  return material_phase_records[record_index * 3u + 1u];
+}
+
+fn phase_record_row2(record_index: u32) -> vec4<f32> {
+  return material_phase_records[record_index * 3u + 2u];
+}
+
+fn find_phase_mechanics(material_id: f32, phase_id: f32) -> PhaseMechanics {
+  for (var record_index = 0u; record_index < params.phase_record_count; record_index = record_index + 1u) {
+    let row0 = phase_record_row0(record_index);
+    if (row0.x == material_id && row0.y == phase_id) {
+      let row1 = phase_record_row1(record_index);
+      let row2 = phase_record_row2(record_index);
+      return PhaseMechanics(row0.z, row0.w, row1.x, row1.y, row1.z, row1.w, row2.x, row2.y, row2.z, row2.w);
+    }
+  }
+  return PhaseMechanics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 255.0, 0.0, 0.0);
+}
+
+fn mechanics_refresh_should_reset(row4: vec4<f32>, row5: vec4<f32>, row6: vec4<f32>, phase_mechanics: PhaseMechanics, rest_volume: f32) -> bool {
+  let previous_rest_volume = row4.w;
+  if (previous_rest_volume <= 0.0 || rest_volume <= 0.0) {
+    return false;
+  }
+  let mechanics_model_changed = abs(row5.x - phase_mechanics.solid) > 0.5 || abs(row6.z - phase_mechanics.eos_model) > 0.5;
+  if (!mechanics_model_changed) {
+    return false;
+  }
+  let rest_ratio = max(previous_rest_volume / rest_volume, rest_volume / previous_rest_volume);
+  return rest_ratio >= 2.0;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let mechanics_base = particle_index * 8u;
+  for (var row = 0u; row < 8u; row = row + 1u) {
+    out_mechanics[mechanics_base + row] = source_mechanics[mechanics_base + row];
+  }
+
+  let thermo0 = sph_thermo[particle_index * 3u];
+  let state0 = sph_state[particle_index * 2u];
+  let phase_mechanics = find_phase_mechanics(thermo0.x, thermo0.y);
+  if (phase_mechanics.status != 1.0) {
+    return;
+  }
+
+  var rest_density = thermo0.w;
+  if (rest_density <= 0.0) {
+    rest_density = phase_mechanics.rest_density;
+  }
+  var rest_volume = 0.0;
+  if (rest_density > 0.0) {
+    rest_volume = max(state0.w, 0.0) / rest_density;
+  }
+
+  var row4 = out_mechanics[mechanics_base + 4u];
+  let row5 = out_mechanics[mechanics_base + 5u];
+  let row6 = out_mechanics[mechanics_base + 6u];
+  if (mechanics_refresh_should_reset(row4, row5, row6, phase_mechanics, rest_volume)) {
+    out_mechanics[mechanics_base] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[mechanics_base + 1u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[mechanics_base + 2u] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    out_mechanics[mechanics_base + 3u] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    row4 = vec4<f32>(0.0, 0.0, 1.0, rest_volume);
+  }
+  out_mechanics[mechanics_base + 4u] = vec4<f32>(row4.x, row4.y, row4.z, rest_volume);
+  out_mechanics[mechanics_base + 5u] = vec4<f32>(
+    phase_mechanics.solid,
+    phase_mechanics.status,
+    phase_mechanics.bulk,
+    phase_mechanics.shear
+  );
+  out_mechanics[mechanics_base + 6u] = vec4<f32>(
+    phase_mechanics.lambda,
+    phase_mechanics.sound_speed,
+    phase_mechanics.eos_model,
+    phase_mechanics.status
+  );
+  let row7 = out_mechanics[mechanics_base + 7u];
+  out_mechanics[mechanics_base + 7u] = vec4<f32>(
+    row7.x,
+    phase_mechanics.dynamic_viscosity,
+    phase_mechanics.surface_tension,
+    row7.w
+  );
+}
+`;
+
 export const mlsMpmResidentSummaryPartialsWgsl = `
 struct ResidentSummaryParams {
   particle_count: u32,
   grid_node_count: u32,
   partial_count: u32,
+  base_start_index: u32,
+  base_end_index: u32,
+  drop_start_index: u32,
+  drop_end_index: u32,
   pad_u1: u32,
 };
 
@@ -4607,32 +5105,76 @@ struct ResidentSummaryParams {
 @group(0) @binding(6) var<uniform> params: ResidentSummaryParams;
 @group(0) @binding(7) var<storage, read> next_sph_thermo: array<vec4<f32>>;
 
-var<workgroup> wg_active_grid_nodes: array<f32, 64>;
-var<workgroup> wg_source_mass: array<f32, 64>;
-var<workgroup> wg_next_mass: array<f32, 64>;
-var<workgroup> wg_source_momentum_x: array<f32, 64>;
-var<workgroup> wg_source_momentum_y: array<f32, 64>;
-var<workgroup> wg_source_momentum_z: array<f32, 64>;
-var<workgroup> wg_next_momentum_x: array<f32, 64>;
-var<workgroup> wg_next_momentum_y: array<f32, 64>;
-var<workgroup> wg_next_momentum_z: array<f32, 64>;
-var<workgroup> wg_max_speed: array<f32, 64>;
-var<workgroup> wg_max_displacement: array<f32, 64>;
-var<workgroup> wg_min_volume_ratio_j: array<f32, 64>;
-var<workgroup> wg_max_volume_ratio_j: array<f32, 64>;
-var<workgroup> wg_phase_mass_solid: array<f32, 64>;
-var<workgroup> wg_phase_mass_liquid: array<f32, 64>;
-var<workgroup> wg_phase_mass_gas: array<f32, 64>;
-var<workgroup> wg_phase_mass_plasma: array<f32, 64>;
-var<workgroup> wg_temperature_mass_sum: array<f32, 64>;
-var<workgroup> wg_min_temperature_k: array<f32, 64>;
-var<workgroup> wg_max_temperature_k: array<f32, 64>;
-var<workgroup> wg_thermal_ready_count: array<f32, 64>;
-var<workgroup> wg_thermal_problem_count: array<f32, 64>;
-var<workgroup> wg_finite_temperature_count: array<f32, 64>;
-var<workgroup> wg_phase_mass_total: array<f32, 64>;
+var<workgroup> wg_active_grid_nodes: array<f32, 32>;
+var<workgroup> wg_source_mass: array<f32, 32>;
+var<workgroup> wg_next_mass: array<f32, 32>;
+var<workgroup> wg_source_momentum_x: array<f32, 32>;
+var<workgroup> wg_source_momentum_y: array<f32, 32>;
+var<workgroup> wg_source_momentum_z: array<f32, 32>;
+var<workgroup> wg_next_momentum_x: array<f32, 32>;
+var<workgroup> wg_next_momentum_y: array<f32, 32>;
+var<workgroup> wg_next_momentum_z: array<f32, 32>;
+var<workgroup> wg_max_speed: array<f32, 32>;
+var<workgroup> wg_max_displacement: array<f32, 32>;
+var<workgroup> wg_min_volume_ratio_j: array<f32, 32>;
+var<workgroup> wg_max_volume_ratio_j: array<f32, 32>;
+var<workgroup> wg_phase_mass_solid: array<f32, 32>;
+var<workgroup> wg_phase_mass_liquid: array<f32, 32>;
+var<workgroup> wg_phase_mass_gas: array<f32, 32>;
+var<workgroup> wg_phase_mass_plasma: array<f32, 32>;
+var<workgroup> wg_temperature_mass_sum: array<f32, 32>;
+var<workgroup> wg_min_temperature_k: array<f32, 32>;
+var<workgroup> wg_max_temperature_k: array<f32, 32>;
+var<workgroup> wg_thermal_ready_count: array<f32, 32>;
+var<workgroup> wg_thermal_problem_count: array<f32, 32>;
+var<workgroup> wg_finite_temperature_count: array<f32, 32>;
+var<workgroup> wg_phase_mass_total: array<f32, 32>;
+var<workgroup> wg_source_position_mass_x: array<f32, 32>;
+var<workgroup> wg_source_position_mass_y: array<f32, 32>;
+var<workgroup> wg_source_position_mass_z: array<f32, 32>;
+var<workgroup> wg_next_position_mass_x: array<f32, 32>;
+var<workgroup> wg_next_position_mass_y: array<f32, 32>;
+var<workgroup> wg_next_position_mass_z: array<f32, 32>;
+var<workgroup> wg_source_min_x: array<f32, 32>;
+var<workgroup> wg_source_min_y: array<f32, 32>;
+var<workgroup> wg_source_min_z: array<f32, 32>;
+var<workgroup> wg_source_max_x: array<f32, 32>;
+var<workgroup> wg_source_max_y: array<f32, 32>;
+var<workgroup> wg_source_max_z: array<f32, 32>;
+var<workgroup> wg_next_min_x: array<f32, 32>;
+var<workgroup> wg_next_min_y: array<f32, 32>;
+var<workgroup> wg_next_min_z: array<f32, 32>;
+var<workgroup> wg_next_max_x: array<f32, 32>;
+var<workgroup> wg_next_max_y: array<f32, 32>;
+var<workgroup> wg_next_max_z: array<f32, 32>;
+var<workgroup> wg_source_bounds_status: array<f32, 32>;
+var<workgroup> wg_next_bounds_status: array<f32, 32>;
+var<workgroup> wg_base_cohort_mass: array<f32, 32>;
+var<workgroup> wg_base_cohort_position_mass_x: array<f32, 32>;
+var<workgroup> wg_base_cohort_position_mass_y: array<f32, 32>;
+var<workgroup> wg_base_cohort_position_mass_z: array<f32, 32>;
+var<workgroup> wg_base_cohort_min_x: array<f32, 32>;
+var<workgroup> wg_base_cohort_min_y: array<f32, 32>;
+var<workgroup> wg_base_cohort_min_z: array<f32, 32>;
+var<workgroup> wg_base_cohort_max_x: array<f32, 32>;
+var<workgroup> wg_base_cohort_max_y: array<f32, 32>;
+var<workgroup> wg_base_cohort_max_z: array<f32, 32>;
+var<workgroup> wg_base_cohort_max_speed: array<f32, 32>;
+var<workgroup> wg_base_cohort_status: array<f32, 32>;
+var<workgroup> wg_drop_cohort_mass: array<f32, 32>;
+var<workgroup> wg_drop_cohort_position_mass_x: array<f32, 32>;
+var<workgroup> wg_drop_cohort_position_mass_y: array<f32, 32>;
+var<workgroup> wg_drop_cohort_position_mass_z: array<f32, 32>;
+var<workgroup> wg_drop_cohort_min_x: array<f32, 32>;
+var<workgroup> wg_drop_cohort_min_y: array<f32, 32>;
+var<workgroup> wg_drop_cohort_min_z: array<f32, 32>;
+var<workgroup> wg_drop_cohort_max_x: array<f32, 32>;
+var<workgroup> wg_drop_cohort_max_y: array<f32, 32>;
+var<workgroup> wg_drop_cohort_max_z: array<f32, 32>;
+var<workgroup> wg_drop_cohort_max_speed: array<f32, 32>;
+var<workgroup> wg_drop_cohort_status: array<f32, 32>;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(32)
 fn main(
   @builtin(global_invocation_id) global_id: vec3<u32>,
   @builtin(local_invocation_id) local_id: vec3<u32>,
@@ -4668,6 +5210,26 @@ fn main(
   var thermal_problem_count = 0.0;
   var finite_temperature_count = 0.0;
   var phase_mass_total = 0.0;
+  var source_position_mass = vec3<f32>(0.0);
+  var next_position_mass = vec3<f32>(0.0);
+  var source_min = vec3<f32>(3.4028234663852886e38);
+  var source_max = vec3<f32>(-3.4028234663852886e38);
+  var next_min = vec3<f32>(3.4028234663852886e38);
+  var next_max = vec3<f32>(-3.4028234663852886e38);
+  var source_bounds_status = 0.0;
+  var next_bounds_status = 0.0;
+  var base_cohort_mass = 0.0;
+  var base_cohort_position_mass = vec3<f32>(0.0);
+  var base_cohort_min = vec3<f32>(3.4028234663852886e38);
+  var base_cohort_max = vec3<f32>(-3.4028234663852886e38);
+  var base_cohort_max_speed2 = 0.0;
+  var base_cohort_status = 0.0;
+  var drop_cohort_mass = 0.0;
+  var drop_cohort_position_mass = vec3<f32>(0.0);
+  var drop_cohort_min = vec3<f32>(3.4028234663852886e38);
+  var drop_cohort_max = vec3<f32>(-3.4028234663852886e38);
+  var drop_cohort_max_speed2 = 0.0;
+  var drop_cohort_status = 0.0;
 
   if (index < params.particle_count) {
     let state_base = index * 2u;
@@ -4685,9 +5247,40 @@ fn main(
     next_mass = next_mass + next_pos_mass.w;
     source_momentum = source_momentum + source_pos_mass.w * source_vel_u.xyz;
     next_momentum = next_momentum + next_pos_mass.w * next_vel_u.xyz;
+    if (source_pos_mass.w > 0.0) {
+      source_position_mass = source_position_mass + source_pos_mass.w * source_pos_mass.xyz;
+      source_min = min(source_min, source_pos_mass.xyz);
+      source_max = max(source_max, source_pos_mass.xyz);
+      source_bounds_status = 1.0;
+    }
+    if (next_pos_mass.w > 0.0) {
+      next_position_mass = next_position_mass + next_pos_mass.w * next_pos_mass.xyz;
+      next_min = min(next_min, next_pos_mass.xyz);
+      next_max = max(next_max, next_pos_mass.xyz);
+      next_bounds_status = 1.0;
+    }
     max_speed2 = max(max_speed2, dot(next_vel_u.xyz, next_vel_u.xyz));
     let displacement = next_pos_mass.xyz - source_pos_mass.xyz;
     max_displacement2 = max(max_displacement2, dot(displacement, displacement));
+    let particle_speed2 = dot(next_vel_u.xyz, next_vel_u.xyz);
+    let in_base_cohort = index >= params.base_start_index && index < params.base_end_index;
+    let in_drop_cohort = index >= params.drop_start_index && index < params.drop_end_index;
+    if (in_base_cohort && next_pos_mass.w > 0.0) {
+      base_cohort_mass = base_cohort_mass + next_pos_mass.w;
+      base_cohort_position_mass = base_cohort_position_mass + next_pos_mass.w * next_pos_mass.xyz;
+      base_cohort_min = min(base_cohort_min, next_pos_mass.xyz);
+      base_cohort_max = max(base_cohort_max, next_pos_mass.xyz);
+      base_cohort_max_speed2 = max(base_cohort_max_speed2, particle_speed2);
+      base_cohort_status = 1.0;
+    }
+    if (in_drop_cohort && next_pos_mass.w > 0.0) {
+      drop_cohort_mass = drop_cohort_mass + next_pos_mass.w;
+      drop_cohort_position_mass = drop_cohort_position_mass + next_pos_mass.w * next_pos_mass.xyz;
+      drop_cohort_min = min(drop_cohort_min, next_pos_mass.xyz);
+      drop_cohort_max = max(drop_cohort_max, next_pos_mass.xyz);
+      drop_cohort_max_speed2 = max(drop_cohort_max_speed2, particle_speed2);
+      drop_cohort_status = 1.0;
+    }
 
     let next_j = next_mls_mechanics[mechanics_base + 4u].z;
     min_volume_ratio_j = min(min_volume_ratio_j, next_j);
@@ -4741,9 +5334,53 @@ fn main(
   wg_thermal_problem_count[lane] = thermal_problem_count;
   wg_finite_temperature_count[lane] = finite_temperature_count;
   wg_phase_mass_total[lane] = phase_mass_total;
+  wg_source_position_mass_x[lane] = source_position_mass.x;
+  wg_source_position_mass_y[lane] = source_position_mass.y;
+  wg_source_position_mass_z[lane] = source_position_mass.z;
+  wg_next_position_mass_x[lane] = next_position_mass.x;
+  wg_next_position_mass_y[lane] = next_position_mass.y;
+  wg_next_position_mass_z[lane] = next_position_mass.z;
+  wg_source_min_x[lane] = source_min.x;
+  wg_source_min_y[lane] = source_min.y;
+  wg_source_min_z[lane] = source_min.z;
+  wg_source_max_x[lane] = source_max.x;
+  wg_source_max_y[lane] = source_max.y;
+  wg_source_max_z[lane] = source_max.z;
+  wg_next_min_x[lane] = next_min.x;
+  wg_next_min_y[lane] = next_min.y;
+  wg_next_min_z[lane] = next_min.z;
+  wg_next_max_x[lane] = next_max.x;
+  wg_next_max_y[lane] = next_max.y;
+  wg_next_max_z[lane] = next_max.z;
+  wg_source_bounds_status[lane] = source_bounds_status;
+  wg_next_bounds_status[lane] = next_bounds_status;
+  wg_base_cohort_mass[lane] = base_cohort_mass;
+  wg_base_cohort_position_mass_x[lane] = base_cohort_position_mass.x;
+  wg_base_cohort_position_mass_y[lane] = base_cohort_position_mass.y;
+  wg_base_cohort_position_mass_z[lane] = base_cohort_position_mass.z;
+  wg_base_cohort_min_x[lane] = base_cohort_min.x;
+  wg_base_cohort_min_y[lane] = base_cohort_min.y;
+  wg_base_cohort_min_z[lane] = base_cohort_min.z;
+  wg_base_cohort_max_x[lane] = base_cohort_max.x;
+  wg_base_cohort_max_y[lane] = base_cohort_max.y;
+  wg_base_cohort_max_z[lane] = base_cohort_max.z;
+  wg_base_cohort_max_speed[lane] = sqrt(base_cohort_max_speed2);
+  wg_base_cohort_status[lane] = base_cohort_status;
+  wg_drop_cohort_mass[lane] = drop_cohort_mass;
+  wg_drop_cohort_position_mass_x[lane] = drop_cohort_position_mass.x;
+  wg_drop_cohort_position_mass_y[lane] = drop_cohort_position_mass.y;
+  wg_drop_cohort_position_mass_z[lane] = drop_cohort_position_mass.z;
+  wg_drop_cohort_min_x[lane] = drop_cohort_min.x;
+  wg_drop_cohort_min_y[lane] = drop_cohort_min.y;
+  wg_drop_cohort_min_z[lane] = drop_cohort_min.z;
+  wg_drop_cohort_max_x[lane] = drop_cohort_max.x;
+  wg_drop_cohort_max_y[lane] = drop_cohort_max.y;
+  wg_drop_cohort_max_z[lane] = drop_cohort_max.z;
+  wg_drop_cohort_max_speed[lane] = sqrt(drop_cohort_max_speed2);
+  wg_drop_cohort_status[lane] = drop_cohort_status;
   workgroupBarrier();
 
-  var stride = 32u;
+  var stride = 16u;
   loop {
     if (lane < stride) {
       let other = lane + stride;
@@ -4771,6 +5408,50 @@ fn main(
       wg_thermal_problem_count[lane] = wg_thermal_problem_count[lane] + wg_thermal_problem_count[other];
       wg_finite_temperature_count[lane] = wg_finite_temperature_count[lane] + wg_finite_temperature_count[other];
       wg_phase_mass_total[lane] = wg_phase_mass_total[lane] + wg_phase_mass_total[other];
+      wg_source_position_mass_x[lane] = wg_source_position_mass_x[lane] + wg_source_position_mass_x[other];
+      wg_source_position_mass_y[lane] = wg_source_position_mass_y[lane] + wg_source_position_mass_y[other];
+      wg_source_position_mass_z[lane] = wg_source_position_mass_z[lane] + wg_source_position_mass_z[other];
+      wg_next_position_mass_x[lane] = wg_next_position_mass_x[lane] + wg_next_position_mass_x[other];
+      wg_next_position_mass_y[lane] = wg_next_position_mass_y[lane] + wg_next_position_mass_y[other];
+      wg_next_position_mass_z[lane] = wg_next_position_mass_z[lane] + wg_next_position_mass_z[other];
+      wg_source_min_x[lane] = min(wg_source_min_x[lane], wg_source_min_x[other]);
+      wg_source_min_y[lane] = min(wg_source_min_y[lane], wg_source_min_y[other]);
+      wg_source_min_z[lane] = min(wg_source_min_z[lane], wg_source_min_z[other]);
+      wg_source_max_x[lane] = max(wg_source_max_x[lane], wg_source_max_x[other]);
+      wg_source_max_y[lane] = max(wg_source_max_y[lane], wg_source_max_y[other]);
+      wg_source_max_z[lane] = max(wg_source_max_z[lane], wg_source_max_z[other]);
+      wg_next_min_x[lane] = min(wg_next_min_x[lane], wg_next_min_x[other]);
+      wg_next_min_y[lane] = min(wg_next_min_y[lane], wg_next_min_y[other]);
+      wg_next_min_z[lane] = min(wg_next_min_z[lane], wg_next_min_z[other]);
+      wg_next_max_x[lane] = max(wg_next_max_x[lane], wg_next_max_x[other]);
+      wg_next_max_y[lane] = max(wg_next_max_y[lane], wg_next_max_y[other]);
+      wg_next_max_z[lane] = max(wg_next_max_z[lane], wg_next_max_z[other]);
+      wg_source_bounds_status[lane] = max(wg_source_bounds_status[lane], wg_source_bounds_status[other]);
+      wg_next_bounds_status[lane] = max(wg_next_bounds_status[lane], wg_next_bounds_status[other]);
+      wg_base_cohort_mass[lane] = wg_base_cohort_mass[lane] + wg_base_cohort_mass[other];
+      wg_base_cohort_position_mass_x[lane] = wg_base_cohort_position_mass_x[lane] + wg_base_cohort_position_mass_x[other];
+      wg_base_cohort_position_mass_y[lane] = wg_base_cohort_position_mass_y[lane] + wg_base_cohort_position_mass_y[other];
+      wg_base_cohort_position_mass_z[lane] = wg_base_cohort_position_mass_z[lane] + wg_base_cohort_position_mass_z[other];
+      wg_base_cohort_min_x[lane] = min(wg_base_cohort_min_x[lane], wg_base_cohort_min_x[other]);
+      wg_base_cohort_min_y[lane] = min(wg_base_cohort_min_y[lane], wg_base_cohort_min_y[other]);
+      wg_base_cohort_min_z[lane] = min(wg_base_cohort_min_z[lane], wg_base_cohort_min_z[other]);
+      wg_base_cohort_max_x[lane] = max(wg_base_cohort_max_x[lane], wg_base_cohort_max_x[other]);
+      wg_base_cohort_max_y[lane] = max(wg_base_cohort_max_y[lane], wg_base_cohort_max_y[other]);
+      wg_base_cohort_max_z[lane] = max(wg_base_cohort_max_z[lane], wg_base_cohort_max_z[other]);
+      wg_base_cohort_max_speed[lane] = max(wg_base_cohort_max_speed[lane], wg_base_cohort_max_speed[other]);
+      wg_base_cohort_status[lane] = max(wg_base_cohort_status[lane], wg_base_cohort_status[other]);
+      wg_drop_cohort_mass[lane] = wg_drop_cohort_mass[lane] + wg_drop_cohort_mass[other];
+      wg_drop_cohort_position_mass_x[lane] = wg_drop_cohort_position_mass_x[lane] + wg_drop_cohort_position_mass_x[other];
+      wg_drop_cohort_position_mass_y[lane] = wg_drop_cohort_position_mass_y[lane] + wg_drop_cohort_position_mass_y[other];
+      wg_drop_cohort_position_mass_z[lane] = wg_drop_cohort_position_mass_z[lane] + wg_drop_cohort_position_mass_z[other];
+      wg_drop_cohort_min_x[lane] = min(wg_drop_cohort_min_x[lane], wg_drop_cohort_min_x[other]);
+      wg_drop_cohort_min_y[lane] = min(wg_drop_cohort_min_y[lane], wg_drop_cohort_min_y[other]);
+      wg_drop_cohort_min_z[lane] = min(wg_drop_cohort_min_z[lane], wg_drop_cohort_min_z[other]);
+      wg_drop_cohort_max_x[lane] = max(wg_drop_cohort_max_x[lane], wg_drop_cohort_max_x[other]);
+      wg_drop_cohort_max_y[lane] = max(wg_drop_cohort_max_y[lane], wg_drop_cohort_max_y[other]);
+      wg_drop_cohort_max_z[lane] = max(wg_drop_cohort_max_z[lane], wg_drop_cohort_max_z[other]);
+      wg_drop_cohort_max_speed[lane] = max(wg_drop_cohort_max_speed[lane], wg_drop_cohort_max_speed[other]);
+      wg_drop_cohort_status[lane] = max(wg_drop_cohort_status[lane], wg_drop_cohort_status[other]);
     }
     workgroupBarrier();
     if (stride == 1u) {
@@ -4780,7 +5461,7 @@ fn main(
   }
 
   if (lane == 0u) {
-    let partial_base = workgroup_id.x * 8u;
+    let partial_base = workgroup_id.x * 21u;
     let momentum_delta = vec3<f32>(
       wg_next_momentum_x[0u] - wg_source_momentum_x[0u],
       wg_next_momentum_y[0u] - wg_source_momentum_y[0u],
@@ -4834,6 +5515,84 @@ fn main(
       wg_phase_mass_total[0u],
       1.0
     );
+    partial_summaries[partial_base + 8u] = vec4<f32>(
+      wg_source_position_mass_x[0u],
+      wg_source_position_mass_y[0u],
+      wg_source_position_mass_z[0u],
+      wg_next_position_mass_x[0u]
+    );
+    partial_summaries[partial_base + 9u] = vec4<f32>(
+      wg_next_position_mass_y[0u],
+      wg_next_position_mass_z[0u],
+      wg_source_min_x[0u],
+      wg_source_min_y[0u]
+    );
+    partial_summaries[partial_base + 10u] = vec4<f32>(
+      wg_source_min_z[0u],
+      wg_source_max_x[0u],
+      wg_source_max_y[0u],
+      wg_source_max_z[0u]
+    );
+    partial_summaries[partial_base + 11u] = vec4<f32>(
+      wg_next_min_x[0u],
+      wg_next_min_y[0u],
+      wg_next_min_z[0u],
+      wg_next_max_x[0u]
+    );
+    partial_summaries[partial_base + 12u] = vec4<f32>(
+      wg_next_max_y[0u],
+      wg_next_max_z[0u],
+      wg_source_bounds_status[0u],
+      wg_next_bounds_status[0u]
+    );
+    partial_summaries[partial_base + 13u] = vec4<f32>(
+      wg_source_mass[0u],
+      wg_next_mass[0u],
+      0.0,
+      0.0
+    );
+    partial_summaries[partial_base + 14u] = vec4<f32>(
+      max(wg_base_cohort_status[0u], wg_drop_cohort_status[0u]),
+      f32(params.base_start_index),
+      f32(params.base_end_index),
+      f32(params.drop_start_index)
+    );
+    partial_summaries[partial_base + 15u] = vec4<f32>(
+      f32(params.drop_end_index),
+      wg_base_cohort_mass[0u],
+      wg_base_cohort_position_mass_x[0u],
+      wg_base_cohort_position_mass_y[0u]
+    );
+    partial_summaries[partial_base + 16u] = vec4<f32>(
+      wg_base_cohort_position_mass_z[0u],
+      wg_base_cohort_min_x[0u],
+      wg_base_cohort_min_y[0u],
+      wg_base_cohort_min_z[0u]
+    );
+    partial_summaries[partial_base + 17u] = vec4<f32>(
+      wg_base_cohort_max_x[0u],
+      wg_base_cohort_max_y[0u],
+      wg_base_cohort_max_z[0u],
+      wg_base_cohort_max_speed[0u]
+    );
+    partial_summaries[partial_base + 18u] = vec4<f32>(
+      wg_drop_cohort_mass[0u],
+      wg_drop_cohort_position_mass_x[0u],
+      wg_drop_cohort_position_mass_y[0u],
+      wg_drop_cohort_position_mass_z[0u]
+    );
+    partial_summaries[partial_base + 19u] = vec4<f32>(
+      wg_drop_cohort_min_x[0u],
+      wg_drop_cohort_min_y[0u],
+      wg_drop_cohort_min_z[0u],
+      wg_drop_cohort_max_x[0u]
+    );
+    partial_summaries[partial_base + 20u] = vec4<f32>(
+      wg_drop_cohort_max_y[0u],
+      wg_drop_cohort_max_z[0u],
+      wg_drop_cohort_max_speed[0u],
+      0.0
+    );
   }
 }
 `;
@@ -4843,6 +5602,10 @@ struct ResidentSummaryParams {
   particle_count: u32,
   grid_node_count: u32,
   partial_count: u32,
+  base_start_index: u32,
+  base_end_index: u32,
+  drop_start_index: u32,
+  drop_end_index: u32,
   pad_u1: u32,
 };
 
@@ -4876,9 +5639,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var thermal_problem_count = 0.0;
   var finite_temperature_count = 0.0;
   var phase_mass_total = 0.0;
+  var source_position_mass = vec3<f32>(0.0);
+  var next_position_mass = vec3<f32>(0.0);
+  var source_min = vec3<f32>(3.4028234663852886e38);
+  var source_max = vec3<f32>(-3.4028234663852886e38);
+  var next_min = vec3<f32>(3.4028234663852886e38);
+  var next_max = vec3<f32>(-3.4028234663852886e38);
+  var source_bounds_status = 0.0;
+  var next_bounds_status = 0.0;
+  var source_position_mass_total = 0.0;
+  var next_position_mass_total = 0.0;
+  var cohort_summary_status = 0.0;
+  var base_cohort_mass = 0.0;
+  var base_cohort_position_mass = vec3<f32>(0.0);
+  var base_cohort_min = vec3<f32>(3.4028234663852886e38);
+  var base_cohort_max = vec3<f32>(-3.4028234663852886e38);
+  var base_cohort_max_speed = 0.0;
+  var drop_cohort_mass = 0.0;
+  var drop_cohort_position_mass = vec3<f32>(0.0);
+  var drop_cohort_min = vec3<f32>(3.4028234663852886e38);
+  var drop_cohort_max = vec3<f32>(-3.4028234663852886e38);
+  var drop_cohort_max_speed = 0.0;
 
   for (var partial_index = 0u; partial_index < params.partial_count; partial_index = partial_index + 1u) {
-    let base = partial_index * 8u;
+    let base = partial_index * 21u;
     let row0 = partial_summaries[base];
     let row1 = partial_summaries[base + 1u];
     let row2 = partial_summaries[base + 2u];
@@ -4887,6 +5671,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let row5 = partial_summaries[base + 5u];
     let row6 = partial_summaries[base + 6u];
     let row7 = partial_summaries[base + 7u];
+    let row8 = partial_summaries[base + 8u];
+    let row9 = partial_summaries[base + 9u];
+    let row10 = partial_summaries[base + 10u];
+    let row11 = partial_summaries[base + 11u];
+    let row12 = partial_summaries[base + 12u];
+    let row13 = partial_summaries[base + 13u];
+    let row14 = partial_summaries[base + 14u];
+    let row15 = partial_summaries[base + 15u];
+    let row16 = partial_summaries[base + 16u];
+    let row17 = partial_summaries[base + 17u];
+    let row18 = partial_summaries[base + 18u];
+    let row19 = partial_summaries[base + 19u];
+    let row20 = partial_summaries[base + 20u];
     active_grid_nodes = active_grid_nodes + row0.z;
     source_mass = source_mass + row0.w;
     next_mass = next_mass + row1.x;
@@ -4907,6 +5704,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     thermal_problem_count = thermal_problem_count + row7.x;
     finite_temperature_count = finite_temperature_count + row7.y;
     phase_mass_total = phase_mass_total + row7.z;
+    source_position_mass = source_position_mass + vec3<f32>(row8.x, row8.y, row8.z);
+    next_position_mass = next_position_mass + vec3<f32>(row8.w, row9.x, row9.y);
+    source_min = min(source_min, vec3<f32>(row9.z, row9.w, row10.x));
+    source_max = max(source_max, vec3<f32>(row10.y, row10.z, row10.w));
+    next_min = min(next_min, vec3<f32>(row11.x, row11.y, row11.z));
+    next_max = max(next_max, vec3<f32>(row11.w, row12.x, row12.y));
+    source_bounds_status = max(source_bounds_status, row12.z);
+    next_bounds_status = max(next_bounds_status, row12.w);
+    source_position_mass_total = source_position_mass_total + row13.x;
+    next_position_mass_total = next_position_mass_total + row13.y;
+    cohort_summary_status = max(cohort_summary_status, row14.x);
+    base_cohort_mass = base_cohort_mass + row15.y;
+    base_cohort_position_mass = base_cohort_position_mass + vec3<f32>(row15.z, row15.w, row16.x);
+    base_cohort_min = min(base_cohort_min, vec3<f32>(row16.y, row16.z, row16.w));
+    base_cohort_max = max(base_cohort_max, vec3<f32>(row17.x, row17.y, row17.z));
+    base_cohort_max_speed = max(base_cohort_max_speed, row17.w);
+    drop_cohort_mass = drop_cohort_mass + row18.x;
+    drop_cohort_position_mass = drop_cohort_position_mass + vec3<f32>(row18.y, row18.z, row18.w);
+    drop_cohort_min = min(drop_cohort_min, vec3<f32>(row19.x, row19.y, row19.z));
+    drop_cohort_max = max(drop_cohort_max, vec3<f32>(row19.w, row20.x, row20.y));
+    drop_cohort_max_speed = max(drop_cohort_max_speed, row20.z);
   }
 
   if (params.particle_count == 0u) {
@@ -4920,6 +5738,36 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var temperature_mass_weighted_mean_k = 0.0;
   if (phase_mass_total > 0.0) {
     temperature_mass_weighted_mean_k = temperature_mass_sum / phase_mass_total;
+  }
+  var source_center_of_mass = vec3<f32>(0.0);
+  if (source_position_mass_total > 0.0) {
+    source_center_of_mass = source_position_mass / source_position_mass_total;
+  }
+  var next_center_of_mass = vec3<f32>(0.0);
+  if (next_position_mass_total > 0.0) {
+    next_center_of_mass = next_position_mass / next_position_mass_total;
+  }
+  if (source_bounds_status == 0.0) {
+    source_min = vec3<f32>(0.0);
+    source_max = vec3<f32>(0.0);
+  }
+  if (next_bounds_status == 0.0) {
+    next_min = vec3<f32>(0.0);
+    next_max = vec3<f32>(0.0);
+  }
+  var base_cohort_center = vec3<f32>(0.0);
+  if (base_cohort_mass > 0.0) {
+    base_cohort_center = base_cohort_position_mass / base_cohort_mass;
+  } else {
+    base_cohort_min = vec3<f32>(0.0);
+    base_cohort_max = vec3<f32>(0.0);
+  }
+  var drop_cohort_center = vec3<f32>(0.0);
+  if (drop_cohort_mass > 0.0) {
+    drop_cohort_center = drop_cohort_position_mass / drop_cohort_mass;
+  } else {
+    drop_cohort_min = vec3<f32>(0.0);
+    drop_cohort_max = vec3<f32>(0.0);
   }
 
   let momentum_delta = next_momentum - source_momentum;
@@ -4970,6 +5818,84 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     finite_temperature_count,
     phase_mass_total,
     1.0
+  );
+  resident_summary[8u] = vec4<f32>(
+    source_center_of_mass.x,
+    source_center_of_mass.y,
+    source_center_of_mass.z,
+    next_center_of_mass.x
+  );
+  resident_summary[9u] = vec4<f32>(
+    next_center_of_mass.y,
+    next_center_of_mass.z,
+    source_min.x,
+    source_min.y
+  );
+  resident_summary[10u] = vec4<f32>(
+    source_min.z,
+    source_max.x,
+    source_max.y,
+    source_max.z
+  );
+  resident_summary[11u] = vec4<f32>(
+    next_min.x,
+    next_min.y,
+    next_min.z,
+    next_max.x
+  );
+  resident_summary[12u] = vec4<f32>(
+    next_max.y,
+    next_max.z,
+    source_bounds_status,
+    next_bounds_status
+  );
+  resident_summary[13u] = vec4<f32>(
+    source_position_mass_total,
+    next_position_mass_total,
+    0.0,
+    0.0
+  );
+  resident_summary[14u] = vec4<f32>(
+    cohort_summary_status,
+    f32(params.base_start_index),
+    f32(params.base_end_index),
+    f32(params.drop_start_index)
+  );
+  resident_summary[15u] = vec4<f32>(
+    f32(params.drop_end_index),
+    base_cohort_mass,
+    base_cohort_center.x,
+    base_cohort_center.y
+  );
+  resident_summary[16u] = vec4<f32>(
+    base_cohort_center.z,
+    base_cohort_min.x,
+    base_cohort_min.y,
+    base_cohort_min.z
+  );
+  resident_summary[17u] = vec4<f32>(
+    base_cohort_max.x,
+    base_cohort_max.y,
+    base_cohort_max.z,
+    base_cohort_max_speed
+  );
+  resident_summary[18u] = vec4<f32>(
+    drop_cohort_mass,
+    drop_cohort_center.x,
+    drop_cohort_center.y,
+    drop_cohort_center.z
+  );
+  resident_summary[19u] = vec4<f32>(
+    drop_cohort_min.x,
+    drop_cohort_min.y,
+    drop_cohort_min.z,
+    drop_cohort_max.x
+  );
+  resident_summary[20u] = vec4<f32>(
+    drop_cohort_max.y,
+    drop_cohort_max.z,
+    drop_cohort_max_speed,
+    0.0
   );
 }
 `;

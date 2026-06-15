@@ -76,6 +76,9 @@ function corotatedCauchyStress(F, mu, lambda) {
   ]);
 }
 const IDENTITY3 = () => new Float64Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+const CONDENSED_MIN_VOLUME_RATIO_J = 0.95;
+const CONDENSED_MAX_VOLUME_RATIO_J = 1.049;
+const CONDENSED_MAX_VOLUME_RATIO_CHANGE_PER_STEP = 1.5;
 
 // Quadratic B-spline weights (3 nodes/axis) and their offset positions, given fx = x/dx − base.
 function quadraticWeights(fx) {
@@ -83,6 +86,52 @@ function quadraticWeights(fx) {
   const b = fx - 1.0;
   const c = fx - 0.5;
   return [0.5 * a * a, 0.75 - b * b, 0.5 * c * c];
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function isotropicFForJ(volumeRatioJ) {
+  const s = Math.cbrt(Math.max(Number(volumeRatioJ) || 1, 1e-12));
+  return new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]);
+}
+
+function condensedTargetVolumeRatioJ(rawNextJ, previousJ) {
+  const previousBounded = clamp(
+    Number.isFinite(previousJ) ? previousJ : 1,
+    CONDENSED_MIN_VOLUME_RATIO_J,
+    CONDENSED_MAX_VOLUME_RATIO_J
+  );
+  const lower = Math.max(
+    CONDENSED_MIN_VOLUME_RATIO_J,
+    previousBounded / CONDENSED_MAX_VOLUME_RATIO_CHANGE_PER_STEP
+  );
+  const upper = Math.min(
+    CONDENSED_MAX_VOLUME_RATIO_J,
+    previousBounded * CONDENSED_MAX_VOLUME_RATIO_CHANGE_PER_STEP
+  );
+  return clamp(
+    Number.isFinite(rawNextJ) ? rawNextJ : previousBounded,
+    lower,
+    upper
+  );
+}
+
+function addNewtonianViscousStress(sigma, C, dynamicViscosityPaS) {
+  const mu = Math.max(Number(dynamicViscosityPaS) || 0, 0);
+  if (!(mu > 0)) return sigma;
+  const divThird = (C[0] + C[4] + C[8]) / 3;
+  sigma[0] += 2 * mu * (C[0] - divThird);
+  sigma[4] += 2 * mu * (C[4] - divThird);
+  sigma[8] += 2 * mu * (C[8] - divThird);
+  const s01 = mu * (C[1] + C[3]);
+  const s02 = mu * (C[2] + C[6]);
+  const s12 = mu * (C[5] + C[7]);
+  sigma[1] += s01; sigma[3] += s01;
+  sigma[2] += s02; sigma[6] += s02;
+  sigma[5] += s12; sigma[7] += s12;
+  return sigma;
 }
 
 /**
@@ -102,6 +151,11 @@ export function createMlsMpmCarrier({
   // used (the material holds its shape / resists shear); otherwise the weakly-compressible fluid
   // pressure is used. Default: everything is a fluid (backwards-compatible).
   constitutiveOf = () => ({ solid: false }),
+  trackFluidVolume = true,
+  liquidVelocityDiffusionAlpha = 0,
+  liquidVelocityDiffusionRadiusM = null,
+  liquidWallDampingAlpha = 0,
+  liquidWallDampingDistanceM = null,
   cflFactor = 0.6 // max grid-node displacement per step, as a fraction of a cell (stability guard)
 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
@@ -115,6 +169,14 @@ export function createMlsMpmCarrier({
   const gny = Math.round(dims[1] / dx) + 5;
   const gnz = Math.round(dims[2] / dx) + 5;
   const ng = gnx * gny * gnz;
+  const liquidDiffusionAlpha = clamp(Number(liquidVelocityDiffusionAlpha) || 0, 0, 1);
+  const liquidDiffusionRadius = Math.max(
+    Number(liquidVelocityDiffusionRadiusM) || (2 * dx),
+    1e-9
+  );
+  const liquidDiffusionRadius2 = liquidDiffusionRadius * liquidDiffusionRadius;
+  const wallDampingAlpha = clamp(Number(liquidWallDampingAlpha) || 0, 0, 1);
+  const wallDampingDistance = Math.max(Number(liquidWallDampingDistanceM) || (1.5 * dx), 1e-9);
   const gridMass = new Float64Array(ng);
   const gridMom = new Float64Array(ng * 3); // momentum, then velocity in place
   const activeNodeEpochs = new Uint32Array(ng);
@@ -148,6 +210,73 @@ export function createMlsMpmCarrier({
     }
   }
 
+  function particleWallClearanceM(p) {
+    const volume = Number(p.mpmVolume0);
+    if (!(volume > 0)) return 0;
+    const minDim = Math.min(...dims.filter((value) => value > 0));
+    const clearance = 0.5 * Math.cbrt(volume);
+    return Number.isFinite(minDim) && minDim > 0
+      ? Math.min(clearance, 0.49 * minDim)
+      : clearance;
+  }
+
+  function applyLiquidVelocityDiffusion(particles) {
+    if (!(liquidDiffusionAlpha > 0) || particles.length < 2) return;
+    const dv = Array.from({ length: particles.length }, () => [0, 0, 0]);
+    for (let i = 0; i < particles.length - 1; i += 1) {
+      const a = particles[i];
+      if (a.mpmSolid || a.mpmCondensed === false) continue;
+      const ma = Number(a.massKg);
+      if (!(ma > 0)) continue;
+      for (let j = i + 1; j < particles.length; j += 1) {
+        const b = particles[j];
+        if (b.mpmSolid || b.mpmCondensed === false || a.material !== b.material) continue;
+        const mb = Number(b.massKg);
+        if (!(mb > 0)) continue;
+        const dxp = b.x[0] - a.x[0];
+        const dyp = b.x[1] - a.x[1];
+        const dzp = b.x[2] - a.x[2];
+        const r2 = dxp * dxp + dyp * dyp + dzp * dzp;
+        if (!(r2 > 0) || r2 > liquidDiffusionRadius2) continue;
+        const r = Math.sqrt(r2);
+        const q = 1 - (r / liquidDiffusionRadius);
+        const mix = liquidDiffusionAlpha * q * q;
+        const invMass = 1 / (ma + mb);
+        const wa = mb * invMass;
+        const wb = ma * invMass;
+        const relx = b.v[0] - a.v[0];
+        const rely = b.v[1] - a.v[1];
+        const relz = b.v[2] - a.v[2];
+        dv[i][0] += mix * wa * relx;
+        dv[i][1] += mix * wa * rely;
+        dv[i][2] += mix * wa * relz;
+        dv[j][0] -= mix * wb * relx;
+        dv[j][1] -= mix * wb * rely;
+        dv[j][2] -= mix * wb * relz;
+      }
+    }
+    for (let i = 0; i < particles.length; i += 1) {
+      particles[i].v[0] += dv[i][0];
+      particles[i].v[1] += dv[i][1];
+      particles[i].v[2] += dv[i][2];
+    }
+  }
+
+  function applyLiquidWallDamping(particles) {
+    if (!(wallDampingAlpha > 0)) return;
+    for (const p of particles) {
+      if (p.mpmSolid || p.mpmCondensed === false) continue;
+      const clearance = particleWallClearanceM(p);
+      const floorDistance = Math.max(0, p.x[1] - clearance);
+      if (floorDistance >= wallDampingDistance) continue;
+      const q = 1 - (floorDistance / wallDampingDistance);
+      const keep = clamp(1 - wallDampingAlpha * q * q, 0, 1);
+      p.v[0] *= keep;
+      p.v[1] *= keep;
+      p.v[2] *= keep;
+    }
+  }
+
   function step(state) {
     const particles = state.particles;
     const n = particles.length;
@@ -162,18 +291,21 @@ export function createMlsMpmCarrier({
       const density = p.massKg / volume; // = rho0 / J
       const con = constitutiveOf(p);
       p.mpmSolid = con.solid; // cache the phase decision for G2P (avoids a 2nd phase lookup)
+      p.mpmCondensed = con.condensed !== false;
       // Cauchy stress σ: corotated elastic for a solid (resists shear → holds shape), otherwise the
       // weakly-compressible fluid pressure σ = −p I.
+      const C = p.mpmC;
       let sigma;
       if (con.solid) {
         sigma = corotatedCauchyStress(p.mpmF, con.shearModulusPa, con.lambdaPa);
       } else {
-        const pressure = eos({ density, specificInternalEnergyJPerKg: p.specificInternalEnergyJPerKg, particle: p }).pressurePa;
+        const pressure = eos({ density, specificInternalEnergyJPerKg: p.specificInternalEnergyJPerKg, particle: p }).pressurePa
+          + Math.max(Number(con.hydrostaticPressurePa ?? p.hydrostaticPressurePa) || 0, 0);
         sigma = new Float64Array([-pressure, 0, 0, 0, -pressure, 0, 0, 0, -pressure]);
+        addNewtonianViscousStress(sigma, C, con.dynamicViscosityPaS);
       }
       // Affine matrix: APIC (m C) + MLS internal-force term  −dt·V·(4/dx²)·σ  (∇w = (4/dx²)(x_i−x_p) w).
       const sScale = -dt * volume * 4 * invDx * invDx;
-      const C = p.mpmC;
       const aff = new Float64Array(9);
       for (let a = 0; a < 9; a += 1) aff[a] = p.massKg * C[a] + sScale * sigma[a];
 
@@ -223,9 +355,9 @@ export function createMlsMpmCarrier({
       // it a spike in velocity jumps particles across grid cells and the sim blows up.
       const sp2 = vx * vx + vy * vy + vz * vz;
       if (sp2 > vMax2) { const s = vMax / Math.sqrt(sp2); vx *= s; vy *= s; vz *= s; }
-      // Separating wall BC: zero the into-wall normal component (no reflection → no energy
-      // injected at the boundary, which the reflecting BC could do). Material piles against the
-      // sealed wall instead of bouncing unstably.
+      // No-slip floor BC: the support wall is stationary, which removes the wall-contact kinetic
+      // energy that a slip-only floor leaves as long-lived liquid slosh. Other sealed walls retain the
+      // normal-only clamp so free-falling material near the top/side boundary is not damped early.
       const i = Math.floor(idx / plane);
       const rem = idx - i * plane;
       const j = Math.floor(rem / gnz);
@@ -233,8 +365,11 @@ export function createMlsMpmCarrier({
       const wx = (i - shift) * dx;
       const wy = (j - shift) * dx;
       const wz = (k - shift) * dx;
+      if (wy < dx) {
+        vx = 0; vy = 0; vz = 0;
+      }
       if ((wx < dx && vx < 0) || (wx > dims[0] - dx && vx > 0)) vx = 0;
-      if ((wy < dx && vy < 0) || (wy > dims[1] - dx && vy > 0)) vy = 0;
+      if (wy > dims[1] - dx && vy > 0) vy = 0;
       if ((wz < dx && vz < 0) || (wz > dims[2] - dx && vz > 0)) vz = 0;
       gridMom[idx * 3] = vx;
       gridMom[idx * 3 + 1] = vy;
@@ -255,6 +390,7 @@ export function createMlsMpmCarrier({
       const wz = quadraticWeights(fz);
       let nvx = 0; let nvy = 0; let nvz = 0;
       const C = new Float64Array(9);
+      let sampledWeight = 0;
       for (let a = 0; a < 3; a += 1) {
         if (!inRangeX(baseX + a)) continue;
         for (let b = 0; b < 3; b += 1) {
@@ -263,6 +399,8 @@ export function createMlsMpmCarrier({
             if (!inRangeZ(baseZ + c)) continue;
             const w = wx[a] * wy[b] * wz[c];
             const idx = nodeIndex(baseX + a, baseY + b, baseZ + c);
+            if (!(gridMass[idx] > 0)) continue;
+            sampledWeight += w;
             const gvx = gridMom[idx * 3];
             const gvy = gridMom[idx * 3 + 1];
             const gvz = gridMom[idx * 3 + 2];
@@ -277,29 +415,64 @@ export function createMlsMpmCarrier({
           }
         }
       }
+      if (sampledWeight > 1e-8 && sampledWeight < 1 - 1e-6) {
+        const normalization = 1 / sampledWeight;
+        nvx *= normalization;
+        nvy *= normalization;
+        nvz *= normalization;
+        for (let a = 0; a < 9; a += 1) C[a] *= normalization;
+      }
       p.v[0] = nvx; p.v[1] = nvy; p.v[2] = nvz;
-      p.mpmC = C;
       p.x[0] += dt * nvx; p.x[1] += dt * nvy; p.x[2] += dt * nvz;
       // Deformation-gradient update: F <- (I + dt C) F.
-      const gradX = mat3mul(new Float64Array([1 + dt * C[0], dt * C[1], dt * C[2], dt * C[3], 1 + dt * C[4], dt * C[5], dt * C[6], dt * C[7], 1 + dt * C[8]]), p.mpmF);
       const solid = p.mpmSolid;
-      if (solid) {
-        p.mpmF = gradX;
+      const condensed = p.mpmCondensed !== false;
+      if (!solid && !trackFluidVolume) {
+        C.fill(0);
       } else {
-        // Fluids/gas keep no shear memory: collapse F to the volume-only part F = J^{1/3} I, so a
-        // melted solid flows (and a re-frozen one starts fresh). Also lets steam expand (J grows).
+        const gradX = mat3mul(new Float64Array([1 + dt * C[0], dt * C[1], dt * C[2], dt * C[3], 1 + dt * C[4], dt * C[5], dt * C[6], dt * C[7], 1 + dt * C[8]]), p.mpmF);
         let J = mat3det(gradX);
-        if (J < 0.05) J = 0.05;
-        const s = Math.cbrt(J);
-        p.mpmF = new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]);
+        if (solid) {
+          if (condensed) {
+            const targetJ = condensedTargetVolumeRatioJ(J, p.mpmJ);
+            if (J > 1e-12) {
+              const scale = Math.cbrt(targetJ / J);
+              for (let a = 0; a < 9; a += 1) gradX[a] *= scale;
+              p.mpmF = gradX;
+            } else {
+              p.mpmF = isotropicFForJ(targetJ);
+            }
+          } else {
+            p.mpmF = gradX;
+          }
+        } else {
+          // Fluids/gas keep no shear memory: collapse F to the volume-only part F = J^{1/3} I, so a
+          // melted solid flows (and a re-frozen one starts fresh). Also lets steam expand (J grows).
+          if (condensed) J = condensedTargetVolumeRatioJ(J, p.mpmJ);
+          if (J < 0.05) J = 0.05;
+          p.mpmF = isotropicFForJ(J);
+        }
       }
+      p.mpmC = C;
       p.mpmJ = mat3det(p.mpmF);
       if (p.mpmJ < 0.1) { const s = Math.cbrt(0.1); p.mpmF = new Float64Array([s, 0, 0, 0, s, 0, 0, 0, s]); p.mpmJ = 0.1; }
       // Keep particles inside the box, and kill the into-wall velocity component when clamping so a
       // particle pinned at a wall can't keep accumulating inward momentum (an instability source).
+      const clearance = particleWallClearanceM(p);
       for (let d = 0; d < 3; d += 1) {
-        if (p.x[d] < 0) { p.x[d] = 0; if (p.v[d] < 0) p.v[d] = 0; }
-        else if (p.x[d] > dims[d]) { p.x[d] = dims[d]; if (p.v[d] > 0) p.v[d] = 0; }
+        const upper = Math.max(clearance, dims[d] - clearance);
+        if (p.x[d] < clearance) { p.x[d] = clearance; if (p.v[d] < 0) p.v[d] = 0; }
+        else if (p.x[d] > upper) { p.x[d] = upper; if (p.v[d] > 0) p.v[d] = 0; }
+      }
+    }
+    applyLiquidWallDamping(particles);
+    applyLiquidVelocityDiffusion(particles);
+    for (const p of particles) {
+      const clearance = particleWallClearanceM(p);
+      for (let d = 0; d < 3; d += 1) {
+        const upper = Math.max(clearance, dims[d] - clearance);
+        if (p.x[d] <= clearance && p.v[d] < 0) p.v[d] = 0;
+        else if (p.x[d] >= upper && p.v[d] > 0) p.v[d] = 0;
       }
     }
     state.step = (state.step ?? 0) + 1;
@@ -317,5 +490,15 @@ export function createMlsMpmCarrier({
     return { state, activeGridNodes };
   }
 
-  return { backend: 'mls-mpm', integrator: 'apic', dt, gridNodesPerAxis: [gnx, gny, gnz], step };
+  return {
+    backend: 'mls-mpm',
+    integrator: 'apic',
+    dt,
+    gridNodesPerAxis: [gnx, gny, gnz],
+    liquidVelocityDiffusionAlpha: liquidDiffusionAlpha,
+    liquidVelocityDiffusionRadiusM: liquidDiffusionRadius,
+    liquidWallDampingAlpha: wallDampingAlpha,
+    liquidWallDampingDistanceM: wallDampingDistance,
+    step
+  };
 }

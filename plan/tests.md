@@ -1,5 +1,3580 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-14 Live Same-Device Auto-Publication + Solid H2O + Law-Isolation Visual Gates
+
+ULG now has a concrete NodeKernel-compatible refresh executor for admitted
+remote task-graph seeds. The executor rebuilds SPH state, SPH thermo, and
+MLS-MPM mechanics WebGPU buffers locally, stores the real GPU handles only in
+StateManager hot storage, and returns local retained-buffer refs to
+`NodeKernel.refreshRemoteTaskGraphHotBuffersFromSeed()`. Remote GPU refs stay
+metadata-only and are not retained as local leases. The browser resident
+authority host now exposes `refreshRemoteSeedHotBuffers()` as the host-level
+call that commits an admitted remote seed and runs this local refresh path.
+It also exposes `submitTaskGraphWithRemoteSeedHotBufferRefresh()`, an opt-in
+NodeKernel graph submit wrapper that auto-refreshes only after a remote cache
+artifact is admitted/imported. The mounted resident scheduler now has a
+default-off prelude that can call that wrapper when a caller explicitly
+supplies a remote resident task graph or graph factory. The next slice adds a
+default SPH/MLS-MPM remote seed graph builder and PeerCompute now preserves
+graph-level `stateSeedPayload` in task-graph results/cache artifacts, so a
+real responder `ComputeManager` can feed ULG's local hot-buffer refresh path.
+That builder now also supports an optional second node,
+`ulg-sph-mls-mpm-resident-steps`, which executes the resident-step compute
+task on the responder with commit deltas suppressed. In the current focused
+gate this second node is CPU-reference evidence only; it proves graph shape
+and responder task execution. The graph can now add a third post-stage seed
+node that receives the resident result through PeerCompute task-graph
+`resultInputs`, derives a full-readback transitional state seed, and lets the
+requester refresh local hot buffers from the advanced seed after NodeKernel/
+StateManager admission/import.
+The same graph builder now also supports an optional evidence-only mechanics
+stage chain before the resident compute stage:
+`state-seed -> mechanics-p2g -> mechanics-grid-update -> mechanics-g2p ->
+resident-steps -> post-stage-state-seed`. Grid update and G2P receive upstream
+stage outputs through PeerCompute task-graph `resultInputs`; the resident stage
+depends on G2P when the chain is enabled. This proves the first compact remote
+worker-stage output boundary under responder `ComputeManager` ownership, while
+the post-stage seed remains the transitional full-readback refresh source.
+The graph can now insert `mechanics-stage-state-seed` between G2P and the
+resident stage. That node derives a non-authoritative seed candidate from
+full-readback G2P state/mechanics arrays, leaves thermo/phase owned by the
+original seed, and can be selected only through explicit
+`preferMechanicsStageSeed`.
+The same focused result now includes a CPU-SPH solid H2O phase gate: cold H2O
+solids are excluded from liquid SPH pressure/density projection, wall contact
+clamps solid groups instead of individual particles, and a visual matrix
+scenario now guards the old "ice flows like water" failure.
+The remote mechanics-stage seed node now also has a no-full-readback compact
+candidate path. Full G2P readback still produces the transitional refresh
+`stateSeedPayload`; retained/no-full G2P output now produces a compact
+mechanics-stage candidate with buffer byte evidence, output families,
+GPU-fence status, `admissionRequired=true`, and `localRefreshRequired=true`.
+It deliberately leaves `stateSeedPayload=null`, so it cannot be selected by
+the current local hot-buffer refresh path until the retained-lane/admitted
+compact refresh contract exists.
+The refresh seed selector now blocks fallback when `preferMechanicsStageSeed`
+is set and only the compact no-full mechanics candidate exists, rather than
+silently refreshing the original graph seed.
+The ULG submit wrapper now also records that compact mechanics candidate
+through `NodeKernel.commitRemoteTaskGraphCompactCandidate()` before returning
+the blocked hot-buffer refresh result. This creates an admitted
+StateManager-authority record for the compact output while still refusing to
+turn remote retained refs into local GPU buffer handles.
+PeerCompute now also exposes
+`NodeKernel.refreshRemoteTaskGraphHotBuffersFromCompactCandidate()`, a
+fail-closed compact refresh surface that reads the admitted compact-candidate
+record, requires a local compact refresh executor, and only completes a GPU
+lane lease with executor-returned local refs. Executor results that report
+blocked/failed or return no local refs now reject the lane and report
+`compact-hot-buffer-refresh-not-completed`. ULG exposes the matching
+`refreshRemoteCompactCandidateHotBuffers()` host wrapper, an opt-in
+`attemptCompactCandidateRefresh` path on the graph submit wrapper, and a
+default compact executor contract that reports
+`blocked-compact-candidate-local-source-required` unless an explicit local
+source seed is attached. The compact candidate now also carries
+`peercompute.ulg.remote-task-graph-compact-local-refresh-contract.v0`, listing
+required local source roles and accepted materialization modes. The first
+materialization mode,
+`peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0`, can carry
+validated compact SPH state, SPH thermo, and MLS-MPM mechanics rows that ULG
+uploads directly into local hot buffers.
+The next materialization mode,
+`peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0`,
+can alias an explicit same-device local hot-buffer record without creating new
+GPU buffers or writes. It stays fail-closed: remote retained refs are still
+metadata-only unless a local StateManager hot-buffer record already owns the
+handles.
+The recurring visual sanity matrix now also carries explicit law-isolation
+labels for mechanics-off static, gravity-off static, pressure-off H2O,
+EOS-off H2O, thermal-off hot H2O, and reactions-off Na/H2O. These labels use
+the browser URL law toggles and keep per-scenario thresholds in the matrix
+definition so future architecture slices can prove disabled law groups stay
+disabled without claiming that laws should be removed.
+The same-device compact refresh path now has a host-side source-publication
+surface. `host.publishSameDeviceHotBufferSource()` stores local same-device
+SPH/MLS-MPM upload handles in StateManager hot storage and returns a
+serializable same-device retained-buffer import descriptor for compact
+candidate propagation.
+The mounted resident ComputeManager path now uses that surface automatically
+after StateManager admission when the resident execution already owns real
+same-device SPH state, SPH thermo, and MLS-MPM mechanics WebGPU upload
+handles. The live execution carries `sameDeviceHotBufferSourcePublication` and
+`sameDeviceRetainedBufferImport`, and the StateManager hot-buffer record keeps
+the non-serializable GPU handles local. The retained import is also bridged
+onto the final G2P reconstruction metadata so compact candidate builders can
+discover the live producer source.
+
+Verified commands:
+
+- PeerCompute focused NodeKernel unit:
+  `node --test tests/unit/nodeKernel.start.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `7/7`.
+  - Evidence: explicit target peer graphs emit `compute-task-graph`, responder
+    `ComputeManager.submitTaskGraph()` runs the graph, preflight reports
+    `distributed-placement-executor-ready`, and the result carries
+    `peercompute.nodekernel.remote-task-graph-placement-provenance.v0`.
+    Remote graph cache artifacts report
+    `peercompute.nodekernel.remote-task-graph-cache-artifact-preflight.v0`;
+    default behavior is `remote-cache-artifact-received-not-admitted`, and
+    explicit admission routes the artifact through NodeKernel/StateManager
+    authority. Explicit admission also imports the result as
+    `peercompute.compute.remote-task-graph-cache-import.v0`; a subsequent
+    local graph with the same admitted cache key returns `cacheStatus: hit`,
+    while remote retained GPU refs remain metadata-only with
+    `usableLocally=false`. The same gate now evaluates
+    `peercompute.compute.remote-task-graph-state-seed-policy.v0`, proving
+    allowed `particle-kinematics` imports can seed warm state, disallowed
+    state families are blocked, and remote retained GPU refs require local
+    hot-buffer refresh rather than becoming local leases. The test now also
+    calls `NodeKernel.commitRemoteTaskGraphStateSeed()` and proves
+    `peercompute.nodekernel.remote-task-graph-state-seed-authority.v0` is
+    committed into the requester warm-delta sink only for the allowed policy
+    path. It then calls
+    `NodeKernel.refreshRemoteTaskGraphHotBuffersFromSeed()` and proves
+    `peercompute.nodekernel.remote-task-graph-hot-buffer-refresh.v0` reads the
+    warm seed, acquires a local GPU resident lane lease, runs a local refresh
+    executor, completes a local fence, retains only local buffer refs, and
+    commits a refresh delta.
+- PeerCompute GPU resident lane regression:
+  `node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  from `/home/cos/projects/peercompute`
+  - Passed: `5/5`.
+  - Evidence: local resident lane leases still complete/reject correctly and
+    required missing fences still block commits.
+- PeerCompute remote compute regression:
+  `node --test tests/unit/nodeKernel.remoteCompute.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `8/8`.
+  - Evidence: existing single-task remote compute and redundant placement
+    paths still pass after adding graph messages.
+- PeerCompute ComputeManager task-graph cache regression:
+  `node --test tests/unit/computeManager.commitDelta.test.js --test-name-pattern "task graph"`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `19/19`.
+  - Evidence: existing read-through cache behavior still blocks unadmitted
+    artifacts, and graph-level `stateSeedPayload` is preserved in the
+    task-graph result, cache artifact, and later admitted cache hit. The same
+    gate now proves graph `resultInputs` inject completed upstream node results
+    into downstream task data while preserving typed arrays and stripping
+    non-cloneable function fields.
+- ULG focused integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "remote seed graph builder"`
+  - Passed: `11/11` because Node's test-name filter still evaluated the whole
+    file.
+  - Evidence: the new test imports an admitted remote task-graph cache result,
+    commits it as
+    `peercompute.nodekernel.remote-task-graph-state-seed-authority.v0`, runs
+    ULG's SPH/MLS-MPM refresh executor through
+    `peercompute.nodekernel.remote-task-graph-hot-buffer-refresh.v0`, verifies
+    local refs do not start with `remote:`, verifies WebGPU upload labels
+    `ulg-sph-particle-state`, `ulg-sph-particle-thermo`, and
+    `ulg-mls-mpm-particle-mechanics`, and verifies StateManager hot storage
+    contains the real local upload handles.
+    The host-level test then proves
+    `peercompute.ulg.remote-task-graph-hot-buffer-refresh-authority-report.v0`
+    from `host.refreshRemoteSeedHotBuffers()`, with summary readiness flags and
+    the same local hot-buffer storage evidence.
+    The automatic host wrapper test proves
+    `peercompute.ulg.remote-task-graph-submit-refresh-report.v0` from a real
+    in-memory remote NodeKernel task-graph hop, and proves a disallowed
+    `reaction-products` family is blocked without any GPU uploads.
+    The remote seed graph-builder test now proves
+    `buildUlgSphMlsMpmRemoteSeedTaskGraph()` produces
+    `peercompute.ulg.remote-task-graph-sph-mls-mpm-resident-graph.v0` with
+    seed, evidence-only mechanics P2G/grid-update/G2P, mechanics-stage seed,
+    evidence-only resident compute, and post-stage seed nodes. A real
+    responder `ComputeManager`
+    executes
+    `runUlgRemoteSphMlsMpmStateSeedGraphNode()` and
+    the static mechanics stage tasks before
+    `ulg-sph-mls-mpm-resident-steps`; P2G, grid update, and G2P report their
+    `peercompute.ulg.mls-mpm-mechanics-*-stage-task-result.v0` schemas with
+    passed stage evidence and non-mutating authority. The mechanics-stage seed
+    node reports
+    `peercompute.ulg.remote-task-graph-sph-mls-mpm-mechanics-stage-seed-node.v0`
+    at `step + 1`, and an explicit `preferMechanicsStageSeed` wrapper run
+    refreshes from `remote-mechanics-stage-state-seed-node`.
+    The same test now directly asserts the no-full G2P compact candidate:
+    `peercompute.ulg.remote-task-graph-sph-mls-mpm-mechanics-stage-compact-seed.v0`
+    reports output buffer byte evidence, GPU-fence satisfaction, admission and
+    local-refresh requirements, and `stateSeedPayload=null`; the selector
+    reports `remote-mechanics-stage-compact-seed-not-refreshable` with
+    `blockRefresh=true` when mechanics-stage refresh is explicitly preferred.
+    The host wrapper then records that compact candidate through
+    `commitRemoteTaskGraphCompactCandidate()`, reports
+    `compactCandidateAdmissionStatus=compact-candidate-committed`, keeps
+    `refreshReport=null`, optionally attempts compact refresh through
+    `refreshRemoteTaskGraphHotBuffersFromCompactCandidate()`, and still returns
+    no `localBufferRefs` when NodeKernel blocks for missing local compact
+    executor. The same integration gate now proves a compact candidate can
+    import an explicit same-device local hot-buffer record without new fake
+    WebGPU buffers or writes, and that a G2P stage result can propagate that
+    same-device source descriptor into the compact candidate rather than
+    requiring the executor caller to attach it manually.
+    The same test now proves the same-device source descriptor is produced by
+    `host.publishSameDeviceHotBufferSource()` from an existing local hot-buffer
+    upload record. The host summary reports
+    `residentSameDeviceHotBufferSourcePublicationReady=true`; the published
+    source record stays in StateManager hot storage; and the same-device import
+    aliases that published source with no new fake WebGPU buffers or writes.
+    The resident node
+    reports
+    `peercompute.ulg.mls-mpm-resident-steps-task-result.v0`, backend
+    `cpu-reference`, and no commit delta. The post-stage seed node reports
+    `peercompute.ulg.remote-task-graph-sph-mls-mpm-post-stage-seed-node.v0`
+    at `step + 1`. PeerCompute returns the graph-level seed in the cache
+    artifact for admission, NodeKernel admits/imports that artifact, and ULG
+    commits/refreshes from the post-stage seed override rather than the
+    original graph-level seed.
+- ULG mounted remote-refresh prelude:
+  `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs`
+  - Passed: `4/4`.
+  - Evidence: default-off mode does not call the graph factory or authority
+    wrapper; enabled mode submits through
+    `submitTaskGraphWithRemoteSeedHotBufferRefresh()`, captures admitted cache
+    and local hot-buffer refresh telemetry, reports missing authority-wrapper
+    status without submitting, and converts refresh errors into
+    `error-local-resident-continued` so the local resident step remains
+    available.
+- ULG live same-device source auto-publication browser gates:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host|SPH phase resident auto scheduler can use the default PeerCompute resident authority host"`
+  - Passed: `2/2`.
+  - Evidence: the manual real browser authority-host path and the mounted auto
+    scheduler both report `same-device-hot-buffer-source-published`; the
+    descriptor source task id matches the admitted resident task id; the
+    retained import points back to the published hot-buffer source; and
+    StateManager hot storage contains the SPH state, SPH thermo, and MLS-MPM
+    mechanics upload handles. The same source hot-buffer key is also present
+    on the final G2P reconstruction metadata.
+- ULG live same-device auto-publication visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-live-source-g2p-bridge-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=2` for all five representative
+    scenarios.
+  - Evidence: artifacts under
+    `/tmp/ulg-visual-sanity-matrix/codex-live-source-g2p-bridge-20260614/`.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `7` pass, `1` expected opt-in long-horizon liquid skip.
+  - Evidence: the new `plain SPH/PBF reference keeps solid H2O from flowing
+    like liquid water` invariant preserves cold H2O base/drop pair distances
+    and solid phase over the CPU-SPH/PBF reference path. The newer
+    gravity-on `plain SPH/PBF reference keeps solid H2O supported under
+    gravity` invariant catches solid drops sinking through solid bases.
+- ULG opt-in liquid atomic:
+  `npm run test:physics-liquid-atomic`
+  - Passed: `8/8`.
+  - Evidence: the H2O/H2O CPU/reference long-horizon acceptance reaches about
+    `1.024 s`, remains merged, keeps J bounded around `1.046..1.049`, and
+    damps final drop speed to about `0.196 m/s` against the `0.25 m/s`
+    threshold. This is CPU/reference evidence; browser scene visual settle
+    proof remains a separate open gate.
+- ULG direct-resident no-full liquid settle probe:
+  `ULG_PROBE_MODE=direct-resident ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2048 ULG_PROBE_EXPECT_LIQUID_MERGE=1 ULG_PROBE_EXPECT_LIQUID_SETTLE=1 ULG_PROBE_LIQUID_SETTLE_MIN_TIME_S=1 ULG_PROBE_LIQUID_SETTLE_MAX_FINAL_DROP_SPEED=0.25 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-liquid-settle-direct-resident-nofull-2048-20260614.json ULG_PROBE_TIMEOUT_MS=600000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-long-horizon`
+  - Passed/classified `good`; `analysis.issues=[]`.
+  - Evidence: `2048` no-full direct-resident substeps reached about
+    `1.024 s`; final drop max speed was about `0.1935 m/s`; support gap ended
+    near `-0.1079 m`; J stayed bounded at about `0.9500..1.0490`; pressure
+    impulse stayed `0`.
+  - Remaining blocker: the batch took about `431.4 s`, with compact summary
+    consuming about `342.7 s`. This proves the retained direct-resident liquid
+    mechanics can pass the settle threshold, but compact-summary/readback cost
+    and a scene-paired visual proof remain open.
+- ULG law-isolation visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-law-isolation-matrix-20260614 ULG_VISUAL_MATRIX_SCENARIOS=law-static-mechanics-off-fe-h2o,law-static-gravity-off-fe-h2o,law-pressure-off-h2o-mlsmpm,law-eos-off-h2o-mlsmpm,law-thermal-off-hot-h2o,law-reactions-off-na-h2o ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=8 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all six scenarios.
+  - Evidence: artifacts under
+    `/tmp/ulg-visual-sanity-matrix/codex-law-isolation-matrix-20260614/`.
+    Static mechanics-off and gravity-off checks reported zero displacement and
+    speed; pressure/EOS/thermal/reaction-off checks reported zero pressure
+    impulse and bounded short-horizon state.
+- ULG same-device source-publication visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-same-device-source-publication-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`; five selected scenarios wrote captured frames
+    under
+    `/tmp/ulg-visual-sanity-matrix/codex-same-device-source-publication-20260614/`.
+- ULG dense visual sequence subset:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-remote-mechanics-stage-seed-sequence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all four scenarios.
+- ULG compact-candidate visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-compact-mechanics-stage-candidate-sequence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all five scenarios.
+- ULG compact-authority visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-core-compact-authority-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=8 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+  - Separate observation: the default six-scenario matrix timed out only on
+    `reaction-product-na-h2o`; keep that as a reaction/closure harness blocker.
+- ULG compact-refresh-surface visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-compact-refresh-surface-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+- ULG compact-executor-contract visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-compact-executor-contract-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+- ULG compact-snapshot-materialization visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-compact-snapshot-materialization-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+- ULG same-device-retained-import visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-same-device-retained-import-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+- ULG same-device-source-descriptor visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-same-device-source-descriptor-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+- ULG CPU-SPH solid H2O visual sequence:
+  `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5320 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=250&baset=250&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=24 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_DIR=/tmp/ulg-visual-sanity-matrix/codex-cpu-sph-solid-h2o-sequence-20260614/solid-h2o-cpu-sph-frames ULG_PROBE_FRAME_EVERY=2 ULG_PROBE_FRAME_MAX=12 ULG_PROBE_TIMEOUT_MS=240000 ULG_PROBE_FAIL_ON_BAD=1 ULG_PROBE_OUTPUT=/tmp/ulg-visual-sanity-matrix/codex-cpu-sph-solid-h2o-sequence-20260614/solid-h2o-cpu-sph.json PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-long-horizon-probe.mjs`
+  - Passed: status `good`, `frameCount=3`, first/last H2O visible surface
+    count `2`, no visual surface issues, and no visible surface outside
+    particle/container bounds.
+- ULG visual matrix solid-H2O label:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-solid-h2o-cpu-sph-matrix-20260614 ULG_VISUAL_MATRIX_SCENARIOS=solid-h2o-cpu-sph ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=8 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3`.
+- ULG solid-support visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-solid-support-contact-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5` for all five selected scenarios.
+- ULG strengthened solid-support static guard:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-solid-support-static-guard-20260614 ULG_VISUAL_MATRIX_SCENARIOS=solid-h2o-cpu-sph ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=6 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `frameCount=5`; `solid-h2o-cpu-sph` now uses
+    `ULG_PROBE_EXPECT_STATIC=1` with static/support thresholds.
+- Hygiene:
+  `git diff --check` from `/home/cos/projects/ulg`
+  - Passed.
+  `git diff --check` from `/home/cos/projects/peercompute`
+  - Passed.
+  `npm run icc:update`
+  - Passed: `indexedFiles=235`, `memoryChunks=1252`.
+
+Open validation gaps:
+
+- This proves the local ULG refresh hook, host-level authority method, opt-in
+  auto-refresh graph wrapper, mounted scheduler prelude, a seven-node remote
+  graph with evidence-only mechanics and resident compute stages, compact
+  mechanics candidate admission through NodeKernel, and a fail-closed compact
+  candidate refresh surface. It does not yet make the mounted resident workload
+  authoritative on a remote peer; the next step is the actual local
+  retained-lane refresh executor implementation for admitted compact outputs,
+  then real law stages on PeerCompute WebGPU workers under ComputeManager/
+  GPUHub authority.
+- Na/H2O reaction-product visual probing remains a known timeout blocker.
+- Liquid H2O settling/free-surface behavior remains separate from the fixed
+  CPU-SPH solid H2O gate.
+
+## Current Focused Result - 2026-06-14 NodeKernel Task-Graph Placement Preflight
+
+NodeKernel task-graph placement now fails closed for non-advisory distributed
+requests until a real distributed graph executor exists. ULG carries the
+preflight schema/status in the mechanics stage-chain artifact.
+
+Verified commands:
+
+- PeerCompute focused NodeKernel unit:
+  `node --test tests/unit/nodeKernel.start.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `5/5`.
+  - Evidence: local graphs report `local-placement-accepted`, advisory
+    distributed graphs report
+    `advisory-distributed-placement-local-execution-allowed`, and
+    non-advisory distributed graphs throw
+    `ERR_NODEKERNEL_DISTRIBUTED_TASK_GRAPH_UNAVAILABLE`.
+- ULG focused Node gate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7`.
+  - Evidence: the mechanics stage-chain artifact reports
+    `peercompute.nodekernel.task-graph-placement-preflight.v0` and
+    `local-placement-accepted`.
+- ULG browser authority gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- Hygiene:
+  - `git diff --check` passed in ULG and sibling PeerCompute.
+  - `npm run icc:update` refreshed ICC with `indexedFiles=233` and
+    `memoryChunks=1218`.
+
+Open validation gaps:
+
+- Dense visual subset was already run for the preceding NodeKernel graph-routing
+  slice; rerun it after the next physics/render-facing change.
+- Distributed graph placement/execution still needs to consume admitted hashes
+  and retained GPU lane refs through NodeKernel/StateManager authority.
+
+## Current Focused Result - 2026-06-14 NodeKernel Task-Graph Routing
+
+The mechanics P2G -> grid-update -> G2P stage-chain graph now routes through
+`NodeKernel.submitTaskGraph()` when a real NodeKernel is available. Direct
+`ComputeManager.submitTaskGraph()` remains the fallback for non-kernel
+contexts.
+
+Verified commands:
+
+- PeerCompute focused NodeKernel unit:
+  `node --test tests/unit/nodeKernel.start.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `3/3`.
+  - Evidence: `NodeKernel.submitTaskGraph()` overwrites graph placement
+    authority to `node-kernel` and returns
+    `peercompute.nodekernel.task-graph-authority.v0`.
+- ULG focused Node gate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7`.
+  - Evidence: the mechanics stage-chain artifact reports
+    `node-kernel-submit-task-graph`, `nodeKernelOwned=true`, and
+    `peercompute.nodekernel.task-graph-authority.v0`.
+- ULG browser authority gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG dense visual sequence subset:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-nodekernel-task-graph-sequence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all four scenarios.
+- Hygiene:
+  - `git diff --check` passed in ULG and sibling PeerCompute.
+  - `npm run icc:update` refreshed ICC with `indexedFiles=233` and
+    `memoryChunks=1218`.
+
+Open validation gaps:
+
+- Distributed graph placement/execution still needs to consume admitted hashes
+  and retained GPU lane refs through NodeKernel/StateManager authority.
+- Na/H2O reaction-product visual probing remains a known timeout blocker.
+
+## Current Focused Result - 2026-06-14 StateManager/NodeKernel Cache Artifact Authority
+
+Architecture is now the active priority because the CPU/reference path and
+visual/atomic gates can guard changes. PeerCompute now treats task-graph cache
+artifacts as StateManager/NodeKernel authority records, not ComputeManager-only
+local cache facts.
+
+Verified commands:
+
+- PeerCompute syntax checks from `/home/cos/projects/peercompute/peercompute`:
+  `node --check` passed for `src/peercompute/stateManager/StateManager.js`,
+  `src/peercompute/computeManager/ComputeManager.js`,
+  `src/peercompute/nodeKernel/NodeKernel.js`, `src/peercompute/index.js`,
+  `tests/stateManager.unit.test.js`,
+  `tests/unit/computeManager.commitDelta.test.js`, and
+  `tests/unit/nodeKernel.start.test.js`.
+  - Passed.
+- PeerCompute focused authority units:
+  `node --test tests/stateManager.unit.test.js tests/unit/computeManager.commitDelta.test.js tests/unit/nodeKernel.start.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `25/25`.
+  - Evidence: StateManager admits/invalidates task-graph cache artifacts,
+    ComputeManager read-through remains blocked until admission, and NodeKernel
+    routes admission/invalidation through StateManager authority.
+- ULG focused Node gate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7`.
+  - Evidence: the mechanics native stage-DAG artifact is first
+    `recorded-not-admitted`, then admitted and invalidated through a
+    NodeKernel-owned StateManager; ComputeManager local cache state follows
+    that authority decision.
+- ULG browser authority gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG dense visual sequence subset:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-state-manager-cache-admission-sequence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all four scenarios.
+- Hygiene:
+  - `git diff --check` passed in ULG and sibling PeerCompute.
+  - `npm run icc:update` refreshed ICC with `indexedFiles=233` and
+    `memoryChunks=1216`.
+
+Open validation gaps:
+
+- Distributed graph placement/execution still needs to consume admitted hashes
+  and retained GPU lane refs through NodeKernel/StateManager authority.
+- Na/H2O reaction-product visual probing remains a known timeout blocker.
+
+## Current Focused Result - 2026-06-14 Graph Cache Artifacts And Admission Metadata
+
+PeerCompute task-graph cache writes now produce explicit artifacts rather than
+only storing cloned results. Each write records
+`peercompute.compute.task-graph-cache-artifact.v0` with result hash, input
+hash, invalidation refs, node result schemas, and
+`peercompute.compute.task-graph-cache-admission.v0`. ULG mechanics graphs
+remain `recorded-not-admitted`, so the cache is provenance evidence only.
+
+Verified commands:
+
+- Syntax:
+  `node --check /home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js src/runtime/sph/sphMlsMpmGpuStep.js tests/peercomputeComputeManagerIntegration.test.mjs tests/demo.e2e.mjs`
+  - Passed.
+- ULG focused Node gate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7`.
+  - Evidence: the mechanics stage-chain graph reports
+    `peercompute.compute.task-graph-cache-artifact.v0`,
+    `recorded-not-admitted`, `admitted=false`, and an `fnv1a32-*` result hash.
+    The direct native DAG also proves `getTaskGraphCacheArtifact()` and
+    `taskGraphCacheArtifactsWritten`.
+- ULG browser authority gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the mounted browser authority host returns the cache artifact
+    schema/status/admission fields from `runMechanicsStageTaskChain()`.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- PeerCompute focused units:
+  `node --test tests/unit/gpuResidentLaneManager.test.js tests/unit/computeManager.commitDelta.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `21/21`.
+- ULG dense visual sequence subset:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-task-graph-cache-artifact-sequence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all four scenarios.
+- Hygiene:
+  - `git diff --check` passed in ULG and sibling PeerCompute.
+  - `npm run icc:update` refreshed ICC with `indexedFiles=233` and
+    `memoryChunks=1214`.
+
+Open validation gaps:
+
+- Cache artifacts are not admitted or replayed yet. StateManager/NodeKernel
+  invalidation and admission must govern read-through before physics output can
+  use the cache.
+- Na/H2O reaction-product visual probing remains a known timeout blocker.
+
+## Current Focused Result - 2026-06-14 Content-Addressed Graph Cache Inputs
+
+PeerCompute task graphs now derive cache keys from declared graph inputs when
+no explicit key is supplied. ULG's mechanics P2G -> grid-update -> G2P
+stage-chain graph declares state refs, closure refs, law ids, invalidation
+refs, units, and per-stage cache inputs, then records
+`peercompute.compute.task-graph-cache-inputs.v0` in the stage-chain artifact.
+The cache is still `record-only` for physics output.
+
+Verified commands:
+
+- Syntax:
+  `node --check /home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js src/runtime/sph/sphMlsMpmGpuStep.js tests/peercomputeComputeManagerIntegration.test.mjs tests/demo.e2e.mjs`
+  - Passed.
+- ULG focused Node gate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7`.
+  - Evidence: the mechanics stage-chain graph reports
+    `nativeTaskGraphCacheKeySource=content-addressed-inputs`,
+    `peercompute.compute.task-graph-cache-inputs.v0`, an `fnv1a32-*`
+    input hash, and a derived scoped cache key.
+- ULG browser authority gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the mounted browser PeerCompute authority host returns the same
+    content-addressed cache-input schema/hash fields from
+    `runMechanicsStageTaskChain()`.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- PeerCompute focused units:
+  `node --test tests/unit/gpuResidentLaneManager.test.js tests/unit/computeManager.commitDelta.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `21/21`.
+- ULG dense visual sequence subset:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-content-addressed-graph-cache-sequence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all four scenarios.
+- Hygiene:
+  - `git diff --check` passed in ULG and sibling PeerCompute.
+  - `npm run icc:update` refreshed ICC with `indexedFiles=233` and
+    `memoryChunks=1213`.
+
+Open validation gaps:
+
+- Cache remains record-only for physics outputs; shared read-through requires
+  admitted content-addressed closure/state artifacts and invalidation rules.
+- Na/H2O reaction-product visual probing remains a known timeout blocker from
+  the prior full matrix run.
+
+## Current Focused Result - 2026-06-14 Task Graph Lifecycle Evidence
+
+Sibling PeerCompute `ComputeManager.submitTaskGraph()` now carries graph-level
+cache, placement, cancellation, stats, active-graph, and optional GPU resident
+lane lease evidence. ULG wires those fields into the mechanics stage-chain
+artifact while keeping the CPU-oracle graph record-only, not replaying cached
+physics state.
+
+Verified commands:
+
+- PeerCompute and ULG syntax:
+  `node --check /home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js src/runtime/sph/sphMlsMpmGpuStep.js tests/peercomputeComputeManagerIntegration.test.mjs tests/demo.e2e.mjs`
+  - Passed.
+- ULG focused Node gate:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7`.
+  - Evidence: the real mechanics P2G -> grid-update -> G2P DAG reports
+    `peercompute.compute.task-graph-result.v0`, record-only cache status,
+    local ComputeManager placement policy, non-cancelled status, and a direct
+    native DAG graph-wide GPU lane lease.
+- ULG browser authority gate:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: `runMechanicsStageTaskChain()` returns cache, placement,
+    cancellation, and lease-status fields from the real browser authority host.
+- ULG physics atomics:
+  `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- PeerCompute focused units:
+  `node --test tests/unit/gpuResidentLaneManager.test.js tests/unit/computeManager.commitDelta.test.js`
+  from `/home/cos/projects/peercompute/peercompute`
+  - Passed: `21/21`.
+- ULG full visual matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-task-graph-lifecycle-evidence-20260614 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Mixed: `4/5` scenarios were `good`; `reaction-product-na-h2o` timed out.
+  - This same Na/H2O timeout existed in the prior retained-vertex run, so it is
+    tracked as a known reaction/closure visual blocker rather than a new graph
+    lifecycle regression.
+- ULG dense visual sequence subset:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-task-graph-lifecycle-sequence-pass-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph,solid-liquid-contact-fe-h2o,phase-change-hot-h2o-water ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=3 ULG_VISUAL_MATRIX_FRAME_EVERY=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `frameCount=3` for all four scenarios.
+- Hygiene:
+  - `git diff --check` passed in ULG and sibling PeerCompute.
+  - `npm run icc:update` refreshed ICC with `indexedFiles=233` and
+    `memoryChunks=1211`.
+
+Open validation gaps:
+
+- Na/H2O reaction-product visual probe still hard-times out before producing a
+  full result.
+- Graph cache keys are currently explicit policy metadata; next step is
+  content-addressed closure/state keys and distributed graph placement.
+
+## Current Focused Result - 2026-06-14 PeerCompute Task Graph Primitive
+
+Sibling PeerCompute `ComputeManager` now exposes `submitTaskGraph()`, a native
+dependency-aware graph submission primitive. ULG proves it by submitting the
+mechanics P2G -> grid-update -> G2P stage DAG as graph nodes whose downstream
+task factories receive upstream results.
+
+Verified commands:
+
+- PeerCompute:
+  `node --check /home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: ULG asserts `computeManager.submitTaskGraph` exists, submits
+    `p2g -> gridUpdate -> g2p`, receives
+    `peercompute.compute.task-graph-result.v0`, checks execution order and
+    dependency batches, and verifies all three stage-task evidence artifacts
+    pass.
+- ULG:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser host executes `runMechanicsStageTaskChain()` and the
+    helper reports `schedulerStatus=peercompute-native-task-graph-used`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-native-task-graph-helper-integration-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+
+Open validation gaps:
+
+- Add graph-level GPU leases, cancellation, cache keys, placement, and
+  distributed execution semantics.
+
+## Current Focused Result - 2026-06-14 Mechanics Stage-Chain Helper
+
+ULG now has `runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks()`,
+a first-class helper that runs one mechanics-only split step while submitting
+P2G, grid update, and G2P through the active ComputeManager stage tasks. It
+records `peercompute.ulg.mls-mpm-mechanics-stage-task-chain.v0`, marks all
+three stage-task boundaries, keeps the mechanics child law non-authoritative,
+and is exposed by the browser resident authority host as
+`runMechanicsStageTaskChain()`.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: the helper submits the P2G, grid-update, and G2P stage tasks
+    through ComputeManager, receives all three stage-task evidence artifacts,
+    records `stageTaskBoundaries` for all stages, and emits the stage-chain
+    artifact.
+- ULG:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser resident authority host exposes
+    `runMechanicsStageTaskChain()`, executes it, and the helper reports
+    `schedulerStatus=peercompute-native-task-graph-used`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-native-task-graph-helper-integration-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Scope: visual sanity covers the default mounted browser path after the
+    helper/native-graph code change; helper execution is proven by both the
+    Node ComputeManager gate and the browser authority gate.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-native-task-graph-helper-integration-20260614/`.
+
+Open validation gaps:
+
+- Add graph-level leases, cancellation, placement, cache keys, and distributed
+  execution semantics.
+
+## Current Focused Result - 2026-06-14 Mechanics Stage Replacement Seam
+
+The mechanics-only split step now has optional whole-stage runner seams for
+P2G, grid update, and G2P. Defaults still call the existing raw kernel
+entrypoints, but a runner can submit a ComputeManager-owned stage task and feed
+that result back into the same mechanics-only step. The focused gate now proves
+P2G-only replacement, P2G+grid-update replacement, and full
+P2G+grid-update+G2P replacement through
+`ulg-mls-mpm-mechanics-{p2g,grid-update,g2p}-stage` tasks. The split-path
+evidence records `stageTaskBoundaries` and the corresponding stage-task
+evidence artifacts; the mechanics child law remains non-authoritative.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js` and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: the mechanics-only split step accepts stage runners that submit
+    `createMlsMpmMechanicsP2gStageComputeTask()`,
+    `createMlsMpmMechanicsGridUpdateStageComputeTask()`, and
+    `createMlsMpmMechanicsG2pStageComputeTask()` through ComputeManager,
+    receives each `peercompute.ulg.mechanics-*-stage-task-evidence.v0`
+    artifact, and records P2G-only, P2G+grid-update, and full
+    P2G+grid-update+G2P `stageTaskBoundaries`.
+- ULG:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-p2g-stage-replacement-hook-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Scope: visual sanity covers the default mounted browser path after the
+    split-step code change; the hook-based replacement seam is currently
+    proven by the Node ComputeManager integration gate until a first-class
+    stage-chain scheduler is browser-wired.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-p2g-stage-replacement-hook-20260614/`.
+
+Open validation gaps:
+
+- Promote this hook seam into a first-class ComputeManager/NodeKernel
+  stage-chain scheduler instead of relying on external function runners.
+
+## Current Focused Result - 2026-06-14 G2P ComputeManager Stage Task
+
+ULG now has a ComputeManager-owned non-mutating G2P mechanics sub-stage task:
+`ulg-mls-mpm-mechanics-g2p-stage`. The task consumes the grid-update artifact,
+suppresses internal pressure-interface impulses for the mechanics-only path,
+returns candidate `sph-particle-state` plus `mls-mpm-mechanics` output, emits
+`peercompute.ulg.mechanics-g2p-stage-task-evidence.v0`, and does not make the
+mechanics law an authoritative child owner yet.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: the Node ComputeManager submits P2G, feeds it into grid update,
+    feeds that into `ulg-mls-mpm-mechanics-g2p-stage`, receives
+    `peercompute.ulg.mls-mpm-mechanics-g2p-stage-compute-task-result.v0`,
+    and validates non-mutating task authority, pressure suppression,
+    transient `mls-mpm-grid` reads, candidate particle/mechanics writes, and
+    evidence-only promotion status.
+- ULG:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the real browser authority host exposes
+    `submitMechanicsG2pStageTask()` and submits P2G -> grid-update -> G2P
+    stage tasks through its real ComputeManager.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-g2p-stage-compute-task-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=12 ULG_VISUAL_MATRIX_FRAME_EVERY=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=3` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-g2p-stage-compute-task-20260614/`.
+
+Open validation gaps:
+
+- Wire P2G/grid-update/G2P stage replacement into the mechanics-only child path
+  under the CPU oracle, StateManager admission, GPU fence/lease evidence, and
+  visual sanity.
+- These stage-task artifacts prove scheduler/authority boundaries; they are
+  not final scientific validation of long-horizon multiscale liquid behavior.
+
+## Current Focused Result - 2026-06-14 Grid Update ComputeManager Stage Task
+
+ULG now has a ComputeManager-owned non-mutating grid-update mechanics
+sub-stage task: `ulg-mls-mpm-mechanics-grid-update-stage`. The task consumes a
+P2G projection artifact, suppresses mechanics-only pressure-interface rows,
+writes only transient updated `mls-mpm-grid`, emits
+`peercompute.ulg.mechanics-grid-update-stage-task-evidence.v0`, and does not
+make the mechanics law an authoritative child owner yet.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: the Node ComputeManager submits P2G, feeds the result into
+    `ulg-mls-mpm-mechanics-grid-update-stage`, receives
+    `peercompute.ulg.mls-mpm-mechanics-grid-update-stage-compute-task-result.v0`,
+    and validates non-mutating task authority, pressure-interface suppression,
+    and transient `mls-mpm-grid` read/write evidence.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the real browser authority host exposes
+    `submitMechanicsGridUpdateStageTask()` and submits P2G -> grid-update
+    stage tasks through its real ComputeManager.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-grid-update-stage-compute-task-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-grid-update-stage-compute-task-20260614/`.
+
+Open validation gaps:
+
+- Add the equivalent ComputeManager-owned G2P stage task.
+- Wire stage replacement into the mechanics-only child path after all stage
+  task boundaries exist and are guarded by CPU oracle plus visual sanity.
+
+## Current Focused Result - 2026-06-14 P2G ComputeManager Stage Task
+
+ULG now has a ComputeManager-owned non-mutating P2G mechanics sub-stage task:
+`ulg-mls-mpm-mechanics-p2g-stage`. The task wraps the existing P2G kernel
+entrypoint, forces mechanics-only pressure/product suppression, writes only
+transient `mls-mpm-grid`, emits
+`peercompute.ulg.mechanics-p2g-stage-task-evidence.v0`, and does not make the
+mechanics law an authoritative child owner yet.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: the Node ComputeManager submits
+    `ulg-mls-mpm-mechanics-p2g-stage`, receives
+    `peercompute.ulg.mls-mpm-mechanics-p2g-stage-compute-task-result.v0`,
+    validates non-mutating task authority, pressure/product suppression, and
+    transient `mls-mpm-grid` output evidence.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the real browser authority host exposes
+    `submitMechanicsP2gStageTask()` and submits a WebGPU P2G stage task through
+    its real ComputeManager.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-p2g-stage-compute-task-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-p2g-stage-compute-task-20260614/`.
+
+Open validation gaps:
+
+- Add equivalent ComputeManager-owned grid-update and G2P stage tasks.
+- Wire stage replacement into the mechanics-only child path after all stage
+  task boundaries exist and are guarded by CPU oracle plus visual sanity.
+
+## Current Focused Result - 2026-06-14 G2P Stage Evidence Gate
+
+Mechanics child task results now emit
+`peercompute.ulg.mechanics-child-g2p-stage-evidence.v0` top-level and under
+`mechanicsChildStageKernelEvidence.perStageEvidence.g2p`. Mechanics promotion
+requires `mechanics-child-g2p-stage-evidence` alongside P2G evidence,
+grid-update evidence, broad stage kernel evidence, the child task envelope,
+and dry-run parity. This completes the individually named evidence gates for
+P2G, grid update, and G2P; the gates remain evidence-only and do not make
+mechanics an authoritative child owner yet.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/mechanicsPromotionEvidence.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics admission includes
+    `mechanics-child-g2p-stage-evidence`; child task results expose a passed
+    G2P artifact; direct and task-wrapped dry-run evidence include it; and
+    promotion evidence satisfies the key before mechanics admission accepts.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser authority host submits a WebGPU mechanics-only child
+    task and verifies the G2P sub-stage artifact through child dry-run and
+    promotion evidence.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-g2p-stage-evidence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-g2p-stage-evidence-20260614/`.
+
+Open validation gaps:
+
+- The next architecture slice should replace/promote one mechanics stage at a
+  time under this completed sub-stage evidence set, CPU oracle, StateManager
+  admission, GPU fence/lease evidence, and visual sanity.
+- These artifacts are stage-boundary/admission evidence, not final scientific
+  validation of multiscale liquid behavior.
+
+## Current Focused Result - 2026-06-14 Grid Update Stage Evidence Gate
+
+Mechanics child task results now emit
+`peercompute.ulg.mechanics-child-grid-update-stage-evidence.v0` top-level and
+under `mechanicsChildStageKernelEvidence.perStageEvidence.gridUpdate`.
+Mechanics promotion requires `mechanics-child-grid-update-stage-evidence`
+alongside P2G evidence, broad stage kernel evidence, the child task envelope,
+and dry-run parity. This is the second individually named mechanics sub-stage
+gate and remains evidence-only, not an authoritative write owner.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/mechanicsPromotionEvidence.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics admission includes
+    `mechanics-child-grid-update-stage-evidence`; child task results expose a
+    passed grid-update artifact; direct and task-wrapped dry-run evidence
+    include it; and promotion evidence satisfies the key before mechanics
+    admission accepts.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser authority host submits a WebGPU mechanics-only child
+    task and verifies the grid-update sub-stage artifact through child dry-run
+    and promotion evidence.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-grid-update-stage-evidence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-grid-update-stage-evidence-20260614/`.
+
+Open validation gaps:
+
+- Add the same individually named evidence gate for G2P.
+- Grid-update evidence is not scientific validation by itself; it only proves
+  the stage boundary and admission artifact before future kernel replacement.
+
+## Current Focused Result - 2026-06-14 P2G Stage Evidence Gate
+
+Mechanics child task results now emit
+`peercompute.ulg.mechanics-child-p2g-stage-evidence.v0` top-level and under
+`mechanicsChildStageKernelEvidence.perStageEvidence.p2g`. Mechanics promotion
+requires `mechanics-child-p2g-stage-evidence` in addition to the broad stage
+kernel evidence, child task envelope, and dry-run parity. This is the first
+individually named mechanics sub-stage gate; it is evidence-only and not an
+authoritative write owner.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/mechanicsPromotionEvidence.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics admission includes
+    `mechanics-child-p2g-stage-evidence`; child task results expose a passed
+    P2G artifact; direct and task-wrapped dry-run evidence include it; and
+    promotion evidence satisfies the key before mechanics admission accepts.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser authority host submits a WebGPU mechanics-only child
+    task and verifies the P2G sub-stage artifact through child dry-run and
+    promotion evidence.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-p2g-stage-evidence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-p2g-stage-evidence-20260614/`.
+
+Open validation gaps:
+
+- Add the same individually named evidence gates for grid update and G2P.
+- P2G evidence is not scientific validation by itself; it only proves the
+  stage boundary and admission artifact before future kernel replacement.
+
+## Current Focused Result - 2026-06-14 Mechanics Stage Kernel Evidence
+
+Mechanics child task results now emit
+`peercompute.ulg.mechanics-child-stage-kernel-evidence.v0`. Mechanics
+promotion requires `mechanics-child-stage-kernel-evidence` in addition to the
+child task envelope and dry-run parity. This gate exposes P2G, grid update, and
+G2P as separately inspectable mechanics stages before any current-owner
+promotion.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/mechanicsPromotionEvidence.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics admission includes
+    `mechanics-child-stage-kernel-evidence`; direct and task-wrapped dry-run
+    evidence include a passed stage-kernel artifact; promotion evidence
+    satisfies the key before mechanics admission accepts.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser authority host submits a WebGPU mechanics-only child
+    task and verifies its required stages are `p2g`, `gridUpdate`, and `g2p`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mechanics-stage-kernel-evidence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-mechanics-stage-kernel-evidence-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+- ULG: `npm run icc:update`
+  - Passed: `indexedFiles=233`, `memoryChunks=1183`.
+
+Open validation gaps:
+
+- Next architecture work should use this per-stage evidence to replace/promote
+  P2G, grid update, and G2P one at a time against the CPU oracle.
+
+## Current Focused Result - 2026-06-14 Required Mechanics Child Envelope
+
+The mechanics-only child task envelope is now required promotion evidence.
+Mechanics law-family admission requires `mechanics-only-child-task-envelope`;
+`runUlgMechanicsChildDryRunTask()` validates the envelope, and
+`runUlgMechanicsPromotionEvidenceTask()` records it before promotion admission.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/mechanicsPromotionEvidence.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics admission includes
+    `mechanics-only-child-task-envelope`; direct and task-wrapped child dry-run
+    results include a passed envelope; promotion evidence satisfies the same
+    key before admission accepts mechanics.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the browser authority host submits a WebGPU mechanics-only child
+    task, passes that result into the child dry-run task, and promotion
+    evidence includes `mechanics-only-child-task-envelope`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mechanics-child-envelope-required-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-mechanics-child-envelope-required-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+- ULG: `npm run icc:update`
+  - Passed: `indexedFiles=233`, `memoryChunks=1180`.
+
+Open validation gaps:
+
+- Next architecture work should replace the underlying mechanics kernels one
+  stage at a time under this required child-task envelope and CPU oracle.
+
+## Current Focused Result - 2026-06-14 ComputeManager Mechanics-Only Child Task
+
+ULG now has a ComputeManager-owned non-mutating mechanics-only resident steps
+task surface: `createMlsMpmMechanicsOnlyResidentStepsComputeTask()`,
+`runMlsMpmMechanicsOnlyResidentStepsComputeTask()`, and
+`submitMlsMpmMechanicsOnlyResidentStepsComputeTask()`. The browser resident
+authority host exposes `submitMechanicsOnlyResidentStepsTask()`. CPU-oracle
+runs do not require a GPU fence; WebGPU runs require same-device lane/fence
+evidence and still suppress commit deltas until promotion admission changes.
+
+Verified commands so far:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`, and
+  `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: the CPU-oracle mechanics-only child task runs through
+    ComputeManager with task family
+    `ulg-mls-mpm-mechanics-only-resident-steps`, suppresses commit deltas, and
+    reports `mechanics-only-entrypoint-enforced`.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the real browser authority host exposes
+    `submitMechanicsOnlyResidentStepsTask()` and submits a WebGPU mechanics-only
+    child task with satisfied ComputeManager GPU fence evidence.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-computemanager-mechanics-child-task-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-computemanager-mechanics-child-task-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+- ULG: `npm run icc:update`
+  - Passed: `indexedFiles=233`, `memoryChunks=1180`.
+
+## Current Focused Result - 2026-06-14 Direct Mechanics-Only Split Step
+
+ULG now has a direct mechanics-only single-step function:
+`runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu()`. The mechanics-only
+sequence entrypoint calls that function for each substep. The direct step runs
+only P2G, grid update, G2P, and optional compact summary; it supplies null
+pressure-interface/product inputs and never calls thermal, reaction, or
+mechanics-refresh stages.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  and `node --check src/runtime/mechanicsPromotionEvidence.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: measured reference evidence and mechanics child dry-run task
+    both report `runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu` as the
+    step source, satisfy the mechanics-only stage/write contract, and feed
+    mechanics promotion admission through the existing evidence gates.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: Chromium authority test verifies the direct mechanics-only step
+    source for both page-generated reference evidence and the task-wrapped
+    child dry-run result.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-direct-mechanics-split-step-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-direct-mechanics-split-step-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The direct split step still uses the existing P2G/grid/G2P kernels. Next work
+  should make it a ComputeManager-owned child worker path with the same
+  evidence gates.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Explicit Mechanics-Only Resident Entrypoint
+
+ULG now has an explicit mechanics-only resident execution entrypoint:
+`runMlsMpmMechanicsOnlyResidentStepsWithOptionalWebGpu()`. Mechanics promotion
+reference evidence and child dry-run evidence route through that entrypoint,
+which disables thermal, reaction, mechanics-refresh, and pressure-interface
+stages and marks evidence with `mechanics-only-entrypoint-enforced`.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  and `node --check src/runtime/mechanicsPromotionEvidence.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: measured reference evidence and mechanics child dry-run task
+    both report `mechanics-only-entrypoint-enforced`; the child dry-run still
+    satisfies the mechanics-only stage/write contract and promotion admission
+    accepts only mechanics families after evidence tasks complete.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: Chromium authority test verifies the same mechanics-only
+    entrypoint provenance on page-generated reference evidence and the
+    task-wrapped child dry-run result.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mechanics-only-entrypoint-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-mechanics-only-entrypoint-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The mechanics-only entrypoint is explicit but still backed by the existing
+  resident CPU mechanics stage chain. Next work should put the split
+  WebGPU/CPU mechanics child kernel behind this entrypoint.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Mechanics-Only Child Stage Contract
+
+ULG now proves that mechanics child dry-run evidence is not silently running
+the full parent pass DAG. Measured reference and child dry-run artifacts carry
+mechanics-only stage contracts: required mechanics stages are `p2g`,
+`gridUpdate`, and `g2p`; thermal/reaction/mechanics-refresh stages must remain
+skipped; authoritative writes are limited to `particle-kinematics` and
+`mechanics`.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/mechanicsPromotionEvidence.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: measured reference evidence and child dry-run evidence both
+    assert `mechanicsOnlyStageContract.passed`; child writes are
+    `particle-kinematics` plus `mechanics`; thermo/phase remains a
+    must-not-write family.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: Chromium authority test checks the mechanics-only contract on
+    measured reference evidence and on the task-wrapped child dry-run result.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mechanics-only-contract-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-mechanics-only-contract-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The mechanics-only candidate still uses the resident CPU mechanics path. The
+  next implementation step is replacing that candidate with the actual split
+  mechanics kernel path while retaining this contract.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Mechanics Child Dry-Run Parity Gate
+
+ULG now requires a non-mutating mechanics child dry-run before mechanics
+promotion evidence can satisfy admission. The child dry-run runs as a
+module-backed ComputeManager task with `suppressCommitDelta: true`, emits
+`peercompute.ulg.mechanics-child-dry-run-evidence.v0`, compares the child
+candidate against measured CPU resident reference evidence, and contributes
+`mechanics-child-dry-run-parity` to promotion admission.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/mechanicsPromotionEvidence.js`
+  and `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics admission now requires
+    `mechanics-child-dry-run-parity`; `ulg-mechanics-child-dry-run` completes
+    one task; the child dry-run artifact feeds mechanics promotion evidence;
+    the resulting promotion admission accepts only `particle-kinematics` and
+    `mechanics`.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: browser authority host exposes
+    `submitMechanicsChildDryRunTask()`, the task returns
+    `mechanics-child-dry-run-parity-ready`, promotion evidence includes
+    `mechanics-child-dry-run-parity`, and task-wrapped promotion admission
+    accepts mechanics.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mechanics-child-dry-run-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-mechanics-child-dry-run-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The child dry-run gate is still using the CPU resident mechanics reference
+  path. The next implementation step is to point that child candidate at a
+  real mechanics-only split path while keeping this same parity gate.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Measured Mechanics Promotion Reference Evidence
+
+ULG now generates mechanics promotion evidence from actual CPU resident
+reference probes. `createUlgMechanicsPromotionReferenceEvidence()` runs
+zero-force and gravity-only mechanics dry runs, measures displacement,
+velocity error, volume stability, pressure-disabled impulse, and mass
+conservation, then feeds those fields into the mechanics promotion evidence
+task. Browser authority coverage combines those measured fields with live host
+authority evidence from the resident step.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/mechanicsPromotionEvidence.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: measured `peercompute.ulg.mechanics-promotion-reference-evidence.v0`
+    reports CPU resident zero-force and gravity-only probes, then task-wrapped
+    mechanics promotion evidence admits the mechanics family through the
+    existing admission task.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: browser page imports the measured reference helper, generates
+    CPU resident mechanics evidence, combines it with live GPU fence,
+    StateManager, committed-delta, owner-map, and visual-sequence evidence,
+    and feeds the task-wrapped promotion admission.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-measured-mechanics-evidence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-measured-mechanics-evidence-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The reference evidence is measured, but mechanics is still not an executable
+  child law dry-run. The next authority gate should wrap mechanics as a
+  non-mutating child candidate and compare its output against this reference.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Mechanics Promotion Evidence Task
+
+ULG now has a non-mutating ComputeManager task for mechanics promotion
+evidence. The task validates structured CPU/reference, conservation,
+volume-stability, pressure-disabled, owner-map, GPU fence, StateManager
+admission, committed-delta, and visual-sequence evidence, then emits
+`peercompute.ulg.mechanics-promotion-evidence.v0`. That artifact feeds the
+existing law-family promotion admission task. Child mechanics remains
+metadata-only and cannot own writes yet.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: `runUlgMechanicsPromotionEvidenceTask()` accepts structured
+    mechanics evidence, the ComputeManager task family
+    `ulg-mechanics-promotion-evidence` records one completed task, and the
+    resulting artifact admits mechanics through the existing promotion
+    admission task.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: browser authority host exposes
+    `submitMechanicsPromotionEvidenceTask()`, task-wrapped mechanics evidence
+    is accepted, and that artifact feeds task-wrapped mechanics promotion
+    admission.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mechanics-promotion-evidence-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-mechanics-promotion-evidence-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The mechanics evidence task currently validates provided structured evidence;
+  it does not yet generate measured dry-run/reference evidence from an
+  independent mechanics child task.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Promotion Admission Task Wrapper
+
+ULG now routes promotion admission through real local ComputeManager task
+execution. The task wrapper is deliberately non-mutating and uses
+`suppressCommitDelta: true`; child law-family descriptors remain
+metadata-only and cannot create solver tasks.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: `createUlgLawFamilyPromotionAdmissionComputeTask()` submits
+    through ComputeManager, missing mechanics evidence rejects, evidenced
+    mechanics admits `particle-kinematics` and `mechanics`, and the task
+    family records two completed tasks.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: browser authority host exposes
+    `submitLawFamilyPromotionAdmissionTask()`, task-wrapped missing mechanics
+    evidence rejects, task-wrapped evidenced mechanics admits, and
+    `ulg-law-family-promotion-admission` completed twice.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_RUN_ID=codex-promotion-admission-task-20260614 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-promotion-admission-task-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- This is still admission-task plumbing, not independent mechanics execution.
+  Mechanics needs stronger reference/dry-run artifacts before it can own
+  writes outside the parent pass DAG.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Promotion Admission Gate
+
+ULG now has a ComputeManager-facing promotion admission gate for metadata-only
+law families. It consumes the resident law graph manifest and registered
+solver descriptors, rejects missing evidence, enforces promotion order, and
+admits only the first candidate families when all required evidence is present.
+It does not execute mechanics independently yet.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: missing mechanics evidence returns
+    `required-evidence-missing`, full mechanics evidence returns
+    `promotion-admission-accepted` for `particle-kinematics` and `mechanics`,
+    and thermal/phase promotion remains blocked by promotion order.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: real browser authority host exposes
+    `ulgLawFamilyPromotionAdmission()`, rejects missing mechanics evidence,
+    admits mechanics when the required evidence map is present, and rejects
+    thermal/phase as out of order.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_RUN_ID=codex-promotion-admission-gate-20260614 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-promotion-admission-gate-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- The gate only admits promotion metadata. It does not yet create an
+  executable mechanics child task or prove independent mechanics mutation.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 State-Family Owner Map
+
+ULG now carries resident state-family ownership metadata in the law graph
+manifest. The pass DAG remains the only current executable owner of admitted
+physics state, while child law-family descriptors declare only prospective
+ownership until promotion gates pass. Mechanics is recorded as the first
+promotion candidate, but it is still metadata-only and cannot create a task.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: manifest owner map status is
+    `single-current-owner-per-family`; pass DAG owns current `mechanics`,
+    `gas-pressure`, and `pressure-interface`; prospective owners map mechanics
+    to `ulg-mls-mpm-mechanics-law`; first promotion candidate is mechanics
+    with `particle-kinematics` and `mechanics` families.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: real browser authority summary exposes the same owner-map
+    status, no conflicts, current pass-DAG owners, prospective child owners,
+    and mechanics first-promotion candidate.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_RUN_ID=codex-state-family-owner-map-20260614 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-state-family-owner-map-20260614/`.
+- ULG: `git diff --check`
+  - Passed.
+
+Open validation gaps:
+
+- Owner metadata does not yet promote mechanics to an independent worker. The
+  next gate should make ComputeManager refuse child-law execution unless the
+  required promotion evidence is present.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Law Graph Manifest
+
+ULG now derives a concrete law graph manifest from the resident solver
+descriptors registered under the browser PeerCompute authority host. The
+manifest is a control-plane object, not a scheduler: it lists graph nodes,
+parent/data-dependency edges, executor status, read/write/conserved state
+families, validation gates, cache policy, and the metadata-only promotion
+policy that blocks child law execution until gates pass.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: manifest schema is
+    `peercompute.ulg.law-closure-graph-manifest.v0`, with `nodeCount=5`,
+    `edgeCount=7`, executable node
+    `ulg-mls-mpm-sph-resident-pass-dag`, four metadata-only law-family nodes,
+    sedenion scope in read state families, and product/pressure outputs in
+    write state families.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: real browser authority summary exposes manifest schema,
+    node/edge counts, executable node IDs, metadata-only node IDs, and the
+    `metadata-only-until-gated` promotion rule.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_RUN_ID=codex-law-graph-manifest-20260614 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-law-graph-manifest-20260614/`.
+
+Open validation gaps:
+
+- The manifest does not yet execute independent child law workers. Promotion
+  still requires CPU-reference parity, conserved-field checks, GPU lease/fence
+  evidence, StateManager admission, and representative visual sequences per
+  law family.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Law-Family Descriptors
+
+ULG now publishes the resident law graph shape through PeerCompute
+`ComputeManager` solver descriptors without splitting execution yet. The
+browser authority host registers one executable pass-DAG solver and four
+metadata-only child law-family descriptors: mechanics, thermal/phase,
+reaction/product/gas, and pressure/interface. Metadata-only children are
+visible to the authority graph but cannot create tasks until their independent
+execution gates are implemented and validated.
+
+Verified commands:
+
+- ULG:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- ULG:
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  and `node --check tests/demo.e2e.mjs`
+  - Passed.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "ULG resident solver descriptors publish executable pass-DAG plus metadata law-family nodes"`
+  - Passed: `7/7` in the file.
+  - Evidence: `ulg-mls-mpm-sph-resident-steps` remains executable; all four
+    law-family descriptors have `runtime=metadata`, `hasExecutor=false`,
+    parent law graph metadata, and `submitSolverTask()` rejection.
+- ULG:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident steps can use the real browser PeerCompute resident authority host"`
+  - Passed: `1/1`.
+  - Evidence: the real browser NodeKernel/ComputeManager authority host
+    reports executable solver IDs, law-family solver IDs, and the law graph
+    ID; the child law-family descriptors reject direct task creation.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_RUN_ID=codex-law-family-descriptors-20260614 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=180000 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-law-family-descriptors-20260614/`.
+
+Open validation gaps:
+
+- Metadata publication does not prove independent law scheduling yet. Each
+  child descriptor must earn execution with CPU-reference parity,
+  conserved-field checks, GPU fence/lease evidence, StateManager admission,
+  and representative visual sequences.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Live Browser Provider Transport
+
+ULG now verifies resident StateManager replication over live browser/libp2p
+transport. The gate starts a local WSS PeerCompute relay inside Playwright,
+keeps the existing ULG HTTPS Vite server on `:5173`, creates two real browser
+PeerCompute `NodeKernel` authority hosts, commits a resident warm delta before
+the second host joins, and proves provider sync replays the preexisting
+`ulg-sph-resident-pass-dag` delta across the real network path.
+
+Verified commands:
+
+- PeerCompute: `node --check peercompute/src/peercompute/nodeKernel/NodeKernel.js`
+  and StateManager/provider syntax checks
+  - Passed.
+- PeerCompute:
+  `node --test peercompute/tests/stateManager.unit.test.js peercompute/tests/unit/nodeKernel.start.test.js`
+  - Passed: `6/6`.
+  - Evidence: `StateManager.requestProviderSync()` publishes a provider sync
+    request after provider initialization, no-ops without a provider, and
+    `NodeKernel.start()` requests provider sync after network connect.
+- PeerCompute:
+  `node --test peercompute/tests/stateManager.unit.test.js peercompute/tests/unit/nodeKernel.start.test.js peercompute/tests/unit/gpuResidentLaneManager.test.js peercompute/tests/unit/computeManager.commitDelta.test.js`
+  - Passed: `27/27`.
+- ULG:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 npx playwright test tests/demo.e2e.mjs --config=tests/playwright.config.mjs --project=chromium --grep "provider transport replays resident warm deltas"`
+  - Passed: `1/1`.
+  - Evidence: late browser NodeKernel receives the preexisting resident warm
+    delta over WSS relay/provider transport; source publishes
+    `yjs-sync-response`, replica publishes `yjs-sync-request`, and the replica
+    committed-delta reader accepts the warm entry.
+- ULG:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `35/35`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-provider-sync-architecture-20260614 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=2 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=4 node scripts/sph-visual-sanity-matrix.mjs`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=3` for both water scenarios.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-provider-sync-architecture-20260614/`.
+
+Open validation gaps:
+
+- This proves compact resident warm-delta replay over live browser provider
+  transport, not full remote resident physics execution across separate
+  machines.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 PeerComputeProvider Initial Sync
+
+PeerComputeProvider now has an initial Yjs sync handshake, and ULG verifies it
+with a resident warm-delta gate. The source StateManager commits the ULG
+resident delta before the replica joins; the replica then requests sync via
+the real PeerComputeProvider path, receives the missing update, and validates
+the preexisting `ulg-sph-resident-pass-dag` warm entry.
+
+Verified commands:
+
+- PeerCompute: `node --check peercompute/src/peercompute/stateManager/PeerComputeProvider.js`
+  - Passed.
+- PeerCompute: `node --check peercompute/tests/stateManager.unit.test.js`
+  - Passed.
+- PeerCompute: `node --test peercompute/tests/stateManager.unit.test.js`
+  - Passed: `3/3`.
+- ULG: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- ULG: `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "PeerComputeProvider transports"`
+  - Passed: `6/6` in the file.
+  - Evidence: replica provider emits `yjs-sync-request`; source provider
+    answers with `yjs-sync-response`; the late replica reads the preexisting
+    ULG resident warm delta and `readResidentStepsCommittedWarmDelta()` accepts
+    it as committed.
+- ULG: `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `35/35`.
+- ULG: `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- ULG: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase (resident steps can use the real browser PeerCompute resident authority host|browser PeerCompute remote placement gate configures hooks without implicit network start|resident auto scheduler can use the default PeerCompute resident authority host)"`
+  - Passed: `3/3`.
+- ULG: `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-provider-initial-sync-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`, short-run `J=[0.9997627139091492,1.0019187927246094]`,
+    max observed speed `0.08506813645362854 m/s`, and no visible surface
+    outside the container or particle bounds.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-provider-initial-sync-20260614/`.
+
+Open validation gaps:
+
+- This proves provider initial sync through in-process NetworkManager shims.
+  The next distributed gate is live browser/libp2p NodeKernel transport for
+  the same resident-delta path.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 PeerComputeProvider Warm-Delta Transport
+
+ULG now has a provider-transport gate for resident StateManager deltas. The
+test creates two real sibling PeerCompute `StateManager`s with
+`disableNetworkProvider=false`, lets both instantiate real
+`PeerComputeProvider`s, and uses a minimal in-process NetworkManager shim only
+to deliver `broadcast()` messages to registered provider handlers.
+
+Verified commands:
+
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "PeerComputeProvider transports"`
+  - Passed: `6/6` in the file.
+  - Evidence: source provider broadcasts `yjs-update` on
+    `ulg-provider-state-sync`; the replica provider applies it; replica warm
+    state contains the ULG resident state delta; and
+    `readResidentStepsCommittedWarmDelta()` accepts it as committed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `35/35`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase (resident steps can use the real browser PeerCompute resident authority host|browser PeerCompute remote placement gate configures hooks without implicit network start|resident auto scheduler can use the default PeerCompute resident authority host)"`
+  - Passed: `3/3`.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-provider-transport-convergence-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`, short-run `J=[0.9997627139091492,1.0019187927246094]`,
+    max observed speed `0.08506813645362854 m/s`, and no visible surface
+    outside the container or particle bounds.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-provider-transport-convergence-20260614/`.
+
+Open validation gaps:
+
+- This proves the PeerComputeProvider `yjs-update` transport path for a fresh
+  resident delta. The initial Yjs state-vector/full-document sync gap this
+  exposed is now covered by the 2026-06-14 initial-sync gate above.
+- Real browser/libp2p provider transport across live NodeKernel peers remains
+  open.
+- The opt-in long-horizon liquid-settling acceptance gate remains the separate
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Replicated StateManager Convergence
+
+The redundant NodeKernel remote-placement smoke now proves an extra authority
+step: after the requester admits the remote resident commit delta into its real
+PeerCompute `StateManager`, the test encodes the requester's Yjs document,
+applies it to a second `StateManager`, and verifies the replica can read and
+validate the same `ulg-sph-resident-pass-dag` warm delta.
+
+Verified commands:
+
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "redundant NodeKernel remote placement quorum"`
+  - Passed: `5/5` in the file.
+  - Evidence: remote primary and replica responders execute through their own
+    `ComputeManager`s; requester provenance reports task signing, satisfied GPU
+    fence, redundant placement, and quorum accepted; requester `StateManager`
+    admits the resident delta; a second `StateManager` receives the encoded
+    Yjs update and reads the same committed warm delta.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `34/34`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `curl -k -I --max-time 5 https://127.0.0.1:5173/`
+  - Passed: live HTTPS Vite server returned `HTTP/2 200`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase (resident steps can use the real browser PeerCompute resident authority host|browser PeerCompute remote placement gate configures hooks without implicit network start|resident auto scheduler can use the default PeerCompute resident authority host)"`
+  - Passed: `3/3`.
+  - Note: the same grep without the HTTPS base URL timed out during
+    `config.webServer` startup because the current live dev server is
+    HTTPS-only while the default Playwright base URL is HTTP.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-replicated-state-convergence-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`, short-run `J=[0.9997627139091492,1.0019187927246094]`,
+    max observed speed `0.08506813645362854 m/s`, and no visible surface
+    outside the container or particle bounds.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-replicated-state-convergence-20260614/`.
+
+Open validation gaps:
+
+- This proves in-memory Yjs update convergence from admitted requester state to
+  a replica `StateManager`. It does not yet prove real browser/provider
+  transport convergence across live NodeKernel peers.
+- The visual matrix remains short-horizon regression evidence. The opt-in
+  long-horizon liquid-settling acceptance gate is still the unresolved
+  physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Remote Placement Smoke
+
+ULG now has an in-memory redundant NodeKernel remote-placement smoke for the
+resident pass DAG. It submits a module-backed ULG resident task with
+`placementHint.advisoryOnly=false`, runs primary and replica responders through
+PeerCompute remote placement, validates quorum, and admits the resulting compact
+delta into the requester's real `StateManager`.
+
+Verified commands:
+
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- `node --check tests/fixtures/ulgRemoteResidentPlacementTask.mjs`
+  - Passed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "redundant NodeKernel remote placement quorum"`
+  - Passed: `5/5` in the file, including the focused remote-placement smoke.
+  - Evidence: responder `ComputeManager`s execute the remote task but commit no
+    deltas; requester provenance reports remote placement, task signing,
+    satisfied GPU fence, redundant placement, and quorum accepted; requester
+    StateManager warm state contains the admitted resident delta.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `34/34`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-remote-placement-smoke-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`, short-run `J=[0.9997627139091492,1.0019187927246094]`,
+    max observed speed `0.08506813645362854 m/s`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-remote-placement-smoke-20260614/`.
+
+Open validation gaps:
+
+- This is an in-memory transport smoke for deterministic resident output, not
+  full browser-to-browser distributed physics. The replicated StateManager
+  convergence portion is now covered by the 2026-06-14 02:04 gate above; the
+  remaining distributed gate is real browser/provider transport across live
+  NodeKernel peers.
+
+## Current Focused Result - 2026-06-14 Remote Placement Gate
+
+The browser PeerCompute resident authority host now exposes an explicit remote
+placement gate. It can configure `NodeKernel` network placement executors,
+`ComputeManager` placement hooks, ULG placement admission, and PeerCompute
+remote-result quorum validation without auto-starting networking or making
+resident physics remote by default.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "remote placement gate configures hooks" --timeout 120000`
+  - Passed: `1/1`.
+  - Evidence: `configureRemotePlacement({peerId:"peer-b", replicaPeerIds:["peer-c"]})`
+    reports `configured-network-not-started`, wires ComputeManager
+    `placementExecutor`, `placementAdmission`, and `placementResultValidator`,
+    keeps `nodeKernelStarted=false`, then `clearRemotePlacement()` removes the
+    hooks.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host|NodeKernel network gate starts and stops explicitly|remote placement gate configures hooks|StateManager warm-delta admission|resident auto scheduler uses an injected ComputeManager|ComputeManager-shaped GPU lane task" --timeout 180000`
+  - Passed: `7/7`.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-remote-placement-gate-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`, short-run `J=[0.9997627139091492,1.0019187927246094]`,
+    max observed speed `0.08506813645362854 m/s`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-remote-placement-gate-20260614/`.
+
+Open validation gaps:
+
+- This configures and proves the gate; it does not yet run resident physics on
+  a remote peer. The next distributed validation should use explicit
+  non-advisory placement hints with a real two-node/browser-local or loopback
+  remote placement probe and StateManager admission evidence.
+
+## Current Focused Result - 2026-06-14 Solver-Created Resident Task Bridge
+
+Mounted resident SPH/MLS-MPM scheduling now uses
+`SolverRegistry.createTask()` for registered PeerCompute solver
+`ulg-mls-mpm-sph-resident-steps` when the active `ComputeManager` exposes a
+real solver registry. The bridge preserves the ULG task's root GPU fence,
+GPU-resident lane, law-graph, read/write family, return-envelope, and
+StateManager commit metadata.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps compute task"`
+  - Passed: `29/29`.
+  - Evidence: the submit helper calls `solverRegistry.createTask()` and the
+    submitted task keeps `peercompute.ulg.mls-mpm-resident-steps-compute-task.v0`,
+    `gpuResidentLane`, `gpuFence`, `lawGraphNode`, and
+    `peercompute.ulg.mls-mpm-resident-steps-solver-task-bridge.v0`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "real browser PeerCompute resident authority host" --timeout 180000`
+  - Passed: `1/1`.
+  - Evidence: browser execution reports
+    `peerComputeSolverTask.created=true`, solver id
+    `ulg-mls-mpm-sph-resident-steps`, solver-task schema
+    `peercompute.compute.solver-task.v0`, and warm-delta scope
+    `ulg-sph-resident-pass-dag`; scene `computeManagerTask` reports the same
+    solver-created bridge.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host|NodeKernel network gate starts and stops explicitly|StateManager warm-delta admission|resident auto scheduler uses an injected ComputeManager|ComputeManager-shaped GPU lane task" --timeout 180000`
+  - Passed: `6/6`.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-solver-created-resident-task-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`, short-run `J=[0.9997627139091492,1.0019187927246094]`,
+    max observed speed `0.08506813645362854 m/s`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-solver-created-resident-task-20260614/`.
+
+Open validation gaps:
+
+- The short visual matrix is a geometry/volume regression guard, not proof of
+  solved liquid settling. The opt-in long-horizon H2O/H2O liquid acceptance
+  gate remains the next physics-quality blocker.
+
+## Current Focused Result - 2026-06-14 Resident Solver Descriptor Registration
+
+The browser NodeKernel `ComputeManager` now registers ULG's resident
+SPH/MLS-MPM pass DAG in PeerCompute `SolverRegistry` as
+`ulg-mls-mpm-sph-resident-steps`.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "real browser PeerCompute resident authority host" --timeout 180000`
+  - Passed: `1/1`.
+  - Evidence: the real browser authority host reports
+    `residentSolverRegistrationStatus=registered`; `ComputeManager.listSolvers()`
+    contains `peercompute.compute.solver-descriptor.v0` for
+    `ulg-mls-mpm-sph-resident-steps` with module
+    `/src/runtime/sph/sphMlsMpmGpuStep.js`, warm-delta scope
+    `ulg-sph-resident-pass-dag`, law node
+    `ulg-mls-mpm-sph-resident-pass-dag`, and WebGPU residency `gpu-lane`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host|NodeKernel network gate starts and stops explicitly|StateManager warm-delta admission|resident auto scheduler uses an injected ComputeManager|ComputeManager-shaped GPU lane task" --timeout 180000`
+  - Passed: `6/6`.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-resident-solver-registry-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-resident-solver-registry-20260614/`.
+
+Follow-up:
+
+- Completed by the 2026-06-14 solver-created resident task bridge: mounted
+  scheduling now uses `SolverRegistry.createTask()` when the real solver
+  registry is available while preserving GPU-lane, fence, and StateManager
+  admission evidence.
+
+## Current Focused Result - 2026-06-14 Explicit NodeKernel Network Gate
+
+The browser PeerCompute resident authority host remains local/no-start by
+default, but it now exposes explicit `startNodeKernelNetwork()` and
+`stopNodeKernelNetwork()` controls with
+`peercompute.ulg.nodekernel-network-gate.v0` evidence. The stop path disconnects
+`NetworkManager` without destroying `StateManager`, so warm resident authority
+survives temporary network tests.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "NodeKernel network gate starts and stops explicitly" --timeout 120000`
+  - Passed: `1/1`.
+  - Evidence: host summary starts with `nodeKernelNetworkGateStatus=not-started`,
+    `startNodeKernelNetwork()` reports `started` and a browser libp2p peer id,
+    `stopNodeKernelNetwork()` reports `stopped-network-only`, and
+    `ComputeManager`/`StateManager` are still usable after network stop.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host|NodeKernel network gate starts and stops explicitly|StateManager warm-delta admission|resident auto scheduler uses an injected ComputeManager|ComputeManager-shaped GPU lane task" --timeout 180000`
+  - Passed: `6/6`.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-nodekernel-network-gate-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-nodekernel-network-gate-20260614/`.
+
+Open validation gaps:
+
+- This is a local browser libp2p start/stop gate with zero peers. It does not
+  prove remote placement, quorum validation, replicated StateManager
+  convergence, or distributed physics execution.
+
+## Current Focused Result - 2026-06-14 Real NodeKernel Browser Authority
+
+The mounted browser resident authority host now initializes a real sibling
+PeerCompute `NodeKernel` locally by default. The node is initialized but not
+P2P-started; its real `ComputeManager`, `StateManager`, and `GPUHub` own the
+default resident authority path. A direct-manager facade remains only as a
+fallback.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host" --timeout 180000`
+  - Passed: `2/2`.
+  - Evidence: both direct and default mounted resident paths report
+    `peercompute-browser-nodekernel-authority-host`,
+    `nodeKernelMode=real-peercompute-nodekernel`, constructor `NodeKernel`,
+    initialized authority metadata, and non-started P2P state.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host|StateManager warm-delta admission|resident auto scheduler uses an injected ComputeManager|ComputeManager-shaped GPU lane task" --timeout 180000`
+  - Passed: `5/5`.
+  - Evidence: ComputeManager lanes, StateManager warm-delta admission,
+    default NodeKernel authority, direct NodeKernel authority, and injected
+    ComputeManager precedence all stayed green.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-real-nodekernel-authority-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-real-nodekernel-authority-20260614/`.
+
+Open validation gaps:
+
+- The node is initialized locally but not connected. Distributed start,
+  peer discovery, remote placement, quorum validation, and live provider
+  StateManager convergence still need explicit gates. Later slices now cover
+  remote placement/quorum and in-memory replicated StateManager convergence;
+  real browser/provider transport remains open.
+- Long-horizon same-material liquid settling remains a separate quality gate.
+
+## Current Focused Result - 2026-06-14 Browser PeerCompute Resident Authority Host
+
+The mounted browser route can now instantiate a local PeerCompute authority
+host by default and run resident SPH/MLS-MPM batches through the real sibling
+PeerCompute `ComputeManager` and `StateManager` before scene publication.
+Injected/explicit ComputeManagers still take precedence and are not paired with
+the default authority host's StateManager.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeBrowserResidentHost.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "default PeerCompute resident authority host|real browser PeerCompute resident authority host|StateManager warm-delta admission|resident auto scheduler uses an injected ComputeManager|ComputeManager-shaped GPU lane task" --timeout 180000`
+  - Passed: `5/5`.
+  - Evidence: the browser-default host reports
+    `peercompute.ulg.browser-resident-authority-host.v0`, routes auto resident
+    batches through source `peercompute-resident-authority-host`, commits the
+    compact resident state delta into PeerCompute warm state, and preserves
+    injected ComputeManager precedence with status `inline-execution-returned`.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in long-horizon liquid skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-browser-peercompute-host-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-browser-peercompute-host-20260614/`.
+
+Open validation gaps:
+
+- The browser host is a local NodeKernel-shaped facade around real
+  PeerCompute managers, not the full distributed NodeKernel/libp2p stack.
+- Later slices now cover quorum validation, non-advisory in-memory remote
+  resident placement, and in-memory replicated StateManager convergence.
+  Remote GPU resident placement over real browser/provider transport remains
+  unproven.
+- Long-horizon same-material liquid settling remains a separate quality gate.
+
+## Current Focused Result - 2026-06-14 StateManager-Backed Scene Publication Gate
+
+The mounted/scene resident path can now require a matching StateManager warm
+delta before publishing ComputeManager-returned hot execution artifacts as
+local scene state.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeResidentCommitBridge.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs && node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `33/33`.
+  - Evidence: the real sibling PeerCompute integration still admits compact
+    resident deltas into real `StateManager` warm state, and the bridge helper
+    can read/validate the committed warm entry.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "StateManager warm-delta admission|ComputeManager-shaped GPU lane task|resident auto scheduler uses an injected ComputeManager" --timeout 180000`
+  - Passed: `3/3`.
+  - Evidence: a browser scene using a ComputeManager-shaped submitter and
+    StateManager-shaped warm store publishes resident execution with
+    `computeManagerTask.status =
+    state-manager-committed-inline-execution-returned`, accepted
+    `peercompute.ulg.resident-state-commit-admission.v0` evidence, and a
+    committed `peercompute.ulg.mls-mpm-resident-steps-state-delta.v0`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-state-manager-publication-20260614 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-state-manager-publication-20260614/`.
+
+Open validation gaps:
+
+- The browser route still needs a real PeerCompute/NodeKernel host by default;
+  this slice accepts injected/provided StateManager-shaped authority.
+- Distributed placement, quorum validation, and replicated StateManager
+  convergence are not covered by this scene publication gate.
+
+## Current Focused Result - 2026-06-13 StateManager Admission Bridge
+
+ULG now has a narrow bridge that validates resident sequence commit deltas
+before handing them to PeerCompute `StateManager`/`DataState`.
+
+Verified commands:
+
+- `node --check src/runtime/peercomputeResidentCommitBridge.js`
+  - Passed.
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `4/4`.
+  - Evidence: a ULG resident sequence/pass-DAG task submitted through the real
+    sibling PeerCompute `ComputeManager` acquired/completed the GPU resident
+    lane, returned satisfied fence evidence, passed the ULG bridge admission
+    gate, and committed
+    `peercompute.ulg.mls-mpm-resident-steps-state-delta.v0` into real
+    PeerCompute `StateManager` warm state under scope
+    `ulg-sph-resident-pass-dag`.
+  - Negative evidence: a result with a satisfied top-level task fence but an
+    unsatisfied payload fence was rejected with
+    `ERR_ULG_RESIDENT_DELTA_REJECTED`, committed no warm delta, and counted as
+    a failed ComputeManager task.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-state-admission-bridge-20260613 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-state-admission-bridge-20260613/`.
+
+Open validation gaps:
+
+- The mounted browser scene does not yet instantiate a real PeerCompute
+  NodeKernel/StateManager host or read accepted state back from StateManager
+  before publishing local scene state.
+- Distributed placement, quorum validation, and network-responder
+  StateManager replication still need separate gates.
+
+## Current Focused Result - 2026-06-13 Resident Sequence Commit Delta Envelope
+
+The real resident sequence/pass-DAG task handler now emits a compact
+StateManager-ready commit delta, instead of requiring test-only glue to provide
+one.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident steps compute task"`
+  - Passed.
+  - Evidence: `runMlsMpmResidentStepsComputeTask()` returns
+    `peercompute.ulg.mls-mpm-resident-steps-commit-delta.v0` with compact
+    `peercompute.ulg.mls-mpm-resident-steps-state-delta.v0` payload carrying
+    the state key, law graph node, expected output families, satisfied
+    GPU-fence report, retained-buffer refs, final-step summary, and recent
+    step summaries.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `31/31`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "ComputeManager-shaped GPU lane task|resident auto scheduler uses an injected ComputeManager" --timeout 180000`
+  - Passed: `2/2`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-resident-commit-delta-20260613 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-resident-commit-delta-20260613/`.
+
+Open validation gaps:
+
+- The compact delta is emitted and PeerCompute can commit deltas, but ULG does
+  not yet route scene state publication through a real StateManager committed
+  state readback.
+- The delta is intentionally compact; full retained GPU state still needs
+  lane-owned buffer references and admission semantics under the real
+  GPUHub/StateManager host.
+
+## Current Focused Result - 2026-06-13 Mounted Resident Scheduler ComputeManager Wiring
+
+The mounted SPH phase demo auto scheduler can now use a provided
+ComputeManager-compatible resident lane host instead of only direct
+scene-local execution.
+
+Verified commands:
+
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "resident auto scheduler uses an injected ComputeManager" --timeout 180000`
+  - Passed: `1/1`.
+  - Evidence: a `globalThis.__ulgResidentComputeManager` injected before page
+    load was discovered by the mounted resident scheduler, the automatic
+    resident sequence submitted a
+    `peercompute.ulg.mls-mpm-resident-steps-compute-task.v0` task on
+    `ulg:sph-resident:demo-auto`, and the scene published an inline
+    `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0` envelope with
+    satisfied GPU-fence evidence.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-resident-auto-manager-20260613 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-resident-auto-manager-20260613/`.
+
+Open validation gaps:
+
+- The demo discovers an injected/provided manager; it does not yet bundle or
+  instantiate the real PeerCompute manager in the browser route.
+- The local scene still publishes inline execution envelopes directly; accepted
+  asynchronous results need the future StateManager committed-delta read path.
+
+## Current Focused Result - 2026-06-13 Real PeerCompute Lane Contract Gate
+
+The ULG resident SPH/MLS-MPM pass-DAG task shape now has a direct contract test
+against the real sibling PeerCompute `ComputeManager`, not only a fake scene
+submitter.
+
+Verified commands:
+
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  - Passed: `2/2`.
+  - Evidence: a `createMlsMpmResidentStepsComputeTask()` task submitted through
+    PeerCompute `ComputeManager` acquired/completed a GPU resident lane lease,
+    attached satisfied `peercompute.compute.gpu-fence-report.v0` evidence,
+    emitted `peercompute.compute.task-execution.v0`, and committed a
+    `ulg-sph-resident-pass-dag` delta only after the fence was satisfied.
+  - Negative evidence: the same ULG resident pass-DAG task shape with a
+    required GPU fence but no fence report was rejected with
+    `ERR_COMPUTE_GPU_FENCE_UNSATISFIED`, committed no delta, and released the
+    lane with `gpu-fence-report-missing`.
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `31/31`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in skip.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-peercompute-contract-20260613 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, `visualSurfaceIssues=[]`,
+    `frameCount=2`.
+  - Frames and logs:
+    `/tmp/ulg-visual-sanity-matrix/codex-peercompute-contract-20260613/`.
+
+Open validation gaps:
+
+- This is still a local inline ComputeManager execution contract. It does not
+  prove NodeKernel network responder transport, distributed placement, or
+  StateManager committed-delta retrieval.
+- The browser scene still uses an optional submitter boundary; it is not yet
+  wired to instantiate and own the real PeerCompute manager/lane host.
+
+## Current Focused Result - 2026-06-13 ComputeManager Resident Sequence Boundary
+
+The resident SPH/MLS-MPM sequence can now cross a ComputeManager-shaped GPU
+resident lane task boundary while preserving the existing CPU/reference and
+visual validation gates.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `71/71`.
+  - New coverage: sequence-level ComputeManager task declarations, law-graph
+    node metadata, no local double-leasing in the task handler, and
+    ComputeManager-compatible submit helper.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "ComputeManager-shaped GPU lane task" --timeout 150000`
+  - Passed: `1/1`.
+  - Evidence: scene `refreshMlsMpmResidentSteps()` submitted through a fake
+    inline ComputeManager, returned a
+    `peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0` envelope,
+    carried `ulg-mls-mpm-sph-resident-pass-dag` law-node metadata, and
+    returned satisfied GPU fence evidence.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "retained surface draw diagnostics build under budget" --timeout 150000`
+  - Passed: `1/1`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "mounted resident Na/H2O promotes product gas pressure" --timeout 150000`
+  - Passed: `1/1`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` expected opt-in skip.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic`
+  - Passed: `6/6`.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-compute-manager-slice-20260613 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=12 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_TIMEOUT_MS=120000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, `issues=[]`, frames written under
+    `/tmp/ulg-visual-sanity-matrix/codex-compute-manager-slice-20260613/`.
+
+Open validation gaps:
+
+- This proves an inline ComputeManager-shaped task boundary, not a distributed
+  NodeKernel/StateManager admission path.
+- Submit-only/asynchronous ComputeManager results are intentionally not
+  accepted as scene-local state until StateManager committed-delta retrieval is
+  implemented.
+
+## Current Focused Result - 2026-06-13 Retained Surface-Vertex Diagnostic
+
+The no-full resident render diagnostic can now prove the render-field plus
+surface-vertex resident path under HTTPS without entering the compact
+surface-draw metadata/readback path that currently hangs Chromium/SwiftShader.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphRenderGpuKernel.test.mjs`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `42/42`.
+  - Includes deferred no-full queue-fence coverage for retained
+    surface-vertex handoff and compact surface-draw metadata summary fencing.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "retained surface draw diagnostics build under budget" --timeout 150000`
+  - Passed: `1/1` in `24.8s` against the HTTPS Vite server on
+    `0.0.0.0:5173`.
+  - Evidence: resident physics stages completed, render rows and render field
+    stayed no-full-readback, the diagnostic reached
+    `resident-surface-vertex-buffers-retained`, retained a
+    `vertexRowsBuffer`, and did not build draw rows, indirect rows, compacted
+    vertex rows, or summary readback.
+  - Harness note: the focused browser test must explicitly dispose the scene
+    after collecting the primitive payload, otherwise active animation plus
+    retained WebGPU buffers can keep Playwright teardown alive until timeout.
+
+Open validation gaps:
+
+- Compact surface-draw metadata/readback is still a separate failing lane; this
+  test deliberately defers it for no-overlay diagnostics.
+- The liquid/solid pulsing, settling, and free-surface behavior remains
+  unresolved by this checkpoint.
+- The normal visible path still needs a GPU-resident draw bridge that renders
+  continuous surfaces without CPU `MarchingCubes` readback.
+
+## Current Focused Result - 2026-06-13 G2P Params ABI Regression
+
+The catastrophic no-full resident zero-output bug is now pinned by a focused
+WebGPU ABI regression. G2P had an 80-byte uniform payload but allocated a
+64-byte params buffer, so no-full WebGPU execution could silently retain zeroed
+output rows after the shader saw invalid params.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphG2pGpuKernel.js && node --check tests/sphG2pGpuKernel.test.mjs && node --test tests/sphG2pGpuKernel.test.mjs`
+  - Passed: `16/16`.
+  - Includes `WebGPU MLS-MPM G2P params buffer fits the full uniform payload`,
+    which fails if `queue.writeBuffer()` writes more bytes than the created
+    params buffer can hold.
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check tests/sphMlsMpmGpuStep.test.mjs && node --check src/runtime/sph/sphG2pGpuKernel.js && node --check tests/sphG2pGpuKernel.test.mjs`
+  - Passed.
+- `node --test tests/sphG2pGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `106/106`.
+- `node --test tests/webgpuKernelAbi.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphThermalGpuKernel.test.mjs tests/sphReactionGpuKernel.test.mjs tests/sphReactionGpuSummary.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `165/165`.
+  - Adds cross-kernel params ABI coverage for `16` resident WebGPU params
+    contracts. The guard compares WGSL scalar param struct byte length, JS
+    ArrayBuffer byte length, WebGPU uniform buffer allocation size, and the
+    writeBuffer factory call.
+- `npm run test:physics-atomics`
+  - Passed the expected fast gate: `5` pass, `1` opt-in long-horizon liquid
+    skip.
+- `npm test`
+  - Passed: `496` pass, `1` skipped.
+- `npm run icc:update`
+  - Passed after the code/doc/test updates: `227` indexed files and `1071`
+    memory chunks.
+
+Probe evidence:
+
+- `/tmp/ulg-h2o-mlsmpm-nofull-buffer-debug-1step-nothermal-fixed.json`
+  - Direct no-full resident H2O/H2O, thermal disabled: classified `good`,
+    conserved mass, nonzero G2P output, bounded J, pressure impulse `0`.
+- `/tmp/ulg-h2o-mlsmpm-fullreadback-direct-1step-g2pdebug-fixed.json`
+  - Direct full-readback H2O/H2O: classified `good`; WebGPU G2P parity passed
+    with `maxStateAbs ~= 7.45e-9` and `maxMechanicsAbs ~= 4.46e-9`.
+- `/tmp/ulg-h2o-mlsmpm-nofull-buffer-debug-1step-thermal-fixed-no-stage-fences.json`
+  - Direct no-full thermal-on H2O/H2O: classified `good` after removing
+    temporary per-stage fences; compact summary still dominated the one-step
+    run at about `3.24 s`.
+- `/tmp/ulg-scene-nofull-h2oh2o-fixed.json`
+  - Mounted H2O/H2O no-full scene probe: classified `good`, H2O visible in all
+    sampled frames, no visual surface issues.
+- `/tmp/ulg-scene-cpusph-h2oh2o-fixed.json`
+  - Mounted CPU-SPH H2O/H2O scene probe: classified `good`, H2O visible in all
+    sampled frames, no visual surface issues.
+
+Open validation gaps:
+
+- This closes the catastrophic zero-output/no-full resident failure, not the
+  final liquid-settling/free-surface quality problem.
+- Add comparable JS/WGSL ABI size tests for every resident law kernel with
+  new params structs as they are introduced. Existing scalar params contracts
+  are now guarded; storage row-layout drift remains covered by row-layout ABI
+  tests.
+- Add a mobile/page-visibility CPU-SPH render lifecycle probe before declaring
+  the phone-only blank/flash symptom fixed.
+
+## Current Focused Result - 2026-06-13 Liquid-Stability Gate
+
+The opt-in node-level long-horizon same-material liquid gate is now a passing
+acceptance check for the first liquid-stability remediation slice.
+
+Verified commands:
+
+- `npm run test:physics-atomics`
+  - Passed the default fast gate: `5` pass, `1` skipped.
+  - The skipped case is the long-horizon H2O/H2O liquid settling acceptance
+    gate. It remains opt-in because it is slower than the default atomics.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic`
+  - Passed: `6/6`. The prior failing H2O/H2O MLS-MPM setup reaches the
+    declared horizon with mass conserved, J bounded, and final drop speed under
+    the `0.25 m/s` acceptance threshold.
+- `npm test`
+  - Passed: `484` pass, `1` skipped.
+
+CPU-SPH mobile/page lifecycle validation, 2026-06-13 20:02 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5630 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5630 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5630 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "CPU-SPH view refreshes" --timeout 120000`
+  - Passed: `1/1`.
+  - Evidence: mobile-sized H2O/H2O `mech=sph` scene steps without blocking,
+    reports `mechanics mode   : sph`, completes a two-frame viewport refresh
+    burst after synthetic `visibilitychange`/`pageshow`, and retains at least
+    one visible H2O CPU-particle MarchingCubes surface.
+- `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `65/65`.
+- `git diff --check`
+  - Passed.
+- `npm run icc:update`
+  - Passed.
+
+No-full surface-summary skip validation, 2026-06-13 20:15 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `65/65`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_PORT=5632 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-no-full-render-summary-skip-smoke-2.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `renderFieldSurfaceSummaryMode=skip`,
+    `renderFieldSurfaceSummarySkipped=true`, render rows readback `false`,
+    render field readback `false`, compact surface summary readback `false`,
+    and `surfaceDrawStatus=resident-surface-draw-summary-skipped` on both
+    resident-batch samples.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5633 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5633 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5633 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "no-full render refresh can skip" --timeout 120000`
+  - Passed: `1/1`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5634 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5634 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5634 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "no-full render refresh can skip|CPU-SPH view refreshes" --timeout 120000`
+  - Passed: `2/2`.
+
+Compact summary scope validation, 2026-06-13 19:50 AKDT:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js src/runtime/sph/sphMlsMpmGpuStep.js src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `26/26`.
+  - New coverage: `particle-visual` compact summaries allocate/dispatch one
+    particle-sized partial summary for a small particle set even when the grid
+    has many nodes, and report active-grid evidence as not requested.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs tests/webgpuKernelAbi.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `92/92`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` skipped opt-in long-horizon liquid gate.
+- `ULG_PROBE_MODE=direct-resident ... ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `gridNodeScanCount=0`, `activeGridNodeCount=null`,
+    `activeGridNodeCountAvailable=false`, no analysis issues, compact summary
+    timings about `3026 ms` cold and `230 ms` warm.
+- `ULG_PROBE_MODE=direct-resident ... ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_SCOPE=full node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Comparison evidence: `gridNodeScanCount=13824`,
+    `activeGridNodeCount=280`, compact summary timings about `3248 ms` cold
+    and `295 ms` warm.
+- `git diff --check`
+  - Passed.
+- `npm run icc:update`
+  - Passed: `227` indexed files and `1076` memory chunks.
+
+Long liquid damping and mounted CPU-SPH validation, 2026-06-13 18:55 AKDT:
+
+- `node --check src/runtime/sph/mlsMpmCarrier.js src/runtime/sphPhaseDemo.js src/runtime/sph/sphGpuBuffers.js src/runtime/sph/sphG2pGpuKernel.js ulg-gpu-abi/src/wgsl.js src/visualization/sphPhaseScene.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test tests/physicsBehaviorInvariants.test.mjs`
+  - Passed: `6/6`.
+- `node --test tests/sphG2pGpuKernel.test.mjs`
+  - Passed: `15/15`, including the CPU G2P liquid wall-damping regression.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test tests/physicsBehaviorInvariants.test.mjs tests/sphPhaseDemo.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `71/71`.
+- `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `60/60`.
+- Mounted CPU-SPH browser probe:
+  `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&lawr=0' ULG_PROBE_OUTPUT=/tmp/ulg-h2o-cpu-sph-scene-probe-fixed2.json ULG_PROBE_PORT=5612 ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=12 ULG_PROBE_INITIAL_RESIDENT_WAIT_MS=1000 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_DIR=/tmp/ulg-h2o-cpu-sph-frames-fixed2 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=10 ULG_PROBE_TIMEOUT_MS=60000 node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `issues=[]`, `maxSpeedObservedMPerS=0.1412157416`,
+    `maxDisplacementObservedM=0.00076258`, H2O visible samples `3/3`,
+    no visual surface issues, and frames written under
+    `/tmp/ulg-h2o-cpu-sph-frames-fixed2/`.
+- Mounted MLS-MPM H2O/H2O full-readback browser probe:
+  `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&lawr=0' ULG_PROBE_OUTPUT=/tmp/ulg-h2o-mlsmpm-scene-probe-full.json ULG_PROBE_PORT=5614 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_INITIAL_RESIDENT_WAIT_MS=1000 ULG_PROBE_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_DIR=/tmp/ulg-h2o-mlsmpm-frames-full ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_FRAME_MAX=6 ULG_PROBE_TIMEOUT_MS=90000 node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `maxSpeedObservedMPerS=0.1055575673`,
+    `maxDisplacementObservedM=0.00005294`, active grid nodes `248`,
+    `J=0.999684..1.002948`, zero pressure impulse, H2O visible samples `2/2`,
+    and `visualSurfaceIssues=[]`.
+  - Caveat: the no-full resident render path still cannot prove fresh
+    MarchingCubes surfaces cheaply; full-readback remains the correctness path
+    until resident visual summaries move into the GPU lane.
+
+Thermal/Debye/reaction-scope and frame-capture validation, 2026-06-13 AKDT:
+
+- `node --check src/runtime/sph/thermalPhase.js src/runtime/sph/sphThermalGpuKernel.js`
+  - Passed.
+- `node --test tests/sphThermalGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs`
+  - Passed: `35/35`.
+- `node --check src/runtime/chemistry/reactionCandidates.js src/runtime/sph/reactionDiscovery.js tests/reactionDiscovery.test.mjs tests/chemistryReactionCandidates.test.mjs tests/sphThermalGpuKernel.test.mjs`
+  - Passed.
+- `node --test tests/chemistryReactionCandidates.test.mjs tests/reactionDiscovery.test.mjs tests/sphThermalGpuKernel.test.mjs`
+  - Passed: `24/24`.
+- Direct resident hot H2O/H2O, `16` substeps, all laws:
+  - Passed/classified stable after the thermal limiter.
+  - Evidence: `maxSpeedMPerS=0.19544`, `minVolumeRatioJ=0.80181`,
+    `maxVolumeRatioJ=1.00118`, `minTemperatureK=299.859`,
+    `maxTemperatureK=449.410`, liquid H2O remains dominant.
+- Direct resident Fe/H2O, `16` substeps, reactions disabled:
+  - Passed after Debye graph expansion.
+  - Evidence: `minTemperatureK=299.431976`, `maxTemperatureK=300`,
+    no spurious cooling to ~130 K.
+- Direct resident Fe/H2O, `16` substeps, all laws:
+  - Passed after reaction candidate scoping.
+  - Evidence: `reactionCount=0`, Fe remains solid, H2O remains liquid, no
+    thousands-K heat spike.
+- Direct resident Na/H2O, `16` substeps, all laws:
+  - Passed mechanically and still discovers the intended reactive family.
+  - Evidence: `reactionCount=1`; this remains a thermochemistry/barrier
+    validation target, not a reason to remove the law.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --check scripts/sph-visual-sanity-matrix.mjs`
+  - Passed.
+- `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_OUTPUT=/tmp/ulg-frame-check/result.json ULG_PROBE_FRAME_DIR=/tmp/ulg-frame-check/frames ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_EVERY=1 ULG_PROBE_PORT=5585 ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_TIMEOUT_MS=120000 node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Artifacts: `/tmp/ulg-frame-check/frames/0000-b000-initial.png`,
+    `/tmp/ulg-frame-check/frames/0001-b001-resident-batch.png`,
+    `/tmp/ulg-frame-check/frames/0002-b002-resident-batch.png`.
+  - Evidence: all three files are valid `1280 x 800` PNGs, probe
+    `frameCount=3`, `writtenFrameCount=3`, `issues=[]`.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_RUN_ID=codex-frame-smoke ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_BASE_PORT=5586 ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=2 ULG_VISUAL_MATRIX_TIMEOUT_MS=60000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 npm run probe:sph-visual-matrix`
+  - Passed with `failedCount=0`, scenario status `good`, `frameCount=2`.
+  - Artifacts: `/tmp/ulg-visual-sanity-matrix/codex-frame-smoke/`.
+
+Open validation gaps:
+
+- Last small representative matrix before frame-capture wiring was `4/5`:
+  liquid/liquid MLS-MPM, CPU-SPH, Fe/H2O, and hot H2O passed; Na/H2O timed out
+  in mounted scene mode while direct resident Na/H2O passed. Treat this as a
+  product-closure/render-scene orchestration gate.
+- The phone CPU-SPH render flash/disappear report is not reproduced by the
+  desktop probe yet. Add a mobile viewport/page-visibility RAF lifecycle probe
+  before declaring that path closed.
+
+Hydrostatic prestrain and condensed-J guard validation, 2026-06-13 AKDT:
+
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` skipped.
+  - This previously failed because the EOS-on H2O/H2O contact case started
+    with hydrostatic liquid `mpmJ` around `0.801..0.952` and then drifted
+    outside the `0.95..1.05` gate.
+- `node --test tests/physicsBehaviorInvariants.test.mjs tests/sphPhaseDemo.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `69/69`, `1` skipped.
+- Direct resident WebGPU mechanics comparison:
+  `ULG_PROBE_MODE=direct-resident ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&wxmin=293.15&wxmax=293.15&wymin=293.15&wymax=293.15&wzmin=293.15&wzmax=293.15&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&lawt=0&lawr=0' ULG_PROBE_OUTPUT=/tmp/ulg-atomic-current-eos-direct-after-jguard.json ULG_PROBE_PORT=5588 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=256 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_MIN_J=0.95 ULG_PROBE_MAX_J=1.05 ULG_PROBE_TIMEOUT_MS=120000 node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `minVolumeRatioJ=0.9999914169311523`,
+    `maxVolumeRatioJ=1.0490002632141113`, drop COM
+    `1.25 -> 1.199495553970337`, pressure impulse `0`.
+  - Performance note: compact summary dominated this run at about `51.7s`,
+    so the result is correctness evidence, not throughput evidence.
+
+Representative visual sanity matrix validation, 2026-06-13 15:01 AKDT:
+
+- `node --check scripts/sph-visual-sanity-matrix.mjs`
+  - Passed.
+- `node scripts/sph-visual-sanity-matrix.mjs --list`
+  - Passed; scenario labels:
+    `liquid-liquid-h2o-mlsmpm`, `liquid-liquid-h2o-cpu-sph`,
+    `solid-liquid-contact-fe-h2o`, `phase-change-hot-h2o-water`,
+    `reaction-product-na-h2o`.
+- `ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_RUN_ID=codex-smoke-cpu-sph ULG_VISUAL_MATRIX_BASE_PORT=5320 ULG_VISUAL_MATRIX_BATCHES=3 ULG_VISUAL_MATRIX_BATCH_STEPS=16 npm run probe:sph-visual-matrix`
+  - Passed/classified `good`, `failedCount=0`, `issues=[]`,
+    `visualSurfaceIssues=[]`.
+  - Summary path:
+    `/tmp/ulg-visual-sanity-matrix/codex-smoke-cpu-sph/summary.json`.
+
+Scope limits:
+
+- This is a reduced-demo stability gate, not a final water model or multiscale
+  claim. Keep the gate mandatory for mechanics edits, then add surface
+  tension/free-surface checks, broader visual sequences, and ComputeManager/
+  GPUHub lane scheduling for the accepted law DAG.
+
+## Current Focused Result - 2026-06-13 Atomic Physics Gate
+
+Added and verified a fast atomic behavior gate for SPH/MLS-MPM regressions.
+
+Verified commands:
+
+- `npm run test:physics-atomics`
+  - Passed the default gate, `5` pass plus the skipped long-horizon liquid
+    acceptance case.
+  - Covers resident zero-force rest, resident gravity-only free-space motion
+    against semi-implicit Euler, mass conservation, zero pressure impulse when
+    pressure is disabled, and H2O/H2O mechanics+gravity law isolation with
+    bounded volume ratio `J`.
+  - Added EOS-on H2O/H2O MLS-MPM contact and plain SPH/PBF reference-lane
+    atomics. The EOS-on case checks same-material contact closure under
+    gravity while keeping J inside `0.95..1.05`; the plain SPH/PBF case checks
+    the reference lane stays finite, bounded, and contact-closing.
+- `node --check tests/physicsBehaviorInvariants.test.mjs && node --test tests/physicsBehaviorInvariants.test.mjs tests/sphPhaseDemo.test.mjs --test-name-pattern "H2O/H2O|plain SPH|physical law groups|demo exposes"`
+  - Passed, `28/28`.
+- `node --test tests/sphG2pGpuKernel.test.mjs tests/mlsMpmCarrier.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphPhaseDemo.test.mjs`
+  - Passed, `63/63`.
+- `node --test tests/sphG2pGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/mlsMpmCarrier.test.mjs`
+  - Passed after the resident G2P pressure-scale patch, `41/41`.
+- `npm test`
+  - Passed, `483/483`.
+- Direct resident mechanics+gravity-only H2O/H2O probe:
+  `/tmp/ulg-history-probes/current-atomicgate-valid-mechanics-gravity-only-256-g2p-scale.json`
+  - Passed/classified `good`: `0.128 s` over `256` direct substeps,
+    pressure impulse `0`, J exactly `1..1`, max speed about `0.135 m/s`,
+    drop COM `1.25 -> 1.235336 m`, and support gap
+    `~0 -> -0.002719 m`.
+- Short visual sequence sanity check:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5174 ULG_SPH_VISUAL_CAPTURE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_FRAMES=3 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_LABEL='h2o-h2o-atomicgate-mech-gravity-pressure-disabled' ... npx playwright test --config tests/playwright.config.mjs --grep 'SPH phase visual sequence'`
+  - Passed, `1/1`, against H2O/H2O mechanics+gravity with EOS/pressure/
+    thermal/reaction disabled.
+  - Wrote PNG/GIF/WebM/timeline artifacts under
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-atomicgate-mech-gravity-pressure-disabled/`.
+  - Timeline evidence: WebGPU resident backend, active grid nodes `248`,
+    pressure impulse `0`, J exactly `1..1`, H2O visible in all `3` sampled
+    frames. Limitation: capture cadence remains slow
+    (`meanIntervalMs ~= 5417` for a `250 ms` target).
+- EOS-on direct resident H2O/H2O contact probe:
+  `/tmp/ulg-history-probes/current-atomicgate-eos-on-liquid-contact-direct-resident.json`
+  - Passed/classified `good`: WebGPU backend, no-full readback, `256`
+    resident substeps / `0.128 s`, min active grid nodes `248`, J
+    `0.997148..1.006978`, pressure impulse `0`, max speed about `1.60 m/s`,
+    drop COM `1.25 -> 1.159897 m`, and support gap
+    `~0 -> -0.016253 m`.
+- EOS-on short visual sequence sanity check:
+  `h2o-h2o-atomicgate-eos-on-liquid-contact`
+  - Passed, `1/1`, and wrote PNG/GIF/WebM/timeline artifacts under
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-atomicgate-eos-on-liquid-contact/`.
+  - Timeline evidence: WebGPU resident backend, active grid nodes `248`, J
+    about `0.9993..1.0104`, pressure impulse `0`, and H2O visible in all
+    `3` sampled frames. Limitation: capture cadence remains slow
+    (`meanIntervalMs ~= 5349` for a `250 ms` target).
+- Simulation-time visual cadence sanity check:
+  `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5335 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5335 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5335 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 ULG_SPH_VISUAL_CAPTURE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_FRAMES=3 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_ADVANCE_TIMEOUT_MS=90000 ULG_SPH_VISUAL_TIMEOUT_MS=300000 ULG_SPH_VISUAL_LABEL='h2o-h2o-sim-cadence-final-eos-on-liquid-contact' ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0' npx playwright test --config tests/playwright.config.mjs --grep 'SPH phase visual sequence'`
+  - Passed, `1/1`.
+  - Wrote PNG/GIF/WebM/timeline artifacts under
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-sim-cadence-final-eos-on-liquid-contact/`.
+  - Timeline evidence: `simulationCadence.status =
+    simulation-advanced-each-frame`, resident steps `32 -> 48 -> 64`,
+    simulation time `0.016 -> 0.024 -> 0.032 s`, repeated samples `0`, J
+    `0.997147..1.010376`, pressure impulse `0`, and H2O visible in all
+    frames. Limitation: wall-clock capture cadence remains slow
+    (`meanIntervalMs ~= 6202` for a `250 ms` target). Frame timing points at
+    resident advance (`~2.37..2.75 s`), metric collection (`~1.52..1.62 s`),
+    and canvas readback (`~1.93..2.11 s`) as the remaining bottlenecks.
+- Long-horizon liquid-quality gate smoke:
+  `ULG_PROBE_MODE=direct-resident ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5336 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-liquid-quality-default-compat-smoke.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`; default probe behavior remains compatible.
+  - New opt-in thresholds are present but disabled by default:
+    `expectLiquidMerge=false`, `expectLiquidSettled=false`.
+- Opt-in H2O/H2O merge/render gate:
+  `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5339 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=0&lawr=0' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_EXPECT_LIQUID_MERGE=1 ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT=1 ULG_PROBE_MIN_J=0.95 ULG_PROBE_MAX_J=1.05 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-liquid-quality-merge-optin-scene-256-tolerance-aligned.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: final H2O visible surface count `1`, visible sample count `5`,
+    support gap `~0 -> -0.02056 m`, J `0.998788..1.007276`, no pressure
+    impulse, no visual surface issues. The probe's particle-bound tolerance is
+    now explicit and defaults to `0.2 m`, matching the sparse render-only
+    radius floor.
+- Opt-in H2O/H2O settle gate:
+  `ULG_PROBE_MODE=direct-resident ... ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2048 ULG_PROBE_EXPECT_LIQUID_MERGE=1 ULG_PROBE_EXPECT_LIQUID_SETTLE=1 ULG_PROBE_LIQUID_SETTLE_MIN_TIME_S=1 ULG_PROBE_LIQUID_SETTLE_MAX_FINAL_DROP_SPEED=0.25 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-liquid-quality-merge-settle-optin-direct-2048-singlebatch.json node scripts/sph-long-horizon-probe.mjs`
+  - Correctly classified `bad` for the unfinished long-horizon water-quality
+    gate.
+  - Evidence: `2048` substeps / `1.024 s`, support gap
+    `~0 -> -0.243569 m`, J `0.985629..1.026000`, pressure impulse `0`, but
+    issue is `liquid-settle-final-drop-speed>0.25`; final drop speed is about
+    `1.43 m/s`.
+  - Timing evidence: the single resident batch took about `399 s`, with
+    compact-summary wait about `368 s` (`~92%` of batch wall time after queued
+    resident work). A `16 x 128` equivalent run produced the same physics
+    conclusion, so the current blocker is both physical settling quality and
+    affordable long-horizon validation.
+
+Scope limits:
+
+- This fixes the disabled-EOS mechanics isolation path and restores an atomic
+  guardrail. It also proves short merge/render coherence under the opt-in
+  gate. It does not prove full all-laws liquid free-surface settling quality;
+  the opt-in settle gate now fails explicitly and remains P0.
+
+## Current Focused Result - 2026-06-13 10:36 AKDT
+
+Law-group isolation, stale no-full cohort diagnostics, and per-surface
+MarchingCubes bounds clipping verified.
+
+Verified commands:
+
+- `node --check src/runtime/sphPhaseDemo.js`
+  - Passed.
+- `node --check src/runtime/sphPhaseViewState.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "physical law groups"`
+  - Passed, `22/22`.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "bounded isosurface|render field|surface radius|surface"`
+  - Passed, `24/24`.
+- Static all-laws-off direct probe:
+  `/tmp/ulg-history-probes/current-lawmatrix-00-static-all-off.json`
+  - Passed/classified `good`: zero displacement, zero speed, and feasible
+    initial preflight.
+- Plain SPH mechanics+gravity+EOS direct probe:
+  `/tmp/ulg-history-probes/current-lawmatrix-01-plain-sph-mech-gravity-eos.json`
+  - Passed/classified `good`: max speed about `0.527 m/s`, drop COM delta
+    about `-0.015 m`, and valid wall defaults.
+- Corrected no-full cohort diagnostic probe:
+  `/tmp/ulg-history-probes/current-lawmatrix-03c-mlsmpm-nofull-cohort-null-check.json`
+  - Passed/classified `good`: `cohortDiagnosticsAvailableCount=0`,
+    drop/base cohort deltas are null, and resident cohort status is
+    `unavailable-no-full-state-readback` instead of stale initial data.
+- Long all-laws live-cohort direct probe:
+  `/tmp/ulg-history-probes/current-lawmatrix-13-direct-long-all-laws-live-cohorts.json`
+  - Passed/classified `good`: `1024` substeps / `0.512 s`, J
+    `0.997748..1.009107`, pressure impulse `0`, drop COM
+    `1.25 -> 0.463889 m`, and center-bound gap
+    `0.183333 -> 0.034447 m`.
+- Support-gap analyzer smoke:
+  `/tmp/ulg-history-probes/current-lawmatrix-14-direct-support-gap-smoke.json`
+  - Passed/classified `good`: finite-support gap is now reported separately
+    from center-bound gap, with support gap `~0 -> -0.01625 m` over
+    `0.128 s`.
+- No-full compact cohort smoke:
+  `/tmp/ulg-history-probes/current-lawmatrix-16-nofull-compact-cohorts-32lane.json`
+  - Passed/classified `good`: compact resident cohort diagnostics are ready
+    without full particle readback, drop COM `1.25 -> 1.159897 m`,
+    support gap `~0 -> -0.01625 m`, J `0.998833..1.006488`, and pressure
+    impulse `0`.
+- Bounds-clipped valid-geometry scene probe:
+  `/tmp/ulg-history-probes/current-lawmatrix-12-scene-bounds-clipped-5batch.json`
+  - Passed/classified `good`: `issues=[]`, `maxOverflow=0`, H2O visible across
+    the sampled sequence, J about `0.997..1.007`, and max speed about
+    `1.026 m/s`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_CAPTURE=1 ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1' ULG_SPH_VISUAL_FRAMES=5 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_LABEL='h2o-h2o-valid-geometry-bounds-clipped-visual' npx playwright test --config tests/playwright.config.mjs --grep 'SPH phase visual sequence'`
+  - Passed, `1/1`.
+  - Artifacts:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-valid-geometry-bounds-clipped-visual/`.
+  - Timeline evidence: `5` captured frames, GIF/WebM assembled, all law groups
+    on, resident render field rows `152`, pressure impulse `0`, two visible
+    liquid H2O domains, and bounded surfaces.
+
+Scope limits:
+
+- This verifies law-isolation plumbing and a visible render-field extraction
+  fix. It does not prove water-like long-horizon merge/settle behavior. The
+  visual harness still reports `slow-capture-cadence` with mean frame interval
+  about `4934 ms` against a `250 ms` target, so faster resident/render
+  validation remains a P0 requirement. The long direct probe proves live
+  descent/contact and bounded volume, but it bypasses scene pressure/surface
+  rendering and therefore does not close the visual merge/settle gate. Compact
+  cohort summaries remove full readback from that motion check, but their
+  queue-wait cost is still high and remains performance work.
+
+## Current Focused Result - 2026-06-13 09:51 AKDT
+
+Valid-geometry H2O/H2O scene render-field surface expansion fixed.
+
+Verified commands:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "bounded isosurface|render field|surface"`
+  - Passed, `24/24`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5294 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=420000 ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-face-contact-scene-256-all-laws-valid-geometry-sparse-res-32.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: no `visible-surface-expanded-beyond-particle-bounds`,
+    `visibleSurfaceSampleCount=5`, `h2oVisibleSurfaceSampleCount=5`, max
+    speed `1.77523 m/s`, J `0.998788..1.007276`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5296 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5296 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5296 --strictPort' PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_CAPTURE=1 ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_VISUAL_LABEL='h2o-h2o-face-contact-valid-geometry-sparse-res-32-drawrange' ULG_SPH_VISUAL_FRAMES=3 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_TIMEOUT_MS=300000 npm run test:e2e -- --grep "SPH phase visual sequence" --timeout 300000`
+  - Passed.
+  - Artifacts:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-face-contact-valid-geometry-sparse-res-32-drawrange/`.
+  - Timeline surface metrics now use active `drawRange` vertices instead of
+    the full MarchingCubes `72000` capacity.
+
+Scope limits:
+
+- This fixes a visible render-field sizing/metric bug for valid short-horizon
+  contact. It still leaves the long-horizon fluid-quality question open:
+  all-laws MLS-MPM preserves J over 1024 direct substeps, while
+  mechanics+gravity-only collapse to the J floor because incompressibility/EOS
+  is disabled.
+
+## Current Focused Result - 2026-06-13 09:21 AKDT
+
+Plain SPH reference mode now distinguishes valid face contact from invalid
+overlapped initial geometry.
+
+Verified commands:
+
+- `node --check src/runtime/sphPhaseDemo.js`
+  - Passed.
+- `node --check src/runtime/sph/sphPhaseCarrier.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "overlapping initial|plain SPH|demo driver"`
+  - Passed, `21/21`.
+- `ULG_PROBE_MODE=direct-resident ... ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph' ... ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-face-contact-plain-sph-reference-pbf-parser-fixed.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: `initialPreflightStatus=preflight-feasible-derived-closures`,
+    wall defaults `283.15 K`, geometry `initial-block-geometry-ok`, max speed
+    `0.080756 m/s`, drop COM delta `-0.000241 m`, and gap delta
+    `-0.000111 m`.
+- `ULG_PROBE_MODE=direct-resident ... ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph' ... ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-overlap-plain-sph-reference-preflight-blocked-parser-fixed.json node scripts/sph-long-horizon-probe.mjs`
+  - Failed intentionally, classified `bad`.
+  - Evidence: `initial-preflight-blocked`,
+    `initial-block-geometry-overlap`, physical support overlap `0.15 m`, and
+    the same high-speed upward impulse that made the earlier center-gap probe
+    misleading.
+
+Scope limits:
+
+- This gives a useful SPH/PBF reference lane for valid short-horizon setups,
+  but it is still CPU reference and diagnostic only. It does not fix the
+  resident MLS-MPM mechanics/contact/volume bug.
+
+## Current Focused Result - 2026-06-13 09:03 AKDT
+
+Plain SPH reference-mode selector and direct probe branch added.
+
+Verified commands:
+
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseDemo.test.mjs --test-name-pattern "plain SPH|demo driver"`
+  - Passed, `20/20`.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_READBACK_MODE=full-parity-readback ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5293 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=24 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-contact-near-plain-sph-reference-smoke-analyzer-fixed.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed as a wiring smoke, classified `good` for the short interval.
+  - Evidence: timeline `mechanicsIntegrator=sph`, final metric phase
+    `plain-sph-cpu-reference-batch`, schema
+    `peercompute.ulg.plain-sph-cpu-reference-step.v0`, max speed
+    `17.2334 m/s`, gap `0.03333336 -> 0.03236580 m`, and explicit limitations
+    that this mode bypasses resident WebGPU MLS-MPM.
+
+Scope limits:
+
+- The selector and probe branch work, but current plain SPH is not yet a
+  trustworthy water reference. It needs wall handling and PBF/incompressible,
+  viscosity, surface-tension, and cavitation/free-surface constraints before
+  being used as the baseline for liquid behavior.
+
+## Current Focused Result - 2026-06-13 08:51 AKDT
+
+Residual liquid/contact bug isolated below pressure/gas/thermal/reaction.
+
+Verified commands:
+
+- `node --test tests/abi.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMechanicsRefreshGpuKernel.test.mjs tests/sphPhaseDemo.test.mjs tests/sphGpuBuffers.test.mjs`
+  - Passed, `67/67`.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_READBACK_MODE=full-parity-readback ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5283 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&laweos=0' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-contact-near-256-eos-off.json node scripts/sph-long-horizon-probe.mjs`
+  - Failed as intended, classified `bad`.
+  - Evidence: gap `0.03333336 -> 0.02995068 m`, drop COM
+    `1.1000 -> 1.00951 m`, base top `0.82680 m`, drop bottom
+    `0.85675 m`, J `0.878366..0.999933`, max speed `1.69935 m/s`,
+    pressure impulse `0`.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_READBACK_MODE=full-parity-readback ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5286 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&laweos=0&lawp=0&lawt=0&lawr=0' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-contact-near-256-mechanics-gravity-only.json node scripts/sph-long-horizon-probe.mjs`
+  - Failed as intended, classified `bad`.
+  - Evidence: law groups were mechanics+gravity only; stages were
+    P2G/gridUpdate/G2P only; gap `0.03333336 -> 0.02995068 m`, drop COM
+    `1.1000 -> 1.00951 m`, base top `0.82680 m`, drop bottom
+    `0.85675 m`, base mean velocity `-0.41877 m/s`, drop mean velocity
+    `-1.42842 m/s`, J `0.876073..0.999933`, max speed `1.69935 m/s`,
+    and internal pressure scale `0`.
+- Hydrostatic initialization probes also failed:
+  - `/tmp/ulg-history-probes/current-h2o-direct-contact-near-256-hydrostatic-init.json`
+  - `/tmp/ulg-history-probes/current-h2o-direct-contact-near-256-hydrostatic-pressure-lane.json`
+
+Scope limits:
+
+- This does not fix liquid behavior. It narrows the active bug below the
+  pressure/gas/render layers and makes the next target MLS-MPM mechanics
+  transfer plus a plain SPH/PBF reference lane.
+
+## Current Focused Result - 2026-06-13 08:05 AKDT
+
+Same-material high-drop render/domain bug fixed short-horizon, and physical
+law-group isolation controls verified.
+
+Verified commands:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed, `58/58`.
+- `npm test`
+  - Passed, `466/466`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5268 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-highdrop-16-sparse-floor.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: resident GPU render field active, two visible liquid H2O domains,
+    zero pressure impulse, J near one, and
+    `maxVisibleSurfaceOutsideParticleBoundsM=0`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5269 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-highdrop-256-sparse-floor.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: no visual surface issues, zero pressure impulse, J
+    `0.998100..1.000672`, total COM Y decreases, and two visible liquid H2O
+    domains remain present over the sampled resident sequence.
+- `ULG_PROBE_EXPECT_STATIC=1 ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5271 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&lawg=0&lawp=0' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-law-toggle-static-smoke.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: status reports `gravity=off pressure=off`, max displacement is
+    `0`, COM Y delta is `0`, pressure impulse is `0`, and two H2O liquid
+    domains stay visible.
+- `npm run icc:update`
+  - Passed, indexed `224` files and `1004` memory chunks.
+
+Scope limits:
+
+- This fixes wall-input/render-domain/sparse-drop visibility bugs in the
+  short-horizon scene path. It does not prove true water-like contact, merge,
+  surface tension, viscosity, incompressible pressure projection, or
+  long-horizon settling.
+- The law-group checkboxes are diagnostic isolation controls; they do not
+  remove laws from the architecture and must become part of the recurring
+  visual/probe matrix.
+
+## Current Focused Result - 2026-06-13 06:20 AKDT
+
+Pressure/gas regression slice repaired, and long-horizon visual validation made
+draw-range aware.
+
+Verified commands:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphG2pGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/multiMaterialEos.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  - Passed, `75/75`.
+- `PLAYWRIGHT_BASE_URL='http://127.0.0.1:5238' PLAYWRIGHT_WEB_SERVER_URL='http://127.0.0.1:5238' PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5238' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 ULG_SPH_LONG_HORIZON_CAPTURE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_LONG_HORIZON_BATCHES=6 ULG_SPH_LONG_HORIZON_BATCH_STEPS=16 ULG_SPH_LONG_HORIZON_RENDER_EVERY=1 ULG_SPH_LONG_HORIZON_MAX_FRAMES=7 ULG_SPH_LONG_HORIZON_READBACK_MODE=no-full-readback ULG_SPH_LONG_HORIZON_RENDER_READBACK_MODE=full-parity-readback ULG_SPH_LONG_HORIZON_RENDER_TIMEOUT_MS=30000 ULG_SPH_LONG_HORIZON_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_LONG_HORIZON_LABEL='h2o-h2o-near-contact-drawrange-sequence-validation-readback' npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident long-horizon probe records H2O/H2O stability"`
+  - Passed, `1/1` in about `1.2m`.
+  - Evidence: `7` fresh render-field readback samples, `7` frame artifacts,
+    `maxVisibleSurfaceCenterMotionM=0.0047826`, max speed
+    `0.878941 m/s`, no analysis issues. The harness now samples drawn
+    MarchingCubes vertices (`168` active vertices), not the fixed `72000`
+    vertex capacity.
+- `PLAYWRIGHT_BASE_URL='http://127.0.0.1:5239' PLAYWRIGHT_WEB_SERVER_URL='http://127.0.0.1:5239' PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5239' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 ULG_SPH_LONG_HORIZON_CAPTURE=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_LONG_HORIZON_BATCHES=4 ULG_SPH_LONG_HORIZON_BATCH_STEPS=16 ULG_SPH_LONG_HORIZON_RENDER_EVERY=1 ULG_SPH_LONG_HORIZON_MAX_FRAMES=5 ULG_SPH_LONG_HORIZON_READBACK_MODE=no-full-readback ULG_SPH_LONG_HORIZON_RENDER_READBACK_MODE=full-parity-readback ULG_SPH_LONG_HORIZON_RENDER_TIMEOUT_MS=30000 ULG_SPH_LONG_HORIZON_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_LONG_HORIZON_LABEL='h2o-h2o-highdrop-drawrange-sequence-validation-readback' npx playwright test --config tests/playwright.config.mjs --grep "SPH phase resident long-horizon probe records H2O/H2O stability"`
+  - Passed, `1/1` in about `1.0m`.
+  - Evidence: `5` fresh render-field readback samples, `5` frames,
+    `maxVisibleSurfaceCenterMotionM=0.0098805`, max speed
+    `0.578135 m/s`, no analysis issues.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_READBACK_MODE=full-parity-readback ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5240 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-highdrop-after-harness-fixes.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: over `256` substeps / `0.128s`, drop COM
+    `2.75 -> 2.669350 m`, final drop velocity `-1.25525 m/s`, pressure
+    impulse `0`, and J `0.998292..1.000527`.
+- `npm run icc:update`
+  - Passed, indexed `224` files and `994` memory chunks.
+
+Scope limits:
+
+- This repairs the frozen/delayed high-drop regression and makes the visual
+  sequence evidence trustworthy enough for recurring sanity checks.
+- It does not complete liquid physics. Same-material contact/merge/settle still
+  needs explicit liquid law work: incompressible pressure projection or
+  equivalent constraint solve, viscosity/surface tension/cavitation closures,
+  phase/wall-temperature consistency, and longer-horizon visual probes.
+
+## Current Focused Result - 2026-06-13 04:46 AKDT
+
+Same-material liquid contact and phase/render split guards added to the
+standalone long-horizon probe.
+
+Verified commands:
+
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_READBACK_MODE=full-parity-readback ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5223 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-contact-near-256-full-cohorts-contact-guard-fixed.json node scripts/sph-long-horizon-probe.mjs`
+  - Failed as intended, classified `bad`.
+  - Evidence: issue `same-material-contact-gap-not-closing`; after `256`
+    substeps / `0.128s`, drop COM changes `1.1000000 -> 1.0804508 m`, the
+    base/drop gap changes only `0.0333334 -> 0.0321894 m`, pressure impulse is
+    `0`, and J remains stable at `0.997498..1.000174`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5224 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=4 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=420000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-contact-near-256-default-blob-0p4-phase-guard.json node scripts/sph-long-horizon-probe.mjs`
+  - Failed as intended, classified `bad`.
+  - Evidence: issues `same-material-h2o-visible-phase-split` and
+    `same-material-h2o-nonliquid-visible-surface`; the final sampled visible
+    H2O descriptors are `liquid:h2o` and `solid:ice` in a same-material 300 K
+    H2O/H2O scenario.
+
+Scope limits:
+
+- These are regression guards and diagnosis evidence, not a fix for liquid
+  contact. The later 08:05 slice fixed the phase/render-domain path that
+  invented the solid/ice visible surface in high-drop scene probes; the
+  contact-gap guard remains active for true liquid contact/settling work.
+
+## Current Focused Result - 2026-06-13 04:30 AKDT
+
+Default visible isosurface radius tightened and validated against resident
+particle AABB bounds.
+
+Verified commands:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "surface radius|blob radius|isosurface radius|resident motion diagnostic|render field|surface"`
+  - Passed, `22/22`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5219 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-contact-near-16-default-blob-0p4.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: no URL `blob=` override, pressure rows `0`, pressure impulse
+    `0`, max speed `0.1308358 m/s`, J `0.999490..0.999996`,
+    `maxVisibleSurfaceOutsideM=0`, and
+    `maxVisibleSurfaceOutsideParticleBoundsM=0`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5274 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5274 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5274 --strictPort' PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_CAPTURE=1 ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_VISUAL_LABEL='h2o-h2o-contact-near-default-blob-0p4' ULG_SPH_VISUAL_FRAMES=3 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_TIMEOUT_MS=300000 npm run test:e2e -- --grep "SPH phase visual sequence" --timeout 300000`
+  - Passed, `1/1` in about `44s`.
+  - Artifacts:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-contact-near-default-blob-0p4/`.
+
+Scope limits:
+
+- This validates the default visible surface radius and the new
+  particle-relative visual guard.
+- It does not validate long-horizon same-material liquid merge/settle physics.
+
+## Current Focused Result - 2026-06-13 04:11 AKDT
+
+Compact resident COM/bounds diagnostics in live browser paths, plus post-change
+visual sequence sanity check.
+
+Verified commands:
+
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --check ulg-gpu-abi/src/index.js && node --check ulg-gpu-abi/src/wgsl.js && node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check scripts/sph-long-horizon-probe.mjs && node --check tests/demo.e2e.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "summary|copy budget|GPU resident lane|compact|compute task|reaction from retained"`
+  - Passed, `25/25`.
+- `node --test tests/abi.test.mjs --test-name-pattern "resident summary ABI"`
+  - Passed, `17/17`.
+- `npm test`
+  - Passed, `457/457`.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5213 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-16-com-bounds.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: pressure rows `0`, max speed `0.0784546 m/s`, J
+    `0.9998219..1.0`, and next Y particle bounds `0.0999236..2.9163332 m`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5214 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-16-com-bounds.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: pressure rows `0`, bounded visible geometry,
+    `maxVisibleSurfaceOutsideM=0`, COM Y delta `-0.0013416 m`, and next Y
+    particle bounds `0.0995834..2.9163332 m`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_DERIVED_E2E_TIMEOUT_MS=300000 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  - Passed, `1/1` in about `3.9m`.
+  - Evidence: live browser path carries `224` byte compact diagnostics,
+    COM/AABB fields, refreshed-mechanics retained buffer mode, and explicit
+    `surface-draw-overlay-disabled-by-policy`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_CAPTURE=1 ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_VISUAL_LABEL='h2o-h2o-separated-current-com-bounds' ULG_SPH_VISUAL_FRAMES=3 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_TIMEOUT_MS=300000 npm run test:e2e -- --grep "SPH phase visual sequence"`
+  - Passed, `1/1` in about `50s`.
+  - Artifacts:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-separated-current-com-bounds/`.
+- `npm run icc:update`
+  - Passed, indexed `224` files and `988` memory chunks.
+
+Scope limits:
+
+- This validates the pressure gate, compact diagnostics, live browser
+  propagation, and short separated H2O/H2O visual sanity path.
+- It does not prove long-horizon same-material liquid merge/settle behavior.
+  That remains P0.
+
+## Current Focused Result - 2026-06-13 02:40 AKDT
+
+Pressure/gas regression boundary, resident cadence, motion diagnostics, and
+render-field bounds fix.
+
+Verified commands:
+
+- `node --check src/runtime/webgpuComputeLayout.js && node --check src/runtime/sph/sphGridGpuKernel.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphG2pGpuKernel.js && node --check src/runtime/sph/sphThermalGpuKernel.js && node --check src/runtime/sph/sphMechanicsRefreshGpuKernel.js && node --check src/runtime/sph/sphMlsMpmGpuSummary.js`
+  - Passed.
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/visualization/sphPhaseScene.js && node --check scripts/sph-long-horizon-probe.mjs && node --check tests/demo.e2e.mjs`
+  - Passed.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5191 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=32 ULG_PROBE_TIMEOUT_MS=300000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-64-final-summary.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: `compactSummaryMode=final-only`, max speed `0.1798196 m/s`,
+    max displacement `0.00008988 m`, active grid nodes `248`, J
+    `0.998767..0.999974`, pressure rows `0`, pressure impulse `0`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5192 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-cadence-final-summary.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: page path reports `substeps=16 target=16`, initial resident
+    `stepCount=16`, `nextTime=0.008s`, zero pressure impulse, visible H2O
+    surface samples, and scene envelope `step-ms=11.4k` instead of the earlier
+    `75.0k` for the same corrected 16-substep cadence.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphGridUpdateGpuKernel.test.mjs tests/sphG2pGpuKernel.test.mjs tests/sphMechanicsRefreshGpuKernel.test.mjs tests/sphMlsMpmGpuSummary.test.mjs tests/residentStateAuthority.test.mjs`
+  - Passed, `74/74`.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `npm test`
+  - Passed, `455/455`.
+- `npm run icc:update`
+  - Passed, indexed `224` files and `980` memory chunks after the latest
+    render-bounds docs.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5194 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=256 ULG_PROBE_TIMEOUT_MS=360000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-separated-256-final-summary.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: separated H2O/H2O reached `nextTime=0.128s`, max speed
+    `1.2552514 m/s`, active grid nodes `296`, J `0.997750..1.000842`,
+    pressure rows/impulse `0`, with final-substep displacement only
+    `0.0006275 m`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5195 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=240000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-separated-64-batch-motion.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: status line reported `status=batch-motion-estimate-visible`,
+    `batch-est=0.012553m`, and render cadence forced refresh with
+    `reason=resident-batch-motion-estimate-visual-refresh`.
+  - Scope limit: visible H2O surface bounds remained oversized/nonphysical, so
+    render-field/surface coherency is still P0.
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident motion diagnostic|render cadence|resident overlay|render field|surface"`
+  - Passed, `19/19`.
+- `npm test`
+  - Passed, `455/455` after the resident motion diagnostic cleanup.
+- `node --check src/visualization/sphPhaseScene.js && node --check scripts/sph-long-horizon-probe.mjs && node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "surface radius|resident motion diagnostic|render field|surface"`
+  - Passed, `20/20`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5197 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=240000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-separated-16-radius-fix-visual-guard.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed as a probe and correctly classified `bad`.
+  - Evidence: `issues=["visible-surface-outside-box"]`, H2O y-min
+    `-0.755995 m`, and `maxVisibleSurfaceOutsideM=0.705995 m`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5199 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=240000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-separated-16-drawrange-bounds.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: H2O `surfaceBoxClipStatus=clipped-to-container`, y-min
+    `-1.06e-8 m`, `maxVisibleSurfaceOutsideM=0`, zero pressure impulse, J
+    `0.999495..1.0`, max speed `0.1569079 m/s`, active H2O draw vertices
+    `840`, and MarchingCubes vertex capacity `72000`.
+  - Scope limit: render-field readback is active, so this is not liquid
+    settling validation or the final resident GPU surface-draw path.
+- `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs --test-name-pattern "surface radius|resident motion diagnostic|render field|surface|marching|draw"`
+  - Passed, `50/50`.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `npm test`
+  - Passed, `456/456`.
+
+## Current Focused Result - 2026-06-13 01:18 AKDT
+
+P0 pressure/gas regression boundary and current pressure-row gate.
+
+Verified commands:
+
+- `node --check scripts/sph-long-horizon-probe.mjs && node --check tests/demo.e2e.mjs`
+  - Passed.
+- `ULG_PROBE_REPO_DIR=/tmp/ulg-history-probes/f0d101f ULG_PROBE_PORT=5181 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/f0d101f-h2o-probe.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: max speed `0.012864 m/s`, max displacement `0.00000645 m`,
+    active grid nodes `248`, J `0.999677..1.000018`, visible H2O surface
+    sampled.
+- `ULG_PROBE_REPO_DIR=/tmp/ulg-history-probes/c81a66a ULG_PROBE_PORT=5182 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/c81a66a-h2o-probe.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed as a probe, classified `bad`.
+  - Evidence: max speed `303.441 m/s`, max displacement `0.151721 m`, J
+    `0.1..8.343449`, pressure rows `146`, consumer
+    `grid-momentum-impulse-submitted-unverified-no-full-readback`.
+- `ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5183 ULG_PROBE_URL='/#drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=0.85&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-probe.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed, classified `good`.
+  - Evidence: max speed `0.140798 m/s`, max displacement `0.0000705 m`, active
+    grid nodes `248`, J `0.999399..1.0`, pressure rows `0`, consumer
+    `blocked-pressure-force-rows-unavailable`, applied pressure impulse `0`.
+- Attempted the gated Playwright long-horizon test through the normal
+  Playwright web-server path; it timed out before reaching the page because
+  `webServer` did not become ready. The standalone probe above is the current
+  reliable history-comparison path.
+
+## Current Focused Result - 2026-06-12 AKDT
+
+P0 resident thermal state handoff behavior fix.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check src/runtime/residentStateAuthority.js`
+  - Passed.
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --check tests/residentStateAuthority.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed, `22/22`.
+  - Covers the resident no-full-readback handoff now carrying thermal
+    `stateBuffer` forward when thermal ran, while surfacing the remaining
+    `mechanics-constitutive-refresh-pending-after-thermal-state` P0 gap.
+- `node --test tests/residentStateAuthority.test.mjs`
+  - Passed, `6/6`.
+  - Covers the authority warning when post-thermal state advances without a
+    matching resident mechanics/constitutive refresh.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary|GPU resident lane|compute task|thermal"`
+  - Passed, `80/80`.
+- `npm test`
+  - Passed, `440/440`.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties" --timeout 180000`
+  - Passed, `1/1`, about `2.2m`.
+
+## Current Focused Result - 2026-06-12 AKDT
+
+ULG resident MLS-MPM/SPH ComputeManager task bridge slice.
+
+Verified commands:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "compute task|GPU resident lane|retain buffers without full readback"`
+  - Passed, `22/22`.
+  - Covers the resident-step task factory declaring GPU-lane residency and
+    required GPU fence metadata, the task handler returning explicit
+    `peercompute.compute.gpu-fence-report.v0` without local double leasing, the
+    submit helper using a ComputeManager-compatible `submitTask()` surface, and
+    existing local lane adapter behavior.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed, `22/22`.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary|GPU resident lane|compute task"`
+  - Passed, `80/80`.
+- `npm test`
+  - Passed, `439/439`.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `npm run icc:update`
+  - Passed, `220` indexed files and `937` memory chunks.
+
+## Current Focused Result - 2026-06-12 AKDT
+
+PeerCompute ComputeManager GPU-resident lane task wrapper slice.
+
+Verified commands:
+
+- In `/home/cos/projects/peercompute`:
+  `node --check peercompute/src/peercompute/computeManager/ComputeManager.js && node --check peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  - Passed.
+- In `/home/cos/projects/peercompute`:
+  `node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  - Passed, `5/5`.
+  - Covers passive lane manager behavior plus `ComputeManager` wrapping
+    declared inline GPU-resident lane tasks in leases before commit and
+    rejecting required-fence misses before `commitDelta`.
+- In `/home/cos/projects/peercompute`:
+  `node --test peercompute/tests/computeManager.unit.test.js peercompute/tests/unit/computeManager.commitDelta.test.js peercompute/tests/unit/computeManager.wasm.test.js peercompute/tests/unit/computeManager.worker.test.js peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  - Passed, `32/32`.
+- In `/home/cos/projects/peercompute`:
+  `git diff --check`
+  - Passed.
+- In `/home/cos/projects/peercompute`:
+  `npm --prefix /home/cos/projects/peercompute/peercompute run build`
+  - Passed with PeerCompute's existing circular chunk and large bundle
+    warnings.
+
+## Current Focused Result - 2026-06-12 AKDT
+
+PeerCompute passive GPU resident lane manager slice.
+
+Verified commands:
+
+- In `/home/cos/projects/peercompute`:
+  `node --check peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js && node --check peercompute/src/peercompute/computeManager/ComputeManager.js && node --check peercompute/src/peercompute/index.js && node --check peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  - Passed.
+- In `/home/cos/projects/peercompute`:
+  `node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  - Passed, `3/3`.
+  - Covers state-keyed lane leases, retained-buffer refs, copy-budget counters,
+    same-lane state-key conflict rejection, GPU fence reports, and passive
+    ComputeManager exposure without changing normal task dispatch.
+- In `/home/cos/projects/peercompute`:
+  `node --test peercompute/tests/computeManager.unit.test.js peercompute/tests/unit/computeManager.commitDelta.test.js peercompute/tests/unit/computeManager.wasm.test.js peercompute/tests/unit/computeManager.worker.test.js peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  - Passed, `30/30`.
+- In `/home/cos/projects/peercompute`:
+  `git diff --check`
+  - Passed.
+- In `/home/cos/projects/peercompute`:
+  `npm --prefix /home/cos/projects/peercompute/peercompute run build`
+  - Passed. Webpack still reports the existing circular chunk and large bundle
+    warnings.
+
+## Current Focused Result - 2026-06-12 AKDT
+
+PeerCompute ULG runtime GPU-fence descriptor/task/provenance slice.
+
+Verified commands:
+
+- In `/home/cos/projects/peercompute`:
+  `node --check demos/multiscale/src/compute/ulgRuntimeTasks.js && node --check demos/multiscale/src/compute/solverWorkerDescriptors.js && node --check peercompute/src/peercompute/computeManager/ComputeManager.js && node --check demos/multiscale/tests/multiscaleModel.test.mjs`
+  - Passed.
+- In `/home/cos/projects/peercompute`:
+  `node --test --test-name-pattern "ULG runtime worker|multiscale solver descriptors can attach|loopback remote placement admits ULG|loopback remote placement executor runs" demos/multiscale/tests/multiscaleModel.test.mjs`
+  - Passed, `4/4`.
+  - Covers `ulg-runtime` descriptor WebGPU queue-fence metadata,
+    `stepUlgRuntime` compact delta GPU-fence emission, and loopback
+    non-advisory remote placement acceptance after ComputeManager verifies the
+    satisfied fence.
+- In `/home/cos/projects/peercompute`:
+  `node --test peercompute/tests/computeManager.unit.test.js peercompute/tests/unit/computeManager.commitDelta.test.js peercompute/tests/unit/computeManager.wasm.test.js peercompute/tests/unit/computeManager.worker.test.js`
+  - Passed, `27/27`.
+- In `/home/cos/projects/peercompute`:
+  `node --test demos/multiscale/tests/multiscaleModel.test.mjs`
+  - Passed, `203/203`.
+- In `/home/cos/projects/peercompute`:
+  `git diff --check`
+  - Passed.
+- In `/home/cos/projects/peercompute`:
+  `npm --prefix /home/cos/projects/peercompute/peercompute run build`
+  - Passed. Webpack still reports the existing circular chunk and large bundle
+    warnings.
+
+## Current Focused Result - 2026-06-12 16:18 AKDT
+
+Added a dedicated todo plan for a higher-performance WebGPU-Ocean-style
+MLS-MPM simulator.
+
+Verified commands:
+
+- `sed -n '1,260p' plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
+  - Passed.
+  - Confirmed the plan includes the website/demo link, GitHub link,
+    architecture target, implementation phases, ULG constraints, acceptance
+    tests, and first implementation slice.
+- `rg -n "webgpu-ocean-mlsmpm|webgpu-ocean.netlify|github.com/matsuoka-601/WebGPU-Ocean|WebGPU-Ocean-style" plan/plan.md plan/todo/perf-upgrade.md plan/todo/overarching-completion-plan.md plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
+  - Passed.
+  - Confirmed the new todo is linked from the active plan, performance plan,
+    and overarching completion plan.
+- `wc -l plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
+  - Passed.
+  - Reported `232` lines.
+- `npm run icc:update`
+  - Passed.
+  - Reported `209` indexed files and `886` memory chunks.
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+  - Passed.
+  - Reported `is_stale: false` at current `HEAD`
+    `c81a66a85c82eb7ce3d960bcd8de0b35ff7d5676`.
+- `git diff --check`
+  - Passed.
+
 ## Current Focused Result - 2026-06-12 15:53 AKDT
 
 Created the repo-root todo handoff file `todo-handoff-6-12.md` with current
@@ -3136,3 +6711,492 @@ Resident playback motion and Three fallback cadence,
     cadence `reason=resident-motion-proven-visual-refresh`; `t90` reached
     `nextStep=6`, `nextTime=0.003`, `maxDx=0.13504351675510406`, and remained
     visible through `resident-gpu-render-field`.
+
+Resident authority and buffer lease contracts, 2026-06-12 17:52 AKDT:
+
+- `node --check src/runtime/residentStateAuthority.js`
+  - Passed.
+- `node --check src/runtime/residentBufferLease.js`
+  - Passed.
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --test tests/residentBufferLease.test.mjs tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/chemistryReactionCandidates.test.mjs`
+  - Passed, `28/28`.
+  - Covers resident state-family ownership, product-event buffer lease guards,
+    no-op reaction ownership, gas/product ownership, no-full-readback resident
+    steps, repeated reaction handoffs, and the sedenion-scoping-adjacent
+    reaction candidate baseline.
+
+Resident render/pressure leases and stale mirror guards, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident|overlay|render|pressure|interface|surface"`
+  - Passed, `44/44`.
+  - Covers retained surface-draw buffer leases, resident overlay behavior,
+    pressure/interface renderer contracts, render-field residency, and surface
+    batching.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "stale CPU|ping-pong unread|resident no-full|cleanup preserves|merges carried"`
+  - Passed, `18/18`.
+  - Covers stale CPU mirror rejection, stale mirrors accepted only with retained
+    GPU uploads in no-full-readback resident mode, product-event leases, and
+    repeated unread buffer ping-pong.
+- `node --test tests/residentBufferLease.test.mjs tests/residentStateAuthority.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs tests/chemistryReactionCandidates.test.mjs`
+  - Passed, `74/74`.
+  - Combined focused safety net for authority ledgers, buffer leases, resident
+    MLS-MPM stepping, retained render buffers, renderer pressure/interface
+    contracts, and reaction candidate baseline behavior.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+
+Resident pressure-interface state authority split, 2026-06-12 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure interface state|resident|overlay|render|pressure|interface|surface"`
+  - Passed, `18/18`.
+  - Covers the new `peercompute.ulg.sph-resident-pressure-interface-state.v0`
+    summary, resident pressure authority fields, retained force-row upload
+    metadata, renderer pressure/interface contracts, and surface/overlay
+    contracts.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried"`
+  - Passed, `63/63`.
+  - Reconfirms MLS-MPM pressure-force-row consumption, no-full resident steps,
+    stale CPU mirror guards, retained render buffers, and the new pressure-state
+    summary. Also covers that scene-level transient pressure-row consumer lease
+    wiring does not regress the resident/render pressure contracts.
+
+Render-field and surface-vertex retained-buffer leases, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "retained buffer|retained buffers|surface draw WebGPU builder|render field optional|surface vertices"`
+  - Passed, `29/29`.
+  - Covers lease-guarded retained render-field buffers, retained surface-vertex
+    buffers, retained surface-draw buffers, and existing resident no-full render
+    field/surface extraction behavior.
+- `node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers"`
+  - Passed, `65/65`.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+
+Compact-summary diagnostics lease, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js`
+  - Passed.
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "compact summary|resident summary|resident no-full|ping-pong unread|cleanup preserves|stale CPU|pressure"`
+  - Passed, `18/18`.
+  - Covers the compact summary readback path reporting a cleaned
+    diagnostics-only lease ledger while preserving resident pressure and
+    no-full-readback contracts.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `65/65`.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+
+Local queue-completion evidence, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "queue|pressure|compact summary|resident summary|retained buffer|retained buffers|surface draw WebGPU builder|render field retained|surface vertices retained"`
+  - Passed, `57/57`.
+  - Covers explicit `queueCompletionStatus` and `queueCompletionMethod` on the
+    grid-update no-full paths, render-field retained-buffer path,
+    surface-vertex retained-buffer path, surface-draw WebGPU builder, and
+    compact resident summary readback.
+  - Evidence is local to these kernels: completion is recorded from
+    `mapAsync(readback-buffer)` when readback occurs and from
+    `queue.onSubmittedWorkDone()` when a no-readback path can fence the queue.
+    PeerCompute-distributed GPU worker fence semantics remain a future contract.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `75/75`.
+  - Rechecks queue evidence together with pressure-state authority, stale CPU
+    mirror guards, retained render buffers, retained pressure rows, and compact
+    summary non-authority.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `npm run icc:update`
+  - Passed, `219` indexed files and `922` memory chunks after the final
+    material-interface/e2e documentation update.
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+  - Passed, `is_stale: false`.
+
+Product-event merge queue evidence, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "merges carried|cleanup preserves|resident no-full|ping-pong unread|compact summary|pressure|queue"`
+  - Passed, `18/18`.
+  - Covers resident product-event merge/copy queue evidence on the merged
+    product-mass handle and resident-step envelope. The fake WebGPU queue now
+    exposes `queue.onSubmittedWorkDone()`, and the merge test asserts
+    `queue-work-completed` before the merged buffer is carried into
+    `nextParticleUploads`.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `76/76`.
+  - Rechecks product-event merge queue evidence with resident authority ledgers,
+    pressure/material-interface state, render leases, and compact-summary
+    diagnostics-only lease cleanup.
+
+Scene pressure-upload queue/cleanup evidence, 2026-06-12 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check tests/demo.e2e.mjs && node --check tests/sphPhaseRenderer.test.mjs && node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure interface state|resident overlay|render"`
+  - Passed, `18/18`.
+  - Covers retained pressure force-row upload queue/cleanup fields flowing
+    through `buildSphResidentPressureInterfaceStateSummary()`.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `76/76`.
+  - Rechecks pressure upload evidence with resident grid update, resident
+    pressure state, material-interface state, and render/lease diagnostics.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  - Passed, `1/1`, about `2.3m`.
+  - Browser WebGPU coverage confirms the resident render-state summary exposes
+    pressure force-row upload queue evidence while derived material properties
+    and resident pressure coupling remain ready.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `npm run icc:update`
+  - Passed, `219` indexed files and `923` memory chunks after pressure-upload
+    evidence and documentation updates.
+- `EMSDK_QUIET=1 python3 /home/cos/projects/infinite_context_coder/scripts/codebase_tool.py status --repo ulg --check-staleness`
+  - Passed, `is_stale: false`.
+
+PeerCompute distributed GPU fence admission contract, 2026-06-12 AKDT:
+
+- In `/home/cos/projects/peercompute`:
+  `node --check peercompute/src/peercompute/computeManager/ComputeManager.js && node --check peercompute/tests/unit/computeManager.commitDelta.test.js && node --test peercompute/tests/unit/computeManager.commitDelta.test.js --test-name-pattern "GPU fence|remote placement"`
+  - Passed, `16/16`.
+  - Covers `peercompute.compute.gpu-fence-report.v0`, task-packet GPU fence
+    requirements, remote provenance normalization, accepted satisfied fence
+    reports, and rejection before commit when a required fence report is
+    missing.
+- In `/home/cos/projects/peercompute`:
+  `node --test peercompute/tests/computeManager.unit.test.js peercompute/tests/unit/computeManager.commitDelta.test.js peercompute/tests/unit/computeManager.wasm.test.js peercompute/tests/unit/computeManager.worker.test.js`
+  - Passed, `27/27`.
+  - Rechecks the new fence gate with existing inline, worker, WASM,
+    WASM-WebGPU, commit-delta, task-envelope, and remote-placement behavior.
+- In `/home/cos/projects/peercompute`:
+  `git diff --check && npm --prefix /home/cos/projects/peercompute/peercompute run build`
+  - Passed. The PeerCompute webpack build still reports its existing circular
+    chunk and large bundle warnings.
+
+Physics-owned material-interface extraction slice, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "material interface|pressure interface state|retained buffer|render field retained|surface draw"`
+  - Passed, `48/48`.
+  - Covers `buildSphPhysicsMaterialInterfaceFieldWebGpu()` consuming retained
+    field/surface buffers, stamping physics-stage authority metadata, and
+    preserving pressure-interface state behavior.
+  - Scope limit: this moves material-interface authority/cadence out of visible
+    rendering, but the source scalar field still reuses the existing field
+    kernel and interface candidate rows still read back for CPU compaction.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `76/76`.
+  - Rechecks material-interface authority with pressure rows, resident
+    no-full-readback paths, queue evidence, render leases, and compact summary
+    non-authority.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  - First run exposed an e2e readiness race after Reset: the wait accepted a
+    WebGPU resident step while render state was still `cpu-particles pending`.
+  - After fixing the wait to require `resident-gpu-render-field` for WebGPU
+    resident runs, the rerun passed, `1/1`, about `2.2m`.
+
+Material-interface source-field ABI wrapper, 2026-06-12 AKDT:
+
+- `node --check ulg-gpu-abi/src/index.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check tests/abi.test.mjs && node --test tests/abi.test.mjs tests/sphRenderGpuKernel.test.mjs --test-name-pattern "render field ABI|material interface|physics material interface|source field"`
+  - Passed, `47/47`.
+  - Covers `peercompute.ulg.sph-material-interface-source-field.v0`, retained
+    source-field buffer lease cleanup, and the physics material-interface
+    extractor consuming the source wrapper instead of ad hoc render-field buffer
+    parameters.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `76/76`.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  - Passed, `1/1`, about `2.3m`.
+
+Material-interface authority status overlay, 2026-06-12 AKDT:
+
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check tests/demo.e2e.mjs && node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "pressure interface state|resident overlay|render"`
+  - Passed, `18/18`.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary"`
+  - Passed, `76/76`.
+- `git diff --check`
+  - Passed.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  - Passed, `1/1`, about `2.3m`, including the new `material iface  :`
+    status assertion.
+
+ULG resident SPH GPU lane adapter, 2026-06-12 AKDT:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed, `19/19`.
+  - Covers optional GPU resident lane acquire/complete evidence on a no-full
+    resident WebGPU step and lease rejection when WebGPU device acquisition
+    fails.
+- `node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check src/runtime/sph/sphGridUpdateGpuKernel.js && node --check src/runtime/sph/sphRenderGpuKernel.js && node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs tests/sphRenderGpuKernel.test.mjs tests/sphPhaseRenderer.test.mjs --test-name-pattern "queue|pressure|material interface|source field|resident|overlay|render|surface|stale CPU|ping-pong unread|no-full|cleanup preserves|merges carried|retained buffer|retained buffers|compact summary|resident summary|GPU resident lane"`
+  - Passed, `77/77`.
+  - Rechecks the new lane adapter with resident authority ledgers, material
+    interface state, pressure rows, retained render buffers, queue evidence,
+    stale CPU guards, and compact-summary non-authority.
+- `git diff --check`
+  - Passed.
+- `npm test`
+  - Passed, `436/436`.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5273 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5273 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5273 --strictPort' PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "SPH phase demo runs derived material properties"`
+  - Passed, `1/1`, about `2.3m`.
+  - Ran on an isolated port because an existing listener on `5173` returned
+    `ERR_EMPTY_RESPONSE` to `npm run status:live`.
+
+Resident surface overlay policy and bounded probe timeout, 2026-06-13 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check src/visualization/sphPhaseDemoMount.js && node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay|overlay policy|surface radius|render field|surface"`
+  - Passed, `21/21`.
+- `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "surface draw|surface vertices|render field"`
+  - Passed, `30/30`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5203 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&surfaceOverlay=1' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=30000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-overlay-forced-bounded.json node scripts/sph-long-horizon-probe.mjs`
+  - Expected blocker captured: result `bad`, timeline `blocked`, reason
+    `browser probe timed out after 30000ms`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5205 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=4 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-default-policy.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Key evidence: overlay policy `surface-draw-overlay-disabled-by-policy`,
+    bridge `three-marching-cubes`, render-field readback `true`, H2O active
+    draw count `840`, `maxVisibleSurfaceOutsideM=0`, applied pressure impulse
+    `0`, and J `0.9997479..1.0`.
+- `git diff --check`
+  - Passed.
+- `npm test`
+  - Passed, `457/457`.
+- `npm run build`
+  - Passed with Vite's existing large-chunk warning.
+- `npm run icc:update`
+  - Passed with `224` indexed files and `982` memory chunks.
+
+Pressure/gas regression worktree search and current scene recheck, 2026-06-13 AKDT:
+
+- `git worktree add --detach /tmp/ulg-regression-1781349875/f0d101f f0d101f`
+  and `git worktree add --detach /tmp/ulg-regression-1781349875/c81a66a c81a66a`
+  - Created isolated historical checkouts without touching the dirty working
+    tree.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/tmp/ulg-regression-1781349875/c81a66a ULG_PROBE_PORT=5211 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/c81a66a-h2o-scene-16.json node scripts/sph-long-horizon-probe.mjs`
+  - Failed/classified `bad`.
+  - Key evidence: `visible-surface-outside-box`,
+    `visible-surface-larger-than-box`, `maxVisibleSurfaceOutsideM=1.3088627`,
+    pressure rows `302`, consumer
+    `grid-momentum-impulse-submitted-unverified-no-full-readback`,
+    max speed `20.7157 m/s`, and J `0.509843..1.372338`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5212 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-16-after-gates.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Key evidence: pressure rows `0`, consumer
+    `blocked-pressure-force-rows-unavailable`, max speed `0.156908 m/s`, J
+    `0.999495..1.0`, active nodes `280`, `maxVisibleSurfaceOutsideM=0`, overlay
+    policy `surface-draw-overlay-disabled-by-policy`, and active H2O draw count
+    `840`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/tmp/ulg-regression-1781349875/f0d101f ULG_PROBE_PORT=5210 ...`
+  - Not used as a clean separated-H2O/H2O comparator: the older page path
+    mapped the URL into an Fe/H2O case and reports `J=0.1`/inactive nodes under
+    today probe assumptions.
+
+Resident compact COM/bounds diagnostics, 2026-06-13 AKDT:
+
+- `node --check ulg-gpu-abi/src/index.js && node --check ulg-gpu-abi/src/wgsl.js && node --check src/runtime/sph/sphMlsMpmGpuSummary.js && node --check src/runtime/sph/sphMlsMpmGpuStep.js && node --check scripts/sph-long-horizon-probe.mjs && node --check tests/demo.e2e.mjs && node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "summary|copy budget|GPU resident lane|compact|compute task|reaction from retained"`
+  - Passed, `25/25`.
+  - Covers the expanded `224` byte MLS-MPM resident compact summary, COM/AABB
+    decode, copy-budget propagation, resident lane byte accounting, and
+    reaction summary byte-size separation.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5213 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-direct-16-com-bounds.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Key evidence: COM and position bounds present in resident diagnostics,
+    pressure rows `0`, max speed `0.0784546 m/s`, J `0.9998219..1.0`,
+    `nextPositionBoundsM.status=position-bounds-ready`, and next Y bounds
+    `0.0999236..2.9163332 m`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_REPO_DIR=/home/cos/projects/ulg ULG_PROBE_PORT=5214 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=16 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-h2o-scene-16-com-bounds.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Key evidence: pressure rows `0`, max speed `0.235361 m/s`, J
+    `0.999142..1.0`, `maxVisibleSurfaceOutsideM=0`,
+    `nextCenterOfMassYDeltaM=-0.0013416`, and next Y bounds
+    `0.0995834..2.9163332 m`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_CAPTURE=1 ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=2.5&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_VISUAL_LABEL='h2o-h2o-separated-current-after-pressure-gate' ULG_SPH_VISUAL_FRAMES=6 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_TIMEOUT_MS=300000 npm run test:e2e -- --grep "SPH phase visual sequence"`
+  - Passed, `1/1`, about `1.2m`.
+  - Artifacts:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-separated-current-after-pressure-gate/`.
+  - Timeline evidence: canvas frame capture, GIF/WebM assembled, pressure rows
+    `0`, visible H2O bounded, but `captureCadence.status=slow-capture-cadence`
+    with mean interval about `6708 ms` for a `250 ms` target.
+
+Current-render H2O/H2O merge/render-field validation, 2026-06-13 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check tests/sphPhaseRenderer.test.mjs && node --check tests/sphRenderGpuKernel.test.mjs && node --check tests/demo.e2e.mjs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `npm test`
+  - Passed, `477/477`.
+- `npm run icc:update`
+  - Passed, `224` indexed files and `1024` memory chunks.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "same-material|resident render fields|surface radius|hysteresis|inactive grace"`
+  - Passed, `25/25`.
+- `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "render domain|domain zero|sparse same-material|render field CPU"`
+  - Passed, `35/35`.
+- `ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/reassess-07-scene-all-laws-tight-long-no-stale.json ULG_PROBE_BATCHES=8 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=2 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_MIN_J=0.95 ULG_PROBE_MAX_J=1.05 node scripts/sph-long-horizon-probe.mjs`
+  - Failed as expected after stale detached surfaces were hidden: issue
+    `same-material-h2o-visible-surface-disappeared`, but particle invariants
+    stayed sane (`J=0.998721..1.008176`, pressure impulse `0`).
+- `ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/reassess-08-scene-all-laws-tight-long-merged-same-material.json ULG_PROBE_BATCHES=8 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=2 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_MIN_J=0.95 ULG_PROBE_MAX_J=1.05 node scripts/sph-long-horizon-probe.mjs`
+  - Failed as stale-cadence evidence after same-material render-domain merge:
+    issue `visible-surface-expanded-beyond-particle-bounds`,
+    `maxVisibleSurfaceOutsideParticleBoundsM=0.054612`.
+- `ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/reassess-09-scene-all-laws-tight-long-render-every-batch.json ULG_PROBE_BATCHES=8 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_MIN_J=0.95 ULG_PROBE_MAX_J=1.05 node scripts/sph-long-horizon-probe.mjs`
+  - Failed as current-render aliasing evidence: issue
+    `same-material-h2o-visible-surface-disappeared`, merged H2O
+    `maxDensity=31.198 < isolation=80` at the bad sample.
+- `ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/reassess-10-scene-all-laws-tight-long-merged-res32-render-every-batch.json ULG_PROBE_BATCHES=8 ULG_PROBE_BATCH_STEPS=64 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_MIN_J=0.95 ULG_PROBE_MAX_J=1.05 node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `512` requested substeps, `maxNextTimeS=0.264 s`,
+    `J=0.998677..1.008176`, pressure impulse `0`, H2O visible in all `9`
+    samples, no visual surface issues, `maxVisibleSurfaceOutsideParticleBoundsM=0`,
+    drop COM `1.2498 -> 0.9031 m`, and support gap
+    `-0.0001686 -> -0.064634 m`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5297 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5297 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5297 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_VISUAL_CAPTURE=1 ULG_SPH_VISUAL_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5' ULG_SPH_VISUAL_LABEL='h2o-h2o-valid-merged-res32-current-render-pass' ULG_SPH_VISUAL_FRAMES=3 ULG_SPH_VISUAL_INTERVAL_MS=250 ULG_SPH_VISUAL_TIMEOUT_MS=300000 npm run test:e2e -- --grep "SPH phase visual sequence" --timeout 300000`
+  - Passed, `1/1`.
+  - Artifacts:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/h2o-h2o-valid-merged-res32-current-render-pass/`.
+  - Timeline: `3` frames, WebGPU resident backend, visible H2O in all frames,
+    pressure impulse `0`, media assembled as GIF/WebM. Cadence remains slow
+    (`meanIntervalMs=5187.65` for a `250 ms` target), so throughput remains a
+    separate remediation item.
+
+Atomic/visual reassessment after screenshot review, 2026-06-13 14:04 AKDT:
+
+- `node --check src/runtime/sph/mlsMpmCarrier.js`
+  - Passed.
+- `node --check src/runtime/sphPhaseDemo.js`
+  - Passed.
+- `node --check tests/sphPhaseDemo.test.mjs`
+  - Passed.
+- `node --check tests/physicsBehaviorInvariants.test.mjs`
+  - Passed.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` skipped opt-in long-horizon liquid gate.
+- `node --test tests/sphPhaseDemo.test.mjs`
+  - Passed: `24/24`.
+- `npm run test:physics-liquid-atomic`
+  - Expected fail remains: after CPU/resident carrier-alignment fixes, H2O/H2O
+    MLS-MPM still retains `1.6130091586080253 m/s` drop speed after
+    `1.0239999999999427 s`, above the `0.25 m/s` acceptance.
+- Law matrix evidence:
+  - MLS-MPM `eos=true pressure=true` and `eos=true pressure=false` produce the
+    same long-horizon H2O/H2O result, so gas/pressure coupling is not the
+    proximate cause of this failure.
+  - MLS-MPM `eos=false pressure=false` removes the high-speed spread by removing
+    condensed incompressibility/pressure physics, so it is not an acceptable
+    fix.
+  - Plain SPH/PBF remains useful as a reference lane but still ends near
+    `0.5259164978735411 m/s`, above the same `0.25 m/s` liquid acceptance.
+- `ULG_SPH_VISUAL_CAPTURE=1 ... npx playwright test --config tests/playwright.config.mjs --grep "SPH phase visual sequence captures dense H2O/H2O resident motion"`
+  - First run proved the harness can emit frame PNGs plus GIF/WebM/timeline
+    artifacts against the live Vite server at `http://127.0.0.1:5174/`.
+  - After strengthening the visual assertions, this gate now fails as intended:
+    visible H2O liquid surfaces with `vertexCount` `72000` and `42000` report
+    `worldBounds=null`, and the bounded H2O surface is a thin column of about
+    `0.197 m x 2.681 m x 0.197 m`.
+  - Artifact directory:
+    `test-results/demo.e2e.mjs-SPH-phase-vis-e110d-nse-H2O-H2O-resident-motion-chromium/sph-h2o-h2o-resident-motion/`.
+
+Current interpretation:
+
+- The current P0 has two independent failing gates: the liquid physics
+  long-horizon speed gate and the resident visual surface-bounds gate.
+- `viscosity` and `surfaceTension` are explicit law groups now, defaulting off
+  and reporting pending/unimplemented if enabled. They still need actual CPU and
+  resident WebGPU implementations before the long-horizon liquid gate can pass.
+
+Liquid-stability remediation validation, 2026-06-13 15:01 AKDT:
+
+- `node --check src/runtime/sph/mlsMpmCarrier.js src/runtime/sph/sphGridUpdateGpuKernel.js src/runtime/sph/sphGridGpuKernel.js src/runtime/sph/sphGpuBuffers.js src/runtime/sph/sphMechanicsMaterialTable.js src/runtime/sph/sphMechanicsRefreshGpuKernel.js src/runtime/sphPhaseDemo.js src/visualization/sphPhaseScene.js ulg-gpu-abi/src/index.js ulg-gpu-abi/src/wgsl.js`
+  - Passed.
+- `node --test tests/sphPhaseDemo.test.mjs tests/sphGpuBuffers.test.mjs tests/sphMechanicsRefreshGpuKernel.test.mjs tests/abi.test.mjs`
+  - Passed: `53/53`.
+- `node --test tests/sphGridUpdateGpuKernel.test.mjs tests/sphGridGpuKernel.test.mjs tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed: `56/56`.
+- `node --test tests/sphPhaseRenderer.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `60/60`.
+- `npm run test:physics-atomics`
+  - Passed: `5` pass, `1` skipped opt-in long-horizon liquid gate.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic`
+  - Passed: `6/6`; this is the first passing run for the prior long-horizon
+    H2O/H2O speed gate.
+- `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph' ULG_PROBE_OUTPUT=/tmp/ulg-cpu-sph-visual-probe.json ULG_PROBE_PORT=5179 ULG_PROBE_BATCHES=5 ULG_PROBE_BATCH_STEPS=24 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT=1 ULG_PROBE_FAIL_ON_BAD=1 node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Evidence: `issues=[]`, `visualSurfaceIssues=[]`,
+    `visibleSurfaceSampleCount=6`, `h2oVisibleSurfaceSampleCount=6`,
+    `firstH2oVisibleSurfaceCount=2`, `lastH2oVisibleSurfaceCount=1`.
+- `npm test`
+  - Passed: `484` pass, `1` skipped.
+
+Mounted Na/H2O resident gas-pressure promotion, 2026-06-13 20:31 AKDT:
+
+- `node --check src/visualization/sphPhaseDemoMount.js && node --check scripts/sph-long-horizon-probe.mjs && node --check tests/demo.e2e.mjs`
+  - Passed.
+- `ULG_PROBE_MODE=scene ULG_PROBE_PORT=5636 ULG_PROBE_URL='/?drop=Na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1.01&dropn=2&basen=4&boxx=4&boxy=4&boxz=4' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-na-h2o-mounted-1x1-promoted-gas.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Resident gas summary source:
+    `gpu-resident-product-mass-gas-species-ledger`; total pressure
+    `125932.56 Pa`, H2 partial pressure about `24.6 kPa`.
+  - Status text shows WebGPU reaction execution and retained product mass rows:
+    `reaction-step-executed`, `rows=144`, `unplaced=1.61kg`,
+    `eos=resident-product-mass-p2g-eos-sidecar-ready`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5637 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5637 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "mounted resident Na/H2O promotes product gas pressure" --timeout 150000`
+  - Passed, `1/1`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5638 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5638 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5638 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "mounted resident Na/H2O promotes product gas pressure|no-full render refresh can skip compact surface summary readback|CPU-SPH view refreshes" --timeout 150000`
+  - Passed, `3/3`.
+
+Bounded retained surface-draw diagnostics, 2026-06-13 20:51 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js && node --check scripts/sph-long-horizon-probe.mjs && node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5641 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5641 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5641 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "retained surface draw diagnostics are budget-bounded" --timeout 150000`
+  - Passed, `1/1`.
+- `ULG_PROBE_MODE=scene ULG_PROBE_PORT=5642 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=2&basen=3&boxx=3&boxy=3&boxz=3' ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_RENDER_EVERY=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=metadata ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_OUTPUT=/tmp/ulg-history-probes/current-surface-draw-diagnostic-budget-skip-small.json node scripts/sph-long-horizon-probe.mjs`
+  - Passed/classified `good`.
+  - Render state: `surfaceDrawDiagnosticMode=metadata`,
+    `surfaceDrawDiagnosticsSkipped=true`,
+    `surfaceDrawDiagnosticsSkipReason=surface-draw-diagnostic-field-cell-budget-exceeded`,
+    `surfaceDrawDiagnosticFieldCellCount=272072`,
+    render rows readback `false`, render field readback `false`, and render
+    field surface summary readback `false`.
+- `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5643 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5643 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5643 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "mounted resident Na/H2O promotes product gas pressure|no-full render refresh can skip compact surface summary readback|retained surface draw diagnostics are budget-bounded|CPU-SPH view refreshes" --timeout 150000`
+  - Passed, `4/4`.

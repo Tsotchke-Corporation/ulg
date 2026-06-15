@@ -12,8 +12,11 @@ import {
   particleRenderDescriptors,
   particleThermalState,
   phaseMassSummary,
+  normalizeSphPhysicalLawGroups,
   waterVaporOpticalStateFromGasSummary
 } from '../src/runtime/sphPhaseDemo.js';
+import { createSphPhaseScenario } from '../src/runtime/thermoPreflight.js';
+import { createSphPhaseViewState } from '../src/runtime/sphPhaseViewState.js';
 import { createDerivedMaterialClosure } from '../src/runtime/material/materialDerivation.js';
 import { materialDerivationSummary } from '../src/runtime/material/propertyProvenance.js';
 import { specificInternalEnergyJPerKg } from '../src/runtime/material/thermoState.js';
@@ -74,6 +77,246 @@ test('particle phase + temperature come from the closure energy', () => {
   assert.ok(summary.byMaterialPhase.h2o.solid > 0);
 });
 
+test('demo initializes hydrostatic pressure only for wall-supported condensed blocks', () => {
+  const driver = createSphPhaseDemo({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 0.85,
+    dropParticleEdge: 2,
+    baseParticleEdge: 3
+  });
+  const base = driver.demo.state.particles.filter((p) => p.role === 'base');
+  const drop = driver.demo.state.particles.filter((p) => p.role === 'drop');
+  const minBaseJ = Math.min(...base.map((p) => p.mpmJ ?? 1));
+
+  assert.equal(driver.demo.initialHydrostaticState.status, 'hydrostatic-initialization-applied');
+  assert.ok(base.some((p) => p.mpmJ < 1));
+  assert.ok(minBaseJ > 0.999, `hydrostatic pre-compression is too large for liquid water: ${minBaseJ}`);
+  assert.ok(base.every((p) => p.hydrostaticInitialization?.status === 'initialized-supported-condensed-block'));
+  assert.ok(base.every((p) => p.hydrostaticInitialization?.volumeRatioModel === 'raw-closure-bulk-modulus'));
+  assert.ok(drop.every((p) => p.mpmJ === undefined));
+});
+
+test('demo preflight reports overlapping initial block geometry', () => {
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({ boxDimensionsM: [5, 5, 5] }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 0.85,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const preflight = driver.preflight();
+  assert.equal(preflight.status, 'preflight-blocked-initial-geometry');
+  assert.equal(preflight.feasibility.geometryBlocked, true);
+  assert.ok(preflight.blockers.includes('initial-block-geometry-overlap'));
+  assert.ok(preflight.initialGeometry.pairs.some((pair) => pair.status === 'initial-blocks-overlap'));
+});
+
+test('demo preflight treats valid room-temperature H2O/H2O as liquid-feasible', () => {
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({
+      wallFaces: {
+        xMin: 293.15,
+        xMax: 293.15,
+        yMin: 293.15,
+        yMax: 293.15,
+        zMin: 293.15,
+        zMax: 293.15
+      },
+      boxDimensionsM: [5, 5, 5]
+    }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const preflight = driver.preflight();
+
+  assert.equal(preflight.status, 'preflight-feasible-derived-closures');
+  assert.equal(preflight.feasibility.feasible, true);
+  assert.equal(preflight.feasibility.finalBasePhase, 'liquid');
+  assert.equal(preflight.feasibility.finalDropPhase, 'liquid');
+  assert.equal(preflight.initialGeometry.status, 'initial-block-geometry-ok');
+});
+
+test('MLS-MPM sound-speed scale includes ideal-gas phases in the CFL cap', () => {
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({ boxDimensionsM: [5, 5, 5] }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 450,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    mechanics: 'mlsmpm'
+  });
+  const viewState = createSphPhaseViewState(driver);
+  const cflCap = driver.demo.gpuMechanics.cflMaxSoundSpeedMPerS;
+  const gasRows = viewState.mlsMpmGpuParticleState.metadata.filter((row) => row.phase === 'gas');
+
+  assert.ok(cflCap > 0);
+  assert.ok(gasRows.length > 0);
+  assert.ok(gasRows.every((row) => row.soundSpeedMPerS <= cflCap * (1 + 1e-6)));
+});
+
+test('demo exposes plain SPH as a CPU reference mechanics mode', () => {
+  const driver = createSphPhaseDemo({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 0.85,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    mechanics: 'sph'
+  });
+  assert.equal(driver.demo.gpuMechanics.integrator, 'sph');
+  driver.step();
+  assert.equal(driver.demo.lastStepTiming.backend, 'cpu-reference');
+  assert.equal(driver.demo.state.particles.length, 2);
+  for (const particle of driver.demo.state.particles) {
+    for (const value of particle.x) assert.ok(Number.isFinite(value));
+    for (const value of particle.v) assert.ok(Number.isFinite(value));
+  }
+});
+
+test('demo physical law groups isolate plain SPH mechanics and thermal stages', () => {
+  assert.deepEqual(normalizeSphPhysicalLawGroups({
+    mechanics: '0',
+    gravity: 'false',
+    eos: false,
+    pressure: 'off',
+    thermal: 0,
+    reactions: 'no',
+    viscosity: '1',
+    surfaceTension: true
+  }), {
+    mechanics: false,
+    gravity: false,
+    eos: false,
+    pressure: false,
+    thermal: false,
+    reactions: false,
+    viscosity: true,
+    surfaceTension: true
+  });
+
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({
+      boxDimensionsM: [5, 5, 5],
+      wallFaces: { xMin: 450, xMax: 450, yMin: 450, yMax: 450, zMin: 450, zMax: 450 }
+    }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    mechanics: 'sph',
+    physicalLawGroups: {
+      mechanics: false,
+      gravity: false,
+      eos: false,
+      thermal: false,
+      reactions: false,
+      viscosity: false
+    }
+  });
+  const before = driver.demo.state.particles.map((particle) => ({
+    x: [...particle.x],
+    v: [...particle.v],
+    u: particle.specificInternalEnergyJPerKg
+  }));
+  const viewState = createSphPhaseViewState(driver);
+
+  assert.equal(driver.demo.gpuMechanics.gravityMPerS2[1], 0);
+  assert.equal(driver.demo.initialHydrostaticState.status, 'hydrostatic-initialization-disabled');
+  assert.deepEqual(viewState.physicalLawGroups, {
+    mechanics: false,
+    gravity: false,
+    eos: false,
+    pressure: true,
+    thermal: false,
+    reactions: false,
+    viscosity: false,
+    surfaceTension: false
+  });
+  assert.deepEqual(viewState.pendingPhysicalLawGroups, []);
+
+  driver.step();
+
+  const after = driver.demo.state.particles.map((particle) => ({
+    x: [...particle.x],
+    v: [...particle.v],
+    u: particle.specificInternalEnergyJPerKg
+  }));
+  assert.deepEqual(after, before);
+  assert.deepEqual(driver.demo.wallHeatLedgerJ, { xMin: 0, xMax: 0, yMin: 0, yMax: 0, zMin: 0, zMax: 0 });
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.mechanics, false);
+  assert.equal(driver.demo.lastStepTiming.physicalLawGroups.thermal, false);
+});
+
+test('fluid law groups expose implemented viscosity and pending surface tension', () => {
+  assert.deepEqual(normalizeSphPhysicalLawGroups({}), {
+    mechanics: true,
+    gravity: true,
+    eos: true,
+    pressure: true,
+    thermal: true,
+    reactions: true,
+    viscosity: true,
+    surfaceTension: false
+  });
+
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({
+      boxDimensionsM: [5, 5, 5],
+      wallFaces: { xMin: 300, xMax: 300, yMin: 300, yMax: 300, zMin: 300, zMax: 300 }
+    }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 1,
+    baseParticleEdge: 1,
+    mechanics: 'mlsmpm',
+    physicalLawGroups: {
+      thermal: false,
+      reactions: false,
+      viscosity: true,
+      surfaceTension: true
+    }
+  });
+  const viewState = createSphPhaseViewState(driver);
+  assert.equal(viewState.physicalLawGroups.viscosity, true);
+  assert.equal(viewState.physicalLawGroups.surfaceTension, true);
+  assert.deepEqual(viewState.pendingPhysicalLawGroups.map((group) => group.key), ['surfaceTension']);
+  driver.step();
+  assert.deepEqual(driver.demo.lastStepTiming.pendingPhysicalLawGroups.map((group) => group.key), ['surfaceTension']);
+  assert.deepEqual(
+    driver.demo.lastStepTiming.unsupportedPhysicalLawGroups,
+    driver.demo.lastStepTiming.pendingPhysicalLawGroups
+  );
+});
+
 test('sealed gas pressure summary derives baseline air pressure from scenario gas closure', () => {
   const demo = buildSphPhaseDemoState({ dropParticleEdge: 1, baseParticleEdge: 1 });
   const pressure = gasPressureSummary(demo);
@@ -88,6 +331,19 @@ test('sealed gas pressure summary derives baseline air pressure from scenario ga
   assert.deepEqual(pressure.pressureFeedback.gasCellField.pressureGradientPaPerM, [0, 0, 0]);
   assert.equal(pressure.pressureFeedback.forceCouplingStatus, 'blocked-material-surface-normals-not-resolved');
   assert.equal(pressure.scientificValidation, false);
+});
+
+test('SPH phase view state carries explicit wall temperatures for resident thermal steps', () => {
+  const wallFaces = { xMin: 291, xMax: 292, yMin: 293, yMax: 294, zMin: 295, zMax: 296 };
+  const demo = buildSphPhaseDemoState({
+    scenario: createSphPhaseScenario({ wallFaces }),
+    dropParticleEdge: 1,
+    baseParticleEdge: 1
+  });
+  const viewState = createSphPhaseViewState({ demo });
+
+  assert.deepEqual(viewState.wallTemperaturesK, wallFaces);
+  assert.deepEqual(viewState.scenario.walls.faces, wallFaces);
 });
 
 test('resident reaction gas pressure uses GPU ledger moles without particle readback', () => {

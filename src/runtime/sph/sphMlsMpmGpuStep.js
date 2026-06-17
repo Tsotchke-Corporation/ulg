@@ -8960,6 +8960,13 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageExecutionBatches: (gpuResidentLaneStagePlanExecution?.executionBatches || [])
       .map((batch) => [...batch]),
     gpuResidentLaneStageExecutionMaxConcurrentStageCount: gpuResidentLaneStagePlanExecution?.maxConcurrentStageCount ?? 0,
+    gpuResidentLaneStageExecutionStateFamilyConflictPolicy:
+      gpuResidentLaneStagePlanExecution?.stateFamilyConflictPolicy || null,
+    gpuResidentLaneStageExecutionStateFamilyConflictDeferrals:
+      (gpuResidentLaneStagePlanExecution?.stateFamilyConflictDeferrals || [])
+        .map((entry) => ({ ...entry })),
+    gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount:
+      gpuResidentLaneStagePlanExecution?.stateFamilyConflictDeferralCount ?? 0,
     gpuResidentLaneStageExecutionExecutorSources: stageExecutionExecutorSources,
     gpuResidentLaneStageExecutionUsedGpuHubExecutors: Object.values(stageExecutionExecutorSources).length > 0
       ? Object.values(stageExecutionExecutorSources).every((source) => source === 'gpu-hub-resident-stage-executor')

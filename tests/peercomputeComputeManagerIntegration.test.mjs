@@ -1279,6 +1279,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     [['p2g'], ['gridUpdate'], ['g2p']]
   );
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionMaxConcurrentStageCount, 1);
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStateFamilyConflictPolicy,
+    'defer-read-write-conflicting-ready-stages'
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount,
+    0
+  );
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode, 'registered');
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 3);
   assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
@@ -1841,6 +1849,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     [['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]
   );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionMaxConcurrentStageCount, 2);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStateFamilyConflictPolicy,
+    'defer-read-write-conflicting-ready-stages'
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount,
+    0
+  );
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.workerRetainedContinuationPlanSchema,
     ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA

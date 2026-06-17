@@ -35,6 +35,14 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: GPU resident ready batches now respect
+state-family read/write conflicts. PeerCompute defers ready stages with
+write/write, write/read, or read/write overlap and reports the exact deferral
+records; ULG mechanics stage-chain telemetry now exposes that policy. This is
+the missing guard between "more concurrency" and "unsafe concurrency." Next:
+promote this from per-lane stage execution into broader ComputeManager/GPUHub
+placement across Workers, devices, and peers.
+
 Current routing note, 2026-06-17 AKDT: the Worker-retained access contract is
 now being consumed, not only published. `host.planWorkerRetainedContinuation()`
 produces `peercompute.ulg.worker-retained-continuation-plan.v0` from admitted

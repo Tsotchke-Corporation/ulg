@@ -15,6 +15,13 @@ make ComputeManager placement consume this contract, enforce state-family
 read/write conflict rules, and overlap independent law stages without
 destroying or reinterpreting Worker-owned buffers.
 
+Status update, 2026-06-17 state-family conflict batching: state-family
+metadata now has a runtime scheduling consequence. GPU resident ready stages
+with conflicting `reads`/`writes` are deferred into separate batches, and ULG
+records the policy/deferral count in mechanics stage-chain telemetry. This
+does not yet replace the full authority ledger, but it makes inaccurate
+read/write metadata a direct concurrency blocker rather than passive docs.
+
 Status update, 2026-06-17 Worker-retained continuation planner: the mechanics
 consumer path now asks the authority host for a continuation plan derived from
 the admitted hot-buffer record. The plan blocks if the required output

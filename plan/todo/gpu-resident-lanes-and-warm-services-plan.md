@@ -20,6 +20,14 @@ co-locate continuation stages and overlap independent law-family, closure,
 cache, and remote-peer work. WebGPU concurrency is still insufficient while
 most hot stages serialize behind one ordered queue/fence/readback cadence.
 
+Status update, 2026-06-17 state-family conflict batching: ready-batch
+execution now checks declared stage read/write families before running stages
+together. This prevents the scheduler from turning "no explicit dependency"
+into unsafe concurrency when two stages share mutable state. ULG currently
+shows zero deferrals for P2G plus pressure/interface because those families are
+independent; future law stages must keep their read/write families accurate or
+they will be serialized by this guard.
+
 Status update, 2026-06-17 Worker-retained continuation planner: admitted
 mechanics Worker-retained publications can now be turned into an explicit
 same-Worker continuation plan by the resident authority host. The planner

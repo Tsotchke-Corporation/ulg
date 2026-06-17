@@ -1,5 +1,68 @@
 # ULG Implementation Log
 
+## 2026-06-17 15:53:07 AKDT - GPU resident state-family conflict batching
+
+Prompt time/date: 2026-06-17 15:53 AKDT, continuing the WebGPU concurrency
+and authority refactor after the Worker-retained continuation-planner slice.
+
+Summary:
+
+- Added state-family read/write conflict gating to sibling PeerCompute's GPU
+  resident lane ready-batch scheduler.
+- Ready stages are now batched only when their declared `reads` and `writes`
+  do not conflict. Write/write, write/read, and read/write overlaps defer the
+  later ready stage into a later batch.
+- Added conflict metadata to PeerCompute stage execution reports and threaded
+  that policy/deferral evidence through ULG mechanics stage-chain telemetry.
+- Confirmed the current ULG concurrent batch, P2G plus pressure/interface, has
+  zero state-family deferrals because their declared writes are distinct.
+- Kept the distinction explicit: conflict deferral orders stages but does not
+  create an implicit dataflow edge. Data dependencies still require
+  `dependsOn` or `inputFrom`.
+
+Files touched:
+
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/tests/unit/gpuResidentLaneManager.test.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/todo/resident-state-authority-contract-plan.md`
+- `plan/log.md`
+- `plan/done/gpu-resident-state-family-conflict-batching-2026-06-17.md`
+
+Validation:
+
+- PASS: sibling PeerCompute syntax checks for `GpuResidentLaneManager.js` and
+  `gpuResidentLaneManager.test.js`.
+- PASS: sibling PeerCompute
+  `node --test tests/unit/gpuResidentLaneManager.test.js` reported `9/9`.
+- PASS: ULG syntax checks for `sphMlsMpmGpuStep.js` and
+  `peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: ULG `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  reported `16/16`.
+- PASS: `npm run test:physics-atomics` reported `11` passing checks and `3`
+  expected opt-in long-horizon skips.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-state-family-conflict-batching-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, and two frames each for three
+  rows under
+  `/tmp/ulg-visual-sanity-matrix/codex-state-family-conflict-batching-20260617`.
+
+Open:
+
+- This is per-lane stage batching, not full distributed placement. The next
+  authority step is to use the same read/write conflict policy when selecting
+  Worker/lane/device/peer placement for promoted law-family tasks.
+- The physics behavior bugs remain separate and still need behavior-gated
+  fixes after this architecture lane.
+
 ## 2026-06-17 15:43:32 AKDT - Worker-retained continuation planner
 
 Prompt time/date: 2026-06-17 15:43 AKDT, continuing the architecture lane

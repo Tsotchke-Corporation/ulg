@@ -2,6 +2,16 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: GPU resident ready-batch execution now
+has a state-family conflict gate. Sibling PeerCompute checks each ready stage's
+declared `reads` and `writes` before placing it in a batch; write/write,
+write/read, and read/write overlaps defer the later ready stage. ULG records
+the resulting conflict policy and deferral count in mechanics stage-chain
+telemetry. Validation passed PeerCompute lane manager `9/9` and ULG
+PeerCompute integration `16/16`. This is scheduling authority, not dataflow:
+conflict deferral does not supply another stage's output unless the stage also
+declares `dependsOn` or `inputFrom`.
+
 Current checkpoint, 2026-06-17 AKDT: Worker-retained publication metadata now
 feeds an explicit same-Worker continuation plan. The authority host exposes
 `planWorkerRetainedContinuation()`, which resolves a hot-buffer publication,

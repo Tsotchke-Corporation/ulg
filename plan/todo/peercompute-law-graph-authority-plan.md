@@ -19,6 +19,13 @@ independent law-family/closure/cache/remote graph work can overlap, while
 ordered physics dependencies still fence only at required state-family
 boundaries.
 
+Status update, 2026-06-17 state-family conflict batching: PeerCompute now
+uses law-stage `reads`/`writes` to prevent conflicting ready stages from
+sharing a GPU resident batch. This gives the law graph a concrete concurrency
+guard beyond explicit dependencies. The next authority move is to reuse this
+same rule at placement time across Workers/devices/peers, then let independent
+closures and law stages overlap only when the state-family graph says they can.
+
 Status update, 2026-06-17 Worker-retained continuation planner: mechanics
 Worker-retained outputs now have a consumer-side authority plan. The plan is
 derived from StateManager hot-buffer evidence and the access contract, then

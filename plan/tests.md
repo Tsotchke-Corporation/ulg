@@ -1,5 +1,33 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 Worker-Retained Access Contract
+
+Worker-retained law-family publications now carry an explicit access contract
+that distinguishes Worker-private retained refs from same-device main-thread
+hot-buffer aliases. This prevents later schedulers from treating Worker-local
+GPU refs as local WebGPU handles, while still allowing ComputeManager/GPUHub to
+schedule same-Worker continuations.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js` and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- PeerCompute authority-host coverage:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained mechanics output descriptors|worker-retained reaction/product output descriptors|worker-retained pressure/interface force-row descriptors"`
+  passed `16/16`. The focused mechanics test asserts
+  `peercompute.ulg.worker-retained-access-contract.v0`,
+  `workerContinuationRequired=true`,
+  `mainThreadGpuHandlesAvailable=false`, empty `localBufferRefs`, and
+  same-Worker retained-ref consumer mode.
+- Fast physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `3` expected
+  opt-in long-horizon skips.
+- Recurring visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-worker-retained-contract-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and two frames each under
+  `/tmp/ulg-visual-sanity-matrix/codex-worker-retained-contract-20260617`.
+
 ## Current Focused Result - 2026-06-17 Resident Render-Field Surface Unclipping
 
 Resident MLS-MPM render-field surfaces now preserve the current

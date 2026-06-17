@@ -2,6 +2,19 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 Worker-retained access contract: admitted
+Worker-retained publications now state how their buffers may be consumed.
+`peercompute.ulg.worker-retained-access-contract.v0` is included in mechanics,
+thermal/phase, pressure/interface, and reaction/product hot records, warm
+deltas, and import descriptors. Worker-private retained GPU refs report empty
+main-thread `localBufferRefs`, `workerContinuationRequired=true`, and
+same-Worker retained-ref consumer mode; same-device main-thread aliases remain
+the only zero-copy local import source. This closes an authority ambiguity
+before broader WebGPU worker promotion. Remaining state-authority work is to
+make ComputeManager placement consume this contract, enforce state-family
+read/write conflict rules, and overlap independent law stages without
+destroying or reinterpreting Worker-owned buffers.
+
 Status update, 2026-06-14 04:41 AKDT: State authority has moved from an
 injected-only shape to a default browser PeerCompute `NodeKernel` authority
 host. The mounted route now runs resident batches through the real sibling

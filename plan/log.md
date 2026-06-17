@@ -1,5 +1,72 @@
 # ULG Implementation Log
 
+## 2026-06-17 15:11:50 AKDT - Worker-retained access contract metadata
+
+Prompt time/date: 2026-06-17 15:11 AKDT, continuing the PeerCompute/
+ComputeManager architecture refactor after the user agreed physics behavior
+can be addressed after the architecture lane.
+
+Summary:
+
+- Confirmed that the older graph-level cache/placement/lease task-graph slice
+  was already implemented and covered: mechanics stage-chain results now carry
+  native task-graph cache, placement, cancellation, lease, and NodeKernel
+  authority metadata.
+- Added `peercompute.ulg.worker-retained-access-contract.v0` as the shared
+  serializable contract for Worker-retained law-family hot-buffer
+  publications.
+- Threaded the contract through mechanics, thermal/phase, pressure/interface,
+  and reaction/product Worker-retained publication paths. The contract makes
+  explicit whether a publication is a main-thread same-device import source or
+  a Worker-private retained-ref source that must be consumed by scheduling a
+  continuation on the same Worker/lane.
+- Added focused mechanics authority-host coverage, matching the existing
+  pressure/interface and reaction/product publication coverage.
+- Kept the physics behavior regressions open. This slice changes authority
+  metadata and planner/scheduler evidence only; it is not a fluid behavior or
+  renderer fix.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/todo/resident-state-authority-contract-plan.md`
+- `plan/log.md`
+- `plan/done/worker-retained-access-contract-2026-06-17.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained mechanics output descriptors|worker-retained reaction/product output descriptors|worker-retained pressure/interface force-row descriptors"`
+  reported `16/16`.
+- PASS: `npm run test:physics-atomics` reported `11` passing checks and `3`
+  expected opt-in long-horizon skips.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-worker-retained-contract-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, and two frame artifacts for
+  each of three rows under
+  `/tmp/ulg-visual-sanity-matrix/codex-worker-retained-contract-20260617`.
+
+Open:
+
+- WebGPU concurrency is still not sufficient. ComputeManager has task-graph
+  and Worker-lane surfaces, but ULG still serializes too much around queue
+  fences/readbacks. Next architecture work should use the access contract to
+  schedule same-Worker continuations and overlap independent law-family,
+  closure, cache, and remote-peer work when state-family read/write sets do
+  not conflict.
+- The visible physics bugs remain tracked for the next behavior pass after
+  this architecture lane: liquid quality is still not final, ice/solid
+  behavior needs explicit gates, and mobile focus/render flashing remains
+  open.
+
 ## 2026-06-17 14:06 AKDT - Resident render-field surface unclipping
 
 Prompt time/date: 2026-06-17 14:06 AKDT, continuing after the user reported

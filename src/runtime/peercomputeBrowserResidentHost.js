@@ -65,6 +65,7 @@ export const ULG_REMOTE_TASK_GRAPH_COMPACT_LOCAL_REFRESH_CONTRACT_SCHEMA = 'peer
 export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA = 'peercompute.ulg.remote-task-graph-compact-buffer-snapshot.v0';
 export const ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0';
 export const ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA = 'peercompute.ulg.sph-mls-mpm-same-device-hot-buffer-source-publication.v0';
+export const ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA = 'peercompute.ulg.worker-retained-access-contract.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
@@ -1770,6 +1771,76 @@ export function publishUlgSphMlsMpmSameDeviceHotBufferSource({
   };
 }
 
+function buildWorkerRetainedAccessContract({
+  cacheKey = null,
+  stateKey = null,
+  hotBufferKey = null,
+  sourceMode = 'worker-retained-buffer-refs',
+  sourceSchema = null,
+  sourceTaskId = null,
+  sourceNodeId = null,
+  sourceStage = null,
+  workerModuleUrl = null,
+  retainedBufferRefs = [],
+  workerRetainedBufferRefs = [],
+  outputFamilies = [],
+  sameDeviceMainThreadHandlesAvailable = false,
+  workerLocal = true,
+  bufferResidency = 'worker-lane-gpu-buffer-retained',
+  consumerAccessProtocol = 'same-worker-lane-retained-buffer-ref'
+} = {}) {
+  const retainedRefs = uniqueStringList(retainedBufferRefs);
+  const workerRefs = uniqueStringList(workerRetainedBufferRefs.length > 0
+    ? workerRetainedBufferRefs
+    : retainedRefs);
+  const sameDevice = sameDeviceMainThreadHandlesAvailable === true;
+  return {
+    schema: ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
+    status: sameDevice
+      ? 'same-device-main-thread-source-ready'
+      : 'worker-local-source-ready-main-thread-refresh-blocked',
+    reason: sameDevice
+      ? 'publication-carries-main-thread-addressable-gpu-handles'
+      : 'worker-retained-gpu-handles-stay-private-to-the-worker-lane',
+    cacheKey,
+    stateKey,
+    sourceHotBufferKey: hotBufferKey,
+    sourceMode,
+    sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl,
+    sameDevice,
+    workerLocal: workerLocal !== false,
+    bufferResidency,
+    consumerAccessProtocol,
+    outputFamilies: uniqueStringList(outputFamilies),
+    retainedBufferRefs: retainedRefs.length > 0 ? retainedRefs : workerRefs,
+    workerRetainedBufferRefs: workerRefs,
+    localBufferRefs: [],
+    mainThreadGpuHandlesAvailable: sameDevice,
+    sameDeviceMainThreadHandlesAvailable: sameDevice,
+    localMaterializationStatus: sameDevice
+      ? 'same-device-retained-buffer-import-ready'
+      : 'blocked-worker-private-gpu-handles',
+    localMaterializationBlocker: sameDevice
+      ? null
+      : 'worker-retained-gpu-handles-are-not-main-thread-transferable',
+    workerContinuationRequired: !sameDevice,
+    workerContinuationProtocol: 'same-worker-lane-retained-buffer-ref',
+    acceptedConsumerModes: sameDevice
+      ? ['same-device-retained-buffer-import', 'same-worker-lane-retained-buffer-ref']
+      : ['same-worker-lane-retained-buffer-ref'],
+    acceptedMaterializationModes: sameDevice
+      ? ['same-device-retained-buffer-import']
+      : [],
+    remoteRetainedRefsUsableLocally: false,
+    stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false
+  };
+}
+
 export function publishUlgMechanicsWorkerRetainedHotBufferSource({
   stateManager = null,
   nodeKernel = null,
@@ -1830,6 +1901,22 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     copyMode: 'zero-copy-worker-retained-ref-descriptor',
     stateManagerAdmissionRequired: true
   };
+  const outputFamilies = uniqueStringList(candidate.outputFamilies || ['sph-particle-state', 'mls-mpm-mechanics']);
+  const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode: workerRetainedBufferImport.sourceMode,
+    sourceSchema: workerRetainedBufferImport.sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    outputFamilies
+  });
+  workerRetainedBufferImport.workerRetainedAccessContract = workerRetainedAccessContract;
   const hotBufferRecord = {
     schema: ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-hot-buffer-source-stored',
@@ -1851,7 +1938,8 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
     compactPublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-mechanics-publications');
@@ -1878,9 +1966,11 @@ export function publishUlgMechanicsWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
-    outputFamilies: uniqueStringList(candidate.outputFamilies || ['sph-particle-state', 'mls-mpm-mechanics']),
+    localBufferRefs: [],
+    outputFamilies,
     compactPublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   const commitDelta = {
     taskId: deltaTaskId,
@@ -1964,6 +2054,22 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     copyMode: 'zero-copy-worker-retained-ref-descriptor',
     stateManagerAdmissionRequired: true
   };
+  const outputFamilies = uniqueStringList(candidate.outputFamilies || ['sph-thermo-phase']);
+  const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode: workerRetainedBufferImport.sourceMode,
+    sourceSchema: workerRetainedBufferImport.sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    outputFamilies
+  });
+  workerRetainedBufferImport.workerRetainedAccessContract = workerRetainedAccessContract;
   const hotBufferRecord = {
     schema: ULG_THERMAL_PHASE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-thermal-phase-hot-buffer-source-stored',
@@ -1985,7 +2091,8 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
     thermalPhasePublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-thermal-phase-publications');
@@ -2012,9 +2119,11 @@ export function publishUlgThermalPhaseWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
-    outputFamilies: uniqueStringList(candidate.outputFamilies || ['sph-thermo-phase']),
+    localBufferRefs: [],
+    outputFamilies,
     thermalPhasePublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   const commitDelta = {
     taskId: deltaTaskId,
@@ -2637,6 +2746,26 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     stateManagerAdmissionRequired: true,
     gridForceApplicationApproved: false
   };
+  const outputFamilies = uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']);
+  const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode: workerRetainedBufferImport.sourceMode,
+    sourceSchema: workerRetainedBufferImport.sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferImport.retainedBufferRefs,
+    workerRetainedBufferRefs,
+    outputFamilies,
+    sameDeviceMainThreadHandlesAvailable: workerRetainedBufferImport.sameDevice,
+    workerLocal: workerRetainedBufferImport.workerLocal,
+    bufferResidency,
+    consumerAccessProtocol
+  });
+  workerRetainedBufferImport.workerRetainedAccessContract = workerRetainedAccessContract;
   const hotBufferRecord = {
     schema: ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-pressure-interface-hot-buffer-source-stored',
@@ -2687,7 +2816,8 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     retainedGasCellFieldSource: workerRetainedBufferImport.retainedGasCellFieldSource,
     retainedSourceFamilies,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-pressure-interface-publications');
@@ -2716,6 +2846,7 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     workerRetainedBufferRefs,
     workerRetainedPressureBufferRefs: workerRetainedBufferImport.workerRetainedPressureBufferRefs,
     retainedPressureBufferRefs,
+    localBufferRefs: [],
     bufferResidency,
     consumerAccessProtocol,
     pressureInterfaceForceRowCount: forceRowCount,
@@ -2743,10 +2874,11 @@ export function publishUlgPressureInterfaceWorkerRetainedHotBufferSource({
     retainedGasCellFieldSourceReady: workerRetainedBufferImport.retainedGasCellFieldSourceReady,
     retainedGasCellFieldSource: workerRetainedBufferImport.retainedGasCellFieldSource,
     retainedSourceFamilies,
-    outputFamilies: uniqueStringList(candidate.outputFamilies || ['pressure-interface-force-rows']),
+    outputFamilies,
     gridForceApplicationApproved: false,
     pressureInterfacePublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   const commitDelta = {
     taskId: deltaTaskId,
@@ -2829,6 +2961,27 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     copyMode: 'zero-copy-worker-retained-ref-descriptor',
     stateManagerAdmissionRequired: true
   };
+  const outputFamilies = uniqueStringList(candidate.outputFamilies || [
+    'sph-particle-state',
+    'sph-thermo-phase',
+    'mls-mpm-mechanics',
+    'resident-product-mass'
+  ]);
+  const workerRetainedAccessContract = buildWorkerRetainedAccessContract({
+    cacheKey: resolvedCacheKey,
+    stateKey: resolvedStateKey,
+    hotBufferKey: resolvedHotBufferKey,
+    sourceMode: workerRetainedBufferImport.sourceMode,
+    sourceSchema: workerRetainedBufferImport.sourceSchema,
+    sourceTaskId,
+    sourceNodeId,
+    sourceStage,
+    workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
+    retainedBufferRefs: workerRetainedBufferRefs,
+    workerRetainedBufferRefs,
+    outputFamilies
+  });
+  workerRetainedBufferImport.workerRetainedAccessContract = workerRetainedAccessContract;
   const hotBufferRecord = {
     schema: ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
     status: 'worker-retained-reaction-product-hot-buffer-source-stored',
@@ -2850,7 +3003,8 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     retainedBufferRefs: workerRetainedBufferRefs,
     localBufferRefs: [],
     reactionProductPublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   stateManager.setHotBuffer(resolvedHotBufferKey, hotBufferRecord);
   const deltaScope = normalizeString(scope, 'ulg-worker-retained-reaction-product-publications');
@@ -2877,14 +3031,11 @@ export function publishUlgReactionProductWorkerRetainedHotBufferSource({
     workerModuleUrl: workerRetainedBufferImport.workerModuleUrl,
     retainedBufferRefs: workerRetainedBufferRefs,
     workerRetainedBufferRefs,
-    outputFamilies: uniqueStringList(candidate.outputFamilies || [
-      'sph-particle-state',
-      'sph-thermo-phase',
-      'mls-mpm-mechanics',
-      'resident-product-mass'
-    ]),
+    localBufferRefs: [],
+    outputFamilies,
     reactionProductPublicationCandidate: cloneSerializableValue(candidate),
-    workerRetainedBufferImport
+    workerRetainedBufferImport,
+    workerRetainedAccessContract
   };
   const commitDelta = {
     taskId: deltaTaskId,

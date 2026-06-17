@@ -35,6 +35,25 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: architecture work is active before the
+next physics behavior pass. Worker-retained law-family hot-buffer publications
+now carry `peercompute.ulg.worker-retained-access-contract.v0` through
+StateManager hot records, warm deltas, and import descriptors for mechanics,
+thermal/phase, pressure/interface, and reaction/product outputs. The contract
+distinguishes same-device main-thread aliases from Worker-private retained GPU
+refs that must be consumed by scheduling a continuation on the same
+Worker/lane. Evidence: syntax checks passed; focused PeerCompute integration
+for mechanics/reaction/pressure Worker-retained output descriptors passed
+`16/16`; `npm run test:physics-atomics` passed `11` checks with `3` expected
+opt-in skips; recurring short visual matrix
+`codex-worker-retained-contract-20260617` passed `3/3` with empty issue counts
+and frame artifacts. Next architecture item: use this contract in
+ComputeManager/GPUHub placement so independent law-family/closure/cache/remote
+tasks can overlap and Worker-retained outputs continue on the lane where their
+buffers live. WebGPU concurrency is not sufficient yet because too much still
+serializes around ordered queue fences/readbacks. The known physics behavior
+bugs remain tracked for the next behavior pass after this architecture lane.
+
 Current routing note, 2026-06-17 AKDT: the resident MLS-MPM H2O render-field
 surface now merges visually without the previous cuboid/chopped look. The
 surface topology had already reported one H2O surface and one connected

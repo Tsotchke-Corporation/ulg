@@ -85,6 +85,9 @@ import {
   ULG_PRESSURE_INTERFACE_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_REACTION_PRODUCT_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
   ULG_REACTION_PRODUCT_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
+  ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
+  ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_PROMOTION_ADMISSION_SCHEMA,
   ULG_RESIDENT_LAW_GRAPH_MANIFEST_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_METADATA_SCOPE,
@@ -3178,6 +3181,103 @@ test('ULG resident authority host refreshes admitted remote seeds into local SPH
   assert.equal(hotBufferRecord.sphUpload.stateBuffer.label, 'ulg-sph-particle-state');
   assert.equal(hotBufferRecord.mlsMpmUpload.mechanicsBuffer.label, 'ulg-mls-mpm-particle-mechanics');
 
+});
+
+test('ULG resident authority host admits worker-retained mechanics output descriptors', async (t) => {
+  const computeMod = await importPeerComputeManager(t);
+  const nodeMod = await importPeerComputeNodeKernel(t);
+  const stateMod = await importPeerComputeStateManager(t);
+  if (!computeMod || !nodeMod || !stateMod) return;
+  const host = await createPeerComputeResidentAuthorityHost({
+    nodeKernelModuleUrl: PEERCOMPUTE_NODE_KERNEL_URL.href,
+    computeManagerModuleUrl: PEERCOMPUTE_COMPUTE_MANAGER_URL.href,
+    stateManagerModuleUrl: PEERCOMPUTE_STATE_MANAGER_URL.href,
+    remoteResultQuorumModuleUrl: PEERCOMPUTE_REMOTE_QUORUM_URL.href,
+    computeTaskModulePath: ULG_MLS_MPM_GPU_STEP_MODULE_URL.href,
+    enableWorkers: false,
+    enablePersistence: false,
+    disableNetworkProvider: true,
+    disableBroadcast: true,
+    nodeKernelConfig: {
+      pubsubPeerDiscovery: false,
+      maxConnections: 0,
+      maxIncomingPendingConnections: 0,
+      enableNetVizDebugTelemetry: false,
+      enableNetVizSessionBroadcast: false,
+      enableNetVizSessionDiscovery: false
+    }
+  });
+  t.after(() => host.destroy?.());
+
+  const summary = summarizePeerComputeResidentAuthorityHost(host);
+  assert.equal(summary.residentWorkerRetainedMechanicsPublicationReady, true);
+
+  const candidate = {
+    schema: 'peercompute.ulg.mechanics-worker-compact-publication-candidate.v0',
+    candidateStatus: 'worker-retained-compact-publication-candidate-ready',
+    cacheKey: 'ulg:test:mechanics-publication-cache',
+    stateKey: 'ulg:test:mechanics-publication-state',
+    workerRetainedBufferRefs: [
+      'ulg-worker:test:g2p:state',
+      'ulg-worker:test:g2p:mechanics'
+    ],
+    outputFamilies: ['sph-particle-state', 'mls-mpm-mechanics']
+  };
+  const workerRunner = { id: 'test-mechanics-worker-runner' };
+  const publication = host.publishWorkerRetainedMechanicsStageOutput({
+    candidate,
+    workerRunner,
+    workerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    sourceTaskId: 'ulg:test:mechanics-stage-plan',
+    sourceStage: 'g2p'
+  });
+
+  assert.equal(publication.schema, ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(publication.status, 'worker-retained-mechanics-output-published');
+  assert.equal(publication.committed, true);
+  assert.equal(publication.sourceStage, 'g2p');
+  assert.deepEqual(publication.outputFamilies, candidate.outputFamilies);
+  assert.deepEqual(publication.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
+  assert.deepEqual(publication.localBufferRefs, []);
+  assert.equal(publication.workerRetainedBufferImport.schema, ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA);
+  assert.equal(publication.workerRetainedBufferImport.copyMode, 'zero-copy-worker-retained-ref-descriptor');
+  assert.equal(publication.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
+  assert.equal(
+    publication.workerRetainedAccessContract.status,
+    'worker-local-source-ready-main-thread-refresh-blocked'
+  );
+  assert.equal(publication.workerRetainedAccessContract.mainThreadGpuHandlesAvailable, false);
+  assert.equal(publication.workerRetainedAccessContract.workerContinuationRequired, true);
+  assert.equal(publication.workerRetainedAccessContract.localMaterializationStatus, 'blocked-worker-private-gpu-handles');
+  assert.deepEqual(publication.workerRetainedAccessContract.acceptedConsumerModes, [
+    'same-worker-lane-retained-buffer-ref'
+  ]);
+  assert.deepEqual(publication.workerRetainedAccessContract.acceptedMaterializationModes, []);
+  assert.deepEqual(publication.workerRetainedAccessContract.localBufferRefs, []);
+  assert.deepEqual(publication.workerRetainedAccessContract.outputFamilies, candidate.outputFamilies);
+  assert.deepEqual(
+    publication.workerRetainedBufferImport.workerRetainedAccessContract,
+    publication.workerRetainedAccessContract
+  );
+
+  const hotRecord = host.stateManager.getHotBuffer(publication.hotBufferKey);
+  assert.equal(hotRecord.schema, ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(hotRecord.status, 'worker-retained-hot-buffer-source-stored');
+  assert.equal(hotRecord.workerRunner, workerRunner);
+  assert.equal(hotRecord.sourceStage, 'g2p');
+  assert.deepEqual(hotRecord.localBufferRefs, []);
+  assert.deepEqual(hotRecord.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
+  assert.equal(hotRecord.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
+  assert.equal(hotRecord.workerRetainedAccessContract.workerContinuationRequired, true);
+
+  const warmDeltas = host.stateManager.getWarmDeltas('ulg-worker-retained-mechanics-publications');
+  const warmDelta = warmDeltas[publication.commitDeltaTaskId];
+  assert.equal(warmDelta.payload.schema, ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA);
+  assert.equal(warmDelta.payload.status, 'worker-retained-mechanics-output-admitted');
+  assert.equal(warmDelta.payload.hotBufferKey, publication.hotBufferKey);
+  assert.equal(warmDelta.payload.workerLocal, true);
+  assert.equal(warmDelta.payload.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
+  assert.equal(warmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
 });
 
 test('ULG resident authority host admits worker-retained reaction/product output descriptors', async (t) => {

@@ -2,6 +2,24 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 Worker-retained access contract: Worker-retained
+law-family publications now carry a shared
+`peercompute.ulg.worker-retained-access-contract.v0`. Mechanics, thermal/phase,
+pressure/interface, and reaction/product publications record whether the output
+is a same-device main-thread hot-buffer alias or a Worker-private retained-ref
+source that can only be consumed by scheduling a continuation on the same
+Worker/lane. Focused PeerCompute integration now covers mechanics publication
+directly, alongside the existing pressure/reaction coverage. Validation:
+syntax checks passed; focused Worker-retained descriptor integration passed
+`16/16`; fast physics atomics passed `11` checks with `3` expected opt-in
+skips; short recurring visual matrix
+`codex-worker-retained-contract-20260617` passed `3/3`. Next lane work is not
+a separate GPUComputeManager scheduler; keep authority in
+ComputeManager/GPUHub/NodeKernel, but make placement use these contracts to
+co-locate continuation stages and overlap independent law-family, closure,
+cache, and remote-peer work. WebGPU concurrency is still insufficient while
+most hot stages serialize behind one ordered queue/fence/readback cadence.
+
 Status update, 2026-06-14 03:26 AKDT: the browser-mounted resident path now
 uses a real local PeerCompute `NodeKernel` by default, so GPU resident lane
 work should continue under `ComputeManager`/`GPUHub` rather than as a sibling

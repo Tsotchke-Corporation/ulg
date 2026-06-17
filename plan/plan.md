@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: architecture work is active before the
+next physics behavior pass. Worker-retained law-family hot-buffer
+publications now carry `peercompute.ulg.worker-retained-access-contract.v0`
+through StateManager hot records, warm deltas, and import descriptors for
+mechanics, thermal/phase, pressure/interface, and reaction/product outputs.
+This contract distinguishes same-device main-thread hot-buffer aliases from
+Worker-private retained GPU refs that must be consumed by scheduling a
+continuation on the same Worker/lane. Validation passed syntax checks, focused
+PeerCompute integration for Worker-retained mechanics/reaction/pressure
+descriptor publication (`16/16`), `npm run test:physics-atomics` (`11` pass,
+`3` expected opt-in skips), and short recurring visual matrix
+`codex-worker-retained-contract-20260617` (`3/3`, empty issue counts, frame
+artifacts). Next architecture work: make ComputeManager/GPUHub placement use
+this contract so independent law-family, closure, cache, and remote-peer graph
+work can overlap while ordered physics dependencies still fence only at real
+state-family boundaries. WebGPU concurrency is not sufficient yet; the current
+hot path still serializes too much around a single ordered queue/fence/readback
+cadence.
+
 Current checkpoint, 2026-06-17 AKDT: the resident MLS-MPM render-field
 blocky/non-merged-looking water artifact is fixed in the Three/MarchingCubes
 readback path. The resident surface was already one connected H2O component,

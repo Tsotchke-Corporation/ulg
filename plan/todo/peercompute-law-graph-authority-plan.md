@@ -2,6 +2,23 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 Worker-retained authority contract: the graph-level
+cache/placement/lease slice is already implemented, so the current authority
+work moved to the next missing boundary: admitted Worker-retained law-family
+outputs now publish an explicit
+`peercompute.ulg.worker-retained-access-contract.v0`. Mechanics,
+thermal/phase, pressure/interface, and reaction/product descriptors now state
+whether their refs are same-device main-thread hot-buffer aliases or
+Worker-private retained refs that require same-Worker/lane continuation. This
+keeps remote/Worker GPU refs from masquerading as local leases while giving
+ComputeManager/GPUHub a concrete placement signal. Focused PeerCompute
+coverage passed for mechanics/reaction/pressure publication descriptors, fast
+physics atomics stayed green, and a short visual sanity matrix passed. Next:
+turn this metadata into dependency-aware placement and concurrency policy so
+independent law-family/closure/cache/remote graph work can overlap, while
+ordered physics dependencies still fence only at required state-family
+boundaries.
+
 Status update, 2026-06-14 04:41 AKDT: now that CPU/reference atomics and the
 short visual sanity matrix can guard regressions, this authority track is the
 active top priority. ULG now initializes a real sibling PeerCompute

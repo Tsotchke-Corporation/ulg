@@ -1,5 +1,69 @@
 # ULG Implementation Log
 
+## 2026-06-17 14:06 AKDT - Resident render-field surface unclipping
+
+Prompt time/date: 2026-06-17 14:06 AKDT, continuing after the user reported
+remaining z-buffer issues and H2O blobs not visually merging.
+
+Summary:
+
+- Investigated the remaining resident MLS-MPM H2O/H2O visual artifact after
+  the depth-write fix. The current visual row already reported one H2O visible
+  surface and one connected component, so the "not merging" look was not a
+  topology split in the accepted row.
+- Found that `applySurfaceFields()` clipped current visible resident render-
+  field MarchingCubes vertices to particle bounds plus capped padding before
+  container clamping. This was a stale/diagnostic bounds guard being applied to
+  live geometry, which chopped the liquid into a cuboid/blocky shape.
+- Changed visible resident render fields to record
+  `surface-bounds-diagnostic-current-render-field` with zero clipped vertices
+  instead of mutating the mesh. Stale retention still uses current bounds, and
+  container clipping still applies.
+- Added resident `renderFieldCellSizeM` metadata and taught the long-horizon
+  probe to use it in the particle-bound envelope, matching the CPU
+  MarchingCubes cell-size slack concept.
+- Added a visual analyzer regression issue
+  `resident-visible-surface-clipped-to-particle-bounds` if a future visible
+  resident surface is clipped back to particle bounds.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `plan/plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/log.md`
+- `plan/done/resident-render-field-surface-unclipping-2026-06-17.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `35/35`.
+- PASS: `git diff --check`.
+- Initial FAIL after removing the clamp:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-h2o-unclipped-renderfield-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported one `visible-surface-expanded-beyond-particle-bounds` issue because
+  resident fields had no cell-size slack in the analyzer. The final frame was
+  visibly improved and already showed one merged mound.
+- PASS after adding resident cell-size metadata:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, one H2O visible surface, one
+  connected component, final tallness `0.488`, footprint fill `0.356`,
+  `maxVisibleSurfaceOutsideParticleBoundsM=0`, and five frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617/liquid-liquid-h2o-mlsmpm-frames`.
+
+Open:
+
+- The resident H2O surface is now merged and no longer cuboid-clipped, but it
+  remains faceted at the current render-field resolution. Surface smoothing and
+  resolution policy remain separate visual-quality work.
+- Raw WebGPU overlay depth sharing and mobile focus-resume flashing still need
+  dedicated pixel/device evidence.
+
 ## 2026-06-17 13:38:13 AKDT - Transmissive H2O depth-write renderer fix
 
 Summary:

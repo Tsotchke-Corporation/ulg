@@ -12,6 +12,23 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-17 AKDT update: resident MLS-MPM H2O/H2O no longer has the current
+  render-field particle-bounds clipping artifact that made merged water look
+  cuboid/blocky and non-merged. The surface topology was already one H2O
+  visible surface with one connected component, but `applySurfaceFields()`
+  clipped live MarchingCubes vertices to particle bounds plus capped padding
+  before clamping to the container. That turned a diagnostic/stale-surface
+  guard into visible geometry deformation. Current visible render fields now
+  record `surface-bounds-diagnostic-current-render-field` with zero clipped
+  vertices; stale retention still checks current bounds, and the analyzer now
+  fails on `resident-visible-surface-clipped-to-particle-bounds` if the live
+  deformation returns. The probe also includes resident render-field cell size
+  in the particle-bound envelope. Evidence:
+  `codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617` passed with
+  `failedCount=0`, empty visual issues, one H2O surface/component, final
+  tallness `0.488`, footprint fill `0.356`, no particle-bound overflow, and
+  depth-writing transmissive metadata. Keep surface smoothing, ice/solid flow,
+  raw WebGPU overlay depth sharing, and mobile focus-resume flashing open.
 - 2026-06-17 AKDT update: default Three/MarchingCubes H2O z-buffer/draw-through
   is fixed for condensed transmissive water. The bug was a renderer policy
   mismatch, not a new physics split: non-vapor transmission was treated as

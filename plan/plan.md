@@ -2,6 +2,26 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: the resident MLS-MPM render-field
+blocky/non-merged-looking water artifact is fixed in the Three/MarchingCubes
+readback path. The resident surface was already one connected H2O component,
+but `applySurfaceFields()` hard-clipped current visible render-field vertices
+to particle bounds plus a small capped padding before container clamping. That
+diagnostic/stale-surface guard deformed the live isosurface into a chopped
+block and hid legitimate support-radius/cell-size extent. Current visible
+render-field surfaces now keep particle-bounds clipping as metadata only
+(`surface-bounds-diagnostic-current-render-field`, zero clipped vertices),
+while stale retention still uses bounds and the container clamp still applies.
+The long-horizon probe now records resident render-field cell size for the
+particle-bound envelope and reports
+`resident-visible-surface-clipped-to-particle-bounds` if this deformation ever
+returns. Validation passed renderer coverage `35/35` and resident MLS-MPM H2O
+row `codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617` with
+`failedCount=0`, empty visual issues, one H2O surface/component, final
+tallness `0.488`, footprint fill `0.356`, depth-writing transmissive metadata,
+`clipStatus=surface-bounds-diagnostic-current-render-field`, and
+`maxVisibleSurfaceOutsideParticleBoundsM=0`.
+
 Current checkpoint, 2026-06-17 AKDT: the H2O z-buffer/draw-order regression is
 fixed for the default Three/MarchingCubes render path. The old renderer policy
 treated condensed transmissive water like alpha transparency: `transparent=true`,

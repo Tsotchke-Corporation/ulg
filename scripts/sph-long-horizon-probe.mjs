@@ -875,6 +875,7 @@ async function runBrowserProbe({
             renderFieldRetainedByGrace: node.userData.renderFieldRetainedByGrace ?? null,
             renderFieldResolution: finiteOrNull(node.userData.renderFieldResolution),
             renderFieldCells: finiteOrNull(node.userData.renderFieldCells),
+            renderFieldCellSizeM: finiteOrNull(node.userData.renderFieldCellSizeM),
             surfaceRadiusM: finiteOrNull(node.userData.surfaceRadiusM),
             requestedSurfaceRadiusM: finiteOrNull(node.userData.requestedSurfaceRadiusM),
             cpuMarchingCubesRadiusFloorM: finiteOrNull(node.userData.cpuMarchingCubesRadiusFloorM),
@@ -2701,6 +2702,9 @@ function analyzeTimeline(timeline, {
         materialTransparent: surface?.materialTransparent ?? null,
         materialDepthWrite: surface?.materialDepthWrite ?? null,
         materialDepthTest: surface?.materialDepthTest ?? null,
+        surfaceBoundsClipStatus: surface?.surfaceBoundsClipStatus ?? null,
+        surfaceBoundsClipVertexCount: finiteMetric(surface?.surfaceBoundsClipVertexCount),
+        surfaceBoundsClipPaddingM: finiteMetric(surface?.surfaceBoundsClipPaddingM),
         ...extra
       });
     };
@@ -2877,6 +2881,16 @@ function analyzeTimeline(timeline, {
             ? largestComponentRatio
             : Math.min(minVisibleSurfaceLargestComponentRatio, largestComponentRatio);
         }
+        if (
+          surface.renderSource === 'resident-gpu-render-field'
+          && surface.surfaceBoundsClipStatus === 'clipped-to-surface-bounds'
+          && finiteMetric(surface.surfaceBoundsClipVertexCount) > 0
+        ) {
+          pushRenderVisualIssue('resident-visible-surface-clipped-to-particle-bounds', metricIndex, surface, {
+            vertexCount: surface.vertexCount ?? null,
+            bounds: surface.worldBounds ?? null
+          });
+        }
         const renderLayer = String(surface.renderLayer || '');
         const renderOrder = finiteMetric(surface.renderOrder);
         const renderOrderBase = finiteMetric(surface.renderOrderBase);
@@ -2960,7 +2974,11 @@ function analyzeTimeline(timeline, {
             finiteMetric(surface.requestedSurfaceRadiusM),
             finiteMetric(surface.cpuMarchingCubesRadiusFloorM)
           );
-          const marchingCubesCellSizeM = Math.max(0, finiteMetric(surface.cpuMarchingCubesCellSizeM));
+          const marchingCubesCellSizeM = Math.max(
+            0,
+            finiteMetric(surface.cpuMarchingCubesCellSizeM),
+            finiteMetric(surface.renderFieldCellSizeM)
+          );
           const allowedParticleBoundsOverflowM = particleBoundsToleranceM
             + particleSupportRadiusM
             + marchingCubesCellSizeM;
@@ -3141,6 +3159,9 @@ function analyzeTimeline(timeline, {
   }
   if (visualSurfaceIssues.some((item) => String(item.issue || '').startsWith('render-'))) {
     issues.push('render-depth-order-visual-trust');
+  }
+  if (visualSurfaceIssues.some((item) => item.issue === 'resident-visible-surface-clipped-to-particle-bounds')) {
+    issues.push('resident-visible-surface-clipped-to-particle-bounds');
   }
   return {
     schema: 'peercompute.ulg.sph-history-long-horizon-analysis.v0',

@@ -6379,6 +6379,14 @@ export function createSphPhaseScene(container, {
     return result;
   }
 
+  function markCurrentRenderFieldSurfaceBoundsDiagnostic(mesh, clip = null) {
+    const paddingM = Number(clip?.paddingM);
+    mesh.userData.surfaceBoundsClipStatus = 'surface-bounds-diagnostic-current-render-field';
+    mesh.userData.surfaceBoundsClipVertexCount = 0;
+    mesh.userData.surfaceBoundsClipPaddingM = Number.isFinite(paddingM) ? paddingM : null;
+    return { status: mesh.userData.surfaceBoundsClipStatus, clampedVertexCount: 0 };
+  }
+
   function rebuildOpticalStateForSurfaceBatches(batches, { materialProperties = null } = {}) {
     opticalGpuTable = createOpticalGpuTableForSurfaceBatches(batches, { materialProperties });
     opticalGpuLookup = createOpticalGpuLookupForSurfaceBatches(opticalGpuTable, batches);
@@ -7041,6 +7049,7 @@ export function createSphPhaseScene(container, {
       mesh.userData.surfaceRadiusM = surfaceRadiusMetersFromRenderFieldRadius(fieldSurface.radiusNorm, refEdgeM);
       mesh.userData.renderFieldResolution = fieldSurface.resolution;
       mesh.userData.renderFieldCells = fieldSurface.fieldCellCount;
+      mesh.userData.renderFieldCellSizeM = cpuMarchingCubesCellSizeM(refEdgeM, fieldSurface.resolution);
       mesh.userData.renderFieldMaxDensity = maxDensity;
       mesh.userData.renderFieldIsolation = fieldSurface.isolation;
       mesh.userData.renderFieldShowIsolation = visibility.showIsolation;
@@ -7082,7 +7091,7 @@ export function createSphPhaseScene(container, {
       mesh.palette.set(fieldSurface.palette);
       mesh.isolation = visibility.renderIsolation;
       mesh.update();
-      clampSurfaceMeshToSurfaceBounds(mesh, surfaceBoundsByKey?.get(descriptor.surfaceKey) ?? null);
+      markCurrentRenderFieldSurfaceBoundsDiagnostic(mesh, surfaceBoundsByKey?.get(descriptor.surfaceKey) ?? null);
       clampSurfaceMeshToContainer(mesh);
       mesh.visible = true;
       mesh.userData.renderFieldRetainedByGrace = false;

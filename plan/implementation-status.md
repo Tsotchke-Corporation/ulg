@@ -1,8 +1,26 @@
 # Implementation Status
 
-Updated: 2026-06-15 CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
+Updated: 2026-06-17 resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
-Latest checkpoint, 2026-06-17 AKDT: H2O transmissive surface depth policy is
+Latest checkpoint, 2026-06-17 AKDT: resident render-field surfaces are no
+longer hard-clipped to current particle bounds before display. That clamp was
+meant as a stale-surface guard, but on current visible MLS-MPM render fields it
+mutated MarchingCubes vertices and produced the blocky/cuboid H2O shape that
+looked like non-merged water despite topology metrics showing one connected
+surface. Current visible render fields now record
+`surface-bounds-diagnostic-current-render-field` and keep particle-bounds
+trust in the analyzer; stale retention still uses the bounds check, and the
+container clamp remains active. The probe now includes resident render-field
+cell size in the particle-bound surface envelope and fails if a visible
+resident surface is ever vertex-clipped back to particle bounds. Validation:
+`node --test tests/sphPhaseRenderer.test.mjs` passed `35/35`; resident MLS-MPM
+H2O row `codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617` passed
+with empty issue counts, one H2O visible surface, one connected component,
+`clipStatus=surface-bounds-diagnostic-current-render-field`, `clipCount=0`,
+`renderFieldCellSizeM=0.1417`, `maxVisibleSurfaceOutsideParticleBoundsM=0`,
+final tallness `0.488`, and footprint fill `0.356`.
+
+Previous checkpoint, 2026-06-17 AKDT: H2O transmissive surface depth policy is
 fixed in the default Three/MarchingCubes render path. Condensed water is now
 rendered as depth-writing MeshPhysicalMaterial transmission (`transparent=false`,
 `depthWrite=true`, stable depth-writing order), while vapor/true-alpha surfaces
@@ -28,6 +46,12 @@ surface, and no visual issues.
 
 ## Done
 
+- Current resident render-field surfaces are no longer deformed by particle-
+  bounds clipping. The renderer records the particle-bounds check as diagnostic
+  metadata, still clamps to the container, and the visual probe now includes
+  resident render-field cell size plus a regression issue for any future
+  visible resident surface clipped to particle bounds. The post-patch MLS-MPM
+  H2O row passes with one connected H2O surface and a plausible merged mound.
 - Default Three/MarchingCubes rendering no longer treats condensed transmissive
   H2O as alpha-blended transparent geometry. This fixes the visible grid/wire
   draw-through artifact on water while preserving vapor/alpha sorting. CPU and

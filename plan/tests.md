@@ -1,5 +1,35 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 Resident Render-Field Surface Unclipping
+
+Resident MLS-MPM render-field surfaces now preserve the current
+MarchingCubes geometry instead of clipping visible vertices back to particle
+bounds. Particle-bounds checks remain diagnostic/validation gates, stale
+surface retention still checks current bounds, and container clipping still
+keeps surfaces inside the box. The probe records resident render-field cell
+size so CPU and resident surface envelopes use comparable sampling slack.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Diff whitespace:
+  `git diff --check` passed.
+- Renderer coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `35/35`.
+- Resident MLS-MPM visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, one H2O visible surface,
+  component count `1`, final tallness `0.4877`, footprint fill `0.3562`,
+  `maxVisibleSurfaceOutsideParticleBoundsM=0`, and five frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617/liquid-liquid-h2o-mlsmpm-frames`.
+  Final H2O metadata reported `renderSource=resident-gpu-render-field`,
+  `renderFieldResolution=64`, `renderFieldCellSizeM=0.1417`,
+  `surfaceBoundsClipStatus=surface-bounds-diagnostic-current-render-field`,
+  `surfaceBoundsClipVertexCount=0`, `transparent=false`, `depthWrite=true`,
+  and `renderOrderPolicy=stable-opaque-layer-order`.
+
 ## Current Focused Result - 2026-06-17 Transmissive H2O Depth Policy
 
 Condensed transmissive water now uses Three's physical transmission path as

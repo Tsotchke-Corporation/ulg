@@ -35,6 +35,20 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: the resident MLS-MPM H2O render-field
+surface now merges visually without the previous cuboid/chopped look. The
+surface topology had already reported one H2O surface and one connected
+component; the misleading "not merging" artifact came from
+`applySurfaceFields()` clipping current visible render-field vertices to
+particle bounds before display. Current render fields now keep that bounds
+check diagnostic-only, still clamp to the container, and the probe fails if a
+visible resident surface is ever particle-bounds-clipped again. Evidence:
+`codex-mlsmpm-h2o-unclipped-renderfield-cellslack-20260617` passed with empty
+issues, one H2O surface/component, final tallness `0.488`, footprint fill
+`0.356`, no particle-bound overflow, and five frames. Keep broader surface
+smoothing, true raw WebGPU overlay depth sharing, mobile focus-resume flashing,
+ice/solid flow, and PeerCompute/WebGPU law-stage migration open.
+
 Current routing note, 2026-06-17 AKDT: the default Three/MarchingCubes H2O
 z-buffer/draw-through issue is fixed for condensed transmissive water. The
 renderer was incorrectly treating non-vapor transmission as alpha transparency,

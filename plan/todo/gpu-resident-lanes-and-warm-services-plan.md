@@ -20,6 +20,16 @@ co-locate continuation stages and overlap independent law-family, closure,
 cache, and remote-peer work. WebGPU concurrency is still insufficient while
 most hot stages serialize behind one ordered queue/fence/readback cadence.
 
+Status update, 2026-06-17 Worker-retained continuation planner: admitted
+mechanics Worker-retained publications can now be turned into an explicit
+same-Worker continuation plan by the resident authority host. The planner
+checks the access contract, output families, same-Worker consumer mode,
+retained refs, and Worker runner availability before enabling retained G2P
+input. The mechanics stage chain records the plan in Worker context and
+telemetry. This is the first practical use of the access contract; next is to
+make ComputeManager/GPUHub placement consume the same evidence for every
+promoted law family.
+
 Status update, 2026-06-17 GPU resident dependency batches: PeerCompute's
 `GpuResidentLaneManager` now accepts explicit stage dependencies and can run
 ready batches under one resident lane lease. ULG's mechanics lane contract

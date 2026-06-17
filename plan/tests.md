@@ -1,5 +1,34 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 Worker-Retained Continuation Planner
+
+Worker-retained publications now have a consumer-side continuation plan instead
+of relying only on caller intent. The authority host can resolve a hot-buffer
+publication, validate its access contract, and report whether a same-Worker
+retained-ref continuation is ready.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js`, and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- ULG PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained mechanics output descriptors|ULG resident solver descriptors publish executable pass-DAG"`
+  passed `16/16`. The new assertions prove
+  `host.planWorkerRetainedContinuation()` returns
+  `same-worker-retained-continuation-ready` for a mechanics publication with
+  `sph-particle-state` and `mls-mpm-mechanics`, blocks when required families
+  are absent, and threads an explicit continuation plan into Worker stage
+  context plus mechanics stage-chain telemetry.
+- Fast physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `3` expected opt-in
+  long-horizon skips.
+- Recurring visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-worker-retained-continuation-plan-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and two frames each under
+  `/tmp/ulg-visual-sanity-matrix/codex-worker-retained-continuation-plan-20260617`.
+
 ## Current Focused Result - 2026-06-17 GPU Resident Stage Dependency Batches
 
 GPU resident lane contracts now carry explicit stage dependencies for the

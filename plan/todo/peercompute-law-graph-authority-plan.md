@@ -19,6 +19,15 @@ independent law-family/closure/cache/remote graph work can overlap, while
 ordered physics dependencies still fence only at required state-family
 boundaries.
 
+Status update, 2026-06-17 Worker-retained continuation planner: mechanics
+Worker-retained outputs now have a consumer-side authority plan. The plan is
+derived from StateManager hot-buffer evidence and the access contract, then
+fed into the mechanics Worker context. This prevents a raw caller boolean from
+being the only reason a Worker-private GPU ref is consumed. The next authority
+step is to lift this from mechanics-only continuation into law-graph placement:
+admit a continuation only when state-family reads/writes, Worker/lane affinity,
+and remote/local residency all agree.
+
 Status update, 2026-06-17 GPU resident dependency batches: the first concrete
 law-stage concurrency surface is now in place. PeerCompute's resident lane
 stage-plan executor accepts explicit dependencies, validates them, executes

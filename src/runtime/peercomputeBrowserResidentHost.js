@@ -66,6 +66,7 @@ export const ULG_REMOTE_TASK_GRAPH_COMPACT_BUFFER_SNAPSHOT_SCHEMA = 'peercompute
 export const ULG_REMOTE_TASK_GRAPH_SAME_DEVICE_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.remote-task-graph-same-device-retained-buffer-import.v0';
 export const ULG_SPH_MLS_MPM_SAME_DEVICE_HOT_BUFFER_SOURCE_PUBLICATION_SCHEMA = 'peercompute.ulg.sph-mls-mpm-same-device-hot-buffer-source-publication.v0';
 export const ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA = 'peercompute.ulg.worker-retained-access-contract.v0';
+export const ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA = 'peercompute.ulg.worker-retained-continuation-plan.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-buffer-import.v0';
 export const ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA = 'peercompute.ulg.mechanics-worker-retained-hot-buffer-publication.v0';
 export const ULG_THERMAL_PHASE_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA = 'peercompute.ulg.thermal-phase-worker-retained-buffer-import.v0';
@@ -1837,6 +1838,149 @@ function buildWorkerRetainedAccessContract({
       : [],
     remoteRetainedRefsUsableLocally: false,
     stateManagerAdmissionRequired: true,
+    authoritativeStateMutation: false
+  };
+}
+
+function workerRetainedSourceRecordFrom({
+  stateManager = null,
+  source = null,
+  hotBufferKey = null
+} = {}) {
+  if (source && typeof source === 'object') return source;
+  const key = normalizeString(hotBufferKey, null);
+  if (key && typeof stateManager?.getHotBuffer === 'function') {
+    return stateManager.getHotBuffer(key) || null;
+  }
+  return null;
+}
+
+function workerRetainedAccessContractFrom(source = null) {
+  if (!source || typeof source !== 'object') return null;
+  const payload = source.payload && typeof source.payload === 'object'
+    ? source.payload
+    : null;
+  return source.schema === ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA
+    ? source
+    : (
+        source.workerRetainedAccessContract
+        || source.workerRetainedBufferImport?.workerRetainedAccessContract
+        || payload?.workerRetainedAccessContract
+        || payload?.workerRetainedBufferImport?.workerRetainedAccessContract
+        || null
+      );
+}
+
+export function planWorkerRetainedContinuationFromAccessContract({
+  stateManager = null,
+  source = null,
+  hotBufferKey = null,
+  workerRetainedAccessContract = null,
+  workerRunner = null,
+  requiredOutputFamilies = [],
+  consumerStageId = null,
+  consumerLawNodeId = null,
+  requestedLaneId = null,
+  requestedStateKey = null,
+  requireWorkerRunner = true
+} = {}) {
+  const sourceRecord = workerRetainedSourceRecordFrom({ stateManager, source, hotBufferKey });
+  const contract = workerRetainedAccessContract
+    || workerRetainedAccessContractFrom(sourceRecord)
+    || null;
+  const resolvedHotBufferKey = normalizeString(
+    hotBufferKey,
+    sourceRecord?.hotBufferKey
+      || sourceRecord?.payload?.hotBufferKey
+      || contract?.sourceHotBufferKey
+      || null
+  );
+  const requiredFamilies = uniqueStringList(requiredOutputFamilies);
+  const outputFamilies = uniqueStringList(
+    contract?.outputFamilies
+      || sourceRecord?.outputFamilies
+      || sourceRecord?.payload?.outputFamilies
+      || []
+  );
+  const missingOutputFamilies = requiredFamilies.filter((family) => !outputFamilies.includes(family));
+  const acceptedConsumerModes = uniqueStringList(contract?.acceptedConsumerModes || []);
+  const workerRetainedBufferRefs = uniqueStringList(
+    contract?.workerRetainedBufferRefs
+      || sourceRecord?.workerRetainedBufferRefs
+      || sourceRecord?.payload?.workerRetainedBufferRefs
+      || sourceRecord?.workerRetainedBufferImport?.workerRetainedBufferRefs
+      || sourceRecord?.payload?.workerRetainedBufferImport?.workerRetainedBufferRefs
+      || []
+  );
+  const localBufferRefs = uniqueStringList(
+    contract?.localBufferRefs
+      || sourceRecord?.localBufferRefs
+      || sourceRecord?.payload?.localBufferRefs
+      || []
+  );
+  const resolvedWorkerRunner = workerRunner || sourceRecord?.workerRunner || sourceRecord?.workerBackend || null;
+  const sameWorkerModeAccepted = acceptedConsumerModes.includes('same-worker-lane-retained-buffer-ref')
+    || contract?.workerContinuationProtocol === 'same-worker-lane-retained-buffer-ref'
+    || contract?.consumerAccessProtocol === 'same-worker-lane-retained-buffer-ref';
+  const blocker = !contract
+    ? 'worker-retained-access-contract-missing'
+    : (contract.schema !== ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA
+      ? 'worker-retained-access-contract-schema-mismatch'
+      : (missingOutputFamilies.length > 0
+        ? 'worker-retained-continuation-output-family-mismatch'
+        : (!sameWorkerModeAccepted
+          ? 'same-worker-retained-ref-consumer-mode-not-accepted'
+          : (workerRetainedBufferRefs.length === 0
+            ? 'worker-retained-buffer-refs-missing'
+            : (contract.workerLocal === false
+              ? 'worker-retained-source-not-worker-local'
+              : (requireWorkerRunner !== false && !resolvedWorkerRunner
+                ? 'worker-retained-source-worker-runner-missing'
+                : null))))));
+  const ready = !blocker;
+  return {
+    schema: ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA,
+    status: ready
+      ? 'same-worker-retained-continuation-ready'
+      : 'blocked-worker-retained-continuation',
+    blocker,
+    useWorkerRetainedInput: ready,
+    consumerMode: ready ? 'same-worker-lane-retained-buffer-ref' : null,
+    consumerStageId: normalizeString(consumerStageId, null),
+    consumerLawNodeId: normalizeString(consumerLawNodeId, null),
+    requestedLaneId: normalizeString(requestedLaneId, null),
+    requestedStateKey: normalizeString(requestedStateKey, null),
+    cacheKey: contract?.cacheKey || sourceRecord?.cacheKey || sourceRecord?.payload?.cacheKey || null,
+    stateKey: contract?.stateKey || sourceRecord?.stateKey || sourceRecord?.payload?.stateKey || null,
+    sourceHotBufferKey: resolvedHotBufferKey,
+    sourceStage: contract?.sourceStage || sourceRecord?.sourceStage || sourceRecord?.payload?.sourceStage || null,
+    sourceNodeId: contract?.sourceNodeId || sourceRecord?.sourceNodeId || sourceRecord?.payload?.sourceNodeId || null,
+    sourceTaskId: contract?.sourceTaskId || sourceRecord?.sourceTaskId || sourceRecord?.payload?.sourceTaskId || null,
+    workerModuleUrl: contract?.workerModuleUrl || sourceRecord?.workerModuleUrl || sourceRecord?.payload?.workerModuleUrl || null,
+    workerContinuationRequired: contract?.workerContinuationRequired === true,
+    mainThreadGpuHandlesAvailable: contract?.mainThreadGpuHandlesAvailable === true,
+    sameDeviceMainThreadHandlesAvailable: contract?.sameDeviceMainThreadHandlesAvailable === true,
+    workerLocal: contract?.workerLocal !== false,
+    bufferResidency: contract?.bufferResidency || sourceRecord?.bufferResidency || sourceRecord?.payload?.bufferResidency || null,
+    workerContinuationProtocol: contract?.workerContinuationProtocol || null,
+    consumerAccessProtocol: contract?.consumerAccessProtocol || null,
+    acceptedConsumerModes,
+    acceptedMaterializationModes: uniqueStringList(contract?.acceptedMaterializationModes || []),
+    requiredOutputFamilies: requiredFamilies,
+    outputFamilies,
+    missingOutputFamilies,
+    workerRetainedBufferRefs,
+    workerRetainedBufferRefCount: workerRetainedBufferRefs.length,
+    localBufferRefs,
+    localBufferRefCount: localBufferRefs.length,
+    workerRunnerAvailable: Boolean(resolvedWorkerRunner),
+    sourceRecordStatus: sourceRecord?.status || sourceRecord?.payload?.status || null,
+    sourceRecordSchema: sourceRecord?.schema || sourceRecord?.payload?.schema || null,
+    accessContractStatus: contract?.status || null,
+    accessContractReason: contract?.reason || null,
+    localMaterializationStatus: contract?.localMaterializationStatus || null,
+    localMaterializationBlocker: contract?.localMaterializationBlocker || null,
+    stateManagerAdmissionRequired: contract?.stateManagerAdmissionRequired === true,
     authoritativeStateMutation: false
   };
 }
@@ -5115,6 +5259,12 @@ export async function createPeerComputeResidentAuthorityHost({
         ...options
       });
     },
+    planWorkerRetainedContinuation(options = {}) {
+      return planWorkerRetainedContinuationFromAccessContract({
+        stateManager,
+        ...options
+      });
+    },
     publishWorkerRetainedThermalPhaseStageOutput(options = {}) {
       return publishUlgThermalPhaseWorkerRetainedHotBufferSource({
         stateManager,
@@ -5819,6 +5969,7 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,
     residentSameDeviceHotBufferSourcePublicationReady: typeof host?.publishSameDeviceHotBufferSource === 'function',
     residentWorkerRetainedMechanicsPublicationReady: typeof host?.publishWorkerRetainedMechanicsStageOutput === 'function',
+    residentWorkerRetainedContinuationPlannerReady: typeof host?.planWorkerRetainedContinuation === 'function',
     residentWorkerRetainedThermalPhasePublicationReady: typeof host?.publishWorkerRetainedThermalPhaseStageOutput === 'function',
     residentWorkerRetainedPressureInterfacePublicationReady: typeof host?.publishWorkerRetainedPressureInterfaceStageOutput === 'function',
     residentPressureInterfaceGasCellFieldAdmissionPublicationReady: typeof host?.publishPressureInterfaceGasCellFieldAdmission === 'function',

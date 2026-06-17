@@ -88,6 +88,7 @@ import {
   ULG_MECHANICS_WORKER_RETAINED_BUFFER_IMPORT_SCHEMA,
   ULG_MECHANICS_WORKER_RETAINED_HOT_BUFFER_PUBLICATION_SCHEMA,
   ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA,
+  ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_PROMOTION_ADMISSION_SCHEMA,
   ULG_RESIDENT_LAW_GRAPH_MANIFEST_SCHEMA,
   ULG_RESIDENT_LAW_FAMILY_METADATA_SCOPE,
@@ -1461,6 +1462,21 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   const pressureInterfaceStagePublicationPayloads = [];
   const thermalStagePublicationPayloads = [];
   const reactionProductStagePublicationPayloads = [];
+  const testWorkerRetainedContinuationPlan = {
+    schema: ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA,
+    status: 'same-worker-retained-continuation-ready',
+    blocker: null,
+    useWorkerRetainedInput: true,
+    consumerMode: 'same-worker-lane-retained-buffer-ref',
+    consumerStageId: 'p2g',
+    consumerLawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
+    sourceHotBufferKey: 'ulg:test:mechanics-worker-retained-hot-buffer',
+    workerRetainedBufferRefs: ['ulg-worker:test:g2p:state', 'ulg-worker:test:g2p:mechanics'],
+    workerRunnerAvailable: true,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    outputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    missingOutputFamilies: []
+  };
   const gpuHubWorkerThermalStageChainStep = await runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageTasks({
     ...mechanicsStageParticle,
     computeManager,
@@ -1528,6 +1544,7 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuResidentLaneId: 'ulg:test:mechanics-stage-gpuhub-worker-thermal',
     gpuResidentLaneStateKey: 'ulg:test:mechanics-stage-gpuhub-worker-thermal-state',
     gpuHubResidentStageWorkerModuleUrl: '/workers/ulg-mechanics-resident-stage.worker.js',
+    gpuHubResidentStageWorkerRetainedContinuationPlan: testWorkerRetainedContinuationPlan,
     gpuHubResidentPressureInterfaceStageWorkerOutputPublisher(payload) {
       pressureInterfaceStagePublicationPayloads.push(payload);
       return {
@@ -1568,7 +1585,9 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
           contextHasPressureInterface: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.materialInterfaceField),
           contextHasGridForceAdmission: Boolean(context?.ulgMechanicsResidentStageWorker?.stageOptions?.gridUpdate?.pressureInterfaceGridForceAdmission),
           contextHasThermalTables: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.thermalMaterialTable),
-          contextHasReactionTable: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.reactionTable)
+          contextHasReactionTable: Boolean(context?.ulgMechanicsResidentStageWorker?.common?.reactionTable),
+          contextUsesWorkerRetainedInput: context?.ulgMechanicsResidentStageWorker?.useWorkerRetainedG2pInput === true,
+          contextContinuationPlanStatus: context?.ulgMechanicsResidentStageWorker?.workerRetainedContinuationPlan?.status || null
         });
         const gpuResidentLaneRequirement = {
           laneId: lease.laneId,
@@ -1798,6 +1817,11 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasPressureInterface, true);
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasThermalTables, true);
   assert.equal(thermalStageWorkerBridgeCalls.at(-1).contextHasReactionTable, true);
+  assert.equal(thermalStageWorkerBridgeCalls.at(0).contextUsesWorkerRetainedInput, true);
+  assert.equal(
+    thermalStageWorkerBridgeCalls.at(0).contextContinuationPlanStatus,
+    'same-worker-retained-continuation-ready'
+  );
   assert.equal(
     thermalStageWorkerBridgeCalls.find((entry) => entry.stageId === 'gridUpdate')?.contextHasGridForceAdmission,
     true
@@ -1817,6 +1841,19 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     [['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]
   );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionMaxConcurrentStageCount, 2);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.workerRetainedContinuationPlanSchema,
+    ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.workerRetainedContinuationPlanStatus,
+    'same-worker-retained-continuation-ready'
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.workerRetainedContinuationPlanUseWorkerInput, true);
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.workerRetainedContinuationPlanSourceHotBufferKey,
+    'ulg:test:mechanics-worker-retained-hot-buffer'
+  );
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 6);
   assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
     p2g: 'gpu-hub-resident-stage-executor',
@@ -3231,6 +3268,7 @@ test('ULG resident authority host admits worker-retained mechanics output descri
 
   const summary = summarizePeerComputeResidentAuthorityHost(host);
   assert.equal(summary.residentWorkerRetainedMechanicsPublicationReady, true);
+  assert.equal(summary.residentWorkerRetainedContinuationPlannerReady, true);
 
   const candidate = {
     schema: 'peercompute.ulg.mechanics-worker-compact-publication-candidate.v0',
@@ -3298,6 +3336,39 @@ test('ULG resident authority host admits worker-retained mechanics output descri
   assert.equal(warmDelta.payload.workerLocal, true);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.schema, ULG_WORKER_RETAINED_ACCESS_CONTRACT_SCHEMA);
   assert.equal(warmDelta.payload.workerRetainedAccessContract.workerContinuationRequired, true);
+
+  assert.equal(typeof host.planWorkerRetainedContinuation, 'function');
+  const continuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+    consumerStageId: 'p2g',
+    consumerLawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
+    requestedLaneId: 'ulg:test:mechanics-publication-lane',
+    requestedStateKey: 'ulg:test:mechanics-publication-state'
+  });
+  assert.equal(continuationPlan.schema, ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA);
+  assert.equal(continuationPlan.status, 'same-worker-retained-continuation-ready');
+  assert.equal(continuationPlan.blocker, null);
+  assert.equal(continuationPlan.useWorkerRetainedInput, true);
+  assert.equal(continuationPlan.consumerMode, 'same-worker-lane-retained-buffer-ref');
+  assert.equal(continuationPlan.sourceHotBufferKey, publication.hotBufferKey);
+  assert.equal(continuationPlan.workerContinuationRequired, true);
+  assert.equal(continuationPlan.mainThreadGpuHandlesAvailable, false);
+  assert.equal(continuationPlan.workerRunnerAvailable, true);
+  assert.deepEqual(continuationPlan.requiredOutputFamilies, ['sph-particle-state', 'mls-mpm-mechanics']);
+  assert.deepEqual(continuationPlan.outputFamilies, candidate.outputFamilies);
+  assert.deepEqual(continuationPlan.missingOutputFamilies, []);
+  assert.deepEqual(continuationPlan.workerRetainedBufferRefs, candidate.workerRetainedBufferRefs);
+
+  const blockedContinuationPlan = host.planWorkerRetainedContinuation({
+    hotBufferKey: publication.hotBufferKey,
+    requiredOutputFamilies: ['resident-product-mass'],
+    consumerStageId: 'reactionProduct'
+  });
+  assert.equal(blockedContinuationPlan.schema, ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA);
+  assert.equal(blockedContinuationPlan.status, 'blocked-worker-retained-continuation');
+  assert.equal(blockedContinuationPlan.blocker, 'worker-retained-continuation-output-family-mismatch');
+  assert.deepEqual(blockedContinuationPlan.missingOutputFamilies, ['resident-product-mass']);
 });
 
 test('ULG resident authority host admits worker-retained reaction/product output descriptors', async (t) => {

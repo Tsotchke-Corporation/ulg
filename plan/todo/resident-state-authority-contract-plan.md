@@ -15,6 +15,14 @@ make ComputeManager placement consume this contract, enforce state-family
 read/write conflict rules, and overlap independent law stages without
 destroying or reinterpreting Worker-owned buffers.
 
+Status update, 2026-06-17 Worker-retained continuation planner: the mechanics
+consumer path now asks the authority host for a continuation plan derived from
+the admitted hot-buffer record. The plan blocks if the required output
+families are absent or if the retained source cannot be consumed on the same
+Worker/lane. This narrows the authority gap between "descriptor was admitted"
+and "a later stage may use it." The remaining state-authority work is to make
+the same read/write-family checks global across all law-family stages.
+
 Status update, 2026-06-17 GPU resident dependency batches: resident stage
 plans now carry explicit `dependsOn`/`inputFrom` edges and execution reports
 record dependency batches. ULG's current DAG makes grid update wait for P2G

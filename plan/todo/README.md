@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: the Worker-retained access contract is
+now being consumed, not only published. `host.planWorkerRetainedContinuation()`
+produces `peercompute.ulg.worker-retained-continuation-plan.v0` from admitted
+hot-buffer evidence and blocks when required output families, retained refs,
+same-Worker consumer mode, or Worker runner availability are missing. The
+mechanics stage chain now records that plan and uses it to enable retained G2P
+input. Next architecture priority: generalize this into ComputeManager/GPUHub
+placement over state-family read/write sets so independent law families can
+overlap without copying or overwriting authoritative resident state.
+
 Current routing note, 2026-06-17 AKDT: WebGPU concurrency is improved but not
 sufficient. Sibling PeerCompute now executes GPU resident lane stage plans in
 explicit dependency-ready batches, and ULG's mechanics contract declares the

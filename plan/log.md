@@ -1,5 +1,66 @@
 # ULG Implementation Log
 
+## 2026-06-17 15:43:32 AKDT - Worker-retained continuation planner
+
+Prompt time/date: 2026-06-17 15:43 AKDT, continuing the architecture lane
+after closing the GPU resident dependency-batch checkpoint.
+
+Summary:
+
+- Added `peercompute.ulg.worker-retained-continuation-plan.v0` as the first
+  explicit consumer-side plan for Worker-private retained GPU outputs.
+- Added an authority-host planner that resolves a Worker-retained publication
+  or hot-buffer record, reads its access contract, checks required output state
+  families, confirms same-Worker retained-ref consumption is allowed, confirms
+  retained refs exist, and confirms a Worker runner is locally available.
+- Exposed `host.planWorkerRetainedContinuation()` so callers can request a
+  same-Worker continuation plan from NodeKernel/StateManager-owned hot-buffer
+  evidence instead of flipping a naked retained-input boolean.
+- Threaded the continuation plan into the mechanics stage-chain Worker context
+  and stage-chain telemetry. The legacy boolean still works, but an admitted
+  plan can now drive `useWorkerRetainedG2pInput`.
+- Kept this scoped to mechanics continuation planning. It does not yet perform
+  full cross-law placement or state-family conflict admission.
+
+Files touched:
+
+- `src/runtime/peercomputeBrowserResidentHost.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/todo/resident-state-authority-contract-plan.md`
+- `plan/log.md`
+- `plan/done/worker-retained-continuation-planner-2026-06-17.md`
+
+Validation:
+
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "worker-retained mechanics output descriptors|ULG resident solver descriptors publish executable pass-DAG"`
+  reported `16/16`.
+- PASS: `npm run test:physics-atomics` reported `11` passing checks and `3`
+  expected opt-in long-horizon skips.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-worker-retained-continuation-plan-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, and two frames each for three
+  rows under
+  `/tmp/ulg-visual-sanity-matrix/codex-worker-retained-continuation-plan-20260617`.
+
+Open:
+
+- Next architecture work is broader placement: combine continuation plans with
+  state-family read/write conflicts, Worker/lane affinity, and remote-peer
+  placement so independent law stages can overlap without copying or
+  corrupting resident state.
+- Physics behavior bugs remain tracked separately and still need behavior
+  gates after the architecture lane.
+
 ## 2026-06-17 15:32:08 AKDT - GPU resident stage dependency batches
 
 Prompt time/date: 2026-06-17 15:32 AKDT, after the user asked whether the

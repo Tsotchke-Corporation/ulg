@@ -7589,6 +7589,10 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   gpuHubResidentThermalStageWorkerOutputPublisher = null,
   gpuHubResidentReactionProductStageWorkerOutputPublisher = null,
   gpuHubResidentStageWorkerUseRetainedInput = false,
+  gpuHubResidentStageWorkerRetainedContinuationPlan = null,
+  gpuHubResidentStageWorkerRetainedContinuationSource = null,
+  gpuHubResidentStageWorkerRetainedContinuationHotBufferKey = null,
+  gpuHubResidentStageWorkerRetainedAccessContract = null,
   residentAuthorityHost = null,
   includeSpatialGasLedgerProducerStage = false,
   includeGasCellEosProducerStage = false,
@@ -7630,6 +7634,27 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     includeReactionProductStage
   });
   const stageOrder = laneStagePlanContract.passDagStages.map((stage) => stage.id);
+  const workerRetainedContinuationPlan = gpuHubResidentStageWorkerRetainedContinuationPlan
+    || (typeof residentAuthorityHost?.planWorkerRetainedContinuation === 'function'
+      && (
+        gpuHubResidentStageWorkerRetainedContinuationSource
+        || gpuHubResidentStageWorkerRetainedContinuationHotBufferKey
+        || gpuHubResidentStageWorkerRetainedAccessContract
+      )
+      ? residentAuthorityHost.planWorkerRetainedContinuation({
+          source: gpuHubResidentStageWorkerRetainedContinuationSource,
+          hotBufferKey: gpuHubResidentStageWorkerRetainedContinuationHotBufferKey,
+          workerRetainedAccessContract: gpuHubResidentStageWorkerRetainedAccessContract,
+          workerRunner: gpuHubResidentStageWorkerRunner,
+          requiredOutputFamilies: ['sph-particle-state', 'mls-mpm-mechanics'],
+          consumerStageId: 'p2g',
+          consumerLawNodeId: 'ulg-mls-mpm-mechanics-p2g-stage',
+          requestedLaneId: laneStagePlanId,
+          requestedStateKey: laneStagePlanStateKey
+        })
+      : null);
+  const useWorkerRetainedG2pInput = gpuHubResidentStageWorkerUseRetainedInput === true
+    || workerRetainedContinuationPlan?.useWorkerRetainedInput === true;
   const sphParticleState = stepOptions.sphParticleState;
   const mlsMpmParticleState = stepOptions.mlsMpmParticleState;
   const dims = finiteVector3(stepOptions.boxDimsM, DEFAULT_BOX_DIMS_M);
@@ -8513,7 +8538,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
             taskIdPrefix,
             preferWebGpu: stepOptions.preferWebGpu === true,
             readbackMode,
-            useWorkerRetainedG2pInput: gpuHubResidentStageWorkerUseRetainedInput === true,
+            useWorkerRetainedG2pInput,
+            workerRetainedContinuationPlan,
             common: {
               sphParticleState,
               mlsMpmParticleState,
@@ -8943,6 +8969,17 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageExecutionRequestedWorkerResidency: requestGpuHubWorkerResidency !== false,
     gpuResidentLaneStageExecutionWorkerRunnerSupplied: Boolean(gpuHubResidentStageWorkerRunner),
     gpuResidentLaneStageExecutionWorkerModuleUrl: gpuHubResidentStageWorkerModuleUrl || null,
+    workerRetainedContinuationPlan,
+    workerRetainedContinuationPlanSchema: workerRetainedContinuationPlan?.schema || null,
+    workerRetainedContinuationPlanStatus: workerRetainedContinuationPlan?.status || null,
+    workerRetainedContinuationPlanBlocker: workerRetainedContinuationPlan?.blocker || null,
+    workerRetainedContinuationPlanUseWorkerInput: workerRetainedContinuationPlan?.useWorkerRetainedInput === true,
+    workerRetainedContinuationPlanSourceHotBufferKey: workerRetainedContinuationPlan?.sourceHotBufferKey || null,
+    workerRetainedContinuationPlanWorkerRunnerAvailable: workerRetainedContinuationPlan?.workerRunnerAvailable === true,
+    workerRetainedContinuationPlanWorkerRetainedBufferRefs: workerRetainedContinuationPlan?.workerRetainedBufferRefs || [],
+    workerRetainedContinuationPlanRequiredOutputFamilies: workerRetainedContinuationPlan?.requiredOutputFamilies || [],
+    workerRetainedContinuationPlanOutputFamilies: workerRetainedContinuationPlan?.outputFamilies || [],
+    workerRetainedContinuationPlanMissingOutputFamilies: workerRetainedContinuationPlan?.missingOutputFamilies || [],
     gpuHubResidentStageExecutorMode,
     gpuHubResidentStageExecutorRegisteredCount: gpuHubResidentStageExecutorRegistrations.length,
     gpuHubResidentStageExecutorStageIds: gpuHubResidentStageExecutorRegistrations.map((entry) => entry.stageId),

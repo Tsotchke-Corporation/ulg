@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: Worker-retained publication metadata now
+feeds an explicit same-Worker continuation plan. The authority host exposes
+`planWorkerRetainedContinuation()`, which resolves a hot-buffer publication,
+validates its Worker-retained access contract, checks required output
+families, confirms retained refs and Worker runner availability, and returns
+`peercompute.ulg.worker-retained-continuation-plan.v0`. The mechanics
+stage-chain Worker context now carries that plan and derives
+`useWorkerRetainedG2pInput` from it, instead of requiring a blind caller flag.
+Validation passed syntax checks and ULG PeerCompute integration `16/16`. This
+is the first consumption of the access contract; broader conflict-aware
+placement across law-family state reads/writes remains next.
+
 Current checkpoint, 2026-06-17 AKDT: GPU resident lane scheduling now has an
 explicit stage-dependency surface. Sibling PeerCompute's
 `GpuResidentLaneManager` normalizes `dependsOn` and `inputFrom`, preserves old

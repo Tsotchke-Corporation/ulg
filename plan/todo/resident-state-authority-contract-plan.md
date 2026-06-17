@@ -15,6 +15,16 @@ make ComputeManager placement consume this contract, enforce state-family
 read/write conflict rules, and overlap independent law stages without
 destroying or reinterpreting Worker-owned buffers.
 
+Status update, 2026-06-17 GPU resident dependency batches: resident stage
+plans now carry explicit `dependsOn`/`inputFrom` edges and execution reports
+record dependency batches. ULG's current DAG makes grid update wait for P2G
+and pressure/interface, G2P wait for grid update, thermal/phase wait for G2P,
+and reaction/product wait for thermal/phase when present. This is the first
+mechanical enforcement point for "ordered only where the physics requires it."
+It does not replace the state authority ledger: the next step is to combine
+these dependencies with read/write family ownership so independent stages can
+overlap only when they cannot corrupt the same authoritative state.
+
 Status update, 2026-06-14 04:41 AKDT: State authority has moved from an
 injected-only shape to a default browser PeerCompute `NodeKernel` authority
 host. The mounted route now runs resident batches through the real sibling

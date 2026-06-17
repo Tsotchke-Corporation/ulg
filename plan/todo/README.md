@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: WebGPU concurrency is improved but not
+sufficient. Sibling PeerCompute now executes GPU resident lane stage plans in
+explicit dependency-ready batches, and ULG's mechanics contract declares the
+law-stage DAG rather than relying on linear pass order. The current accepted
+batches prove scheduler-level overlap (`p2g` plus independent
+`pressureInterface` before `gridUpdate`), not guaranteed simultaneous GPU
+kernel execution on one ordered WebGPU queue. Evidence: PeerCompute lane tests
+passed `8/8`; ULG PeerCompute integration passed `16/16`; physics atomics
+passed `11` with `3` expected opt-in skips; recurring visual matrix
+`codex-stage-dependency-batches-20260617` passed `3/3`. Next architecture
+priority: use worker-retained access contracts plus state-family read/write
+sets for conflict-aware placement and same-Worker retained-ref continuations.
+Do not treat this as a physics behavior fix; liquid, ice/solid, z-buffer/focus,
+and long-horizon stability bugs remain in the behavior lane.
+
 Current routing note, 2026-06-17 AKDT: architecture work is active before the
 next physics behavior pass. Worker-retained law-family hot-buffer publications
 now carry `peercompute.ulg.worker-retained-access-contract.v0` through

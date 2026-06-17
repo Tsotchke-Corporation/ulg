@@ -20,6 +20,19 @@ co-locate continuation stages and overlap independent law-family, closure,
 cache, and remote-peer work. WebGPU concurrency is still insufficient while
 most hot stages serialize behind one ordered queue/fence/readback cadence.
 
+Status update, 2026-06-17 GPU resident dependency batches: PeerCompute's
+`GpuResidentLaneManager` now accepts explicit stage dependencies and can run
+ready batches under one resident lane lease. ULG's mechanics lane contract
+uses this to distinguish true physics ordering from incidental linear order:
+grid update depends on P2G and pressure/interface when present; G2P depends on
+grid update; thermal/phase depends on G2P; reaction/product depends on
+thermal/phase or G2P. The execution report includes dependency mode, batch
+layout, and max concurrent stage count. This gives ComputeManager/GPUHub a
+real concurrency surface, but it is not yet enough for high-throughput
+WebGPU-resident physics: a single WebGPU queue is ordered, and the next work is
+still conflict-aware Worker/lane/device placement, same-Worker retained-ref
+continuations, and fewer validation/render readbacks.
+
 Status update, 2026-06-14 03:26 AKDT: the browser-mounted resident path now
 uses a real local PeerCompute `NodeKernel` by default, so GPU resident lane
 work should continue under `ComputeManager`/`GPUHub` rather than as a sibling

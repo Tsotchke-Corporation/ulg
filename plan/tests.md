@@ -1,5 +1,41 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 GPU Resident Stage Dependency Batches
+
+GPU resident lane contracts now carry explicit stage dependencies for the
+MLS-MPM mechanics law chain, and sibling PeerCompute can execute ready batches
+under one resident lane stage plan while preserving sequential fallback for old
+contracts.
+
+Focused checks:
+
+- PeerCompute lane manager syntax:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js`
+  and
+  `/home/cos/projects/peercompute/peercompute/tests/unit/gpuResidentLaneManager.test.js`
+  passed `node --check`.
+- PeerCompute lane manager coverage:
+  `node --test tests/unit/gpuResidentLaneManager.test.js` passed `8/8`. The
+  new dependency-batch test proves `p2g` and `pressureInterface` start in the
+  same ready batch, `gridUpdate` waits for both, `g2p` waits for `gridUpdate`,
+  and the execution report records `maxConcurrentStageCount=2`.
+- ULG integration syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js` and
+  `node --check tests/peercomputeComputeManagerIntegration.test.mjs` passed.
+- ULG PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs` passed
+  `16/16`. The mechanics-only lane reports dependency batches
+  `[['p2g'], ['gridUpdate'], ['g2p']]`; the pressure/thermal/reaction lane
+  reports
+  `[['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]`.
+- Fast physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `3` expected
+  opt-in long-horizon skips.
+- Recurring visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-stage-dependency-batches-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and two frames each under
+  `/tmp/ulg-visual-sanity-matrix/codex-stage-dependency-batches-20260617`.
+
 ## Current Focused Result - 2026-06-17 Worker-Retained Access Contract
 
 Worker-retained law-family publications now carry an explicit access contract

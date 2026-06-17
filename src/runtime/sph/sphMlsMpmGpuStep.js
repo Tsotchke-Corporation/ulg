@@ -6611,6 +6611,7 @@ function createMlsMpmMechanicsStageLaneContract({
       id: SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID,
       lawNodeId: 'ulg-resident-spatial-gas-ledger-law',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: [],
       reads: ['resident-product-mass', 'reaction-closure-table'],
       writes: ['resident-spatial-gas-species-ledger']
     }] : []),
@@ -6618,6 +6619,7 @@ function createMlsMpmMechanicsStageLaneContract({
       id: GAS_CELL_EOS_PRODUCER_STAGE_ID,
       lawNodeId: 'ulg-resident-gas-cell-eos-law',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: includeSpatialGasLedgerProducerStage ? [SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID] : [],
       reads: ['resident-spatial-gas-species-ledger', 'resident-product-mass'],
       writes: ['resident-gas-pressure']
     }] : []),
@@ -6625,6 +6627,7 @@ function createMlsMpmMechanicsStageLaneContract({
       id: PRESSURE_INTERFACE_STAGE_ID,
       lawNodeId: 'ulg-pressure-interface-force-law',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: includeGasCellEosProducerStage ? [GAS_CELL_EOS_PRODUCER_STAGE_ID] : [],
       reads: ['resident-gas-pressure', 'sph-material-interface-field'],
       writes: ['pressure-interface-force-rows']
     }] : []),
@@ -6632,6 +6635,11 @@ function createMlsMpmMechanicsStageLaneContract({
       id: 'gridUpdate',
       lawNodeId: 'ulg-mls-mpm-mechanics-grid-update-stage',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: uniqueNonEmptyStrings([
+        'p2g',
+        ...(includePressureInterfaceStage ? [PRESSURE_INTERFACE_STAGE_ID] : [])
+      ]),
+      inputFrom: includePressureInterfaceStage ? PRESSURE_INTERFACE_STAGE_ID : 'p2g',
       reads: ['mls-mpm-grid'],
       writes: ['mls-mpm-grid']
     },
@@ -6639,6 +6647,8 @@ function createMlsMpmMechanicsStageLaneContract({
       id: 'g2p',
       lawNodeId: 'ulg-mls-mpm-mechanics-g2p-stage',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: ['gridUpdate'],
+      inputFrom: 'gridUpdate',
       reads: ['mls-mpm-grid', 'sph-particle-state', 'mls-mpm-mechanics'],
       writes: ['sph-particle-state', 'mls-mpm-mechanics']
     }
@@ -6648,6 +6658,8 @@ function createMlsMpmMechanicsStageLaneContract({
       id: THERMAL_PHASE_STAGE_ID,
       lawNodeId: 'ulg-thermal-phase-law',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: ['g2p'],
+      inputFrom: 'g2p',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics'],
       writes: ['sph-thermo-phase']
     });
@@ -6657,6 +6669,8 @@ function createMlsMpmMechanicsStageLaneContract({
       id: REACTION_PRODUCT_STAGE_ID,
       lawNodeId: 'ulg-reaction-product-gas-law',
       runtimeTarget: 'compute-manager-stage-task',
+      dependsOn: [includeThermalPhaseStage ? THERMAL_PHASE_STAGE_ID : 'g2p'],
+      inputFrom: includeThermalPhaseStage ? THERMAL_PHASE_STAGE_ID : 'g2p',
       reads: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'reaction-closure-table'],
       writes: ['sph-particle-state', 'sph-thermo-phase', 'mls-mpm-mechanics', 'resident-product-mass']
     });
@@ -6698,6 +6712,8 @@ function createMlsMpmMechanicsStageLaneContract({
     sequenceRequested: true,
     sequenceRunnable: true,
     sequenceMode,
+    stageDependencyMode: 'explicit-stage-dependencies',
+    parallelStageExecution: true,
     defaultEnabled: false,
     passDagStages,
     ownershipRules: [
@@ -8913,6 +8929,11 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
     gpuResidentLaneStageExecutionCompletedStageCount: gpuResidentLaneStagePlanExecution?.completedStageCount ?? 0,
     gpuResidentLaneStageExecutionStageOrder: (gpuResidentLaneStagePlanExecution?.stageResults || [])
       .map((entry) => entry.stageId),
+    gpuResidentLaneStageExecutionDependencyMode: gpuResidentLaneStagePlanExecution?.dependencyMode || null,
+    gpuResidentLaneStageExecutionParallel: gpuResidentLaneStagePlanExecution?.parallelStageExecution === true,
+    gpuResidentLaneStageExecutionBatches: (gpuResidentLaneStagePlanExecution?.executionBatches || [])
+      .map((batch) => [...batch]),
+    gpuResidentLaneStageExecutionMaxConcurrentStageCount: gpuResidentLaneStagePlanExecution?.maxConcurrentStageCount ?? 0,
     gpuResidentLaneStageExecutionExecutorSources: stageExecutionExecutorSources,
     gpuResidentLaneStageExecutionUsedGpuHubExecutors: Object.values(stageExecutionExecutorSources).length > 0
       ? Object.values(stageExecutionExecutorSources).every((source) => source === 'gpu-hub-resident-stage-executor')

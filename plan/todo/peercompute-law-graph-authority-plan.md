@@ -19,6 +19,17 @@ independent law-family/closure/cache/remote graph work can overlap, while
 ordered physics dependencies still fence only at required state-family
 boundaries.
 
+Status update, 2026-06-17 GPU resident dependency batches: the first concrete
+law-stage concurrency surface is now in place. PeerCompute's resident lane
+stage-plan executor accepts explicit dependencies, validates them, executes
+ready batches, and reports the actual batch layout. ULG now publishes the
+mechanics/pressure/thermal/reaction stage DAG through its resident sequence
+contract, so ComputeManager can distinguish independent law work from real
+physics dependencies. This is still scheduler-level concurrency, not a claim
+that one WebGPU queue runs kernels out of order. The next authority step is
+state-family conflict admission and placement across same-Worker, remote-peer,
+and local-lane boundaries using the Worker-retained access contract.
+
 Status update, 2026-06-14 04:41 AKDT: now that CPU/reference atomics and the
 short visual sanity matrix can guard regressions, this authority track is the
 active top priority. ULG now initializes a real sibling PeerCompute

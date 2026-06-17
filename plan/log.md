@@ -1,5 +1,82 @@
 # ULG Implementation Log
 
+## 2026-06-17 15:32:08 AKDT - GPU resident stage dependency batches
+
+Prompt time/date: 2026-06-17 15:32 AKDT, after the user asked whether the
+WebGPU work is sufficiently concurrent while the architecture refactor remains
+active before the next physics behavior pass.
+
+Summary:
+
+- Answered that the WebGPU path is not sufficiently concurrent yet. The current
+  work improves scheduler concurrency and placement evidence, but one ordered
+  GPU queue/lane and readback/fence cadence still serialize too much of the
+  hot loop.
+- Extended sibling PeerCompute's `GpuResidentLaneManager` so resident lane
+  stage plans can declare explicit `dependsOn` and `inputFrom` fields.
+- Preserved the old sequential stage-order behavior for contracts without
+  explicit dependencies.
+- Added dependency validation, ready-batch execution with `Promise.all`, and
+  execution metadata: dependency mode, parallel-stage flag, execution batches,
+  and max concurrent stage count.
+- Updated ULG's MLS-MPM mechanics lane contract to publish a real stage DAG:
+  P2G and independent pressure/interface work can share a ready batch, grid
+  update waits for both, G2P waits for grid update, thermal/phase waits for
+  G2P, and reaction/product waits for thermal/phase when present.
+- Kept the known physics behavior bugs open. This slice changes
+  ComputeManager/GPUHub scheduling semantics and evidence only; it is not a
+  liquid, ice/solid, or renderer behavior fix.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/tests/unit/gpuResidentLaneManager.test.js`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/todo/resident-state-authority-contract-plan.md`
+- `plan/log.md`
+- `plan/done/gpu-resident-stage-dependency-batches-2026-06-17.md`
+
+Validation:
+
+- PASS: sibling PeerCompute
+  `node --check src/peercompute/computeManager/GpuResidentLaneManager.js`.
+- PASS: sibling PeerCompute
+  `node --check tests/unit/gpuResidentLaneManager.test.js`.
+- PASS: sibling PeerCompute
+  `node --test tests/unit/gpuResidentLaneManager.test.js` reported `8/8`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+  reported `16/16`.
+- PASS: `npm run test:physics-atomics` reported `11` passing checks and `3`
+  expected opt-in long-horizon skips.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-stage-dependency-batches-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, and two frames each for three
+  rows under
+  `/tmp/ulg-visual-sanity-matrix/codex-stage-dependency-batches-20260617`.
+
+Open:
+
+- This is not full WebGPU parallelism. WebGPU queues remain ordered, so same-
+  queue GPU commands still fence in order even when JavaScript stage handlers
+  are scheduled as ready batches. True throughput still needs conflict-aware
+  placement across Worker/lane/device boundaries, same-Worker continuation
+  consumption of retained refs, fewer readbacks, and explicit state-family
+  read/write admission.
+- The next architecture slice should consume the worker-retained access
+  contract in placement and same-Worker continuation scheduling. The next
+  behavior slice should keep using atomics plus visual sequences for liquid,
+  ice/solid, z-buffer/focus, and long-horizon stability bugs.
+
 ## 2026-06-17 15:11:50 AKDT - Worker-retained access contract metadata
 
 Prompt time/date: 2026-06-17 15:11 AKDT, continuing the PeerCompute/

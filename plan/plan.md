@@ -2,6 +2,24 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: GPU resident lane scheduling now has an
+explicit stage-dependency surface. Sibling PeerCompute's
+`GpuResidentLaneManager` normalizes `dependsOn` and `inputFrom`, preserves old
+sequential behavior when dependencies are absent, validates dependency ids,
+executes ready batches with `Promise.all`, and reports dependency mode,
+execution batches, and max concurrent stage count. ULG's resident MLS-MPM
+mechanics contract now emits that DAG: P2G and independent pressure/interface
+work can share a ready batch, grid update waits for P2G plus pressure when
+present, G2P waits for grid update, thermal/phase waits for G2P, and
+reaction/product waits for thermal/phase or G2P. Validation passed sibling
+PeerCompute lane coverage `8/8`, ULG PeerCompute integration `16/16`, fast
+physics atomics `11` pass with `3` expected opt-in skips, and short visual
+matrix `codex-stage-dependency-batches-20260617` with `failedCount=0`. This
+answers the concurrency audit narrowly: scheduler concurrency is better, but
+WebGPU is still not sufficiently concurrent overall because same-device queue
+commands remain ordered and too much of the hot loop still waits on
+readbacks/fences.
+
 Current checkpoint, 2026-06-17 AKDT: architecture work is active before the
 next physics behavior pass. Worker-retained law-family hot-buffer
 publications now carry `peercompute.ulg.worker-retained-access-contract.v0`

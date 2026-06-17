@@ -1,8 +1,25 @@
 # Implementation Status
 
-Updated: 2026-06-17 worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
+Updated: 2026-06-17 GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
-Latest checkpoint, 2026-06-17 AKDT: Worker-retained law-family publications
+Latest checkpoint, 2026-06-17 AKDT: ULG resident lane contracts now expose
+explicit stage dependencies, and sibling PeerCompute's GPU resident lane
+manager can execute dependency-ready batches while preserving sequential
+fallback for older contracts. The ULG mechanics contract now records
+`stageDependencyMode=explicit-stage-dependencies`; P2G and independent
+pressure/interface work can share a ready batch, grid update waits for its
+declared inputs, G2P waits for grid update, thermal/phase waits for G2P, and
+reaction/product waits for thermal/phase or G2P. Validation: sibling
+PeerCompute lane tests passed `8/8`; ULG PeerCompute integration passed
+`16/16`; `npm run test:physics-atomics` passed `11` checks with `3` expected
+opt-in skips; short visual matrix
+`codex-stage-dependency-batches-20260617` passed `3/3` with empty issue counts.
+This improves scheduler concurrency but is not full WebGPU parallelism:
+same-queue commands still execute in order, and the hot path still needs
+conflict-aware placement, same-Worker retained-ref continuations, and fewer
+readbacks/fences.
+
+Previous checkpoint, 2026-06-17 AKDT: Worker-retained law-family publications
 now carry `peercompute.ulg.worker-retained-access-contract.v0`. Mechanics,
 thermal/phase, pressure/interface, and reaction/product hot-buffer
 publications now state whether their refs are main-thread same-device aliases
@@ -63,6 +80,13 @@ surface, and no visual issues.
 
 ## Done
 
+- GPU resident lane stage plans now support explicit dependency batches through
+  sibling PeerCompute's `GpuResidentLaneManager`, and ULG's MLS-MPM mechanics
+  contract publishes a concrete law-stage DAG. This lets independent stage
+  handlers such as P2G and pressure/interface overlap at the scheduler level
+  before grid update consumes both. The execution report now records dependency
+  mode, ready batches, and max concurrent stage count so future placement work
+  can audit actual overlap instead of assuming it.
 - Worker-retained law-family publications now expose an explicit access
   contract through StateManager hot records, warm deltas, and import
   descriptors. Worker-private mechanics/thermal/pressure/reaction refs are

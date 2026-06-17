@@ -1268,6 +1268,16 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
     ['p2g', 'gridUpdate', 'g2p']
   );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionDependencyMode,
+    'explicit-stage-dependencies'
+  );
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionParallel, true);
+  assert.deepEqual(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionBatches,
+    [['p2g'], ['gridUpdate'], ['g2p']]
+  );
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionMaxConcurrentStageCount, 1);
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode, 'registered');
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 3);
   assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
@@ -1797,6 +1807,16 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
     ['p2g', 'pressureInterface', 'gridUpdate', 'g2p', 'thermalPhase', 'reactionProduct']
   );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionDependencyMode,
+    'explicit-stage-dependencies'
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionParallel, true);
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionBatches,
+    [['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]
+  );
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionMaxConcurrentStageCount, 2);
   assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 6);
   assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
     p2g: 'gpu-hub-resident-stage-executor',

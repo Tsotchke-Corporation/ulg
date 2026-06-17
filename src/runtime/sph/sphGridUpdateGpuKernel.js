@@ -372,6 +372,7 @@ export function updateMlsMpmGridCpu({
   const cfl = finiteNumber(cflFactor, DEFAULT_CFL_FACTOR);
   const gridSpacingM = finiteNumber(p2gGridProjection.gridSpacingM, 0);
   const boundaryEpsilonM = Math.max(1e-7, Math.abs(gridSpacingM) * 1e-6);
+  const floorNoSlipLimitM = gridSpacingM - boundaryEpsilonM;
   const vmax = dtSeconds > 0 ? (cfl * gridSpacingM) / dtSeconds : Number.POSITIVE_INFINITY;
   const vmax2 = vmax * vmax;
   const source = p2gGridProjection.gridNodes;
@@ -421,7 +422,7 @@ export function updateMlsMpmGridCpu({
         const scale = vmax / Math.sqrt(speed2);
         velocity = velocity.map((component) => component * scale);
       }
-      if (nodePosition[1] <= gridSpacingM + boundaryEpsilonM) {
+      if (nodePosition[1] < floorNoSlipLimitM) {
         velocity = [0, 0, 0];
       }
       if ((nodePosition[0] <= gridSpacingM + boundaryEpsilonM && velocity[0] < 0) || (nodePosition[0] >= dims[0] - gridSpacingM - boundaryEpsilonM && velocity[0] > 0)) velocity[0] = 0;
@@ -604,7 +605,7 @@ export async function runMlsMpmGridUpdateWebGpu({
       pressureInterfaceForceRowCount: pressureForceRowCount
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.v1',
+      cacheKey: 'ulg-mls-mpm-grid-update.v2',
       label: 'ulg-mls-mpm-grid-update',
       code: mlsMpmGridUpdateWgsl,
       entryPoint: 'main',

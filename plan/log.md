@@ -1,5 +1,63 @@
 # ULG Implementation Log
 
+## 2026-06-17 AKDT - Resident MLS-MPM floor-boundary free-surface fix
+
+Summary:
+
+- Fixed the resident MLS-MPM H2O/H2O free-surface spread regression that caused
+  sticky/nested block-like water in the browser.
+- Reproduced the current split-path divergence: monolithic CPU MLS-MPM reached
+  about `1.83 m` raw X/Z spread by `1.024 s`, while resident split CPU/WebGPU
+  reached only about `1.23 m`.
+- Ruled out the audit's specific G2P renormalization suspect for the current
+  fixture: toggling it did not change the monolithic CPU carrier result.
+- Found and fixed the actual resident parity break: grid update zeroed the
+  first interior floor row (`y <= dx`) instead of only the floor guard row below
+  `dx`, freezing tangential floor-supported liquid motion.
+- Updated CPU and WGSL resident grid-update kernels, bumped WebGPU grid-update
+  pipeline cache keys, and added a resident split long-horizon free-surface
+  acceptance gate.
+
+Files touched:
+
+- `src/runtime/sph/sphGridUpdateGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `ulg-gpu-abi/src/wgsl.js`
+- `tests/sphGridUpdateGpuKernel.test.mjs`
+- `tests/physicsBehaviorInvariants.test.mjs`
+- `plan/plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/todo/6-16-audit.md`
+- `plan/todo/critique.md`
+- `plan/done/resident-mlsmpm-floor-boundary-free-surface-2026-06-17.md`
+
+Validation:
+
+- PASS: `node --test tests/sphGridUpdateGpuKernel.test.mjs` reported `14/14`.
+- PASS: direct resident CPU-reference H2O/H2O MLS-MPM diagnostic at `1.024 s`
+  reached raw X/Z spread about `1.830 m`, with `J=1.0464..1.0490`.
+- PASS:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test tests/physicsBehaviorInvariants.test.mjs --test-name-pattern "resident MLS-MPM H2O/H2O long-horizon"`
+  reported `14/14` in about `243 s`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, one connected H2O surface, no visual issues, final
+  tallness `0.440`, footprint fill `0.182`, and five frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617`.
+
+Open:
+
+- Low-resolution MLS-MPM water still renders faceted/blocky; this pass fixes the
+  severe resident floor-sticking regression, not final fluid visual quality.
+- Mobile focus-resume flashing/disappearing and z-buffer pixel-level artifacts
+  remain open visual-trust gates.
+- Ice/solid flowing like liquid needs a separate CPU/resident behavior gate.
+- Accepted law stages still need continued migration behind PeerCompute
+  ComputeManager/GPUHub/WebGPU workers.
+
 ## 2026-06-15 AKDT - Surface component visual metrics
 
 Summary:

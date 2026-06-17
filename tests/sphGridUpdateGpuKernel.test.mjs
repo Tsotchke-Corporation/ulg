@@ -214,7 +214,7 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
   nearlyEqual(cfl.updatedGridNodes[1], 2);
 
   const wall = updateMlsMpmGridCpu({
-    p2gGridProjection: manualP2gProjection({ momentum: [3, -4, 5], nodePosition: [2, 1, 2] }),
+    p2gGridProjection: manualP2gProjection({ momentum: [3, -4, 5], nodePosition: [2, 0, 2] }),
     dt: 0.1,
     gravityMPerS2: [0, 0, 0],
     boxDimsM: [5, 5, 5],
@@ -225,15 +225,22 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
   nearlyEqual(wall.updatedGridNodes[3], 0);
 });
 
-test('CPU MLS-MPM grid update clamps exactly one-cell wall boundary nodes', () => {
-  const lower = updateMlsMpmGridCpu({
-    p2gGridProjection: manualP2gProjection({ momentum: [0, -4, 0], nodePosition: [2, 1, 2] }),
+test('CPU MLS-MPM grid update leaves the first interior floor row free for liquid spreading', () => {
+  const floorInterior = updateMlsMpmGridCpu({
+    p2gGridProjection: manualP2gProjection({ momentum: [4, -4, 0], nodePosition: [2, 1, 2] }),
     dt: 0.1,
     gravityMPerS2: [0, 0, 0],
     boxDimsM: [5, 5, 5],
     cflFactor: 10
   });
-  const upper = updateMlsMpmGridCpu({
+  const floorGuard = updateMlsMpmGridCpu({
+    p2gGridProjection: manualP2gProjection({ momentum: [4, -4, 0], nodePosition: [2, 0, 2] }),
+    dt: 0.1,
+    gravityMPerS2: [0, 0, 0],
+    boxDimsM: [5, 5, 5],
+    cflFactor: 10
+  });
+  const upperInterior = updateMlsMpmGridCpu({
     p2gGridProjection: manualP2gProjection({ momentum: [0, 4, 0], nodePosition: [2, 4, 2] }),
     dt: 0.1,
     gravityMPerS2: [0, 0, 0],
@@ -241,8 +248,12 @@ test('CPU MLS-MPM grid update clamps exactly one-cell wall boundary nodes', () =
     cflFactor: 10
   });
 
-  nearlyEqual(lower.updatedGridNodes[2], 0);
-  nearlyEqual(upper.updatedGridNodes[2], 0);
+  nearlyEqual(floorInterior.updatedGridNodes[1], 2);
+  nearlyEqual(floorInterior.updatedGridNodes[2], -2);
+  nearlyEqual(floorGuard.updatedGridNodes[1], 0);
+  nearlyEqual(floorGuard.updatedGridNodes[2], 0);
+  nearlyEqual(floorGuard.updatedGridNodes[3], 0);
+  nearlyEqual(upperInterior.updatedGridNodes[2], 0);
 });
 
 test('optional MLS-MPM grid update returns CPU reference when WebGPU is not requested', async () => {

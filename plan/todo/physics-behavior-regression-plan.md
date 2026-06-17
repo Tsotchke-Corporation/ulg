@@ -12,6 +12,22 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-17 AKDT update: resident MLS-MPM H2O/H2O no longer fails the
+  long-horizon free-surface spread gate. The current fixture did not reproduce
+  the audit's suspected G2P renormalization as the lever; toggling that logic
+  left the monolithic CPU carrier unchanged. The actual resident/browser
+  regression was the split grid-update floor boundary: CPU/WGSL resident kernels
+  zeroed velocity at `y <= dx`, freezing the first interior row that liquid
+  needs for tangential spreading. The monolithic CPU oracle uses a floor guard
+  below `dx`, and the resident CPU/WGSL kernels now match that behavior. Evidence:
+  direct resident CPU-reference H2O/H2O at `1.024 s` now reaches about `1.83 m`
+  raw X/Z spread with bounded `J`; opt-in physics behavior tests passed `14/14`;
+  visual matrix
+  `codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617` passed with final
+  tallness `0.440`, footprint fill `0.182`, one connected H2O surface, no visual
+  issues, and five frame artifacts. Keep this as a resident parity fix, not a
+  final fluid-quality claim: low-resolution MLS-MPM still renders faceted/blocky,
+  and z-buffer/focus/solid-flow gates remain open.
 - 2026-06-15 AKDT update: CPU-SPH H2O/H2O no longer fails the long browser
   free-surface shape gate. The SPH reference lane now applies a small
   volume-derived free-surface relaxation closure to floor-supported liquid

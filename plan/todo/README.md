@@ -35,6 +35,24 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: the resident MLS-MPM H2O/H2O
+free-surface spread regression is fixed for the browser/resident split path.
+The root cause was a parity break in the resident grid-update floor boundary:
+the split CPU/WGSL path zeroed velocity for the first interior grid row at
+`y <= dx`, while the monolithic CPU carrier only fully no-slips the floor guard
+row below `dx`. That froze the row floor-supported liquid needed for tangential
+spread, producing the sticky/nested block-like water screenshots. The resident
+grid-update CPU and WGSL kernels now leave the first interior row active, grid
+update pipeline cache keys are bumped, and acceptance coverage includes a new
+resident split long-horizon free-surface gate. Evidence:
+`ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test tests/physicsBehaviorInvariants.test.mjs --test-name-pattern "resident MLS-MPM H2O/H2O long-horizon"`
+passed `14/14`; visual matrix
+`codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617` passed with
+`failedCount=0`, final tallness `0.440`, footprint fill `0.182`, one connected
+H2O surface, no visual issues, and five close-spaced frames. Keep visual polish,
+surface smoothing, mobile focus-resume flashing, z-buffer pixel evidence,
+ice/solid flow, and the PeerCompute/WebGPU law-stage migration open.
+
 Current routing note, 2026-06-15 AKDT: CPU-SPH same-material water now passes
 the long free-surface visual gate, but MLS-MPM remains the active liquid P0.
 The CPU reference lane uses a small, law-gated reduced free-surface relaxation

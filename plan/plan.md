@@ -2,6 +2,27 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: the resident MLS-MPM same-material H2O
+free-surface regression from the recent pressure/gas/resident refactor is fixed
+for the split CPU/WebGPU path. The audit's concrete G2P-renormalization suspect
+was not the active lever for the current fixture; the monolithic CPU carrier was
+already passing the `1 s` free-surface shape gate. The resident P2G/grid/G2P path
+was diverging because grid update applied a full no-slip clamp to `y <= dx`,
+zeroing the first interior floor row and preventing liquid tangential spread.
+`src/runtime/sph/sphGridUpdateGpuKernel.js` and `ulg-gpu-abi/src/wgsl.js` now
+leave that first interior row free while keeping the floor guard row no-slip,
+and the WebGPU grid-update cache keys are bumped to avoid stale resident
+pipelines. New acceptance coverage adds a resident split long-horizon H2O/H2O
+free-surface gate. Validation passed grid-update unit coverage, the opt-in
+long physics behavior suite (`14/14`), and browser visual matrix
+`codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617` with
+`failedCount=0`, one connected H2O surface, no visual issues, final tallness
+`0.440`, footprint fill `0.182`, and five frames through `1.024 s`.
+Remaining open work: low-res MLS-MPM still looks faceted/blocky, mobile
+focus-resume flashing and z-buffer pixel trust need real-device/pixel evidence,
+solid/ice flow needs separate gates, and accepted law stages still need to keep
+moving behind PeerCompute/ComputeManager/WebGPU workers.
+
 Current checkpoint, 2026-06-15 AKDT: the CPU-SPH liquid/free-surface behavior
 has a first reduced mechanics remediation. The SPH carrier now includes a
 small volume-derived free-surface relaxation closure for floor-supported liquid

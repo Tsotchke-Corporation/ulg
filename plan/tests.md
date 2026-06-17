@@ -8859,3 +8859,28 @@ Bounded retained surface-draw diagnostics, 2026-06-13 20:51 AKDT:
     field surface summary readback `false`.
 - `PLAYWRIGHT_BASE_URL=http://127.0.0.1:5643 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5643 PLAYWRIGHT_WEB_SERVER_COMMAND='npm run dev -- --host 127.0.0.1 --port 5643 --strictPort' PLAYWRIGHT_WEB_SERVER_TIMEOUT_MS=60000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run test:e2e -- --grep "mounted resident Na/H2O promotes product gas pressure|no-full render refresh can skip compact surface summary readback|retained surface draw diagnostics are budget-bounded|CPU-SPH view refreshes" --timeout 150000`
   - Passed, `4/4`.
+
+Resident MLS-MPM floor-boundary/free-surface validation, 2026-06-17 12:45 AKDT:
+
+- `node --test tests/sphGridUpdateGpuKernel.test.mjs`
+  - Passed: `14/14`.
+  - Covers the corrected floor boundary: the floor guard row is no-slip, while
+    the first interior floor row remains free to carry liquid spreading velocity.
+- Direct resident CPU-reference diagnostic for H2O/H2O MLS-MPM at `1.024 s`
+  - Passed manually: `2048` resident split substeps, raw X/Z spread about
+    `1.830 m`, Y spread about `0.688 m`, `J=1.0464..1.0490`, and max speed about
+    `0.730 m/s`.
+  - This matches the monolithic CPU oracle and replaces the previous resident
+    under-spread of about `1.23 m`.
+- `ULG_RUN_LONG_LIQUID_ATOMIC=1 node --test tests/physicsBehaviorInvariants.test.mjs --test-name-pattern "resident MLS-MPM H2O/H2O long-horizon"`
+  - Passed: `14/14` in about `243 s`.
+  - Node still ran the file's other long gates despite the name pattern; the new
+    resident split H2O/H2O free-surface gate passed.
+- `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  - Passed: `failedCount=0`, no issue counts, no visual-surface issues.
+  - Final metrics at `1.024 s`: H2O surface count `1`, tallness `0.440`,
+    footprint fill `0.182`, height `0.938 m`, `maxVisibleSurfaceOutsideM=0`.
+  - Frame artifacts:
+    `/tmp/ulg-visual-sanity-matrix/codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617/liquid-liquid-h2o-mlsmpm-frames/`.
+  - Manual frame inspection: final frame is still low-resolution/faceted, but no
+    longer shows detached/nested/sticky water or bounds escape.

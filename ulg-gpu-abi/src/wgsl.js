@@ -4664,19 +4664,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (speed2 > vmax * vmax) {
       velocity = velocity * (vmax / sqrt(speed2));
     }
-	    let node_pos = row1.xyz;
-	    if (node_pos.y <= params.grid_spacing_m) {
-	      velocity = vec3<f32>(0.0);
-	    }
-	    if ((node_pos.x <= params.grid_spacing_m && velocity.x < 0.0) || (node_pos.x >= params.box_x - params.grid_spacing_m && velocity.x > 0.0)) {
-	      velocity.x = 0.0;
-	    }
-	    if (node_pos.y >= params.box_y - params.grid_spacing_m && velocity.y > 0.0) {
-	      velocity.y = 0.0;
-	    }
-	    if ((node_pos.z <= params.grid_spacing_m && velocity.z < 0.0) || (node_pos.z >= params.box_z - params.grid_spacing_m && velocity.z > 0.0)) {
-	      velocity.z = 0.0;
-	    }
+    let node_pos = row1.xyz;
+    let floor_no_slip_limit_m = params.grid_spacing_m - max(1.0e-7, abs(params.grid_spacing_m) * 1.0e-6);
+    if (node_pos.y < floor_no_slip_limit_m) {
+      velocity = vec3<f32>(0.0);
+    }
+    if ((node_pos.x <= params.grid_spacing_m && velocity.x < 0.0) || (node_pos.x >= params.box_x - params.grid_spacing_m && velocity.x > 0.0)) {
+      velocity.x = 0.0;
+    }
+    if (node_pos.y >= params.box_y - params.grid_spacing_m && velocity.y > 0.0) {
+      velocity.y = 0.0;
+    }
+    if ((node_pos.z <= params.grid_spacing_m && velocity.z < 0.0) || (node_pos.z >= params.box_z - params.grid_spacing_m && velocity.z > 0.0)) {
+      velocity.z = 0.0;
+    }
     status = 1.0;
   }
 

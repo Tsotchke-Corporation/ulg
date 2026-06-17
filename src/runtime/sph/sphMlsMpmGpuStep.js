@@ -1519,7 +1519,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       ]
     });
     const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.v1',
+      cacheKey: 'ulg-mls-mpm-grid-update.v2',
       label: 'ulg-mls-mpm-grid-update',
       code: mlsMpmGridUpdateWgsl,
       entryPoint: 'main',
@@ -1902,8 +1902,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     });
     const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: activeGridDispatch.useActiveGrid
-        ? 'ulg-mls-mpm-grid-update.active-grid.v1'
-        : 'ulg-mls-mpm-grid-update.v1',
+        ? 'ulg-mls-mpm-grid-update.active-grid.v2'
+        : 'ulg-mls-mpm-grid-update.v2',
       label: activeGridDispatch.useActiveGrid
         ? 'ulg-mls-mpm-grid-update-active-grid'
         : 'ulg-mls-mpm-grid-update',

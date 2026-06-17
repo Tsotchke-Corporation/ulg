@@ -2,8 +2,24 @@
 
 Updated: 2026-06-15 CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
+Latest checkpoint, 2026-06-17 AKDT: resident MLS-MPM H2O/H2O split-path
+free-surface spreading is fixed. The resident grid-update CPU/WGSL kernels now
+match the monolithic CPU oracle's floor boundary semantics by keeping the first
+interior floor row active; WebGPU grid-update cache keys were bumped, and a
+resident split long-horizon free-surface gate now guards the regression.
+Validation: grid-update unit suite, opt-in physics behavior suite `14/14`, and
+visual matrix `codex-mlsmpm-free-surface-1s-floorfix-finalframe-20260617`
+passed with final tallness `0.440`, footprint fill `0.182`, one connected H2O
+surface, and no visual issues.
+
 ## Done
 
+- Resident MLS-MPM H2O/H2O now passes the long free-surface spread gate in the
+  split resident path used by the browser. The floor grid-update clamp no longer
+  zeros the first interior row (`y == dx`), which was freezing tangential liquid
+  flow and producing sticky/nested water shapes. CPU and WGSL resident kernels
+  are aligned with the monolithic CPU oracle, and the grid-update pipeline cache
+  keys are bumped to avoid stale shader reuse in long-lived browser sessions.
 - CPU-SPH same-material H2O now passes the long free-surface shape gate in the
   browser. `createSphPhaseCarrier()` applies a small volume-derived
   free-surface relaxation closure for floor-supported liquid groups, and

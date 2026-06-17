@@ -13,6 +13,8 @@ import {
   runMlsMpmResidentStepsWithOptionalWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuStep.js';
 import {
+  buildMlsMpmGpuParticleBuffers,
+  buildSphGpuParticleBuffers,
   MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
@@ -136,6 +138,38 @@ function supportBounds3D(particles) {
 
 function liquidFreeSurfaceShapeMetrics(particles, boxDimsM) {
   const bounds = supportBounds3D(particles);
+  const horizontalExtentM = Math.max(bounds.size[0], bounds.size[2], 1e-9);
+  return {
+    bounds,
+    tallnessRatio: bounds.size[1] / horizontalExtentM,
+    footprintFillRatio: (bounds.size[0] * bounds.size[2])
+      / Math.max(Number(boxDimsM?.[0]) * Number(boxDimsM?.[2]), 1e-9)
+  };
+}
+
+function packedSupportBounds3D(sphParticleState) {
+  const min = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  const max = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY];
+  for (let particleIndex = 0; particleIndex < sphParticleState.particleCount; particleIndex += 1) {
+    const stateOffset = particleIndex * SPH_GPU_PARTICLE_STATE_FLOATS;
+    const thermoOffset = particleIndex * SPH_GPU_PARTICLE_THERMO_FLOATS;
+    const massKg = Number(sphParticleState.state[stateOffset + 3]);
+    const restDensityKgPerM3 = Number(sphParticleState.thermo[thermoOffset + 3]);
+    const radius = massKg > 0 && restDensityKgPerM3 > 0
+      ? 0.5 * Math.cbrt(massKg / restDensityKgPerM3)
+      : 0;
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = Number(sphParticleState.state[stateOffset + axis]);
+      if (!Number.isFinite(value)) continue;
+      min[axis] = Math.min(min[axis], value - radius);
+      max[axis] = Math.max(max[axis], value + radius);
+    }
+  }
+  return { min, max, size: max.map((value, axis) => value - min[axis]) };
+}
+
+function packedLiquidFreeSurfaceShapeMetrics(sphParticleState, boxDimsM) {
+  const bounds = packedSupportBounds3D(sphParticleState);
   const horizontalExtentM = Math.max(bounds.size[0], bounds.size[2], 1e-9);
   return {
     bounds,
@@ -790,6 +824,7 @@ test('H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop 
   const finalGap = dropBaseSupportGapY(particles);
   const j = volumeRatioRange(particles);
   const finalDropSpeedMPerS = maxParticleSpeedForRole(particles, 'drop');
+  const freeSurfaceShape = liquidFreeSurfaceShapeMetrics(particles, driver.demo.box.dimensionsM);
   assertFiniteParticleState(particles);
   nearlyEqual(driver.totals().massKg, initialMass, Math.max(1e-9, initialMass * 1e-8));
   assert.ok(driver.demo.state.time >= 1, `long-horizon liquid gate did not reach 1 s: ${driver.demo.state.time}s`);
@@ -799,4 +834,82 @@ test('H2O/H2O long-horizon liquid acceptance remains merged and damps bulk drop 
   assert.ok(j.min >= 0.95, `long-horizon liquid volume compressed too far: ${j.min}`);
   assert.ok(j.max <= 1.05, `long-horizon liquid volume expanded too far: ${j.max}`);
   assert.ok(finalDropSpeedMPerS < 0.25, `liquid drop retained excessive bulk motion after ${driver.demo.state.time}s: ${finalDropSpeedMPerS} m/s`);
+  assert.ok(
+    freeSurfaceShape.tallnessRatio <= 0.75,
+    `MLS-MPM liquid stayed too tall/blocky: ${freeSurfaceShape.tallnessRatio}`
+  );
+  assert.ok(
+    freeSurfaceShape.footprintFillRatio >= 0.15,
+    `MLS-MPM liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio}`
+  );
+});
+
+test('resident MLS-MPM H2O/H2O long-horizon liquid acceptance matches free-surface spread oracle', {
+  skip: process.env.ULG_RUN_LONG_LIQUID_ATOMIC === '1'
+    ? false
+    : 'Set ULG_RUN_LONG_LIQUID_ATOMIC=1 to run the opt-in resident liquid-settling acceptance gate.'
+}, async () => {
+  const driver = createSphPhaseDemo({
+    scenario: createSphPhaseScenario({
+      boxDimensionsM: [5, 5, 5],
+      wallTemperatureK: 283.15
+    }),
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    mechanics: 'mlsmpm',
+    physicalLawGroups: {
+      mechanics: true,
+      gravity: true,
+      eos: true,
+      pressure: true,
+      thermal: false,
+      reactions: false,
+      viscosity: true,
+      surfaceTension: false
+    }
+  });
+  const materialProperties = driver.demo.materialProperties;
+  const sphParticleState = buildSphGpuParticleBuffers(driver.demo.state, { materialProperties });
+  const mlsMpmParticleState = buildMlsMpmGpuParticleBuffers(driver.demo.state, { materialProperties });
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    sphParticleState,
+    mlsMpmParticleState,
+    stepCount: 2048,
+    preferWebGpu: false,
+    gridSpacingM: driver.demo.gpuMechanics.gridSpacingM,
+    boxDimsM: driver.demo.box.dimensionsM,
+    dt: driver.demo.gpuMechanics.dt,
+    gravityMPerS2: driver.demo.gpuMechanics.gravityMPerS2,
+    cflFactor: driver.demo.gpuMechanics.gridCflFactor,
+    internalPressureScale: 1,
+    compactSummaryMode: 'final-only'
+  });
+
+  try {
+    const freeSurfaceShape = packedLiquidFreeSurfaceShapeMetrics(
+      execution.nextSphParticleState,
+      driver.demo.box.dimensionsM
+    );
+    const finalDiagnostics = execution.finalStep.diagnostics;
+    assert.equal(execution.completedStepCount, 2048);
+    assert.ok(execution.nextSphParticleState.time >= 1, `resident liquid gate did not reach 1 s: ${execution.nextSphParticleState.time}s`);
+    assert.ok(finalDiagnostics.minVolumeRatioJ >= 0.95, `resident liquid volume compressed too far: ${finalDiagnostics.minVolumeRatioJ}`);
+    assert.ok(finalDiagnostics.maxVolumeRatioJ <= 1.05, `resident liquid volume expanded too far: ${finalDiagnostics.maxVolumeRatioJ}`);
+    assert.ok(
+      freeSurfaceShape.tallnessRatio <= 0.75,
+      `resident MLS-MPM liquid stayed too tall/blocky: ${freeSurfaceShape.tallnessRatio}`
+    );
+    assert.ok(
+      freeSurfaceShape.footprintFillRatio >= 0.15,
+      `resident MLS-MPM liquid footprint did not spread enough: ${freeSurfaceShape.footprintFillRatio}`
+    );
+  } finally {
+    destroyMlsMpmResidentStepsBuffers(execution);
+  }
 });

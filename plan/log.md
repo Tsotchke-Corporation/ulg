@@ -1,5 +1,76 @@
 # ULG Implementation Log
 
+## 2026-06-17 13:38:13 AKDT - Transmissive H2O depth-write renderer fix
+
+Summary:
+
+- Fixed the remaining default Three/MarchingCubes H2O z-buffer/draw-through
+  issue reported after the physics fixes.
+- Confirmed the CPU-SPH H2O/H2O long row was already geometrically merged:
+  pre-patch `codex-cpu-sph-h2o-merge-depth-repro-20260617` passed with one H2O
+  surface, one connected component, and final free-surface metrics green.
+- Found the renderer policy bug: condensed transmissive water was treated as
+  alpha transparency (`transparent=true`, `depthWrite=false`), so the floor
+  grid rendered through water and closed liquid shells were vulnerable to
+  transparent sort artifacts.
+- Changed non-vapor transmissive surfaces to use Three's physical transmission
+  path as depth-writing geometry (`transparent=false`, `depthWrite=true`,
+  stable order). Vapor and true alpha opacity still render as non-depth-writing
+  sortable transparency.
+- Applied the same contract in the optical GPU lookup material refresh and the
+  visual probe's render-depth analyzer.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `tests/sphPhaseRenderer.test.mjs`
+- `tests/demo.e2e.mjs`
+- `plan/plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/log.md`
+- `plan/done/transmissive-h2o-depth-policy-2026-06-17.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-visual-sanity-matrix.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `35/35`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-h2o-depthwrite-short-2-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, empty issue counts, and H2O metadata
+  `transparent=false`, `depthWrite=true`, `depthTest=true`,
+  `renderLayer=transmissive-surface`,
+  `renderOrderPolicy=stable-opaque-layer-order`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-h2o-depthwrite-merge-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, one H2O visible surface, one connected component,
+  final tallness `0.440`, footprint fill `0.182`, empty visual issues, and five
+  frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-mlsmpm-h2o-depthwrite-merge-20260617`.
+- PASS:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-h2o-depthwrite-long-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=144 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=6 ULG_VISUAL_MATRIX_FRAME_EVERY=36 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  reported `failedCount=0`, one H2O visible surface, one connected component,
+  final tallness `0.582`, footprint fill `0.296`, empty visual issues, and five
+  frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-cpu-sph-h2o-depthwrite-long-20260617`.
+- PASS: `git diff --check`.
+
+Open:
+
+- Low-resolution resident MLS-MPM water is still faceted/blocky; this slice
+  fixes depth composition, not surface smoothness.
+- Raw WebGPU surface overlay remains a separate-canvas/depth path when forced;
+  default policy still uses Three/MarchingCubes readback.
+- Mobile focus-resume flashing/disappearing still needs a dedicated device or
+  pixel-sequence probe.
+
 ## 2026-06-17 AKDT - Resident MLS-MPM floor-boundary free-surface fix
 
 Summary:

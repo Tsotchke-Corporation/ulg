@@ -583,7 +583,7 @@ test('SPH renderer keeps condensed transmissive H2O geometrically visible', () =
   };
 
   assert.equal(renderAlphaFromOpticalResponse(waterOptics, waterOptics), 1);
-  assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), false);
+  assert.equal(renderDepthWriteFromOpticalResponse(waterOptics, waterOptics), true);
   assert.equal(renderAlphaFromOpticalResponse(vaporOptics, vaporOptics), vaporOptics.opacity);
 });
 
@@ -765,6 +765,16 @@ test('SPH renderer leaves transparent same-layer meshes depth-sortable', () => {
     baseOrder
   );
   assert.notEqual(
+    surfaceObjectRenderOrder(baseOrder, 'depth-writing-water-a', {
+      renderLayer: 'transmissive-surface',
+      depthWrite: true
+    }),
+    surfaceObjectRenderOrder(baseOrder, 'depth-writing-water-b', {
+      renderLayer: 'transmissive-surface',
+      depthWrite: true
+    })
+  );
+  assert.notEqual(
     surfaceObjectRenderOrder(SPH_PHASE_RENDER_ORDER.opaqueSurface, 'iron-a', {
       renderLayer: 'opaque-surface',
       depthWrite: true
@@ -941,7 +951,7 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /reveal_texture/);
 });
 
-test('SPH renderer orders transparent surfaces and disables their depth writes', () => {
+test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {
   const opaqueMetal = {
     material: 'fe',
     phase: 'solid',
@@ -982,7 +992,7 @@ test('SPH renderer orders transparent surfaces and disables their depth writes',
   assert.equal(renderLayerFromOpticalResponse(opaqueMetal, opaqueMetal), 'opaque-surface');
   assert.equal(renderOrderFromOpticalResponse(opaqueMetal, opaqueMetal), SPH_PHASE_RENDER_ORDER.opaqueSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(condensedWater, condensedWater), false);
+  assert.equal(renderDepthWriteFromOpticalResponse(condensedWater, condensedWater), true);
   assert.equal(renderLayerFromOpticalResponse(condensedWater, condensedWater), 'transmissive-surface');
   assert.equal(renderOrderFromOpticalResponse(condensedWater, condensedWater), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
 
@@ -990,7 +1000,7 @@ test('SPH renderer orders transparent surfaces and disables their depth writes',
   assert.equal(renderLayerFromOpticalResponse(vapor, vapor), 'vapor-surface');
   assert.equal(renderOrderFromOpticalResponse(vapor, vapor), SPH_PHASE_RENDER_ORDER.vaporSurface);
 
-  assert.equal(renderDepthWriteFromOpticalResponse(transparentSolid, transparentSolid), false);
+  assert.equal(renderDepthWriteFromOpticalResponse(transparentSolid, transparentSolid), true);
   assert.equal(renderLayerFromOpticalResponse(transparentSolid, transparentSolid), 'transmissive-surface');
   assert.equal(renderOrderFromOpticalResponse(transparentSolid, transparentSolid), SPH_PHASE_RENDER_ORDER.transmissiveSurface);
 

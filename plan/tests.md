@@ -1,5 +1,40 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 Transmissive H2O Depth Policy
+
+Condensed transmissive water now uses Three's physical transmission path as
+depth-writing glass, not alpha blending. H2O liquid surfaces report
+`transparent=false`, `depthWrite=true`, `depthTest=true`,
+`renderLayer=transmissive-surface`, and
+`renderOrderPolicy=stable-opaque-layer-order`; vapor and true alpha opacity
+surfaces remain non-depth-writing and depth-sortable.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`,
+  `node --check scripts/sph-visual-sanity-matrix.mjs`,
+  `node --check tests/sphPhaseRenderer.test.mjs`, and
+  `node --check tests/demo.e2e.mjs` passed.
+- Renderer coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `35/35`.
+- Short CPU-SPH visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-h2o-depthwrite-short-2-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=4 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with empty issue counts and H2O depth-writing transmissive metadata.
+- Long CPU-SPH visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-h2o-depthwrite-long-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph ULG_VISUAL_MATRIX_BATCHES=144 ULG_VISUAL_MATRIX_BATCH_STEPS=24 ULG_VISUAL_MATRIX_FRAME_MAX=6 ULG_VISUAL_MATRIX_FRAME_EVERY=36 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, one H2O visible surface, component count `1`,
+  final tallness `0.5821`, footprint fill `0.2960`, empty visual issues, and
+  five frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-cpu-sph-h2o-depthwrite-long-20260617/liquid-liquid-h2o-cpu-sph-frames`.
+- Resident MLS-MPM visual row:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-mlsmpm-h2o-depthwrite-merge-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=4 ULG_VISUAL_MATRIX_BATCH_STEPS=512 ULG_VISUAL_MATRIX_FRAME_MAX=5 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=600000 ULG_PROBE_EXPECT_LIQUID_FREE_SURFACE=1 ULG_PROBE_LIQUID_FREE_SURFACE_MIN_TIME_S=1 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, one H2O visible surface, component count `1`,
+  final tallness `0.4403`, footprint fill `0.1815`, empty visual issues, and
+  five frames under
+  `/tmp/ulg-visual-sanity-matrix/codex-mlsmpm-h2o-depthwrite-merge-20260617/liquid-liquid-h2o-mlsmpm-frames`.
+
 ## Current Focused Result - 2026-06-15 CPU-SPH Free-Surface Remediation
 
 The CPU-SPH reference lane now has a reduced free-surface mechanics closure for

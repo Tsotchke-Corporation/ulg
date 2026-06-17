@@ -12,6 +12,24 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-17 AKDT update: default Three/MarchingCubes H2O z-buffer/draw-through
+  is fixed for condensed transmissive water. The bug was a renderer policy
+  mismatch, not a new physics split: non-vapor transmission was treated as
+  alpha transparency, so water surfaces had `transparent=true`,
+  `depthWrite=false`, and same-layer transparent ordering. Floor grid lines
+  then rendered through water even when the surface was one merged component.
+  `src/visualization/sphPhaseScene.js` now keeps condensed transmissive media
+  at `opacity=1`, `transparent=false`, `depthWrite=true`, and stable
+  depth-writing order; vapor and true alpha opacity remain non-depth-writing.
+  The optical GPU lookup refresh and long-horizon probe now follow the same
+  contract. Evidence: renderer tests passed `35/35`; CPU-SPH long H2O visual
+  row `codex-cpu-sph-h2o-depthwrite-long-20260617` passed with one H2O surface,
+  one component, final tallness `0.582`, footprint fill `0.296`, and empty
+  visual issues; resident MLS-MPM H2O row
+  `codex-mlsmpm-h2o-depthwrite-merge-20260617` passed with one H2O surface,
+  one component, final tallness `0.440`, footprint fill `0.182`, and empty
+  visual issues. Keep raw WebGPU overlay depth sharing, mobile focus-resume
+  flashing, and low-resolution faceted/blocky liquid quality open.
 - 2026-06-17 AKDT update: resident MLS-MPM H2O/H2O no longer fails the
   long-horizon free-surface spread gate. The current fixture did not reproduce
   the audit's suspected G2P renormalization as the lever; toggling that logic

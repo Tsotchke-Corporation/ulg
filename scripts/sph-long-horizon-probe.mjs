@@ -2685,8 +2685,8 @@ function analyzeTimeline(timeline, {
   let lastH2oLiquidSurfaceTallnessRatio = null;
   let lastH2oLiquidSurfaceFootprintFillRatio = null;
   if (!directResident) {
-    const transparentRenderLayers = new Set(['transmissive-surface', 'vapor-surface', 'alpha-surface']);
-    const knownSurfaceRenderLayers = new Set(['opaque-surface', ...transparentRenderLayers]);
+    const alphaTransparentRenderLayers = new Set(['vapor-surface', 'alpha-surface']);
+    const knownSurfaceRenderLayers = new Set(['opaque-surface', 'transmissive-surface', ...alphaTransparentRenderLayers]);
     const pushRenderVisualIssue = (issue, metricIndex, surface, extra = {}) => {
       visualSurfaceIssues.push({
         issue,
@@ -2889,7 +2889,10 @@ function analyzeTimeline(timeline, {
         if (surface.materialDepthTest === false) {
           pushRenderVisualIssue('render-surface-depth-test-disabled', metricIndex, surface);
         }
-        if (transparentRenderLayers.has(renderLayer) || surface.materialDepthWrite === false) {
+        const alphaTransparentSurface = alphaTransparentRenderLayers.has(renderLayer)
+          || surface.materialDepthWrite === false
+          || surface.materialTransparent === true;
+        if (alphaTransparentSurface) {
           if (surface.materialDepthWrite !== false) {
             pushRenderVisualIssue('render-transparent-surface-depth-write-enabled', metricIndex, surface);
           }
@@ -2903,7 +2906,7 @@ function analyzeTimeline(timeline, {
           ) {
             pushRenderVisualIssue('render-transparent-surface-hashed-render-order', metricIndex, surface);
           }
-        } else if (renderLayer === 'opaque-surface') {
+        } else if (renderLayer === 'opaque-surface' || renderLayer === 'transmissive-surface') {
           if (surface.materialDepthWrite !== true) {
             pushRenderVisualIssue('render-opaque-surface-depth-write-disabled', metricIndex, surface);
           }

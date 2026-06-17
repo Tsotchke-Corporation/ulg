@@ -1777,8 +1777,7 @@ export function surfaceObjectRenderOrder(baseOrder, surfaceKey = '', {
   depthWrite = true
 } = {}) {
   const base = Number.isFinite(baseOrder) ? baseOrder : 0;
-  const transparentLayer = renderLayer === 'transmissive-surface'
-    || renderLayer === 'vapor-surface'
+  const transparentLayer = renderLayer === 'vapor-surface'
     || renderLayer === 'alpha-surface'
     || depthWrite === false;
   if (transparentLayer) return base;
@@ -1897,10 +1896,8 @@ export function renderAlphaFromOpticalResponse(optics = {}, descriptorOrRow = {}
 }
 
 export function renderDepthWriteFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
-  const transmission = clamp(Number.isFinite(optics.transmission) ? optics.transmission : 0, 0, 1);
   const alpha = renderAlphaFromOpticalResponse(optics, descriptorOrRow);
-  const transparent = transmission > 0.01 || alpha < 0.999;
-  return !transparent;
+  return alpha >= 0.999;
 }
 
 export function renderLayerFromOpticalResponse(optics = {}, descriptorOrRow = {}) {
@@ -1966,7 +1963,7 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
   const optics = opticsOverride || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
   const usesTransmission = optics.transmission > 0.01;
   const renderAlpha = renderAlphaFromOpticalResponse(optics, descriptor);
-  const transparent = usesTransmission || renderAlpha < 0.999;
+  const transparent = renderAlpha < 0.999;
   const baseColor = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
   const baseColorLinear = optics.baseColorLinear || null;
   const materialColor = new THREE.Color();
@@ -2693,7 +2690,7 @@ export function createSphPhaseScene(container, {
       );
       const renderAlpha = renderAlphaFromOpticalResponse(row, descriptor);
       material.opacity = renderAlpha;
-      material.transparent = row.transmission > 0.01 || renderAlpha < 0.999;
+      material.transparent = renderAlpha < 0.999;
       material.depthWrite = renderDepthWriteFromOpticalResponse(row, descriptor);
       material.metalness = clamp(row.metalness, 0, 1);
       material.roughness = clamp(row.roughness, 0, 1);

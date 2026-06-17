@@ -4784,8 +4784,14 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(Number.isFinite(derivedSummary.sphResidentPerf.lastResidentMs)).toBe(true);
     expect(derivedSummary.sphResidentRenderState.gpuAuthoritativeState).toBe(true);
     expect(derivedSummary.visibleSurfaces
-      .filter((surface) => (surface.materialTransmission ?? 0) > 0.01 || (surface.materialOpacity ?? 1) < 0.999)
+      .filter((surface) => (surface.materialOpacity ?? 1) < 0.999)
       .every((surface) => surface.materialDepthWrite === false)).toBe(true);
+    expect(derivedSummary.visibleSurfaces
+      .filter((surface) => (surface.materialTransmission ?? 0) > 0.01 && (surface.materialOpacity ?? 1) >= 0.999)
+      .every((surface) => (
+        surface.materialDepthWrite === true
+        && surface.renderOrderPolicy === 'stable-opaque-layer-order'
+      ))).toBe(true);
     expect(derivedSummary.sphResidentRenderState.scientificValidation).toBe(false);
     expect(derivedSummary.sphResidentRenderState.sphValidation).toBe(false);
     expect(derivedSummary.sphResidentRenderState.phaseChangeValidation).toBe(false);
@@ -4846,10 +4852,12 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   const transmissiveH2oSurfaces = visibleH2oSurfaces.filter((surface) => (
     (surface.materialTransmission ?? 0) > 0.01
     || surface.renderLayer === 'transmissive-surface'
-    || surface.renderOrderPolicy === 'three-transparent-depth-sort-within-layer'
   ));
   expect(transmissiveH2oSurfaces.length).toBeGreaterThan(0);
-  expect(transmissiveH2oSurfaces.every((surface) => surface.materialDepthWrite === false)).toBe(true);
+  expect(transmissiveH2oSurfaces.every((surface) => (
+    surface.materialDepthWrite === true
+    && surface.renderOrderPolicy === 'stable-opaque-layer-order'
+  ))).toBe(true);
   expect(visibleH2oSurfaces.some((surface) => (
     Number.isFinite(surface.renderAlpha)
     && surface.renderAlpha > 0

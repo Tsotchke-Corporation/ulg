@@ -35,6 +35,22 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: the default Three/MarchingCubes H2O
+z-buffer/draw-through issue is fixed for condensed transmissive water. The
+renderer was incorrectly treating non-vapor transmission as alpha transparency,
+so liquid H2O used `transparent=true`, `depthWrite=false`, and same-layer
+transparent sorting. That allowed the floor grid to draw through water and made
+merged liquid shells visually unreliable. H2O liquid now renders as
+depth-writing physical transmission (`transparent=false`, `depthWrite=true`,
+stable order), while vapor/alpha surfaces stay non-depth-writing. Evidence:
+renderer tests passed `35/35`; CPU-SPH post-patch long visual row
+`codex-cpu-sph-h2o-depthwrite-long-20260617` and resident MLS-MPM post-patch
+row `codex-mlsmpm-h2o-depthwrite-merge-20260617` both passed with one H2O
+surface, one connected component, empty visual issue counts, and depth-writing
+transmissive metadata. Keep low-resolution MLS-MPM blockiness, explicit raw
+WebGPU overlay depth sharing, and mobile focus-resume flashing in the open
+visual-trust lane.
+
 Current routing note, 2026-06-17 AKDT: the resident MLS-MPM H2O/H2O
 free-surface spread regression is fixed for the browser/resident split path.
 The root cause was a parity break in the resident grid-update floor boundary:

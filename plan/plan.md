@@ -2,6 +2,30 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: the H2O z-buffer/draw-order regression is
+fixed for the default Three/MarchingCubes render path. The old renderer policy
+treated condensed transmissive water like alpha transparency: `transparent=true`,
+`depthWrite=false`, and same-layer transparent ordering. That made the floor
+grid draw through water and left closed liquid shells vulnerable to sort
+artifacts even when the physics surface was already one merged component.
+`src/visualization/sphPhaseScene.js` now keeps non-vapor transmissive media at
+`opacity=1`, `transparent=false`, `depthWrite=true`, with stable depth-writing
+ordering; vapor and true alpha opacity remain non-depth-writing and
+depth-sortable. The optical GPU lookup material refresh now uses the same
+contract, and the visual probe no longer classifies depth-writing transmissive
+surfaces as alpha-transparent failures. Validation passed renderer coverage
+`35/35`, short and long CPU-SPH H2O/H2O visual rows, and the resident MLS-MPM
+H2O/H2O `1.024 s` row. Post-patch evidence: CPU long
+`codex-cpu-sph-h2o-depthwrite-long-20260617` passed with one H2O surface, one
+component, empty issue counts, final tallness `0.582`, footprint fill `0.296`,
+and H2O metadata `transparent=false`, `depthWrite=true`; resident MLS-MPM
+`codex-mlsmpm-h2o-depthwrite-merge-20260617` passed with final tallness
+`0.440`, footprint fill `0.182`, one H2O surface/component, and the same
+depth-writing transmissive metadata. Remaining visual work: low-res MLS-MPM
+surfaces are still blocky/faceted, mobile focus-resume flashing still needs a
+dedicated device/pixel probe, and the raw WebGPU overlay canvas remains a
+latent separate-depth path when explicitly enabled.
+
 Current checkpoint, 2026-06-17 AKDT: the resident MLS-MPM same-material H2O
 free-surface regression from the recent pressure/gas/resident refactor is fixed
 for the split CPU/WebGPU path. The audit's concrete G2P-renormalization suspect

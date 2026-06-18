@@ -26,6 +26,7 @@ import {
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
 import { computeBufferBinding, createCachedExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import { tagResidentProductMassDevice, tagWebGpuBufferDevice } from './sphGpuDeviceIdentity.js';
 
 export {
   ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -368,7 +369,7 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     || sumProductInventoryMass(productInventory, 'visibleMassKg');
   const unplacedGasProductMassKg = Number(reactionSummary.ledgerUnplacedGasProductMassKg) || 0;
   const gasSpeciesLedger = mergeResidentGasSpeciesLedgers(reactionSummary.gasSpeciesLedger);
-  return {
+  const handle = {
     schema: ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA,
     status: retainedProductEventBuffer
       ? 'resident-product-mass-buffer-retained'
@@ -422,6 +423,9 @@ export function createResidentProductMassHandle(reactionSummary = null) {
     sphValidation: false,
     fullPhysicsValidation: false
   };
+  return retainedProductEventBuffer
+    ? tagResidentProductMassDevice(handle, reactionSummary.productEventDevice)
+    : handle;
 }
 
 export function decodeSphReactionProductInventoryValues(values, reactionTable = null) {
@@ -779,7 +783,11 @@ export async function runSphReactionSummaryWebGpu({
   reactionRecordBuffer = null,
   proposalBuffer = null,
   readProductEvents = false,
-  retainProductEventBuffer = false
+  retainProductEventBuffer = false,
+  readCompactSummary = true,
+  readGasSpeciesSummary = true,
+  readProductInventory = true,
+  readAtomResidual = true
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runSphReactionSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
@@ -793,9 +801,11 @@ export async function runSphReactionSummaryWebGpu({
   const partialCount = Math.max(1, Math.ceil(particleCount / SUMMARY_WORKGROUP_SIZE));
   const summaryByteLength = SPH_GPU_REACTION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const partialsByteLength = partialCount * summaryByteLength;
-  const gasSpeciesCount = Math.max(0, reactionTable.gasProductCount ?? 0);
+  const productTermCount = Math.max(0, reactionTable.productTermCount ?? 0);
+  const gasProductCount = Math.max(0, reactionTable.gasProductCount ?? 0);
+  const gasSpeciesCount = gasProductCount;
   const gasSpeciesByteLength = gasSpeciesCount * SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  const productInventoryCount = Math.max(0, reactionTable.productTermCount ?? 0);
+  const productInventoryCount = productTermCount;
   const productInventoryByteLength = productInventoryCount * SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const productEventCount = Math.max(0, particleCount * (reactionTable.productTermCount ?? 0));
   const useProductEventBuffer = productEventCount > 0 && (readProductEvents || retainProductEventBuffer);
@@ -803,6 +813,13 @@ export async function runSphReactionSummaryWebGpu({
   const productEventByteLength = productEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const atomResidualCount = Math.max(0, reactionTable.atomTermCount ?? 0);
   const atomResidualByteLength = atomResidualCount * SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const shouldReadCompactSummary = readCompactSummary !== false;
+  const shouldReadGasSpeciesSummary = readGasSpeciesSummary !== false;
+  const shouldReadProductInventory = readProductInventory !== false;
+  const shouldReadAtomResidual = readAtomResidual !== false;
+  const shouldRunProductInventory = productInventoryCount > 0 && shouldReadProductInventory;
+  const shouldRunGasSpecies = gasSpeciesCount > 0 && shouldReadGasSpeciesSummary;
+  const shouldRunAtomResidual = atomResidualCount > 0 && shouldReadAtomResidual;
   const borrowedReactionRecordBuffer = Boolean(reactionRecordBuffer);
   const recordsBuffer = reactionRecordBuffer || writeStorageBuffer(
     device,
@@ -823,58 +840,58 @@ export async function runSphReactionSummaryWebGpu({
     'ulg-sph-reaction-summary-proposals-empty',
     new Float32Array(Math.max(1, particleCount * 4))
   );
-  const partialsBuffer = device.createBuffer({
+  const partialsBuffer = shouldReadCompactSummary ? device.createBuffer({
     label: 'ulg-sph-reaction-summary-partials',
     size: Math.max(4, partialsByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE
-  });
-  const summaryBuffer = device.createBuffer({
+  }) : null;
+  const summaryBuffer = shouldReadCompactSummary ? device.createBuffer({
     label: 'ulg-sph-reaction-summary-out',
     size: summaryByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  });
-  const readBuffer = device.createBuffer({
+  }) : null;
+  const readBuffer = shouldReadCompactSummary ? device.createBuffer({
     label: 'ulg-sph-reaction-summary-readback',
     size: summaryByteLength,
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
-  });
-  const gasSpeciesBuffer = gasSpeciesCount > 0 ? device.createBuffer({
+  }) : null;
+  const gasSpeciesBuffer = shouldRunGasSpecies ? device.createBuffer({
     label: 'ulg-sph-reaction-gas-species-summary-out',
     size: Math.max(4, gasSpeciesByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   }) : null;
-  const gasSpeciesReadBuffer = gasSpeciesCount > 0 ? device.createBuffer({
+  const gasSpeciesReadBuffer = shouldRunGasSpecies ? device.createBuffer({
     label: 'ulg-sph-reaction-gas-species-summary-readback',
     size: Math.max(4, gasSpeciesByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
-  const productInventoryBuffer = productInventoryCount > 0 ? device.createBuffer({
+  const productInventoryBuffer = shouldRunProductInventory ? device.createBuffer({
     label: 'ulg-sph-reaction-product-inventory-out',
     size: Math.max(4, productInventoryByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   }) : null;
-  const productInventoryReadBuffer = productInventoryCount > 0 ? device.createBuffer({
+  const productInventoryReadBuffer = shouldRunProductInventory ? device.createBuffer({
     label: 'ulg-sph-reaction-product-inventory-readback',
     size: Math.max(4, productInventoryByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
-  const productEventBuffer = useProductEventBuffer ? device.createBuffer({
+  const productEventBuffer = useProductEventBuffer ? tagWebGpuBufferDevice(device.createBuffer({
     label: 'ulg-sph-reaction-product-event-out',
     size: Math.max(4, productEventByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
-  }) : null;
+  }), device) : null;
   let retainedProductEventBuffer = false;
   const productEventReadBuffer = useProductEventBuffer && readProductEvents ? device.createBuffer({
     label: 'ulg-sph-reaction-product-event-readback',
     size: Math.max(4, productEventByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   }) : null;
-  const atomResidualBuffer = atomResidualCount > 0 ? device.createBuffer({
+  const atomResidualBuffer = shouldRunAtomResidual ? device.createBuffer({
     label: 'ulg-sph-reaction-atom-residual-out',
     size: Math.max(4, atomResidualByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   }) : null;
-  const atomResidualReadBuffer = atomResidualCount > 0 ? device.createBuffer({
+  const atomResidualReadBuffer = shouldRunAtomResidual ? device.createBuffer({
     label: 'ulg-sph-reaction-atom-residual-readback',
     size: Math.max(4, atomResidualByteLength),
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
@@ -884,6 +901,26 @@ export async function runSphReactionSummaryWebGpu({
     size: 48,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  let deferLocalBufferCleanup = false;
+  let localBuffersDestroyed = false;
+  const destroyLocalBuffers = () => {
+    if (localBuffersDestroyed) return;
+    localBuffersDestroyed = true;
+    if (!borrowedReactionRecordBuffer) recordsBuffer.destroy?.();
+    if (!borrowedProposalBuffer) proposalsBuffer.destroy?.();
+    partialsBuffer?.destroy?.();
+    summaryBuffer?.destroy?.();
+    readBuffer?.destroy?.();
+    gasSpeciesBuffer?.destroy?.();
+    gasSpeciesReadBuffer?.destroy?.();
+    productInventoryBuffer?.destroy?.();
+    productInventoryReadBuffer?.destroy?.();
+    if (!retainedProductEventBuffer) productEventBuffer?.destroy?.();
+    productEventReadBuffer?.destroy?.();
+    atomResidualBuffer?.destroy?.();
+    atomResidualReadBuffer?.destroy?.();
+    paramsBuffer.destroy?.();
+  };
 
   try {
     device.queue.writeBuffer(paramsBuffer, 0, createSummaryParamsArray({
@@ -897,54 +934,62 @@ export async function runSphReactionSummaryWebGpu({
       partialCount,
       hasProposals: borrowedProposalBuffer
     }));
-    const { pipeline: partialsPipeline, bindGroupLayout: partialsBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-reaction-summary-partials',
-      label: 'ulg-sph-reaction-summary-partials',
-      code: sphReactionSummaryPartialsWgsl,
-      entryPoint: 'main',
-      bindings: [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'read-only-storage'),
-        computeBufferBinding(2, 'read-only-storage'),
-        computeBufferBinding(3, 'read-only-storage'),
-        computeBufferBinding(4, 'read-only-storage'),
-        computeBufferBinding(5, 'storage'),
-        computeBufferBinding(6, 'uniform'),
-        computeBufferBinding(7, 'read-only-storage')
-      ]
-    });
-    const partialsBindGroup = device.createBindGroup({
-      layout: partialsBindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: sourceStateBuffer } },
-        { binding: 1, resource: { buffer: sourceThermoBuffer } },
-        { binding: 2, resource: { buffer: nextStateBuffer } },
-        { binding: 3, resource: { buffer: nextThermoBuffer } },
-        { binding: 4, resource: { buffer: recordsBuffer } },
-        { binding: 5, resource: { buffer: partialsBuffer } },
-        { binding: 6, resource: { buffer: paramsBuffer } },
-        { binding: 7, resource: { buffer: proposalsBuffer } }
-      ]
-    });
-    const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-sph-reaction-summary-finalize',
-      label: 'ulg-sph-reaction-summary-finalize',
-      code: sphReactionSummaryFinalizeWgsl,
-      entryPoint: 'main',
-      bindings: [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'storage'),
-        computeBufferBinding(2, 'uniform')
-      ]
-    });
-    const finalizeBindGroup = device.createBindGroup({
-      layout: finalizeBindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: partialsBuffer } },
-        { binding: 1, resource: { buffer: summaryBuffer } },
-        { binding: 2, resource: { buffer: paramsBuffer } }
-      ]
-    });
+    let partialsPipeline = null;
+    let partialsBindGroup = null;
+    let finalizePipeline = null;
+    let finalizeBindGroup = null;
+    if (shouldReadCompactSummary) {
+      const partialsInfo = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-summary-partials',
+        label: 'ulg-sph-reaction-summary-partials',
+        code: sphReactionSummaryPartialsWgsl,
+        entryPoint: 'main',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'read-only-storage'),
+          computeBufferBinding(2, 'read-only-storage'),
+          computeBufferBinding(3, 'read-only-storage'),
+          computeBufferBinding(4, 'read-only-storage'),
+          computeBufferBinding(5, 'storage'),
+          computeBufferBinding(6, 'uniform'),
+          computeBufferBinding(7, 'read-only-storage')
+        ]
+      });
+      partialsPipeline = partialsInfo.pipeline;
+      partialsBindGroup = device.createBindGroup({
+        layout: partialsInfo.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: sourceStateBuffer } },
+          { binding: 1, resource: { buffer: sourceThermoBuffer } },
+          { binding: 2, resource: { buffer: nextStateBuffer } },
+          { binding: 3, resource: { buffer: nextThermoBuffer } },
+          { binding: 4, resource: { buffer: recordsBuffer } },
+          { binding: 5, resource: { buffer: partialsBuffer } },
+          { binding: 6, resource: { buffer: paramsBuffer } },
+          { binding: 7, resource: { buffer: proposalsBuffer } }
+        ]
+      });
+      const finalizeInfo = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-sph-reaction-summary-finalize',
+        label: 'ulg-sph-reaction-summary-finalize',
+        code: sphReactionSummaryFinalizeWgsl,
+        entryPoint: 'main',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'storage'),
+          computeBufferBinding(2, 'uniform')
+        ]
+      });
+      finalizePipeline = finalizeInfo.pipeline;
+      finalizeBindGroup = device.createBindGroup({
+        layout: finalizeInfo.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: partialsBuffer } },
+          { binding: 1, resource: { buffer: summaryBuffer } },
+          { binding: 2, resource: { buffer: paramsBuffer } }
+        ]
+      });
+    }
     let gasSpeciesPipeline = null;
     let gasSpeciesBindGroup = null;
     let productInventoryPipeline = null;
@@ -953,7 +998,7 @@ export async function runSphReactionSummaryWebGpu({
     let productEventBindGroup = null;
     let atomResidualPipeline = null;
     let atomResidualBindGroup = null;
-    if (productInventoryCount > 0) {
+    if (shouldRunProductInventory) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
         cacheKey: 'ulg-sph-reaction-product-inventory',
         label: 'ulg-sph-reaction-product-inventory',
@@ -1017,7 +1062,7 @@ export async function runSphReactionSummaryWebGpu({
         ]
       });
     }
-    if (atomResidualCount > 0) {
+    if (shouldRunAtomResidual) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
         cacheKey: 'ulg-sph-reaction-atom-residual',
         label: 'ulg-sph-reaction-atom-residual',
@@ -1045,7 +1090,7 @@ export async function runSphReactionSummaryWebGpu({
         ]
       });
     }
-    if (gasSpeciesCount > 0) {
+    if (shouldRunGasSpecies) {
       const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
         cacheKey: 'ulg-sph-reaction-gas-species-summary',
         label: 'ulg-sph-reaction-gas-species-summary',
@@ -1078,17 +1123,19 @@ export async function runSphReactionSummaryWebGpu({
       });
     }
     const encoder = device.createCommandEncoder();
-    const partialsPass = encoder.beginComputePass();
-    partialsPass.setPipeline(partialsPipeline);
-    partialsPass.setBindGroup(0, partialsBindGroup);
-    partialsPass.dispatchWorkgroups(partialCount);
-    partialsPass.end();
-    const finalizePass = encoder.beginComputePass();
-    finalizePass.setPipeline(finalizePipeline);
-    finalizePass.setBindGroup(0, finalizeBindGroup);
-    finalizePass.dispatchWorkgroups(1);
-    finalizePass.end();
-    if (productInventoryPipeline && productInventoryBindGroup && productInventoryCount > 0) {
+    if (shouldReadCompactSummary && partialsPipeline && partialsBindGroup && finalizePipeline && finalizeBindGroup) {
+      const partialsPass = encoder.beginComputePass();
+      partialsPass.setPipeline(partialsPipeline);
+      partialsPass.setBindGroup(0, partialsBindGroup);
+      partialsPass.dispatchWorkgroups(partialCount);
+      partialsPass.end();
+      const finalizePass = encoder.beginComputePass();
+      finalizePass.setPipeline(finalizePipeline);
+      finalizePass.setBindGroup(0, finalizeBindGroup);
+      finalizePass.dispatchWorkgroups(1);
+      finalizePass.end();
+    }
+    if (productInventoryPipeline && productInventoryBindGroup && shouldRunProductInventory) {
       const productInventoryPass = encoder.beginComputePass();
       productInventoryPass.setPipeline(productInventoryPipeline);
       productInventoryPass.setBindGroup(0, productInventoryBindGroup);
@@ -1106,7 +1153,7 @@ export async function runSphReactionSummaryWebGpu({
         encoder.copyBufferToBuffer(productEventBuffer, 0, productEventReadBuffer, 0, productEventByteLength);
       }
     }
-    if (atomResidualPipeline && atomResidualBindGroup && atomResidualCount > 0) {
+    if (atomResidualPipeline && atomResidualBindGroup && shouldRunAtomResidual) {
       const atomResidualPass = encoder.beginComputePass();
       atomResidualPass.setPipeline(atomResidualPipeline);
       atomResidualPass.setBindGroup(0, atomResidualBindGroup);
@@ -1114,7 +1161,7 @@ export async function runSphReactionSummaryWebGpu({
       atomResidualPass.end();
       encoder.copyBufferToBuffer(atomResidualBuffer, 0, atomResidualReadBuffer, 0, atomResidualByteLength);
     }
-    if (gasSpeciesPipeline && gasSpeciesBindGroup && gasSpeciesCount > 0) {
+    if (gasSpeciesPipeline && gasSpeciesBindGroup && shouldRunGasSpecies) {
       const gasPass = encoder.beginComputePass();
       gasPass.setPipeline(gasSpeciesPipeline);
       gasPass.setBindGroup(0, gasSpeciesBindGroup);
@@ -1122,14 +1169,17 @@ export async function runSphReactionSummaryWebGpu({
       gasPass.end();
       encoder.copyBufferToBuffer(gasSpeciesBuffer, 0, gasSpeciesReadBuffer, 0, gasSpeciesByteLength);
     }
-    encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
+    if (shouldReadCompactSummary) {
+      encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
+    }
     device.queue.submit([encoder.finish()]);
-    await readBuffer.mapAsync(GPU_MAP_MODE.READ);
-    const values = new Float32Array(readBuffer.getMappedRange()).slice(0, SPH_GPU_REACTION_SUMMARY_FLOATS);
-    readBuffer.unmap();
-    let gasSpeciesLedger = {
+    retainedProductEventBuffer = retainProductEventBuffer && Boolean(productEventBuffer);
+    const destroyProductEventBuffer = retainedProductEventBuffer
+      ? () => productEventBuffer.destroy?.()
+      : null;
+    const emptyGasSpeciesLedger = {
       schema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
-      status: 'gas-species-compact-ledger-not-run',
+      status: shouldRunGasSpecies ? 'gas-species-compact-ledger-pending-readback' : 'gas-species-compact-ledger-not-run',
       records: [],
       bySpecies: {},
       recordCount: 0,
@@ -1139,15 +1189,9 @@ export async function runSphReactionSummaryWebGpu({
       chemistryValidation: false,
       fullPhysicsValidation: false
     };
-    if (gasSpeciesReadBuffer && gasSpeciesByteLength > 0) {
-      await gasSpeciesReadBuffer.mapAsync(GPU_MAP_MODE.READ);
-      const gasValues = new Float32Array(gasSpeciesReadBuffer.getMappedRange()).slice(0, gasSpeciesCount * SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_FLOATS);
-      gasSpeciesReadBuffer.unmap();
-      gasSpeciesLedger = decodeSphReactionGasSpeciesSummaryValues(gasValues, reactionTable);
-    }
-    let productInventory = {
+    const emptyProductInventory = {
       schema: ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
-      status: 'product-inventory-compact-ledger-not-run',
+      status: shouldRunProductInventory ? 'product-inventory-compact-ledger-pending-readback' : 'product-inventory-compact-ledger-not-run',
       records: [],
       byMaterial: {},
       recordCount: 0,
@@ -1157,13 +1201,7 @@ export async function runSphReactionSummaryWebGpu({
       chemistryValidation: false,
       fullPhysicsValidation: false
     };
-    if (productInventoryReadBuffer && productInventoryByteLength > 0) {
-      await productInventoryReadBuffer.mapAsync(GPU_MAP_MODE.READ);
-      const inventoryValues = new Float32Array(productInventoryReadBuffer.getMappedRange()).slice(0, productInventoryCount * SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS);
-      productInventoryReadBuffer.unmap();
-      productInventory = decodeSphReactionProductInventoryValues(inventoryValues, reactionTable);
-    }
-    let productEvents = {
+    const residentProductEvents = {
       schema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
       status: useProductEventBuffer ? 'product-event-sparse-storage-gpu-resident' : 'product-event-sparse-storage-not-run',
       records: [],
@@ -1183,15 +1221,9 @@ export async function runSphReactionSummaryWebGpu({
       chemistryValidation: false,
       fullPhysicsValidation: false
     };
-    if (productEventReadBuffer && productEventByteLength > 0) {
-      await productEventReadBuffer.mapAsync(GPU_MAP_MODE.READ);
-      const productEventValues = new Float32Array(productEventReadBuffer.getMappedRange()).slice(0, productEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS);
-      productEventReadBuffer.unmap();
-      productEvents = decodeSphReactionProductEventValues(productEventValues, reactionTable);
-    }
-    let atomResidualSummary = {
+    const emptyAtomResidualSummary = {
       schema: ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
-      status: 'atom-residual-compact-ledger-not-run',
+      status: shouldRunAtomResidual ? 'atom-residual-compact-ledger-pending-readback' : 'atom-residual-compact-ledger-not-run',
       records: [],
       atomResidualMolByZ: {},
       maxAbsAtomResidualMol: 0,
@@ -1204,6 +1236,139 @@ export async function runSphReactionSummaryWebGpu({
       chemistryValidation: false,
       fullPhysicsValidation: false
     };
+    if (!shouldReadCompactSummary) {
+      deferLocalBufferCleanup = true;
+      return {
+        schema: ULG_SPH_GPU_REACTION_SUMMARY_SCHEMA,
+        executionSchema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: useProductEventBuffer
+          ? 'reaction-resident-product-event-buffer-ready'
+          : 'reaction-resident-summary-readback-skipped',
+        kernelScope: SUMMARY_SCOPE,
+        reductionStrategy: 'skipped-resident-product-event-buffer-only',
+        particleCount,
+        reactionCount: reactionTable.reactionCount ?? 0,
+        productTermCount,
+        gasProductCount,
+        changedMaterialCount: null,
+        changedMassCount: null,
+        visibleProductMassKg: null,
+        visibleGasProductMassKg: null,
+        outputGasPhaseMassKg: null,
+        sourceMassKg: null,
+        nextMassKg: null,
+        massDeltaKg: null,
+        thermalReadyCount: null,
+        thermalProblemCount: null,
+        finiteTemperatureCount: null,
+        reactionSummaryAvailable: false,
+        canonicalReactionEventCount: null,
+        consumedReactantMassKg: null,
+        expectedProductMassKg: null,
+        rawProductMassKg: null,
+        ledgerVisibleProductMassKg: null,
+        ledgerUnplacedProductMassKg: null,
+        ledgerGasProductMassKg: null,
+        ledgerVisibleGasProductMassKg: null,
+        ledgerUnplacedGasProductMassKg: null,
+        sealedBoxGasProductMoles: null,
+        reactionHeatJ: null,
+        ledgerMassResidualKg: null,
+        ledgerReadyEventCount: null,
+        ledgerProblemEventCount: null,
+        proposalMutualPairCount: null,
+        compactLedgerAvailable: false,
+        visibleOnly: true,
+        unplacedProductInventoryIncluded: false,
+        readbackMode: 'resident-product-event-buffer-no-readback',
+        fullParticleReadbackPerformed: false,
+        compactSummaryReadbackSkipped: true,
+        compactSummaryReadbackSkipReason: 'resident no-full hot loop retains GPU product-event sidecar without CPU mapAsync',
+        localBufferCleanupStatus: typeof device.queue?.onSubmittedWorkDone === 'function'
+          ? 'deferred-until-queue-complete'
+          : 'pending-no-queue-fence',
+        rowLayout: [...SPH_GPU_REACTION_SUMMARY_ROW_LAYOUT],
+        summaryStrideFloats: SPH_GPU_REACTION_SUMMARY_FLOATS,
+        summaryStrideBytes: SPH_GPU_REACTION_SUMMARY_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+        gasSpeciesLedger: emptyGasSpeciesLedger,
+        gasSpeciesLedgerSchema: ULG_SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_SCHEMA,
+        gasSpeciesLedgerCount: 0,
+        gasSpeciesReadbackFloatCount: 0,
+        gasSpeciesReadbackByteLength: 0,
+        productInventory: emptyProductInventory,
+        productInventorySchema: ULG_SPH_GPU_REACTION_PRODUCT_INVENTORY_SCHEMA,
+        productInventoryCount: 0,
+        productInventoryReadbackFloatCount: 0,
+        productInventoryReadbackByteLength: 0,
+        productEvents: residentProductEvents,
+        productEventSchema: ULG_SPH_GPU_REACTION_PRODUCT_EVENT_SCHEMA,
+        productEventRowCount: residentProductEvents.rowCount,
+        productEventActiveEventCount: residentProductEvents.activeEventCount,
+        productEventReadbackFloatCount: 0,
+        productEventReadbackByteLength: 0,
+        productEventBufferByteLength: useProductEventBuffer ? productEventByteLength : 0,
+        productEventDevice: retainedProductEventBuffer ? device : null,
+        productEventWorkgroupCount,
+        productEventBufferRetained: retainedProductEventBuffer,
+        productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
+        destroyProductEventBuffer,
+        atomResidualSummary: emptyAtomResidualSummary,
+        atomResidualSchema: ULG_SPH_GPU_REACTION_ATOM_RESIDUAL_SCHEMA,
+        atomResidualCount: 0,
+        atomResidualReadbackFloatCount: 0,
+        atomResidualReadbackByteLength: 0,
+        strictReactionGate: {
+          schema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
+          status: 'strict-reaction-gate-not-run-resident-no-readback',
+          blockers: ['compact reaction ledger readback skipped'],
+          warnings: [],
+          strictForceCouplingAllowed: false,
+          scientificValidation: false,
+          chemistryValidation: false,
+          fullPhysicsValidation: false
+        },
+        strictReactionGateSchema: ULG_SPH_REACTION_STRICT_GATE_SCHEMA,
+        compactReadbackFloatCount: 0,
+        compactReadbackByteLength: 0,
+        compactPartialSummaryCount: 0,
+        compactPartialSummaryByteLength: 0,
+        compactReductionWorkgroupSize: SUMMARY_WORKGROUP_SIZE,
+        sourceStateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
+        sourceThermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
+        compactLedgerProposalBufferBound: borrowedProposalBuffer,
+        scientificValidation: false,
+        chemistryValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    await readBuffer.mapAsync(GPU_MAP_MODE.READ);
+    const values = new Float32Array(readBuffer.getMappedRange()).slice(0, SPH_GPU_REACTION_SUMMARY_FLOATS);
+    readBuffer.unmap();
+    let gasSpeciesLedger = emptyGasSpeciesLedger;
+    if (gasSpeciesReadBuffer && gasSpeciesByteLength > 0) {
+      await gasSpeciesReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      const gasValues = new Float32Array(gasSpeciesReadBuffer.getMappedRange()).slice(0, gasSpeciesCount * SPH_GPU_REACTION_GAS_SPECIES_SUMMARY_FLOATS);
+      gasSpeciesReadBuffer.unmap();
+      gasSpeciesLedger = decodeSphReactionGasSpeciesSummaryValues(gasValues, reactionTable);
+    }
+    let productInventory = emptyProductInventory;
+    if (productInventoryReadBuffer && productInventoryByteLength > 0) {
+      await productInventoryReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      const inventoryValues = new Float32Array(productInventoryReadBuffer.getMappedRange()).slice(0, productInventoryCount * SPH_GPU_REACTION_PRODUCT_INVENTORY_FLOATS);
+      productInventoryReadBuffer.unmap();
+      productInventory = decodeSphReactionProductInventoryValues(inventoryValues, reactionTable);
+    }
+    let productEvents = residentProductEvents;
+    if (productEventReadBuffer && productEventByteLength > 0) {
+      await productEventReadBuffer.mapAsync(GPU_MAP_MODE.READ);
+      const productEventValues = new Float32Array(productEventReadBuffer.getMappedRange()).slice(0, productEventCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS);
+      productEventReadBuffer.unmap();
+      productEvents = decodeSphReactionProductEventValues(productEventValues, reactionTable);
+    }
+    let atomResidualSummary = emptyAtomResidualSummary;
     if (atomResidualReadBuffer && atomResidualByteLength > 0) {
       await atomResidualReadBuffer.mapAsync(GPU_MAP_MODE.READ);
       const residualValues = new Float32Array(atomResidualReadBuffer.getMappedRange()).slice(0, atomResidualCount * SPH_GPU_REACTION_ATOM_RESIDUAL_FLOATS);
@@ -1216,10 +1381,6 @@ export async function runSphReactionSummaryWebGpu({
       atomResidualSummary,
       reactionTable
     });
-    retainedProductEventBuffer = retainProductEventBuffer && Boolean(productEventBuffer);
-    const destroyProductEventBuffer = retainedProductEventBuffer
-      ? () => productEventBuffer.destroy?.()
-      : null;
     return {
       ...compactSummary,
       gasSpeciesLedger,
@@ -1239,6 +1400,7 @@ export async function runSphReactionSummaryWebGpu({
       productEventReadbackFloatCount: productEventReadBuffer ? productEvents.rowCount * SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS : 0,
       productEventReadbackByteLength: productEventReadBuffer ? productEventByteLength : 0,
       productEventBufferByteLength: useProductEventBuffer ? productEventByteLength : 0,
+      productEventDevice: retainedProductEventBuffer ? device : null,
       productEventWorkgroupCount,
       productEventBufferRetained: retainedProductEventBuffer,
       productEventBuffer: retainedProductEventBuffer ? productEventBuffer : null,
@@ -1260,19 +1422,15 @@ export async function runSphReactionSummaryWebGpu({
       compactLedgerProposalBufferBound: borrowedProposalBuffer
     };
   } finally {
-    if (!borrowedReactionRecordBuffer) recordsBuffer.destroy?.();
-    if (!borrowedProposalBuffer) proposalsBuffer.destroy?.();
-    partialsBuffer.destroy?.();
-    summaryBuffer.destroy?.();
-    readBuffer.destroy?.();
-    gasSpeciesBuffer?.destroy?.();
-    gasSpeciesReadBuffer?.destroy?.();
-    productInventoryBuffer?.destroy?.();
-    productInventoryReadBuffer?.destroy?.();
-    if (!retainedProductEventBuffer) productEventBuffer?.destroy?.();
-    productEventReadBuffer?.destroy?.();
-    atomResidualBuffer?.destroy?.();
-    atomResidualReadBuffer?.destroy?.();
-    paramsBuffer.destroy?.();
+    if (deferLocalBufferCleanup) {
+      const cleanupFence = typeof device.queue?.onSubmittedWorkDone === 'function'
+        ? device.queue.onSubmittedWorkDone()
+        : null;
+      if (cleanupFence?.then) {
+        cleanupFence.then(destroyLocalBuffers, destroyLocalBuffers);
+      }
+    } else {
+      destroyLocalBuffers();
+    }
   }
 }

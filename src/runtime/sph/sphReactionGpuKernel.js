@@ -1263,7 +1263,10 @@ function outputEnvelope({
   retainedOutputParticleBuffers = false,
   destroyOutputParticleBuffers = null,
   readbackMode = FULL_READBACK_MODE,
-  sourceParticlePackMode = null
+  sourceParticlePackMode = null,
+  queueCompletionStatus = null,
+  queueCompletionMethod = null,
+  scratchBufferCleanupStatus = null
 }) {
   return {
     schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
@@ -1346,6 +1349,9 @@ function outputEnvelope({
     mechanicsBufferByteLength,
     retainedOutputParticleBuffers,
     destroyOutputParticleBuffers,
+    queueCompletionStatus,
+    queueCompletionMethod,
+    scratchBufferCleanupStatus,
     readbackMode,
     sourceParticlePackMode,
     fullReadbackPerformed: readbackMode !== NO_FULL_READBACK_MODE,
@@ -1601,7 +1607,11 @@ export async function runSphReactionStepWebGpu({
   thermalResponseGraphUpload = null,
   retainOutputParticleBuffers = false,
   resetMechanics = true,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  readCompactReactionSummary = true,
+  readReactionGasSpeciesSummary = true,
+  readReactionProductInventory = true,
+  readReactionAtomResidual = true
 } = {}) {
   assertReactionInputs({ sphParticleState, mlsMpmParticleState, reactionTable, thermalMaterialTable });
   assertOptionalThermalPhaseResponseTable(thermalPhaseResponseTable);
@@ -1830,13 +1840,17 @@ export async function runSphReactionStepWebGpu({
         reactionTable,
         sourceStateBuffer: summarySourceStateBuffer,
         sourceThermoBuffer: summarySourceThermoBuffer,
-	        nextStateBuffer: outStateBuffer,
-	        nextThermoBuffer: outThermoBuffer,
-	        reactionRecordBuffer,
-	        proposalBuffer,
-	        readProductEvents: false,
-	        retainProductEventBuffer: retainOutputParticleBuffers
-	      });
+        nextStateBuffer: outStateBuffer,
+        nextThermoBuffer: outThermoBuffer,
+        reactionRecordBuffer,
+        proposalBuffer,
+        readProductEvents: false,
+        retainProductEventBuffer: retainOutputParticleBuffers,
+        readCompactSummary: readCompactReactionSummary,
+        readGasSpeciesSummary: readReactionGasSpeciesSummary,
+        readProductInventory: readReactionProductInventory,
+        readAtomResidual: readReactionAtomResidual
+      });
     } catch (error) {
       reactionSummary = {
         schema: ULG_SPH_GPU_REACTION_SUMMARY_EXECUTION_SCHEMA,
@@ -1860,6 +1874,9 @@ export async function runSphReactionStepWebGpu({
   let thermo = new Float32Array();
   let mechanics = new Float32Array();
   let proposals = new Float32Array();
+  let queueCompletionStatus = 'queue-submitted';
+  let queueCompletionMethod = 'queue.submit';
+  let scratchBufferCleanupStatus = 'pending';
   if (!noFullReadback) {
     const [stateBytes, thermoBytes, mechanicsBytes, proposalBytes] = await Promise.all([
       readBuffer(device, outStateBuffer, sphParticleState.state.byteLength, 'ulg-sph-reaction-state-readback'),
@@ -1871,11 +1888,14 @@ export async function runSphReactionStepWebGpu({
     thermo = new Float32Array(thermoBytes);
     mechanics = new Float32Array(mechanicsBytes);
     proposals = new Float32Array(proposalBytes);
-  } else if (device.queue?.onSubmittedWorkDone) {
-    await device.queue.onSubmittedWorkDone();
+    queueCompletionStatus = 'readback-map-completed';
+    queueCompletionMethod = 'mapAsync(output-readback-buffers)';
   }
 
-  for (const buffer of [
+  const nonRetainedOutputBuffers = retainOutputParticleBuffers
+    ? []
+    : [outStateBuffer, outThermoBuffer, outMechanicsBuffer];
+  const scratchBuffers = [
     packedParticleRecordBuffer,
     outPackedParticleRecordBuffer,
     reactionRecordBuffer,
@@ -1883,12 +1903,35 @@ export async function runSphReactionStepWebGpu({
     paramsBuffer,
     localSourceStateBuffer,
     localSourceThermoBuffer,
-    localSourceMechanicsBuffer
-  ]) {
-    buffer?.destroy?.();
+    localSourceMechanicsBuffer,
+    ...(noFullReadback ? nonRetainedOutputBuffers : [])
+  ];
+  let scratchBuffersDestroyed = false;
+  const destroyScratchBuffers = () => {
+    if (scratchBuffersDestroyed) return;
+    scratchBuffersDestroyed = true;
+    for (const buffer of scratchBuffers) buffer?.destroy?.();
+    if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
+  };
+  if (noFullReadback) {
+    const cleanupFence = typeof device.queue?.onSubmittedWorkDone === 'function'
+      ? device.queue.onSubmittedWorkDone()
+      : null;
+    if (cleanupFence?.then) {
+      scratchBufferCleanupStatus = 'deferred-until-queue-complete';
+      queueCompletionStatus = 'queue-submitted-cleanup-deferred';
+      queueCompletionMethod = 'queue.onSubmittedWorkDone(background-cleanup)';
+      cleanupFence.then(destroyScratchBuffers, destroyScratchBuffers);
+    } else {
+      scratchBufferCleanupStatus = 'pending-no-queue-fence';
+      queueCompletionStatus = 'queue-submitted-cleanup-pending';
+      queueCompletionMethod = 'queue.submit';
+    }
+  } else {
+    destroyScratchBuffers();
+    scratchBufferCleanupStatus = 'destroyed-after-readback';
   }
-  if (localResponseGraphUpload) destroySphThermalResponseGraphBuffers(localResponseGraphUpload);
-  if (!retainOutputParticleBuffers) {
+  if (!retainOutputParticleBuffers && !noFullReadback) {
     outStateBuffer.destroy?.();
     outThermoBuffer.destroy?.();
     outMechanicsBuffer.destroy?.();
@@ -1932,6 +1975,9 @@ export async function runSphReactionStepWebGpu({
     mechanicsBufferByteLength: mlsMpmParticleState.mechanics.byteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
 	    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
+    queueCompletionStatus,
+    queueCompletionMethod,
+    scratchBufferCleanupStatus,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     sourceParticlePackMode: sourceUsesBorrowedGpuBuffers ? 'gpu-pack-source-buffers' : 'cpu-packed-source-arrays'
   });

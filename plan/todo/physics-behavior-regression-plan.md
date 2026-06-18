@@ -12,6 +12,28 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-18 AKDT update: the user's MLS-MPM water/water console report
+  included a concrete browser WGSL parser failure:
+  `ulg-sph-render-field-surface-summary` declared `let active`, and newer WGSL
+  parsers reject `active` as reserved. This is fixed by renaming the local to
+  `has_active_cells` and adding an ABI guard against exact WGSL
+  `let|var|const active` declarations. Validation:
+  `node --test tests/webgpuKernelAbi.test.mjs` passed `2/2`, and the later
+  console-capturing browser probes have no WGSL parser or invalid
+  shader/pipeline issue counts. The console report also exposed two harness
+  gaps now fixed: the visual probe previously did not fail on full browser
+  console WebGPU validation messages, and the resident SPH device request did
+  not opt into supported higher `maxBufferSize` /
+  `maxStorageBufferBindingSize` limits. The fixed harness classifies WebGPU
+  validation warnings as `browser-console:*` issues, and the water/water
+  MLS-MPM matrix plus Na/H2O MLS-MPM probe now pass with empty
+  `browserConsoleIssueCounts`. The remaining
+  `peercompute-worker-inline-fallback` warning is expected from the current
+  local authority host defaulting `enableWorkers=false`. The same user console
+  also showed `ulg-sph-thermal-output-state` submitted after destroy on a hot
+  Fe/H2O SPH route. Keep that as a separate open thermal hot-buffer
+  lifetime/lease bug; do not conflate it with the WGSL parser failure,
+  required-limit device setup, or water/water flow mechanics.
 - 2026-06-18 AKDT update: the current dense visual harness does not reproduce
   "ice flows like water" in the cold same-material CPU-SPH static H2O/H2O
   support fixture. Run `codex-solid-h2o-static-sequence-20260618` passed with

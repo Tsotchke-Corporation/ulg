@@ -1,8 +1,59 @@
 # Implementation Status
 
-Updated: 2026-06-18 CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
+Updated: 2026-06-18 WebGPU-Ocean MLS-MPM audit and performance routing, browser console harness and WebGPU high-buffer required limits, NodeKernel GPU resident stage execution authority, WGSL render-field surface-summary reserved identifier fix, CPU-SPH solid H2O static sequence recheck, CPU-SPH and resident MLS-MPM visual flow sequence gates, reaction product visual contract and flow cadence triage, ComputeManager GPU resident stage-placement preflight, GPU resident state-family conflict batching, worker-retained continuation planner, GPU resident stage dependency batches, worker-retained access contract metadata, resident render-field surface unclipping, transmissive H2O depth policy, resident MLS-MPM floor boundary free-surface fix, CPU-SPH free-surface remediation, free-surface shape gate, surface component visual metrics, render depth-order visual matrix gate, plain-SPH liquid settling, CPU liquid render-domain merge, plain-SPH no-force law isolation, product-event spatial ledger source preservation, mounted no-snapshot gas-cell import guard, mounted gas-cell EOS producer hot-loop opt-in, gas-cell EOS producer stage-chain pressure import wiring, resident gas-cell EOS producer stage, retained pressure/interface gas-cell source descriptor consumption, retained pressure/interface gas-cell field source descriptor, spatial gas-cell source provenance, gas-cell field admission publisher, spatial gas-cell EOS producer contract, pressure gas-cell retained-ref classification, scene gas-cell import host wiring, StateManager gas-cell field import publisher, admitted gas-cell field import descriptor, local gas-cell field consumption admission gate, retained local-gas-cell pressure publication gate, local gas-cell pressure field contract, pressure/local-gradient contract metadata, pressure/interface WebGPU-retained publication gate, scene pressure-row upload admission gate, transparent renderer depth-order pass, pressure/interface retained-buffer admission evidence, pressure/interface WebGPU force-row producer, pressure/interface same-frame grid admission, pressure/interface grid consumption admission gate, pressure/interface Worker publication admission, pressure/interface Worker stage DAG boundary, reaction/product Worker publication admission, reaction/product Worker stage DAG boundary, thermal/phase Worker publication admission, formal GPUHub thermal/phase stage DAG, browser Worker thermal/phase stage, worker-retained thermo input, worker-retained mechanics continuation input, admitted worker-retained mechanics publication path, worker WebGPU no-full retained-ref publication candidate, worker WebGPU mechanics stage-chain browser gate, mechanics resident-stage Worker module, GPUHub worker-ready runner seam, GPUHub worker policy evidence, GPUHub resident stage executor mechanics chain, browser same-lane WebGPU mechanics stage-chain validation, same-lane WebGPU-requested mechanics stage tasks, lane-executed ULG mechanics stage tasks, ULG mechanics stage-chain lane-plan evidence, PeerCompute lane stage-plan executor, resident sequence lane contract, mounted active-grid scene opt-in, active-grid resident mechanics slice, resident summary fence attribution, opt-in fused mechanics evidence, live same-device source auto-publication, CPU-SPH solid H2O gate, law-isolation visual matrix, direct-resident liquid settle gate, and live-device focus-change renderer follow-up
 
-Latest checkpoint, 2026-06-18 AKDT: the cold same-material CPU-SPH solid-H2O
+Latest checkpoint, 2026-06-18 AKDT: WebGPU-Ocean Phase 1 audit is complete.
+The reference MLS-MPM loop uses particle-parallel P2G/G2P dispatches, fixed-
+point integer `atomicAdd` accumulation, grid-only clear/update/finalize passes,
+and a GPU particle/depth/thickness render path. This validates the planned
+architecture: keep ULG's closure/provenance work in the control plane, but
+replace the current fallback-heavy hot loop with an explicit Ocean-style
+resident lane. ULG's current P2G shader already dispatches per particle and
+scatters to 3x3x3 grid nodes with atomics; the remaining performance issue is
+queue fences, summary/readback cadence, Worker residency, and product/gas/
+thermal sidecar integration. Do not spend major effort micro-optimizing
+fallback readbacks that the resident lane will replace.
+
+Previous checkpoint, 2026-06-18 AKDT: the browser probes now capture full
+Playwright console/pageerror telemetry, classify WebGPU validation failures as
+normal probe issues, and carry aggregate `browserConsoleIssueCounts` through
+the visual matrix summary. `requestOpticalGpuDevice()` now requests elevated
+`maxBufferSize` and `maxStorageBufferBindingSize` when the adapter supports
+them, which lets resident surface/interface buffers exceed Chromium's default
+256 MiB buffer and 128 MiB storage-binding caps on capable hardware while
+retaining preflight guards for smaller adapters. Validation: syntax checks
+passed; focused optical/render tests passed; water/water MLS-MPM visual matrix
+`codex-console-harness-h2o-mlsmpm-20260618` passed with empty
+`browserConsoleIssueCounts`; Na/H2O MLS-MPM probe
+`/tmp/ulg-na-h2o-mlsmpm-console-harness-2.json` passed `status=good` with
+empty `browserConsole.issueCounts`. The only captured browser-console warning
+in those rows is `peercompute-worker-inline-fallback`. Current source review
+shows ULG passes `enableWorkers=true` into the browser resident host, so this
+is a Worker capability/bootstrap blocker in the captured context, not an
+expected disabled-by-config state.
+
+Previous checkpoint, 2026-06-18 AKDT: GPU resident stage execution now routes
+through NodeKernel when a real NodeKernel owns the resident ComputeManager.
+The mechanics stage chain records
+`gpuResidentLaneStageExecutionAuthorityPath=node-kernel-execution` plus
+`peercompute.nodekernel.gpu-resident-stage-execution-authority.v0`, while
+injected/local-only ComputeManager paths preserve `compute-manager-execution`.
+If a future non-advisory remote execution returns retained refs that need
+local refresh, the local lane is rejected instead of completed. Validation:
+syntax checks passed; focused PeerCompute integration passed `16/16`; physics
+atomics passed `11` with `3` expected opt-in skips; visual matrix
+`codex-nodekernel-stage-execution-authority-20260618` passed `3/3` with empty
+issue counts.
+
+Previous checkpoint, 2026-06-18 AKDT: fixed the browser WGSL parse failure in
+`ulg-sph-render-field-surface-summary` by renaming the reserved local
+identifier `active` to `has_active_cells`. `node --test
+tests/webgpuKernelAbi.test.mjs` now includes a reserved-identifier guard and
+passed `2/2`; the later browser-console-capturing water/water and Na/H2O
+probes show no WGSL parser or invalid shader/pipeline issue counts. The
+separate `ulg-sph-thermal-output-state` destroyed-buffer warning remains open.
+
+Previous checkpoint, 2026-06-18 AKDT: the cold same-material CPU-SPH solid-H2O
 static/support row still passes under the current dense visual sequence
 harness. Run `codex-solid-h2o-static-sequence-20260618` passed with
 `failedCount=0`, nine frames over `0.9216 s`, max displacement `1.19e-7 m`,

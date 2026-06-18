@@ -12,6 +12,10 @@ import {
 import { opticalLookupWgsl } from '../../../ulg-gpu-abi/src/wgsl.js';
 import { zForSymbol } from '../electronicStructure/periodicTable.js';
 import { computeBufferBinding, createExplicitComputePipeline } from '../webgpuComputeLayout.js';
+import {
+  residentSphWebGpuLimitsForAdapter,
+  webGpuDeviceDescriptorForResidentSph
+} from '../webgpuDeviceLimits.js';
 import { opticalRenderParams } from './opticalClosure.js';
 
 export {
@@ -541,9 +545,6 @@ function watchDeviceLost(device, onDeviceLost) {
   });
 }
 
-const DEFAULT_STORAGE_BUFFERS_PER_STAGE = 8;
-const RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE = 10;
-
 export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigator, { onDeviceLost = null } = {}) {
   if (!navigatorRef?.gpu) {
     return { status: 'blocked-webgpu-unavailable', reason: 'navigator.gpu unavailable', device: null };
@@ -552,17 +553,8 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
   if (!adapter) {
     return { status: 'blocked-webgpu-unavailable', reason: 'requestAdapter returned null', device: null };
   }
-  const adapterStorageLimit = Number(adapter.limits?.maxStorageBuffersPerShaderStage || 0);
-  const requiredLimits = {};
-  if (adapterStorageLimit >= RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE) {
-    requiredLimits.maxStorageBuffersPerShaderStage = Math.max(
-      DEFAULT_STORAGE_BUFFERS_PER_STAGE,
-      RESIDENT_SPH_STORAGE_BUFFERS_PER_STAGE
-    );
-  }
-  const deviceDescriptor = Object.keys(requiredLimits).length > 0
-    ? { requiredLimits }
-    : undefined;
+  const { requiredLimits, adapterLimits } = residentSphWebGpuLimitsForAdapter(adapter);
+  const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(adapter);
   const device = await adapter.requestDevice(deviceDescriptor);
   if (typeof onDeviceLost === 'function') {
     watchDeviceLost(device, onDeviceLost);
@@ -573,13 +565,13 @@ export async function requestOpticalGpuDevice(navigatorRef = globalThis.navigato
     device,
     requiredLimits,
     adapterLimits: {
-      maxStorageBuffersPerShaderStage: adapterStorageLimit || null
+      ...adapterLimits
     }
   };
 }
 
 function writeStorageBuffer(device, label, data) {
-  const byteLength = Math.max(4, data.byteLength);
+  const byteLength = Math.max(16, data.byteLength);
   const buffer = device.createBuffer({
     label,
     size: byteLength,
@@ -637,11 +629,12 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
     throw new TypeError('runOpticalGpuLookup requires lookup queries');
   }
   const outputByteLength = lookup.queryCount * OPTICAL_GPU_LOOKUP_OUTPUT_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const paddedOutputByteLength = Math.max(16, outputByteLength);
   const recordBuffer = writeStorageBuffer(device, 'ulg-optical-lookup-records', table.records);
   const queryBuffer = writeStorageBuffer(device, 'ulg-optical-lookup-queries', lookup.queries);
   const outputBuffer = device.createBuffer({
     label: 'ulg-optical-lookup-outputs',
-    size: Math.max(4, outputByteLength),
+    size: paddedOutputByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
   const paramsBuffer = device.createBuffer({
@@ -651,7 +644,7 @@ export async function runOpticalGpuLookup({ device, table, lookup }) {
   });
   const readBuffer = device.createBuffer({
     label: 'ulg-optical-lookup-readback',
-    size: Math.max(4, outputByteLength),
+    size: paddedOutputByteLength,
     usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
   });
   try {

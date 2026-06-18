@@ -1088,6 +1088,30 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     ['p2g', 'gridUpdate', 'g2p']
   );
   assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionAuthorityPath,
+    'node-kernel-execution'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelExecutionAuthoritySchema,
+    'peercompute.nodekernel.gpu-resident-stage-execution-authority.v0'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelExecutionAuthorityStatus,
+    'executed-through-local-compute-manager'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelExecutionAuthorityRequestedPlacement,
+    'local'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelExecutionAuthorityLocalPlacement,
+    true
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelExecutionAuthorityLocalHotBufferRefreshRequired,
+    false
+  );
+  assert.equal(
     scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementAuthorityPath,
     'node-kernel-preflight'
   );
@@ -1353,6 +1377,14 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(
     laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementAuthorityPath,
     'compute-manager-preflight'
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionAuthorityPath,
+    'compute-manager-execution'
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelExecutionAuthoritySchema,
+    null
   );
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelPlacementPreflightSchema, null);
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode, 'registered');

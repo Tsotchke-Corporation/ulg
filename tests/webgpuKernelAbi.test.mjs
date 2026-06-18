@@ -250,3 +250,19 @@ test('SPH WGSL source avoids reserved local identifiers rejected by browsers', (
     'WGSL parser rejects active as a reserved local identifier'
   );
 });
+
+test('MLS-MPM P2G shader scatters particles in parallel instead of scanning particle_count per grid node', () => {
+  const wgslSource = readRepoText('ulg-gpu-abi/src/wgsl.js');
+  const match = wgslSource.match(/export const mlsMpmP2gGridProjectionWgsl = `([\s\S]*?)`;/);
+  assert.ok(match, 'missing mlsMpmP2gGridProjectionWgsl export');
+  const p2gSource = match[1];
+
+  assert.match(p2gSource, /let particle_index = global_id\.x;/);
+  assert.match(p2gSource, /atomicAdd\(&grid_accumulators/);
+  assert.match(p2gSource, /fn finalize_grid/);
+  assert.doesNotMatch(
+    p2gSource,
+    /for\s*\(\s*var\s+particle_index\s*=\s*0u;\s*particle_index\s*<\s*params\.particle_count/,
+    'MLS-MPM P2G must not scan every particle inside each grid-node invocation'
+  );
+});

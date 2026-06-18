@@ -10,6 +10,7 @@
     "icc:update": "node scripts/update-icc.mjs",
     "stage:service-assets": "node scripts/stage-service-assets.mjs",
     "status:live": "node scripts/live-status.mjs",
+    "bench:sph-performance": "node scripts/sph-performance-benchmark.mjs",
     "probe:sph-long-horizon": "node scripts/sph-long-horizon-probe.mjs",
     "probe:sph-visual-matrix": "node scripts/sph-visual-sanity-matrix.mjs",
     "test": "node --test tests/*.test.mjs",

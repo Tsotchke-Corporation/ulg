@@ -1,5 +1,360 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Direct Resident Fused-Sequence Active-Grid Benchmark
+
+Summary:
+
+- Added a direct-resident mode to `scripts/sph-performance-benchmark.mjs` so
+  the benchmark can measure the MLS-MPM WebGPU hot loop without scene
+  rendering, render-row readback, or compact-summary readback.
+- Let the no-full fused resident mechanics sequence run with
+  `compactSummaryMode=none`; `every-step` compact summary still blocks the
+  fused sequence because that mode needs per-step diagnostics.
+- Passed `summaryRunner: null` into the fused sequence when compact summaries
+  are disabled, and recorded `compactSummaryRequested=false` in stage timing
+  for that lane.
+- Added focused unit coverage proving fused resident sequence plus active-grid
+  dispatch can run with `compactSummaryMode=none` and without invoking the
+  compact summary runner.
+- Corrected the benchmark timing surface to optionally await
+  `queue.onSubmittedWorkDone()` after the fused resident sequence. The earlier
+  `2.6ms` direct-resident row was enqueue-only timing; queue-fenced timing is
+  now reported as `residentGpuQueueFenceMs` and used for
+  `residentStageStepsPerSecond`.
+- Fixed warm no-readback active-grid fallback by preserving conservative
+  predicted resident position bounds on unread GPU-resident states. Follow-up
+  batches can now keep `boundsSource=resident-position-bounds` instead of
+  falling back to the full grid with `position-bounds-unavailable`.
+- Wired the same queue-fence measurement knob through the mounted scene path:
+  `residentQueueFence=1` in the scenario URL maps to
+  `measureFusedSequenceQueueFence`, participates in resident cache signatures,
+  and is emitted in the mounted resident execution policy/status text.
+
+Validation:
+
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "compactSummaryMode none|fused resident sequence can run active-grid|carries active-grid bounds"`
+  reported `54/54`.
+- PASS direct-resident benchmark:
+  `ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-direct-resident-active-grid.json ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_PORT=5220 ULG_BENCH_FAIL_ON_ERROR=1 npm run bench:sph-performance`
+  completed with scenario `status=good`, `browserConsoleIssueCount=0`,
+  actual particles `1024`, `fusedResidentSequence=true`,
+  `fusedResidentSequenceStepCount=4`, `compactSummaryRequested=false`,
+  `residentGpuQueueFenceMs=643.6`, `residentGpuCompletedStageMs=647`, and
+  active-grid dispatch over `4913` of `54872` grid nodes.
+- PASS warm direct-resident benchmark:
+  `ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-direct-resident-active-grid-warm.json ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=3 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_PORT=5222 ULG_BENCH_FAIL_ON_ERROR=1 npm run bench:sph-performance`
+  completed with scenario `status=good`, `browserConsoleIssueCount=0`,
+  `measureGpuQueueFence=true`, final-batch
+  `residentGpuCompletedStageMs=38.9`, `residentGpuQueueFenceMs=37.6`,
+  `residentStageStepsPerSecond=25.7`, and active-grid dispatch still enabled
+  over `19343` of `54872` grid nodes with
+  `boundsSource=resident-position-bounds`.
+- PASS queue-fenced warm scale benchmark:
+  `ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-direct-resident-scale-warm-queue-fenced.json ULG_BENCH_PROBE_MODE=direct-resident ULG_BENCH_PARTICLE_COUNTS=10000,50000 ULG_BENCH_BATCHES=3 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_PORT=5225 ULG_BENCH_TIMEOUT_MS=300000 npm run bench:sph-performance`
+  completed with `browserConsoleIssueCount=0`; final-batch rows reported
+  `140.2ms` at `9826` particles and `580.3ms` at `48778` particles.
+- PASS phone-shaped mounted scene queue-fence benchmark:
+  `ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-mobile-spheres-no-thermal-queue-fenced-warm.json ULG_BENCH_PARTICLE_COUNTS=152 ULG_BENCH_BATCHES=3 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_PORT=5231 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=3 ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1 ULG_BENCH_FAIL_ON_ERROR=1 npm run bench:sph-performance`
+  completed with scenario `status=good`, `browserConsoleIssueCount=0`,
+  `surfaceDrawBridge=three-render-row-spheres`, final-batch
+  `residentGpuCompletedStageMs=104.2`, `residentGpuQueueFenceMs=103.4`,
+  `visualRefreshHzEstimate=2.28`, `renderRowsReadbackByteLength=6144`, and
+  active-grid dispatch over `13520/27000` nodes.
+- PASS focused runtime and renderer tests after the mounted scene wiring:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "compactSummaryMode none|fused resident sequence can run active-grid|carries active-grid bounds"`
+  reported `54/54`, and `node --test tests/sphPhaseRenderer.test.mjs`
+  reported `35/35`.
+
+Open:
+
+- This benchmark lane is mechanics-only by design. Thermal/reaction sidecars,
+  compact diagnostics, and direct GPU rendering still need to be integrated
+  into the fused resident sequence before it represents full GUI throughput.
+- The direct lane skips compact motion proof, so the embedded physics probe can
+  report missing displacement/max-speed proof while the benchmark scenario is
+  still valid for hot-loop performance.
+- The remaining performance gap is architectural: the active grid is still
+  conservatively expanded from carried bounds, not computed by a GPU-side
+  bounds reduction, the mounted scene still reads render rows back into Three
+  geometry, and the fused sequence still lacks sidecars and a direct GPU
+  renderer.
+
+## 2026-06-18 AKDT - MLS-MPM Browser Hot-Loop Console Cleanup
+
+Summary:
+
+- Fixed the current browser WebGPU validation failures for the Cs/H2O
+  no-full resident MLS-MPM route.
+- Added WebGPU device identity tagging for resident product-event/product-mass
+  buffers and skipped stale cross-device retained product-event handles before
+  bind-group creation.
+- Centralized resident WebGPU device-limit requests so optical buffers,
+  `GpuBroker`, and carrier kernels request supported larger
+  `maxBufferSize`, `maxStorageBufferBindingSize`, and
+  `maxStorageBuffersPerShaderStage` limits.
+- Removed avoidable no-full reaction queue waits by deferring scratch cleanup
+  until submitted work completes, preserving retained reaction/product-event
+  buffers.
+- Added `compactSummaryMode=none` for no-full resident sequences and the live
+  scene auto path. This sets compact readback budgets to zero and skips the
+  per-step compact-summary `mapAsync` fence.
+- Disabled the raw WebGPU surface draw overlay by default because it composites
+  as a separate canvas and cannot depth-test against the Three scene when the
+  perspective shifts. It remains available with `surfaceOverlay=1`.
+- Confirmed in browser console harnesses that Workers are available in the
+  current page (`typeof Worker === "function"`) and the current ComputeManager
+  startup no longer emits the inline-worker fallback warning.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "compactSummaryMode none|budget no compact-summary|resident no-full step runs reaction|ping-pong unread retained buffers|cross-device retained product-event buffers"`
+  reported `52/52`.
+- PASS:
+  `node --test tests/sphReactionGpuKernel.test.mjs --test-name-pattern "no-full|reaction"`.
+- PASS:
+  `node --test tests/sphReactionGpuSummary.test.mjs --test-name-pattern "resident|product-event|summary"`.
+- PASS:
+  `node --test tests/opticalGpuBuffers.test.mjs tests/orchestration.test.mjs tests/sphPhaseRenderer.test.mjs`
+  reported `63/63`.
+- PASS browser manual resident probe on `http://localhost:5174/` Cs/H2O
+  MLS-MPM with `compactSummaryMode=none`: `issueCount=0`,
+  `Worker=function`, `stageTiming.totalMs=18.7`,
+  `reactionStep=7ms`, `compactSummary=0`,
+  `compactSummaryRequested=false`, retained reaction product-event buffer
+  ready.
+- PASS browser auto scheduler probe on the same route: completed first
+  16-step batch, `issueCount=0`, no resident error, `compactSummaryMode=none`,
+  final-step `stageTiming.totalMs=3`, `compactSummary=0`.
+- PASS visual perspective sanity: screenshots before/after an orbit drag were
+  nonblank, reported a single full-size Three canvas, and no separate raw
+  WebGPU overlay canvas.
+
+Open:
+
+- Headless/browser still reports WebGL `ReadPixels` performance warnings from
+  the Three/MarchingCubes fallback path.
+- The live render path is still not a true WebGPU-resident fluid renderer; the
+  WebGPU-Ocean-style architecture remains the next broad performance target.
+- Full scientific/physics validation still requires explicit compact or full
+  readback modes; the live no-full `none` mode is a performance/display mode,
+  not a validation substitute.
+
+## 2026-06-18 AKDT - WebGPU-Ocean MLS-MPM audit and performance routing
+
+Prompt time/date: 2026-06-18 AKDT, after the user asked whether a fundamental
+architectural fix already exists and warned against spending too much time
+optimizing code that will be replaced.
+
+Summary:
+
+- Confirmed the future performance fix is already planned in
+  `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`: an Ocean-style resident
+  GPU hot loop, not more CPU/readback fallback tuning.
+- Cloned and inspected WebGPU-Ocean under `/tmp/ulg-webgpu-ocean-audit`.
+- Audited its MLS-MPM dispatch order:
+  `clearGrid -> p2g_1 -> p2g_2 -> updateGrid -> g2p -> copyPosition`, repeated
+  inside one command encoder.
+- Verified the reference P2G/G2P shape: one invocation per particle for P2G
+  and G2P, `@workgroup_size(64)`, 3x3x3 node loops inside each particle
+  invocation, fixed-point integer `atomicAdd` for mass/momentum accumulation,
+  and grid-only clear/update/finalize passes.
+- Audited the reference renderer: particle-position buffers feed GPU
+  depth/thickness/sphere render passes directly, avoiding CPU mesh extraction
+  for the main fluid view.
+- Compared that to current ULG evidence: ULG's P2G shader is already
+  particle-parallel scatter with fixed-point atomics, but the hot path still
+  loses time to compact summary fences, reaction summary/readback cadence,
+  Worker residency failure, and product/gas/thermal sidecar scheduling.
+- Kept the tactical reaction-summary readback reduction only where it preserves
+  gas pressure evidence: no-full reaction stages keep compact/gas summary
+  reads but skip product-inventory and atom-residual readbacks by default.
+- Corrected the prior worker-warning interpretation: ULG passes
+  `enableWorkers=true` into the browser resident host, while PeerCompute's
+  `ComputeManager._supportsWorkers()` returned false in the captured context.
+  This is an open Worker capability/bootstrap blocker, not an intentionally
+  disabled host default.
+
+Files touched:
+
+- `src/runtime/sph/sphReactionGpuSummary.js`
+- `src/runtime/sph/sphReactionGpuKernel.js`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/sphReactionGpuSummary.test.mjs`
+- `tests/sphMlsMpmGpuStep.test.mjs`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/todo/README.md`
+- `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
+- `plan/done/webgpu-ocean-mlsmpm-reference-audit-2026-06-18.md`
+- `plan/log.md`
+
+Validation:
+
+- PASS: syntax checks for the touched SPH runtime and focused tests.
+- PASS: reaction summary/kernel tests and resident-step focused tests.
+- PASS: H2O/H2O MLS-MPM browser probe
+  `/tmp/ulg-h2o-h2o-mlsmpm-no-reaction-summary-readback-20260618.json`
+  classified `good` with zero browser-console issues/warnings.
+- PASS: Na/H2O MLS-MPM browser probe
+  `/tmp/ulg-na-h2o-mlsmpm-compact-gas-only-reaction-summary-20260618.json`
+  classified `good` with zero browser-console issues/warnings and preserved
+  `gpu-resident-reaction-pressure-summary`.
+
+Open:
+
+- Build the next performance slice as a replacement backend: an explicit
+  Ocean-style resident lane with scatter/tiled P2G, resident sidecars,
+  throttled compact diagnostics, and GPU-resident rendering/surface generation.
+- Fix Worker bootstrap/capability so browser resident stage tasks actually
+  leave the main thread when Worker residency is requested.
+- Investigate the separate hot Fe/H2O `ulg-sph-thermal-output-state` submitted
+  after destroy warning under the console harness.
+
+## 2026-06-18 AKDT - Browser console harness and WebGPU required limits
+
+Prompt time/date: 2026-06-18 AKDT, following the user's callout that the
+browser console harness was not being treated as part of visual validation.
+
+Summary:
+
+- Extended `scripts/sph-long-horizon-probe.mjs` to capture full Playwright
+  `console` and `pageerror` events for both scene and direct-resident probe
+  paths.
+- Classified WebGPU validation failures, WGSL parser errors, invalid GPU
+  objects, destroyed-buffer submits, cross-device buffers, warning-limit
+  messages, and page errors as `browser-console:*` analysis issues.
+- Added browser-console issue/warning aggregation to
+  `scripts/sph-visual-sanity-matrix.mjs` summaries.
+- Updated `requestOpticalGpuDevice()` to request supported higher
+  `maxBufferSize` and `maxStorageBufferBindingSize` limits, capped at 1 GiB
+  for resident SPH. This fixes the 305,015,808-byte material-interface
+  candidate buffer on capable adapters.
+- Added render-buffer preflights for max buffer size and storage binding size
+  so low-limit adapters fall back before invalid WebGPU buffers/bind groups are
+  created.
+- Recorded the `Web Workers not available` console warning as
+  `peercompute-worker-inline-fallback` warning evidence. Later source review
+  shows ULG passes `enableWorkers=true`, so the remaining warning is a Worker
+  capability/bootstrap blocker, not an expected disabled-by-config state.
+
+Files touched:
+
+- `src/runtime/material/opticalGpuBuffers.js`
+- `src/runtime/sph/sphRenderGpuKernel.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `tests/opticalGpuBuffers.test.mjs`
+- `tests/sphRenderGpuKernel.test.mjs`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/log.md`
+- `plan/done/webgpu-console-harness-and-buffer-limits-2026-06-18.md`
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/material/opticalGpuBuffers.js`,
+  `src/runtime/sph/sphRenderGpuKernel.js`,
+  `scripts/sph-long-horizon-probe.mjs`,
+  `scripts/sph-visual-sanity-matrix.mjs`,
+  `tests/opticalGpuBuffers.test.mjs`, and
+  `tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --test tests/opticalGpuBuffers.test.mjs` reported `17/17`.
+- PASS:
+  `node --test tests/sphRenderGpuKernel.test.mjs --test-name-pattern "material interface candidate"`
+  covered candidate parity plus low-limit max-buffer and storage-binding
+  fallback.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs` reported `2/2`.
+- PASS: visual matrix
+  `codex-console-harness-h2o-mlsmpm-20260618` reported `failedCount=0`,
+  empty `browserConsoleIssueCounts`, and one expected
+  `peercompute-worker-inline-fallback` warning.
+- PASS: Na/H2O MLS-MPM browser probe
+  `/tmp/ulg-na-h2o-mlsmpm-console-harness-2.json` reported top-level
+  `status=good`, empty `timeline.browserConsole.issueCounts`, and one expected
+  `peercompute-worker-inline-fallback` warning.
+
+Open:
+
+- Browser Worker bootstrap/capability remains open. The harness records the
+  warning without hiding it; it is separate from the WebGPU buffer-limit fix.
+- The separate hot Fe/H2O SPH destroyed thermal output buffer warning remains
+  open until a focused hot-buffer lifetime/lease pass reproduces it under the
+  new console harness.
+
+## 2026-06-18 AKDT - NodeKernel stage execution authority and WGSL active keyword fix
+
+Prompt time/date: 2026-06-18 AKDT, continuing the architecture refactor after
+the user reported MLS-MPM water/water flow plus browser WebGPU console errors.
+
+Summary:
+
+- Fixed the browser WGSL parser failure in
+  `ulg-sph-render-field-surface-summary` by renaming the reserved local
+  identifier `active` to `has_active_cells`.
+- Added a WebGPU ABI guard so exact WGSL `let|var|const active` declarations
+  do not re-enter the shader bundle.
+- Routed mechanics stage-chain execution through
+  `nodeKernel.executeGpuResidentLaneStagePlan()` when a real NodeKernel owns
+  the resident ComputeManager.
+- Preserved direct ComputeManager execution for injected/local-only paths.
+- Added stage-chain telemetry for NodeKernel execution authority and remote
+  result admission/refresh flags.
+- Recorded the separate `ulg-sph-thermal-output-state` destroyed-buffer warning
+  as open follow-up, not part of the render-field shader parser fix.
+
+Files touched:
+
+- `ulg-gpu-abi/src/wgsl.js`
+- `tests/webgpuKernelAbi.test.mjs`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/implementation-status.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/done/nodekernel-gpu-resident-stage-execution-routing-2026-06-18.md`
+- `plan/done/wgsl-render-field-surface-summary-active-keyword-2026-06-18.md`
+- `plan/log.md`
+
+Validation:
+
+- PASS: syntax checks for `src/runtime/sph/sphMlsMpmGpuStep.js`,
+  `tests/peercomputeComputeManagerIntegration.test.mjs`,
+  `ulg-gpu-abi/src/wgsl.js`, and `tests/webgpuKernelAbi.test.mjs`.
+- PASS: `node --test tests/webgpuKernelAbi.test.mjs` reported `2/2`.
+- PASS: focused PeerCompute integration reported `16/16`.
+- PASS: `npm run test:physics-atomics` reported `11` pass with `3` expected
+  opt-in skips.
+- PASS: visual matrix `codex-nodekernel-stage-execution-authority-20260618`
+  reported `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, and two frame artifacts per row.
+- PASS: shader/parser evidence found no `Invalid ShaderModule`,
+  `Invalid ComputePipeline`, or reserved-`active` messages. Full browser
+  console validation is now covered by the later console harness entry above.
+
+Open:
+
+- Wire opt-in non-advisory remote resident-stage execution result admission and
+  local hot-buffer refresh through NodeKernel.
+- Investigate the separate hot Fe/H2O SPH warning where
+  `ulg-sph-thermal-output-state` is submitted after destroy.
+
 ## 2026-06-18 AKDT - Solid H2O static sequence recheck
 
 Prompt time/date: 2026-06-18 AKDT, continuing the P0 physics behavior and
@@ -25823,3 +26178,144 @@ Open:
   fragmentation, CPU SPH liquid/solid stacked/blob behavior, mounted-route
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
+
+## 2026-06-18 AKDT - Resident point bridge fast path and benchmark split
+
+Summary:
+
+- Added a Three.js resident render-row point bridge for the default
+  `surfaceDraw=three-render-row-points` MLS-MPM browser path.
+- Skipped CPU `MarchingCubes` surface batching, resident render-field
+  surface-table capture, CPU surface apply, and setup presentation refresh for
+  resident Three bridge modes.
+- Kept material/mechanics/thermal/reaction table setup intact while publishing
+  an explicit skipped resident surface state and skipped surface-apply timing.
+- Changed resident render refresh so the point bridge does not rebuild
+  continuous surface batches from decoded render rows.
+- Published `materialKeys`/`phaseKeys` from decoded render-row summaries so
+  the probe recognizes H2O/Cs point-bridge visibility.
+- Updated `scripts/sph-long-horizon-probe.mjs` to treat
+  `three-render-row-points` with vertices as visible resident overlay
+  evidence.
+- Fixed small WebGPU optical lookup storage bindings by padding query/output
+  storage buffers and readback buffers to at least 16 bytes.
+- Added and refined `scripts/sph-performance-benchmark.mjs`; the benchmark now
+  reports benchmark status separately from physics probe status, and resident
+  final-step timing separately from probe-wall batch timing.
+
+Files touched:
+
+- `src/visualization/sphPhaseScene.js`
+- `src/visualization/sphPhaseDemoMount.js`
+- `src/runtime/material/opticalGpuBuffers.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-performance-benchmark.mjs`
+- `package.json`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
+- `plan/log.md`
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check src/runtime/material/opticalGpuBuffers.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --test tests/opticalGpuBuffers.test.mjs` reported `18/18`.
+- PASS:
+  `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=2&basen=2&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-points&blob=1' ULG_PROBE_OUTPUT=artifacts/sph-long-probe-smoke-after-output-padding.json ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_FAIL_ON_BAD=0 npm run probe:sph-long-horizon`
+  completed with `browserConsoleIssueCount=0`, `setParticlesTiming.totalMs=2.9`,
+  render FPS about `52.3`, `surfaceDrawVisibleRendererBridge=three-render-row-points`,
+  `residentOverlayVisibleSampleCount=1`, and no visual-surface issues.
+- PASS:
+  `ULG_PROBE_URL='/?drop=Cs&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&boxz=5&dropn=3&basen=5&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-points&blob=1' ULG_PROBE_OUTPUT=artifacts/sph-long-probe-cs-h2o-after.json ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_FAIL_ON_BAD=0 npm run probe:sph-long-horizon`
+  completed with `browserConsoleIssueCount=0`, `setParticlesTiming.totalMs=4.2`,
+  render FPS about `54.5`,
+  `residentProductMassStatus=resident-product-mass-buffer-retained`, and
+  `residentProductMassEosCouplingStatus=resident-product-mass-p2g-eos-sidecar-ready`.
+- PASS:
+  `ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-smoke-after.json npm run bench:sph-performance`
+  reported benchmark scenario `status=good`, `browserConsoleIssueCount=0`,
+  resident final-step `9.5ms`, and bridge `three-render-row-points`.
+- PASS:
+  `ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=1 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-1000-after.json npm run bench:sph-performance`
+  reported actual particles `1024`, benchmark scenario `status=good`,
+  `browserConsoleIssueCount=0`, resident final-step `9.7ms`, and bridge
+  `three-render-row-points`.
+- PASS:
+  `ULG_BENCH_PARTICLE_COUNTS=16 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=16 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-16x16-after2.json npm run bench:sph-performance`
+  reported `completedStepCount=16`, benchmark scenario `status=good`,
+  `browserConsoleIssueCount=0`, resident final-step `1.6ms`, and separate
+  `probeWallStepsPerSecond`.
+
+Open:
+
+- `three-render-row-points` is an interim renderer and still uses render-row
+  readback. The final WebGPU-Ocean-style renderer must consume resident GPU
+  buffers directly.
+- Compact motion proof remains disabled in the no-full performance route, so
+  physics probe status can remain `bad` with `missing-max-speed` and
+  `no-positive-displacement` while benchmark status is `good`.
+- Scene benchmark rows still need cumulative multi-step GPU queue timing.
+  Direct-resident rows now have queue-fenced fused-sequence timing, but the
+  broader harness still needs GPU-side active-grid bounds telemetry, cache
+  warm/cold split, and larger rows after the true resident surface path lands.
+
+## 2026-06-18 AKDT - Mobile resident sphere bridge and benchmark viewport coverage
+
+Summary:
+
+- Added `surfaceDraw=three-render-row-spheres`, a capped Three.js
+  `InstancedMesh` sphere bridge for resident render rows. Phone-sized mounted
+  views now default to this mode, while desktop keeps the point bridge.
+- Kept the mobile bridge in the normal Three scene/depth path so perspective
+  shifts do not depend on a separate raw WebGPU overlay.
+- Avoided per-instance color-buffer population on the sphere path; the mobile
+  bridge uses a fixed visible water material until the final GPU surface path
+  lands.
+- Extended the long-horizon probe and benchmark harness with viewport,
+  device-scale, mobile, and touch settings.
+- Extended benchmark rows with grid-node count, active-grid availability,
+  render-row readback byte length, surface draw byte counters, and estimated
+  readback bytes per batch/step.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS:
+  `ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-desktop-after-spheres.json ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_PORT=5197 ULG_BENCH_FAIL_ON_ERROR=1 npm run bench:sph-performance`
+  reported scenario `status=good`, `browserConsoleIssueCount=0`,
+  `surfaceDrawBridge=three-render-row-points`,
+  `fusedResidentMechanics=true`, `residentStageMs=2.2`,
+  `renderRowsReadbackByteLength=49152`, and
+  `estimatedReadbackBytesPerStep=12288`.
+- PASS:
+  `ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-mobile-spheres.json ULG_BENCH_PARTICLE_COUNTS=152 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_PORT=5198 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=3 ULG_BENCH_FAIL_ON_ERROR=1 npm run bench:sph-performance`
+  reported scenario `status=good`, `browserConsoleIssueCount=0`,
+  `surfaceDrawBridge=three-render-row-spheres`,
+  `fusedResidentMechanics=true`, `residentStageMs=1.6`,
+  `renderRowsReadbackByteLength=6144`, and
+  `estimatedReadbackBytesPerStep=1536`.
+- PASS:
+  mobile visual probe captured two frames under
+  `artifacts/sph-long-probe-mobile-h2o-spheres-after-cleanup-frames/` with
+  `browserConsole.issueCount=0`,
+  `renderState.backend=render-rows-three-sphere-bridge`,
+  `surfaceDrawVisibleRendererBridge=three-render-row-spheres`,
+  `surfaceDrawVisibleRenderSource=resident-render-rows-three-instanced-spheres`,
+  and `residentOverlayVisibleSampleCount=1`.
+
+Open:
+
+- This is a phone-readable tactical bridge, not Phase 5 completion. It still
+  uses render-row readback and CPU-owned Three instance matrices.
+- The no-full performance route still reports physics probe issues
+  `missing-max-speed` and `no-positive-displacement` because compact motion
+  proof is disabled there.
+- The true performance work remains the WebGPU-Ocean-style resident surface or
+  screen-space fluid renderer that consumes GPU buffers directly.

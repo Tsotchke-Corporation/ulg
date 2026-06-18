@@ -496,6 +496,38 @@ test('GPU broker marks granted leases retryable when a device is lost', async ()
   assert.equal(fallbackLease.status, 'fallback');
 });
 
+test('GPU broker requests resident WebGPU buffer limits when supported', async () => {
+  const fakeDevice = { lost: new Promise(() => {}) };
+  const adapterLimit = (4 * 1024 * 1024 * 1024) - 4;
+  let requestDescriptor = null;
+  const broker = new GpuBroker({
+    navigatorRef: {
+      gpu: {
+        async requestAdapter() {
+          return {
+            features: new Set(),
+            limits: {
+              maxStorageBuffersPerShaderStage: 12,
+              maxBufferSize: adapterLimit,
+              maxStorageBufferBindingSize: adapterLimit
+            },
+            async requestDevice(descriptor) {
+              requestDescriptor = descriptor;
+              return fakeDevice;
+            }
+          };
+        }
+      }
+    }
+  });
+  await broker.probe();
+  const device = await broker.getDevice();
+  assert.equal(device, fakeDevice);
+  assert.equal(requestDescriptor.requiredLimits.maxBufferSize, adapterLimit);
+  assert.equal(requestDescriptor.requiredLimits.maxStorageBufferBindingSize, adapterLimit);
+  assert.equal(broker.capabilities.requiredLimits.maxBufferSize, adapterLimit);
+});
+
 test('WorkerSupervisor records gpu-device-lost messages without relaxing completion', async () => {
   class FakeWorker extends EventTarget {
     postMessage(message) {

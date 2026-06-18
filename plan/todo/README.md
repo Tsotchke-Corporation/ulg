@@ -35,6 +35,52 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-18 AKDT: WebGPU-Ocean Phase 1 audit is complete
+and it confirms the fundamental performance fix already in
+`webgpu-ocean-mlsmpm-simulator-plan.md`. The reference loop is particle-
+parallel for P2G/G2P, uses fixed-point integer `atomicAdd` scatter into grid
+cells, keeps grid work in grid-only passes, and renders particle-derived
+depth/thickness on GPU. ULG now has particle-parallel scatter P2G, so do not
+spend major effort optimizing fallback readback paths that the replacement
+lane should remove. The next performance slice is an explicit Ocean-style
+resident lane: scatter/tiled P2G, resident product/gas/thermal sidecars,
+throttled compact diagnostics, and GPU surface/render generation.
+
+Current routing note, 2026-06-18 AKDT: browser visual probes now treat
+DevTools console WebGPU validation as first-class evidence. The probe captures
+page console/pageerror events, analysis emits `browser-console:*` issues, and
+the matrix aggregates `browserConsoleIssueCounts`. Do not call a browser
+visual run clean unless this count is empty. The resident SPH WebGPU device
+request now asks for supported higher `maxBufferSize` and
+`maxStorageBufferBindingSize` limits, fixing the 305,015,808-byte material
+interface candidate buffer on capable adapters. The remaining
+`peercompute-worker-inline-fallback` console warning is not explained by a
+ULG disabled-by-default setting: the browser resident host passes
+`enableWorkers=true`, while PeerCompute still reports Worker support false in
+the captured context. Treat it as Worker capability/bootstrap work, not as a
+WebGPU memory-limit or shader issue.
+
+Current routing note, 2026-06-18 AKDT: ULG now follows NodeKernel for both GPU
+resident stage placement and execution when a real NodeKernel owns the
+resident ComputeManager. The mechanics stage chain records
+`node-kernel-execution` and
+`peercompute.nodekernel.gpu-resident-stage-execution-authority.v0`; direct
+injected ComputeManagers stay on `compute-manager-execution`. PeerCompute is
+now ahead of the older todo wording: placement executor contracts, execution
+authority, remote result metadata admission, and local hot-buffer refresh
+surfaces exist in sibling PeerCompute. Next architecture priority is to wire
+ULG to those remote/admission/refresh surfaces deliberately for opt-in
+non-advisory remote resident-stage work, without treating remote retained refs
+as local handles.
+
+Current routing note, 2026-06-18 AKDT: the browser WGSL parser error in
+`ulg-sph-render-field-surface-summary` is fixed. `active` was renamed to
+`has_active_cells`, and the WebGPU ABI test now guards against exact WGSL
+`let|var|const active` declarations. Keep the separate
+`ulg-sph-thermal-output-state used in submit while destroyed` warning in the
+behavior/visual-trust lane; it is likely a thermal hot-buffer lifetime or lease
+cleanup bug, not the render-field surface-summary parser failure.
+
 Current routing note, 2026-06-18 AKDT: the cold same-material CPU-SPH
 solid-H2O static row remains stable under the current dense visual sequence
 harness. `codex-solid-h2o-static-sequence-20260618` passed with nine frames

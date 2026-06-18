@@ -1,0 +1,87 @@
+const BUFFER_DEVICE = new WeakMap();
+const HANDLE_DEVICE = new WeakMap();
+const DEVICE_TOKEN = Symbol('ulg.webgpu.device');
+const DEVICE_ID_TOKEN = Symbol('ulg.webgpu.deviceId');
+
+let nextDeviceId = 1;
+
+function isObject(value) {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
+}
+
+function assignHidden(target, key, value) {
+  if (!isObject(target)) return;
+  try {
+    Object.defineProperty(target, key, {
+      value,
+      configurable: true
+    });
+  } catch {
+    // Some host WebGPU objects may be non-extensible. The WeakMaps still carry
+    // identity while the object remains live.
+  }
+}
+
+export function webGpuDeviceId(device) {
+  if (!isObject(device)) return null;
+  if (device[DEVICE_ID_TOKEN]) return device[DEVICE_ID_TOKEN];
+  const id = `ulg-webgpu-device:${nextDeviceId}`;
+  nextDeviceId += 1;
+  assignHidden(device, DEVICE_ID_TOKEN, id);
+  return id;
+}
+
+export function tagWebGpuBufferDevice(buffer, device) {
+  if (!isObject(buffer) || !isObject(device)) return buffer;
+  BUFFER_DEVICE.set(buffer, device);
+  assignHidden(buffer, DEVICE_TOKEN, device);
+  assignHidden(buffer, DEVICE_ID_TOKEN, webGpuDeviceId(device));
+  return buffer;
+}
+
+export function tagResidentProductMassDevice(handle, device) {
+  if (!isObject(handle) || !isObject(device)) return handle;
+  HANDLE_DEVICE.set(handle, device);
+  assignHidden(handle, DEVICE_TOKEN, device);
+  assignHidden(handle, DEVICE_ID_TOKEN, webGpuDeviceId(device));
+  tagWebGpuBufferDevice(handle.productEventBuffer, device);
+  return handle;
+}
+
+export function webGpuBufferDevice(buffer) {
+  if (!isObject(buffer)) return null;
+  return BUFFER_DEVICE.get(buffer) || buffer[DEVICE_TOKEN] || null;
+}
+
+export function residentProductMassDevice(handle) {
+  if (!isObject(handle)) return null;
+  return HANDLE_DEVICE.get(handle) || handle[DEVICE_TOKEN] || webGpuBufferDevice(handle.productEventBuffer);
+}
+
+export function webGpuBufferMatchesDevice(buffer, device) {
+  if (!isObject(buffer) || !isObject(device)) return true;
+  const owner = webGpuBufferDevice(buffer);
+  return !owner || owner === device;
+}
+
+export function residentProductMassMatchesDevice(handle, device) {
+  if (!isObject(handle) || !isObject(device)) return true;
+  const owner = residentProductMassDevice(handle);
+  return !owner || owner === device;
+}
+
+export function webGpuDeviceMismatchInfo({ buffer = null, residentProductMass = null, device = null } = {}) {
+  const owner = residentProductMassDevice(residentProductMass) || webGpuBufferDevice(buffer);
+  if (!owner || !device || owner === device) {
+    return {
+      mismatch: false,
+      sourceDeviceId: owner ? webGpuDeviceId(owner) : null,
+      consumerDeviceId: device ? webGpuDeviceId(device) : null
+    };
+  }
+  return {
+    mismatch: true,
+    sourceDeviceId: webGpuDeviceId(owner),
+    consumerDeviceId: webGpuDeviceId(device)
+  };
+}

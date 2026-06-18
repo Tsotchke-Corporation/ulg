@@ -369,6 +369,8 @@ export function extractSphRenderRowsCpu({
 
 function writeStorageBuffer(device, label, data, extraUsage = 0) {
   const byteLength = Math.max(4, data.byteLength);
+  assertWebGpuBufferSizeFitsDevice(device, label, byteLength);
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, label, byteLength);
   const buffer = device.createBuffer({
     label,
     size: byteLength,
@@ -376,6 +378,30 @@ function writeStorageBuffer(device, label, data, extraUsage = 0) {
   });
   if (data.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+function webGpuDeviceMaxBufferSize(device) {
+  const value = Number(device?.limits?.maxBufferSize);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function webGpuDeviceMaxStorageBufferBindingSize(device) {
+  const value = Number(device?.limits?.maxStorageBufferBindingSize);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function assertWebGpuBufferSizeFitsDevice(device, label, byteLength) {
+  const maxBufferSize = webGpuDeviceMaxBufferSize(device);
+  if (maxBufferSize == null) return;
+  if (byteLength <= maxBufferSize) return;
+  throw new RangeError(`${label} byte length ${byteLength} exceeds WebGPU device maxBufferSize ${maxBufferSize}`);
+}
+
+function assertWebGpuStorageBufferBindingSizeFitsDevice(device, label, byteLength) {
+  const maxStorageBufferBindingSize = webGpuDeviceMaxStorageBufferBindingSize(device);
+  if (maxStorageBufferBindingSize == null) return;
+  if (byteLength <= maxStorageBufferBindingSize) return;
+  throw new RangeError(`${label} byte length ${byteLength} exceeds WebGPU device maxStorageBufferBindingSize ${maxStorageBufferBindingSize}`);
 }
 
 function createParamsArray({
@@ -508,6 +534,7 @@ function createSurfaceDrawParamsArray({
 }
 
 async function readBuffer(device, sourceBuffer, byteLength, label = 'ulg-sph-render-readback') {
+  assertWebGpuBufferSizeFitsDevice(device, label, Math.max(4, byteLength));
   const readback = device.createBuffer({
     label,
     size: Math.max(4, byteLength),
@@ -1312,6 +1339,12 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
   const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
   const totalFieldCells = renderField.totalFieldCells ?? 0;
   const candidateCount = totalFieldCells * 3;
+  const candidateRowsByteLength = candidateCount
+    * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-candidates', Math.max(4, candidateRowsByteLength));
+  assertWebGpuBufferSizeFitsDevice(device, 'ulg-sph-interface-candidate-readback', Math.max(4, candidateRowsByteLength));
+  assertWebGpuStorageBufferBindingSizeFitsDevice(device, 'ulg-sph-interface-candidates', Math.max(4, candidateRowsByteLength));
   const borrowedFieldRowsBuffer = fieldRowsBuffer || null;
   const borrowedSurfaceBuffer = surfaceBuffer || null;
   const sourceFieldRowsBuffer = borrowedFieldRowsBuffer || writeStorageBuffer(
@@ -1325,12 +1358,11 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
     'ulg-sph-interface-render-surfaces',
     renderField.surfaceTable.records
   );
-  const candidateRowsBuffer = writeStorageBuffer(
-    device,
-    'ulg-sph-interface-candidates',
-    new Float32Array(candidateCount * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS),
-    GPU_BUFFER_USAGE.COPY_SRC
-  );
+  const candidateRowsBuffer = device.createBuffer({
+    label: 'ulg-sph-interface-candidates',
+    size: Math.max(4, candidateRowsByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-interface-candidate-params',
     size: 32,
@@ -1381,7 +1413,7 @@ export async function buildSphMaterialInterfaceCandidateFieldWebGpu({
   const bytes = await readBuffer(
     device,
     candidateRowsBuffer,
-    candidateCount * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    candidateRowsByteLength,
     'ulg-sph-interface-candidate-readback'
   );
   queueCompletionStatus = 'readback-map-completed';

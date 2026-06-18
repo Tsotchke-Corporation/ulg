@@ -2,6 +2,18 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-18 NodeKernel execution authority consumption: ULG now
+uses `nodeKernel.executeGpuResidentLaneStagePlan()` for mechanics stage-chain
+execution when a real NodeKernel owns the resident ComputeManager. The raw
+ComputeManager execution remains the direct fallback for injected/local-only
+managers, but NodeKernel-owned paths now record
+`peercompute.nodekernel.gpu-resident-stage-execution-authority.v0` alongside
+the existing NodeKernel placement preflight. If a future remote execution
+returns nonlocal retained refs that require hot-buffer refresh, ULG rejects the
+local lane instead of completing it with remote refs. Next: wire explicit,
+opt-in remote resident-stage result admission and local hot-buffer refresh
+through the sibling PeerCompute NodeKernel surfaces.
+
 Status update, 2026-06-17 NodeKernel placement wrapper: sibling PeerCompute
 now wraps GPU resident stage placement preflight at the NodeKernel layer, and
 ULG now uses that wrapper when a real NodeKernel is supplied. Local and

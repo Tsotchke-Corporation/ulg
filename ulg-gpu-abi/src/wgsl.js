@@ -4263,9 +4263,17 @@ struct StressRows {
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> mls_mechanics: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> grid_nodes: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> grid_accumulators: array<atomic<i32>>;
 @group(0) @binding(4) var<uniform> params: P2gProjectionParams;
 @group(0) @binding(5) var<storage, read> product_events: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> grid_nodes: array<vec4<f32>>;
+
+const P2G_ATOMIC_SCALE: f32 = 65536.0;
+const P2G_ATOMIC_INV_SCALE: f32 = 1.0 / P2G_ATOMIC_SCALE;
+
+fn p2g_quantize(value: f32) -> i32 {
+  return i32(round(clamp(value * P2G_ATOMIC_SCALE, -2147483000.0, 2147483000.0)));
+}
 
 fn quadratic_weights(fx: f32) -> vec3<f32> {
   let a = 1.5 - fx;
@@ -4279,6 +4287,54 @@ fn weight_at(weights: vec3<f32>, offset: i32) -> f32 {
   if (offset == 1) { return weights.y; }
   if (offset == 2) { return weights.z; }
   return 0.0;
+}
+
+fn p2g_weight_at(weights: vec3<f32>, offset: i32) -> f32 {
+  return weight_at(weights, offset);
+}
+
+fn p2g_storage_index(i: u32, j: u32, k: u32) -> u32 {
+  return (i * params.grid_ny + j) * params.grid_nz + k;
+}
+
+fn p2g_node_enabled(i: u32, j: u32, k: u32) -> bool {
+  return true;
+}
+
+fn p2g_finalize_node_index(global_index: u32) -> u32 {
+  if (global_index >= params.grid_node_count) {
+    return params.grid_node_count;
+  }
+  return global_index;
+}
+
+fn p2g_try_storage_index(node_i: i32, node_j: i32, node_k: i32) -> u32 {
+  let i = node_i + i32(params.shift);
+  let j = node_j + i32(params.shift);
+  let k = node_k + i32(params.shift);
+  if (
+    i < 0 || j < 0 || k < 0
+    || i >= i32(params.grid_nx)
+    || j >= i32(params.grid_ny)
+    || k >= i32(params.grid_nz)
+  ) {
+    return params.grid_node_count;
+  }
+  let storage_i = u32(i);
+  let storage_j = u32(j);
+  let storage_k = u32(k);
+  if (!p2g_node_enabled(storage_i, storage_j, storage_k)) {
+    return params.grid_node_count;
+  }
+  return p2g_storage_index(storage_i, storage_j, storage_k);
+}
+
+fn p2g_atomic_add(node_index: u32, mass: f32, momentum: vec3<f32>) {
+  let base = node_index * 4u;
+  atomicAdd(&grid_accumulators[base], p2g_quantize(mass));
+  atomicAdd(&grid_accumulators[base + 1u], p2g_quantize(momentum.x));
+  atomicAdd(&grid_accumulators[base + 2u], p2g_quantize(momentum.y));
+  atomicAdd(&grid_accumulators[base + 3u], p2g_quantize(momentum.z));
 }
 
 fn product_event_row0(event_index: u32) -> vec4<f32> {
@@ -4391,10 +4447,216 @@ fn corotated_stress(
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let node_index = global_id.x;
+  let particle_index = global_id.x;
+  if (particle_index >= params.particle_count) {
+    return;
+  }
+
+  let state_base = particle_index * 2u;
+  let thermo_base = particle_index * 3u;
+  let mechanics_base = particle_index * 8u;
+  let pos_mass = sph_state[state_base];
+  let vel_u = sph_state[state_base + 1u];
+  let thermo0 = sph_thermo[thermo_base];
+  let _thermo_status = sph_thermo[thermo_base + 2u].z;
+  if (!(pos_mass.w > 0.0)) {
+    return;
+  }
+
+  let p_grid = pos_mass.xyz * params.inv_grid_spacing_m;
+  let base_x = i32(floor(p_grid.x - 0.5));
+  let base_y = i32(floor(p_grid.y - 0.5));
+  let base_z = i32(floor(p_grid.z - 0.5));
+  let wx = quadratic_weights(p_grid.x - f32(base_x));
+  let wy = quadratic_weights(p_grid.y - f32(base_y));
+  let wz = quadratic_weights(p_grid.z - f32(base_z));
+
+  let row0 = mls_mechanics[mechanics_base];
+  let row1 = mls_mechanics[mechanics_base + 1u];
+  let row2 = mls_mechanics[mechanics_base + 2u];
+  let row3 = mls_mechanics[mechanics_base + 3u];
+  let row4 = mls_mechanics[mechanics_base + 4u];
+  let row5 = mls_mechanics[mechanics_base + 5u];
+  let row6 = mls_mechanics[mechanics_base + 6u];
+  let row7 = mls_mechanics[mechanics_base + 7u];
+  let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
+  let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
+  let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
+  let c00 = row2.y; let c01 = row2.z; let c02 = row2.w;
+  let c10 = row3.x; let c11 = row3.y; let c12 = row3.z;
+  let c20 = row3.w; let c21 = row4.x; let c22 = row4.y;
+  let volume = max(row4.w * max(row4.z, 1.0e-9), 0.0);
+  var sigma = StressRows(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  if (params.dt != 0.0 && volume > 0.0) {
+    if (row5.x > 0.5 && row5.w > 0.0) {
+      sigma = corotated_stress(
+        f00, f01, f02,
+        f10, f11, f12,
+        f20, f21, f22,
+        row5.w,
+        row6.x
+      );
+    } else {
+      let density = pos_mass.w / max(volume, 1.0e-30);
+      let pressure = params.internal_pressure_scale * (
+        packed_pressure(density, thermo0.w, row6.y, row6.z) + max(row7.x, 0.0)
+      );
+      let dynamic_viscosity = max(row7.y, 0.0);
+      let div_third = (c00 + c11 + c22) / 3.0;
+      let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
+      let visc11 = 2.0 * dynamic_viscosity * (c11 - div_third);
+      let visc22 = 2.0 * dynamic_viscosity * (c22 - div_third);
+      let visc01 = dynamic_viscosity * (c01 + c10);
+      let visc02 = dynamic_viscosity * (c02 + c20);
+      let visc12 = dynamic_viscosity * (c12 + c21);
+      sigma = StressRows(
+        vec3<f32>(-pressure + visc00, visc01, visc02),
+        vec3<f32>(visc01, -pressure + visc11, visc12),
+        vec3<f32>(visc02, visc12, -pressure + visc22)
+      );
+    }
+  }
+  let stress_scale = -params.dt * volume * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
+  let aff_x = vec3<f32>(
+    pos_mass.w * c00 + stress_scale * sigma.x.x,
+    pos_mass.w * c01 + stress_scale * sigma.x.y,
+    pos_mass.w * c02 + stress_scale * sigma.x.z
+  );
+  let aff_y = vec3<f32>(
+    pos_mass.w * c10 + stress_scale * sigma.y.x,
+    pos_mass.w * c11 + stress_scale * sigma.y.y,
+    pos_mass.w * c12 + stress_scale * sigma.y.z
+  );
+  let aff_z = vec3<f32>(
+    pos_mass.w * c20 + stress_scale * sigma.z.x,
+    pos_mass.w * c21 + stress_scale * sigma.z.y,
+    pos_mass.w * c22 + stress_scale * sigma.z.z
+  );
+
+  for (var ox = 0i; ox < 3i; ox = ox + 1i) {
+    for (var oy = 0i; oy < 3i; oy = oy + 1i) {
+      for (var oz = 0i; oz < 3i; oz = oz + 1i) {
+        let node_i = base_x + ox;
+        let node_j = base_y + oy;
+        let node_k = base_z + oz;
+        let node_index = p2g_try_storage_index(node_i, node_j, node_k);
+        if (node_index >= params.grid_node_count) {
+          continue;
+        }
+        let weight = p2g_weight_at(wx, ox) * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz);
+        if (weight == 0.0) {
+          continue;
+        }
+        let node_pos = vec3<f32>(
+          f32(node_i) * params.grid_spacing_m,
+          f32(node_j) * params.grid_spacing_m,
+          f32(node_k) * params.grid_spacing_m
+        );
+        let dpos = node_pos - pos_mass.xyz;
+        let affine_momentum = vec3<f32>(
+          dot(aff_x, dpos),
+          dot(aff_y, dpos),
+          dot(aff_z, dpos)
+        );
+        let particle_momentum = pos_mass.w * vel_u.xyz + affine_momentum;
+        p2g_atomic_add(node_index, weight * pos_mass.w, weight * particle_momentum);
+      }
+    }
+  }
+}
+
+@compute @workgroup_size(64)
+fn scatter_product_events(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let event_index = global_id.x;
+  if (event_index >= params.resident_product_event_count) {
+    return;
+  }
+
+  let event0 = product_event_row0(event_index);
+  let event3 = product_event_row3(event_index);
+  let event4 = product_event_row4(event_index);
+  let event5 = product_event_row5(event_index);
+  let event6 = product_event_row6(event_index);
+  let event7 = product_event_row7(event_index);
+  let event_unplaced_mass_kg = event3.y;
+  let event_status = event4.z;
+  if (event_status != 1.0 || event_unplaced_mass_kg <= 0.0) {
+    return;
+  }
+
+  let event_grid = event0.xyz * params.inv_grid_spacing_m;
+  let base_x = i32(floor(event_grid.x - 0.5));
+  let base_y = i32(floor(event_grid.y - 0.5));
+  let base_z = i32(floor(event_grid.z - 0.5));
+  let wx = quadratic_weights(event_grid.x - f32(base_x));
+  let wy = quadratic_weights(event_grid.y - f32(base_y));
+  let wz = quadratic_weights(event_grid.z - f32(base_z));
+  let support_volume_m3 = max(event5.w, 0.0);
+  let rest_density_kg_per_m3 = event4.y;
+  let sound_speed_m_per_s = event6.w;
+  let eos_model_id = event7.x;
+
+  for (var ox = 0i; ox < 3i; ox = ox + 1i) {
+    for (var oy = 0i; oy < 3i; oy = oy + 1i) {
+      for (var oz = 0i; oz < 3i; oz = oz + 1i) {
+        let node_i = base_x + ox;
+        let node_j = base_y + oy;
+        let node_k = base_z + oz;
+        let node_index = p2g_try_storage_index(node_i, node_j, node_k);
+        if (node_index >= params.grid_node_count) {
+          continue;
+        }
+        let weight = p2g_weight_at(wx, ox) * p2g_weight_at(wy, oy) * p2g_weight_at(wz, oz);
+        if (weight == 0.0) {
+          continue;
+        }
+        var pressure_affine = vec3<f32>(0.0);
+        if (params.dt != 0.0 && support_volume_m3 > 0.0) {
+          let event_density = event_unplaced_mass_kg / max(support_volume_m3, 1.0e-30);
+          let event_pressure = params.internal_pressure_scale * packed_pressure(
+            event_density,
+            rest_density_kg_per_m3,
+            sound_speed_m_per_s,
+            eos_model_id
+          );
+          let event_stress_scale = -params.dt * support_volume_m3 * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
+          let diagonal_affine = event_stress_scale * -event_pressure;
+          let node_pos = vec3<f32>(
+            f32(node_i) * params.grid_spacing_m,
+            f32(node_j) * params.grid_spacing_m,
+            f32(node_k) * params.grid_spacing_m
+          );
+          let event_dpos = node_pos - event0.xyz;
+          pressure_affine = vec3<f32>(
+            diagonal_affine * event_dpos.x,
+            diagonal_affine * event_dpos.y,
+            diagonal_affine * event_dpos.z
+          );
+        }
+        p2g_atomic_add(
+          node_index,
+          weight * event_unplaced_mass_kg,
+          weight * (event_unplaced_mass_kg * event5.xyz + pressure_affine)
+        );
+      }
+    }
+  }
+}
+
+@compute @workgroup_size(64)
+fn finalize_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  let node_index = p2g_finalize_node_index(global_id.x);
   if (node_index >= params.grid_node_count) {
     return;
   }
+
+  let accumulator_base = node_index * 4u;
+  let mass = f32(atomicLoad(&grid_accumulators[accumulator_base])) * P2G_ATOMIC_INV_SCALE;
+  let momentum = vec3<f32>(
+    f32(atomicLoad(&grid_accumulators[accumulator_base + 1u])) * P2G_ATOMIC_INV_SCALE,
+    f32(atomicLoad(&grid_accumulators[accumulator_base + 2u])) * P2G_ATOMIC_INV_SCALE,
+    f32(atomicLoad(&grid_accumulators[accumulator_base + 3u])) * P2G_ATOMIC_INV_SCALE
+  );
 
   let plane = params.grid_ny * params.grid_nz;
   let i = node_index / plane;
@@ -4409,160 +4671,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     f32(node_j) * params.grid_spacing_m,
     f32(node_k) * params.grid_spacing_m
   );
-
-  var mass = 0.0;
-  var momentum = vec3<f32>(0.0, 0.0, 0.0);
-
-  for (var particle_index = 0u; particle_index < params.particle_count; particle_index = particle_index + 1u) {
-    let state_base = particle_index * 2u;
-    let thermo_base = particle_index * 3u;
-    let mechanics_base = particle_index * 8u;
-    let pos_mass = sph_state[state_base];
-    let vel_u = sph_state[state_base + 1u];
-    let thermo0 = sph_thermo[thermo_base];
-    let _thermo_status = sph_thermo[thermo_base + 2u].z;
-    let p_grid = pos_mass.xyz * params.inv_grid_spacing_m;
-    let base_x = i32(floor(p_grid.x - 0.5));
-    let base_y = i32(floor(p_grid.y - 0.5));
-    let base_z = i32(floor(p_grid.z - 0.5));
-    let ox = node_i - base_x;
-    let oy = node_j - base_y;
-    let oz = node_k - base_z;
-    if (ox < 0 || ox > 2 || oy < 0 || oy > 2 || oz < 0 || oz > 2) {
-      continue;
-    }
-
-    let wx = quadratic_weights(p_grid.x - f32(base_x));
-    let wy = quadratic_weights(p_grid.y - f32(base_y));
-    let wz = quadratic_weights(p_grid.z - f32(base_z));
-    let weight = weight_at(wx, ox) * weight_at(wy, oy) * weight_at(wz, oz);
-    if (weight == 0.0) {
-      continue;
-    }
-
-    let row0 = mls_mechanics[mechanics_base];
-    let row1 = mls_mechanics[mechanics_base + 1u];
-    let row2 = mls_mechanics[mechanics_base + 2u];
-    let row3 = mls_mechanics[mechanics_base + 3u];
-    let row4 = mls_mechanics[mechanics_base + 4u];
-    let row5 = mls_mechanics[mechanics_base + 5u];
-    let row6 = mls_mechanics[mechanics_base + 6u];
-    let row7 = mls_mechanics[mechanics_base + 7u];
-    let f00 = row0.x; let f01 = row0.y; let f02 = row0.z;
-    let f10 = row0.w; let f11 = row1.x; let f12 = row1.y;
-    let f20 = row1.z; let f21 = row1.w; let f22 = row2.x;
-    let c00 = row2.y; let c01 = row2.z; let c02 = row2.w;
-    let c10 = row3.x; let c11 = row3.y; let c12 = row3.z;
-    let c20 = row3.w; let c21 = row4.x; let c22 = row4.y;
-    let dpos = node_pos - pos_mass.xyz;
-    let volume = max(row4.w * max(row4.z, 1.0e-9), 0.0);
-    var sigma = StressRows(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-    if (params.dt != 0.0 && volume > 0.0) {
-      if (row5.x > 0.5 && row5.w > 0.0) {
-        sigma = corotated_stress(
-          f00, f01, f02,
-          f10, f11, f12,
-          f20, f21, f22,
-          row5.w,
-          row6.x
-        );
-      } else {
-        let density = pos_mass.w / max(volume, 1.0e-30);
-        let pressure = params.internal_pressure_scale * (
-          packed_pressure(density, thermo0.w, row6.y, row6.z) + max(row7.x, 0.0)
-        );
-        let dynamic_viscosity = max(row7.y, 0.0);
-        let div_third = (c00 + c11 + c22) / 3.0;
-        let visc00 = 2.0 * dynamic_viscosity * (c00 - div_third);
-        let visc11 = 2.0 * dynamic_viscosity * (c11 - div_third);
-        let visc22 = 2.0 * dynamic_viscosity * (c22 - div_third);
-        let visc01 = dynamic_viscosity * (c01 + c10);
-        let visc02 = dynamic_viscosity * (c02 + c20);
-        let visc12 = dynamic_viscosity * (c12 + c21);
-	        sigma = StressRows(
-	          vec3<f32>(-pressure + visc00, visc01, visc02),
-	          vec3<f32>(visc01, -pressure + visc11, visc12),
-	          vec3<f32>(visc02, visc12, -pressure + visc22)
-	        );
-      }
-    }
-    let stress_scale = -params.dt * volume * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
-    let aff_x = vec3<f32>(
-      pos_mass.w * c00 + stress_scale * sigma.x.x,
-      pos_mass.w * c01 + stress_scale * sigma.x.y,
-      pos_mass.w * c02 + stress_scale * sigma.x.z
-    );
-    let aff_y = vec3<f32>(
-      pos_mass.w * c10 + stress_scale * sigma.y.x,
-      pos_mass.w * c11 + stress_scale * sigma.y.y,
-      pos_mass.w * c12 + stress_scale * sigma.y.z
-    );
-    let aff_z = vec3<f32>(
-      pos_mass.w * c20 + stress_scale * sigma.z.x,
-      pos_mass.w * c21 + stress_scale * sigma.z.y,
-      pos_mass.w * c22 + stress_scale * sigma.z.z
-    );
-    let affine_momentum = vec3<f32>(
-      dot(aff_x, dpos),
-      dot(aff_y, dpos),
-      dot(aff_z, dpos)
-    );
-    let particle_momentum = pos_mass.w * vel_u.xyz + affine_momentum;
-    mass = mass + weight * pos_mass.w;
-    momentum = momentum + weight * particle_momentum;
-  }
-
-  for (var event_index = 0u; event_index < params.resident_product_event_count; event_index = event_index + 1u) {
-    let event0 = product_event_row0(event_index);
-    let event3 = product_event_row3(event_index);
-    let event4 = product_event_row4(event_index);
-    let event5 = product_event_row5(event_index);
-    let event6 = product_event_row6(event_index);
-    let event7 = product_event_row7(event_index);
-    let event_unplaced_mass_kg = event3.y;
-    let event_status = event4.z;
-    if (event_status != 1.0 || event_unplaced_mass_kg <= 0.0) {
-      continue;
-    }
-    let event_grid = event0.xyz * params.inv_grid_spacing_m;
-    let base_x = i32(floor(event_grid.x - 0.5));
-    let base_y = i32(floor(event_grid.y - 0.5));
-    let base_z = i32(floor(event_grid.z - 0.5));
-    let ox = node_i - base_x;
-    let oy = node_j - base_y;
-    let oz = node_k - base_z;
-    if (ox < 0 || ox > 2 || oy < 0 || oy > 2 || oz < 0 || oz > 2) {
-      continue;
-    }
-    let wx = quadratic_weights(event_grid.x - f32(base_x));
-    let wy = quadratic_weights(event_grid.y - f32(base_y));
-    let wz = quadratic_weights(event_grid.z - f32(base_z));
-    let weight = weight_at(wx, ox) * weight_at(wy, oy) * weight_at(wz, oz);
-    mass = mass + weight * event_unplaced_mass_kg;
-    let support_volume_m3 = max(event5.w, 0.0);
-    let rest_density_kg_per_m3 = event4.y;
-    let sound_speed_m_per_s = event6.w;
-    let eos_model_id = event7.x;
-    var pressure_affine = vec3<f32>(0.0);
-    if (params.dt != 0.0 && support_volume_m3 > 0.0) {
-      let event_density = event_unplaced_mass_kg / max(support_volume_m3, 1.0e-30);
-      let event_pressure = params.internal_pressure_scale * packed_pressure(
-        event_density,
-        rest_density_kg_per_m3,
-        sound_speed_m_per_s,
-        eos_model_id
-      );
-      let event_stress_scale = -params.dt * support_volume_m3 * 4.0 * params.inv_grid_spacing_m * params.inv_grid_spacing_m;
-      let diagonal_affine = event_stress_scale * -event_pressure;
-      let event_dpos = node_pos - event0.xyz;
-      pressure_affine = vec3<f32>(
-        diagonal_affine * event_dpos.x,
-        diagonal_affine * event_dpos.y,
-        diagonal_affine * event_dpos.z
-      );
-    }
-    momentum = momentum + weight * (event_unplaced_mass_kg * event5.xyz + pressure_affine);
-  }
 
   let status = select(0.0, 1.0, mass > 0.0);
   grid_nodes[node_index * 2u] = vec4<f32>(mass, momentum.x, momentum.y, momentum.z);

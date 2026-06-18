@@ -2,6 +2,18 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-18 NodeKernel resident-stage execution authority:
+Sibling PeerCompute now has the full fail-closed resident-stage authority
+sequence: placement executor contract, execution authority, remote result
+metadata admission, and local hot-buffer refresh from admission. ULG now
+consumes the NodeKernel execution wrapper for mechanics stage-chain execution
+when a real NodeKernel owns the resident ComputeManager. This closes the local
+authority mismatch where ULG asked NodeKernel for placement but executed
+directly through ComputeManager. The next law-graph step is not another
+parallel scheduler; it is an explicit opt-in remote resident-stage lane that
+admits remote compact metadata through StateManager and refreshes local hot
+buffers before any accepted mutation.
+
 Status update, 2026-06-17 NodeKernel resident-stage placement wrapper:
 PeerCompute now has the NodeKernel-side authority envelope for GPU resident
 stage placement preflight. This is the law-graph boundary ULG needs before

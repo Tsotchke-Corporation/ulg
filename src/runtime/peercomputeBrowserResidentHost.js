@@ -4940,7 +4940,7 @@ export async function createPeerComputeResidentAuthorityHost({
   enablePersistence = false,
   disableNetworkProvider = true,
   disableBroadcast = true,
-  enableWorkers = false,
+  enableWorkers = true,
   enableWebGPU = true,
   gpuDeviceId = 'gpu-device:ulg-browser-resident-host',
   acceptedScopes = ['ulg-sph-resident-pass-dag'],

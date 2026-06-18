@@ -167,8 +167,29 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'lawv',
   'lawst',
   'blob',
-  'residentAuto'
+  'residentAuto',
+  'residentWorkers',
+  'surfaceDraw',
+  'surfaceDrawDiagnostic',
+  'surfaceOverlay'
 ]);
+
+const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
+  'auto',
+  'metadata',
+  'off',
+  'three',
+  'three-compact-vertices',
+  'three-points',
+  'three-render-row-points',
+  'three-spheres',
+  'three-render-row-spheres'
+]);
+
+function normalizeResidentSurfaceDrawDiagnosticMode(value, fallback = 'three-render-row-points') {
+  const normalized = String(value ?? fallback).trim().toLowerCase();
+  return RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES.has(normalized) ? normalized : fallback;
+}
 
 function fmt(n, digits = 2) {
   if (n == null || !Number.isFinite(n)) return '—';
@@ -1553,23 +1574,38 @@ export function mountSphPhaseDemoOverlay({
     const number = Math.round(Number(value));
     return Number.isFinite(number) && number > 0 ? number : null;
   }
+  const initialResidentWorkersEnabled = booleanUrlParam(
+    initialHash.get('residentWorkers') ?? initialQuery.get('residentWorkers'),
+    true
+  );
   const initialResidentActiveGridEnabled = booleanUrlParam(
     initialHash.get('residentActiveGrid') ?? initialQuery.get('residentActiveGrid'),
     false
   );
   const initialResidentFuseSequenceEnabled = initialResidentActiveGridEnabled || booleanUrlParam(
     initialHash.get('residentFuseSequence') ?? initialQuery.get('residentFuseSequence'),
-    false
+    true
   );
   const initialResidentActiveGridSafetyCells = positiveIntegerUrlParam(
     initialHash.get('residentActiveGridSafety') ?? initialQuery.get('residentActiveGridSafety')
   );
+  const initialResidentQueueFenceEnabled = booleanUrlParam(
+    initialHash.get('residentQueueFence')
+      ?? initialQuery.get('residentQueueFence')
+      ?? initialHash.get('residentMeasureQueueFence')
+      ?? initialQuery.get('residentMeasureQueueFence')
+      ?? initialHash.get('residentGpuQueueFence')
+      ?? initialQuery.get('residentGpuQueueFence'),
+    false
+  );
   function residentExecutionPolicyFromUrl() {
     return {
       schema: 'peercompute.ulg.sph-demo-resident-execution-policy.v0',
+      residentWorkersEnabled: initialResidentWorkersEnabled,
       fuseNoFullResidentMechanicsSequence: initialResidentFuseSequenceEnabled,
       fuseNoFullResidentMechanicsActiveGrid: initialResidentActiveGridEnabled,
-      activeGridSafetyCells: initialResidentActiveGridSafetyCells
+      activeGridSafetyCells: initialResidentActiveGridSafetyCells,
+      measureFusedSequenceQueueFence: initialResidentQueueFenceEnabled
     };
   }
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(
@@ -1577,11 +1613,29 @@ export function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('surfaceOverlay')
       ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT
   );
+  const defaultThreeResidentSurfaceDrawMode = window.innerWidth < 700
+    ? 'three-render-row-spheres'
+    : 'three-render-row-points';
+  const residentSurfaceDrawDiagnosticMode = normalizeResidentSurfaceDrawDiagnosticMode(
+    initialHash.get('surfaceDraw')
+      ?? initialQuery.get('surfaceDraw')
+      ?? initialHash.get('surfaceDrawDiagnostic')
+      ?? initialQuery.get('surfaceDrawDiagnostic'),
+    residentSurfaceDrawOverlayMode === 'enabled' ? 'auto' : defaultThreeResidentSurfaceDrawMode
+  );
+  const useThreeCompactSurfaceDrawBridge = residentSurfaceDrawDiagnosticMode === 'three-compact-vertices'
+    || residentSurfaceDrawDiagnosticMode === 'three-render-row-points'
+    || residentSurfaceDrawDiagnosticMode === 'three-points'
+    || residentSurfaceDrawDiagnosticMode === 'three-render-row-spheres'
+    || residentSurfaceDrawDiagnosticMode === 'three-spheres'
+    || residentSurfaceDrawDiagnosticMode === 'three';
   const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
   function syncUrlFromControls() {
     const q = new URLSearchParams();
     for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(el));
-    if (initialResidentFuseSequenceEnabled) q.set('residentFuseSequence', '1');
+    if (!initialResidentWorkersEnabled) q.set('residentWorkers', '0');
+    q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
+    q.set('surfaceDraw', residentSurfaceDrawDiagnosticMode);
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
     window.history.replaceState(null, '', `#${q.toString()}`);
@@ -1790,7 +1844,8 @@ export function mountSphPhaseDemoOverlay({
     return [
       `fuse-seq=${effective?.fuseNoFullResidentMechanicsSequence ? 'on' : 'off'}`,
       `active-grid=${effective?.fuseNoFullResidentMechanicsActiveGrid ? 'on' : 'off'}`,
-      `safety=${effective?.activeGridSafetyCells ?? 'default'}`
+      `safety=${effective?.activeGridSafetyCells ?? 'default'}`,
+      `queue-fence=${effective?.measureFusedSequenceQueueFence ? 'on' : 'off'}`
     ].join(' ');
   }
 
@@ -2512,6 +2567,7 @@ export function mountSphPhaseDemoOverlay({
     surfaceRadiusScale: blobScaleOf(),
     preserveDrawingBuffer: preserveDrawingBufferForCapture,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
+    residentSurfaceDrawDiagnosticMode,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
   });
   overlay.__sphScene = scene;
@@ -2603,7 +2659,8 @@ export function mountSphPhaseDemoOverlay({
     publishPeerComputeResidentAuthorityHostStatus('initializing');
     peerComputeResidentAuthorityHostPromise = ensurePeerComputeResidentAuthorityHost({
       peercomputeModuleUrl,
-      computeTaskModulePath: residentComputeTaskModulePath
+      computeTaskModulePath: residentComputeTaskModulePath,
+      enableWorkers: initialResidentWorkersEnabled
     })
       .then((host) => {
         peerComputeResidentAuthorityHost = host;
@@ -3212,7 +3269,8 @@ export function mountSphPhaseDemoOverlay({
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     fuseNoFullResidentMechanicsSequence = false,
     fuseNoFullResidentMechanicsActiveGrid = false,
-    activeGridSafetyCells = null
+    activeGridSafetyCells = null,
+    measureFusedSequenceQueueFence = false
   } = {}) {
     const sph = scene.getSphGpuParticleState?.();
     const mls = scene.getMlsMpmGpuParticleState?.();
@@ -3231,7 +3289,8 @@ export function mountSphPhaseDemoOverlay({
       Object.entries(physicalLawGroupsFromControls()).map(([key, enabled]) => `${key}:${enabled ? 1 : 0}`).join(','),
       `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid) ? 1 : 0}`,
-      `activeGridSafety=${activeGridSafetyCells ?? 'default'}`
+      `activeGridSafety=${activeGridSafetyCells ?? 'default'}`,
+      `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`
     ].join('|');
   }
 
@@ -3509,6 +3568,7 @@ export function mountSphPhaseDemoOverlay({
       pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
       stepCount: normalizedStepCount,
       readbackMode,
+      compactSummaryMode: readbackMode === 'no-full-readback' ? 'none' : undefined,
       continueFromResidentState,
       ...residentExecutionPolicy,
       force: Boolean(force || continueFromResidentState)
@@ -3702,7 +3762,9 @@ export function mountSphPhaseDemoOverlay({
               residentAuthorityHost: residentAuthorityHostForSchedule,
               pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
               pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
-              pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null
+              pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
+              renderFieldSurfaceSummaryMode: useThreeCompactSurfaceDrawBridge ? 'skip' : 'auto',
+              surfaceDrawDiagnosticMode: residentSurfaceDrawDiagnosticMode
             });
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
             overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
@@ -3868,6 +3930,7 @@ export function mountSphPhaseDemoOverlay({
       surfaceRadiusScale: blobScaleOf(),
       preserveDrawingBuffer: preserveDrawingBufferForCapture,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
+      residentSurfaceDrawDiagnosticMode,
       residentAuthorityHost: currentResidentAuthorityHostForScene()
     });
     overlay.__sphScene = scene;
@@ -4439,6 +4502,7 @@ export function mountSphPhaseDemoOverlay({
         `view state       : ${activeViewStateSource}`,
         `law groups       : ${lawGroupStatusText()}`,
         `resident auto    : ${residentAutoSchedule?.status || (initialResidentAutoEnabled ? 'enabled' : 'disabled')}`,
+        `resident workers : ${initialResidentWorkersEnabled ? 'enabled' : 'disabled-by-url'}`,
         `resident policy  : ${residentExecutionPolicyStatus}`,
         `resident backend : ${residentBackend}`,
         `mls grid         : dims=${gridDims ? gridDims.join('x') : 'pending'} nodes=${gridNodeCount || 'pending'} dx=${Number.isFinite(gridSpacingM) ? fmt(gridSpacingM, 3) : 'pending'}m`,

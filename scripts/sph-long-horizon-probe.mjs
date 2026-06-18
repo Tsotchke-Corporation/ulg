@@ -13,6 +13,178 @@ const DEFAULT_BOX_DIMS_M = [5, 5, 5];
 const DEFAULT_DROP_PARTICLE_EDGE = 3;
 const DEFAULT_BASE_PARTICLE_EDGE = 5;
 const DEFAULT_CHROMIUM_ARGS = ['--enable-unsafe-webgpu'];
+const BROWSER_CONSOLE_ENTRY_LIMIT = 500;
+const BROWSER_CONSOLE_ISSUE_LIMIT = 200;
+
+const BROWSER_CONSOLE_ISSUE_PATTERNS = [
+  {
+    issue: 'webgpu-buffer-size-limit',
+    pattern: /Buffer size .* exceeds the max buffer size limit/i
+  },
+  {
+    issue: 'webgpu-storage-binding-size-limit',
+    pattern: /Binding size .* maximum storage buffer binding size|exceeds WebGPU device maxStorageBufferBindingSize/i
+  },
+  {
+    issue: 'webgpu-cross-device-buffer',
+    pattern: /associated with \[Device\], and cannot be used with \[Device\]/i
+  },
+  {
+    issue: 'webgpu-destroyed-buffer-submit',
+    pattern: /used in submit while destroyed/i
+  },
+  {
+    issue: 'wgsl-parse-error',
+    pattern: /Error while parsing WGSL|CreateShaderModule|Invalid ShaderModule|reserved keyword/i
+  },
+  {
+    issue: 'webgpu-invalid-object',
+    pattern: /\[Invalid (Buffer|BindGroup|CommandBuffer|ComputePipeline|ShaderModule)/i
+  },
+  {
+    issue: 'webgpu-warning-limit',
+    pattern: /WebGPU: too many warnings/i
+  }
+];
+
+const BROWSER_CONSOLE_WARNING_PATTERNS = [
+  {
+    warning: 'peercompute-worker-inline-fallback',
+    pattern: /Web Workers not available; falling back to inline execution/i
+  }
+];
+
+function incrementCount(target, key) {
+  if (!key) return;
+  target[key] = (target[key] || 0) + 1;
+}
+
+function classifyBrowserConsoleText(text) {
+  const value = String(text || '');
+  const issue = BROWSER_CONSOLE_ISSUE_PATTERNS.find((entry) => entry.pattern.test(value));
+  if (issue) {
+    return {
+      issue: issue.issue,
+      severity: 'error'
+    };
+  }
+  const warning = BROWSER_CONSOLE_WARNING_PATTERNS.find((entry) => entry.pattern.test(value));
+  if (warning) {
+    return {
+      warning: warning.warning,
+      severity: 'warning'
+    };
+  }
+  return {
+    issue: null,
+    warning: null,
+    severity: null
+  };
+}
+
+function compactBrowserConsoleLocation(message) {
+  const location = typeof message?.location === 'function' ? message.location() : null;
+  if (!location) return null;
+  return {
+    url: location.url || null,
+    lineNumber: Number.isFinite(Number(location.lineNumber)) ? Number(location.lineNumber) : null,
+    columnNumber: Number.isFinite(Number(location.columnNumber)) ? Number(location.columnNumber) : null
+  };
+}
+
+function createBrowserConsoleCapture() {
+  const entries = [];
+  const issues = [];
+  const pageErrors = [];
+  const issueCounts = {};
+  const warningCounts = {};
+  let droppedEntryCount = 0;
+  let droppedIssueCount = 0;
+
+  const recordEntry = (entry) => {
+    const classification = classifyBrowserConsoleText(entry.text);
+    const compact = {
+      ...entry,
+      ...classification
+    };
+    if (classification.issue) {
+      incrementCount(issueCounts, classification.issue);
+      if (issues.length < BROWSER_CONSOLE_ISSUE_LIMIT) {
+        issues.push(compact);
+      } else {
+        droppedIssueCount += 1;
+      }
+    }
+    if (classification.warning) {
+      incrementCount(warningCounts, classification.warning);
+    }
+    if (entries.length < BROWSER_CONSOLE_ENTRY_LIMIT) {
+      entries.push(compact);
+    } else {
+      droppedEntryCount += 1;
+    }
+  };
+
+  return {
+    entries,
+    issues,
+    pageErrors,
+    recordConsole(message) {
+      recordEntry({
+        kind: 'console',
+        type: typeof message?.type === 'function' ? message.type() : null,
+        text: typeof message?.text === 'function' ? message.text() : String(message || ''),
+        location: compactBrowserConsoleLocation(message),
+        receivedAtMs: Date.now()
+      });
+    },
+    recordPageError(error) {
+      const item = {
+        kind: 'pageerror',
+        type: 'pageerror',
+        text: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack || null : null,
+        issue: 'browser-page-error',
+        severity: 'error',
+        receivedAtMs: Date.now()
+      };
+      incrementCount(issueCounts, item.issue);
+      if (issues.length < BROWSER_CONSOLE_ISSUE_LIMIT) {
+        issues.push(item);
+      } else {
+        droppedIssueCount += 1;
+      }
+      if (pageErrors.length < BROWSER_CONSOLE_ISSUE_LIMIT) {
+        pageErrors.push(item);
+      }
+    },
+    summary() {
+      return {
+        schema: 'peercompute.ulg.sph-browser-console-summary.v0',
+        entryCount: entries.length + droppedEntryCount,
+        retainedEntryCount: entries.length,
+        droppedEntryCount,
+        issueCount: Object.values(issueCounts).reduce((sum, count) => sum + count, 0),
+        retainedIssueCount: issues.length,
+        droppedIssueCount,
+        pageErrorCount: pageErrors.length,
+        issueCounts: { ...issueCounts },
+        warningCounts: { ...warningCounts },
+        issueTypes: Object.keys(issueCounts),
+        warningTypes: Object.keys(warningCounts)
+      };
+    }
+  };
+}
+
+function attachBrowserConsoleTelemetry(timeline, capture) {
+  if (!timeline || typeof timeline !== 'object' || !capture) return timeline;
+  timeline.pageConsole = [...capture.entries];
+  timeline.pageErrors = [...capture.pageErrors];
+  timeline.browserConsole = capture.summary();
+  timeline.browserConsoleIssues = [...capture.issues];
+  return timeline;
+}
 
 function parseChromiumArgs(value) {
   return String(value || '')
@@ -39,12 +211,21 @@ function probeChromiumLaunchReport() {
     schema: 'peercompute.ulg.sph-probe-browser-launch.v0',
     channel: options.channel || null,
     executablePath: options.executablePath || null,
-    args: [...options.args]
+    args: [...options.args],
+    page: probePageReport()
   };
 }
 
 async function launchProbeBrowser() {
   return chromium.launch(probeChromiumLaunchOptions());
+}
+
+function booleanEnv(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
 }
 
 function positiveInteger(value, fallback) {
@@ -63,6 +244,38 @@ function commaList(value) {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function probePageOptions() {
+  const viewport = {
+    width: positiveInteger(process.env.ULG_PROBE_VIEWPORT_WIDTH, 1280),
+    height: positiveInteger(process.env.ULG_PROBE_VIEWPORT_HEIGHT, 800)
+  };
+  const deviceScaleFactor = finiteNumber(process.env.ULG_PROBE_DEVICE_SCALE_FACTOR, null);
+  const isMobile = booleanEnv(process.env.ULG_PROBE_IS_MOBILE, false);
+  const hasTouch = booleanEnv(process.env.ULG_PROBE_HAS_TOUCH, isMobile);
+  return {
+    viewport,
+    ignoreHTTPSErrors: true,
+    ...(deviceScaleFactor && deviceScaleFactor > 0 ? { deviceScaleFactor } : {}),
+    ...(isMobile ? { isMobile } : {}),
+    ...(hasTouch ? { hasTouch } : {})
+  };
+}
+
+function probePageReport() {
+  const options = probePageOptions();
+  return {
+    schema: 'peercompute.ulg.sph-probe-page-options.v0',
+    viewport: { ...options.viewport },
+    deviceScaleFactor: options.deviceScaleFactor ?? null,
+    isMobile: options.isMobile === true,
+    hasTouch: options.hasTouch === true
+  };
+}
+
+async function newProbePage(browser) {
+  return browser.newPage(probePageOptions());
 }
 
 function appendQueryParam(url, key, value) {
@@ -401,24 +614,22 @@ async function runBrowserProbe({
   residentBufferDebug,
   compactSummaryScope,
   thermalWallRate,
+  measureGpuQueueFence = false,
   captureFrames,
   captureFrameEvery,
   captureFrameMax,
   initialResidentWaitMs
 }) {
   const browser = await launchProbeBrowser();
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const page = await newProbePage(browser);
   const preProbeSnapshots = [];
-  const pageConsole = [];
+  const consoleCapture = createBrowserConsoleCapture();
+  const pageConsole = consoleCapture.entries;
   page.on('console', (message) => {
-    const text = message.text();
-    if (text.includes('sph-probe-progress') || text.includes('sph-resident-progress')) {
-      pageConsole.push({
-        type: message.type(),
-        text,
-        receivedAtMs: Date.now()
-      });
-    }
+    consoleCapture.recordConsole(message);
+  });
+  page.on('pageerror', (error) => {
+    consoleCapture.recordPageError(error);
   });
   try {
     const target = new URL(withBrowserProbeParams(scenarioUrl), baseUrl).toString();
@@ -467,6 +678,7 @@ async function runBrowserProbe({
       residentBufferDebug: requestedResidentBufferDebug,
       compactSummaryScope: requestedCompactSummaryScope,
       thermalWallRate: requestedThermalWallRate,
+      measureGpuQueueFence: requestedMeasureGpuQueueFence,
       captureFrames: requestedCaptureFrames,
       captureFrameEvery: requestedCaptureFrameEvery,
       captureFrameMax: requestedCaptureFrameMax,
@@ -536,6 +748,8 @@ async function runBrowserProbe({
         totalMs: finiteOrNull(stageTiming.totalMs),
         stageMs: { ...(stageTiming.stageMs || {}) },
         queueFenceMs: { ...(stageTiming.queueFenceMs || {}) },
+        queueFenceStatus: { ...(stageTiming.queueFenceStatus || {}) },
+        queueFenceMethod: { ...(stageTiming.queueFenceMethod || {}) },
         compactSummaryTiming: stageTiming.compactSummaryTiming ? {
           ...stageTiming.compactSummaryTiming,
           totalMs: finiteOrNull(stageTiming.compactSummaryTiming.totalMs),
@@ -548,6 +762,7 @@ async function runBrowserProbe({
         requestedReadbackMode: stageTiming.requestedReadbackMode ?? null,
         compactSummaryRequested: stageTiming.compactSummaryRequested ?? null,
         compactSummaryScope: stageTiming.compactSummaryScope ?? null,
+        fusedResidentMechanics: stageTiming.fusedResidentMechanics ?? null,
         fusedResidentSequence: stageTiming.fusedResidentSequence ?? null,
         fusedResidentSequenceStepCount: stageTiming.fusedResidentSequenceStepCount ?? null,
         activeGridDispatch: stageTiming.activeGridDispatch
@@ -576,13 +791,23 @@ async function runBrowserProbe({
         const hash = new URLSearchParams(url.hash.replace(/^#/, ''));
         const activeGrid = booleanUrlParam(hash.get('residentActiveGrid') ?? query.get('residentActiveGrid'), false);
         const fuseSequence = activeGrid || booleanUrlParam(hash.get('residentFuseSequence') ?? query.get('residentFuseSequence'), false);
+        const queueFence = booleanUrlParam(
+          hash.get('residentQueueFence')
+            ?? query.get('residentQueueFence')
+            ?? hash.get('residentMeasureQueueFence')
+            ?? query.get('residentMeasureQueueFence')
+            ?? hash.get('residentGpuQueueFence')
+            ?? query.get('residentGpuQueueFence'),
+          false
+        );
         return {
           schema: 'peercompute.ulg.sph-probe-resident-execution-policy.v0',
           fuseNoFullResidentMechanicsSequence: fuseSequence,
           fuseNoFullResidentMechanicsActiveGrid: activeGrid,
           activeGridSafetyCells: positiveIntegerUrlParam(
             hash.get('residentActiveGridSafety') ?? query.get('residentActiveGridSafety')
-          )
+          ),
+          measureFusedSequenceQueueFence: queueFence
         };
       };
       const residentExecutionPolicy = overlay?.__mlsMpmResidentExecutionPolicy
@@ -1116,6 +1341,13 @@ async function runBrowserProbe({
             surfaceDrawActiveSurfaceCount: renderState.surfaceDrawActiveSurfaceCount ?? null,
             surfaceDrawVertexCount: renderState.surfaceDrawVertexCount ?? null,
             surfaceDrawTriangleCount: renderState.surfaceDrawTriangleCount ?? null,
+            surfaceDrawSourceVertexRowCount: renderState.surfaceDrawSourceVertexRowCount ?? null,
+            surfaceDrawRowsBufferRetained: renderState.surfaceDrawRowsBufferRetained ?? null,
+            surfaceDrawRowsBufferByteLength: renderState.surfaceDrawRowsBufferByteLength ?? null,
+            surfaceDrawIndirectRowsBufferRetained: renderState.surfaceDrawIndirectRowsBufferRetained ?? null,
+            surfaceDrawIndirectRowsBufferByteLength: renderState.surfaceDrawIndirectRowsBufferByteLength ?? null,
+            surfaceDrawCompactedVertexRowsBufferRetained: renderState.surfaceDrawCompactedVertexRowsBufferRetained ?? null,
+            surfaceDrawCompactedVertexRowsBufferByteLength: renderState.surfaceDrawCompactedVertexRowsBufferByteLength ?? null,
             surfaceDrawVisibleRendererBridge: renderState.surfaceDrawVisibleRendererBridge ?? null,
             surfaceDrawVisibleRenderSource: renderState.surfaceDrawVisibleRenderSource ?? null,
             surfaceDrawOverlayPolicyStatus: renderState.surfaceDrawOverlayPolicyStatus ?? null,
@@ -1130,6 +1362,8 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeStatus: renderState.surfaceDrawRenderBridgeStatus ?? null,
             surfaceDrawRenderBridgeLastRenderStatus: renderState.surfaceDrawRenderBridgeLastRenderStatus ?? null,
             surfaceDrawRenderBridgeFrameCount: renderState.surfaceDrawRenderBridgeFrameCount ?? null,
+            surfaceDrawRenderBridgeThreeMeshCount: renderState.surfaceDrawRenderBridgeThreeMeshCount ?? null,
+            surfaceDrawRenderBridgeThreeGeometryByteLength: renderState.surfaceDrawRenderBridgeThreeGeometryByteLength ?? null,
               materialKeys: Array.isArray(renderState.materialKeys) ? [...renderState.materialKeys] : []
             } : null,
             residentParticleUploadDebug: overlay.__sphResidentParticleUploadDebug || null,
@@ -1144,11 +1378,20 @@ async function runBrowserProbe({
             vertexCount: surfaceDraw.vertexCount ?? null,
             triangleCount: surfaceDraw.triangleCount ?? null,
             activeSurfaceCount: surfaceDraw.activeSurfaceCount ?? null,
+            sourceVertexRowCount: surfaceDraw.sourceVertexRowCount ?? null,
+            drawRowsBufferRetained: surfaceDraw.drawRowsBufferRetained ?? null,
+            drawRowsBufferByteLength: surfaceDraw.drawRowsBufferByteLength ?? null,
+            drawIndirectRowsBufferRetained: surfaceDraw.drawIndirectRowsBufferRetained ?? null,
+            drawIndirectRowsBufferByteLength: surfaceDraw.drawIndirectRowsBufferByteLength ?? null,
+            compactedVertexRowsBufferRetained: surfaceDraw.compactedVertexRowsBufferRetained ?? null,
+            compactedVertexRowsBufferByteLength: surfaceDraw.compactedVertexRowsBufferByteLength ?? null,
             visibleRendererBridge: surfaceDraw.visibleRendererBridge ?? null,
             visibleRenderSource: surfaceDraw.visibleRenderSource ?? null,
             renderBridgeStatus: surfaceDraw.renderBridgeStatus ?? null,
             renderBridgeLastRenderStatus: surfaceDraw.renderBridgeLastRenderStatus ?? null,
-            renderBridgeFrameCount: surfaceDraw.renderBridgeFrameCount ?? null
+            renderBridgeFrameCount: surfaceDraw.renderBridgeFrameCount ?? null,
+            renderBridgeThreeMeshCount: surfaceDraw.renderBridgeThreeMeshCount ?? null,
+            renderBridgeThreeGeometryByteLength: surfaceDraw.renderBridgeThreeGeometryByteLength ?? null
           } : null,
           surfaces: surfaceSnapshot(sceneApi)
         };
@@ -1302,10 +1545,14 @@ async function runBrowserProbe({
             force: true,
             pressureInterfaceForceSolver: requestedDisablePressureInterface ? null : undefined,
             pressureInterfaceForceRowsBuffer: requestedDisablePressureInterface ? null : undefined,
-            thermalStepOptions: Number.isFinite(requestedThermalWallRate)
-              ? { wallRate: requestedThermalWallRate }
-              : undefined,
-            ...residentExecutionPolicy
+          thermalStepOptions: Number.isFinite(requestedThermalWallRate)
+            ? { wallRate: requestedThermalWallRate }
+            : undefined,
+            ...residentExecutionPolicy,
+            measureFusedSequenceQueueFence: Boolean(
+              requestedMeasureGpuQueueFence
+              || residentExecutionPolicy?.measureFusedSequenceQueueFence
+            )
           });
           markProbeProgress('resident-batch-completed', {
             batchIndex,
@@ -1430,6 +1677,7 @@ async function runBrowserProbe({
       residentBufferDebug,
       compactSummaryScope,
       thermalWallRate,
+      measureGpuQueueFence,
       captureFrames,
       captureFrameEvery,
       captureFrameMax,
@@ -1477,7 +1725,8 @@ async function runBrowserProbe({
       }, timeoutMs);
     });
     try {
-      return await Promise.race([inPageProbe, timeoutProbe]);
+      const timeline = await Promise.race([inPageProbe, timeoutProbe]);
+      return attachBrowserConsoleTelemetry(timeline, consoleCapture);
     } finally {
       if (timeoutProbeTimer) clearTimeout(timeoutProbeTimer);
     }
@@ -1496,27 +1745,38 @@ async function runDirectResidentProbe({
   batches,
   batchSteps,
   readbackMode,
+  compactSummaryMode,
   compactSummaryScope,
   thermalWallRate,
   fuseResidentMechanicsSequence = false,
   fuseResidentMechanicsActiveGrid = false,
-  fusedActiveGridSafetyCells = null
+  fusedActiveGridSafetyCells = null,
+  measureGpuQueueFence = false
 }) {
   const browser = await launchProbeBrowser();
-  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const page = await newProbePage(browser);
+  const consoleCapture = createBrowserConsoleCapture();
+  page.on('console', (message) => {
+    consoleCapture.recordConsole(message);
+  });
+  page.on('pageerror', (error) => {
+    consoleCapture.recordPageError(error);
+  });
   try {
     const target = new URL(scenarioUrl || DEFAULT_URL, baseUrl).toString();
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    return await page.evaluate(async ({
+    const timeline = await page.evaluate(async ({
       scenarioUrl: requestedScenarioUrl,
       batches: requestedBatches,
       batchSteps: requestedBatchSteps,
       readbackMode: requestedReadbackMode,
       compactSummaryScope: requestedCompactSummaryScope,
+      compactSummaryMode: requestedCompactSummaryMode,
       thermalWallRate: requestedThermalWallRate,
       fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
       fuseResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
       fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells,
+      measureGpuQueueFence: requestedMeasureGpuQueueFence,
       defaults
     }) => {
       const finiteOrNull = (value) => {
@@ -1941,6 +2201,8 @@ async function runDirectResidentProbe({
           totalMs: finiteOrNull(step.stageTiming.totalMs),
           stageMs: { ...(step.stageTiming.stageMs || {}) },
           queueFenceMs: { ...(step.stageTiming.queueFenceMs || {}) },
+          queueFenceStatus: { ...(step.stageTiming.queueFenceStatus || {}) },
+          queueFenceMethod: { ...(step.stageTiming.queueFenceMethod || {}) },
           compactSummaryTiming: step.stageTiming.compactSummaryTiming ? {
             ...step.stageTiming.compactSummaryTiming,
             totalMs: finiteOrNull(step.stageTiming.compactSummaryTiming.totalMs),
@@ -1953,6 +2215,9 @@ async function runDirectResidentProbe({
           requestedReadbackMode: step.stageTiming.requestedReadbackMode ?? null,
           compactSummaryRequested: step.stageTiming.compactSummaryRequested ?? null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null,
+          fusedResidentMechanics: step.stageTiming.fusedResidentMechanics ?? null,
+          fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? null,
+          fusedResidentSequenceStepCount: step.stageTiming.fusedResidentSequenceStepCount ?? null,
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }
             : null,
@@ -2329,11 +2594,12 @@ async function runDirectResidentProbe({
               },
               cohortRanges: activeCohortRanges,
               stepCount: requestedBatchSteps,
-              compactSummaryMode: 'final-only',
+              compactSummaryMode: requestedCompactSummaryMode,
               retainIntermediateSteps: false,
               fuseNoFullResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
               fuseNoFullResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
-              activeGridSafetyCells: requestedFusedActiveGridSafetyCells
+              activeGridSafetyCells: requestedFusedActiveGridSafetyCells,
+              measureFusedSequenceQueueFence: requestedMeasureGpuQueueFence
             });
             metrics.push(sample({
               batchIndex,
@@ -2393,10 +2659,12 @@ async function runDirectResidentProbe({
         batchStepCount: requestedBatchSteps,
         requestedSubsteps: requestedBatches * requestedBatchSteps,
         readbackMode: requestedReadbackMode,
+        compactSummaryMode: requestedCompactSummaryMode,
         compactSummaryScope: requestedCompactSummaryScope,
         fuseResidentMechanicsSequence: requestedFuseResidentMechanicsSequence,
         fuseResidentMechanicsActiveGrid: requestedFuseResidentMechanicsActiveGrid,
         fusedActiveGridSafetyCells: requestedFusedActiveGridSafetyCells ?? null,
+        measureGpuQueueFence: requestedMeasureGpuQueueFence,
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
         renderEveryBatches: 0,
         errors,
@@ -2416,10 +2684,12 @@ async function runDirectResidentProbe({
       batchSteps,
       readbackMode,
       compactSummaryScope,
+      compactSummaryMode,
       thermalWallRate,
       fuseResidentMechanicsSequence,
       fuseResidentMechanicsActiveGrid,
       fusedActiveGridSafetyCells,
+      measureGpuQueueFence,
       defaults: {
         wallTemperatureK: DEFAULT_WALL_TEMPERATURE_K,
         dropTemperatureK: DEFAULT_DROP_TEMPERATURE_K,
@@ -2431,6 +2701,7 @@ async function runDirectResidentProbe({
         baseParticleEdge: DEFAULT_BASE_PARTICLE_EDGE
       }
     });
+    return attachBrowserConsoleTelemetry(timeline, consoleCapture);
   } finally {
     await Promise.race([
       browser.close(),
@@ -2632,7 +2903,28 @@ function analyzeTimeline(timeline, {
     const renderBridgeStatus = metric?.surfaceDraw?.renderBridgeStatus
       ?? metric?.renderState?.surfaceDrawRenderBridgeStatus
       ?? null;
-    return bridge === 'webgpu-storage-indirect-overlay'
+    const sourceVertexRowCount = Number(
+      metric?.surfaceDraw?.sourceVertexRowCount
+        ?? metric?.renderState?.surfaceDrawSourceVertexRowCount
+        ?? 0
+    );
+    const compactedVertexRowsBufferByteLength = Number(
+      metric?.surfaceDraw?.compactedVertexRowsBufferByteLength
+        ?? metric?.renderState?.surfaceDrawCompactedVertexRowsBufferByteLength
+        ?? 0
+    );
+    const retainedResidentDrawBuffers = Boolean(
+      metric?.surfaceDraw?.drawIndirectRowsBufferRetained
+        ?? metric?.renderState?.surfaceDrawIndirectRowsBufferRetained
+    ) && Boolean(
+      metric?.surfaceDraw?.compactedVertexRowsBufferRetained
+        ?? metric?.renderState?.surfaceDrawCompactedVertexRowsBufferRetained
+    );
+    const residentDrawCountsUnknown = (
+      (metric?.surfaceDraw?.activeSurfaceCount ?? metric?.renderState?.surfaceDrawActiveSurfaceCount ?? null) == null
+      && (metric?.surfaceDraw?.vertexCount ?? metric?.renderState?.surfaceDrawVertexCount ?? null) == null
+    );
+    const webGpuIndirectOverlayVisible = bridge === 'webgpu-storage-indirect-overlay'
       && renderSource === 'resident-surface-draw-buffers'
       && (
         status === 'resident-surface-draw-buffers-retained'
@@ -2643,7 +2935,38 @@ function analyzeTimeline(timeline, {
         || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'webgpu-overlay-rendered'
         || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'webgpu-overlay-rendered'
       )
-      && (activeSurfaceCount > 0 || vertexCount > 0);
+      && (
+        activeSurfaceCount > 0
+        || vertexCount > 0
+        || (
+          residentDrawCountsUnknown
+          && retainedResidentDrawBuffers
+          && sourceVertexRowCount > 0
+          && compactedVertexRowsBufferByteLength > 0
+        )
+      );
+    const threeRenderRowPointsVisible = (
+        bridge === 'three-render-row-points'
+        || bridge === 'three-render-row-spheres'
+      )
+      && (
+        renderSource === 'resident-render-rows-three-points'
+        || renderSource === 'resident-render-rows-three-instanced-spheres'
+      )
+      && (
+        status === 'resident-render-row-points-built'
+        || status === 'resident-render-row-spheres-built'
+      )
+      && (
+        renderBridgeStatus === 'three-render-row-points-ready'
+        || renderBridgeStatus === 'three-render-row-spheres-ready'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'three-render-row-points-submitted'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'three-render-row-spheres-submitted'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-points-submitted'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-spheres-submitted'
+      )
+      && vertexCount > 0;
+    return webGpuIndirectOverlayVisible || threeRenderRowPointsVisible;
   };
   const residentRenderFieldSummaryVisible = (metric) => (
     metric?.renderState?.source === 'resident-gpu-render-field'
@@ -3272,6 +3595,11 @@ function analyzeTimeline(timeline, {
   if (visualSurfaceIssues.some((item) => item.issue === 'resident-visible-surface-clipped-to-particle-bounds')) {
     issues.push('resident-visible-surface-clipped-to-particle-bounds');
   }
+  const browserConsoleIssueCounts = timeline?.browserConsole?.issueCounts || {};
+  const browserConsoleWarningCounts = timeline?.browserConsole?.warningCounts || {};
+  for (const [issue, count] of Object.entries(browserConsoleIssueCounts)) {
+    if (Number(count) > 0) issues.push(`browser-console:${issue}`);
+  }
   return {
     schema: 'peercompute.ulg.sph-history-long-horizon-analysis.v0',
     status: issues.length ? 'bad' : 'good',
@@ -3301,6 +3629,10 @@ function analyzeTimeline(timeline, {
     visibleBoundsToleranceM,
     particleBoundsToleranceM,
     issues,
+    browserConsoleIssueCounts,
+    browserConsoleWarningCounts,
+    browserConsoleIssueCount: Object.values(browserConsoleIssueCounts).reduce((sum, count) => sum + Number(count || 0), 0),
+    browserConsoleWarningCount: Object.values(browserConsoleWarningCounts).reduce((sum, count) => sum + Number(count || 0), 0),
     initialPreflightStatus: initialPreflight?.status ?? null,
     initialPreflightBlockers,
     maxSpeedObservedMPerS,
@@ -3386,6 +3718,11 @@ async function main() {
     process.env.ULG_PROBE_COMPACT_SUMMARY_SCOPE,
     readbackMode === 'no-full-readback' ? 'particle-visual' : 'full'
   );
+  const compactSummaryMode = ['none', 'final-only', 'every-step'].includes(
+    String(process.env.ULG_PROBE_COMPACT_SUMMARY_MODE || '').toLowerCase()
+  )
+    ? String(process.env.ULG_PROBE_COMPACT_SUMMARY_MODE).toLowerCase()
+    : 'final-only';
   const fuseResidentMechanicsSequence = process.env.ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE === '1'
     || process.env.ULG_PROBE_FUSE_NO_FULL_RESIDENT_MECHANICS_SEQUENCE === '1';
   const fuseResidentMechanicsActiveGrid = process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID === '1'
@@ -3394,18 +3731,35 @@ async function main() {
   const fusedActiveGridSafetyCells = process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS == null
     ? null
     : positiveInteger(process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID_SAFETY_CELLS, null);
-  const renderReadbackMode = process.env.ULG_PROBE_RENDER_READBACK_MODE === 'no-full-readback'
+  const measureGpuQueueFence = booleanEnv(
+    process.env.ULG_PROBE_MEASURE_GPU_QUEUE_FENCE
+    ?? process.env.ULG_PROBE_MEASURE_FUSED_SEQUENCE_QUEUE_FENCE,
+    false
+  );
+  const renderReadbackModeEnv = String(process.env.ULG_PROBE_RENDER_READBACK_MODE || '').toLowerCase();
+  const renderReadbackMode = renderReadbackModeEnv === 'no-full-readback'
     ? 'no-full-readback'
-    : 'full-parity-readback';
-  const renderRowsReadbackMode = process.env.ULG_PROBE_RENDER_ROWS_READBACK_MODE === 'no-full-readback'
+    : (renderReadbackModeEnv === 'full-parity-readback' ? 'full-parity-readback' : 'auto');
+  const renderRowsReadbackModeEnv = String(process.env.ULG_PROBE_RENDER_ROWS_READBACK_MODE || '').toLowerCase();
+  const renderRowsReadbackMode = renderRowsReadbackModeEnv === 'no-full-readback'
     ? 'no-full-readback'
-    : renderReadbackMode;
+    : (renderRowsReadbackModeEnv === 'full-parity-readback' ? 'full-parity-readback' : renderReadbackMode);
   const renderFieldSurfaceSummaryMode = ['skip', 'readback', 'auto'].includes(
     String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE || '').toLowerCase()
   )
     ? String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE).toLowerCase()
     : 'auto';
-  const surfaceDrawDiagnosticMode = ['auto', 'metadata', 'off'].includes(
+  const surfaceDrawDiagnosticMode = [
+    'auto',
+    'metadata',
+    'off',
+    'three-compact-vertices',
+    'three-render-row-points',
+    'three-render-row-spheres',
+    'three-points',
+    'three-spheres',
+    'three'
+  ].includes(
     String(process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || '').toLowerCase()
   )
     ? String(process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE).toLowerCase()
@@ -3521,11 +3875,13 @@ async function main() {
         batches,
         batchSteps,
         readbackMode,
+        compactSummaryMode,
         compactSummaryScope,
         thermalWallRate,
         fuseResidentMechanicsSequence,
         fuseResidentMechanicsActiveGrid,
-        fusedActiveGridSafetyCells
+        fusedActiveGridSafetyCells,
+        measureGpuQueueFence
       })
       : await runBrowserProbe({
         baseUrl: server.baseUrl,
@@ -3546,6 +3902,7 @@ async function main() {
         residentBufferDebug,
         compactSummaryScope,
         thermalWallRate,
+        measureGpuQueueFence,
         captureFrames,
         captureFrameEvery,
         captureFrameMax,

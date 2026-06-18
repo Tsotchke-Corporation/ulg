@@ -1046,14 +1046,18 @@ test('MLS-MPM GPU P2G grid projection ABI exposes f32x4-aligned grid rows', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /struct P2gProjectionParams/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_state: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> mls_mechanics: array<vec4<f32>>/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_nodes: array<vec4<f32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_accumulators: array<atomic<i32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(6\) var<storage, read_write> grid_nodes: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /resident_product_event_count: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(5\) var<storage, read> product_events: array<vec4<f32>>/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn quadratic_weights/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn packed_pressure/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn scatter_product_events/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn finalize_grid/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /event_unplaced_mass_kg <= 0.0/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
+  assert.doesNotMatch(mlsMpmP2gGridProjectionWgsl, /for \(var particle_index = 0u; particle_index < params\.particle_count/);
 });
 
 test('MLS-MPM GPU grid update ABI exposes f32x4-aligned velocity rows', () => {

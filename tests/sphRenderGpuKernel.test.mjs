@@ -1029,6 +1029,59 @@ test('SPH material interface candidate field optional WebGPU rejects parity drif
   assert.equal(execution.candidateReadback, false);
 });
 
+test('SPH material interface candidate field falls back before oversized WebGPU buffer creation', async () => {
+  const field = twoSurfaceRenderField();
+  const execution = await deriveSphMaterialInterfaceCandidateFieldWithOptionalWebGpu({
+    renderField: field,
+    preferWebGpu: true,
+    device: {
+      limits: { maxBufferSize: 16 },
+      queue: {
+        writeBuffer() {
+          throw new Error('writeBuffer should not run after maxBufferSize preflight');
+        }
+      },
+      createBuffer() {
+        throw new Error('createBuffer should not run after maxBufferSize preflight');
+      }
+    }
+  });
+
+  assert.equal(execution.backend, 'cpu-reference');
+  assert.equal(execution.status, 'webgpu-error-cpu-reference');
+  assert.equal(execution.webgpuStatus.status, 'fallback-cpu');
+  assert.match(execution.webgpuStatus.reason, /exceeds WebGPU device maxBufferSize/);
+  assert.equal(execution.candidateReadback, false);
+});
+
+test('SPH material interface candidate field falls back before oversized storage binding', async () => {
+  const field = twoSurfaceRenderField();
+  const execution = await deriveSphMaterialInterfaceCandidateFieldWithOptionalWebGpu({
+    renderField: field,
+    preferWebGpu: true,
+    device: {
+      limits: {
+        maxBufferSize: 1024 * 1024 * 1024,
+        maxStorageBufferBindingSize: 16
+      },
+      queue: {
+        writeBuffer() {
+          throw new Error('writeBuffer should not run after storage binding preflight');
+        }
+      },
+      createBuffer() {
+        throw new Error('createBuffer should not run after storage binding preflight');
+      }
+    }
+  });
+
+  assert.equal(execution.backend, 'cpu-reference');
+  assert.equal(execution.status, 'webgpu-error-cpu-reference');
+  assert.equal(execution.webgpuStatus.status, 'fallback-cpu');
+  assert.match(execution.webgpuStatus.reason, /exceeds WebGPU device maxStorageBufferBindingSize/);
+  assert.equal(execution.candidateReadback, false);
+});
+
 test('SPH material interface field derives surface normals and areas from render-field crossings', () => {
   const field = twoSurfaceRenderField();
   const interfaceField = deriveSphMaterialInterfaceField(field);

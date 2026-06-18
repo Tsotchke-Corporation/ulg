@@ -37,7 +37,10 @@ import { runMlsMpmG2pWithOptionalWebGpu } from '../runtime/sph/sphG2pGpuKernel.j
 import {
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_ADMISSION_SCHEMA,
   ULG_PRESSURE_INTERFACE_GAS_CELL_FIELD_IMPORT_SCHEMA,
+  MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
+  MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE,
   destroyMlsMpmResidentStepsBuffers,
+  normalizeMlsMpmResidentCompactSummaryMode,
   runMlsMpmResidentStepWithOptionalWebGpu,
   runMlsMpmResidentStepsWithOptionalWebGpu,
   submitMlsMpmResidentStepsComputeTask
@@ -58,6 +61,7 @@ import {
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
   buildSphRenderFieldCpu,
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWebGpu,
@@ -125,7 +129,41 @@ function nowMs() {
 const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
 const RESIDENT_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT = 'disabled';
-const SPH_THREE_WEBGPU_BINDING_REASON = 'raw WebGPU canvas overlay disabled by policy; using Three/MarchingCubes render-field readback';
+const SPH_THREE_WEBGPU_BINDING_REASON = 'raw WebGPU canvas overlay disabled until it can share Three scene depth; using Three/MarchingCubes render-field readback';
+const SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE = 'three-compact-vertices';
+const SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS = 'three-compact-surface-geometry-ready';
+const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE = 'three-render-row-points';
+const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS = 'three-render-row-points-ready';
+const SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE = 'three-render-row-spheres';
+const SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_STATUS = 'three-render-row-spheres-ready';
+const SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES = 4096;
+function isThreeResidentSurfaceBridgeMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return mode === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
+    || mode === 'three-points'
+    || mode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+    || mode === 'three-spheres'
+    || mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
+    || mode === 'three';
+}
+const SPH_SURFACE_VERTEX_ROW_INDEX = Object.freeze({
+  surfaceIndex: 0,
+  materialId: 1,
+  phaseId: 2,
+  triangleIndex: 3,
+  vertexIndex: 4,
+  positionXM: 5,
+  positionYM: 6,
+  positionZM: 7,
+  normalX: 8,
+  normalY: 9,
+  normalZ: 10,
+  opticalStateId: 11,
+  density: 12,
+  isolation: 13,
+  sourceVoxelLinearIndex: 14,
+  status: 15
+});
 const GPU_TEXTURE_USAGE = {
   COPY_SRC: globalThis.GPUTextureUsage?.COPY_SRC ?? 1,
   TEXTURE_BINDING: globalThis.GPUTextureUsage?.TEXTURE_BINDING ?? 4,
@@ -2461,12 +2499,15 @@ export function createSphPhaseScene(container, {
   preserveDrawingBuffer = false,
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
+  residentSurfaceDrawDiagnosticMode = 'auto',
   residentAuthorityHost = null,
   navigatorRef = globalThis.navigator
 } = {}) {
   const dims = boxDimsM ?? [boxEdgeM, boxEdgeM, boxEdgeM];
   const refEdgeM = Math.max(dims[0], dims[1], dims[2]);
   const residentSurfaceDrawOverlayMode = normalizeResidentSurfaceDrawOverlayMode(residentSurfaceDrawOverlay);
+  const residentSurfaceDrawDiagnosticModeDefault = String(residentSurfaceDrawDiagnosticMode || 'auto').trim().toLowerCase();
+  const useResidentThreeSurfaceBridgeByDefault = isThreeResidentSurfaceBridgeMode(residentSurfaceDrawDiagnosticModeDefault);
   let residentSurfaceDrawOverlayPolicy = null;
   function resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh = false } = {}) {
     if (refresh || !residentSurfaceDrawOverlayPolicy) {
@@ -3844,6 +3885,7 @@ export function createSphPhaseScene(container, {
     fuseNoFullResidentMechanicsSequence = false,
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
+    measureFusedSequenceQueueFence = false,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined
   } = {}) {
@@ -3872,7 +3914,8 @@ export function createSphPhaseScene(container, {
       dims.join(','),
       `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid) ? 1 : 0}`,
-      `activeGridSafety=${normalizedActiveGridSafetyCells}`
+      `activeGridSafety=${normalizedActiveGridSafetyCells}`,
+      `queueFence=${Boolean(measureFusedSequenceQueueFence) ? 1 : 0}`
     ].join('|');
   }
 
@@ -3884,6 +3927,7 @@ export function createSphPhaseScene(container, {
   function mlsMpmResidentStepsSignatureFor({
     stepCount = 1,
     retainIntermediateSteps = false,
+    compactSummaryMode = MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP,
     compactSummaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
     residentSourceMode = 'cpu-packed-state',
     ...args
@@ -3894,6 +3938,7 @@ export function createSphPhaseScene(container, {
       stepSignature,
       normalizeResidentStepCount(stepCount),
       Boolean(retainIntermediateSteps),
+      normalizeMlsMpmResidentCompactSummaryMode(compactSummaryMode),
       normalizeMlsMpmResidentSummaryScope(compactSummaryScope),
       residentSourceMode
     ].join('|');
@@ -3954,6 +3999,22 @@ export function createSphPhaseScene(container, {
     status = 'surface-draw-overlay-resources-released'
   } = {}) {
     if (renderBridge) {
+      if (renderBridge.threeSurfaceGroup) {
+        scene.remove(renderBridge.threeSurfaceGroup);
+        renderBridge.threeSurfaceGroup.traverse?.((object) => {
+          if (!object?.isMesh && !object?.isPoints) return;
+          object.geometry?.dispose?.();
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          for (const material of materials) {
+            material?.map?.dispose?.();
+            material?.alphaMap?.dispose?.();
+            material?.dispose?.();
+          }
+        });
+        renderBridge.threeSurfaceGroup = null;
+        renderBridge.threeMeshes = [];
+        renderBridge.threeMeshCount = 0;
+      }
       if (clearOverlay) clearSphResidentSurfaceDrawOverlayCanvas(renderBridge);
       renderBridge.cameraBuffer?.destroy?.();
       renderBridge.opticalGpuBuffers?.recordsBuffer?.destroy?.();
@@ -4181,6 +4242,494 @@ export function createSphPhaseScene(container, {
     return {
       accumView: bridge.oitAccumTexture.createView(),
       revealView: bridge.oitRevealTexture.createView()
+    };
+  }
+
+  function createSphResidentSurfaceDrawThreeCompactBridge({
+    surfaceDrawExecution,
+    materialProperties = currentMaterialProperties
+  } = {}) {
+    const compactedRows = surfaceDrawExecution?.compactedVertexRows;
+    const rowStride = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+    const schema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
+    const rendererBridge = 'three-compact-surface-geometry';
+    if (!(compactedRows instanceof Float32Array) || compactedRows.length < rowStride) {
+      return {
+        schema,
+        status: 'three-compact-surface-geometry-unavailable',
+        reason: 'compact surface vertex readback rows are required for the Three bridge',
+        rendererBridge,
+        visibleRenderSource: 'three-marching-cubes-fallback',
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+
+    const rowCount = Math.floor(compactedRows.length / rowStride);
+    const activeRowsBySurface = new Map();
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const offset = rowIndex * rowStride;
+      if (!(compactedRows[offset + SPH_SURFACE_VERTEX_ROW_INDEX.status] > 0)) continue;
+      const surfaceIndex = Math.max(0, Math.round(Number(
+        compactedRows[offset + SPH_SURFACE_VERTEX_ROW_INDEX.surfaceIndex]
+      ) || 0));
+      let rows = activeRowsBySurface.get(surfaceIndex);
+      if (!rows) {
+        rows = [];
+        activeRowsBySurface.set(surfaceIndex, rows);
+      }
+      rows.push(rowIndex);
+    }
+
+    const sourceSurfaces = Array.isArray(surfaceDrawExecution?.surfaces)
+      ? surfaceDrawExecution.surfaces
+      : [];
+    const surfaceRecords = sourceSurfaces.length
+      ? sourceSurfaces
+      : [...activeRowsBySurface.keys()].sort((a, b) => a - b).map((surfaceIndex) => ({ surfaceIndex }));
+    const group = new THREE.Group();
+    group.name = 'ulg-sph-resident-surface-draw-three-compact';
+    group.frustumCulled = false;
+    const meshes = [];
+    let totalVertexCount = 0;
+    let totalTriangleCount = 0;
+    let geometryByteLength = 0;
+
+    for (let recordIndex = 0; recordIndex < surfaceRecords.length; recordIndex += 1) {
+      const sourceSurface = surfaceRecords[recordIndex] || {};
+      const surfaceIndex = Math.max(0, Math.round(Number(sourceSurface.surfaceIndex ?? recordIndex) || 0));
+      const explicitVertexOffset = Number(sourceSurface.vertexOffset);
+      const explicitVertexCount = Math.max(0, Math.round(Number(sourceSurface.vertexCount) || 0));
+      const rowIndices = [];
+      const hasExplicitVertexRange = sourceSurface.vertexOffset != null
+        && Number.isFinite(explicitVertexOffset)
+        && explicitVertexOffset >= 0
+        && explicitVertexCount > 0;
+      if (hasExplicitVertexRange) {
+        const start = Math.max(0, Math.round(explicitVertexOffset));
+        const end = Math.min(rowCount, start + explicitVertexCount);
+        for (let rowIndex = start; rowIndex < end; rowIndex += 1) {
+          const offset = rowIndex * rowStride;
+          if (compactedRows[offset + SPH_SURFACE_VERTEX_ROW_INDEX.status] > 0) rowIndices.push(rowIndex);
+        }
+      } else {
+        rowIndices.push(...(activeRowsBySurface.get(surfaceIndex) || []));
+      }
+      if (rowIndices.length < 3) continue;
+
+      const alignedVertexCount = rowIndices.length - (rowIndices.length % 3);
+      if (alignedVertexCount < 3) continue;
+      const positions = new Float32Array(alignedVertexCount * 3);
+      const normals = new Float32Array(alignedVertexCount * 3);
+      let normalMagnitude = 0;
+      for (let vertexIndex = 0; vertexIndex < alignedVertexCount; vertexIndex += 1) {
+        const rowOffset = rowIndices[vertexIndex] * rowStride;
+        const vectorOffset = vertexIndex * 3;
+        positions[vectorOffset] = compactedRows[rowOffset + SPH_SURFACE_VERTEX_ROW_INDEX.positionXM];
+        positions[vectorOffset + 1] = compactedRows[rowOffset + SPH_SURFACE_VERTEX_ROW_INDEX.positionYM];
+        positions[vectorOffset + 2] = compactedRows[rowOffset + SPH_SURFACE_VERTEX_ROW_INDEX.positionZM];
+        const nx = compactedRows[rowOffset + SPH_SURFACE_VERTEX_ROW_INDEX.normalX];
+        const ny = compactedRows[rowOffset + SPH_SURFACE_VERTEX_ROW_INDEX.normalY];
+        const nz = compactedRows[rowOffset + SPH_SURFACE_VERTEX_ROW_INDEX.normalZ];
+        normals[vectorOffset] = nx;
+        normals[vectorOffset + 1] = ny;
+        normals[vectorOffset + 2] = nz;
+        normalMagnitude += Math.abs(nx) + Math.abs(ny) + Math.abs(nz);
+      }
+
+      const descriptor = renderDescriptorOf({
+        material: sourceSurface.material ?? `material-${sourceSurface.materialId ?? surfaceIndex}`,
+        phase: sourceSurface.phase ?? `phase-${sourceSurface.phaseId ?? 0}`,
+        renderKey: sourceSurface.renderKey ?? sourceSurface.material ?? `surface-${surfaceIndex}`,
+        opticalState: sourceSurface.opticalState || null,
+        opticalStateKey: sourceSurface.opticalStateKey ?? 'default',
+        renderDomainId: sourceSurface.renderDomainId,
+        renderDomainKey: sourceSurface.renderDomainKey
+      });
+      const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+      geometry.setDrawRange(0, alignedVertexCount);
+      if (!(normalMagnitude > 0)) geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+
+      const mesh = new THREE.Mesh(
+        geometry,
+        makeSurfaceMaterial(descriptor, properties)
+      );
+      mesh.name = `ulg-sph-three-compact-${descriptor.surfaceKey}`;
+      mesh.frustumCulled = false;
+      mesh.visible = true;
+      mesh.userData.renderMode = 'resident-surface-draw-three-compact';
+      mesh.userData.renderSource = 'resident-surface-draw-three-compact-vertices';
+      mesh.userData.materialKey = descriptor.material;
+      mesh.userData.renderKey = descriptor.renderKey;
+      mesh.userData.phase = descriptor.phase;
+      mesh.userData.surfaceIndex = surfaceIndex;
+      mesh.userData.surfaceDrawVertexOffset = hasExplicitVertexRange
+        ? Math.max(0, Math.round(explicitVertexOffset))
+        : null;
+      mesh.userData.surfaceDrawVertexCount = alignedVertexCount;
+      mesh.userData.surfaceDrawTriangleCount = alignedVertexCount / 3;
+      mesh.userData.surfaceDrawSource = surfaceDrawExecution.schema ?? null;
+      mesh.userData.optical = mesh.material.userData.optical;
+      applySurfaceRenderOrdering(mesh, mesh.material.userData.optical, descriptor);
+      group.add(mesh);
+      meshes.push(mesh);
+      totalVertexCount += alignedVertexCount;
+      totalTriangleCount += alignedVertexCount / 3;
+      geometryByteLength += positions.byteLength + normals.byteLength;
+    }
+
+    if (meshes.length > 0) {
+      scene.add(group);
+      suppressThreeSurfaceMeshesForResidentOverlay('resident-surface-draw-three-compact-active');
+    }
+    const status = meshes.length > 0
+      ? SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
+      : 'three-compact-surface-geometry-empty';
+    const bridge = {
+      schema,
+      status,
+      rendererBridge,
+      visibleRenderSource: meshes.length > 0
+        ? 'resident-surface-draw-three-compact-vertices'
+        : 'resident-surface-draw-three-compact-empty',
+      reason: meshes.length > 0 ? null : 'compact surface vertex readback had no active triangle rows',
+      overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+      threeSurfaceGroup: group,
+      threeMeshes: meshes,
+      threeMeshCount: meshes.length,
+      threeGeometryByteLength: geometryByteLength,
+      frameCount: 0,
+      lastRenderStatus: meshes.length > 0 ? 'three-compact-surface-geometry-submitted' : 'three-compact-surface-geometry-empty',
+      drawOrderingPolicy: 'three-scene-render-order-depth-policy',
+      drawOrderCount: meshes.length,
+      drawOrderSurfaceIndices: meshes.map((mesh) => mesh.userData.surfaceIndex),
+      drawOrderIndirectOffsets: [],
+      depthPolicy: 'three-managed-depth-buffer',
+      depthAttachmentFormat: null,
+      depthAttachmentReady: true,
+      transparencyCompositeMode: 'three-material-depth-sort',
+      oitAccumFormat: null,
+      oitRevealFormat: null,
+      oitTargetsReady: false,
+      lastOpaqueDrawCount: meshes.filter((mesh) => mesh.material?.depthWrite).length,
+      lastTransparentDrawCount: meshes.filter((mesh) => !mesh.material?.depthWrite).length,
+      opticalRenderSource: 'closure-derived-three-materials',
+      opticalRecordCount: opticalGpuTable?.recordCount ?? 0,
+      opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
+      opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
+      opticalSpectralSampleStrideFloats: opticalGpuTable?.spectralSampleStrideFloats ?? 0,
+      temporalSwapPolicy: null,
+      retainedPreviousOverlay: false,
+      vertexCount: totalVertexCount,
+      triangleCount: totalTriangleCount,
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+    if (meshes.length > 0) {
+      sphResidentSurfaceDrawRenderBridge = bridge;
+      scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
+    }
+    return bridge;
+  }
+
+  function createSphResidentRenderRowsThreePointBridge({
+    decoded,
+    renderRowsExecution,
+    smoothingLengthM = null,
+    bridgeMode = SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
+  } = {}) {
+    const positionsM = decoded?.positionsM;
+    const colorsRgb = decoded?.colorsRgb;
+    const schema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
+    const requestedBridgeMode = String(bridgeMode || SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE).trim().toLowerCase();
+    if (!(positionsM instanceof Float32Array) || positionsM.length < 3) {
+      return {
+        schema,
+        status: 'three-render-row-points-unavailable',
+        reason: 'full render-row positions are required for the Three point bridge',
+        rendererBridge: requestedBridgeMode,
+        visibleRenderSource: 'three-marching-cubes-fallback',
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
+    const pointCount = Math.floor(positionsM.length / 3);
+    const positions = new Float32Array(pointCount * 3);
+    positions.set(positionsM.subarray(0, pointCount * 3));
+    const smoothingLength = Number.isFinite(Number(smoothingLengthM)) && Number(smoothingLengthM) > 0
+      ? Number(smoothingLengthM)
+      : 0.08;
+    const requestedSphereBridge = requestedBridgeMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+      || requestedBridgeMode === 'three-spheres';
+    const useSphereBridge = requestedSphereBridge && pointCount <= SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES;
+    let rendererBridge = useSphereBridge
+      ? SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+      : SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE;
+    let bridgeStatus = useSphereBridge
+      ? SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_STATUS
+      : SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS;
+    let visibleRenderSource = useSphereBridge
+      ? 'resident-render-rows-three-instanced-spheres'
+      : 'resident-render-rows-three-points';
+    let renderObject = null;
+    let renderReason = requestedSphereBridge && !useSphereBridge
+      ? `sphere bridge skipped above ${SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES} render-row instances`
+      : null;
+    let geometryByteLength = positions.byteLength;
+    let lastOpaqueDrawCount = 0;
+    let lastTransparentDrawCount = 1;
+    let transparencyCompositeMode = 'three-points-alpha-depth-sort';
+    let drawOrderingPolicy = 'three-points-depth-policy';
+
+    if (useSphereBridge) {
+      const sphereRadius = Math.max(0.025, Math.min(0.16, smoothingLength * 0.32));
+      const sphereGeometry = new THREE.SphereGeometry(sphereRadius, 8, 6);
+      const sphereMaterial = new THREE.MeshBasicMaterial({
+        color: 0x9ed8ff,
+        vertexColors: false,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: true,
+        depthTest: true
+      });
+      sphereMaterial.userData.optical = {
+        alpha: sphereMaterial.opacity,
+        transparencyClassId: 1,
+        depthWriteFlag: 1
+      };
+      const mesh = new THREE.InstancedMesh(sphereGeometry, sphereMaterial, pointCount);
+      const temp = new THREE.Object3D();
+      for (let index = 0; index < pointCount; index += 1) {
+        const offset = index * 3;
+        temp.position.set(positions[offset], positions[offset + 1], positions[offset + 2]);
+        temp.updateMatrix();
+        mesh.setMatrixAt(index, temp.matrix);
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.name = 'ulg-sph-three-render-row-spheres';
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 1200;
+      mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
+      mesh.userData.renderSource = visibleRenderSource;
+      mesh.userData.pointCount = pointCount;
+      mesh.userData.sphereRadiusM = sphereRadius;
+      renderObject = mesh;
+      geometryByteLength += pointCount * 16 * Float32Array.BYTES_PER_ELEMENT;
+      transparencyCompositeMode = 'three-instanced-spheres-depth-buffer';
+      drawOrderingPolicy = 'three-instanced-spheres-depth-policy';
+    } else {
+      const colors = new Float32Array(pointCount * 3);
+      if (colorsRgb instanceof Float32Array && colorsRgb.length >= pointCount * 3) {
+        colors.set(colorsRgb.subarray(0, pointCount * 3));
+      } else {
+        for (let index = 0; index < pointCount; index += 1) {
+          const offset = index * 3;
+          colors[offset] = 0.25;
+          colors[offset + 1] = 0.55;
+          colors[offset + 2] = 1.0;
+        }
+      }
+      geometryByteLength += colors.byteLength;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      const pointSize = Math.max(0.025, Math.min(0.18, smoothingLength * 0.45));
+      const material = new THREE.PointsMaterial({
+        size: pointSize,
+        sizeAttenuation: true,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.82,
+        depthWrite: false,
+        depthTest: true
+      });
+      material.userData.optical = {
+        alpha: material.opacity,
+        transparencyClassId: 1,
+        depthWriteFlag: 0
+      };
+      const points = new THREE.Points(geometry, material);
+      points.name = 'ulg-sph-three-render-row-points';
+      points.frustumCulled = false;
+      points.renderOrder = 1200;
+      points.userData.renderMode = SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE;
+      points.userData.renderSource = visibleRenderSource;
+      points.userData.pointCount = pointCount;
+      renderObject = points;
+    }
+    const group = new THREE.Group();
+    group.name = useSphereBridge
+      ? 'ulg-sph-resident-render-row-three-spheres'
+      : 'ulg-sph-resident-render-row-three-points';
+    group.frustumCulled = false;
+    group.add(renderObject);
+    scene.add(group);
+    suppressThreeSurfaceMeshesForResidentOverlay('resident-render-row-three-points-active');
+    const bridge = {
+      schema,
+      status: bridgeStatus,
+      rendererBridge,
+      visibleRenderSource,
+      reason: renderReason,
+      overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+      threeSurfaceGroup: group,
+      threeMeshes: [renderObject],
+      threeMeshCount: 1,
+      threeGeometryByteLength: geometryByteLength,
+      frameCount: 0,
+      lastRenderStatus: useSphereBridge
+        ? 'three-render-row-spheres-submitted'
+        : 'three-render-row-points-submitted',
+      drawOrderingPolicy,
+      drawOrderCount: 1,
+      drawOrderSurfaceIndices: [],
+      drawOrderIndirectOffsets: [],
+      depthPolicy: 'three-managed-depth-buffer',
+      depthAttachmentFormat: null,
+      depthAttachmentReady: true,
+      transparencyCompositeMode,
+      oitAccumFormat: null,
+      oitRevealFormat: null,
+      oitTargetsReady: false,
+      lastOpaqueDrawCount,
+      lastTransparentDrawCount,
+      opticalRenderSource: useSphereBridge ? 'fixed-water-sphere-material' : 'render-row-vertex-colors',
+      opticalRecordCount: opticalGpuTable?.recordCount ?? 0,
+      opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
+      opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
+      opticalSpectralSampleStrideFloats: opticalGpuTable?.spectralSampleStrideFloats ?? 0,
+      temporalSwapPolicy: null,
+      retainedPreviousOverlay: false,
+      vertexCount: pointCount,
+      triangleCount: 0,
+      pointCount,
+      sphereBridgeRequested: requestedSphereBridge,
+      sphereBridgeUsed: useSphereBridge,
+      sphereBridgeMaxInstances: SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES,
+      renderRowsReadback: Boolean(renderRowsExecution?.renderRowsReadback),
+      scientificValidation: false,
+      sphValidation: false,
+      surfaceExtractionValidation: false,
+      fullPhysicsValidation: false
+    };
+    sphResidentSurfaceDrawRenderBridge = bridge;
+    scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
+    return bridge;
+  }
+
+  function summarizeThreeCompactSurfaceVertexRows(compactedRows, surfaces = []) {
+    const rowStride = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS;
+    const rowCount = compactedRows instanceof Float32Array
+      ? Math.floor(compactedRows.length / rowStride)
+      : 0;
+    const countsBySurface = new Map();
+    let vertexCount = 0;
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const offset = rowIndex * rowStride;
+      if (!(compactedRows[offset + SPH_SURFACE_VERTEX_ROW_INDEX.status] > 0)) continue;
+      const surfaceIndex = Math.max(0, Math.round(Number(
+        compactedRows[offset + SPH_SURFACE_VERTEX_ROW_INDEX.surfaceIndex]
+      ) || 0));
+      countsBySurface.set(surfaceIndex, (countsBySurface.get(surfaceIndex) || 0) + 1);
+      vertexCount += 1;
+    }
+    const sourceSurfaces = Array.isArray(surfaces) ? surfaces : [];
+    const surfaceRecords = sourceSurfaces.length
+      ? sourceSurfaces.map((surface, index) => {
+        const surfaceIndex = Math.max(0, Math.round(Number(surface?.surfaceIndex ?? index) || 0));
+        const surfaceVertexCount = countsBySurface.get(surfaceIndex) || 0;
+        return {
+          ...surface,
+          surfaceIndex,
+          vertexOffset: null,
+          vertexCount: surfaceVertexCount,
+          triangleOffset: null,
+          triangleCount: Math.floor(surfaceVertexCount / 3),
+          status: surfaceVertexCount > 0 ? 'surface-draw-ready' : 'surface-draw-empty'
+        };
+      })
+      : [...countsBySurface.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([surfaceIndex, surfaceVertexCount]) => ({
+          surfaceIndex,
+          vertexOffset: null,
+          vertexCount: surfaceVertexCount,
+          triangleOffset: null,
+          triangleCount: Math.floor(surfaceVertexCount / 3),
+          status: surfaceVertexCount > 0 ? 'surface-draw-ready' : 'surface-draw-empty'
+        }));
+    return {
+      surfaceRecords,
+      activeSurfaceCount: [...countsBySurface.values()].filter((count) => count > 0).length,
+      vertexCount,
+      triangleCount: Math.floor(vertexCount / 3)
+    };
+  }
+
+  function createSphSurfaceDrawExecutionFromSurfaceVertices(surfaceVerticesExecution) {
+    const compactedVertexRows = surfaceVerticesExecution?.vertexRows instanceof Float32Array
+      ? surfaceVerticesExecution.vertexRows
+      : new Float32Array();
+    const summary = summarizeThreeCompactSurfaceVertexRows(
+      compactedVertexRows,
+      surfaceVerticesExecution?.surfaces || []
+    );
+    const sourceVertexRowCount = Math.floor(
+      compactedVertexRows.length / SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
+    );
+    return {
+      schema: 'peercompute.ulg.sph-gpu-render-surface-draw.v0',
+      backend: 'webgpu-surface-vertex-readback-bridge',
+      status: summary.vertexCount > 0 ? 'surface-draw-metadata-ready' : 'surface-draw-metadata-empty',
+      reason: 'Three compact bridge skips serial surface-draw metadata shader and uses surface vertex rows directly',
+      sourceSurfaceVertexSchema: surfaceVerticesExecution?.schema ?? null,
+      sourceSurfaceVertexBackend: surfaceVerticesExecution?.backend ?? null,
+      surfaceCount: surfaceVerticesExecution?.surfaceCount ?? summary.surfaceRecords.length,
+      activeSurfaceCount: summary.activeSurfaceCount,
+      vertexCount: summary.vertexCount,
+      triangleCount: summary.triangleCount,
+      sourceVertexRowCount,
+      compactedVertexRows,
+      surfaces: summary.surfaceRecords,
+      drawRows: new Float32Array(),
+      drawIndirectRows: new Uint32Array(),
+      drawRowsBufferRetained: false,
+      drawRowsBufferByteLength: 0,
+      drawIndirectSchema: null,
+      drawIndirectRowStrideUints: 0,
+      drawIndirectRowsBufferRetained: false,
+      drawIndirectRowsBufferByteLength: 0,
+      compactedVertexRowsBufferRetained: false,
+      compactedVertexRowsBufferByteLength: 0,
+      residentBufferLeaseLedgerStatus: null,
+      residentBufferLeaseResourceCount: 0,
+      residentBufferLeaseActiveLeaseCount: 0,
+      residentBufferLeaseSummary: null,
+      readbackMode: RESIDENT_FULL_READBACK_MODE,
+      surfaceDrawReadback: true,
+      surfaceDrawSummaryReadback: false,
+      surfaceDrawSummaryReadbackByteLength: 0,
+      fullSurfaceDrawReadback: false,
+      compactionMode: 'surface-vertex-readback-cpu-compact',
+      queueCompletionStatus: surfaceVerticesExecution?.queueCompletionStatus ?? null,
+      queueCompletionMethod: surfaceVerticesExecution?.queueCompletionMethod ?? null,
+      releaseSurfaceDrawBufferLeases() {},
+      destroySurfaceDrawBuffers() {}
     };
   }
 
@@ -5574,10 +6123,12 @@ export function createSphPhaseScene(container, {
     stepCount = 1,
     retainIntermediateSteps = false,
     continueFromResidentState = false,
+    compactSummaryMode = null,
     compactSummaryScope = null,
     fuseNoFullResidentMechanicsSequence = false,
     fuseNoFullResidentMechanicsActiveGrid = false,
     fuseNoFullResidentActiveGrid = false,
+    measureFusedSequenceQueueFence = false,
     activeGridSafetyCells = undefined,
     fusedActiveGridSafetyCells = undefined,
     thermalStepOptions: thermalStepOptionOverrides = null,
@@ -5610,6 +6161,13 @@ export function createSphPhaseScene(container, {
     const effectiveReactionTable = lawGroups.reactions ? sphReactionTable : null;
     const normalizedStepCount = normalizeResidentStepCount(stepCount);
     const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+    const requestedCompactSummaryMode = normalizeMlsMpmResidentCompactSummaryMode(
+      compactSummaryMode ?? (
+        requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+          ? MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE
+          : MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_EVERY_STEP
+      )
+    );
     const requestedCompactSummaryScope = normalizeMlsMpmResidentSummaryScope(
       compactSummaryScope ?? (
         requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
@@ -5621,6 +6179,7 @@ export function createSphPhaseScene(container, {
     const requestedFuseNoFullResidentMechanicsActiveGrid = Boolean(
       fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid
     );
+    const requestedMeasureFusedSequenceQueueFence = Boolean(measureFusedSequenceQueueFence);
     const activeGridSafetyValue = fusedActiveGridSafetyCells ?? activeGridSafetyCells;
     const normalizedActiveGridSafetyCells = Number.isFinite(Number(activeGridSafetyValue)) && Number(activeGridSafetyValue) > 0
       ? Math.max(1, Math.round(Number(activeGridSafetyValue)))
@@ -5629,9 +6188,12 @@ export function createSphPhaseScene(container, {
       schema: 'peercompute.ulg.sph-scene-resident-execution-policy.v0',
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
-      activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null
+      measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
+      activeGridSafetyCells: normalizedActiveGridSafetyCells ?? null,
+      compactSummaryMode: requestedCompactSummaryMode
     };
     scene.userData.mlsMpmResidentRequestedReadbackMode = requestedReadbackMode;
+    scene.userData.mlsMpmResidentCompactSummaryMode = requestedCompactSummaryMode;
     const continuationUploads = mlsMpmResidentSteps?.nextParticleUploads ?? null;
     const continuationAvailable = Boolean(
       continueFromResidentState
@@ -5660,6 +6222,7 @@ export function createSphPhaseScene(container, {
       readbackMode: requestedReadbackMode,
       stepCount: normalizedStepCount,
       retainIntermediateSteps,
+      compactSummaryMode: requestedCompactSummaryMode,
       compactSummaryScope: requestedCompactSummaryScope,
       residentSourceMode,
       pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
@@ -5668,6 +6231,7 @@ export function createSphPhaseScene(container, {
       physicalLawGroups: lawGroups,
       fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
       fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+      measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
       activeGridSafetyCells: normalizedActiveGridSafetyCells
     });
     const markResidentStepsProgress = (status, extra = {}) => {
@@ -5677,6 +6241,7 @@ export function createSphPhaseScene(container, {
         signature,
         stepCount: normalizedStepCount,
         readbackMode: requestedReadbackMode,
+        compactSummaryMode: requestedCompactSummaryMode,
         compactSummaryScope: requestedCompactSummaryScope,
         residentSourceMode,
         continueFromResidentState: Boolean(continueFromResidentState),
@@ -5824,7 +6389,7 @@ export function createSphPhaseScene(container, {
           gridUpdateRunner,
           g2pRunner,
           stepCount: normalizedStepCount,
-          compactSummaryMode: 'final-only',
+          compactSummaryMode: requestedCompactSummaryMode,
           compactSummaryScope: requestedCompactSummaryScope,
           retainIntermediateSteps,
           onResidentStageProgress(progress = {}) {
@@ -5840,6 +6405,7 @@ export function createSphPhaseScene(container, {
           },
           fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
           fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+          measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
           activeGridSafetyCells: normalizedActiveGridSafetyCells
         };
         let execution = null;
@@ -5957,15 +6523,20 @@ export function createSphPhaseScene(container, {
           stageTiming: execution?.finalStep?.stageTiming || null
         });
         execution.requestedReadbackMode = requestedReadbackMode;
+        execution.compactSummaryMode = requestedCompactSummaryMode;
         execution.compactSummaryScope = requestedCompactSummaryScope;
         execution.residentSourceMode = residentSourceMode;
         execution.continuedFromResidentState = continuationAvailable;
         execution.continuationAvailable = Boolean(execution.nextParticleUploads);
         execution.physicalLawGroups = { ...lawGroups };
         execution.residentExecutionPolicy = residentExecutionPolicy;
-        if (execution.finalStep) execution.finalStep.requestedReadbackMode = requestedReadbackMode;
+        if (execution.finalStep) {
+          execution.finalStep.requestedReadbackMode = requestedReadbackMode;
+          execution.finalStep.compactSummaryMode = requestedCompactSummaryMode;
+        }
         for (const summary of execution.stepSummaries ?? []) {
           summary.requestedReadbackMode = requestedReadbackMode;
+          summary.compactSummaryMode = requestedCompactSummaryMode;
         }
         execution.signature = signature;
         const pressureRowsConsumerQueueEvidence = pressureConsumerQueueEvidenceFromExecution(execution);
@@ -5995,6 +6566,7 @@ export function createSphPhaseScene(container, {
             readbackMode: requestedReadbackMode,
             stepCount: normalizedStepCount,
             retainIntermediateSteps,
+            compactSummaryMode: requestedCompactSummaryMode,
             compactSummaryScope: requestedCompactSummaryScope,
             residentSourceMode,
             pressureInterfaceForceSolver: effectivePressureInterfaceForceSolver,
@@ -6003,6 +6575,7 @@ export function createSphPhaseScene(container, {
             physicalLawGroups: lawGroups,
             fuseNoFullResidentMechanicsSequence: requestedFuseNoFullResidentMechanicsSequence,
             fuseNoFullResidentMechanicsActiveGrid: requestedFuseNoFullResidentMechanicsActiveGrid,
+            measureFusedSequenceQueueFence: requestedMeasureFusedSequenceQueueFence,
             activeGridSafetyCells: normalizedActiveGridSafetyCells
           }) !== signature
         ) {
@@ -6970,6 +7543,47 @@ export function createSphPhaseScene(container, {
     return sphResidentRenderSurfaceState;
   }
 
+  function captureSkippedResidentRenderSurfaceState({
+    status = 'resident-render-surface-table-skipped',
+    reason = null,
+    emissiveByMaterial = null,
+    materialProperties = null
+  } = {}) {
+    const surfaceTable = {
+      schema: 'peercompute.ulg.sph-render-surface-table.v0',
+      status,
+      reason,
+      surfaceCount: 0,
+      totalFieldCells: 0,
+      maxFieldCellCount: 0,
+      metadata: [],
+      records: new Float32Array()
+    };
+    sphResidentRenderSurfaceState = {
+      schema: 'peercompute.ulg.sph-resident-render-surface-state.v0',
+      status,
+      reason,
+      particleBatches: [],
+      fieldBatches: [],
+      surfaceTable,
+      emissiveByMaterial,
+      materialCount: materialProperties ? Object.keys(materialProperties).length : 0,
+      surfaceCount: 0,
+      surfaceTableSurfaceCount: 0,
+      surfaceTableTotalFieldCells: 0,
+      materialKeys: [],
+      phaseKeys: [],
+      signature: 'empty',
+      readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    scene.userData.sphResidentRenderSurfaceState = sphResidentRenderSurfaceState;
+    return sphResidentRenderSurfaceState;
+  }
+
   function applySurfaceFields(surfaceFields, {
     emissiveByMaterial = null,
     materialProperties = null,
@@ -7183,18 +7797,25 @@ export function createSphPhaseScene(container, {
         stageMs[name] = Math.max(0, nowMs() - startMs);
       }
     };
-    const batches = measure('surfaceBatching', () => createContinuousSurfaceBatches({
-      positionsM,
-      colorsRgb,
-      materials,
-      boxEdgeM,
-      boxDimsM: dims,
-      smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
-    }));
+    const skipCpuSurfaceGeometry = useResidentThreeSurfaceBridgeByDefault;
+    const batches = measure('surfaceBatching', () => (
+      skipCpuSurfaceGeometry
+        ? []
+        : createContinuousSurfaceBatches({
+          positionsM,
+          colorsRgb,
+          materials,
+          boxEdgeM,
+          boxDimsM: dims,
+          smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
+        })
+    ));
     const cpuSurfaceBatches = measure('cpuSurfaceMerge', () => (
-      mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches, {
-        phasePredicate: (phase) => String(phase || '').toLowerCase() === 'liquid'
-      })
+      skipCpuSurfaceGeometry
+        ? []
+        : mergeSameMaterialPhaseSurfaceBatchesForRenderField(batches, {
+          phasePredicate: (phase) => String(phase || '').toLowerCase() === 'liquid'
+        })
     ));
     currentMaterialProperties = materialProperties || null;
     currentRenderDomainCounts = normalizeRenderDomainCounts(renderDomainCounts);
@@ -7259,23 +7880,36 @@ export function createSphPhaseScene(container, {
       })
         : null
     ));
-    const residentFieldBatches = measure('residentSurfaceBatches', () => createResidentRenderSurfaceBatches({
-      particleBatches: batches,
-      materialProperties,
-      reactionTable: sphReactionTable,
-      smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
-    }));
+    const residentFieldBatches = measure('residentSurfaceBatches', () => (
+      skipCpuSurfaceGeometry
+        ? []
+        : createResidentRenderSurfaceBatches({
+          particleBatches: batches,
+          materialProperties,
+          reactionTable: sphReactionTable,
+          smoothingLengthM: nextSphGpuParticleState?.smoothingLengthM ?? null
+        })
+    ));
     const nextSurfaceBatchIdentitySignature = residentSurfaceBatchIdentitySignature(residentFieldBatches);
     measure('opticalState', () => rebuildOpticalStateForSurfaceBatchesWithCache(residentFieldBatches, {
       materialProperties,
       cachedOpticalGpuTable: staticTableCache?.opticalGpuTable || null
     }));
-    const residentSurfaceState = measure('residentSurfaceTable', () => captureResidentRenderSurfaceState({
-      particleBatches: batches,
-      fieldBatches: residentFieldBatches,
-      emissiveByMaterial,
-      materialProperties
-    }));
+    const residentSurfaceState = measure('residentSurfaceTable', () => (
+      skipCpuSurfaceGeometry
+        ? captureSkippedResidentRenderSurfaceState({
+          status: 'resident-render-surface-table-skipped-three-resident-bridge',
+          reason: 'CPU surface geometry is skipped while the Three resident render-row bridge is active',
+          emissiveByMaterial,
+          materialProperties
+        })
+        : captureResidentRenderSurfaceState({
+          particleBatches: batches,
+          fieldBatches: residentFieldBatches,
+          emissiveByMaterial,
+          materialProperties
+        })
+    ));
     scene.userData.sphThermalMaterialTable = sphThermalMaterialTable;
     scene.userData.sphThermalClosureGraphBuffers = sphThermalClosureGraphBuffers;
     scene.userData.sphThermalPhaseResponseTable = sphThermalPhaseResponseTable;
@@ -7324,15 +7958,60 @@ export function createSphPhaseScene(container, {
     mlsMpmMechanicsPredictionSignature = null;
     scene.userData.mlsMpmMechanicsPrediction = null;
     clearMlsMpmResidentExecutionArtifacts();
-    measure('surfaceApply', () => applySurfaceBatches(cpuSurfaceBatches, {
-      emissiveByMaterial,
-      materialProperties,
-      renderSource: 'cpu-particles'
-    }));
-    const presentationRefresh = forceViewportRefreshBurst({
-      reason: 'set-particles-cpu-surface-apply',
-      frameCount: 2
+    measure('surfaceApply', () => {
+      if (skipCpuSurfaceGeometry) {
+        releaseThreeSurfaceSuppression('set-particles-three-resident-bridge-fast-path');
+        for (const surface of surfaces.values()) {
+          surface.mesh.visible = false;
+          surface.mesh.userData.renderSource = 'cpu-surface-skipped-three-resident-bridge';
+          surface.mesh.userData.surfaceInactiveFrameCount = 0;
+        }
+        scene.userData.sphSurfaceApplyTiming = {
+          schema: 'peercompute.ulg.sph-surface-apply-timing.v0',
+          status: 'cpu-surface-skipped-three-resident-bridge',
+          reason: 'Three resident render-row bridge is the selected surface renderer',
+          totalMs: 0,
+          totals: {
+            ensureSurfaceMs: 0,
+            materialMs: 0,
+            resetMs: 0,
+            addBallMs: 0,
+            updateMs: 0,
+            hideInactiveMs: 0
+          },
+          details: [],
+          surfaceCount: 0,
+          renderSource: 'three-resident-render-row-bridge',
+          scientificValidation: false,
+          sphValidation: false,
+          fullPhysicsValidation: false
+        };
+        return;
+      }
+      applySurfaceBatches(cpuSurfaceBatches, {
+        emissiveByMaterial,
+        materialProperties,
+        renderSource: 'cpu-particles'
+      });
     });
+    const presentationRefresh = skipCpuSurfaceGeometry
+      ? {
+        schema: 'peercompute.ulg.sph-scene-presentation-refresh.v0',
+        status: 'presentation-refresh-skipped-three-resident-bridge',
+        reason: 'CPU surface apply skipped; resident render refresh owns visible particles',
+        requestedFrameCount: 0,
+        completedFrameCount: 0,
+        immediateRefresh: false,
+        lastRefresh: null,
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      }
+      : forceViewportRefreshBurst({
+        reason: 'set-particles-cpu-surface-apply',
+        frameCount: 2
+      });
     scene.userData.sphSetParticlesTiming = {
       schema: 'peercompute.ulg.sph-scene-set-particles-timing.v0',
       totalMs: Math.max(0, nowMs() - timingStartMs),
@@ -7446,19 +8125,26 @@ export function createSphPhaseScene(container, {
 	  async function buildSphResidentSurfaceDrawBridge({
 	    device,
 	    renderFieldExecution,
-	    buildDrawMetadata = true
+	    buildDrawMetadata = true,
+        renderBridgeMode = null,
+        materialProperties = currentMaterialProperties
 	  } = {}) {
 	    let surfaceVerticesExecution = null;
 	    let surfaceDrawExecution = null;
 	    let retainSurfaceVerticesExecution = false;
     try {
+      const useThreeCompactVertexBridge = renderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
+      const surfaceVertexReadbackMode = useThreeCompactVertexBridge
+        ? RESIDENT_FULL_READBACK_MODE
+        : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
       markSphResidentRenderProgress('surface-draw-bridge-started', {
         stage: 'surface-draw-bridge',
         surfaceCount: renderFieldExecution?.surfaceCount ?? 0,
         totalFieldCells: renderFieldExecution?.totalFieldCells ?? 0,
         maxFieldCellCount: renderFieldExecution?.maxFieldCellCount ?? null,
         renderFieldReadback: Boolean(renderFieldExecution?.renderFieldReadback),
-        readbackMode: renderFieldExecution?.readbackMode ?? null
+        readbackMode: renderFieldExecution?.readbackMode ?? null,
+        renderBridgeMode: useThreeCompactVertexBridge ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE : 'resident-overlay'
       });
       if (
         renderFieldExecution?.schema !== 'peercompute.ulg.sph-gpu-render-field.v0'
@@ -7481,9 +8167,9 @@ export function createSphPhaseScene(container, {
         renderField: renderFieldExecution,
         fieldRowsBuffer: renderFieldExecution.fieldRowsBuffer,
         surfaceBuffer: renderFieldExecution.surfaceBuffer,
-        readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
-        retainVertexRowsBuffer: true,
-        waitForQueueCompletion: false,
+        readbackMode: surfaceVertexReadbackMode,
+        retainVertexRowsBuffer: !useThreeCompactVertexBridge,
+        waitForQueueCompletion: !useThreeCompactVertexBridge,
         deferCleanup: false,
         onProgress(progress = {}) {
           markSphResidentRenderProgress(progress.status || 'surface-vertices-progress', {
@@ -7591,30 +8277,40 @@ export function createSphPhaseScene(container, {
 	          fullPhysicsValidation: false
 	        };
 	      }
+      if (useThreeCompactVertexBridge) {
+        markSphResidentRenderProgress('surface-draw-metadata-skipped-three-compact', {
+          stage: 'surface-draw-metadata',
+          surfaceCount: surfaceVerticesExecution.surfaceCount,
+          sourceVertexRowCount: surfaceVerticesExecution.vertexCount ?? null,
+          reason: 'Three compact bridge uses surface vertex readback directly'
+        });
+        surfaceDrawExecution = createSphSurfaceDrawExecutionFromSurfaceVertices(surfaceVerticesExecution);
+      } else {
 	      markSphResidentRenderProgress('surface-draw-metadata-started', {
-        stage: 'surface-draw-metadata',
-        surfaceCount: surfaceVerticesExecution.surfaceCount,
-        sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
-          ?? surfaceVerticesExecution.maxVertexRows
-          ?? null
-      });
-      surfaceDrawExecution = await buildSphRenderSurfaceDrawMetadataWebGpu({
-        device,
-        surfaceVertices: surfaceVerticesExecution,
-        surfaceBuffer: renderFieldExecution.surfaceBuffer,
-        readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
-        compactSummaryReadback: true,
-        retainDrawRowsBuffer: true,
-        retainDrawIndirectRowsBuffer: true,
-        retainCompactedVertexRowsBuffer: true,
-        waitForQueueCompletion: false,
-        onProgress(progress = {}) {
-          markSphResidentRenderProgress(progress.status || 'surface-draw-metadata-progress', {
-            ...progress,
-            currentStage: progress.stage || 'surface-draw-metadata'
-          });
-        }
-      });
+          stage: 'surface-draw-metadata',
+          surfaceCount: surfaceVerticesExecution.surfaceCount,
+          sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
+            ?? surfaceVerticesExecution.maxVertexRows
+            ?? null
+        });
+        surfaceDrawExecution = await buildSphRenderSurfaceDrawMetadataWebGpu({
+          device,
+          surfaceVertices: surfaceVerticesExecution,
+          surfaceBuffer: renderFieldExecution.surfaceBuffer,
+          readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+          compactSummaryReadback: false,
+          retainDrawRowsBuffer: true,
+          retainDrawIndirectRowsBuffer: true,
+          retainCompactedVertexRowsBuffer: true,
+          waitForQueueCompletion: false,
+          onProgress(progress = {}) {
+            markSphResidentRenderProgress(progress.status || 'surface-draw-metadata-progress', {
+              ...progress,
+              currentStage: progress.stage || 'surface-draw-metadata'
+            });
+          }
+        });
+      }
       markSphResidentRenderProgress('surface-draw-metadata-complete', {
         stage: 'surface-draw-metadata',
         surfaceCount: surfaceDrawExecution.surfaceCount,
@@ -7628,18 +8324,26 @@ export function createSphPhaseScene(container, {
       });
       markSphResidentRenderProgress('surface-draw-render-bridge-started', {
         stage: 'surface-draw-render-bridge',
-        surfaceCount: surfaceDrawExecution.surfaceCount
+        surfaceCount: surfaceDrawExecution.surfaceCount,
+        renderBridgeMode: useThreeCompactVertexBridge ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE : 'resident-overlay'
       });
-      const renderBridge = createSphResidentSurfaceDrawRenderBridge({
-        device,
-        surfaceDrawExecution
-      });
-      const renderBridgeReady = renderBridge?.status === 'webgpu-storage-indirect-overlay-ready';
+      const renderBridge = useThreeCompactVertexBridge
+        ? createSphResidentSurfaceDrawThreeCompactBridge({
+          surfaceDrawExecution,
+          materialProperties
+        })
+        : createSphResidentSurfaceDrawRenderBridge({
+          device,
+          surfaceDrawExecution
+        });
+      const renderBridgeReady = renderBridge?.status === 'webgpu-storage-indirect-overlay-ready'
+        || renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS;
       const overlayPolicy = renderBridge?.overlayPolicy || resolveSceneResidentSurfaceDrawOverlayPolicy();
       markSphResidentRenderProgress('surface-draw-render-bridge-complete', {
         stage: 'surface-draw-render-bridge',
         surfaceCount: surfaceDrawExecution.surfaceCount,
         renderBridgeStatus: renderBridge?.status ?? null,
+        renderBridgeMode: renderBridge?.rendererBridge ?? null,
         overlayPolicyStatus: overlayPolicy?.status ?? null
       });
       return {
@@ -7657,9 +8361,9 @@ export function createSphPhaseScene(container, {
         sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
         surfaceDrawBackend: surfaceDrawExecution.backend,
         surfaceCount: surfaceDrawExecution.surfaceCount,
-        activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? 0,
-        vertexCount: surfaceDrawExecution.vertexCount ?? 0,
-        triangleCount: surfaceDrawExecution.triangleCount ?? 0,
+        activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? null,
+        vertexCount: surfaceDrawExecution.vertexCount ?? null,
+        triangleCount: surfaceDrawExecution.triangleCount ?? null,
         sourceVertexRowCount: surfaceDrawExecution.sourceVertexRowCount,
         drawRowsBufferRetained: Boolean(surfaceDrawExecution.drawRowsBufferRetained),
         drawRowsBufferByteLength: surfaceDrawExecution.drawRowsBufferByteLength ?? 0,
@@ -7681,19 +8385,25 @@ export function createSphPhaseScene(container, {
         compactionMode: surfaceDrawExecution.compactionMode,
         renderFieldBufferMode: 'released-after-surface-draw',
         surfaceVertexBufferMode: 'released-after-surface-draw',
-        surfaceDrawBufferMode: 'retained-compact-draw-buffers',
+        surfaceDrawBufferMode: useThreeCompactVertexBridge
+          ? 'three-compact-vertex-readback'
+          : 'retained-compact-draw-buffers',
         surfaceDrawInputBuffersReleased: true,
         visibleRendererBridge: renderBridgeReady
-          ? 'webgpu-storage-indirect-overlay'
-          : (renderBridge?.rendererBridge || 'pending-three-webgpu-binding'),
+          ? renderBridge.rendererBridge
+          : (useThreeCompactVertexBridge
+            ? 'three-marching-cubes-fallback'
+            : (renderBridge?.rendererBridge || 'pending-three-webgpu-binding')),
         visibleRenderSource: renderBridgeReady
-          ? 'resident-surface-draw-buffers'
+          ? renderBridge.visibleRenderSource
           : 'three-marching-cubes-fallback',
         renderBridgeSchema: renderBridge?.schema ?? null,
         renderBridgeStatus: renderBridge?.status ?? null,
         renderBridgeReason: renderBridge?.reason ?? null,
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
+        renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
+        renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
@@ -7881,20 +8591,39 @@ export function createSphPhaseScene(container, {
         readbackMode,
         ...renderDomainExtractionOptions(currentRenderDomainCounts)
       });
-      const requestedRenderRowsReadbackMode = renderRowsReadbackMode === 'full-parity-readback'
-        || renderRowsReadbackMode === 'no-full-readback'
-        ? renderRowsReadbackMode
-        : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
       const requestedRenderFieldSurfaceSummaryMode = ['auto', 'readback', 'skip'].includes(
         String(renderFieldSurfaceSummaryMode || '').toLowerCase()
       )
         ? String(renderFieldSurfaceSummaryMode || '').toLowerCase()
         : 'auto';
-      const requestedSurfaceDrawDiagnosticMode = ['auto', 'metadata', 'off'].includes(
+      const requestedSurfaceDrawDiagnosticMode = [
+        'auto',
+        'metadata',
+        'off',
+        SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE,
+        SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE,
+        SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE,
+        'three-points',
+        'three-spheres',
+        'three'
+      ].includes(
         String(surfaceDrawDiagnosticMode || '').toLowerCase()
       )
         ? String(surfaceDrawDiagnosticMode || '').toLowerCase()
         : 'auto';
+      const shouldUseThreeRenderRowPointsBridge = requestedSurfaceDrawDiagnosticMode === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
+        || requestedSurfaceDrawDiagnosticMode === 'three-points'
+        || requestedSurfaceDrawDiagnosticMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+        || requestedSurfaceDrawDiagnosticMode === 'three-spheres'
+        || requestedSurfaceDrawDiagnosticMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
+        || requestedSurfaceDrawDiagnosticMode === 'three';
+      const shouldUseThreeCompactSurfaceDrawBridge = false;
+      const requestedRenderRowsReadbackMode = shouldUseThreeRenderRowPointsBridge
+        ? RESIDENT_FULL_READBACK_MODE
+        : (renderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+          || renderRowsReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+          ? renderRowsReadbackMode
+          : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT);
       const requestedSurfaceDrawDiagnosticMaxFieldCells = Math.max(
         1,
         Math.round(Number(surfaceDrawDiagnosticMaxFieldCells) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT)
@@ -7927,28 +8656,35 @@ export function createSphPhaseScene(container, {
           reactionTable: sphReactionTable,
           gasPressureSummary
         });
-        particleBatches = createContinuousSurfaceBatches({
-          positionsM: decoded.positionsM,
-          colorsRgb: decoded.colorsRgb,
-          materials: decoded.materials,
-          boxEdgeM,
-          boxDimsM: dims,
-          smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
-        });
+        particleBatches = shouldUseThreeRenderRowPointsBridge
+          ? []
+          : createContinuousSurfaceBatches({
+            positionsM: decoded.positionsM,
+            colorsRgb: decoded.colorsRgb,
+            materials: decoded.materials,
+            boxEdgeM,
+            boxDimsM: dims,
+            smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
+          });
       } else {
         particleBatches = sphResidentRenderSurfaceState?.particleBatches || [];
       }
-      const productEventSurfaceBatches = createProductEventSurfaceBatches({
+      const productEventSurfaceBatches = shouldUseThreeRenderRowPointsBridge
+        ? []
+        : createProductEventSurfaceBatches({
         baseBatches: particleBatches,
         reactionSummary,
         reactionTable: sphReactionTable,
         materialProperties,
         smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
       });
-      const canReuseResidentSurfaceTable = !hasRenderRowsReadback
+      const canReuseResidentSurfaceTable = !shouldUseThreeRenderRowPointsBridge
+        && !hasRenderRowsReadback
         && productEventSurfaceBatches.length === 0
         && sphResidentRenderSurfaceState?.surfaceTable?.schema;
-      const fieldBatches = canReuseResidentSurfaceTable
+      const fieldBatches = shouldUseThreeRenderRowPointsBridge
+        ? []
+        : (canReuseResidentSurfaceTable
         ? sphResidentRenderSurfaceState.fieldBatches
         : createResidentRenderSurfaceBatches({
           particleBatches,
@@ -7956,7 +8692,7 @@ export function createSphPhaseScene(container, {
           materialProperties,
           reactionTable: sphReactionTable,
           smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
-        });
+        }));
       if (!decoded) {
         decoded = {
           schema: 'peercompute.ulg.sph-gpu-render-rows-decoded.v0',
@@ -7969,7 +8705,7 @@ export function createSphPhaseScene(container, {
           emissiveByMaterial: sphResidentRenderSurfaceState?.emissiveByMaterial || {}
         };
       }
-      if (!canReuseResidentSurfaceTable) {
+      if (!canReuseResidentSurfaceTable && !shouldUseThreeRenderRowPointsBridge) {
         rebuildOpticalStateForSurfaceBatches(fieldBatches, { materialProperties });
         captureResidentRenderSurfaceState({
           particleBatches,
@@ -7978,50 +8714,136 @@ export function createSphPhaseScene(container, {
           materialProperties
         });
       }
-      const residentSurfaceTable = canReuseResidentSurfaceTable
+      const residentSurfaceTable = shouldUseThreeRenderRowPointsBridge
+        ? {
+          schema: 'peercompute.ulg.sph-render-surface-table.v0',
+          status: 'surface-table-skipped-three-render-row-points',
+          surfaceCount: 0,
+          totalFieldCells: 0,
+          maxFieldCellCount: 0,
+          metadata: [],
+          records: new Float32Array()
+        }
+        : (canReuseResidentSurfaceTable
         ? sphResidentRenderSurfaceState.surfaceTable
-        : sphResidentRenderSurfaceState.surfaceTable;
-      const useDiagnosticSurfaceTable = requestedSurfaceDrawDiagnosticMode === 'metadata';
-      const diagnosticSurfaceTableMaxResolution = useDiagnosticSurfaceTable
-        ? diagnosticRenderFieldResolutionForBudget(fieldBatches.length, {
-          maxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
-          maxResolution: requestedSurfaceDrawDiagnosticMaxResolution
-        })
-        : null;
-      const surfaceTable = useDiagnosticSurfaceTable
-        ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
-          maxResolution: diagnosticSurfaceTableMaxResolution
-        })
-        : residentSurfaceTable;
-      markSphResidentRenderProgress('resident-render-surface-table-ready', {
-        stage: 'surface-table',
-        surfaceCount: surfaceTable.surfaceCount,
-        totalFieldCells: surfaceTable.totalFieldCells,
-        maxFieldCellCount: surfaceTable.maxFieldCellCount,
-        diagnosticMode: requestedSurfaceDrawDiagnosticMode,
-        diagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
-        diagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
-        diagnosticSurfaceTableMaxResolution
-      });
+        : sphResidentRenderSurfaceState.surfaceTable);
       let decodedRenderRowsSummary = summarizeDecodedRenderRows(decoded);
-      let renderFieldExecution = null;
-      let materialInterfaceField = null;
-      let renderFieldCpuParitySummary = null;
-      let renderFieldSurfaceSummary = null;
-      let renderFieldSurfaceSummarySkipped = null;
-      let renderFieldSource = 'resident-gpu-render-field';
-      let nextResidentSurfaceDraw = null;
-      const surfaceOverlayPolicy = surfaceDrawOverlayPolicyOverride?.schema
-        ? surfaceDrawOverlayPolicyOverride
-        : resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh: true });
+      const decodedMaterialKeys = decodedRenderRowsSummary
+        ? [...new Set(Object.keys(decodedRenderRowsSummary.materialPhaseCounts || {})
+          .map((key) => key.split('|')[0])
+          .filter((key) => key && key !== 'unknown'))]
+        : [];
+      const decodedPhaseKeys = decodedRenderRowsSummary
+        ? [...new Set(Object.keys(decodedRenderRowsSummary.materialPhaseCounts || {})
+          .map((key) => key.split('|')[1])
+          .filter((key) => key && key !== 'unknown'))]
+        : [];
+	      let renderFieldExecution = null;
+	      let materialInterfaceField = null;
+	      let renderFieldCpuParitySummary = null;
+	      let renderFieldSurfaceSummary = null;
+	      let renderFieldSurfaceSummarySkipped = null;
+	      let renderFieldSource = 'resident-gpu-render-field';
+	      let nextResidentSurfaceDraw = null;
+	      const surfaceOverlayPolicy = surfaceDrawOverlayPolicyOverride?.schema
+	        ? surfaceDrawOverlayPolicyOverride
+	        : resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh: true });
+	      const useDiagnosticSurfaceTable = requestedSurfaceDrawDiagnosticMode === 'metadata'
+	        || shouldUseThreeCompactSurfaceDrawBridge
+	        || surfaceOverlayPolicy.enabled;
+	      const diagnosticSurfaceTableMaxResolution = useDiagnosticSurfaceTable
+	        ? diagnosticRenderFieldResolutionForBudget(fieldBatches.length, {
+	          maxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+	          maxResolution: requestedSurfaceDrawDiagnosticMaxResolution
+	        })
+	        : null;
+	      const surfaceTable = useDiagnosticSurfaceTable
+	        ? createRenderFieldSurfaceTableForBatches(fieldBatches, {
+	          maxResolution: diagnosticSurfaceTableMaxResolution
+	        })
+	        : residentSurfaceTable;
+	      markSphResidentRenderProgress('resident-render-surface-table-ready', {
+	        stage: 'surface-table',
+	        surfaceCount: surfaceTable.surfaceCount,
+	        totalFieldCells: surfaceTable.totalFieldCells,
+	        maxFieldCellCount: surfaceTable.maxFieldCellCount,
+	        diagnosticMode: requestedSurfaceDrawDiagnosticMode,
+	        diagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+	        diagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+	        diagnosticSurfaceTableMaxResolution,
+	        overlayPolicyStatus: surfaceOverlayPolicy.status ?? null
+	      });
       const shouldBuildRetainedSurfaceDrawDiagnostics = Boolean(
         surfaceOverlayPolicy.enabled
         || requestedSurfaceDrawDiagnosticMode === 'metadata'
+        || shouldUseThreeCompactSurfaceDrawBridge
       );
       const visibleRenderFieldReadbackMode = renderFieldReadbackMode === 'full-parity-readback'
         || renderFieldReadbackMode === 'no-full-readback'
         ? renderFieldReadbackMode
         : residentRenderFieldReadbackModeForSurfaceOverlay(surfaceOverlayPolicy.enabled);
+      if (shouldUseThreeRenderRowPointsBridge) {
+        const renderRowBridgeIsSphereMode = requestedSurfaceDrawDiagnosticMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+          || requestedSurfaceDrawDiagnosticMode === 'three-spheres';
+        const renderRowBridgeBackend = renderRowBridgeIsSphereMode
+          ? 'render-rows-three-sphere-bridge'
+          : 'render-rows-three-point-bridge';
+        const renderRowBridgeStatus = renderRowBridgeIsSphereMode
+          ? 'render-field-skipped-three-render-row-spheres'
+          : 'render-field-skipped-three-render-row-points';
+        const renderRowBridgeLabel = renderRowBridgeIsSphereMode
+          ? 'Three sphere bridge'
+          : 'Three point bridge';
+        renderFieldExecution = {
+          schema: 'peercompute.ulg.sph-gpu-render-field.v0',
+          backend: renderRowBridgeBackend,
+          status: renderRowBridgeStatus,
+          reason: `${renderRowBridgeLabel} renders directly from GPU render-row readback`,
+          surfaceCount: fieldBatches.length,
+          totalFieldCells: 0,
+          maxFieldCellCount: 0,
+          productEventCount,
+          productEventBufferBound: false,
+          productEventBufferByteLength: 0,
+          renderFieldInputSource: 'resident-render-rows',
+          renderFieldReadback: false,
+          readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
+          fieldRowByteLength: 0,
+          normalHotLoopReadbackFree: false,
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+        materialInterfaceField = {
+          schema: 'peercompute.ulg.sph-material-interface-field.v0',
+          status: renderRowBridgeIsSphereMode
+            ? 'material-interface-field-skipped-three-render-row-spheres'
+            : 'material-interface-field-skipped-three-render-row-points',
+          reason: `${renderRowBridgeLabel} does not need a material-interface surface field`,
+          sourceRenderFieldSchema: renderFieldExecution.schema,
+          sourceRenderFieldStatus: renderFieldExecution.status,
+          sourceRenderFieldReadback: false,
+          sourceRenderFieldReadbackMode: renderFieldExecution.readbackMode,
+          surfaceCount: fieldBatches.length,
+          readySurfaceCount: 0,
+          totalSurfaceAreaM2: 0,
+          elementCount: 0,
+          elements: [],
+          gpuAuthoritativeState: true,
+          compactRenderReadback: true,
+          scientificValidation: false,
+          sphValidation: false,
+          surfaceExtractionValidation: false,
+          fullPhysicsValidation: false
+        };
+        publishSphResidentMaterialInterfaceState(materialInterfaceField);
+        markSphResidentRenderProgress('resident-render-field-skipped-three-points', {
+          stage: 'render-field',
+          surfaceCount: fieldBatches.length,
+          particleCount: renderRowsExecution.particleCount
+        });
+      } else {
       try {
         const buildRenderFieldForRows = () => buildSphRenderFieldWebGpu({
           device: resolvedDeviceResult.device,
@@ -8326,8 +9148,79 @@ export function createSphPhaseScene(container, {
           fullPhysicsValidation: false
         };
       }
+      }
       if (renderFieldSource === 'resident-gpu-render-field') {
-        if (
+        if (shouldUseThreeRenderRowPointsBridge) {
+          renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+            status: 'released-after-three-render-row-points'
+          });
+          renderFieldExecution?.destroyRenderFieldBuffers?.({
+            releaseLeases: true,
+            reason: 'three-render-row-points-cleanup'
+          });
+          const renderBridge = createSphResidentRenderRowsThreePointBridge({
+            decoded,
+            renderRowsExecution,
+            smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null,
+            bridgeMode: requestedSurfaceDrawDiagnosticMode
+          });
+          const renderBridgeReady = renderBridge?.status === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS
+            || renderBridge?.status === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_STATUS;
+          nextResidentSurfaceDraw = residentSurfaceDrawUnavailable(
+            renderBridgeReady
+              ? `resident render rows are displayed through a ${renderBridge.rendererBridge} bridge`
+              : (renderBridge?.reason || 'resident render-row Three bridge unavailable'),
+            { renderFieldExecution, overlayPolicy: surfaceOverlayPolicy }
+          );
+          nextResidentSurfaceDraw.status = renderBridgeReady
+            ? (renderBridge.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+              ? 'resident-render-row-spheres-built'
+              : 'resident-render-row-points-built')
+            : 'resident-render-row-points-unavailable';
+          nextResidentSurfaceDraw.diagnosticOnly = false;
+          nextResidentSurfaceDraw.diagnosticMode = requestedSurfaceDrawDiagnosticMode;
+          nextResidentSurfaceDraw.activeSurfaceCount = 0;
+          nextResidentSurfaceDraw.vertexCount = renderBridge?.pointCount ?? renderBridge?.vertexCount ?? 0;
+          nextResidentSurfaceDraw.triangleCount = 0;
+          nextResidentSurfaceDraw.renderFieldBufferMode = 'released-after-three-render-row-points';
+          nextResidentSurfaceDraw.visibleRendererBridge = renderBridgeReady
+            ? renderBridge.rendererBridge
+            : 'three-marching-cubes-fallback';
+          nextResidentSurfaceDraw.visibleRenderSource = renderBridgeReady
+            ? renderBridge.visibleRenderSource
+            : 'three-marching-cubes-fallback';
+          nextResidentSurfaceDraw.surfaceDrawReadback = Boolean(renderRowsExecution.renderRowsReadback);
+          nextResidentSurfaceDraw.surfaceDrawSummaryReadback = false;
+          nextResidentSurfaceDraw.surfaceDrawSummarySkipped = true;
+          nextResidentSurfaceDraw.surfaceDrawSummaryReadbackByteLength = 0;
+          nextResidentSurfaceDraw.renderBridgeSchema = renderBridge?.schema ?? null;
+          nextResidentSurfaceDraw.renderBridgeStatus = renderBridge?.status ?? null;
+          nextResidentSurfaceDraw.renderBridgeReason = renderBridge?.reason ?? null;
+          nextResidentSurfaceDraw.renderBridgeFrameCount = renderBridge?.frameCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeLastRenderStatus = renderBridge?.lastRenderStatus ?? null;
+          nextResidentSurfaceDraw.renderBridgeThreeMeshCount = renderBridge?.threeMeshCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeThreeGeometryByteLength = renderBridge?.threeGeometryByteLength ?? 0;
+          nextResidentSurfaceDraw.renderBridgeDrawOrderingPolicy = renderBridge?.drawOrderingPolicy ?? null;
+          nextResidentSurfaceDraw.renderBridgeDrawOrderCount = renderBridge?.drawOrderCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeDrawOrderSurfaceIndices = [...(renderBridge?.drawOrderSurfaceIndices || [])];
+          nextResidentSurfaceDraw.renderBridgeDrawOrderIndirectOffsets = [...(renderBridge?.drawOrderIndirectOffsets || [])];
+          nextResidentSurfaceDraw.renderBridgeDepthPolicy = renderBridge?.depthPolicy ?? null;
+          nextResidentSurfaceDraw.renderBridgeDepthAttachmentFormat = renderBridge?.depthAttachmentFormat ?? null;
+          nextResidentSurfaceDraw.renderBridgeDepthAttachmentReady = Boolean(renderBridge?.depthAttachmentReady);
+          nextResidentSurfaceDraw.renderBridgeTransparencyCompositeMode = renderBridge?.transparencyCompositeMode ?? null;
+          nextResidentSurfaceDraw.renderBridgeOitAccumFormat = renderBridge?.oitAccumFormat ?? null;
+          nextResidentSurfaceDraw.renderBridgeOitRevealFormat = renderBridge?.oitRevealFormat ?? null;
+          nextResidentSurfaceDraw.renderBridgeOitTargetsReady = Boolean(renderBridge?.oitTargetsReady);
+          nextResidentSurfaceDraw.renderBridgeLastOpaqueDrawCount = renderBridge?.lastOpaqueDrawCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeLastTransparentDrawCount = renderBridge?.lastTransparentDrawCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeOpticalRenderSource = renderBridge?.opticalRenderSource ?? null;
+          nextResidentSurfaceDraw.renderBridgeOpticalRecordCount = renderBridge?.opticalRecordCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeOpticalRecordStrideFloats = renderBridge?.opticalRecordStrideFloats ?? 0;
+          nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleCount = renderBridge?.opticalSpectralSampleCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleStrideFloats = renderBridge?.opticalSpectralSampleStrideFloats ?? 0;
+          nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = renderBridge?.temporalSwapPolicy ?? null;
+          nextResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay = Boolean(renderBridge?.retainedPreviousOverlay);
+        } else if (
           !shouldBuildRetainedSurfaceDrawDiagnostics
           && !renderFieldExecution?.renderFieldReadback
           && (renderFieldSurfaceSummary || renderFieldSurfaceSummarySkipped)
@@ -8372,7 +9265,7 @@ export function createSphPhaseScene(container, {
             renderFieldExecution?.totalFieldCells ?? surfaceTable?.totalFieldCells
           ) || 0));
           const diagnosticOverBudget = Boolean(
-            requestedSurfaceDrawDiagnosticMode === 'metadata'
+            (requestedSurfaceDrawDiagnosticMode === 'metadata' || shouldUseThreeCompactSurfaceDrawBridge)
             && renderFieldTotalCells > requestedSurfaceDrawDiagnosticMaxFieldCells
           );
           if (diagnosticOverBudget) {
@@ -8416,7 +9309,11 @@ export function createSphPhaseScene(container, {
 	              buildDrawMetadata: !(
 	                requestedSurfaceDrawDiagnosticMode === 'metadata'
 	                && !surfaceOverlayPolicy.enabled
-	              )
+	              ),
+                  renderBridgeMode: shouldUseThreeCompactSurfaceDrawBridge
+                    ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
+                    : null,
+                  materialProperties
 	            });
             markSphResidentRenderProgress('resident-render-surface-draw-diagnostic-complete', {
               stage: 'surface-draw-diagnostic',
@@ -8443,8 +9340,15 @@ export function createSphPhaseScene(container, {
               nextResidentSurfaceDraw.renderBridgeStatus = surfaceOverlayPolicy.status;
               nextResidentSurfaceDraw.renderBridgeReason = surfaceOverlayPolicy.reason || SPH_THREE_WEBGPU_BINDING_REASON;
             }
-            if (nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay') {
-              suppressThreeSurfaceMeshesForResidentOverlay('resident-surface-draw-overlay-active');
+            if (
+              nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay'
+              || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
+            ) {
+              suppressThreeSurfaceMeshesForResidentOverlay(
+                nextResidentSurfaceDraw.visibleRendererBridge === 'three-compact-surface-geometry'
+                  ? 'resident-surface-draw-three-compact-active'
+                  : 'resident-surface-draw-overlay-active'
+              );
             }
           }
         } else {
@@ -8472,30 +9376,57 @@ export function createSphPhaseScene(container, {
           { renderFieldExecution }
         );
       }
-      if (nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay') {
-        sphResidentSurfaceDraw = nextResidentSurfaceDraw;
-        scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
-        releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
-      } else {
-        clearSphResidentSurfaceDrawArtifacts();
-        sphResidentSurfaceDraw = nextResidentSurfaceDraw;
-        scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
-      }
-      await refreshOpticalGpuLookup({
-        preferWebGpu,
-        navigatorRef: overrideNavigatorRef,
-        device,
-        deviceResult: resolvedDeviceResult
-      });
-      const pressureInterfaceState = skipPressureInterfaceRefresh
-        ? {
-          schema: 'peercompute.ulg.sph-pressure-interface-state.v0',
-          status: 'pressure-interface-refresh-skipped',
-          source: 'resident-render-validation',
-          sourceCadence: 'visual-render-refresh',
-          reason: 'validation render refresh requested pressure-interface skip'
-        }
-        : await refreshSphResidentPressureInterfaceState({
+	      if (
+	        nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay'
+	        || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
+	        || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-points'
+	        || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-spheres'
+	      ) {
+	        sphResidentSurfaceDraw = nextResidentSurfaceDraw;
+	        scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
+	        releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
+	      } else {
+	        clearSphResidentSurfaceDrawArtifacts();
+	        sphResidentSurfaceDraw = nextResidentSurfaceDraw;
+	        scene.userData.sphResidentSurfaceDraw = sphResidentSurfaceDraw;
+	      }
+	      markSphResidentRenderProgress('resident-render-optical-lookup-started', {
+	        stage: 'optical-lookup',
+	        source: 'resident-render-refresh'
+	      });
+	      await refreshOpticalGpuLookup({
+	        preferWebGpu,
+	        navigatorRef: overrideNavigatorRef,
+	        device,
+	        deviceResult: resolvedDeviceResult
+	      });
+	      markSphResidentRenderProgress('resident-render-optical-lookup-complete', {
+	        stage: 'optical-lookup',
+	        source: 'resident-render-refresh'
+	      });
+	      const shouldSkipPressureInterfaceRefresh = Boolean(
+	        skipPressureInterfaceRefresh
+	        || (
+	          surfaceOverlayPolicy.enabled
+	          && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+	        )
+	      );
+	      markSphResidentRenderProgress('resident-render-pressure-interface-started', {
+	        stage: 'pressure-interface',
+	        source: 'resident-render-refresh',
+	        skipped: shouldSkipPressureInterfaceRefresh
+	      });
+	      const pressureInterfaceState = shouldSkipPressureInterfaceRefresh
+	        ? {
+	          schema: 'peercompute.ulg.sph-pressure-interface-state.v0',
+	          status: 'pressure-interface-refresh-skipped',
+	          source: 'resident-render-validation',
+	          sourceCadence: 'visual-render-refresh',
+	          reason: skipPressureInterfaceRefresh
+	            ? 'validation render refresh requested pressure-interface skip'
+	            : 'resident overlay render refresh skips pressure-interface producer work'
+	        }
+	        : await refreshSphResidentPressureInterfaceState({
           preferWebGpu,
           navigatorRef: overrideNavigatorRef,
           device: device || resolvedDeviceResult?.device || null,
@@ -8509,9 +9440,15 @@ export function createSphPhaseScene(container, {
           pressureInterfaceGasCellFieldAdmission,
           pressureInterfaceGasCellFieldImport,
           pressureInterfaceGasCellFieldImportStateKey,
-          source: 'resident-render-field-pressure-interface-producer',
-          sourceCadence: 'visual-render-refresh'
-        });
+	          source: 'resident-render-field-pressure-interface-producer',
+	          sourceCadence: 'visual-render-refresh'
+	        });
+	      markSphResidentRenderProgress('resident-render-pressure-interface-complete', {
+	        stage: 'pressure-interface',
+	        source: 'resident-render-refresh',
+	        skipped: shouldSkipPressureInterfaceRefresh,
+	        status: pressureInterfaceState?.status ?? null
+	      });
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
         status: renderFieldSource === 'resident-gpu-render-field'
@@ -8601,9 +9538,9 @@ export function createSphPhaseScene(container, {
         surfaceDrawSourceSurfaceVertexSchema: sphResidentSurfaceDraw?.sourceSurfaceVertexSchema ?? null,
         surfaceDrawSurfaceDrawSchema: sphResidentSurfaceDraw?.surfaceDrawSchema ?? null,
         surfaceDrawSurfaceCount: sphResidentSurfaceDraw?.surfaceCount ?? 0,
-	        surfaceDrawActiveSurfaceCount: sphResidentSurfaceDraw?.activeSurfaceCount ?? 0,
-	        surfaceDrawVertexCount: sphResidentSurfaceDraw?.vertexCount ?? 0,
-	        surfaceDrawTriangleCount: sphResidentSurfaceDraw?.triangleCount ?? 0,
+	        surfaceDrawActiveSurfaceCount: sphResidentSurfaceDraw?.activeSurfaceCount ?? null,
+	        surfaceDrawVertexCount: sphResidentSurfaceDraw?.vertexCount ?? null,
+	        surfaceDrawTriangleCount: sphResidentSurfaceDraw?.triangleCount ?? null,
 	        surfaceDrawSourceVertexRowCount: sphResidentSurfaceDraw?.sourceVertexRowCount ?? 0,
 	        surfaceDrawVertexRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.surfaceVertexRowsBufferRetained),
 	        surfaceDrawVertexRowsBufferByteLength: sphResidentSurfaceDraw?.surfaceVertexRowsBufferByteLength ?? 0,
@@ -8635,6 +9572,8 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeReason: sphResidentSurfaceDraw?.renderBridgeReason ?? null,
         surfaceDrawRenderBridgeFrameCount: sphResidentSurfaceDraw?.renderBridgeFrameCount ?? 0,
         surfaceDrawRenderBridgeLastRenderStatus: sphResidentSurfaceDraw?.renderBridgeLastRenderStatus ?? null,
+        surfaceDrawRenderBridgeThreeMeshCount: sphResidentSurfaceDraw?.renderBridgeThreeMeshCount ?? 0,
+        surfaceDrawRenderBridgeThreeGeometryByteLength: sphResidentSurfaceDraw?.renderBridgeThreeGeometryByteLength ?? 0,
         surfaceDrawRenderBridgeDrawOrderingPolicy: sphResidentSurfaceDraw?.renderBridgeDrawOrderingPolicy ?? null,
         surfaceDrawRenderBridgeDrawOrderCount: sphResidentSurfaceDraw?.renderBridgeDrawOrderCount ?? 0,
         surfaceDrawRenderBridgeDrawOrderSurfaceIndices: [...(sphResidentSurfaceDraw?.renderBridgeDrawOrderSurfaceIndices || [])],
@@ -8678,8 +9617,14 @@ export function createSphPhaseScene(container, {
         residentSurfaceTableStatus: sphResidentRenderSurfaceState?.status ?? null,
         residentSurfaceTableSurfaceCount: sphResidentRenderSurfaceState?.surfaceTableSurfaceCount ?? 0,
         residentSurfaceTableTotalFieldCells: sphResidentRenderSurfaceState?.surfaceTableTotalFieldCells ?? 0,
-        materialKeys: [...new Set(fieldBatches.map((batch) => batch.material))],
-        phaseKeys: [...new Set(fieldBatches.map((batch) => batch.phase))],
+        materialKeys: [...new Set([
+          ...fieldBatches.map((batch) => batch.material),
+          ...decodedMaterialKeys
+        ].filter(Boolean))],
+        phaseKeys: [...new Set([
+          ...fieldBatches.map((batch) => batch.phase),
+          ...decodedPhaseKeys
+        ].filter(Boolean))],
         gasPressureSummaryStatus: gasPressureSummary?.status ?? null,
         gasPressureSummarySource: gasPressureSummary?.source ?? null,
         residentPressureOpticalStateApplied: decoded.materials.some((descriptor) => Boolean(descriptor.opticalState)),

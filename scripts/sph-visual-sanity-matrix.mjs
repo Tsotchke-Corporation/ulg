@@ -507,6 +507,10 @@ async function main() {
       visualSurfaceIssues,
       visualSurfaceIssueCount: visualSurfaceIssues.length,
       visualSurfaceIssueTypes: Object.keys(countBy(visualSurfaceIssues, (issue) => issue.issue)),
+      browserConsoleIssueCounts: analysis.browserConsoleIssueCounts || {},
+      browserConsoleWarningCounts: analysis.browserConsoleWarningCounts || {},
+      browserConsoleIssueCount: finiteOrNull(analysis.browserConsoleIssueCount) ?? 0,
+      browserConsoleWarningCount: finiteOrNull(analysis.browserConsoleWarningCount) ?? 0,
       maxSpeedObservedMPerS: finiteOrNull(analysis.maxSpeedObservedMPerS),
       maxDisplacementObservedM: finiteOrNull(analysis.maxDisplacementObservedM),
       minVolumeObservedJ: finiteOrNull(analysis.minVolumeObservedJ),
@@ -553,6 +557,18 @@ async function main() {
     failedCount: results.filter((result) => result.failed).length,
     captureFrames,
     issueCounts: countBy(results.flatMap((result) => result.issues)),
+    browserConsoleIssueCounts: results.reduce((counts, result) => {
+      for (const [key, value] of Object.entries(result.browserConsoleIssueCounts || {})) {
+        counts[key] = (counts[key] || 0) + Number(value || 0);
+      }
+      return counts;
+    }, {}),
+    browserConsoleWarningCounts: results.reduce((counts, result) => {
+      for (const [key, value] of Object.entries(result.browserConsoleWarningCounts || {})) {
+        counts[key] = (counts[key] || 0) + Number(value || 0);
+      }
+      return counts;
+    }, {}),
     visualSurfaceIssueCounts: countBy(
       results.flatMap((result) => result.visualSurfaceIssues),
       (issue) => issue.issue

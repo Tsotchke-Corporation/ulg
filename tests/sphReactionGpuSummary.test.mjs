@@ -661,3 +661,47 @@ test('SPH reaction product events can remain GPU-resident without product-event 
   summary.destroyProductEventBuffer();
   assert.equal(retained.destroyed, true);
 });
+
+test('SPH reaction resident product-event mode skips compact summary readbacks', async () => {
+  const values = new Float32Array(SPH_GPU_REACTION_SUMMARY_FLOATS);
+  const device = fakeSummaryDevice(values);
+  const buffer = (label) => ({ label });
+  const summary = await runSphReactionSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount: 65
+    },
+    reactionTable: reactionTable(),
+    sourceStateBuffer: buffer('source-state'),
+    sourceThermoBuffer: buffer('source-thermo'),
+    nextStateBuffer: buffer('next-state'),
+    nextThermoBuffer: buffer('next-thermo'),
+    proposalBuffer: buffer('reaction-proposals'),
+    retainProductEventBuffer: true,
+    readCompactSummary: false,
+    readGasSpeciesSummary: false,
+    readProductInventory: false,
+    readAtomResidual: false
+  });
+
+  assert.equal(summary.status, 'reaction-resident-product-event-buffer-ready');
+  assert.equal(summary.readbackMode, 'resident-product-event-buffer-no-readback');
+  assert.equal(summary.reactionSummaryAvailable, false);
+  assert.equal(summary.compactSummaryReadbackSkipped, true);
+  assert.equal(summary.compactReadbackByteLength, 0);
+  assert.equal(summary.gasSpeciesReadbackByteLength, 0);
+  assert.equal(summary.productInventoryReadbackByteLength, 0);
+  assert.equal(summary.atomResidualReadbackByteLength, 0);
+  assert.equal(summary.productEventRowCount, 130);
+  assert.equal(summary.productEventBufferRetained, true);
+  assert.deepEqual(device.dispatches.map((dispatch) => dispatch.count), [3]);
+  assert.deepEqual(device.copies, []);
+  assert.equal(device.shaderModules.length, 1);
+  assert.equal(device.createdBuffers.some((created) => created.label.includes('summary-readback')), false);
+  assert.equal(device.createdBuffers.some((created) => created.label.includes('product-inventory-readback')), false);
+  const retained = device.createdBuffers.find((created) => created.label === 'ulg-sph-reaction-product-event-out');
+  assert.equal(retained.destroyed, false);
+  summary.destroyProductEventBuffer();
+  assert.equal(retained.destroyed, true);
+});

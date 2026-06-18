@@ -15,6 +15,11 @@ import {
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
+import {
+  tagWebGpuBufferDevice,
+  webGpuBufferMatchesDevice,
+  webGpuDeviceMismatchInfo
+} from './sphGpuDeviceIdentity.js';
 
 export {
   ULG_MLS_MPM_GPU_GRID_PROJECTION_EXECUTION_SCHEMA,
@@ -40,10 +45,11 @@ const GPU_MAP_MODE = {
 
 const DEFAULT_BOX_DIMS_M = Object.freeze([5, 5, 5]);
 const DEFAULT_GRID_SHIFT = 1;
-const GRID_SCOPE = 'gather-form-p2g-stress-momentum-projection';
+const GRID_SCOPE = 'particle-parallel-scatter-p2g-stress-momentum-projection';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const EMPTY_PRODUCT_EVENT_STORAGE_ROWS = new Float32Array(SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS);
+const P2G_ACCUMULATOR_COMPONENTS = 4;
 const TAIT_EXPONENT = 7;
 const EOS_MODEL_IDS = Object.freeze({
   disabled: 0,
@@ -476,7 +482,10 @@ function outputEnvelope({
   residentProductMass = null,
   residentProductMassProductEventCount = 0,
   residentProductMassCoupledEventCount = null,
-  residentProductMassCoupledUnplacedMassKg = null
+  residentProductMassCoupledUnplacedMassKg = null,
+  residentProductMassProductEventBufferDeviceMismatch = false,
+  residentProductMassProductEventBufferSourceDeviceId = null,
+  residentProductMassProductEventBufferConsumerDeviceId = null
 }) {
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   return {
@@ -514,11 +523,16 @@ function outputEnvelope({
     residentProductMassCoupledEventCount,
     residentProductMassCoupledUnplacedMassKg,
     residentProductMassConsumeMassPolicy: residentProductMass?.consumeMassPolicy ?? null,
-    residentProductMassGridCouplingStatus: residentProductMassGridCouplingStatus({
-      residentProductMass,
-      productEventCount: residentProductMassProductEventCount,
-      backend
-    }),
+    residentProductMassGridCouplingStatus: residentProductMassProductEventBufferDeviceMismatch
+      ? 'blocked-cross-device-product-event-buffer'
+      : residentProductMassGridCouplingStatus({
+          residentProductMass,
+          productEventCount: residentProductMassProductEventCount,
+          backend
+        }),
+    residentProductMassProductEventBufferDeviceMismatch,
+    residentProductMassProductEventBufferSourceDeviceId,
+    residentProductMassProductEventBufferConsumerDeviceId,
     residentProductMassEosCouplingStatus: residentProductMass?.eosCouplingStatus ?? null,
     scientificValidation: false,
     sphValidation: false,
@@ -713,13 +727,26 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const gridSpec = createMlsMpmGridSpec({ boxDimsM, gridSpacingM });
   const outputByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_NODE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const accumulatorElementCount = Math.max(1, gridSpec.gridNodeCount * P2G_ACCUMULATOR_COMPONENTS);
+  const accumulatorByteLength = accumulatorElementCount * Int32Array.BYTES_PER_ELEMENT;
   const borrowedStateBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.stateBuffer : null;
   const borrowedThermoBuffer = sphParticleUpload?.status === 'webgpu-uploaded' ? sphParticleUpload.thermoBuffer : null;
   const borrowedMechanicsBuffer = mlsMpmParticleUpload?.status === 'webgpu-uploaded'
     ? mlsMpmParticleUpload.mechanicsBuffer
     : null;
   const productEventRows = productEventRowsFromResidentProductMass(residentProductMass);
-  const borrowedProductEventBuffer = residentProductMass?.productEventBuffer || null;
+  const rawBorrowedProductEventBuffer = residentProductMass?.productEventBuffer || null;
+  const productEventBufferMismatch = rawBorrowedProductEventBuffer && !(productEventRows instanceof Float32Array)
+    ? webGpuDeviceMismatchInfo({
+        buffer: rawBorrowedProductEventBuffer,
+        residentProductMass,
+        device
+      })
+    : { mismatch: false, sourceDeviceId: null, consumerDeviceId: null };
+  const borrowedProductEventBuffer = rawBorrowedProductEventBuffer
+    && webGpuBufferMatchesDevice(rawBorrowedProductEventBuffer, device)
+    ? rawBorrowedProductEventBuffer
+    : null;
   const productEventCount = borrowedProductEventBuffer || productEventRows instanceof Float32Array
     ? productEventRowCountFromResidentProductMass(residentProductMass, productEventRows)
     : 0;
@@ -727,17 +754,22 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-p2g-sph-thermo-in', sphParticleState.thermo);
   const mechanicsBuffer = borrowedMechanicsBuffer || writeStorageBuffer(device, 'ulg-mls-mpm-p2g-mechanics-in', mlsMpmParticleState.mechanics);
   const productEventBuffer = borrowedProductEventBuffer
-    || writeStorageBuffer(
+    || tagWebGpuBufferDevice(writeStorageBuffer(
       device,
       'ulg-mls-mpm-p2g-resident-product-events-in',
       productEventRows instanceof Float32Array && productEventRows.length >= SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS
         ? productEventRows
         : EMPTY_PRODUCT_EVENT_STORAGE_ROWS
-    );
+    ), device);
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-grid-out',
     size: Math.max(4, outputByteLength),
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+  });
+  const accumulatorBuffer = device.createBuffer({
+    label: 'ulg-mls-mpm-p2g-grid-accumulators',
+    size: Math.max(4, accumulatorByteLength),
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   });
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-p2g-params',
@@ -762,37 +794,71 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       productEventCount,
       internalPressureScale
     ));
+    const p2gBindings = [
+      computeBufferBinding(0, 'read-only-storage'),
+      computeBufferBinding(1, 'read-only-storage'),
+      computeBufferBinding(2, 'read-only-storage'),
+      computeBufferBinding(3, 'storage'),
+      computeBufferBinding(4, 'uniform'),
+      computeBufferBinding(5, 'read-only-storage'),
+      computeBufferBinding(6, 'storage')
+    ];
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.v2',
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v1',
       label: 'ulg-mls-mpm-p2g-grid-projection',
       code: mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
-      bindings: [
-        computeBufferBinding(0, 'read-only-storage'),
-        computeBufferBinding(1, 'read-only-storage'),
-        computeBufferBinding(2, 'read-only-storage'),
-        computeBufferBinding(3, 'storage'),
-        computeBufferBinding(4, 'uniform'),
-        computeBufferBinding(5, 'read-only-storage')
-      ]
+      bindings: p2gBindings
     });
-    const bindGroup = device.createBindGroup({
-      layout: bindGroupLayout,
-      entries: [
+    const { pipeline: productPipeline, bindGroupLayout: productBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.product-scatter.v1',
+      label: 'ulg-mls-mpm-p2g-product-event-scatter',
+      code: mlsMpmP2gGridProjectionWgsl,
+      entryPoint: 'scatter_product_events',
+      bindings: p2gBindings
+    });
+    const { pipeline: finalizePipeline, bindGroupLayout: finalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
+      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v1',
+      label: 'ulg-mls-mpm-p2g-grid-finalize',
+      code: mlsMpmP2gGridProjectionWgsl,
+      entryPoint: 'finalize_grid',
+      bindings: p2gBindings
+    });
+    const p2gEntries = [
         { binding: 0, resource: { buffer: stateBuffer } },
         { binding: 1, resource: { buffer: thermoBuffer } },
         { binding: 2, resource: { buffer: mechanicsBuffer } },
-        { binding: 3, resource: { buffer: gridBuffer } },
+        { binding: 3, resource: { buffer: accumulatorBuffer } },
         { binding: 4, resource: { buffer: paramsBuffer } },
-        { binding: 5, resource: { buffer: productEventBuffer } }
-      ]
-    });
+        { binding: 5, resource: { buffer: productEventBuffer } },
+        { binding: 6, resource: { buffer: gridBuffer } }
+      ];
+    const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: p2gEntries });
+    const productBindGroup = device.createBindGroup({ layout: productBindGroupLayout, entries: p2gEntries });
+    const finalizeBindGroup = device.createBindGroup({ layout: finalizeBindGroupLayout, entries: p2gEntries });
     const encoder = device.createCommandEncoder();
+    if (typeof encoder.clearBuffer === 'function') {
+      encoder.clearBuffer(accumulatorBuffer, 0, Math.max(4, accumulatorByteLength));
+    } else {
+      device.queue.writeBuffer(accumulatorBuffer, 0, new Int32Array(accumulatorElementCount));
+    }
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sphParticleState.particleCount / 64)));
     pass.end();
+    if (productEventCount > 0) {
+      const productPass = encoder.beginComputePass();
+      productPass.setPipeline(productPipeline);
+      productPass.setBindGroup(0, productBindGroup);
+      productPass.dispatchWorkgroups(Math.max(1, Math.ceil(productEventCount / 64)));
+      productPass.end();
+    }
+    const finalizePass = encoder.beginComputePass();
+    finalizePass.setPipeline(finalizePipeline);
+    finalizePass.setBindGroup(0, finalizeBindGroup);
+    finalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+    finalizePass.end();
     if (!noFullReadback) {
       encoder.copyBufferToBuffer(gridBuffer, 0, readBuffer, 0, Math.max(4, outputByteLength));
     }
@@ -819,7 +885,10 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
         : 0,
       residentProductMassCoupledUnplacedMassKg: productEventCount > 0
         ? (residentProductMass?.unplacedProductMassKg ?? null)
-        : 0
+        : 0,
+      residentProductMassProductEventBufferDeviceMismatch: productEventBufferMismatch.mismatch,
+      residentProductMassProductEventBufferSourceDeviceId: productEventBufferMismatch.sourceDeviceId,
+      residentProductMassProductEventBufferConsumerDeviceId: productEventBufferMismatch.consumerDeviceId
     });
     if (retainGridBuffer) {
       projection.gridBuffer = gridBuffer;
@@ -835,6 +904,7 @@ export async function runMlsMpmP2gGridProjectionWebGpu({
       if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
       if (!borrowedProductEventBuffer) productEventBuffer.destroy?.();
       if (!retainGridBuffer || !returnedRetainedGridBuffer) gridBuffer.destroy?.();
+      accumulatorBuffer.destroy?.();
       paramsBuffer.destroy?.();
       readBuffer?.destroy?.();
     };

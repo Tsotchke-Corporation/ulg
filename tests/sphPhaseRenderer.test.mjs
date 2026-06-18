@@ -8,6 +8,7 @@ import {
   SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL,
+  SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
@@ -804,6 +805,8 @@ test('SPH resident overlay draw order follows render policy metadata', () => {
 });
 
 test('SPH resident overlay policy chooses no-full-readback only when overlay is available', () => {
+  assert.equal(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT, 'disabled');
+  assert.equal(normalizeResidentSurfaceDrawOverlayMode(), 'disabled');
   assert.equal(normalizeResidentSurfaceDrawOverlayMode('1'), 'enabled');
   assert.equal(normalizeResidentSurfaceDrawOverlayMode('three'), 'disabled');
   assert.equal(normalizeResidentSurfaceDrawOverlayMode('wat'), 'auto');

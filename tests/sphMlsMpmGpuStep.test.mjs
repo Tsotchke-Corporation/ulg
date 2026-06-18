@@ -84,6 +84,7 @@ import {
   runMlsMpmResidentSummaryWebGpu
 } from '../src/runtime/sph/sphMlsMpmGpuSummary.js';
 import { ULG_SPH_RESIDENT_PRODUCT_MASS_SCHEMA } from '../src/runtime/sph/sphReactionGpuSummary.js';
+import { tagResidentProductMassDevice } from '../src/runtime/sph/sphGpuDeviceIdentity.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../src/runtime/sph/sphMechanicsMaterialTable.js';
 import {
   RESIDENT_STATE_FAMILIES,
@@ -752,7 +753,7 @@ test('MLS-MPM resident step preserves shifted grid origin into G2P', async () =>
     ...buffers,
     preferWebGpu: false,
     gridSpacingM: 1,
-    boxDimsM: [5, 5, 5],
+    boxDimsM: [3, 3, 3],
     dt: 0.01,
     gravityMPerS2: gravity,
     cflFactor: 10
@@ -875,7 +876,7 @@ test('MLS-MPM grid update optional WebGPU path forwards pressure force rows', as
     pressureInterfaceGridForceAdmission,
     dt: 0.25,
     gravityMPerS2: [0, 0, 0],
-    boxDimsM: [3, 3, 3],
+    boxDimsM: [5, 5, 5],
     cflFactor: 10,
     preferWebGpu: true,
     navigatorRef: webGpuNavigator(),
@@ -1732,7 +1733,7 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);
   assert.equal(step.nextParticleUploads.sphParticleUpload.thermoBuffer, sourceThermoBuffer);
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 3);
+  assert.equal(device.dispatches.length, 4);
 });
 
 test('MLS-MPM resident step rejects a GPU resident lane lease when WebGPU device acquisition fails', async () => {
@@ -2099,6 +2100,45 @@ test('SPH spatial gas ledger producer stage derives compact ledger from retained
 
   result.destroySpatialGasLedgerRowsBuffer?.();
   assert.equal(result.spatialGasLedgerRowsBuffer.destroyed, true);
+});
+
+test('SPH spatial gas ledger producer blocks cross-device retained product-event buffers before binding', async () => {
+  const sourceDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const consumerDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const residentProductMass = tagResidentProductMassDevice(residentProductMassHandle({
+    label: 'cross-device-product-events',
+    rowCount: 2,
+    byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    gasSpeciesRows: [
+      { material: 'h2', materialId: 1, massKg: 0.002016, moles: 1, unplacedMassKg: 0.002016 }
+    ]
+  }), sourceDevice);
+
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentProductMass,
+    reactionTable: {
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+      productTermMetadata: [
+        { productTermIndex: 0, material: 'h2', routing: 'gas' }
+      ]
+    },
+    boxDimsM: [2, 2, 2],
+    device: consumerDevice
+  });
+
+  assert.equal(result.backend, 'cpu-reference');
+  assert.equal(result.status, 'spatial-gas-ledger-producer-stage-ready');
+  assert.equal(result.executionSource, 'aggregate-gas-ledger-single-cell-spatial-fallback');
+  assert.equal(result.webgpuStatus.status, 'blocked-cross-device-product-event-buffer');
+  assert.equal(result.productEventBufferDeviceMismatch, true);
+  assert.equal(result.compactSpatialGasReadbackPerformed, false);
+  assert.equal(result.fullProductEventReadbackPerformed, false);
+  assert.equal(consumerDevice.bindGroups.length, 0);
+  assert.equal(consumerDevice.dispatches.length, 0);
+  assert.equal(result.spatialGasSpeciesLedger.status, 'spatial-gas-species-ledger-ready');
+  assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 1);
 });
 
 test('SPH spatial gas ledger producer derives positioned gas rows when product support volume is missing', async () => {
@@ -3295,6 +3335,28 @@ test('MLS-MPM resident steps compute task declares a ComputeManager GPU lane pas
   assert.equal(task.data.residentSequenceLaneContract.sequenceMode, 'per-step-resident-pass-dag');
 });
 
+test('MLS-MPM resident steps compute task can budget no compact-summary readback', async () => {
+  const { options } = noFullReadbackResidentStepFixture();
+  const task = createMlsMpmResidentStepsComputeTask({
+    ...options,
+    modulePath: './sphMlsMpmGpuStep.js',
+    taskId: 'ulg:test:resident-steps-no-summary-task',
+    laneId: 'ulg:test:sph-resident-steps',
+    stateKey: 'ulg:test:sph-state-steps',
+    domainKey: 'ulg:test-domain',
+    stepCount: 3,
+    compactSummaryMode: 'none'
+  });
+
+  assert.equal(task.data.compactSummaryMode, 'none');
+  assert.equal(task.gpuResidentLane.copyBudget.readbackBytes, 0);
+  assert.equal(task.gpuResidentLane.copyBudget.compactSummaryBytes, 0);
+  assert.equal(task.webgpu.copyBudget.readbackBytes, 0);
+  assert.equal(task.webgpu.copyBudget.compactSummaryBytes, 0);
+  assert.equal(task.gpuResidentLane.residentSequenceLaneContract.compactSummaryMode, 'none');
+  assert.equal(task.gpuResidentLane.residentSequenceLaneContract.sequenceRunnable, false);
+});
+
 test('MLS-MPM resident steps compute task handler returns fence evidence without local double leasing', async () => {
   const { options } = noFullReadbackResidentStepFixture();
   const ignoredLaneManager = fakeGpuResidentLaneManager();
@@ -4102,16 +4164,20 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
         }
       };
     },
-	    reactionStepRunner(args) {
-	      reactionCalls += 1;
-	      assert.equal(args.sourceStateBuffer.label, 'thermal-state-before-reaction');
-	      assert.equal(args.sourceThermoBuffer.label, 'thermal-thermo-before-reaction');
-	      assert.equal(args.sourceMechanicsBuffer.label, 'g2p-mechanics-before-reaction');
-	      assert.equal(args.readbackMode, 'no-full-readback');
-	      assert.equal(args.retainOutputParticleBuffers, true);
-	      assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
-	      const productEventBuffer = tracker.buffer('reaction-product-events-after-thermal');
-	      return {
+    reactionStepRunner(args) {
+      reactionCalls += 1;
+      assert.equal(args.sourceStateBuffer.label, 'thermal-state-before-reaction');
+      assert.equal(args.sourceThermoBuffer.label, 'thermal-thermo-before-reaction');
+      assert.equal(args.sourceMechanicsBuffer.label, 'g2p-mechanics-before-reaction');
+      assert.equal(args.readbackMode, 'no-full-readback');
+      assert.equal(args.retainOutputParticleBuffers, true);
+      assert.equal(args.readCompactReactionSummary, false);
+      assert.equal(args.readReactionGasSpeciesSummary, false);
+      assert.equal(args.readReactionProductInventory, false);
+      assert.equal(args.readReactionAtomResidual, false);
+      assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
+      const productEventBuffer = tracker.buffer('reaction-product-events-after-thermal');
+      return {
         schema: ULG_SPH_GPU_REACTION_STEP_SCHEMA,
         backend: 'webgpu',
         status: 'reaction-step-executed',
@@ -4967,6 +5033,96 @@ test('MLS-MPM resident steps ping-pong retained particle buffers across repeated
   assert.equal(tracker.destroyed, 8);
 });
 
+test('MLS-MPM resident steps compactSummaryMode none skips no-full summary readback', async () => {
+  const { options, tracker } = noFullReadbackResidentStepFixture();
+  let summaryCallCount = 0;
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...options,
+    stepCount: 2,
+    compactSummaryMode: 'none',
+    summaryRunner() {
+      summaryCallCount += 1;
+      throw new Error('compact summary should not run in none mode');
+    }
+  });
+
+  assert.equal(summaryCallCount, 0);
+  assert.equal(execution.compactSummaryMode, 'none');
+  assert.equal(execution.completedStepCount, 2);
+  assert.equal(execution.finalStep.stageTiming.compactSummaryRequested, false);
+  assert.equal(execution.finalStep.stageTiming.stageMs.compactSummary, 0);
+  assert.equal(execution.finalStep.diagnostics.compactGpuSummaryAvailable, false);
+  assert.equal(execution.stepSummaries[0].diagnostics.compactGpuSummaryAvailable, false);
+  assert.equal(execution.stepSummaries[1].diagnostics.compactGpuSummaryAvailable, false);
+  assert.equal(execution.nextSphParticleState.status, 'gpu-resident-unread-ready');
+  assert.equal(execution.nextMlsMpmParticleState.status, 'gpu-resident-unread-ready');
+  destroyMlsMpmResidentStepsBuffers(execution);
+  assert.ok(tracker.destroyed > 0);
+});
+
+test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMode none', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const originalOnSubmittedWorkDone = device.queue.onSubmittedWorkDone;
+  let summaryCallCount = 0;
+  let queueFenceCount = 0;
+  device.queue.onSubmittedWorkDone = async () => {
+    queueFenceCount += 1;
+    await originalOnSubmittedWorkDone.call(device.queue);
+  };
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 1,
+    measureFusedSequenceQueueFence: true,
+    summaryRunner() {
+      summaryCallCount += 1;
+      throw new Error('compact summary should not run in none-mode fused sequence');
+    }
+  });
+
+  assert.equal(summaryCallCount, 0);
+  assert.equal(execution.status, 'resident-steps-executed');
+  assert.equal(execution.compactSummaryMode, 'none');
+  assert.equal(execution.fusedResidentSequence.status, 'fused-resident-sequence-executed');
+  assert.equal(execution.fusedResidentSequence.activeGridDispatch.useActiveGrid, true);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, true);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentSequenceStepCount, 2);
+  assert.equal(execution.finalStep.stageTiming.compactSummaryRequested, false);
+  assert.equal(execution.finalStep.stageTiming.stageMs.compactSummary, 0);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
+  assert.ok(queueFenceCount >= 1);
+  assert.equal(execution.finalStep.stageTiming.queueFenceStatus.fusedMechanicsSequence, 'complete');
+  assert.equal(execution.finalStep.stageTiming.queueFenceMethod.fusedMechanicsSequence, 'queue.onSubmittedWorkDone');
+  assert.equal(Number.isFinite(execution.finalStep.stageTiming.queueFenceMs.fusedMechanicsSequence), true);
+  assert.equal(execution.fusedResidentSequence.queueFenceRequested, true);
+  assert.equal(execution.fusedResidentSequence.queueFenceStatus, 'complete');
+  assert.equal(execution.stepSummaries[0].compactSummaryAvailable, false);
+  assert.equal(execution.stepSummaries[1].compactSummaryAvailable, false);
+  assert.equal(device.submissions.length, 1);
+  assert.equal(device.dispatches.length, 8);
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
 test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
@@ -5064,8 +5220,8 @@ test('MLS-MPM resident steps can opt into one-submit fused mechanics sequence', 
   assert.equal(execution.stepSummaries[1].status, 'resident-step-webgpu-executed');
   assert.equal(execution.stepSummaries[0].fusedResidentSequence, true);
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 6);
-  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 7);
+  assert.equal(device.dispatches.length, 8);
+  assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, 8);
   destroyMlsMpmResidentStepsBuffers(execution);
   assert.equal(device.createdBuffers.filter((buffer) => buffer.destroyed).length, device.createdBuffers.length);
 });
@@ -5152,8 +5308,178 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(execution.finalStep.p2gGridProjection.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.gridUpdate.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
-  assert.equal(device.clears.length, 2);
-  assert.deepEqual(device.dispatches.map((entry) => entry.count), [4, 4, 1, 4, 4, 1]);
+  assert.equal(device.clears.length, 4);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 4, 4, 1, 1, 4, 4, 1]);
+  destroyMlsMpmResidentStepsBuffers(execution);
+});
+
+test('MLS-MPM resident fused mechanics sequence carries active-grid bounds across unread batches', async () => {
+  const buffers = manualBuffers({
+    position: [2.5, 2.5, 2.5],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25
+  });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const baseOptions = {
+    ...buffers,
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [5, 5, 5],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 1
+  };
+  const first = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...baseOptions,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    }
+  });
+  const second = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...baseOptions,
+    sphParticleState: first.nextSphParticleState,
+    mlsMpmParticleState: first.nextMlsMpmParticleState,
+    sphParticleUpload: first.nextParticleUploads.sphParticleUpload,
+    mlsMpmParticleUpload: first.nextParticleUploads.mlsMpmParticleUpload
+  });
+
+  assert.equal(first.fusedResidentSequence.activeGridDispatch.useActiveGrid, true);
+  assert.equal(first.nextSphParticleState.cpuStateStale, true);
+  assert.equal(first.nextSphParticleState.residentPositionBoundsM.status, 'resident-active-grid-predicted-bounds');
+  assert.equal(second.fusedResidentSequence.activeGridDispatch.useActiveGrid, true);
+  assert.equal(second.fusedResidentSequence.activeGridDispatch.boundsSource, 'resident-position-bounds');
+  assert.notEqual(second.fusedResidentSequence.activeGridDispatch.reason, 'position-bounds-unavailable');
+  destroyMlsMpmResidentStepsBuffers(first);
+  destroyMlsMpmResidentStepsBuffers(second);
+});
+
+test('MLS-MPM resident steps fall back to per-step fused mechanics when thermal blocks fused sequence', async () => {
+  const buffers = manualBuffers();
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const thermalInputs = [];
+  const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'final-only',
+    compactSummaryScope: 'particle-visual',
+    fuseNoFullResidentMechanicsSequence: true,
+    thermalMaterialTable: { schema: 'peercompute.ulg.sph-gpu-thermal-material-table.v0' },
+    thermalStepRunner(args) {
+      thermalInputs.push({
+        stateBufferLabel: args.sourceStateBuffer?.label ?? null,
+        thermoBufferLabel: args.sourceThermoBuffer?.label ?? null,
+        readbackMode: args.readbackMode
+      });
+      const index = thermalInputs.length;
+      return {
+        schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
+        backend: 'webgpu',
+        status: 'thermal-step-executed',
+        particleCount: buffers.sphParticleState.particleCount,
+        state: new Float32Array(),
+        thermo: new Float32Array(),
+        stateBuffer: tracker.buffer(`thermal-state-${index}`),
+        thermoBuffer: tracker.buffer(`thermal-thermo-${index}`),
+        stateBufferByteLength: buffers.sphParticleState.state.byteLength,
+        thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
+        retainedOutputParticleBuffers: true,
+        readbackMode: args.readbackMode,
+        normalHotLoopReadbackFree: true,
+        destroyOutputParticleBuffers() {
+          this.stateBuffer.destroy();
+          this.thermoBuffer.destroy();
+        }
+      };
+    },
+    summaryRunner({ gridUpdate, g2pReconstruction, thermalStep, summaryScope }) {
+      assert.equal(gridUpdate.fusedResidentMechanics, true);
+      assert.equal(g2pReconstruction.fusedResidentMechanics, true);
+      assert.equal(thermalStep?.backend, 'webgpu');
+      return {
+        schema: 'peercompute.ulg.mls-mpm-resident-summary-execution.v0',
+        backend: 'webgpu',
+        status: 'compact-summary-ready',
+        compactGpuSummaryAvailable: true,
+        readbackMode: 'no-full-readback',
+        summaryScope,
+        particleCount: buffers.sphParticleState.particleCount,
+        gridNodeCount: gridUpdate.gridNodeCount,
+        activeGridNodeCount: null,
+        activeGridNodeCountAvailable: false,
+        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-requested',
+        gridNodeScanCount: 0,
+        gridNodeScanSkipped: true,
+        sourceMassKg: 8,
+        nextMassKg: 8,
+        massDeltaKg: 0,
+        maxSpeedMPerS: 0,
+        maxDisplacementM: 0,
+        minVolumeRatioJ: 1,
+        maxVolumeRatioJ: 1,
+        phaseMassKg: { solid: 0, liquid: 8, gas: 0, plasma: 0 },
+        phaseMassTotalKg: 8,
+        thermalPhaseSummaryAvailable: true,
+        compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
+        timing: {
+          schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
+          totalMs: 0,
+          setupMs: 0,
+          encodeMs: 0,
+          submitMs: 0,
+          mapAsyncWaitMs: 0,
+          decodeMs: 0,
+          queueFenceAttribution: 'unit-summary-runner',
+          summaryKernelDispatchCount: 0,
+          summaryWorkgroupCount: 0,
+          compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES
+        },
+        mapAsyncWaitMs: 0,
+        queueFenceAttribution: 'unit-summary-runner'
+      };
+    }
+  });
+
+  assert.equal(execution.fusedResidentSequence, undefined);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentMechanics, true);
+  assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, undefined);
+  assert.equal(execution.finalStep.stageTiming.thermalRequested, true);
+  assert.equal(execution.finalStep.stageTiming.stageMs.p2gGridProjection, 0);
+  assert.equal(execution.finalStep.stageTiming.stageMs.gridUpdate, 0);
+  assert.equal(execution.finalStep.stageTiming.stageMs.g2pReconstruction, 0);
+  assert.equal(thermalInputs.length, 2);
+  assert.equal(thermalInputs[0].stateBufferLabel, 'ulg-mls-mpm-fused-g2p-state-out');
+  assert.equal(thermalInputs[1].stateBufferLabel, 'ulg-mls-mpm-fused-g2p-state-out');
+  assert.equal(device.submissions.length, 2);
+  assert.equal(device.dispatches.length, 8);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

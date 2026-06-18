@@ -1,4 +1,5 @@
 import { createId } from './ids.js';
+import { webGpuDeviceDescriptorForResidentSph } from './webgpuDeviceLimits.js';
 
 const PRIORITY_ORDER = ['render', 'interactive', 'simulation', 'background', 'validation'];
 
@@ -59,13 +60,15 @@ export class GpuBroker {
       return null;
     }
     try {
-      const device = await this.adapterHandle.requestDevice();
+      const deviceDescriptor = webGpuDeviceDescriptorForResidentSph(this.adapterHandle);
+      const device = await this.adapterHandle.requestDevice(deviceDescriptor);
       this.device = device;
       this.capabilities = {
         ...this.capabilities,
         deviceStatus: 'ready',
         fallback: null,
-        reason: 'device acquired'
+        reason: 'device acquired',
+        requiredLimits: deviceDescriptor?.requiredLimits || {}
       };
       if (device?.lost?.then) {
         device.lost.then((info) => this.markDeviceLost(info)).catch((error) => this.markDeviceLost(error));

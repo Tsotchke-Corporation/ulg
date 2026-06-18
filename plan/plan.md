@@ -2,6 +2,161 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the performance harness now has a
+direct-resident MLS-MPM hot-loop lane that bypasses scene rendering and compact
+summary readback so it can measure the WebGPU mechanics sequence. The first
+direct-resident evidence row exposed an important harness bug: the earlier
+`2.6ms` four-step number was command enqueue time, not completed GPU work.
+The benchmark now requests `queue.onSubmittedWorkDone()` for the fused resident
+sequence and reports queue-fenced GPU timing. With
+`ULG_BENCH_PROBE_MODE=direct-resident`,
+`ULG_BENCH_BATCH_STEPS=4`, `compactSummaryMode=none`, and thermal disabled,
+`artifacts/sph-performance-benchmark-direct-resident-active-grid.json`
+reports scenario `status=good`, `browserConsoleIssueCount=0`, actual particles
+`1024`, `fusedResidentSequence=true`, `fusedResidentSequenceStepCount=4`,
+`compactSummaryRequested=false`, active-grid dispatch over `4913` of `54872`
+grid nodes (`activeGridRatio=0.0895`), and real resident GPU-completed timing
+around `647ms` cold for one four-step batch. A warm three-batch run at
+`artifacts/sph-performance-benchmark-direct-resident-active-grid-warm.json`
+now stays active-grid across unread resident batches by carrying conservative
+predicted resident bounds; its final four-step batch reports
+`residentGpuCompletedStageMs=38.9`, `residentGpuQueueFenceMs=37.6`, and active
+grid over `19343/54872` nodes. This proves the platform path is fused and
+particle-parallel WebGPU rather than a CPU particle loop, but it is still
+mechanics-only and not fast enough: thermal/reaction sidecars, compact
+diagnostics, GPU-side bounds reduction, and the live GPU surface renderer still
+need to be moved into the same resident sequence before the GUI FPS problem is
+solved end to end.
+
+Current checkpoint, 2026-06-18 AKDT: phone-sized MLS-MPM resident rendering now
+uses a Three.js instanced-sphere render-row bridge by default
+(`surfaceDraw=three-render-row-spheres` below 700px wide) instead of square
+point sprites. The long-horizon and performance browser harnesses can emulate
+mobile viewport/DPR/touch settings, and the mobile smoke row at 390x844 DPR 3
+is console-clean with `surfaceDrawBridge=three-render-row-spheres`,
+`fusedResidentMechanics=true`, `renderRowsReadbackByteLength=6144`, resident
+final-step timing around `1.6ms`, and a captured resident frame under
+`artifacts/sph-long-probe-mobile-h2o-spheres-after-cleanup-frames/`. Desktop
+keeps the point bridge by default and remains console-clean. This is still an
+interim Three-managed bridge with render-row readback; the WebGPU-Ocean-style
+direct GPU surface/fluid renderer remains the performance target.
+Follow-up measured scene rows now prove the displayed phone path remains too
+slow even when console-clean: with thermal disabled and
+`ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1`,
+`artifacts/sph-performance-benchmark-mobile-spheres-no-thermal-queue-fenced-warm.json`
+reports final-batch `residentGpuCompletedStageMs=104.2`,
+`residentGpuQueueFenceMs=103.4`, `visualRefreshHzEstimate=2.28`,
+`renderRowsReadbackByteLength=6144`, and active-grid expansion to
+`13520/27000` nodes for only `128` particles. The sphere bridge fixes mobile
+point-sprite/perspective artifacts; it does not solve FPS.
+
+Current checkpoint, 2026-06-18 AKDT: the default MLS-MPM resident render path
+now uses a Three.js resident render-row point bridge for `surfaceDraw=three-render-row-points`
+instead of building CPU `MarchingCubes` geometry on load. `setParticles()`
+skips CPU surface batching, resident render-field surface-table capture, and
+CPU surface apply for that mode; H2O/H2O setup dropped from roughly `422ms`
+to `2.9-4.9ms` in the browser probe and captured render FPS rose to roughly
+`50-54`. The bridge consumes WebGPU render rows, exposes material keys from
+decoded rows, and the probe treats it as visible resident surface evidence, so
+the prior "same-material H2O visible surface disappeared" issue is gone.
+WebGPU optical lookup storage/readback buffers now pad small bindings to the
+16-byte storage-buffer minimum, removing the `ulg-optical-lookup-* bound with
+size 4` validation failure. New `npm run bench:sph-performance` smoke reports
+both probe-wall throughput and resident final-step throughput: 16-particle
+H2O/H2O and 1024-particle H2O/H2O are console-clean with resident final-step
+times around `9.5-9.7ms`, while a warmed 16-substep smoke reports final-step
+`1.6ms`; Cs/H2O no-full resident smoke is also console-clean and reports
+resident product-mass/EOS sidecar readiness. Remaining caveats: this point
+bridge is an interim renderer, not the final GPU surface/ocean renderer; it
+still needs render-row readback for Three geometry, compact motion proof is
+disabled in the no-full benchmark route, and active-grid multi-step telemetry
+still needs a clearer cumulative timing surface.
+
+Current checkpoint, 2026-06-18 AKDT: MLS-MPM browser hot-loop console cleanup
+is in place for the Cs/H2O no-full resident route. Retained product-event
+buffers are now tagged with their creating WebGPU device and stale cross-device
+handles are skipped before bind-group creation, fixing the
+`resident-product-mass-merged-product-events is associated with [Device]`
+validation failure. WebGPU device acquisition now requests supported
+adapter-scale resident limits (`maxBufferSize`,
+`maxStorageBufferBindingSize`, and `maxStorageBuffersPerShaderStage`) so
+large resident candidate buffers are not rejected on adapters that advertise
+larger limits. The raw WebGPU surface overlay is disabled by default until it
+can share Three.js depth; `surfaceOverlay=1` remains the opt-in debug path.
+The live no-full scene path now uses `compactSummaryMode=none`, which sets the
+resident lane compact readback budget to zero and avoids the per-step
+compact-summary `mapAsync` fence. Browser evidence on
+`http://localhost:5174/` with Cs/H2O MLS-MPM: manual one-step probe captured
+`issueCount=0`, `Worker=function`, `stageTiming.totalMs=18.7`,
+`reactionStep=7ms`, and `compactSummary=0`; the auto scheduler completed its
+16-step batch with `issueCount=0`, `compactSummaryMode=none`, and final-step
+`compactSummaryRequested=false`. A perspective-drag screenshot sanity pass
+showed one visible Three canvas and no separate raw overlay canvas. Remaining
+caveats: headless/browser still reports WebGL `ReadPixels` performance stalls
+from the Three/MarchingCubes fallback, the live render state is still not a
+true GPU-resident fluid renderer, and the WebGPU-Ocean-style render/hot-loop
+architecture remains the next non-tactical performance target.
+
+Current checkpoint, 2026-06-18 AKDT: WebGPU-Ocean Phase 1 audit is complete
+and confirms the architectural performance direction. The reference MLS-MPM
+loop uses one invocation per particle for P2G/G2P, fixed-point integer
+`atomicAdd` scatter into grid cells, grid-only clear/update/finalize passes,
+and a GPU render path that draws particle-derived depth/thickness without CPU
+mesh extraction. ULG already has the first form of particle-parallel scatter
+P2G in `mlsMpmP2gGridProjectionWgsl`, so the next performance slice should
+not be another fallback readback tweak. It should turn the current kernels into
+an explicit Ocean-style resident lane: particle-parallel scatter/tiled P2G,
+resident product/gas/thermal sidecars, throttled compact diagnostics, and a
+GPU surface/render path. Current H2O/H2O and Na/H2O probes are console-clean
+after the tactical fixes, but Na/H2O still spends seconds in reaction/summary
+and compact-summary fences.
+
+Current checkpoint, 2026-06-18 AKDT: GPU resident stage execution now follows
+the same NodeKernel authority path as placement when a real NodeKernel owns the
+resident ComputeManager. The mechanics stage chain calls
+`nodeKernel.executeGpuResidentLaneStagePlan()` when available, records
+`peercompute.nodekernel.gpu-resident-stage-execution-authority.v0`, and keeps
+direct `computeManager.executeGpuResidentLaneStagePlan()` only for injected or
+local-only ComputeManager paths. If a future non-advisory remote execution
+returns retained refs that require local hot-buffer refresh, the local lane is
+rejected instead of being completed as if those refs were local. Validation:
+focused PeerCompute integration passed `16/16`, physics atomics passed `11`
+with `3` expected opt-in skips, and visual matrix
+`codex-nodekernel-stage-execution-authority-20260618` passed `3/3`.
+
+Current checkpoint, 2026-06-18 AKDT: the browser visual probes now record full
+page console/pageerror telemetry and turn WebGPU validation failures into
+normal analysis issues. `scripts/sph-long-horizon-probe.mjs` reports
+`browserConsoleIssueCounts`, and `scripts/sph-visual-sanity-matrix.mjs`
+aggregates those counts in `summary.json`. `requestOpticalGpuDevice()` also
+opts into supported higher `maxBufferSize` and
+`maxStorageBufferBindingSize` limits, fixing the 305,015,808-byte resident
+material-interface candidate buffer on adapters that advertise larger limits.
+The material-interface WebGPU path now preflights both limits before creating
+storage/readback buffers, so lower-limit adapters fall back instead of
+creating invalid GPU objects. Validation: water/water MLS-MPM visual matrix
+`codex-console-harness-h2o-mlsmpm-20260618` passed with empty
+browser-console issue counts, and the Na/H2O MLS-MPM probe
+`/tmp/ulg-na-h2o-mlsmpm-console-harness-2.json` passed `status=good` with
+empty browser-console issue counts. The captured
+`peercompute-worker-inline-fallback` warning remains a real scheduling
+blocker: ULG passes `enableWorkers=true` into the browser resident host, but
+PeerCompute's `ComputeManager._supportsWorkers()` still returned false in the
+captured context. Treat it as Worker capability/bootstrap work, not as a GPU
+memory or shader issue.
+
+Current checkpoint, 2026-06-18 AKDT: fixed the browser WGSL parser failure in
+`ulg-sph-render-field-surface-summary`. The shader used `let active`, which
+newer WGSL parsers reject as a reserved identifier; it is now
+`has_active_cells`, and `tests/webgpuKernelAbi.test.mjs` guards against
+reintroducing exact `let|var|const active` declarations in the WGSL bundle.
+Validation passed the WebGPU ABI test and the later console-capturing browser
+probes have no WGSL parser or invalid shader/pipeline issue counts. Separate
+open warning from the user's console:
+`ulg-sph-thermal-output-state` can still be submitted after destroy in a
+hot Fe/H2O SPH route, so thermal hot-buffer lifetime/lease cleanup needs its
+own follow-up.
+
 Current checkpoint, 2026-06-18 AKDT: the cold same-material CPU-SPH solid-H2O
 static fixture has been rechecked under the current dense visual sequence
 harness. Run `codex-solid-h2o-static-sequence-20260618` passed with

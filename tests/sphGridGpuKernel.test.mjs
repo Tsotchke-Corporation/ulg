@@ -275,12 +275,13 @@ function fakeP2gDevice() {
   return device;
 }
 
-test('MLS-MPM P2G grid projection WGSL declares gather-form grid bindings', () => {
+test('MLS-MPM P2G grid projection WGSL declares particle-parallel scatter bindings', () => {
   assert.match(mlsMpmP2gGridProjectionWgsl, /struct P2gProjectionParams/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_state/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> sph_thermo/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> mls_mechanics/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_nodes/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read_write> grid_accumulators: array<atomic<i32>>/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /@group\(0\) @binding\(6\) var<storage, read_write> grid_nodes/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /resident_product_event_count: u32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /internal_pressure_scale: f32/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /var<storage, read> product_events/);
@@ -289,8 +290,9 @@ test('MLS-MPM P2G grid projection WGSL declares gather-form grid bindings', () =
   assert.match(mlsMpmP2gGridProjectionWgsl, /return max\(0\.0, sound_speed_m_per_s \* sound_speed_m_per_s/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /pow\(ratio, 7\.0\) - 1\.0\);[\s\S]{0,80}return pressure;/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /fn corotated_stress/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /for \(var event_index = 0u; event_index < params\.resident_product_event_count/);
-  assert.match(mlsMpmP2gGridProjectionWgsl, /for \(var particle_index/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn scatter_product_events/);
+  assert.match(mlsMpmP2gGridProjectionWgsl, /fn finalize_grid/);
+  assert.doesNotMatch(mlsMpmP2gGridProjectionWgsl, /for \(var particle_index = 0u; particle_index < params\.particle_count/);
   assert.match(mlsMpmP2gGridProjectionWgsl, /@compute @workgroup_size\(64\)/);
 });
 
@@ -309,7 +311,7 @@ test('CPU MLS-MPM P2G grid projection conserves mass and linear momentum without
 
   assert.equal(projection.schema, ULG_MLS_MPM_GPU_GRID_PROJECTION_SCHEMA);
   assert.equal(projection.backend, 'cpu-reference');
-  assert.equal(projection.kernelScope, 'gather-form-p2g-stress-momentum-projection');
+  assert.equal(projection.kernelScope, 'particle-parallel-scatter-p2g-stress-momentum-projection');
   assert.equal(projection.gridNodeStrideFloats, 8);
   nearlyEqual(summary.mass, 8, 1e-5);
   nearlyEqual(summary.momentum[0], 16, 1e-5);

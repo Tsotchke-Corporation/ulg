@@ -79,7 +79,11 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
     gpu: {
       async requestAdapter() {
         return {
-          limits: { maxStorageBuffersPerShaderStage: 10 },
+          limits: {
+            maxStorageBuffersPerShaderStage: 10,
+            maxBufferSize: 512 * 1024 * 1024,
+            maxStorageBufferBindingSize: 512 * 1024 * 1024
+          },
           async requestDevice(descriptor) {
             requestDescriptor = descriptor;
             return device;
@@ -92,10 +96,47 @@ test('requestOpticalGpuDevice asks for the resident SPH storage-buffer limit whe
   assert.equal(result.status, 'webgpu-device-ready');
   assert.equal(result.device, device);
   assert.deepEqual(requestDescriptor, {
-    requiredLimits: { maxStorageBuffersPerShaderStage: 10 }
+    requiredLimits: {
+      maxStorageBuffersPerShaderStage: 10,
+      maxBufferSize: 512 * 1024 * 1024,
+      maxStorageBufferBindingSize: 512 * 1024 * 1024
+    }
   });
   assert.equal(result.requiredLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.requiredLimits.maxBufferSize, 512 * 1024 * 1024);
+  assert.equal(result.requiredLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
   assert.equal(result.adapterLimits.maxStorageBuffersPerShaderStage, 10);
+  assert.equal(result.adapterLimits.maxBufferSize, 512 * 1024 * 1024);
+  assert.equal(result.adapterLimits.maxStorageBufferBindingSize, 512 * 1024 * 1024);
+});
+
+test('requestOpticalGpuDevice asks for adapter-scale resident buffer limits', async () => {
+  const device = { lost: new Promise(() => {}) };
+  const adapterLimit = (4 * 1024 * 1024 * 1024) - 4;
+  let requestDescriptor = null;
+  const result = await requestOpticalGpuDevice({
+    gpu: {
+      async requestAdapter() {
+        return {
+          limits: {
+            maxStorageBuffersPerShaderStage: 12,
+            maxBufferSize: adapterLimit,
+            maxStorageBufferBindingSize: adapterLimit
+          },
+          async requestDevice(descriptor) {
+            requestDescriptor = descriptor;
+            return device;
+          }
+        };
+      }
+    }
+  });
+
+  assert.equal(result.status, 'webgpu-device-ready');
+  assert.equal(requestDescriptor.requiredLimits.maxBufferSize, adapterLimit);
+  assert.equal(requestDescriptor.requiredLimits.maxStorageBufferBindingSize, adapterLimit);
+  assert.equal(result.requiredLimits.maxBufferSize, adapterLimit);
+  assert.equal(result.requiredLimits.maxStorageBufferBindingSize, adapterLimit);
 });
 
 test('optical GPU table deduplicates material-phase records and preserves stable ids', () => {

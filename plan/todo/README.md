@@ -98,6 +98,14 @@ This matters before broad performance tuning because bad initial packing
 inflates neighbor/interface work and produces incoherent contact, pressure, and
 thermal coupling.
 
+Current routing note, 2026-06-18 AKDT: add a precomputed material-property JSON
+bank as an explicit material resolver/cache todo. The scope ladder is elements
+first, then element crystalline-structure records, then a top-1000 common
+compound bank after schemas and provenance gates are stable. Treat these JSON
+records as versioned, unit-bearing, provenance-rich warm inputs for
+initialization, PBR, table packing, and resolver caches, not as unvalidated
+source-of-truth constants.
+
 Current routing note, 2026-06-18 AKDT: the cold same-material CPU-SPH
 solid-H2O static row remains stable under the current dense visual sequence
 harness. `codex-solid-h2o-static-sequence-20260618` passed with nine frames
@@ -1755,9 +1763,10 @@ still hard-times out before writing a full result.
      GPU resident; use compact summaries instead of full readback.
 6. **Material/closure resolver migration**
    - `webgpu-material-property-resolvers-plan.md`
+   - `material-property-json-bank-plan.md`
    - Goal: move resolver families into ComputeManager-managed CPU/WASM/WebGPU
      workers with explicit closure provenance, cache keys, validity domains,
-     and CPU/WASM reference paths.
+     precomputed JSON bank warm inputs, and CPU/WASM reference paths.
 7. **Frontier law expansion**
    - `frontier-todo.md`
    - Goal: add radiation, nuclear, Cherenkov, gravity, MHD/PIC, quantum

@@ -5812,6 +5812,134 @@ test('SPH phase resident steps publish after StateManager warm-delta admission',
   expect(result.finalStepReadbackMode).toBe('no-full-readback');
 });
 
+test('SPH phase default PeerCompute resident authority host starts browser compute workers', async ({ page }) => {
+  test.setTimeout(90_000);
+  const workerFallbackWarnings = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Web Workers not available|Worker bootstrap failed|falling back to inline execution/i.test(text)) {
+      workerFallbackWarnings.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentWorkers=1&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.waitForFunction(() => {
+    const host = globalThis.__ulgResidentAuthorityHost || null;
+    return Boolean(
+      host?.status === 'ready'
+      && host?.workerCapability?.status === 'worker-capability-ready'
+      && (host?.computeManager?.getStats?.()?.workerCount ?? 0) > 0
+    );
+  }, null, { timeout: 60_000 });
+
+  const result = await page.evaluate(() => {
+    const host = globalThis.__ulgResidentAuthorityHost || null;
+    return {
+      pageWorkerType: typeof Worker,
+      pageGlobalThisWorkerType: typeof globalThis.Worker,
+      hostStatus: host?.status ?? null,
+      hostSource: host?.source ?? null,
+      workerCapabilityStatus: host?.workerCapability?.status ?? null,
+      workerCapabilityBlocker: host?.workerCapability?.blocker ?? null,
+      workerConstructorAvailable: host?.workerCapability?.workerConstructorAvailable ?? null,
+      requestedEnableWorkers: host?.workerCapability?.requestedEnableWorkers ?? null,
+      effectiveEnableWorkers: host?.workerCapability?.effectiveEnableWorkers ?? null,
+      workerCount: host?.computeManager?.getStats?.()?.workerCount ?? null,
+      targetWorkers: host?.computeManager?.getStats?.()?.targetWorkers ?? null,
+      computeManagerSupportsWorkers: host?.computeManager?._supportsWorkers?.() ?? null
+    };
+  });
+
+  expect(result.pageWorkerType).toBe('function');
+  expect(result.pageGlobalThisWorkerType).toBe('function');
+  expect(result.hostStatus).toBe('ready');
+  expect(result.hostSource).toBe('peercompute-browser-nodekernel-authority-host');
+  expect(result.workerCapabilityStatus).toBe('worker-capability-ready');
+  expect(result.workerCapabilityBlocker).toBe(null);
+  expect(result.workerConstructorAvailable).toBe(true);
+  expect(result.requestedEnableWorkers).toBe(true);
+  expect(result.effectiveEnableWorkers).toBe(true);
+  expect(result.computeManagerSupportsWorkers).toBe(true);
+  expect(result.workerCount).toBeGreaterThan(0);
+  expect(result.targetWorkers).toBeGreaterThan(0);
+  expect(workerFallbackWarnings).toEqual([]);
+
+  await page.evaluate(async () => {
+    await globalThis.__ulgResidentAuthorityHost?.destroy?.();
+    globalThis.__ulgResidentAuthorityHost = null;
+  });
+});
+
+test('SPH phase mounted resident scheduler can publish worker-retained mechanics stage lane', async ({ page }) => {
+  test.setTimeout(180_000);
+  const consoleIssues = [];
+  page.on('console', (message) => {
+    const text = message.text();
+    if (/Web Workers not available|Worker bootstrap failed|falling back to inline execution|Invalid Buffer|Invalid BindGroup|Invalid CommandBuffer|Error while parsing WGSL/i.test(text)) {
+      consoleIssues.push(text);
+    }
+  });
+
+  await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=2&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=1&residentWorkers=1&residentStageWorkers=1&residentFuseSequence=1&visualCapture=1');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  await page.waitForFunction(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const lane = overlay?.__sphMountedMechanicsStageWorkerLane || null;
+    return lane?.status === 'worker-stage-lane-published'
+      || lane?.status === 'worker-stage-lane-error'
+      || lane?.status === 'worker-stage-lane-blocked';
+  }, null, { timeout: 150_000 });
+
+  const result = await page.evaluate(async () => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const lane = overlay?.__sphMountedMechanicsStageWorkerLane || null;
+    const host = overlay?.__sphPeerComputeResidentAuthorityHost || null;
+    const execution = overlay?.__mlsMpmResidentSteps || null;
+    return {
+      lane,
+      hostStatus: host?.status ?? null,
+      workerCapabilityStatus: host?.workerCapabilityStatus ?? host?.workerCapability?.status ?? null,
+      residentComputeManagerTaskStatus: execution?.computeManagerTask?.status ?? null,
+      residentExecutionBackend: execution?.backend ?? null
+    };
+  });
+
+  expect(result.hostStatus).toBe('ready');
+  expect(result.workerCapabilityStatus).toBe('worker-capability-ready');
+  expect(result.residentComputeManagerTaskStatus).toBe('state-manager-committed-inline-execution-returned');
+  expect(result.residentExecutionBackend).toBe('webgpu');
+  expect(result.lane?.enabled).toBe(true);
+  expect(result.lane?.status).toBe('worker-stage-lane-published');
+  expect(result.lane?.gpuHubResidentStageExecutorMode).toBe('registered');
+  expect(result.lane?.gpuResidentLaneStageExecutionUsedGpuHubExecutors).toBe(true);
+  expect(result.lane?.gpuResidentLaneStageExecutionWorkerRunnerSupplied).toBe(true);
+  expect(Object.values(result.lane?.gpuResidentLaneStageExecutionWorkerResidencyStatuses || {})).toEqual([
+    'worker-ready',
+    'worker-ready',
+    'worker-ready'
+  ]);
+  expect(result.lane?.workerCompactPublicationCandidateStatus).toBe('worker-retained-compact-publication-candidate-ready');
+  expect(result.lane?.workerCompactPublicationStatus).toBe('worker-retained-mechanics-output-published');
+  expect(result.lane?.workerCompactPublicationCommitted).toBe(true);
+  expect(result.lane?.workerCompactPublicationRecordStatus).toBe('worker-retained-hot-buffer-source-stored');
+  expect(result.lane?.workerCompactPublicationRecordHasWorkerRunner).toBe(true);
+  expect(result.lane?.renderHandoffStatus).toBe('blocked-worker-gpu-handles-not-main-thread-renderable');
+  expect(consoleIssues).toEqual([]);
+
+  await page.evaluate(async () => {
+    document.querySelector('#sph-phase-overlay')?.__sphScene?.dispose?.();
+    await globalThis.__ulgResidentAuthorityHost?.destroy?.();
+    globalThis.__ulgResidentAuthorityHost = null;
+  });
+});
+
 test('SPH phase resident steps can use the real browser PeerCompute resident authority host', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&residentAuto=0&visualCapture=1');

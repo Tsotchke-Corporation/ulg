@@ -171,6 +171,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'blob',
   'residentAuto',
   'residentWorkers',
+  'residentStageWorkers',
   'renderer',
   'surfaceDraw',
   'surfaceDrawDiagnostic',
@@ -1616,6 +1617,10 @@ export function mountSphPhaseDemoOverlay({
     initialHash.get('residentWorkers') ?? initialQuery.get('residentWorkers'),
     true
   );
+  const initialResidentStageWorkersEnabled = booleanUrlParam(
+    initialHash.get('residentStageWorkers') ?? initialQuery.get('residentStageWorkers'),
+    false
+  );
   const initialResidentActiveGridEnabled = booleanUrlParam(
     initialHash.get('residentActiveGrid') ?? initialQuery.get('residentActiveGrid'),
     false
@@ -1640,6 +1645,7 @@ export function mountSphPhaseDemoOverlay({
     return {
       schema: 'peercompute.ulg.sph-demo-resident-execution-policy.v0',
       residentWorkersEnabled: initialResidentWorkersEnabled,
+      residentStageWorkersEnabled: initialResidentStageWorkersEnabled,
       fuseNoFullResidentMechanicsSequence: initialResidentFuseSequenceEnabled,
       fuseNoFullResidentMechanicsActiveGrid: initialResidentActiveGridEnabled,
       activeGridSafetyCells: initialResidentActiveGridSafetyCells,
@@ -1695,6 +1701,7 @@ export function mountSphPhaseDemoOverlay({
     const q = new URLSearchParams();
     for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(el));
     if (!initialResidentWorkersEnabled) q.set('residentWorkers', '0');
+    if (initialResidentStageWorkersEnabled) q.set('residentStageWorkers', '1');
     q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
     if (initialSphRendererBackend !== 'webgl') q.set('renderer', initialSphRendererBackend);
     if (initialThreeWebGpuRendererPresentationEnabled) q.set('rendererPresentation', '1');
@@ -2671,6 +2678,8 @@ export function mountSphPhaseDemoOverlay({
   let pendingMlsMpmG2pReconstructionSignature = null;
   let pendingMlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentStepsToken = 0;
+  let pendingMountedMechanicsStageWorkerLanePromise = null;
+  let mountedMechanicsStageWorkerLaneSequence = 0;
   let particleSyncGeneration = 0;
   let resetRebuildPending = false;
   let residentRenderReadbackSequence = 0;
@@ -3333,6 +3342,7 @@ export function mountSphPhaseDemoOverlay({
   function mlsMpmResidentStepsSignature({
     stepCount = currentResidentStepsPerSchedule(),
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+    residentStageWorkersEnabled = false,
     fuseNoFullResidentMechanicsSequence = false,
     fuseNoFullResidentMechanicsActiveGrid = false,
     activeGridSafetyCells = null,
@@ -3353,6 +3363,7 @@ export function mountSphPhaseDemoOverlay({
       Math.max(1, Math.round(Number(stepCount) || 1)),
       readbackMode,
       Object.entries(physicalLawGroupsFromControls()).map(([key, enabled]) => `${key}:${enabled ? 1 : 0}`).join(','),
+      `stageWorkers=${Boolean(residentStageWorkersEnabled) ? 1 : 0}`,
       `fuseSeq=${Boolean(fuseNoFullResidentMechanicsSequence) ? 1 : 0}`,
       `activeGrid=${Boolean(fuseNoFullResidentMechanicsActiveGrid) ? 1 : 0}`,
       `activeGridSafety=${activeGridSafetyCells ?? 'default'}`,
@@ -3439,6 +3450,176 @@ export function mountSphPhaseDemoOverlay({
           : {})
       }
     });
+  }
+
+  function mountedMechanicsStageWorkerLaneReport(status, extra = {}) {
+    return {
+      schema: 'peercompute.ulg.sph-demo-mounted-mechanics-stage-worker-lane.v0',
+      enabled: initialResidentStageWorkersEnabled,
+      status,
+      source: 'mounted-sph-phase-resident-scheduler',
+      updatedAtMs: performance.now(),
+      ...extra
+    };
+  }
+
+  function publishMountedMechanicsStageWorkerLane(status, extra = {}) {
+    const report = mountedMechanicsStageWorkerLaneReport(status, extra);
+    overlay.__sphMountedMechanicsStageWorkerLane = report;
+    return report;
+  }
+
+  function maybeRunMountedMechanicsStageWorkerLane({
+    host,
+    signature,
+    scheduleToken,
+    generation,
+    sourceExecution = null
+  } = {}) {
+    if (!initialResidentStageWorkersEnabled) return null;
+    if (pendingMountedMechanicsStageWorkerLanePromise) {
+      publishMountedMechanicsStageWorkerLane('worker-stage-lane-joining-pending-run', {
+        signature,
+        scheduleToken,
+        generation
+      });
+      return pendingMountedMechanicsStageWorkerLanePromise;
+    }
+    const resolvedHost = host
+      || peerComputeResidentAuthorityHost
+      || residentAuthorityHost
+      || runtime?.residentAuthorityHost
+      || globalThis.__ulgResidentAuthorityHost
+      || null;
+    const sequence = mountedMechanicsStageWorkerLaneSequence + 1;
+    mountedMechanicsStageWorkerLaneSequence = sequence;
+    publishMountedMechanicsStageWorkerLane('worker-stage-lane-pending', {
+      signature,
+      scheduleToken,
+      generation,
+      sequence,
+      workerCapabilityStatus: resolvedHost?.workerCapability?.status || null
+    });
+    pendingMountedMechanicsStageWorkerLanePromise = (async () => {
+      if (!resolvedHost || typeof resolvedHost.runMechanicsStageTaskChain !== 'function') {
+        return publishMountedMechanicsStageWorkerLane('worker-stage-lane-blocked', {
+          signature,
+          scheduleToken,
+          generation,
+          sequence,
+          blocker: 'resident-authority-host-stage-chain-required'
+        });
+      }
+      if (typeof resolvedHost.createUlgMechanicsResidentStageWorkerRunner !== 'function') {
+        return publishMountedMechanicsStageWorkerLane('worker-stage-lane-blocked', {
+          signature,
+          scheduleToken,
+          generation,
+          sequence,
+          blocker: 'mechanics-stage-worker-runner-factory-required'
+        });
+      }
+      if (typeof resolvedHost.publishWorkerRetainedMechanicsStageOutput !== 'function') {
+        return publishMountedMechanicsStageWorkerLane('worker-stage-lane-blocked', {
+          signature,
+          scheduleToken,
+          generation,
+          sequence,
+          blocker: 'worker-retained-publication-authority-required'
+        });
+      }
+      const sphParticleState = scene.getSphGpuParticleState?.()
+        || sourceExecution?.finalStep?.nextSphParticleState
+        || null;
+      const mlsMpmParticleState = scene.getMlsMpmGpuParticleState?.()
+        || sourceExecution?.finalStep?.nextMlsMpmParticleState
+        || null;
+      if (!sphParticleState?.schema || !mlsMpmParticleState?.schema) {
+        return publishMountedMechanicsStageWorkerLane('worker-stage-lane-blocked', {
+          signature,
+          scheduleToken,
+          generation,
+          sequence,
+          blocker: 'scene-particle-states-required'
+        });
+      }
+      const workerRunner = resolvedHost.createUlgMechanicsResidentStageWorkerRunner({
+        timeoutMs: 60000,
+        requestIdPrefix: `ulg-mounted-mechanics-stage-worker-${sequence}`
+      });
+      try {
+        const stageResult = await resolvedHost.runMechanicsStageTaskChain({
+          sphParticleState,
+          mlsMpmParticleState,
+          stageTaskIdPrefix: `ulg:mounted:mechanics-stage-worker:${sequence}`,
+          preferWebGpu: true,
+          useNativeTaskGraph: false,
+          readbackMode: 'no-full-readback',
+          compactSummaryScope: 'particle-visual',
+          gridSpacingM: sphParticleState.smoothingLengthM,
+          boxDimsM: scene.getBoxDimensionsM?.() || sceneBoxDimsM,
+          dt: mlsMpmParticleState.mechanicsDtS ?? sphParticleState.dt ?? 0,
+          gpuResidentLaneId: 'ulg:mounted:mechanics-stage-worker-lane',
+          gpuResidentLaneStateKey: 'ulg:mounted:mechanics-stage-worker-state',
+          gpuResidentLaneDomainKey: 'sph-phase-demo-mounted-stage-worker',
+          gpuHubResidentStageWorkerRunner: workerRunner,
+          gpuHubResidentStageWorkerModuleUrl: resolvedHost.ulgMechanicsResidentStageWorkerModulePath,
+          gpuHubResidentStageWorkerOutputPublisher: (payload) => (
+            resolvedHost.publishWorkerRetainedMechanicsStageOutput(payload)
+          )
+        });
+        const chain = stageResult?.mechanicsStageTaskChain || null;
+        const hotBufferKey = chain?.workerCompactPublicationHotBufferKey || null;
+        const hotBufferRecord = hotBufferKey
+          ? resolvedHost.stateManager?.getHotBuffer?.(hotBufferKey)
+          : null;
+        const published = chain?.workerCompactPublicationCommitted === true;
+        return publishMountedMechanicsStageWorkerLane(
+          published ? 'worker-stage-lane-published' : 'worker-stage-lane-executed',
+          {
+            signature,
+            scheduleToken,
+            generation,
+            sequence,
+            stageChainStatus: chain?.status || null,
+            gpuHubResidentStageExecutorMode: chain?.gpuHubResidentStageExecutorMode || null,
+            gpuResidentLaneStageExecutionStatus: chain?.gpuResidentLaneStageExecutionStatus || null,
+            gpuResidentLaneStageExecutionUsedGpuHubExecutors:
+              chain?.gpuResidentLaneStageExecutionUsedGpuHubExecutors ?? null,
+            gpuResidentLaneStageExecutionWorkerRunnerSupplied:
+              chain?.gpuResidentLaneStageExecutionWorkerRunnerSupplied ?? null,
+            gpuResidentLaneStageExecutionWorkerResidencyStatuses:
+              chain?.gpuResidentLaneStageExecutionWorkerResidencyStatuses || {},
+            gpuResidentLaneStageTaskBackends: chain?.gpuResidentLaneStageTaskBackends || {},
+            gpuResidentLaneStageTaskFenceSatisfied: chain?.gpuResidentLaneStageTaskFenceSatisfied || {},
+            workerCompactPublicationCandidateStatus: chain?.workerCompactPublicationCandidateStatus || null,
+            workerCompactPublicationStatus: chain?.workerCompactPublicationStatus || null,
+            workerCompactPublicationCommitted: published,
+            workerCompactPublicationHotBufferKey: hotBufferKey,
+            workerCompactPublicationRecordStatus: hotBufferRecord?.status || null,
+            workerCompactPublicationRecordHasWorkerRunner: Boolean(hotBufferRecord?.workerRunner),
+            renderHandoffStatus: published
+              ? 'blocked-worker-gpu-handles-not-main-thread-renderable'
+              : 'blocked-worker-publication-required',
+            nextRequiredImplementation:
+              'main-thread-render-import-from-worker-retained-compact-surface-or-same-device-renderer'
+          }
+        );
+      } finally {
+        workerRunner?.dispose?.();
+      }
+    })().catch((error) => publishMountedMechanicsStageWorkerLane('worker-stage-lane-error', {
+      signature,
+      scheduleToken,
+      generation,
+      sequence,
+      error: error instanceof Error ? error.message : String(error)
+    })).finally(() => {
+      pendingMountedMechanicsStageWorkerLanePromise = null;
+      renderStatus();
+      updateWarningBanner();
+    });
+    return pendingMountedMechanicsStageWorkerLanePromise;
   }
 
   function scheduleMlsMpmResidentSteps({
@@ -3711,6 +3892,15 @@ export function mountSphPhaseDemoOverlay({
       overlay.__mlsMpmResidentContinuedFromResidentState = Boolean(execution?.continuedFromResidentState);
       overlay.__mlsMpmResidentContinuationAvailable = Boolean(execution?.continuationAvailable);
       updateResidentGasPressureSummary(overlay.__mlsMpmResidentStep);
+      if (initialResidentStageWorkersEnabled && !continueFromResidentState) {
+        maybeRunMountedMechanicsStageWorkerLane({
+          host: residentAuthorityHostForSchedule,
+          signature,
+          scheduleToken,
+          generation,
+          sourceExecution: execution
+        });
+      }
       const residentStepForRefresh = overlay.__mlsMpmResidentStep || execution?.finalStep || null;
       const residentReactionResultForRefresh = residentStepForRefresh?.reactionStep?.result
         || residentStepForRefresh?.reactionStep

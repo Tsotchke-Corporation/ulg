@@ -27275,3 +27275,45 @@ Remaining:
   The current patch makes the experimental request safe and visible; it routes
   around Three WebGPU presentation/device-lifetime failures until the native
   renderer can consume resident buffers without full readback or page errors.
+
+## 2026-06-18 14:24 AKDT - Mounted Worker-Stage Lane Guard
+
+Status:
+
+- Added an opt-in mounted scheduler diagnostics lane behind
+  `residentStageWorkers=1`. It uses the existing PeerCompute/GPUHub
+  `createUlgMechanicsResidentStageWorkerRunner()` and
+  `runMechanicsStageTaskChain()` path from the real SPH phase overlay instead
+  of a standalone harness.
+- Kept the default resident execution path unchanged. The main mounted
+  resident batch still returns the inline same-device envelope
+  `state-manager-committed-inline-execution-returned`, because worker-owned
+  WebGPU buffers cannot be handed directly to the Three renderer.
+- The new mounted lane publishes
+  `overlay.__sphMountedMechanicsStageWorkerLane` with stage residency,
+  worker-retained publication, hot-buffer storage, and the explicit render
+  blocker `blocked-worker-gpu-handles-not-main-thread-renderable`.
+- Added a browser guard proving the default resident authority host starts real
+  browser workers and no longer emits the old `Web Workers not available` /
+  inline fallback warning in the isolated current browser path.
+- The sibling `/home/cos/projects/webgpu-marching-cubes` adapter was advanced
+  by the subagent with caller-owned `devicePolicy`, versioned
+  `outputDescriptors`, retained compact position descriptors, draw/indirect
+  placeholders, and material/PBR passthrough slots. ULG still needs a
+  translation or replacement stage from compact `float32x4` positions into its
+  richer surface/render rows.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5277 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5277 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "default PeerCompute resident authority host starts browser compute workers|mounted resident scheduler can publish worker-retained mechanics stage lane"` reported `2/2` pass.
+
+Remaining:
+
+- Do not flip the combined resident-step task to generic `localExecution=worker`.
+  That would lose the same-device GPUBuffer publication contract the renderer
+  currently depends on.
+- Next architecture slice: consume the native marching-cubes/worker-retained
+  output descriptors in ULG and build a main-thread render import that does not
+  require full render-row readback.

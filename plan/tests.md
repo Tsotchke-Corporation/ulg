@@ -10003,3 +10003,27 @@ Three WebGPU presentation fail-closed, 2026-06-18 13:57 AKDT:
     reached a console-clean page but stalled at
     `surface-vertices-full-readback-started`, so the final patch falls back at
     mode selection instead of compact/full-readback surface vertices.
+
+Mounted worker-stage lane guard, 2026-06-18 14:24 AKDT:
+
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5277 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5277 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "default PeerCompute resident authority host starts browser compute workers|mounted resident scheduler can publish worker-retained mechanics stage lane"`
+  - Passed: `2/2`.
+  - The first row proves `typeof Worker === "function"`, host
+    `workerCapability.status=worker-capability-ready`, ComputeManager reports
+    worker support and worker count, and the old worker fallback warning does
+    not appear.
+  - The second row runs the real mounted SPH phase scheduler with
+    `residentStageWorkers=1`. It verifies the main resident batch still returns
+    `state-manager-committed-inline-execution-returned` on `webgpu`, while the
+    opt-in stage-worker lane publishes
+    `worker-retained-mechanics-output-published`, records
+    `worker-ready` residency for P2G/grid-update/G2P, stores the hot-buffer
+    record, and reports
+    `renderHandoffStatus=blocked-worker-gpu-handles-not-main-thread-renderable`.
+  - The row fails on `Web Workers not available`, Worker bootstrap fallback,
+    invalid WebGPU buffers/bind groups/command buffers, and WGSL parse errors;
+    the issue list was empty.

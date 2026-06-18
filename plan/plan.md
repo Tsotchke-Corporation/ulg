@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: browser Workers are no longer an
+availability mystery, and the mounted scheduler now has an opt-in
+`residentStageWorkers=1` diagnostics lane. The default PeerCompute resident
+authority host starts real browser workers with `worker-capability-ready` and
+no `Web Workers not available` fallback warning. Separately, the mounted scene
+can run the existing GPUHub mechanics stage worker bridge from the real
+resident scheduler and publish a worker-retained mechanics hot-buffer record:
+the focused e2e row reports worker residency `worker-ready` for P2G,
+grid-update, and G2P, `worker-retained-mechanics-output-published`, and zero
+browser console WebGPU/fallback issues. The main resident batch still returns
+the same-device inline execution envelope because GPUBuffer handles are not
+transferable from a Worker into the Three scene; the new status reports
+`renderHandoffStatus=blocked-worker-gpu-handles-not-main-thread-renderable`.
+Next work is the actual render handoff: translate worker-retained/native
+marching-cubes compact outputs into a main-thread same-device renderer path or
+replace the current Three readback bridge.
+
 Current checkpoint, 2026-06-18 AKDT: the experimental
 `renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers`
 route now fails closed instead of poisoning the browser console. Three WebGPU

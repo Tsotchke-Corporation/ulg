@@ -46,6 +46,7 @@ import {
   renderDepthWriteFromOpticalResponse,
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
+  resolveSphSurfaceRendererMaterialPolicy,
   normalizeSurfaceRadiusForRenderField,
   renderDescriptorForSurfaceRecord,
   residentSurfaceDrawOrder,
@@ -58,7 +59,8 @@ import {
   surfaceRadiusMetersFromRenderFieldRadius,
   surfaceObjectRenderOrder,
   stableSurfaceRenderOrder,
-  stabilizeRenderRowSphereBridgeMaterial
+  stabilizeRenderRowSphereBridgeMaterial,
+  stabilizeSurfaceMeshMaterialForRenderer
 } from '../src/visualization/sphPhaseScene.js';
 import {
   GPU_PHASE_IDS,
@@ -1359,6 +1361,73 @@ test('SPH render-row sphere bridge brightens dark transmissive proxy materials o
   assert.ok(material.opacity >= 0.72);
   assert.ok(material.color.r + material.color.g + material.color.b > 0.4);
   assert.equal(material.userData.renderRowSphereFallbackReason, 'transmissive-proxy-low-luminance');
+});
+
+test('SPH surface mesh material proxies transmissive PBR on mobile WebGL paths', () => {
+  const policy = resolveSphSurfaceRendererMaterialPolicy({
+    rendererBackend: 'three-webgl',
+    navigatorRef: {
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+      maxTouchPoints: 5
+    },
+    visualViewport: { width: 390, height: 844 }
+  });
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.01, 0.012, 0.014),
+    transmission: 0.96,
+    thickness: 0.6,
+    transparent: true,
+    opacity: 0.05
+  });
+  material.userData.optical = {
+    transmission: 0.96,
+    baseColorSrgb: [0.01, 0.012, 0.014]
+  };
+
+  stabilizeSurfaceMeshMaterialForRenderer(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    rendererMaterialPolicy: policy,
+    bridgeMode: 'three-compact-vertices'
+  });
+
+  assert.equal(policy.transmissiveProxyRequired, true);
+  assert.equal(material.transmission, 0);
+  assert.equal(material.thickness, 0);
+  assert.ok(material.opacity >= 0.78);
+  assert.equal(material.userData.surfaceMaterialRendererProxy, true);
+  assert.equal(material.userData.surfaceMaterialRendererProxyReason, 'mobile-webgl-transmissive-surface-proxy');
+  assert.deepEqual(material.userData.surfaceMaterialFallbackColor, [0.44, 0.76, 0.91]);
+  assert.ok(material.color.b > material.color.r);
+});
+
+test('SPH surface mesh material preserves true transmissive PBR on Three WebGPU paths', () => {
+  const policy = resolveSphSurfaceRendererMaterialPolicy({
+    rendererBackend: 'three-webgpu',
+    navigatorRef: {
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)',
+      maxTouchPoints: 5
+    },
+    visualViewport: { width: 390, height: 844 }
+  });
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.2, 0.4, 0.7),
+    transmission: 0.82,
+    thickness: 0.4,
+    transparent: true,
+    opacity: 0.2
+  });
+  material.userData.optical = { transmission: 0.82 };
+
+  stabilizeSurfaceMeshMaterialForRenderer(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    rendererMaterialPolicy: policy,
+    bridgeMode: 'three-webgpu-surface-buffers'
+  });
+
+  assert.equal(policy.transmissiveProxyRequired, false);
+  assert.equal(material.transmission, 0.82);
+  assert.equal(material.thickness, 0.4);
+  assert.equal(material.userData.surfaceMaterialRendererProxy, undefined);
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

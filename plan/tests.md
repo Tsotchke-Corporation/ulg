@@ -1,5 +1,36 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Mobile WebGL Surface Material Proxy
+
+Engine-owned Three surface meshes now have an explicit renderer material
+policy. On mobile WebGL, transmissive surfaces are converted to a visible
+closure-derived color proxy so H2O/glass-like materials do not render flat
+black when `MeshPhysicalMaterial.transmission` is unsupported or unreliable.
+Same-device Three WebGPU material paths preserve true transmission.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Renderer material policy coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "surface mesh material|render-row sphere|depth policy"`
+  passed `47/47`.
+- Browser console/visual probe:
+  `/tmp/ulg-sph-mobile-cpu-surface-material-policy-off.json` completed with
+  `status=good`, `analysis.status=good`, browser console `issueCount=0`,
+  `warningCount=0`, two visible H2O samples, mobile WebGL policy
+  `surface-material-mobile-webgl-transmission-proxy`, and surface proxy summary
+  `proxyCount=1` for `h2o`.
+
+Known residual risk:
+
+- This protects the CPU/Three and compact/Three fallback material path. The
+  resident compact MLS-MPM probe is still bottlenecked by the known
+  readback-heavy surface extraction route; the architectural fix remains the
+  same-device no-readback surface renderer.
+
 ## Current Focused Result - 2026-06-18 Retained Three Render-Row No-Full Visual Mode
 
 The interim Three render-row bridge now reports when it forces full render-row

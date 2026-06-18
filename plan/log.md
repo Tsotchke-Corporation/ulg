@@ -1,5 +1,42 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Mobile WebGL Surface Material Proxy
+
+Status:
+
+- Added a renderer material policy for engine-owned Three surface meshes. On
+  mobile WebGL targets, transmissive `MeshPhysicalMaterial` surfaces now proxy
+  transmission through closure-derived visible material color instead of relying
+  on the WebGL transmission path that can render flat black on phones.
+- Applied the policy to CPU MarchingCubes surfaces, Three compact surface
+  geometry, and the gated Three WebGPU surface-buffer bridge. Same-device Three
+  WebGPU paths keep true transmissive PBR when they are available.
+- Published `sphSurfaceMaterialRenderPolicy`,
+  `sphSurfaceMaterialRendererProxySummary`, and compact-bridge
+  `materialRendererProxyCount` diagnostics so browser probes can report when a
+  mobile material proxy is active.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "surface mesh material|render-row sphere|depth policy"`
+  reported `47/47` pass.
+- PASS browser mobile CPU/Three surface probe:
+  `/tmp/ulg-sph-mobile-cpu-surface-material-policy-off.json` completed with
+  `status=good`, `analysis.status=good`, browser console issue/warning counts
+  `0/0`, `surface-material-mobile-webgl-transmission-proxy`, one visible H2O
+  surface, and proxy summary `proxyCount=1`, `proxyMaterials=["h2o"]`.
+
+Open:
+
+- A requested resident compact `three-compact-vertices` mobile MLS-MPM probe
+  still hit the known slow surface-readback route and was stopped after it
+  produced no JSON. This material fix improves the engine mesh fallback; the
+  throughput fix remains the no-readback same-device surface renderer.
+
 ## 2026-06-18 AKDT - Three Render-Row Readback Telemetry And Retained No-Full Bridge
 
 Status:

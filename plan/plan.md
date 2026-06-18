@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: mobile WebGL surface materials now fail
+visible instead of flat black. Engine-owned Three surface meshes publish a
+renderer material policy; phone/WebGL targets proxy transmissive
+`MeshPhysicalMaterial` surfaces through closure-derived visible material color,
+while same-device Three WebGPU paths preserve true transmissive PBR. The
+policy is applied to CPU MarchingCubes surfaces, Three compact surface
+geometry, and the gated surface-buffer bridge, and browser diagnostics now
+include `sphSurfaceMaterialRenderPolicy`,
+`sphSurfaceMaterialRendererProxySummary`, and compact bridge
+`materialRendererProxyCount`. The mobile CPU/Three probe
+`/tmp/ulg-sph-mobile-cpu-surface-material-policy-off.json` passed with
+`status=good`, zero browser console issues/warnings, one visible H2O surface,
+and `proxyCount=1`. This fixes the phone black-material fallback path; it does
+not solve the resident compact surface readback bottleneck.
+
 Current checkpoint, 2026-06-18 AKDT: ULG now consumes the native
 `webgpu-marching-cubes` adapter's newer `outputDescriptors` contract. The ULG
 wrapper prefers `result.outputDescriptors.rows.position` as the retained compact

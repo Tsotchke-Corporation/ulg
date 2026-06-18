@@ -194,6 +194,68 @@ export function resolveSphSceneViewportSize(container, {
   };
 }
 
+export function resolveSphSurfaceRendererMaterialPolicy({
+  rendererBackend = 'three-webgl',
+  navigatorRef = globalThis.navigator,
+  container = null,
+  visualViewport = globalThis.visualViewport
+} = {}) {
+  const backend = String(rendererBackend || 'three-webgl').trim().toLowerCase();
+  const rect = typeof container?.getBoundingClientRect === 'function'
+    ? container.getBoundingClientRect()
+    : null;
+  const viewportWidth = Number(visualViewport?.width ?? rect?.width ?? container?.clientWidth ?? globalThis.innerWidth);
+  const viewportHeight = Number(visualViewport?.height ?? rect?.height ?? container?.clientHeight ?? globalThis.innerHeight);
+  const viewportMin = Math.min(
+    Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : Infinity,
+    Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : Infinity
+  );
+  const userAgent = String(navigatorRef?.userAgent || '').toLowerCase();
+  const maxTouchPoints = Math.max(0, Math.round(Number(navigatorRef?.maxTouchPoints) || 0));
+  const coarsePointer = Boolean(
+    typeof globalThis.matchMedia === 'function'
+    && globalThis.matchMedia('(pointer: coarse)')?.matches
+  );
+  const touchTarget = maxTouchPoints > 0
+    || coarsePointer
+    || Boolean(globalThis.ontouchstart);
+  const mobileUserAgent = /android|iphone|ipad|ipod|mobile/.test(userAgent);
+  const mobileViewport = Number.isFinite(viewportMin) && viewportMin <= 640;
+  const mobileTarget = Boolean(mobileUserAgent || (touchTarget && mobileViewport));
+  const rendererIsWebGL = backend === 'three-webgl' || backend === 'three-webgpu-webgl-fallback';
+  const rendererIsWebGPU = backend === 'three-webgpu';
+  const transmissiveProxyRequired = Boolean(rendererIsWebGL && mobileTarget);
+  const status = transmissiveProxyRequired
+    ? 'surface-material-mobile-webgl-transmission-proxy'
+    : 'surface-material-true-pbr';
+  const reason = transmissiveProxyRequired
+    ? 'mobile WebGL surface meshes proxy transmissive materials through visible closure-derived color because MeshPhysicalMaterial transmission can render black'
+    : null;
+  const signature = [
+    status,
+    backend,
+    mobileTarget ? 'mobile' : 'desktop',
+    rendererIsWebGPU ? 'webgpu' : (rendererIsWebGL ? 'webgl' : 'unknown')
+  ].join(':');
+  return {
+    schema: 'peercompute.ulg.sph-surface-renderer-material-policy.v0',
+    status,
+    reason,
+    signature,
+    rendererBackend: backend,
+    rendererIsWebGL,
+    rendererIsWebGPU,
+    mobileTarget,
+    touchTarget,
+    mobileUserAgent,
+    mobileViewport,
+    viewportWidth: Number.isFinite(viewportWidth) ? viewportWidth : null,
+    viewportHeight: Number.isFinite(viewportHeight) ? viewportHeight : null,
+    maxTouchPoints,
+    transmissiveProxyRequired
+  };
+}
+
 const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
 const RESIDENT_NO_FULL_READBACK_MODE = 'no-full-readback';
 export const SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT = 'disabled';
@@ -2522,6 +2584,7 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
 }
 
 const RENDER_ROW_SPHERE_BRIDGE_MIN_TRANSMISSIVE_OPACITY = 0.66;
+const SURFACE_MESH_MOBILE_TRANSMISSIVE_OPACITY = 0.78;
 
 function srgbLuminance(color = []) {
   const r = Number(color[0]);
@@ -2565,6 +2628,55 @@ function averageRenderRowColorSrgb(colorsRgb, indices = [], descriptor = {}) {
     ? [r / count, g / count, b / count]
     : fallbackBridgeColorSrgbForDescriptor(descriptor);
   return srgbLuminance(color) > 0.025 ? color : fallbackBridgeColorSrgbForDescriptor(descriptor);
+}
+
+export function stabilizeSurfaceMeshMaterialForRenderer(material, {
+  descriptor = null,
+  fallbackColorSrgb = null,
+  rendererMaterialPolicy = null,
+  bridgeMode = null,
+  minTransmissiveOpacity = SURFACE_MESH_MOBILE_TRANSMISSIVE_OPACITY
+} = {}) {
+  if (!material) return material;
+  const policy = rendererMaterialPolicy || resolveSphSurfaceRendererMaterialPolicy();
+  material.userData.surfaceMaterialRendererPolicy = policy.status;
+  material.userData.surfaceMaterialRendererPolicyReason = policy.reason || null;
+  material.userData.surfaceMaterialRendererPolicySignature = policy.signature || null;
+  material.userData.surfaceMaterialRendererBridgeMode = bridgeMode || null;
+  const optics = material.userData?.optical || {};
+  const transmission = Number(material.transmission ?? optics.transmission ?? 0);
+  if (!(policy.transmissiveProxyRequired && Number.isFinite(transmission) && transmission > 0.01)) {
+    return material;
+  }
+
+  const fallbackColor = Array.isArray(fallbackColorSrgb)
+    ? fallbackColorSrgb
+    : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
+  material.userData.surfaceMaterialOriginalTransmission = transmission;
+  material.userData.surfaceMaterialRendererProxy = true;
+  material.userData.surfaceMaterialRendererProxyReason = 'mobile-webgl-transmissive-surface-proxy';
+  material.transmission = 0;
+  material.thickness = 0;
+  material.opacity = Math.max(
+    Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
+    minTransmissiveOpacity
+  );
+  material.transparent = material.opacity < 0.999;
+  material.envMapIntensity = Math.max(Number(material.envMapIntensity) || 0, 0.9);
+  if (Number.isFinite(Number(material.roughness))) {
+    material.roughness = Math.max(Number(material.roughness), 0.18);
+  }
+  if (material.color) {
+    material.color.setRGB(
+      clamp(fallbackColor[0], 0, 1),
+      clamp(fallbackColor[1], 0, 1),
+      clamp(fallbackColor[2], 0, 1),
+      (activeThreeNamespace || THREE).SRGBColorSpace
+    );
+    material.userData.surfaceMaterialFallbackColor = [...fallbackColor];
+  }
+  material.needsUpdate = true;
+  return material;
 }
 
 export function stabilizeRenderRowSphereBridgeMaterial(material, {
@@ -3147,6 +3259,15 @@ export function createSphPhaseScene(container, {
     }
     return residentSurfaceDrawOverlayPolicy;
   }
+  function resolveSceneSurfaceMaterialRenderPolicy() {
+    const policy = resolveSphSurfaceRendererMaterialPolicy({
+      rendererBackend: rendererBackendName(),
+      navigatorRef,
+      container
+    });
+    scene.userData.sphSurfaceMaterialRenderPolicy = policy;
+    return policy;
+  }
   let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
   let currentWallTemperaturesK = null;
   const scene = new Three.Scene();
@@ -3249,6 +3370,7 @@ export function createSphPhaseScene(container, {
     scene.userData.sphResidentExtensionSurfaceRendererCapability = resolveResidentExtensionSurfaceRendererCapability({
       renderer
     });
+    resolveSceneSurfaceMaterialRenderPolicy();
     return scene.userData.sphRendererInit;
   }
   scene.userData.sphRendererBackend = renderer.isWebGPURenderer
@@ -3834,6 +3956,31 @@ export function createSphPhaseScene(container, {
     sphResidentMaterialInterfaceState = state || null;
     scene.userData.sphResidentMaterialInterfaceState = sphResidentMaterialInterfaceState;
     return sphResidentMaterialInterfaceState;
+  }
+
+  function publishSurfaceMaterialRendererProxySummary(reason = 'surface-material-policy-refresh') {
+    const surfaceMeshes = [...surfaces.values()]
+      .map((surface) => surface?.mesh)
+      .filter(Boolean);
+    const proxyMeshes = surfaceMeshes.filter((mesh) => mesh.material?.userData?.surfaceMaterialRendererProxy);
+    const summary = {
+      schema: 'peercompute.ulg.sph-surface-material-renderer-proxy-summary.v0',
+      status: proxyMeshes.length > 0
+        ? 'surface-material-renderer-proxy-active'
+        : 'surface-material-renderer-proxy-inactive',
+      reason,
+      materialRenderPolicy: scene.userData.sphSurfaceMaterialRenderPolicy || null,
+      surfaceCount: surfaceMeshes.length,
+      proxyCount: proxyMeshes.length,
+      proxySurfaceKeys: proxyMeshes.map((mesh) => mesh.userData?.surfaceKey || mesh.userData?.renderKey || 'unknown'),
+      proxyMaterials: proxyMeshes.map((mesh) => mesh.userData?.materialKey || mesh.userData?.renderKey || 'unknown'),
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    scene.userData.sphSurfaceMaterialRendererProxySummary = summary;
+    return summary;
   }
 
   function publishSphResidentPressureInterfaceState(state) {
@@ -5168,6 +5315,7 @@ export function createSphPhaseScene(container, {
       ? sourceSurfaces
       : [...activeRowsBySurface.keys()].sort((a, b) => a - b).map((surfaceIndex) => ({ surfaceIndex }));
     const materialMap = buildSphRenderMaterialMap(materialProperties || {}, sphReactionTable);
+    const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
     const group = new Three.Group();
     group.name = 'ulg-sph-resident-surface-draw-three-compact';
     group.frustumCulled = false;
@@ -5175,6 +5323,7 @@ export function createSphPhaseScene(container, {
     let totalVertexCount = 0;
     let totalTriangleCount = 0;
     let geometryByteLength = 0;
+    let surfaceMaterialRendererProxyCount = 0;
 
     for (let recordIndex = 0; recordIndex < surfaceRecords.length; recordIndex += 1) {
       const sourceSurface = surfaceRecords[recordIndex] || {};
@@ -5232,10 +5381,15 @@ export function createSphPhaseScene(container, {
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
 
-      const mesh = new Three.Mesh(
-        geometry,
-        makeSurfaceMaterial(descriptor, properties)
-      );
+      const material = makeSurfaceMaterial(descriptor, properties);
+      stabilizeSurfaceMeshMaterialForRenderer(material, {
+        descriptor,
+        rendererMaterialPolicy: materialRenderPolicy,
+        bridgeMode: rendererBridge
+      });
+      if (material.userData.surfaceMaterialRendererProxy) surfaceMaterialRendererProxyCount += 1;
+
+      const mesh = new Three.Mesh(geometry, material);
       mesh.name = `ulg-sph-three-compact-${descriptor.surfaceKey}`;
       mesh.frustumCulled = false;
       mesh.visible = true;
@@ -5258,6 +5412,9 @@ export function createSphPhaseScene(container, {
       mesh.userData.surfaceDrawTriangleCount = alignedVertexCount / 3;
       mesh.userData.surfaceDrawSource = surfaceDrawExecution.schema ?? null;
       mesh.userData.optical = mesh.material.userData.optical;
+      mesh.userData.surfaceMaterialRendererPolicy = mesh.material.userData.surfaceMaterialRendererPolicy || null;
+      mesh.userData.surfaceMaterialRendererProxy = Boolean(mesh.material.userData.surfaceMaterialRendererProxy);
+      mesh.userData.surfaceMaterialRendererProxyReason = mesh.material.userData.surfaceMaterialRendererProxyReason || null;
       applySurfaceRenderOrdering(mesh, mesh.material.userData.optical, descriptor);
       group.add(mesh);
       meshes.push(mesh);
@@ -5306,6 +5463,8 @@ export function createSphPhaseScene(container, {
       opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
       opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
       opticalSpectralSampleStrideFloats: opticalGpuTable?.spectralSampleStrideFloats ?? 0,
+      materialRenderPolicy,
+      materialRendererProxyCount: surfaceMaterialRendererProxyCount,
       temporalSwapPolicy: null,
       retainedPreviousOverlay: false,
       vertexCount: totalVertexCount,
@@ -6102,6 +6261,7 @@ export function createSphPhaseScene(container, {
       ? surfaceDrawExecution.surfaces
       : [];
     const materialMap = buildSphRenderMaterialMap(materialProperties || {}, sphReactionTable);
+    const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
     const group = new Three.Group();
     group.name = 'ulg-sph-resident-surface-draw-three-webgpu-buffers';
     group.frustumCulled = false;
@@ -6110,6 +6270,7 @@ export function createSphPhaseScene(container, {
     let totalTriangleCount = 0;
     let opaqueDrawCount = 0;
     let transparentDrawCount = 0;
+    let surfaceMaterialRendererProxyCount = 0;
     const fallbackCenter = new Three.Vector3(dims[0] * 0.5, dims[1] * 0.5, dims[2] * 0.5);
     const fallbackRadius = Math.max(1e-6, Math.hypot(dims[0], dims[1], dims[2]) * 0.5);
 
@@ -6147,10 +6308,15 @@ export function createSphPhaseScene(container, {
         boundsCenter.clone().addScalar(boundsRadius)
       );
 
-      const mesh = new Three.Mesh(
-        geometry,
-        makeSurfaceMaterial(descriptor, properties)
-      );
+      const material = makeSurfaceMaterial(descriptor, properties);
+      stabilizeSurfaceMeshMaterialForRenderer(material, {
+        descriptor,
+        rendererMaterialPolicy: materialRenderPolicy,
+        bridgeMode: rendererBridge
+      });
+      if (material.userData.surfaceMaterialRendererProxy) surfaceMaterialRendererProxyCount += 1;
+
+      const mesh = new Three.Mesh(geometry, material);
       mesh.name = `ulg-sph-three-webgpu-buffers-${descriptor.surfaceKey}`;
       mesh.frustumCulled = false;
       mesh.visible = true;
@@ -6172,6 +6338,9 @@ export function createSphPhaseScene(container, {
       mesh.userData.surfaceDrawSource = surfaceDrawExecution.schema ?? null;
       mesh.userData.gpuBufferGeometry = true;
       mesh.userData.optical = mesh.material.userData.optical;
+      mesh.userData.surfaceMaterialRendererPolicy = mesh.material.userData.surfaceMaterialRendererPolicy || null;
+      mesh.userData.surfaceMaterialRendererProxy = Boolean(mesh.material.userData.surfaceMaterialRendererProxy);
+      mesh.userData.surfaceMaterialRendererProxyReason = mesh.material.userData.surfaceMaterialRendererProxyReason || null;
       applySurfaceRenderOrdering(mesh, mesh.material.userData.optical, descriptor);
       if (mesh.material?.depthWrite) opaqueDrawCount += 1;
       else transparentDrawCount += 1;
@@ -6226,6 +6395,8 @@ export function createSphPhaseScene(container, {
       opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
       opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
       opticalSpectralSampleStrideFloats: opticalGpuTable?.spectralSampleStrideFloats ?? 0,
+      materialRenderPolicy,
+      materialRendererProxyCount: surfaceMaterialRendererProxyCount,
       temporalSwapPolicy: null,
       retainedPreviousOverlay: false,
       vertexCount: totalVertexCount,
@@ -8338,10 +8509,12 @@ export function createSphPhaseScene(container, {
     const config = configOverride || SURFACE_CONFIG[descriptor.renderKey] || SURFACE_CONFIG.default;
     const optics = opticsOverride || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
     const opticalSignature = opticalSignatureForMaterial(optics);
+    const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
     let surface = surfaces.get(key);
     if (surface) {
       if (
         surface.opticalSignature !== opticalSignature
+        || surface.materialPolicySignature !== materialRenderPolicy.signature
         || surface.config.resolution !== config.resolution
         || surface.config.isolation !== config.isolation
         || surface.config.subtract !== config.subtract
@@ -8351,13 +8524,20 @@ export function createSphPhaseScene(container, {
         surface.mesh.geometry?.dispose?.();
         surface.mesh.material.dispose();
         surfaces.delete(key);
+        publishSurfaceMaterialRendererProxySummary('surface-material-disposed-for-refresh');
       } else {
         return surface;
       }
     }
+    const material = makeSurfaceMaterial(descriptor, properties, optics);
+    stabilizeSurfaceMeshMaterialForRenderer(material, {
+      descriptor,
+      rendererMaterialPolicy: materialRenderPolicy,
+      bridgeMode: 'cpu-marching-cubes'
+    });
     const mesh = new MarchingCubes(
       config.resolution,
-      makeSurfaceMaterial(descriptor, properties, optics),
+      material,
       false,
       true,
       config.maxPolyCount
@@ -8376,10 +8556,22 @@ export function createSphPhaseScene(container, {
     mesh.userData.renderKey = descriptor.renderKey;
     mesh.userData.phase = descriptor.phase;
     mesh.userData.optical = mesh.material.userData.optical;
+    mesh.userData.surfaceMaterialRendererPolicy = mesh.material.userData.surfaceMaterialRendererPolicy || null;
+    mesh.userData.surfaceMaterialRendererProxy = Boolean(mesh.material.userData.surfaceMaterialRendererProxy);
+    mesh.userData.surfaceMaterialRendererProxyReason = mesh.material.userData.surfaceMaterialRendererProxyReason || null;
     applySurfaceRenderOrdering(mesh, mesh.material.userData.optical, descriptor);
     scene.add(mesh);
-    surface = { mesh, config, properties, descriptor, opticalSignature, inactiveFrameCount: 0 };
+    surface = {
+      mesh,
+      config,
+      properties,
+      descriptor,
+      opticalSignature,
+      materialPolicySignature: materialRenderPolicy.signature,
+      inactiveFrameCount: 0
+    };
     surfaces.set(key, surface);
+    publishSurfaceMaterialRendererProxySummary('surface-material-created');
     return surface;
   }
 

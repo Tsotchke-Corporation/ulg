@@ -77,6 +77,12 @@ Tactical status, 2026-06-18 AKDT:
   engine-owned Three compact geometry with explicit
   `full-parity-readback` telemetry. This should improve visibility on mobile,
   but it is intentionally not counted as the throughput fix.
+- Engine-owned Three surface meshes now proxy transmissive PBR on mobile WebGL
+  through closure-derived visible material colors and publish proxy diagnostics.
+  This fixes the phone flat-black material failure for CPU/compact fallback
+  surfaces, but it is still not the throughput fix because resident compact
+  MLS-MPM surfaces remain tied to readback-heavy extraction until the
+  same-device renderer lands.
 - The first engine-owned Three WebGPU renderer gate exists behind
   `renderer=webgpu` and can initialize a renderer-owned `GPUDevice` for future
   same-device presentation/geometry bridge work. Routine resident

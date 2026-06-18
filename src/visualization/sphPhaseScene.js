@@ -2228,6 +2228,110 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
   return material;
 }
 
+const RENDER_ROW_SPHERE_BRIDGE_MIN_TRANSMISSIVE_OPACITY = 0.66;
+
+function srgbLuminance(color = []) {
+  const r = Number(color[0]);
+  const g = Number(color[1]);
+  const b = Number(color[2]);
+  if (![r, g, b].every(Number.isFinite)) return 0;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function fallbackBridgeColorSrgbForDescriptor(descriptor = {}) {
+  const material = String(descriptor.material || descriptor.renderKey || '').toLowerCase();
+  if (material === 'h2o' || material === 'water' || descriptor.renderKey === 'ice') return [0.44, 0.76, 0.91];
+  if (material === 'fe' || material === 'iron') return [0.66, 0.62, 0.56];
+  if (material === 'cs' || material === 'cesium') return [0.78, 0.68, 0.44];
+  if (material === 'na' || material === 'sodium') return [0.72, 0.70, 0.62];
+  if (material === 'csoh' || material === 'naoh') return [0.72, 0.82, 0.9];
+  if (material === 'air') return [0.72, 0.86, 1.0];
+  return [0.8, 0.82, 0.86];
+}
+
+function averageRenderRowColorSrgb(colorsRgb, indices = [], descriptor = {}) {
+  if (!(colorsRgb instanceof Float32Array) || !Array.isArray(indices) || indices.length === 0) {
+    return fallbackBridgeColorSrgbForDescriptor(descriptor);
+  }
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let count = 0;
+  for (const index of indices) {
+    const offset = Math.max(0, Math.round(Number(index) || 0)) * 3;
+    const cr = colorsRgb[offset];
+    const cg = colorsRgb[offset + 1];
+    const cb = colorsRgb[offset + 2];
+    if (![cr, cg, cb].every(Number.isFinite)) continue;
+    r += clamp(cr, 0, 1);
+    g += clamp(cg, 0, 1);
+    b += clamp(cb, 0, 1);
+    count += 1;
+  }
+  const color = count > 0
+    ? [r / count, g / count, b / count]
+    : fallbackBridgeColorSrgbForDescriptor(descriptor);
+  return srgbLuminance(color) > 0.025 ? color : fallbackBridgeColorSrgbForDescriptor(descriptor);
+}
+
+export function stabilizeRenderRowSphereBridgeMaterial(material, {
+  descriptor = null,
+  fallbackColorSrgb = null,
+  minTransmissiveOpacity = RENDER_ROW_SPHERE_BRIDGE_MIN_TRANSMISSIVE_OPACITY
+} = {}) {
+  if (!material) return material;
+  const optics = material.userData?.optical || {};
+  const fallbackColor = Array.isArray(fallbackColorSrgb)
+    ? fallbackColorSrgb
+    : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
+  let changed = false;
+
+  if (material.vertexColors) {
+    // Instanced sphere proxy geometry does not carry per-vertex colors; mobile
+    // drivers can multiply PBR color by missing vertex-color attributes.
+    material.vertexColors = false;
+    changed = true;
+  }
+
+  const transmission = Number(material.transmission ?? optics.transmission ?? 0);
+  if (Number.isFinite(transmission) && transmission > 0.01) {
+    material.userData.renderRowSphereOriginalTransmission = transmission;
+    material.transmission = 0;
+    material.thickness = 0;
+    material.opacity = Math.max(
+      Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
+      minTransmissiveOpacity
+    );
+    material.transparent = material.opacity < 0.999;
+    material.userData.renderRowSphereTransmissionProxy = true;
+    changed = true;
+  }
+
+  const materialColor = material.color;
+  const currentLuminance = materialColor
+    ? 0.2126 * materialColor.r + 0.7152 * materialColor.g + 0.0722 * materialColor.b
+    : 0;
+  const blockedOptics = Boolean(optics.blocked)
+    || Math.round(Number(optics.vertexColorPolicyId) || 0) === 255
+    || optics.vertexColorPolicy === 'blocked'
+    || Number(optics.status) === 0;
+  if (materialColor && (blockedOptics || currentLuminance <= 0.01)) {
+    materialColor.setRGB(
+      clamp(fallbackColor[0], 0, 1),
+      clamp(fallbackColor[1], 0, 1),
+      clamp(fallbackColor[2], 0, 1),
+      THREE.SRGBColorSpace
+    );
+    material.opacity = Math.max(Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1, 0.72);
+    material.transparent = material.opacity < 0.999;
+    material.userData.renderRowSphereFallbackColor = [...fallbackColor];
+    changed = true;
+  }
+
+  if (changed) material.needsUpdate = true;
+  return material;
+}
+
 function applySurfaceRenderOrdering(mesh, optics = {}, descriptorOrRow = {}) {
   const layer = renderLayerFromOpticalResponse(optics, descriptorOrRow);
   const order = renderOrderFromOpticalResponse(optics, descriptorOrRow);
@@ -4746,6 +4850,8 @@ export function createSphPhaseScene(container, {
     let bridgeMaterialKeys = [];
     let minParticleRadiusM = null;
     let maxParticleRadiusM = null;
+    let sphereBridgeTransmissionProxyCount = 0;
+    let sphereBridgeFallbackColorCount = 0;
     const previousBridge = sphResidentSurfaceDrawRenderBridge;
 
     if (useSphereBridge) {
@@ -4794,6 +4900,7 @@ export function createSphPhaseScene(container, {
         const properties = materialPropertiesForSurfaceDescriptor(descriptor, currentMaterialProperties);
         const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, descriptor);
         const material = makeSurfaceMaterial(descriptor, properties, cachedOptics);
+        const bridgeFallbackColorSrgb = averageRenderRowColorSrgb(colorsRgb, indices, descriptor);
         const emissive = decoded?.emissiveByMaterial?.[descriptor.material]
           ?? decoded?.emissiveByMaterial?.[descriptor.renderKey]
           ?? null;
@@ -4806,6 +4913,10 @@ export function createSphPhaseScene(container, {
         mesh.name = `ulg-sph-three-render-row-spheres-${descriptor.surfaceKey}`;
         mesh.frustumCulled = false;
         applySurfaceRenderOrdering(mesh, material.userData.optical, descriptor);
+        stabilizeRenderRowSphereBridgeMaterial(material, {
+          descriptor,
+          fallbackColorSrgb: bridgeFallbackColorSrgb
+        });
         mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
         mesh.userData.renderSource = visibleRenderSource;
         mesh.userData.pointCount = indices.length;
@@ -4817,6 +4928,10 @@ export function createSphPhaseScene(container, {
         mesh.userData.opticalStateKey = descriptor.opticalStateKey || 'default';
         mesh.userData.renderDomainId = descriptor.renderDomainId;
         mesh.userData.renderDomainKey = descriptor.renderDomainKey;
+        mesh.userData.renderRowSphereTransmissionProxy = Boolean(material.userData.renderRowSphereTransmissionProxy);
+        mesh.userData.renderRowSphereFallbackColor = material.userData.renderRowSphereFallbackColor || null;
+        if (material.userData.renderRowSphereTransmissionProxy) sphereBridgeTransmissionProxyCount += 1;
+        if (material.userData.renderRowSphereFallbackColor) sphereBridgeFallbackColorCount += 1;
         let groupMinRadius = Number.POSITIVE_INFINITY;
         let groupMaxRadius = Number.NEGATIVE_INFINITY;
         for (let localIndex = 0; localIndex < indices.length; localIndex += 1) {
@@ -4860,6 +4975,8 @@ export function createSphPhaseScene(container, {
       lastTransparentDrawCount = transparentGroups;
       transparencyCompositeMode = 'three-instanced-spheres-material-pbr-depth-buffer';
       drawOrderingPolicy = 'three-instanced-spheres-material-pbr-depth-policy';
+      group.userData.sphereBridgeTransmissionProxyCount = sphereBridgeTransmissionProxyCount;
+      group.userData.sphereBridgeFallbackColorCount = sphereBridgeFallbackColorCount;
     } else {
       let positions = null;
       let colors = null;
@@ -4996,6 +5113,8 @@ export function createSphPhaseScene(container, {
       sphereBridgeUsed: useSphereBridge,
       sphereBridgeMaxInstances: SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES,
       sphereBridgeMaterialKeys: bridgeMaterialKeys,
+      sphereBridgeTransmissionProxyCount,
+      sphereBridgeFallbackColorCount,
       minParticleRadiusM,
       maxParticleRadiusM,
       renderRowsReadback: Boolean(renderRowsExecution?.renderRowsReadback),
@@ -9089,6 +9208,11 @@ export function createSphPhaseScene(container, {
         renderBridgeOpticalRecordStrideFloats: renderBridge?.opticalRecordStrideFloats ?? 0,
         renderBridgeOpticalSpectralSampleCount: renderBridge?.opticalSpectralSampleCount ?? 0,
         renderBridgeOpticalSpectralSampleStrideFloats: renderBridge?.opticalSpectralSampleStrideFloats ?? 0,
+        renderBridgeSphereMaterialKeys: [...(renderBridge?.sphereBridgeMaterialKeys || [])],
+        renderBridgeSphereTransmissionProxyCount: renderBridge?.sphereBridgeTransmissionProxyCount ?? 0,
+        renderBridgeSphereFallbackColorCount: renderBridge?.sphereBridgeFallbackColorCount ?? 0,
+        renderBridgeMinParticleRadiusM: renderBridge?.minParticleRadiusM ?? null,
+        renderBridgeMaxParticleRadiusM: renderBridge?.maxParticleRadiusM ?? null,
         renderBridgeTemporalSwapPolicy: renderBridge?.temporalSwapPolicy ?? null,
         renderBridgeRetainedPreviousOverlay: Boolean(renderBridge?.retainedPreviousOverlay),
         surfaceDraw: surfaceDrawExecution,
@@ -9980,6 +10104,8 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleCount = renderBridge?.opticalSpectralSampleCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleStrideFloats = renderBridge?.opticalSpectralSampleStrideFloats ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereMaterialKeys = [...(renderBridge?.sphereBridgeMaterialKeys || [])];
+          nextResidentSurfaceDraw.renderBridgeSphereTransmissionProxyCount = renderBridge?.sphereBridgeTransmissionProxyCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereFallbackColorCount = renderBridge?.sphereBridgeFallbackColorCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeMinParticleRadiusM = renderBridge?.minParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeMaxParticleRadiusM = renderBridge?.maxParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = renderBridge?.temporalSwapPolicy ?? null;
@@ -10379,6 +10505,8 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeOpticalSpectralSampleCount: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? 0,
         surfaceDrawRenderBridgeOpticalSpectralSampleStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleStrideFloats ?? 0,
         surfaceDrawRenderBridgeSphereMaterialKeys: [...(sphResidentSurfaceDraw?.renderBridgeSphereMaterialKeys || [])],
+        surfaceDrawRenderBridgeSphereTransmissionProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereTransmissionProxyCount ?? 0,
+        surfaceDrawRenderBridgeSphereFallbackColorCount: sphResidentSurfaceDraw?.renderBridgeSphereFallbackColorCount ?? 0,
         surfaceDrawRenderBridgeMinParticleRadiusM: sphResidentSurfaceDraw?.renderBridgeMinParticleRadiusM ?? null,
         surfaceDrawRenderBridgeMaxParticleRadiusM: sphResidentSurfaceDraw?.renderBridgeMaxParticleRadiusM ?? null,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDraw?.renderBridgeTemporalSwapPolicy

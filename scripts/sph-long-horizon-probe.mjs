@@ -1465,7 +1465,14 @@ async function runBrowserProbe({
             renderBridgeThreeGeometryByteLength: surfaceDraw.renderBridgeThreeGeometryByteLength ?? null,
             renderBridgeEngineIntegration: surfaceDraw.renderBridgeEngineIntegration ?? null,
             renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
-            renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null
+            renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null,
+            renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)
+              ? [...surfaceDraw.renderBridgeSphereMaterialKeys]
+              : [],
+            renderBridgeSphereTransmissionProxyCount: surfaceDraw.renderBridgeSphereTransmissionProxyCount ?? null,
+            renderBridgeSphereFallbackColorCount: surfaceDraw.renderBridgeSphereFallbackColorCount ?? null,
+            renderBridgeMinParticleRadiusM: surfaceDraw.renderBridgeMinParticleRadiusM ?? null,
+            renderBridgeMaxParticleRadiusM: surfaceDraw.renderBridgeMaxParticleRadiusM ?? null
           } : null,
           surfaces: surfaceSnapshot(sceneApi)
         };

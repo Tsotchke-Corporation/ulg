@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import * as THREE from 'three';
 import {
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
@@ -50,7 +51,8 @@ import {
   surfaceRadiusScaleForRenderBatch,
   surfaceRadiusMetersFromRenderFieldRadius,
   surfaceObjectRenderOrder,
-  stableSurfaceRenderOrder
+  stableSurfaceRenderOrder,
+  stabilizeRenderRowSphereBridgeMaterial
 } from '../src/visualization/sphPhaseScene.js';
 import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
 import { createMlsMpmGridSpec } from '../src/runtime/sph/sphGridGpuKernel.js';
@@ -1025,6 +1027,37 @@ test('SPH resident render-row overlay shader draws directly from retained GPU ro
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /RENDER_ROW_VEC4_STRIDE/);
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /clip\.z = clip\.z \* 0\.5 \+ clip\.w \* 0\.5/);
   assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /pass\.draw|fn fs_main/);
+});
+
+test('SPH render-row sphere bridge stabilizes transmissive PBR for mobile proxy geometry', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0, 0, 0),
+    vertexColors: true,
+    transmission: 0.98,
+    thickness: 0.6,
+    transparent: true,
+    opacity: 0.003
+  });
+  material.userData.optical = {
+    blocked: true,
+    transmission: 0.98,
+    vertexColorPolicyId: 255
+  };
+  const previousVersion = material.version;
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    fallbackColorSrgb: [0.44, 0.76, 0.91]
+  });
+
+  assert.equal(material.vertexColors, false);
+  assert.equal(material.transmission, 0);
+  assert.equal(material.thickness, 0);
+  assert.ok(material.opacity >= 0.66);
+  assert.ok(material.color.r + material.color.g + material.color.b > 0.1);
+  assert.equal(material.userData.renderRowSphereTransmissionProxy, true);
+  assert.deepEqual(material.userData.renderRowSphereFallbackColor, [0.44, 0.76, 0.91]);
+  assert.ok(material.version > previousVersion);
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

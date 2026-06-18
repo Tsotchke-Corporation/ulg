@@ -1,5 +1,29 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 CPU-SPH Visual Flow Sequence Gate
+
+CPU-SPH same-material H2O/H2O now has an opt-in close-spaced visual sequence
+gate. The gate records the simulated time represented by captured frames and
+can fail when a row captures too little simulated time to prove motion.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseDemoMount.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- CPU-SPH flow sequence:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-cpu-sph-flow-sequence-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-cpu-sph-flow-sequence ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=12 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=360000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, nine frames, `visualFrameTimeSpanS=0.9216`,
+  frame times from `0` through `0.9216 s`, final H2O tallness `0.587`,
+  footprint fill `0.297`, one H2O visible surface/component, and empty visual
+  issues.
+- Resident MLS-MPM flow sequence:
+  attempted `codex-mlsmpm-flow-sequence-20260617` with the shortened opt-in
+  row, but headless WebGPU/SwiftShader stayed busy for about five minutes
+  without writing an artifact. This is recorded as resident visual-harness cost
+  and remains open; it is not counted as a physics failure.
+
 ## Current Focused Result - 2026-06-17 Reaction Product Visual Contract And Flow Cadence Triage
 
 Na/H2O CPU/plain-SPH reaction state is now asserted by the visual matrix, and

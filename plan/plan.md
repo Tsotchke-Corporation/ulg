@@ -2,6 +2,17 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: CPU-SPH H2O/H2O visual flow now has an
+opt-in dense sequence gate and fresh passing evidence. The new
+`liquid-liquid-h2o-cpu-sph-flow-sequence` matrix scenario captures a sequence
+of frames and checks that those frames span enough simulated time. Run
+`codex-cpu-sph-flow-sequence-20260617` passed with nine frames over
+`0.9216 s`, final H2O tallness `0.587`, footprint fill `0.297`, one visible
+H2O surface/component, and empty visual issues. The overlay top chip also
+reports `sim t` so live playback can reveal whether the sim clock is advancing.
+Resident MLS-MPM flow-sequence validation remains open because headless
+WebGPU/SwiftShader was too expensive to complete the shortened row promptly.
+
 Current checkpoint, 2026-06-17 AKDT: the reaction/product visual contract has
 been tightened for the room-temperature Na/H2O plain-SPH row. The mounted CPU
 state already produced reactions, but the UI displayed stale drop/base role

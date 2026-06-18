@@ -2766,6 +2766,17 @@ export function mountSphPhaseDemoOverlay({
     }
   }
 
+  function currentSimulationTimeS() {
+    return finiteNumberOrNull(
+      driver?.demo?.state?.time
+        ?? activeViewState?.time
+        ?? scene.getMlsMpmResidentStep?.()?.particlePingPong?.nextTime
+        ?? overlay.__mlsMpmResidentStep?.particlePingPong?.nextTime
+        ?? scene.getMlsMpmResidentSteps?.()?.nextSphParticleState?.time
+        ?? overlay.__mlsMpmResidentSteps?.nextSphParticleState?.time
+    );
+  }
+
   function setCpuClosureTask(task) {
     cpuClosureTask = task ? {
       schema: 'peercompute.ulg.sph-demo-cpu-closure-task.v0',
@@ -2886,7 +2897,9 @@ export function mountSphPhaseDemoOverlay({
   }
 
   function updateWarningBanner() {
-    fpsEl.textContent = `render fps ${fmt(frameCounters.renderFps, 1)} | physics fps ${fmt(frameCounters.physicsFps, 1)} | resident fps ${fmt(frameCounters.residentFps, 1)}`;
+    const simTimeS = currentSimulationTimeS();
+    const simText = Number.isFinite(simTimeS) ? ` | sim t ${fmt(simTimeS, 3)}s` : '';
+    fpsEl.textContent = `render fps ${fmt(frameCounters.renderFps, 1)} | physics fps ${fmt(frameCounters.physicsFps, 1)} | resident fps ${fmt(frameCounters.residentFps, 1)}${simText}`;
     const warnings = currentWarningMessages();
     const warningNodes = warnings.map((message) => {
       const chip = document.createElement('span');

@@ -24920,6 +24920,54 @@ Validation:
   (MLS-MPM) and `0.1296 s` (CPU-SPH). The next behavior harness needs dense
   flow sequences over enough simulated time to prove visible motion.
 
+## 2026-06-17 AKDT - CPU-SPH Visual Flow Sequence Gate
+
+Prompt context: continuing the reaction/flow triage after confirming the user
+was seeing CPU-SPH fluid motion as stalled or unclear.
+
+Actions:
+
+- Added opt-in visual matrix scenarios for CPU-SPH and resident MLS-MPM H2O/H2O
+  flow sequences without adding them to the default matrix.
+- Extended the long-horizon probe to record simulated time on captured visual
+  frame samples.
+- Extended probe analysis and matrix summaries with `visualFrameTimesS`,
+  `visualFrameTimeSpanS`, and a minimum visual-frame time-span threshold.
+- Added a live `sim t` readout to the overlay warning chip so apparent stalls
+  can be checked against simulation-time progress.
+- Ran the CPU-SPH flow sequence and recorded the resident MLS-MPM headless cost
+  blocker.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added `plan/done/cpu-sph-visual-flow-sequence-2026-06-17.md`.
+
+Files touched:
+
+- `src/visualization/sphPhaseDemoMount.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/cpu-sph-visual-flow-sequence-2026-06-17.md`
+
+Validation:
+
+- PASS: syntax checks for the touched JS/MJS files.
+- PASS: `codex-cpu-sph-flow-sequence-20260617` reported `failedCount=0`, nine
+  frames, `visualFrameTimeSpanS=0.9216`, frame times from `0` through
+  `0.9216 s`, one H2O visible surface/component, final tallness `0.587`,
+  footprint fill `0.297`, and empty visual issues.
+- ABORTED/OPEN: `codex-h2o-flow-sequences-20260617` and the shortened
+  `codex-mlsmpm-flow-sequence-20260617` resident MLS-MPM attempts stayed busy
+  in headless WebGPU/SwiftShader for several minutes without writing artifacts.
+  This is recorded as a resident visual-harness performance blocker, not a
+  physics pass or fail.
+
 ## 2026-06-15 14:37 AKDT - Free-Surface Shape Visual Gate
 
 Prompt time/date: 2026-06-15 14:37 AKDT, continuing the active goal after the

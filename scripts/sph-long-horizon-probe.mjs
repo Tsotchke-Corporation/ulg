@@ -987,11 +987,19 @@ async function runBrowserProbe({
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
         const plainSphStepResult = overlay.__sphLastStepResult || null;
+        const sceneTimeS = finiteOrNull(
+          plainSphStepResult?.time
+            ?? residentStep?.particlePingPong?.nextTime
+            ?? steps?.nextSphParticleState?.time
+            ?? overlay.__sphPhaseViewState?.time
+            ?? overlay.__sphDriver?.demo?.state?.time
+        );
         return {
           batchIndex,
           phase,
           capturedAtMs: performance.now(),
           batchMs,
+          sceneTimeS,
           initial: batchIndex === 0 ? {
             preflight: overlay.__sphPhasePreflight || null
           } : null,
@@ -2452,6 +2460,7 @@ function analyzeTimeline(timeline, {
   expectedMaterialPresent = [],
   expectedMaterialAbsent = [],
   minReactionEventsTotal = null,
+  minVisualFrameTimeSpanS = null,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   scenarioUrl = DEFAULT_URL,
   visibleBoundsToleranceM = 0.05,
@@ -2493,10 +2502,24 @@ function analyzeTimeline(timeline, {
   const internalPressureScaleSeries = finiteSeries('internalPressureScale');
   const nextTimeSeries = metrics
     .map((metric) => finiteMetric(
-      metric.residentStep?.particlePingPong?.nextTime
+      metric.sceneTimeS
+        ?? metric.plainSphStepResult?.time
+        ?? metric.residentStep?.particlePingPong?.nextTime
         ?? metric.residentSteps?.nextTime
     ))
     .filter(Number.isFinite);
+  const metricTimeS = (metric) => finiteMetric(
+    metric?.sceneTimeS
+      ?? metric?.plainSphStepResult?.time
+      ?? metric?.residentStep?.particlePingPong?.nextTime
+      ?? metric?.residentSteps?.nextTime
+  );
+  const visualFrameTimesS = (Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [])
+    .map((frame) => metricTimeS(metrics[Number(frame?.sampleIndex)]))
+    .filter(Number.isFinite);
+  const visualFrameTimeSpanS = visualFrameTimesS.length >= 2
+    ? Math.max(...visualFrameTimesS) - Math.min(...visualFrameTimesS)
+    : null;
   const nextCenterOfMassYSeries = diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.nextCenterOfMassM?.[1]))
     .filter(Number.isFinite);
@@ -3153,6 +3176,13 @@ function analyzeTimeline(timeline, {
       issues.push(`unexpected-material-present:${material}`);
     }
   }
+  if (Number.isFinite(minVisualFrameTimeSpanS)) {
+    if (!Number.isFinite(visualFrameTimeSpanS)) {
+      issues.push('missing-visual-frame-time-span');
+    } else if (visualFrameTimeSpanS < minVisualFrameTimeSpanS) {
+      issues.push(`visual-frame-time-span<${minVisualFrameTimeSpanS}`);
+    }
+  }
   if (
     expectedLiquidH2oSameMaterial
     && Number.isFinite(maxNextTimeS)
@@ -3267,6 +3297,7 @@ function analyzeTimeline(timeline, {
     expectedMaterialPresent,
     expectedMaterialAbsent,
     minReactionEventsTotal: Number.isFinite(minReactionEventsTotal) ? minReactionEventsTotal : null,
+    minVisualFrameTimeSpanS: Number.isFinite(minVisualFrameTimeSpanS) ? minVisualFrameTimeSpanS : null,
     visibleBoundsToleranceM,
     particleBoundsToleranceM,
     issues,
@@ -3306,6 +3337,8 @@ function analyzeTimeline(timeline, {
     lastH2oVisibleSurfaceCount,
     finalParticlesByMaterial,
     maxReactionEventsTotal,
+    visualFrameTimesS,
+    visualFrameTimeSpanS,
     meanBatchMs,
     maxBatchMs,
     meanCompactSummaryMs,
@@ -3445,6 +3478,9 @@ async function main() {
   const minReactionEventsTotal = process.env.ULG_PROBE_MIN_REACTION_EVENTS_TOTAL == null
     ? null
     : positiveInteger(process.env.ULG_PROBE_MIN_REACTION_EVENTS_TOTAL, null);
+  const minVisualFrameTimeSpanS = process.env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S == null
+    ? null
+    : finiteNumber(process.env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S, null);
   const visibleBoundsToleranceM = finiteNumber(process.env.ULG_PROBE_VISIBLE_BOUNDS_TOLERANCE_M, 0.05);
   const particleBoundsToleranceM = finiteNumber(process.env.ULG_PROBE_PARTICLE_BOUNDS_TOLERANCE_M, 0.2);
   const thresholds = {
@@ -3468,6 +3504,7 @@ async function main() {
     expectedMaterialPresent,
     expectedMaterialAbsent,
     minReactionEventsTotal,
+    minVisualFrameTimeSpanS,
     visibleBoundsToleranceM,
     particleBoundsToleranceM
   };

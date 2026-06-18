@@ -12,6 +12,20 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-17 AKDT update: CPU-SPH H2O/H2O now has a close-spaced visual flow
+  sequence gate instead of relying on short screenshot rows. The opt-in matrix
+  scenario `liquid-liquid-h2o-cpu-sph-flow-sequence` captures nine frames over
+  `0.9216 s` of simulated time and asserts that the captured visual sequence
+  spans at least `0.8 s`. Fresh evidence
+  `codex-cpu-sph-flow-sequence-20260617` passed with `failedCount=0`, one H2O
+  surface/component, empty visual issues, final tallness `0.587`, footprint
+  fill `0.297`, and frame times
+  `0, 0.1152, 0.2304, ..., 0.9216 s`. The live top status chip now includes
+  `sim t` so "not moving" reports can be separated from too-little simulated
+  time. Resident MLS-MPM still needs a cheaper visual-flow sequence: the
+  shortened headless WebGPU/SwiftShader row stayed busy for about five minutes
+  without producing an artifact, so treat that as harness cost/open resident
+  validation, not as a fresh physics pass or fail.
 - 2026-06-17 AKDT update: Na/H2O plain-SPH reactions are not dead in the
   mounted CPU state, but the UI and visual harness were hiding the evidence.
   Direct mounted stepping and the new focused visual contract now show eight

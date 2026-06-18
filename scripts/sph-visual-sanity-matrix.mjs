@@ -17,10 +17,34 @@ const SCENARIOS = [
     expectedH2oVisibleSurfaceCount: 1
   },
   {
+    label: 'liquid-liquid-h2o-mlsmpm-flow-sequence',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=mlsmpm',
+    expectedMechanics: 'mlsmpm',
+    expectedH2oVisibleSurfaceCount: 1,
+    expectLiquidFreeSurface: true,
+    liquidFreeSurfaceMinTimeS: 0.8,
+    minVisualFrameTimeSpanS: 0.8,
+    batches: 4,
+    batchSteps: 512,
+    defaultEnabled: false
+  },
+  {
     label: 'liquid-liquid-h2o-cpu-sph',
     url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
     expectedMechanics: 'sph',
     expectedH2oVisibleSurfaceCount: 1
+  },
+  {
+    label: 'liquid-liquid-h2o-cpu-sph-flow-sequence',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
+    expectedMechanics: 'sph',
+    expectedH2oVisibleSurfaceCount: 1,
+    expectLiquidFreeSurface: true,
+    liquidFreeSurfaceMinTimeS: 0.8,
+    minVisualFrameTimeSpanS: 0.8,
+    batches: 8,
+    batchSteps: 384,
+    defaultEnabled: false
   },
   {
     label: 'solid-h2o-cpu-sph',
@@ -213,7 +237,7 @@ function countBy(values, keyOf = (value) => value) {
 
 function selectedScenarios() {
   const filter = String(process.env.ULG_VISUAL_MATRIX_SCENARIOS || '').trim();
-  if (!filter) return SCENARIOS;
+  if (!filter) return SCENARIOS.filter((scenario) => scenario.defaultEnabled !== false);
   const wanted = new Set(filter.split(',').map((entry) => entry.trim()).filter(Boolean));
   return SCENARIOS.filter((scenario) => wanted.has(scenario.label));
 }
@@ -361,6 +385,9 @@ function scenarioEnv({
   if (scenario.liquidFreeSurfaceMaxHeightM != null) {
     env.ULG_PROBE_LIQUID_FREE_SURFACE_MAX_HEIGHT_M = String(scenario.liquidFreeSurfaceMaxHeightM);
   }
+  if (scenario.minVisualFrameTimeSpanS != null) {
+    env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S = String(scenario.minVisualFrameTimeSpanS);
+  }
   if (process.env.ULG_VISUAL_MATRIX_CAPTURE_FRAMES === '1') {
     env.ULG_PROBE_CAPTURE_FRAMES = '1';
     env.ULG_PROBE_FRAME_DIR = frameDir;
@@ -475,6 +502,9 @@ async function main() {
       maxReactionEventsTotal: finiteOrNull(analysis.maxReactionEventsTotal),
       finalParticlesByMaterial: analysis.finalParticlesByMaterial || null,
       maxNextTimeS: finiteOrNull(analysis.maxNextTimeS),
+      minVisualFrameTimeSpanS: finiteOrNull(analysis.minVisualFrameTimeSpanS),
+      visualFrameTimeSpanS: finiteOrNull(analysis.visualFrameTimeSpanS),
+      visualFrameTimesS: Array.isArray(analysis.visualFrameTimesS) ? analysis.visualFrameTimesS : [],
       expectLiquidFreeSurface: analysis.expectLiquidFreeSurface === true,
       liquidFreeSurfaceMinTimeS: finiteOrNull(analysis.liquidFreeSurfaceMinTimeS),
       liquidFreeSurfaceMaxTallnessRatio: finiteOrNull(analysis.liquidFreeSurfaceMaxTallnessRatio),

@@ -1909,10 +1909,6 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
     if (activeGridDispatch.useActiveGrid) {
-      encoder.clearBuffer(gridBuffer, 0, Math.max(4, gridByteLength));
-      encoder.clearBuffer(updatedGridBuffer, 0, Math.max(4, updatedGridByteLength));
-    }
-    if (activeGridDispatch.useActiveGrid) {
       const accumulatorClearPass = encoder.beginComputePass();
       accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
       accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
@@ -2346,10 +2342,6 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     const encoder = device.createCommandEncoder();
     if (typeof encoder.clearBuffer !== 'function') {
       throw new Error('Fused resident mechanics sequence requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
-    }
-    if (activeGridDispatch.useActiveGrid) {
-      encoder.clearBuffer(gridBuffer, 0, Math.max(4, gridByteLength));
-      encoder.clearBuffer(updatedGridBuffer, 0, Math.max(4, updatedGridByteLength));
     }
     let currentStateBuffer = sphParticleUpload.stateBuffer;
     let currentMechanicsBuffer = mlsMpmParticleUpload.mechanicsBuffer;

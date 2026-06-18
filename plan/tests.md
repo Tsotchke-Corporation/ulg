@@ -2,12 +2,13 @@
 
 ## Current Focused Result - 2026-06-18 Active-Grid P2G Accumulator Clear
 
-Active-grid fused MLS-MPM mechanics now clears P2G accumulators through an
-active-node WGSL `clear_accumulators` pass instead of a full accumulator
-`clearBuffer()` per substep. The resident dispatch topology and benchmark JSON
-report `p2gAccumulatorClear.bufferClearMode=active-grid-compute-clear`, so
-future browser artifacts can prove the hot loop is not hiding that full-grid
-clear.
+Active-grid fused MLS-MPM mechanics no longer issues command-encoder
+full-buffer clears in the active-grid path. P2G accumulators are cleared
+through an active-node WGSL `clear_accumulators` pass, and P2G finalize/grid
+update overwrite the active grid/output nodes directly. The resident dispatch
+topology and benchmark JSON report
+`p2gAccumulatorClear.bufferClearMode=active-grid-compute-clear`, so future
+browser artifacts can prove the hot loop is not hiding a full-grid clear.
 
 Focused checks:
 
@@ -18,9 +19,9 @@ Focused checks:
   `node --check tests/sphMlsMpmGpuStep.test.mjs` passed.
 - Runtime/unit topology:
   `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `56/56`; active-grid
-  single-step dispatch now reports five dispatches per substep and two
-  full-buffer clears, while fused two-step active-grid sequence reports ten
-  dispatches and `dispatchCount=10`.
+  single-step dispatch now reports five dispatches per substep and zero
+  command-encoder full-buffer clears, while fused two-step active-grid sequence
+  reports ten dispatches, `dispatchCount=10`, and zero full-buffer clears.
 - Browser console/benchmark probes:
   `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-smoke.json`
   and `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-10k.json`
@@ -32,7 +33,7 @@ Known residual risk:
 
 - This is a real hot-loop cleanup, but it is not enough for interactive GUI
   rates. The 10k direct-resident row still reports final-batch
-  `residentGpuCompletedStageMs=179.6`; the next performance work remains
+  `residentGpuCompletedStageMs=157.5`; the next performance work remains
   GPU-side bounds/sparse dispatch and the no-readback renderer path.
 
 ## Current Focused Result - 2026-06-18 Mobile WebGL Surface Material Proxy

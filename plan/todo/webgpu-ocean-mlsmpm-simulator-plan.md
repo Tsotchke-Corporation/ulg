@@ -150,17 +150,20 @@ Tactical status, 2026-06-18 AKDT:
   `48778` particles, with zero browser-console issues. The path is dispatched
   particle-parallel, but the active-grid expansion and per-substep full
   mechanics sequence are not yet Ocean-fast.
-- Active-grid fused mechanics no longer clears the full P2G accumulator buffer
-  every active-grid substep. A generated `clear_accumulators` WGSL entry now
-  clears only active AABB nodes before particle scatter, and the dispatch
-  topology reports `p2gAccumulatorClear.bufferClearMode=active-grid-compute-clear`.
+- Active-grid fused mechanics no longer issues command-encoder full-buffer
+  clears in the active-grid path. A generated `clear_accumulators` WGSL entry
+  now clears only active AABB accumulator nodes before particle scatter, P2G
+  finalize/grid update overwrite active grid/output nodes directly, and the
+  dispatch topology reports
+  `p2gAccumulatorClear.bufferClearMode=active-grid-compute-clear`.
   Browser direct-resident evidence at
   `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-smoke.json`
   and `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-10k.json`
-  is console-clean and queue-fenced. This removes one full-grid operation but
-  still leaves the 10k direct mechanics row at `residentGpuCompletedStageMs=179.6`;
-  next throughput work should target GPU-side bounds/sparse or indirect
-  dispatch metadata and the no-readback renderer/surface consumer.
+  is console-clean and queue-fenced. This removes the explicit full-grid clear
+  commands but still leaves the 10k direct mechanics row at
+  `residentGpuCompletedStageMs=157.5`; next throughput work should target
+  GPU-side bounds/sparse or indirect dispatch metadata and the no-readback
+  renderer/surface consumer.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

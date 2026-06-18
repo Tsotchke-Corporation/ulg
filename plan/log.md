@@ -4,11 +4,11 @@
 
 Status:
 
-- Removed a full P2G accumulator `clearBuffer()` from the active-grid fused
+- Removed full-grid `clearBuffer()` commands from the active-grid fused
   MLS-MPM mechanics path. Active-grid runs now dispatch a generated
   `clear_accumulators` WGSL entry over the active node AABB before scatter,
-  so P2G accumulator clearing scales with active nodes instead of full grid
-  nodes.
+  while P2G finalize and grid update overwrite the active grid/output nodes
+  directly.
 - Applied the same active-node clear path to both single-step fused mechanics
   and one-submit fused mechanics sequences. Non-active-grid paths keep the
   previous full-buffer clear behavior.
@@ -33,14 +33,15 @@ Validation:
   `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-10k.json`
   completed with benchmark `status=good`, browser console issue/warning counts
   `0/{}`, queue fence `complete`, active grid `5508/54872`, and
-  `residentGpuCompletedStageMs=179.6` for the final four-step batch.
+  `residentGpuCompletedStageMs=157.5` for the final four-step batch.
 
 Open:
 
-- This removes one full-grid hot-loop operation, but the GUI FPS problem is
-  not solved. The direct mechanics lane is still too slow at 10k scale, and
-  the live GUI still needs the no-readback renderer/surface consumer plus
-  GPU-side bounds reduction or sparse/indirect active-grid metadata.
+- This removes the explicit full-grid clear commands from the active-grid
+  hot-loop path, but the GUI FPS problem is not solved. The direct mechanics
+  lane is still too slow at 10k scale, and the live GUI still needs the
+  no-readback renderer/surface consumer plus GPU-side bounds reduction or
+  sparse/indirect active-grid metadata.
 
 ## 2026-06-18 AKDT - Mobile WebGL Surface Material Proxy
 

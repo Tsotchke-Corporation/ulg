@@ -1812,7 +1812,7 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
   assert.equal(device.dispatches[3].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
   assert.equal(device.dispatches[4].count, 1);
   assert.ok(device.dispatches[0].count < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
-  assert.equal(device.clears.length, 2);
+  assert.equal(device.clears.length, 0);
   destroyMlsMpmResidentStepBuffers(step);
 });
 
@@ -5461,7 +5461,7 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.min, [1.125, 1.2, 1.175]);
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.max, [1.375, 1.4, 1.425]);
   assert.equal(execution.nextSphParticleState.residentMaxSpeedMPerS, 0);
-  assert.equal(device.clears.length, 2);
+  assert.equal(device.clears.length, 0);
   assert.deepEqual(device.dispatches.map((entry) => entry.count), [4, 1, 4, 4, 1, 4, 1, 4, 4, 1]);
   destroyMlsMpmResidentStepsBuffers(execution);
 });

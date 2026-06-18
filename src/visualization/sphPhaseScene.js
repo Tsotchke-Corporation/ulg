@@ -3,7 +3,7 @@
 // instead of visible point sprites. Colour still comes from the closure-backed demo state.
 
 import * as THREE from 'three';
-import { WebGPURenderer as ThreeWebGPURenderer } from 'three/webgpu';
+import * as THREE_WEBGPU from 'three/webgpu';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
@@ -130,6 +130,7 @@ const SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS = Object.freeze({
   maxStorageBufferBindingSize: 512 * 1024 * 1024
 });
 const SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED = false;
+let activeThreeNamespace = THREE;
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
@@ -266,7 +267,7 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     reason = 'Three WebGPU renderer did not expose backend buffer binding API';
   } else if (rendererPresentationDisabled) {
     status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-presentation-disabled';
-    reason = 'Three WebGPU renderer device is initialized, but scene presentation is disabled pending the Three WebGPU namespace migration';
+    reason = 'Three WebGPU renderer device is initialized, but scene presentation is disabled pending the Three WebGPU presentation lifetime fix';
   } else if (rendererBackend === 'three-webgpu' && device && !rendererBackendDeviceReady) {
     status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-device-pending';
     reason = 'Three WebGPU renderer backend device is not initialized yet';
@@ -310,6 +311,7 @@ export function createThreeWebGpuExternalInterleavedBufferAttribute({
   offset = 0,
   name = ''
 } = {}) {
+  const Three = renderer?.userData?.sphThreeNamespace || activeThreeNamespace || THREE;
   const vertexCount = Math.max(0, Math.floor(Number(count) || 0));
   const rowStride = Math.max(1, Math.floor(Number(stride) || 0));
   const attributeItemSize = Math.max(1, Math.floor(Number(itemSize) || 0));
@@ -320,9 +322,9 @@ export function createThreeWebGpuExternalInterleavedBufferAttribute({
   if (!buffer) {
     throw new Error('caller-owned GPUBuffer is required');
   }
-  const interleavedBuffer = new THREE.InterleavedBuffer(new Float32Array(rowStride), rowStride);
+  const interleavedBuffer = new Three.InterleavedBuffer(new Float32Array(rowStride), rowStride);
   interleavedBuffer.count = vertexCount;
-  const attribute = new THREE.InterleavedBufferAttribute(
+  const attribute = new Three.InterleavedBufferAttribute(
     interleavedBuffer,
     attributeItemSize,
     attributeOffset,
@@ -2364,6 +2366,7 @@ export function residentSurfaceDrawPipelineKey(draw = {}) {
 }
 
 function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride = null) {
+  const Three = activeThreeNamespace || THREE;
   const descriptor = renderDescriptorOf(descriptorOrKey);
   // Transmission / IOR / attenuation come from the optical closure (refractive index + Beer–Lambert
   // extinction): clear media transmit according to optical depth; conductors become opaque from
@@ -2374,16 +2377,16 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
   const transparent = renderAlpha < 0.999;
   const baseColor = optics.baseColorSrgb ?? optics.pbr?.baseColorSrgb ?? [1, 1, 1];
   const baseColorLinear = optics.baseColorLinear || null;
-  const materialColor = new THREE.Color();
+  const materialColor = new Three.Color();
   if (baseColorLinear) {
-    materialColor.setRGB(baseColorLinear[0], baseColorLinear[1], baseColorLinear[2], THREE.LinearSRGBColorSpace);
+    materialColor.setRGB(baseColorLinear[0], baseColorLinear[1], baseColorLinear[2], Three.LinearSRGBColorSpace);
   } else {
-    materialColor.setRGB(baseColor[0], baseColor[1], baseColor[2], THREE.SRGBColorSpace);
+    materialColor.setRGB(baseColor[0], baseColor[1], baseColor[2], Three.SRGBColorSpace);
   }
-  const material = new THREE.MeshPhysicalMaterial({
+  const material = new Three.MeshPhysicalMaterial({
     color: materialColor,
     vertexColors: optics.vertexColorPolicy === 'particle-diagnostic' || Math.round(optics.vertexColorPolicyId || 0) === 2,
-    side: THREE.DoubleSide,
+    side: Three.DoubleSide,
     clearcoat: optics.metalness > 0.5 ? 0.18 : 0.05,
     metalness: optics.metalness,
     roughness: optics.roughness,
@@ -2399,20 +2402,20 @@ function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride 
   material.userData.renderOrder = renderOrderFromOpticalResponse(optics, descriptor);
   const attenuationColor = optics.attenuationLinear || optics.attenuationColor || null;
   if (attenuationColor) {
-    material.attenuationColor = new THREE.Color();
+    material.attenuationColor = new Three.Color();
     if (optics.attenuationLinear) {
       material.attenuationColor.setRGB(
         attenuationColor[0],
         attenuationColor[1],
         attenuationColor[2],
-        THREE.LinearSRGBColorSpace
+        Three.LinearSRGBColorSpace
       );
     } else {
       material.attenuationColor.setRGB(
         attenuationColor[0],
         attenuationColor[1],
         attenuationColor[2],
-        THREE.SRGBColorSpace
+        Three.SRGBColorSpace
       );
     }
     material.attenuationDistance = Math.max(0.05, optics.attenuationDistanceM);
@@ -2515,7 +2518,7 @@ export function stabilizeRenderRowSphereBridgeMaterial(material, {
       clamp(fallbackColor[0], 0, 1),
       clamp(fallbackColor[1], 0, 1),
       clamp(fallbackColor[2], 0, 1),
-      THREE.SRGBColorSpace
+      (activeThreeNamespace || THREE).SRGBColorSpace
     );
     material.opacity = Math.max(Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1, 0.72);
     material.transparent = material.opacity < 0.999;
@@ -3011,6 +3014,10 @@ export function createSphPhaseScene(container, {
   const residentSurfaceDrawDiagnosticModeDefault = String(residentSurfaceDrawDiagnosticMode || 'auto').trim().toLowerCase();
   const useResidentThreeSurfaceBridgeByDefault = isThreeResidentSurfaceBridgeMode(residentSurfaceDrawDiagnosticModeDefault);
   const requestedRendererBackend = normalizeSphRendererBackend(rendererBackend);
+  const canUseThreeWebGpuRenderer = requestedRendererBackend === 'webgpu'
+    && Boolean(navigatorRef?.gpu || globalThis.navigator?.gpu);
+  const Three = canUseThreeWebGpuRenderer ? THREE_WEBGPU : THREE;
+  activeThreeNamespace = Three;
   let residentSurfaceDrawOverlayPolicy = null;
   function resolveSceneResidentSurfaceDrawOverlayPolicy({ refresh = false } = {}) {
     if (refresh || !residentSurfaceDrawOverlayPolicy) {
@@ -3025,7 +3032,7 @@ export function createSphPhaseScene(container, {
   }
   let radiusScale = surfaceRadiusScale; // mutable so the blob-size control is live (no rebuild)
   let currentWallTemperaturesK = null;
-  const scene = new THREE.Scene();
+  const scene = new Three.Scene();
   let sceneResidentAuthorityHost = residentAuthorityHost || null;
   scene.userData.residentAuthorityHost = sceneResidentAuthorityHost;
   function setResidentAuthorityHost(host = null) {
@@ -3040,21 +3047,19 @@ export function createSphPhaseScene(container, {
   // transmissive (clear), so they take their look from what is behind them — a pure-black void made
   // them read dark. Transmission samples the background render, so lifting it brightens the glassy
   // surfaces without faking opacity.
-  scene.background = new THREE.Color(0x18222b);
+  scene.background = new Three.Color(0x18222b);
 
   const initialViewport = resolveSphSceneViewportSize(container);
   const width = initialViewport.width;
   const height = initialViewport.height;
-  const camera = new THREE.PerspectiveCamera(46, width / height, 0.05, 500);
+  const camera = new Three.PerspectiveCamera(46, width / height, 0.05, 500);
   // Aim at the box centre and pull back proportionally to the largest box edge so the whole sealed
   // box (and everything contained in it) is framed, instead of looking at the floor and cropping.
-  const center = new THREE.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+  const center = new Three.Vector3(dims[0] / 2, dims[1] / 2, dims[2] / 2);
   camera.position.set(center.x + refEdgeM * 0.85, center.y + refEdgeM * 0.55, center.z + refEdgeM * 1.15);
 
-  const canUseThreeWebGpuRenderer = requestedRendererBackend === 'webgpu'
-    && Boolean(navigatorRef?.gpu || globalThis.navigator?.gpu);
   const renderer = canUseThreeWebGpuRenderer
-    ? new ThreeWebGPURenderer({
+    ? new Three.WebGPURenderer({
       antialias: true,
       preserveDrawingBuffer: Boolean(preserveDrawingBuffer),
       requiredLimits: SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS
@@ -3063,6 +3068,7 @@ export function createSphPhaseScene(container, {
   renderer.userData = {
     ...(renderer.userData || {}),
     sphRequestedRendererBackend: requestedRendererBackend,
+    sphThreeNamespace: Three,
     sphWebGpuPresentationEnabled: !canUseThreeWebGpuRenderer || SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED
   };
   let rendererReady = !renderer.isWebGPURenderer;
@@ -3078,8 +3084,8 @@ export function createSphPhaseScene(container, {
   renderer.domElement.style.display = 'block';
   renderer.domElement.style.width = '100%';
   renderer.domElement.style.height = '100%';
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.outputColorSpace = Three.SRGBColorSpace;
+  renderer.toneMapping = Three.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
   container.appendChild(renderer.domElement);
   function rendererBackendName() {
@@ -3134,7 +3140,7 @@ export function createSphPhaseScene(container, {
         : 'three-webgpu-renderer-device-ready-presentation-disabled';
       const reason = rendererReady
         ? null
-        : 'scene presentation is disabled pending the Three WebGPU namespace migration';
+        : 'scene presentation is disabled pending the Three WebGPU presentation lifetime fix';
       publishRendererInitStatus(status, reason);
       if (rendererReady) {
         scheduleEnvironmentMap();
@@ -3182,20 +3188,20 @@ export function createSphPhaseScene(container, {
   // Bright, fairly even illumination so the non-emissive surfaces (ice/water) read clearly; a
   // hemisphere light gives a soft sky/ground fill on top of the flat ambient, and two directional
   // lights (key + fill) shape the surfaces without leaving any face in the dark.
-  scene.add(new THREE.AmbientLight(0xffffff, 1.4));
-  scene.add(new THREE.HemisphereLight(0xddffff, 0x202a30, 0.9));
-  const key = new THREE.DirectionalLight(0xffffff, 1.1);
+  scene.add(new Three.AmbientLight(0xffffff, 1.4));
+  scene.add(new Three.HemisphereLight(0xddffff, 0x202a30, 0.9));
+  const key = new Three.DirectionalLight(0xffffff, 1.1);
   key.position.set(4, 8, 6);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xbfe9ff, 0.5);
+  const fill = new Three.DirectionalLight(0xbfe9ff, 0.5);
   fill.position.set(-6, 3, -4);
   scene.add(fill);
 
   // Sealed-box domain wireframe (the full Lx×Ly×Lz box) + a floor grid sized to the footprint.
-  const boxGeom = new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
-  const box = new THREE.LineSegments(
-    new THREE.EdgesGeometry(boxGeom),
-    new THREE.LineBasicMaterial({
+  const boxGeom = new Three.BoxGeometry(dims[0], dims[1], dims[2]);
+  const box = new Three.LineSegments(
+    new Three.EdgesGeometry(boxGeom),
+    new Three.LineBasicMaterial({
       color: 0x36d6a4,
       transparent: true,
       opacity: 0.6,
@@ -3207,7 +3213,7 @@ export function createSphPhaseScene(container, {
   box.userData.renderLayer = 'container-wire';
   scene.add(box);
   const gridFootprint = Math.max(dims[0], dims[2]);
-  const grid = new THREE.GridHelper(gridFootprint, 20, 0x1d8b6d, 0x0d332b);
+  const grid = new Three.GridHelper(gridFootprint, 20, 0x1d8b6d, 0x0d332b);
   grid.position.set(dims[0] / 2, 0, dims[2] / 2);
   const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
   for (const material of gridMaterials) {
@@ -3327,7 +3333,7 @@ export function createSphPhaseScene(container, {
         clamp(row.baseColorLinear[0], 0, 1),
         clamp(row.baseColorLinear[1], 0, 1),
         clamp(row.baseColorLinear[2], 0, 1),
-        THREE.LinearSRGBColorSpace
+        Three.LinearSRGBColorSpace
       );
       const renderAlpha = renderAlphaFromOpticalResponse(row, descriptor);
       material.opacity = renderAlpha;
@@ -3357,43 +3363,10 @@ export function createSphPhaseScene(container, {
   }
 
   function requestCachedOpticalGpuDevice(ref = navigatorRef) {
-    if (renderer.isWebGPURenderer) {
-      if (!opticalGpuDeviceResultPromise) {
-        opticalGpuDeviceResultPromise = Promise.resolve(rendererInitPromise).then(() => {
-          const device = renderer.backend?.device || null;
-          if (!device) {
-            return {
-              status: 'webgpu-error-fallback',
-              reason: rendererInitError || 'Three WebGPU renderer device is not ready',
-              device: null,
-              rendererBackend: rendererBackendName(),
-              rendererOwnedDevice: true
-            };
-          }
-          return {
-            status: 'webgpu-device-ready',
-            reason: 'using Three WebGPU renderer-owned GPUDevice',
-            device,
-            requiredLimits: { ...SPH_THREE_WEBGPU_RENDERER_REQUIRED_LIMITS },
-            adapterLimits: null,
-            rendererBackend: rendererBackendName(),
-            rendererOwnedDevice: true
-          };
-        }).catch((error) => {
-          opticalGpuDeviceResultPromise = null;
-          return {
-            status: 'webgpu-error-fallback',
-            reason: error instanceof Error ? error.message : String(error),
-            device: null,
-            rendererBackend: rendererBackendName(),
-            rendererOwnedDevice: true
-          };
-        });
-      }
-      return opticalGpuDeviceResultPromise;
-    }
     if (!opticalGpuDeviceResultPromise) {
       opticalGpuDeviceResultPromise = requestOpticalGpuDevice(ref).then((result) => {
+        result.rendererBackend = rendererBackendName();
+        result.rendererOwnedDevice = false;
         if (result.device?.lost?.then) {
           result.device.lost.finally(() => {
             if (opticalGpuDeviceResultPromise) opticalGpuDeviceResultPromise = null;
@@ -3405,7 +3378,9 @@ export function createSphPhaseScene(container, {
         return {
           status: 'webgpu-error-fallback',
           reason: error instanceof Error ? error.message : String(error),
-          device: null
+          device: null,
+          rendererBackend: rendererBackendName(),
+          rendererOwnedDevice: false
         };
       });
     }
@@ -4992,7 +4967,7 @@ export function createSphPhaseScene(container, {
       ? sourceSurfaces
       : [...activeRowsBySurface.keys()].sort((a, b) => a - b).map((surfaceIndex) => ({ surfaceIndex }));
     const materialMap = buildSphRenderMaterialMap(materialProperties || {}, sphReactionTable);
-    const group = new THREE.Group();
+    const group = new Three.Group();
     group.name = 'ulg-sph-resident-surface-draw-three-compact';
     group.frustumCulled = false;
     const meshes = [];
@@ -5048,15 +5023,15 @@ export function createSphPhaseScene(container, {
         materialMap
       });
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+      const geometry = new Three.BufferGeometry();
+      geometry.setAttribute('position', new Three.BufferAttribute(positions, 3));
+      geometry.setAttribute('normal', new Three.BufferAttribute(normals, 3));
       geometry.setDrawRange(0, alignedVertexCount);
       if (!(normalMagnitude > 0)) geometry.computeVertexNormals();
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
 
-      const mesh = new THREE.Mesh(
+      const mesh = new Three.Mesh(
         geometry,
         makeSurfaceMaterial(descriptor, properties)
       );
@@ -5250,7 +5225,7 @@ export function createSphPhaseScene(container, {
         bridgeReused = true;
         bridgeUpdateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
       } else {
-        group = new THREE.Group();
+        group = new Three.Group();
         group.name = 'ulg-sph-resident-render-row-three-spheres';
         group.frustumCulled = false;
         scene.add(group);
@@ -5258,7 +5233,7 @@ export function createSphPhaseScene(container, {
       if (previousBridge?.threeSurfaceGroup && previousBridge.threeSurfaceGroup !== group) {
         previousBridge.threeSurfaceGroup.visible = false;
       }
-      const temp = new THREE.Object3D();
+      const temp = new Three.Object3D();
       const meshes = [];
       let transparentGroups = 0;
       let opaqueGroups = 0;
@@ -5280,10 +5255,10 @@ export function createSphPhaseScene(container, {
         );
         if (!canReuseMesh) {
           if (mesh) disposeSphereMesh(mesh);
-          const sphereGeometry = new THREE.SphereGeometry(1, 8, 6);
+          const sphereGeometry = new Three.SphereGeometry(1, 8, 6);
           const material = makeSurfaceMaterial(descriptor, properties, nextOptics);
           material.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
-          mesh = new THREE.InstancedMesh(sphereGeometry, material, indices.length);
+          mesh = new Three.InstancedMesh(sphereGeometry, material, indices.length);
           mesh.name = `ulg-sph-three-render-row-spheres-${surfaceKey}`;
           mesh.frustumCulled = false;
           group.add(mesh);
@@ -5307,7 +5282,7 @@ export function createSphPhaseScene(container, {
           ?? decoded?.emissiveByMaterial?.[descriptor.renderKey]
           ?? null;
         if (emissive && material.emissive) {
-          material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
+          material.emissive.setRGB(emissive[0], emissive[1], emissive[2], Three.SRGBColorSpace);
           material.emissiveIntensity = 1.8;
         }
         applySurfaceRenderOrdering(mesh, material.userData.optical, descriptor);
@@ -5408,9 +5383,9 @@ export function createSphPhaseScene(container, {
       } else {
         positions = new Float32Array(requiredFloats);
         colors = new Float32Array(requiredFloats);
-        geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geometry = new Three.BufferGeometry();
+        geometry.setAttribute('position', new Three.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new Three.BufferAttribute(colors, 3));
       }
       positions.set(positionsM.subarray(0, requiredFloats), 0);
       if (positions.length > requiredFloats) positions.fill(0, requiredFloats);
@@ -5435,7 +5410,7 @@ export function createSphPhaseScene(container, {
       geometry.computeBoundingSphere();
       if (!points) {
         const pointSize = Math.max(0.025, Math.min(0.18, smoothingLength * 0.45));
-        const material = new THREE.PointsMaterial({
+        const material = new Three.PointsMaterial({
           size: pointSize,
           sizeAttenuation: true,
           vertexColors: true,
@@ -5449,7 +5424,7 @@ export function createSphPhaseScene(container, {
           transparencyClassId: 1,
           depthWriteFlag: 0
         };
-        points = new THREE.Points(geometry, material);
+        points = new Three.Points(geometry, material);
         points.name = 'ulg-sph-three-render-row-points';
         points.frustumCulled = false;
         points.renderOrder = 1200;
@@ -5461,7 +5436,7 @@ export function createSphPhaseScene(container, {
       threeMeshes = [points];
     }
     if (!group) {
-      group = new THREE.Group();
+      group = new Three.Group();
       group.name = useSphereBridge
         ? 'ulg-sph-resident-render-row-three-spheres'
         : 'ulg-sph-resident-render-row-three-points';
@@ -5926,7 +5901,7 @@ export function createSphPhaseScene(container, {
       ? surfaceDrawExecution.surfaces
       : [];
     const materialMap = buildSphRenderMaterialMap(materialProperties || {}, sphReactionTable);
-    const group = new THREE.Group();
+    const group = new Three.Group();
     group.name = 'ulg-sph-resident-surface-draw-three-webgpu-buffers';
     group.frustumCulled = false;
     const meshes = [];
@@ -5934,7 +5909,7 @@ export function createSphPhaseScene(container, {
     let totalTriangleCount = 0;
     let opaqueDrawCount = 0;
     let transparentDrawCount = 0;
-    const fallbackCenter = new THREE.Vector3(dims[0] * 0.5, dims[1] * 0.5, dims[2] * 0.5);
+    const fallbackCenter = new Three.Vector3(dims[0] * 0.5, dims[1] * 0.5, dims[2] * 0.5);
     const fallbackRadius = Math.max(1e-6, Math.hypot(dims[0], dims[1], dims[2]) * 0.5);
 
     for (let recordIndex = 0; recordIndex < sourceSurfaces.length; recordIndex += 1) {
@@ -5951,12 +5926,12 @@ export function createSphPhaseScene(container, {
         materialMap
       });
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
-      const geometry = new THREE.BufferGeometry();
+      const geometry = new Three.BufferGeometry();
       geometry.setAttribute('position', positionBinding.attribute);
       geometry.setAttribute('normal', normalBinding.attribute);
       geometry.setDrawRange(vertexOffset, alignedVertexCount);
       const boundsCenter = Array.isArray(sourceSurface.boundsCenterM)
-        ? new THREE.Vector3(
+        ? new Three.Vector3(
           Number(sourceSurface.boundsCenterM[0]) || 0,
           Number(sourceSurface.boundsCenterM[1]) || 0,
           Number(sourceSurface.boundsCenterM[2]) || 0
@@ -5965,13 +5940,13 @@ export function createSphPhaseScene(container, {
       const boundsRadius = Number.isFinite(Number(sourceSurface.boundsRadiusM)) && Number(sourceSurface.boundsRadiusM) > 0
         ? Number(sourceSurface.boundsRadiusM)
         : fallbackRadius;
-      geometry.boundingSphere = new THREE.Sphere(boundsCenter.clone(), boundsRadius);
-      geometry.boundingBox = new THREE.Box3(
+      geometry.boundingSphere = new Three.Sphere(boundsCenter.clone(), boundsRadius);
+      geometry.boundingBox = new Three.Box3(
         boundsCenter.clone().subScalar(boundsRadius),
         boundsCenter.clone().addScalar(boundsRadius)
       );
 
-      const mesh = new THREE.Mesh(
+      const mesh = new Three.Mesh(
         geometry,
         makeSurfaceMaterial(descriptor, properties)
       );
@@ -6380,7 +6355,7 @@ export function createSphPhaseScene(container, {
         resizeSphResidentSurfaceDrawOverlayCanvas(bridge);
         camera.updateMatrixWorld?.();
         camera.matrixWorldInverse?.copy?.(camera.matrixWorld)?.invert?.();
-        const viewProjection = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         const cameraPayload = new Float32Array(SPH_RENDER_ROW_WEBGPU_OVERLAY_CAMERA_FLOATS);
         cameraPayload.set(viewProjection.elements, 0);
         cameraPayload[16] = bridge.canvas?.width || 1;
@@ -6448,7 +6423,7 @@ export function createSphPhaseScene(container, {
     try {
       resizeSphResidentSurfaceDrawOverlayCanvas(bridge);
       const depthView = ensureSphResidentSurfaceDrawDepthView(bridge);
-      const viewProjection = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
       const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
       const canvasView = bridge.context.getCurrentTexture().createView();
@@ -8470,7 +8445,7 @@ export function createSphPhaseScene(container, {
       mesh.userData.opticalSurfaceVisibility = opticalVisibility;
       const emissive = emissiveByMaterial?.[batch.material] ?? emissiveByMaterial?.[batch.renderKey] ?? null;
       if (emissive) {
-        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
+        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], Three.SRGBColorSpace);
         mesh.material.emissiveIntensity = 1.8;
       } else {
         mesh.material.emissive.setRGB(0, 0, 0);
@@ -9110,7 +9085,7 @@ export function createSphPhaseScene(container, {
       mesh.userData.opticalGpuRecord = gpuRecordsBySurface.get(opticalCoverageKey(descriptor)) || null;
       const emissive = emissiveByMaterial?.[descriptor.material] ?? emissiveByMaterial?.[descriptor.renderKey] ?? null;
       if (emissive) {
-        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
+        mesh.material.emissive.setRGB(emissive[0], emissive[1], emissive[2], Three.SRGBColorSpace);
         mesh.material.emissiveIntensity = 1.8;
       } else {
         mesh.material.emissive.setRGB(0, 0, 0);
@@ -11615,6 +11590,7 @@ export function createSphPhaseScene(container, {
         reason,
         rendererInitStatus,
         rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        error: rendererInitError,
         updatedAtMs: nowMs(),
         scientificValidation: false,
         sphValidation: false,
@@ -11680,7 +11656,7 @@ export function createSphPhaseScene(container, {
     renderer.setPixelRatio(pixelRatio);
     renderer.setSize(w, h, false);
     resizeSphResidentSurfaceDrawOverlayCanvas();
-    const drawingBufferSize = renderer.getDrawingBufferSize?.(new THREE.Vector2());
+    const drawingBufferSize = renderer.getDrawingBufferSize?.(new Three.Vector2());
     scene.userData.sphViewportResize = {
       schema: 'peercompute.ulg.sph-scene-viewport-resize.v0',
       status: 'viewport-resized',
@@ -11711,7 +11687,7 @@ export function createSphPhaseScene(container, {
       const rendered = renderSceneFrame({ reason });
       if (rendered) renderSphResidentSurfaceDrawOverlay();
       const rect = renderer.domElement?.getBoundingClientRect?.();
-      const drawingBufferSize = renderer.getDrawingBufferSize?.(new THREE.Vector2());
+      const drawingBufferSize = renderer.getDrawingBufferSize?.(new Three.Vector2());
       const status = {
         schema: 'peercompute.ulg.sph-scene-viewport-refresh.v0',
         status: rendered ? 'viewport-refresh-rendered' : 'viewport-refresh-skipped-renderer-not-ready',

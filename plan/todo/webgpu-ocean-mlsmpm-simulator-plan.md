@@ -73,13 +73,16 @@ Tactical status, 2026-06-18 AKDT:
   surface milestone is therefore an engine-owned Three WebGPU renderer path
   plus a storage-buffer geometry bridge, not another canvas overlay.
 - The first engine-owned Three WebGPU renderer gate exists behind
-  `renderer=webgpu` and can initialize a renderer-owned `GPUDevice` for
-  resident compute to reuse. Actual WebGPU scene presentation remains disabled:
-  an ungated probe showed the current mixed `three` / `three/webgpu` scene
-  objects trip WebGPU pipeline errors. The next renderer task is to migrate the
-  mounted scene/material namespace to Three WebGPU-compatible objects, then
-  enable the external-buffer surface bridge with browser pixel and console
-  validation.
+  `renderer=webgpu` and can initialize a renderer-owned `GPUDevice` for future
+  same-device presentation/geometry bridge work. Routine resident
+  compute/readback stays on the cached resident compute device; an attempted
+  renderer-owned compute reuse path failed render-row `mapAsync` once
+  presentation was active. Actual WebGPU scene presentation remains disabled:
+  the mounted scene/material namespace has been migrated to the active Three
+  namespace, but an ungated probe still produced `Instance dropped in
+  popErrorScope`. The next renderer task is a dedicated Three WebGPU
+  presentation lifetime fix, followed by browser pixel and console validation
+  before enabling the external-buffer surface bridge.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

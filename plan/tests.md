@@ -4,11 +4,13 @@
 
 This slice adds the engine-side contract for a future no-readback Three WebGPU
 surface renderer. `renderer=webgpu` now initializes a Three `WebGPURenderer`
-device without rendering the current mixed-namespace scene, and resident GPU
-work can reuse that renderer-owned `GPUDevice`. The marching-cubes extension
-surface bridge can build Three meshes whose interleaved attributes point at
-retained ULG surface row GPU buffers, but visible WebGPU presentation is still
-blocked until the scene/material namespace migration is done.
+device without rendering through the current WebGPU presentation path. Routine
+resident compute/readback stays on the cached resident compute device; the
+renderer-owned device is reserved as presentation/same-device bridge evidence.
+The marching-cubes extension surface bridge can build Three meshes whose
+interleaved attributes point at retained ULG surface row GPU buffers, but
+visible WebGPU presentation is still blocked until the Three WebGPU
+presentation lifetime issue is resolved.
 
 Focused checks:
 
@@ -19,15 +21,16 @@ Focused checks:
   `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|external interleaved|extension surface renderer capability|sphere bridge|render-row|depth policy|surface draw"`
   passed `42/42`.
 - Browser console probe:
-  `artifacts/sph-probe-three-webgpu-renderer-device-gated.json` completed with
+  `artifacts/sph-probe-three-webgpu-renderer-regated-device-split.json`
+  completed with
   `status=good`, `analysis.status=good`, zero browser console issues, and
   `renderer=webgpu` held behind the explicit presentation-disabled gate.
 
 Known residual risk:
 
-- The first ungated presentation probe produced WebGPU page errors from the
-  current mixed `three` and `three/webgpu` scene. Do not enable WebGPU
-  presentation until the scene uses a compatible Three WebGPU namespace and the
+- The ungated presentation probe after the namespace cleanup and compute-device
+  split still produced WebGPU page error `Instance dropped in popErrorScope`.
+  Do not enable WebGPU presentation until that exact error is gone and the
   browser console probe is clean with actual rendered pixels.
 
 ## Current Focused Result - 2026-06-18 Extension Surface Renderer Capability Gate

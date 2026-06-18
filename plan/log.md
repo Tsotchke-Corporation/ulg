@@ -7,10 +7,12 @@ Summary:
 - Added an opt-in `renderer=webgpu` scene option that constructs a Three
   `WebGPURenderer` with resident-friendly requested limits and initializes it
   asynchronously without throwing during the render loop.
-- Changed the resident GPU device resolver so WebGPU renderer mode reuses the
-  renderer-owned `GPUDevice`. This is required before any retained surface
-  buffer can be consumed by Three without cross-device WebGPU validation
-  errors.
+- Kept routine resident compute/readback on the cached resident WebGPU compute
+  device even when `renderer=webgpu` is requested. An attempted renderer-owned
+  device reuse path made render-row `mapAsync` fail once Three WebGPU
+  presentation was active, so the renderer-owned `GPUDevice` is now treated as
+  presentation/same-device bridge capability evidence, not the default compute
+  device.
 - Added a same-device external interleaved-buffer bridge for translated
   marching-cubes extension surface rows. It builds engine-owned Three meshes
   whose position/normal attributes point at the retained ULG surface row
@@ -18,10 +20,13 @@ Summary:
 - Tightened the extension renderer capability gate so it blocks WebGL,
   uninitialized Three WebGPU devices, cross-device buffers, and the current
   WebGPU presentation hold.
-- Kept actual Three WebGPU scene presentation disabled for now. The browser
-  probe showed mixed `three` and `three/webgpu` scene objects trip WebGPU
-  pipeline errors, so the next renderer slice must migrate the scene/material
-  namespace cleanly before enabling presentation.
+- Migrated scene-created Three objects/materials to the active Three namespace
+  selected by the renderer backend, while keeping the WebGL fallback renderer
+  path unchanged.
+- Kept actual Three WebGPU scene presentation disabled for now. After the
+  namespace cleanup and compute-device split, an ungated probe still produced
+  the browser page error `Instance dropped in popErrorScope`; re-gating
+  presentation restored a console-clean probe.
 
 Validation:
 
@@ -31,19 +36,27 @@ Validation:
   `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|external interleaved|extension surface renderer capability|sphere bridge|render-row|depth policy|surface draw"`
   reported `42/42` pass.
 - PASS browser console probe:
-  `ULG_PROBE_OUTPUT=artifacts/sph-probe-three-webgpu-renderer-device-gated.json ULG_PROBE_FRAME_DIR=artifacts/sph-probe-three-webgpu-renderer-device-gated-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_VIEWPORT_WIDTH=900 ULG_PROBE_VIEWPORT_HEIGHT=680 ULG_PROBE_ENABLE_UNSAFE_WEBGPU=1 ULG_PROBE_PORT=5227 npm run probe:sph-long-horizon`
+  `ULG_PROBE_OUTPUT=artifacts/sph-probe-three-webgpu-renderer-regated-device-split.json ULG_PROBE_FRAME_DIR=artifacts/sph-probe-three-webgpu-renderer-regated-device-split-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_VIEWPORT_WIDTH=900 ULG_PROBE_VIEWPORT_HEIGHT=680 ULG_PROBE_ENABLE_UNSAFE_WEBGPU=1 ULG_PROBE_PORT=5227 npm run probe:sph-long-horizon`
   with `renderer=webgpu` completed with `status=good`,
   `analysis.status=good`, and browser console `issueCount=0`.
+- FAIL evidence kept out of the shipping gate: the ungated presentation probe at
+  `artifacts/sph-probe-three-webgpu-renderer-present-device-split.json` reached
+  `renderer-frame-rendered` initially but later reported browser page error
+  `Instance dropped in popErrorScope`. The same run marked the render-row sphere
+  bridge visible, so the blocker is Three WebGPU presentation lifetime/state,
+  not the engine-owned render-row bridge.
 
 Open:
 
 - The first ungated WebGPU presentation probe hit Three WebGPU pipeline errors
-  when rendering the current mixed `three` / `three/webgpu` scene. WebGPU
-  presentation remains disabled until the scene objects/materials are migrated
-  to a compatible Three WebGPU namespace.
+  when rendering the current mixed `three` / `three/webgpu` scene. A later
+  namespace/device split removed the mixed-constructor risk but still hit
+  `Instance dropped in popErrorScope`, so WebGPU presentation remains disabled
+  until a dedicated Three WebGPU presentation lifetime fix is proven
+  console-clean.
 - The extension surface bridge is ready for a same-device Three WebGPU
   renderer, but live visibility remains on the Three render-row fallback until
-  that namespace migration is complete.
+  the WebGPU presentation lifetime blocker is fixed and validated.
 
 ## 2026-06-18 AKDT - Extension Surface Renderer Capability Gate
 

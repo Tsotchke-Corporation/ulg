@@ -27227,3 +27227,51 @@ Validation:
 - PASS: `node --check src/visualization/sphPhaseScene.js`.
 - PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|extension surface renderer capability|external interleaved|surface draw"` reported `43/43` pass.
+
+## 2026-06-18 13:57 AKDT - Three WebGPU Presentation Fails Closed
+
+Status:
+
+- Added an explicit renderer-owned resident-device policy for Three WebGPU.
+  The default is disabled: the Three presentation device is treated as
+  capability evidence only, not as the resident compute/render extraction
+  device. The renderer init now publishes
+  `rendererOwnedResidentDevicePolicy` and the scene publishes
+  `sphThreeWebGpuRendererOwnedResidentDevicePolicy`.
+- Blocked `renderer=webgpu&rendererPresentation=1` from constructing a Three
+  WebGPU presentation renderer unless that unsafe renderer-owned resident-device
+  path is explicitly enabled internally. The mounted engine falls back to the
+  stable Three WebGL renderer and records `rendererPresentationBlocked=true`
+  with a concrete block reason, avoiding the prior
+  `Instance dropped in popErrorScope` page error.
+- Fixed surface-bridge routing so `three-webgpu-surface-buffers` no longer
+  skips the CPU/resident surface table during `setParticles()`. Empty retained
+  render fields now return a structured `resident-surface-draw-empty-render-field`
+  result before any surface-vertex GPU dispatch.
+- When a same-device surface-buffer bridge cannot be proven, requests now fall
+  back at mode-selection time to the engine-owned `three-render-row-spheres`
+  bridge. This avoids the full surface-vertex readback stall observed while
+  trying to use compact marching-cubes geometry as a fallback.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|renderer-owned resident|extension surface renderer capability|external interleaved|surface draw|sphere bridge|render-row"` reported `44/44` pass.
+- PASS: browser console probe
+  `artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-4.json`
+  reported `status=good`, `browserConsoleIssueCount=0`,
+  `browserConsoleWarningCount=0`, three captured frames,
+  `rendererBackend=three-webgl`, `rendererPresentationBlocked=true`,
+  requested surface draw `three-webgpu-surface-buffers`, effective surface draw
+  `three-render-row-spheres`, fallback reason
+  `same-device GPUBuffer geometry requires Three WebGPU renderer; current scene renderer is WebGLRenderer`,
+  bridge status `three-render-row-spheres-ready`, and
+  `renderBridgeEngineIntegration=three-renderer-owned-scene-object`.
+
+Remaining:
+
+- The real zero-readback same-device surface renderer is still not complete.
+  The current patch makes the experimental request safe and visible; it routes
+  around Three WebGPU presentation/device-lifetime failures until the native
+  renderer can consume resident buffers without full readback or page errors.

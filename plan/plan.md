@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the experimental
+`renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers`
+route now fails closed instead of poisoning the browser console. Three WebGPU
+presentation is blocked unless the unsafe renderer-owned resident-device path
+is explicitly enabled internally; the mounted engine falls back to the stable
+Three WebGL renderer while resident compute still uses WebGPU. Requests for the
+same-device `three-webgpu-surface-buffers` bridge now publish a fallback reason
+and use the engine-owned `three-render-row-spheres` bridge when the renderer
+and resident buffers cannot be proven same-device. The passing probe
+`artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-4.json`
+reported `status=good`, zero browser console issues/warnings,
+`rendererPresentationBlocked=true`, requested bridge
+`three-webgpu-surface-buffers`, effective bridge `three-render-row-spheres`,
+and `renderBridgeEngineIntegration=three-renderer-owned-scene-object`.
+This keeps rendering alive and diagnostics honest; it does not complete the
+zero-readback same-device surface renderer.
+
 Current checkpoint, 2026-06-18 AKDT: the active roadmap split is now explicit.
 The GPU-resident surface extraction / native WebGPU marching-cubes work is
 owned in the sibling `/home/cos/projects/webgpu-marching-cubes` extension so it

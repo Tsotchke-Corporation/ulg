@@ -33,6 +33,7 @@ import {
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphRendererBackend,
   createThreeWebGpuExternalInterleavedBufferAttribute,
+  resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
@@ -152,6 +153,44 @@ test('SPH renderer backend option normalizes WebGPU as opt-in', () => {
   assert.equal(normalizeSphRendererBackend('three-webgpu'), 'webgpu');
   assert.equal(normalizeSphRendererBackend('webgl'), 'webgl');
   assert.equal(normalizeSphRendererBackend('bad-value'), 'webgl');
+});
+
+test('SPH Three WebGPU renderer-owned resident device is explicit opt-in', () => {
+  const readyDevice = { label: 'renderer-owned-ready-device' };
+  const readyRenderer = {
+    isWebGPURenderer: true,
+    backend: {
+      device: readyDevice,
+      get() { return { buffer: null }; }
+    },
+    userData: { sphWebGpuPresentationEnabled: true }
+  };
+
+  const defaultPolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
+    renderer: readyRenderer
+  });
+  assert.equal(defaultPolicy.status, 'renderer-owned-resident-device-disabled');
+  assert.equal(defaultPolicy.rendererOwnedDeviceAllowed, false);
+  assert.equal(defaultPolicy.requested, false);
+
+  const pendingPolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: { get() { return { buffer: null }; } },
+      userData: { sphWebGpuPresentationEnabled: true }
+    },
+    requested: true
+  });
+  assert.equal(pendingPolicy.status, 'renderer-owned-resident-device-blocked-device-pending');
+  assert.equal(pendingPolicy.rendererOwnedDeviceAllowed, false);
+
+  const enabledPolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
+    renderer: readyRenderer,
+    requested: true
+  });
+  assert.equal(enabledPolicy.status, 'renderer-owned-resident-device-enabled');
+  assert.equal(enabledPolicy.rendererOwnedDeviceAllowed, true);
+  assert.equal(enabledPolicy.rendererBackendDeviceReady, true);
 });
 
 test('SPH extension surface renderer capability blocks no-readback GPU buffers on WebGL scenes', () => {

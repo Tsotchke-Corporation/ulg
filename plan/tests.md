@@ -9977,3 +9977,29 @@ Three WebGPU surface buffer capability gate, 2026-06-18 13:25 AKDT:
     geometry as `same-device-gpu-buffer-geometry-blocked-three-webgpu-device-pending`
     until Three WebGPU exposes an initialized backend device, while still
     allowing the same-device bridge when renderer and resident devices match.
+
+Three WebGPU presentation fail-closed, 2026-06-18 13:57 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|renderer-owned resident|extension surface renderer capability|external interleaved|surface draw|sphere bridge|render-row"`
+  - Passed: `44/44`.
+  - Covers the explicit renderer-owned resident-device opt-in policy, the
+    Three WebGPU presentation fail-closed gate, extension surface capability,
+    and render-row bridge behavior.
+- `ULG_PROBE_VISUAL_ONLY=1 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=3&boxx=4&boxy=4&boxz=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&renderer=webgpu&rendererPresentation=1&surfaceDraw=three-webgpu-surface-buffers&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-webgpu-surface-buffers ULG_PROBE_OUTPUT=artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-4.json ULG_PROBE_FRAME_DIR=artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-4-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_MAX=3 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_PORT=5256 ULG_PROBE_TIMEOUT_MS=180000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-long-horizon`
+  - Passed with `status=good`, `browserConsoleIssueCount=0`,
+    `browserConsoleWarningCount=0`, and three captured frames.
+  - Renderer evidence: requested backend `webgpu`, actual
+    `rendererBackend=three-webgl`, `rendererPresentationBlocked=true`.
+  - Surface evidence: requested draw `three-webgpu-surface-buffers`, effective
+    draw `three-render-row-spheres`, fallback reason
+    `same-device GPUBuffer geometry requires Three WebGPU renderer; current scene renderer is WebGLRenderer`,
+    bridge status `three-render-row-spheres-ready`, and
+    `renderBridgeEngineIntegration=three-renderer-owned-scene-object`.
+  - Failed pre-fix evidence: `artifacts/sph-probe-three-webgpu-surface-buffers-device-policy-3.json`
+    reached a console-clean page but stalled at
+    `surface-vertices-full-readback-started`, so the final patch falls back at
+    mode selection instead of compact/full-readback surface vertices.

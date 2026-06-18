@@ -27383,3 +27383,18 @@ Remaining:
 - The real throughput fix is still the no-readback same-device renderer path:
   Three WebGPU presentation lifetime, external storage-buffer geometry import,
   and browser pixel/console validation.
+
+## 2026-06-18 14:29 AKDT - Reset Clears Resident Render Bridge
+
+Status:
+
+- Fixed `clearSphResidentSurfaceDrawArtifacts()` so reset clears
+  `sphResidentSurfaceDrawRenderBridge` and `scene.userData.sphResidentSurfaceDrawRenderBridge`
+  after releasing resources, even when there is no overlay canvas to remove.
+- This targets the stale Three mesh / resident bridge state seen after reset:
+  canvas removal is now independent from render-bridge state invalidation.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `45/45` pass.

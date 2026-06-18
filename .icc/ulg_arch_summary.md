@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `342`
-- total lines indexed: `207760`
+- total lines indexed: `207783`
 - languages: `{"markdown": 128, "javascript": 108, "text": 88, "json": 17, "c": 1}`
 
 ## Important Files
@@ -58,9 +58,9 @@
 - `scripts`: 6 files, 7153 lines, symbols=0, tests=0, languages={"text": 6}
 - `src/services`: 5 files, 2195 lines, symbols=57, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
-- `plan`: 5 files, 45951 lines, symbols=0, tests=0, languages={"markdown": 5}
+- `plan`: 5 files, 45976 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `plan/moot`: 5 files, 1771 lines, symbols=0, tests=0, languages={"markdown": 5}
-- `src/visualization`: 4 files, 18117 lines, symbols=415, tests=0, languages={"javascript": 4}
+- `src/visualization`: 4 files, 18115 lines, symbols=415, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8389 lines, symbols=53, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/examples`: 4 files, 184 lines, symbols=0, tests=0, languages={"json": 4}
 - `src`: 3 files, 684 lines, symbols=13, tests=0, languages={"javascript": 2, "text": 1}
@@ -77,10 +77,10 @@
 
 | Lines | Path | Language |
 |---:|---|---|
-| 27386 | `plan/log.md` | markdown |
+| 27401 | `plan/log.md` | markdown |
 | 12703 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
-| 12427 | `src/visualization/sphPhaseScene.js` | javascript |
-| 10073 | `plan/tests.md` | markdown |
+| 12425 | `src/visualization/sphPhaseScene.js` | javascript |
+| 10083 | `plan/tests.md` | markdown |
 | 7741 | `tests/demo.e2e.mjs` | text |
 | 6172 | `ulg-gpu-abi/src/wgsl.js` | javascript |
 | 6048 | `src/runtime/peercomputeBrowserResidentHost.js` | javascript |

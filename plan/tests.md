@@ -10070,3 +10070,13 @@ Extension surface engine fallback, 2026-06-18 14:29 AKDT:
     fixture reached `resident-render-surface-table-ready surfaces=0 cells=0`
     and failed the existing `surfaceDrawDiagnosticFieldCellCount > 0`
     assertion. The test assertion was not changed.
+
+Reset resident render bridge cleanup, 2026-06-18 14:29 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `45/45`.
+  - The reset cleanup is a scene-closure resource invalidation fix: released
+    surface draw bridges are now nulled from scene state even when no overlay
+    canvas was present.

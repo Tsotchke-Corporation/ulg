@@ -4981,10 +4981,8 @@ export function createSphPhaseScene(container, {
     });
     sphResidentSurfaceDraw = null;
     scene.userData.sphResidentSurfaceDraw = null;
-    if (removeCanvas) {
-      sphResidentSurfaceDrawRenderBridge = null;
-      scene.userData.sphResidentSurfaceDrawRenderBridge = null;
-    }
+    sphResidentSurfaceDrawRenderBridge = null;
+    scene.userData.sphResidentSurfaceDrawRenderBridge = null;
   }
 
   function resetResidentStateForParticleReset({

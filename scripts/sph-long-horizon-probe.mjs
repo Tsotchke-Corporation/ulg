@@ -58,6 +58,13 @@ function finiteNumber(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function commaList(value) {
+  return String(value || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function appendQueryParam(url, key, value) {
   const hashIndex = url.indexOf('#');
   const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
@@ -979,6 +986,7 @@ async function runBrowserProbe({
         const residentStep = sceneApi.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || steps?.finalStep || null;
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+        const plainSphStepResult = overlay.__sphLastStepResult || null;
         return {
           batchIndex,
           phase,
@@ -989,6 +997,24 @@ async function runBrowserProbe({
           } : null,
         statusText: overlay.querySelector('#sph-status')?.textContent ?? '',
         warningText: overlay.querySelector('#sph-warning-bar')?.textContent ?? '',
+        plainSphStepResult: plainSphStepResult ? {
+          step: plainSphStepResult.step ?? null,
+          time: finiteOrNull(plainSphStepResult.time),
+          reactionEventsStep: finiteOrNull(plainSphStepResult.reactionEventsStep),
+          reactionEventsTotal: finiteOrNull(plainSphStepResult.reactionEventsTotal),
+          particlesByMaterial: { ...(plainSphStepResult.particlesByMaterial || {}) },
+          phaseMassByMaterialPhase: plainSphStepResult.phaseMassSummary?.byMaterialPhase || null,
+          reactionLedger: plainSphStepResult.reactionLedger ? {
+            schema: plainSphStepResult.reactionLedger.schema ?? null,
+            eventCount: finiteOrNull(plainSphStepResult.reactionLedger.eventCount),
+            productMassKgByMaterial: { ...(plainSphStepResult.reactionLedger.productMassKgByMaterial || {}) },
+            gasMassKgByMaterial: { ...(plainSphStepResult.reactionLedger.gasMassKgByMaterial || {}) },
+            heatJ: finiteOrNull(plainSphStepResult.reactionLedger.heatJ),
+            massResidualKg: finiteOrNull(plainSphStepResult.reactionLedger.massResidualKg),
+            maxAbsAtomResidualMol: finiteOrNull(plainSphStepResult.reactionLedger.maxAbsAtomResidualMol),
+            chargeResidualMol: finiteOrNull(plainSphStepResult.reactionLedger.chargeResidualMol)
+          } : null
+        } : null,
         residentGasPressureSummary: overlay?.__sphResidentGasPressureSummary ? {
           schema: overlay.__sphResidentGasPressureSummary.schema ?? null,
           status: overlay.__sphResidentGasPressureSummary.status ?? null,
@@ -1160,6 +1186,11 @@ async function runBrowserProbe({
                 sourceTime: null,
                 nextTime: finiteOrNull(stepResult?.time)
               },
+              reactionEventsStep: finiteOrNull(stepResult?.reactionEventsStep),
+              reactionEventsTotal: finiteOrNull(stepResult?.reactionEventsTotal),
+              particlesByMaterial: { ...(stepResult?.particlesByMaterial || {}) },
+              phaseMassByMaterialPhase: stepResult?.phaseMassSummary?.byMaterialPhase || null,
+              reactionLedger: stepResult?.reactionLedger || null,
               diagnostics: particleDiagnosticsForState(nextState, previousState, ranges),
               stageStatus: {
                 plainSph: 'cpu-reference-executed',
@@ -2418,6 +2449,9 @@ function analyzeTimeline(timeline, {
   liquidFreeSurfaceMinFootprintFillRatio = 0.15,
   liquidFreeSurfaceMaxHeightM = null,
   expectedH2oVisibleSurfaceCount = null,
+  expectedMaterialPresent = [],
+  expectedMaterialAbsent = [],
+  minReactionEventsTotal = null,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   scenarioUrl = DEFAULT_URL,
   visibleBoundsToleranceM = 0.05,
@@ -2636,6 +2670,34 @@ function analyzeTimeline(timeline, {
     : null;
   const lastH2oVisibleSurfaceCount = h2oVisibleSurfaceCountSeries.length
     ? h2oVisibleSurfaceCountSeries[h2oVisibleSurfaceCountSeries.length - 1]
+    : null;
+  const materialCountSnapshots = metrics
+    .map((metric) => (
+      metric?.plainSphStepResult?.particlesByMaterial
+      ?? metric?.residentStep?.particlesByMaterial
+      ?? null
+    ))
+    .filter((counts) => counts && typeof counts === 'object');
+  const finalParticlesByMaterial = materialCountSnapshots.length
+    ? materialCountSnapshots[materialCountSnapshots.length - 1]
+    : null;
+  const materialCountFor = (counts, material) => {
+    if (!counts || !material) return 0;
+    const wanted = String(material).toLowerCase();
+    for (const [key, value] of Object.entries(counts)) {
+      if (String(key).toLowerCase() === wanted) return Number(value) || 0;
+    }
+    return 0;
+  };
+  const reactionEventsTotalSeries = metrics
+    .map((metric) => finiteMetric(
+      metric?.plainSphStepResult?.reactionEventsTotal
+        ?? metric?.residentStep?.reactionEventsTotal
+        ?? metric?.residentStep?.reactionLedger?.eventCount
+    ))
+    .filter(Number.isFinite);
+  const maxReactionEventsTotal = reactionEventsTotalSeries.length
+    ? Math.max(...reactionEventsTotalSeries)
     : null;
   const batchMsSeries = metrics
     .filter((metric) => metric.phase === 'resident-batch')
@@ -3074,6 +3136,23 @@ function analyzeTimeline(timeline, {
     }
   }
   if (maxPressureImpulseNSeconds != null && maxPressureImpulseNSeconds > 1e-5) issues.push('same-material-pressure-impulse-applied');
+  if (Number.isFinite(minReactionEventsTotal)) {
+    if (!Number.isFinite(maxReactionEventsTotal)) {
+      issues.push('missing-reaction-events-total');
+    } else if (maxReactionEventsTotal < minReactionEventsTotal) {
+      issues.push(`reaction-events-total<${minReactionEventsTotal}`);
+    }
+  }
+  for (const material of expectedMaterialPresent) {
+    if (materialCountFor(finalParticlesByMaterial, material) <= 0) {
+      issues.push(`expected-material-missing:${material}`);
+    }
+  }
+  for (const material of expectedMaterialAbsent) {
+    if (materialCountFor(finalParticlesByMaterial, material) > 0) {
+      issues.push(`unexpected-material-present:${material}`);
+    }
+  }
   if (
     expectedLiquidH2oSameMaterial
     && Number.isFinite(maxNextTimeS)
@@ -3185,6 +3264,9 @@ function analyzeTimeline(timeline, {
     expectedH2oVisibleSurfaceCount: Number.isFinite(expectedH2oVisibleSurfaceCount)
       ? expectedH2oVisibleSurfaceCount
       : null,
+    expectedMaterialPresent,
+    expectedMaterialAbsent,
+    minReactionEventsTotal: Number.isFinite(minReactionEventsTotal) ? minReactionEventsTotal : null,
     visibleBoundsToleranceM,
     particleBoundsToleranceM,
     issues,
@@ -3222,6 +3304,8 @@ function analyzeTimeline(timeline, {
     maxDropSpeedMPerS: dropMaxSpeedSeries.length ? Math.max(...dropMaxSpeedSeries) : null,
     firstH2oVisibleSurfaceCount,
     lastH2oVisibleSurfaceCount,
+    finalParticlesByMaterial,
+    maxReactionEventsTotal,
     meanBatchMs,
     maxBatchMs,
     meanCompactSummaryMs,
@@ -3356,6 +3440,11 @@ async function main() {
   const expectedH2oVisibleSurfaceCount = process.env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT == null
     ? null
     : positiveInteger(process.env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT, null);
+  const expectedMaterialPresent = commaList(process.env.ULG_PROBE_EXPECT_MATERIAL_PRESENT);
+  const expectedMaterialAbsent = commaList(process.env.ULG_PROBE_EXPECT_MATERIAL_ABSENT);
+  const minReactionEventsTotal = process.env.ULG_PROBE_MIN_REACTION_EVENTS_TOTAL == null
+    ? null
+    : positiveInteger(process.env.ULG_PROBE_MIN_REACTION_EVENTS_TOTAL, null);
   const visibleBoundsToleranceM = finiteNumber(process.env.ULG_PROBE_VISIBLE_BOUNDS_TOLERANCE_M, 0.05);
   const particleBoundsToleranceM = finiteNumber(process.env.ULG_PROBE_PARTICLE_BOUNDS_TOLERANCE_M, 0.2);
   const thresholds = {
@@ -3376,6 +3465,9 @@ async function main() {
     liquidFreeSurfaceMinFootprintFillRatio,
     liquidFreeSurfaceMaxHeightM,
     expectedH2oVisibleSurfaceCount,
+    expectedMaterialPresent,
+    expectedMaterialAbsent,
+    minReactionEventsTotal,
     visibleBoundsToleranceM,
     particleBoundsToleranceM
   };
@@ -3450,6 +3542,9 @@ async function main() {
       liquidFreeSurfaceMinFootprintFillRatio,
       liquidFreeSurfaceMaxHeightM,
       expectedH2oVisibleSurfaceCount,
+      expectedMaterialPresent,
+      expectedMaterialAbsent,
+      minReactionEventsTotal,
       visibleBoundsToleranceM,
       particleBoundsToleranceM,
       boxDimsM: boxDimsFromScenarioUrl(scenarioUrl),

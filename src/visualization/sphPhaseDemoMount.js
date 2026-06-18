@@ -383,6 +383,42 @@ function materialStatusLabel(material) {
   return key || 'material';
 }
 
+function materialParticleCountsText(counts = {}) {
+  const entries = Object.entries(counts)
+    .filter(([, count]) => Number(count) > 0)
+    .sort(([left], [right]) => String(left).localeCompare(String(right)));
+  const total = entries.reduce((sum, [, count]) => sum + (Number(count) || 0), 0);
+  const body = entries.map(([material, count]) => `${materialStatusLabel(material)} ${count}`).join('  ');
+  return `${body || 'none'}  total ${total}`;
+}
+
+function materialParticleCountsFromMaterials(materials = []) {
+  const counts = {};
+  for (const descriptor of materials || []) {
+    const material = descriptor?.material || descriptor?.renderKey || 'unknown';
+    counts[material] = (counts[material] || 0) + 1;
+  }
+  return counts;
+}
+
+function materialParticleCountsFromParticles(particles = []) {
+  const counts = {};
+  for (const particle of particles || []) {
+    const material = particle?.material || 'unknown';
+    counts[material] = (counts[material] || 0) + 1;
+  }
+  return counts;
+}
+
+function reactionStatusText(note, reactionLedger = null) {
+  if (!reactionLedger?.eventCount) return note || '—';
+  const productMaterials = Object.keys(reactionLedger.productMassKgByMaterial || {});
+  const gasMaterials = Object.keys(reactionLedger.gasMassKgByMaterial || {});
+  const productText = productMaterials.length ? `products=${productMaterials.join(',')}` : 'products=none';
+  const gasText = gasMaterials.length ? `gas=${gasMaterials.join(',')}` : 'gas=none';
+  return `${note || 'reaction'}; events=${reactionLedger.eventCount} ${productText} ${gasText}`;
+}
+
 function phaseStatusText(pre = {}, dropMaterial = 'drop', baseMaterial = 'base') {
   const feasibility = pre.feasibility || {};
   const dropPhase = feasibility.finalDropPhase
@@ -4275,19 +4311,39 @@ export function mountSphPhaseDemoOverlay({
       };
     }
     const count = Math.max(1, Math.round(Number(steps) || 1));
-    for (let i = 0; i < count; i += 1) driver.step();
+    let reactionEventsStep = 0;
+    for (let i = 0; i < count; i += 1) {
+      driver.step();
+      reactionEventsStep += driver.demo.lastStepTiming?.reactionEvents || 0;
+    }
     recordPhysicsFrame(count);
     syncParticles();
     renderStatus();
-    return {
+    const reactionLedger = driver.demo.state.reactionLedger || null;
+    const result = {
       step: driver.demo.state.step ?? 0,
       time: driver.demo.state.time ?? 0,
+      reactionEventsStep,
+      reactionEventsTotal: reactionLedger?.eventCount ?? reactionEventsStep,
       gasPressureSummary: gasPressureSummary(driver.demo),
       particlesByMaterial: driver.demo.state.particles.reduce((acc, particle) => {
         acc[particle.material] = (acc[particle.material] || 0) + 1;
         return acc;
-      }, {})
+      }, {}),
+      phaseMassSummary: phaseMassSummary(driver.demo),
+      reactionLedger: reactionLedger ? {
+        schema: reactionLedger.schema || 'peercompute.ulg.sph-reaction-ledger.v0',
+        eventCount: reactionLedger.eventCount ?? 0,
+        productMassKgByMaterial: { ...(reactionLedger.productMassKgByMaterial || {}) },
+        gasMassKgByMaterial: { ...(reactionLedger.gasMassKgByMaterial || {}) },
+        heatJ: reactionLedger.heatJ ?? 0,
+        massResidualKg: reactionLedger.massResidualKg ?? 0,
+        maxAbsAtomResidualMol: reactionLedger.maxAbsAtomResidualMol ?? null,
+        chargeResidualMol: reactionLedger.chargeResidualMol ?? null
+      } : null
     };
+    overlay.__sphLastStepResult = result;
+    return result;
   }
   overlay.__sphStep = stepDemoForVisualTest;
 
@@ -4304,6 +4360,7 @@ export function mountSphPhaseDemoOverlay({
       const phase = activeViewStatePhaseSummary || activeViewState.phaseMassSummary || { byMaterialPhase: {} };
       const gasPressure = currentGasPressureSummary(activeViewStateGasPressure || activeViewState.gasPressureSummary || null);
       const materialPhases = formatMaterialPhaseMasses(phase.byMaterialPhase || {});
+      const particleCounts = materialParticleCountsText(materialParticleCountsFromMaterials(activeViewState.materials || []));
       const solidFractions = solidFractionStatusText(phase);
       const ledger = pre.energyBudget?.wallLedger?.map((w) => `  ${w.faceId} ${w.role} ${fmt(w.heatJ)}J`).join('\n') || '  pending';
       const residentSteps = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || null;
@@ -4359,8 +4416,8 @@ export function mountSphPhaseDemoOverlay({
         `final phase      : ${phaseStatusText(pre, activeViewState.dropMaterial, activeViewState.baseMaterial)}`,
         `heat to walls    : ${fmt(pre.energyBudget?.heatExportedToWallsJ)} J`,
         `masses (kg)      : ${massStatusText(pre, activeViewState.dropMaterial, activeViewState.baseMaterial)}`,
-        `particles        : ${activeViewState.dropMaterial} ${activeViewState.counts?.drop ?? 0}  ${activeViewState.baseMaterial} ${activeViewState.counts?.base ?? 0}  total ${activeViewState.counts?.total ?? 0}`,
-        `reaction         : ${activeViewState.reactionNote || '—'}`,
+        `particles        : ${particleCounts}`,
+        `reaction         : ${reactionStatusText(activeViewState.reactionNote)}`,
         `material phases  : ${materialPhases || '—'}`,
         `gas pressure     : ${gasPressureStatusText(gasPressure)}`,
         `solid fractions  : ${solidFractions || '—'}`,
@@ -4435,6 +4492,8 @@ export function mountSphPhaseDemoOverlay({
     const ledger = pre.energyBudget.wallLedger.map((w) => `  ${w.faceId} ${w.role} ${fmt(w.heatJ)}J`).join('\n');
     const materialPhases = formatMaterialPhaseMasses(phase.byMaterialPhase);
     const solidFractions = solidFractionStatusText(phase);
+    const particleCounts = materialParticleCountsText(materialParticleCountsFromParticles(driver.demo.state.particles));
+    const reactionLedger = driver.demo.state.reactionLedger || null;
     const residentSteps = scene.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || null;
     const residentStep = scene.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || null;
     const p2gProjection = scene.getMlsMpmP2gGridProjection?.() || overlay.__mlsMpmP2gGridProjection || null;
@@ -4575,8 +4634,8 @@ export function mountSphPhaseDemoOverlay({
       `final phase      : ${phaseStatusText(pre, driver.demo.dropMaterial, driver.demo.baseMaterial)}`,
       `heat to walls    : ${fmt(pre.energyBudget.heatExportedToWallsJ)} J`,
       `masses (kg)      : ${massStatusText(pre, driver.demo.dropMaterial, driver.demo.baseMaterial)}`,
-      `particles        : ${driver.demo.dropMaterial} ${driver.demo.counts.drop}  ${driver.demo.baseMaterial} ${driver.demo.counts.base}  total ${driver.demo.counts.total}`,
-      `reaction         : ${driver.demo.reactionNote || '—'}`,
+      `particles        : ${particleCounts}`,
+      `reaction         : ${reactionStatusText(driver.demo.reactionNote, reactionLedger)}`,
       `material phases  : ${materialPhases || '—'}`,
       `molecules/macro  : ${moleculesPerMacroStatusText(pre, driver.demo.dropMaterial, driver.demo.baseMaterial)}`,
       `gas pressure     : ${gasPressureStatusText(gasPressure)}`,

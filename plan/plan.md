@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: the reaction/product visual contract has
+been tightened for the room-temperature Na/H2O plain-SPH row. The mounted CPU
+state already produced reactions, but the UI displayed stale drop/base role
+counts and the matrix did not require visible product inventory. The overlay
+now reports current material particle counts and cumulative reaction-ledger
+status, `stepDemoForVisualTest()` exposes reaction events plus material
+counts, and the visual matrix requires `naoh` plus `h2` to be present and `Na`
+to be absent for `reaction-product-na-h2o`. Evidence:
+`codex-reaction-panel-contract-rerun-20260617` passed with `failedCount=0`,
+`maxReactionEventsTotal=8`, and final particles `{h2o:125, naoh:8, h2:8}`.
+The live fluid-flow complaint remains open as a visual-cadence/sequence issue:
+short rows still under-sample simulated time even though long atomics pass.
+
 Current checkpoint, 2026-06-17 AKDT: ULG now prefers NodeKernel for GPU
 resident stage placement preflight when a real NodeKernel owns the resident
 ComputeManager. The mechanics stage chain records

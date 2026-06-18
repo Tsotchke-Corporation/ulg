@@ -12,6 +12,34 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-17 AKDT update: Na/H2O plain-SPH reactions are not dead in the
+  mounted CPU state, but the UI and visual harness were hiding the evidence.
+  Direct mounted stepping and the new focused visual contract now show eight
+  reaction events, Na consumed, and final material inventory
+  `{h2o: 125, naoh: 8, h2: 8}` for the room-temperature Na/H2O blob-1 row.
+  The status panel previously reported static drop/base role counts after the
+  particles had mutated, and the visual matrix only required a bounded "good"
+  row rather than actual product formation. The panel now reports current
+  material particle counts from the live particles, `stepDemoForVisualTest()`
+  exposes cumulative reaction events and product counts, and the Na/H2O visual
+  scenario requires `naoh` plus `h2` to exist and `Na` to be absent. Evidence:
+  `codex-reaction-panel-contract-rerun-20260617` passed with `failedCount=0`,
+  `maxReactionEventsTotal=8`, and two frame artifacts. Keep resident/WebGPU
+  reaction-ledger placement, gas visibility, and product optics open; this is
+  a CPU/plain-SPH state and harness/status fix, not completion of the full
+  reaction/product architecture.
+- 2026-06-17 AKDT update: live fluid motion still needs a browser-cadence and
+  visual-sequence pass. The long scientific atomics now pass (`14/14`) and
+  direct long-horizon H2O/H2O probes show the core CPU-SPH and resident
+  MLS-MPM state spreading over about a simulated second, but the short
+  screenshot-style matrix run `codex-reaction-flow-regression-20260617` still
+  failed both liquid rows because it reached only `0.192 s` for MLS-MPM and
+  `0.1296 s` for CPU-SPH, leaving tall/low-footprint water
+  (`0.930`/`0.144` and `0.973`/`0.117`). Treat the user's "fluids do not
+  appear to flow" report as an active P0 UX/validation issue: the harness must
+  capture enough simulated time and close-spaced frames to infer motion, and
+  the live browser must make simulation-time progress obvious without relying
+  on app focus changes or stale render readbacks.
 - 2026-06-17 AKDT update: resident MLS-MPM H2O/H2O no longer has the current
   render-field particle-bounds clipping artifact that made merged water look
   cuboid/blocky and non-merged. The surface topology was already one H2O

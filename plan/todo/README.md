@@ -35,6 +35,21 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: reaction execution and product
+visibility now have a focused CPU/plain-SPH visual contract, but live fluid
+motion remains an active behavior/UX gate. The Na/H2O room-temperature blob-1
+row now fails unless cumulative reaction events exist, `naoh` and `h2` are in
+the final particle inventory, and `Na` is absent; the status panel also reports
+current material counts instead of stale drop/base role counts. Evidence:
+`codex-reaction-panel-contract-rerun-20260617` passed with
+`maxReactionEventsTotal=8` and final particles `{h2o:125, naoh:8, h2:8}`.
+Separate evidence says the apparent "fluids do not flow" report is still not
+closed: long atomics pass, but short visual rows under-sample simulated time
+and still look tall/low-footprint. Next behavior item after the current
+architecture clean point is a browser visual-cadence/sequence gate that drives
+enough simulated time for H2O/H2O CPU-SPH and MLS-MPM, captures close-spaced
+frames, and makes real motion or lack of motion unambiguous.
+
 Current routing note, 2026-06-17 AKDT: ULG now routes mechanics stage
 placement preflight through NodeKernel when a real NodeKernel owns the
 ComputeManager, and records both NodeKernel authority and raw ComputeManager

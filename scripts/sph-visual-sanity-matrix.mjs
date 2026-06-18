@@ -44,7 +44,10 @@ const SCENARIOS = [
   {
     label: 'reaction-product-na-h2o',
     url: '/?drop=na&base=h2o&dropt=293.15&baset=293.15&iceh=0&ironh=1&dropn=2&basen=5&boxx=5&boxy=5&boxz=5&mech=sph&blob=1',
-    expectedMechanics: 'sph'
+    expectedMechanics: 'sph',
+    expectedMaterialPresent: ['naoh', 'h2'],
+    expectedMaterialAbsent: ['Na'],
+    minReactionEventsTotal: 1
   },
   {
     label: 'law-static-mechanics-off-fe-h2o',
@@ -301,6 +304,15 @@ function scenarioEnv({
   if (scenario.expectedH2oVisibleSurfaceCount != null) {
     env.ULG_PROBE_EXPECT_H2O_VISIBLE_SURFACE_COUNT = String(scenario.expectedH2oVisibleSurfaceCount);
   }
+  if (Array.isArray(scenario.expectedMaterialPresent) && scenario.expectedMaterialPresent.length) {
+    env.ULG_PROBE_EXPECT_MATERIAL_PRESENT = scenario.expectedMaterialPresent.join(',');
+  }
+  if (Array.isArray(scenario.expectedMaterialAbsent) && scenario.expectedMaterialAbsent.length) {
+    env.ULG_PROBE_EXPECT_MATERIAL_ABSENT = scenario.expectedMaterialAbsent.join(',');
+  }
+  if (scenario.minReactionEventsTotal != null) {
+    env.ULG_PROBE_MIN_REACTION_EVENTS_TOTAL = String(scenario.minReactionEventsTotal);
+  }
   if (scenario.maxSpeedMPerS != null) {
     env.ULG_PROBE_MAX_SPEED = String(scenario.maxSpeedMPerS);
   }
@@ -460,6 +472,8 @@ async function main() {
       minVolumeObservedJ: finiteOrNull(analysis.minVolumeObservedJ),
       maxVolumeObservedJ: finiteOrNull(analysis.maxVolumeObservedJ),
       maxPressureImpulseNSeconds: finiteOrNull(analysis.maxPressureImpulseNSeconds),
+      maxReactionEventsTotal: finiteOrNull(analysis.maxReactionEventsTotal),
+      finalParticlesByMaterial: analysis.finalParticlesByMaterial || null,
       maxNextTimeS: finiteOrNull(analysis.maxNextTimeS),
       expectLiquidFreeSurface: analysis.expectLiquidFreeSurface === true,
       liquidFreeSurfaceMinTimeS: finiteOrNull(analysis.liquidFreeSurfaceMinTimeS),

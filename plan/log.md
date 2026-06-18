@@ -24869,6 +24869,57 @@ Open:
   ice/solid rigidity, long-horizon liquid settling/free-surface quality, volume
   pulsation/blinking, and renderer z-buffer/focus visual trust.
 
+## 2026-06-17 AKDT - Reaction Product Visual Contract And Flow Cadence Triage
+
+Prompt context: user reported that reactions do not seem to work and fluids do
+not appear to flow anymore.
+
+Actions:
+
+- Confirmed the mounted CPU/plain-SPH Na/H2O state does produce reaction
+  products, but the UI and matrix were not proving that fact.
+- Updated the overlay status to report current material particle counts from
+  live particles instead of static drop/base role counts.
+- Extended `stepDemoForVisualTest()` with reaction event totals, compact
+  reaction-ledger data, phase mass summary, and current particles by material.
+- Extended the long-horizon probe and visual matrix summary with
+  `maxReactionEventsTotal` and `finalParticlesByMaterial`.
+- Tightened `reaction-product-na-h2o` so it requires `naoh` and `h2`, rejects
+  remaining `Na`, and requires at least one reaction event.
+- Recorded the live-fluid-flow complaint as still open: long atomics pass, but
+  short visual rows under-sample simulated time and still do not provide a
+  reliable visual sequence proving flow by eye.
+- Updated `plan/plan.md`, `plan/todo/README.md`,
+  `plan/todo/physics-behavior-regression-plan.md`,
+  `plan/implementation-status.md`, and `plan/tests.md`.
+- Added `plan/done/reaction-product-visual-contract-2026-06-17.md`.
+
+Files touched:
+
+- `src/visualization/sphPhaseDemoMount.js`
+- `scripts/sph-long-horizon-probe.mjs`
+- `scripts/sph-visual-sanity-matrix.mjs`
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/log.md`
+- `plan/done/reaction-product-visual-contract-2026-06-17.md`
+
+Validation:
+
+- PASS: syntax checks for the touched JS/MJS files.
+- PASS: `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic`
+  reported `14/14`.
+- PASS: visual matrix run `codex-reaction-panel-contract-rerun-20260617` reported
+  `failedCount=0`, `maxReactionEventsTotal=8`, final particles
+  `{h2o:125, naoh:8, h2:8}`, empty visual issues, and two frames.
+- OPEN: visual matrix run `codex-reaction-flow-regression-20260617` failed the
+  short H2O/H2O liquid rows because simulated time only reached `0.192 s`
+  (MLS-MPM) and `0.1296 s` (CPU-SPH). The next behavior harness needs dense
+  flow sequences over enough simulated time to prove visible motion.
+
 ## 2026-06-15 14:37 AKDT - Free-Surface Shape Visual Gate
 
 Prompt time/date: 2026-06-15 14:37 AKDT, continuing the active goal after the

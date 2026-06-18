@@ -1,5 +1,35 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 Reaction Product Visual Contract And Flow Cadence Triage
+
+Na/H2O CPU/plain-SPH reaction state is now asserted by the visual matrix, and
+the overlay status reports the current material inventory instead of stale
+drop/base role counts. Live fluid flow remains a separate cadence/sequence
+gate: long atomics pass, while the short visual rows still do not advance far
+enough in simulated time to prove settling by eye.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseDemoMount.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-visual-sanity-matrix.mjs` passed.
+- Long scientific liquid atomics:
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1 npm run test:physics-liquid-atomic` passed
+  `14/14`.
+- Reaction visual contract:
+  visual matrix run `codex-reaction-panel-contract-rerun-20260617` for
+  `reaction-product-na-h2o` passed with `failedCount=0`,
+  `maxReactionEventsTotal=8`, final particles `{h2o:125, naoh:8, h2:8}`,
+  empty visual issues, and two frame artifacts.
+- Flow cadence triage:
+  visual matrix run `codex-reaction-flow-regression-20260617` intentionally
+  kept the liquid complaint open. It failed the MLS-MPM and CPU-SPH H2O/H2O
+  rows because the short run reached only `0.192 s` and `0.1296 s` simulated
+  time, with tallness/footprint still `0.930`/`0.144` and `0.973`/`0.117`.
+  The next behavior harness must capture enough simulated time and close-spaced
+  frames to prove visible flow, not just nonblank bounded geometry.
+
 ## Current Focused Result - 2026-06-17 NodeKernel GPU Resident Stage-Placement Preflight Routing
 
 ULG now routes mechanics stage placement preflight through NodeKernel when a

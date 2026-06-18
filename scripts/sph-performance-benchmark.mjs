@@ -255,6 +255,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const residentSteps = metric?.residentSteps || null;
   const effectiveProbeMode = result?.timeline?.probeMode || probeMode;
   const residentStageTiming = residentStep?.stageTiming ?? residentSteps?.finalStepStageTiming ?? null;
+  const dispatchTopology = residentStageTiming?.dispatchTopology
+    ?? residentStep?.dispatchTopology
+    ?? residentSteps?.fusedResidentSequence?.dispatchTopology
+    ?? null;
+  const p2gAccumulatorClearTopology = dispatchTopology?.p2gAccumulatorClear ?? null;
   const residentDiagnostics = residentStep?.diagnostics ?? null;
   const meanBatchMs = Number.isFinite(Number(analysis.meanBatchMs)) ? Number(analysis.meanBatchMs) : null;
   const residentStageMs = numberOrNull(residentStageTiming?.totalMs);
@@ -393,6 +398,21 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     residentStageStepsPerSecond,
     performanceGate,
     residentStageTiming,
+    dispatchTopologyStatus: dispatchTopology?.status ?? null,
+    dispatchesPerSubstep: dispatchTopology?.dispatchesPerSubstep ?? null,
+    totalDispatches: dispatchTopology?.totalDispatches ?? null,
+    workgroupsPerSubstep: dispatchTopology?.workgroupsPerSubstep ?? null,
+    totalWorkgroups: dispatchTopology?.totalWorkgroups ?? null,
+    p2gAccumulatorClear: p2gAccumulatorClearTopology ? {
+      stageId: p2gAccumulatorClearTopology.stageId ?? null,
+      topology: p2gAccumulatorClearTopology.topology ?? null,
+      entryPoint: p2gAccumulatorClearTopology.entryPoint ?? null,
+      dispatchAxis: p2gAccumulatorClearTopology.dispatchAxis ?? null,
+      dispatchWorkgroupsPerSubstep: p2gAccumulatorClearTopology.dispatchWorkgroupsPerSubstep ?? null,
+      invocationLimitPerSubstep: p2gAccumulatorClearTopology.invocationLimitPerSubstep ?? null,
+      activeGridEnabled: p2gAccumulatorClearTopology.activeGridEnabled ?? null,
+      bufferClearMode: p2gAccumulatorClearTopology.bufferClearMode ?? null
+    } : null,
     residentStepsStatus: residentSteps?.status ?? null,
     residentStepStatus: residentStep?.status ?? null,
     fusedResidentMechanics: residentStageTiming?.fusedResidentMechanics ?? null,

@@ -1,5 +1,47 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Active-Grid P2G Accumulator Clear
+
+Status:
+
+- Removed a full P2G accumulator `clearBuffer()` from the active-grid fused
+  MLS-MPM mechanics path. Active-grid runs now dispatch a generated
+  `clear_accumulators` WGSL entry over the active node AABB before scatter,
+  so P2G accumulator clearing scales with active nodes instead of full grid
+  nodes.
+- Applied the same active-node clear path to both single-step fused mechanics
+  and one-submit fused mechanics sequences. Non-active-grid paths keep the
+  previous full-buffer clear behavior.
+- Published the new `p2gAccumulatorClear` stage through resident dispatch
+  topology and benchmark JSON, including `bufferClearMode`,
+  `dispatchWorkgroupsPerSubstep`, total dispatch counts, and workgroup totals.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `56/56`
+  pass, including active-grid dispatch shape assertions.
+- PASS browser direct-resident 1k smoke:
+  `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-smoke.json`
+  completed with benchmark `status=good`, browser console issue/warning counts
+  `0/{}`, queue fence `complete`, active grid `4913/54872`, and
+  `p2gAccumulatorClear.bufferClearMode=active-grid-compute-clear`.
+- PASS browser direct-resident 10k row:
+  `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-10k.json`
+  completed with benchmark `status=good`, browser console issue/warning counts
+  `0/{}`, queue fence `complete`, active grid `5508/54872`, and
+  `residentGpuCompletedStageMs=179.6` for the final four-step batch.
+
+Open:
+
+- This removes one full-grid hot-loop operation, but the GUI FPS problem is
+  not solved. The direct mechanics lane is still too slow at 10k scale, and
+  the live GUI still needs the no-readback renderer/surface consumer plus
+  GPU-side bounds reduction or sparse/indirect active-grid metadata.
+
 ## 2026-06-18 AKDT - Mobile WebGL Surface Material Proxy
 
 Status:

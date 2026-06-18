@@ -1794,18 +1794,25 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
   assert.equal(step.g2pReconstruction.activeGridDispatch.useActiveGrid, true);
   assert.equal(step.stageTiming.dispatchTopology.gridUpdate.dispatchAxis, 'active-grid-node');
   assert.equal(step.stageTiming.dispatchTopology.p2gFinalize.dispatchAxis, 'active-grid-node');
+  assert.equal(step.stageTiming.dispatchTopology.p2gAccumulatorClear.dispatchAxis, 'active-grid-node');
+  assert.equal(step.stageTiming.dispatchTopology.p2gAccumulatorClear.bufferClearMode, 'active-grid-compute-clear');
   assert.equal(
     step.stageTiming.dispatchTopology.p2gFinalize.dispatchWorkgroupsPerSubstep,
     Math.ceil(activeGridDispatch.activeNodeCount / 64)
   );
-  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 4);
-  assert.equal(device.dispatches.length, 4);
-  assert.equal(device.dispatches[0].count, 1);
-  assert.equal(device.dispatches[1].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
+  assert.equal(
+    step.stageTiming.dispatchTopology.p2gAccumulatorClear.dispatchWorkgroupsPerSubstep,
+    Math.ceil(activeGridDispatch.activeNodeCount / 64)
+  );
+  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 5);
+  assert.equal(device.dispatches.length, 5);
+  assert.equal(device.dispatches[0].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
+  assert.equal(device.dispatches[1].count, 1);
   assert.equal(device.dispatches[2].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
-  assert.equal(device.dispatches[3].count, 1);
-  assert.ok(device.dispatches[1].count < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
-  assert.equal(device.clears.length, 3);
+  assert.equal(device.dispatches[3].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
+  assert.equal(device.dispatches[4].count, 1);
+  assert.ok(device.dispatches[0].count < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
+  assert.equal(device.clears.length, 2);
   destroyMlsMpmResidentStepBuffers(step);
 });
 
@@ -5234,7 +5241,7 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(execution.stepSummaries[0].compactSummaryAvailable, false);
   assert.equal(execution.stepSummaries[1].compactSummaryAvailable, false);
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 8);
+  assert.equal(device.dispatches.length, 10);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
@@ -5436,11 +5443,17 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(execution.finalStep.gridUpdate.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.stageTiming.dispatchTopology.substepCount, 2);
-  assert.equal(execution.finalStep.stageTiming.dispatchTopology.totalDispatches, 8);
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.totalDispatches, 10);
   assert.equal(execution.finalStep.stageTiming.dispatchTopology.p2g.topology, 'particle-parallel-scatter');
   assert.equal(execution.finalStep.stageTiming.dispatchTopology.g2p.dispatchAxis, 'particle');
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.p2gAccumulatorClear.dispatchAxis, 'active-grid-node');
+  assert.equal(
+    execution.finalStep.stageTiming.dispatchTopology.p2gAccumulatorClear.bufferClearMode,
+    'active-grid-compute-clear'
+  );
   assert.equal(execution.finalStep.stageTiming.dispatchTopology.gridUpdate.dispatchAxis, 'active-grid-node');
-  assert.equal(execution.finalStep.fusedResidentSequence.dispatchTopology.totalDispatches, 8);
+  assert.equal(execution.finalStep.fusedResidentSequence.dispatchTopology.totalDispatches, 10);
+  assert.equal(execution.finalStep.fusedResidentSequence.dispatchCount, 10);
   assert.equal(execution.stepSummaries[0].diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
   assert.equal(execution.stepSummaries[0].diagnostics.cpuParticleLoopInHotPath, false);
   assert.equal(execution.finalStep.residentPositionBoundsSource, 'compact-gpu-summary-next-bounds');
@@ -5448,8 +5461,8 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.min, [1.125, 1.2, 1.175]);
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.max, [1.375, 1.4, 1.425]);
   assert.equal(execution.nextSphParticleState.residentMaxSpeedMPerS, 0);
-  assert.equal(device.clears.length, 4);
-  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 4, 4, 1, 1, 4, 4, 1]);
+  assert.equal(device.clears.length, 2);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [4, 1, 4, 4, 1, 4, 1, 4, 4, 1]);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

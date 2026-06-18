@@ -811,7 +811,8 @@ async function runBrowserProbe({
         perParticleLocalStencilNodeCount: stage.perParticleLocalStencilNodeCount ?? null,
         gridWriteMode: stage.gridWriteMode ?? null,
         gridReadMode: stage.gridReadMode ?? null,
-        activeGridEnabled: stage.activeGridEnabled ?? null
+        activeGridEnabled: stage.activeGridEnabled ?? null,
+        bufferClearMode: stage.bufferClearMode ?? null
       } : null;
       const compactDispatchTopology = (topology) => topology ? {
         schema: topology.schema ?? null,
@@ -830,6 +831,7 @@ async function runBrowserProbe({
         workgroupsPerSubstep: topology.workgroupsPerSubstep ?? null,
         totalWorkgroups: topology.totalWorkgroups ?? null,
         p2g: compactDispatchStageTopology(topology.p2g),
+        p2gAccumulatorClear: compactDispatchStageTopology(topology.p2gAccumulatorClear),
         p2gFinalize: compactDispatchStageTopology(topology.p2gFinalize),
         gridUpdate: compactDispatchStageTopology(topology.gridUpdate),
         g2p: compactDispatchStageTopology(topology.g2p)
@@ -2164,7 +2166,8 @@ async function runDirectResidentProbe({
         perParticleLocalStencilNodeCount: stage.perParticleLocalStencilNodeCount ?? null,
         gridWriteMode: stage.gridWriteMode ?? null,
         gridReadMode: stage.gridReadMode ?? null,
-        activeGridEnabled: stage.activeGridEnabled ?? null
+        activeGridEnabled: stage.activeGridEnabled ?? null,
+        bufferClearMode: stage.bufferClearMode ?? null
       } : null;
       const compactDispatchTopology = (topology) => topology ? {
         schema: topology.schema ?? null,
@@ -2183,6 +2186,7 @@ async function runDirectResidentProbe({
         workgroupsPerSubstep: topology.workgroupsPerSubstep ?? null,
         totalWorkgroups: topology.totalWorkgroups ?? null,
         p2g: compactDispatchStageTopology(topology.p2g),
+        p2gAccumulatorClear: compactDispatchStageTopology(topology.p2gAccumulatorClear),
         p2gFinalize: compactDispatchStageTopology(topology.p2gFinalize),
         gridUpdate: compactDispatchStageTopology(topology.gridUpdate),
         g2p: compactDispatchStageTopology(topology.g2p)

@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: active-grid fused MLS-MPM mechanics no
+longer clears the full P2G accumulator buffer every active-grid substep. The
+active-grid P2G shader variant now exposes `clear_accumulators`, and both the
+single-step and one-submit fused sequence paths dispatch that kernel over the
+active AABB before particle scatter. Resident dispatch topology now includes
+`p2gAccumulatorClear` with `bufferClearMode=active-grid-compute-clear`; active
+single-step tests report five dispatches per substep and the two-step active
+sequence reports ten total dispatches. Browser direct-resident evidence at
+`artifacts/sph-performance-benchmark-active-grid-accumulator-clear-smoke.json`
+and `artifacts/sph-performance-benchmark-active-grid-accumulator-clear-10k.json`
+is console-clean, queue-fenced, and active-grid gated; the 10k row reports
+`residentGpuCompletedStageMs=179.6` over active grid `5508/54872`. This removes
+one obvious full-grid hot-loop operation, but it does not solve GUI FPS; the
+next performance blockers remain GPU-side bounds/sparse dispatch and the
+no-readback renderer/surface consumer.
+
 Current checkpoint, 2026-06-18 AKDT: mobile WebGL surface materials now fail
 visible instead of flat black. Engine-owned Three surface meshes publish a
 renderer material policy; phone/WebGL targets proxy transmissive

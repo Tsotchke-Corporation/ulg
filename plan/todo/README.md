@@ -35,6 +35,20 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: ComputeManager now owns an advisory
+GPU resident stage-placement preflight. Before ULG executes the mechanics
+stage plan, it asks PeerCompute for
+`peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0`, which
+uses the same dependency batches and state-family read/write conflict policy
+as execution. Telemetry now records placement batches, max concurrent stage
+count, executor sources, Worker readiness/fallback, and missing executors.
+Evidence: PeerCompute lane tests `10/10`, ULG PeerCompute integration
+`16/16`, physics atomics `11` pass with `3` expected opt-in skips, and visual
+matrix `codex-stage-placement-preflight-20260617` passed `3/3`. Next:
+connect this report to actual ComputeManager/NodeKernel placement across
+Workers, devices, and peers; do not claim true distributed WebGPU concurrency
+until placement can fail closed and retained refs are consumed where they live.
+
 Current routing note, 2026-06-17 AKDT: GPU resident ready batches now respect
 state-family read/write conflicts. PeerCompute defers ready stages with
 write/write, write/read, or read/write overlap and reports the exact deferral

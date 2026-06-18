@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: GPU resident lane placement now has a
+ComputeManager-owned preflight surface before stage execution. Sibling
+PeerCompute emits
+`peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0` through
+`ComputeManager.preflightGpuResidentLaneStagePlacement()`, using the same
+dependency batches and state-family conflict deferrals as real execution. ULG
+records the preflight in mechanics stage-chain telemetry: placement batches,
+max concurrent stage count, conflict policy/deferral count, GPUHub executor
+sources, Worker residency statuses, worker ready/fallback counts, and missing
+executor count. Validation passed sibling PeerCompute lane tests `10/10`, ULG
+PeerCompute integration `16/16`, physics atomics `11` pass with `3` expected
+opt-in skips, and visual matrix
+`codex-stage-placement-preflight-20260617` with `failedCount=0`. This answers
+the concurrency audit more honestly: scheduling can now prove where overlap is
+safe, but true high-throughput WebGPU/peer concurrency still needs placement
+to act on this report across Workers, devices, and peers.
+
 Current checkpoint, 2026-06-17 AKDT: GPU resident ready-batch execution now
 has a state-family conflict gate. Sibling PeerCompute checks each ready stage's
 declared `reads` and `writes` before placing it in a batch; write/write,

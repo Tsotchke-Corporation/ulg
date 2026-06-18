@@ -1,5 +1,34 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 ComputeManager GPU Resident Stage-Placement Preflight
+
+ComputeManager now reports GPU resident lane placement before execution. ULG
+records that preflight in mechanics stage-chain telemetry so Worker/lane/device
+placement can be audited before actual stage handlers mutate state.
+
+Focused checks:
+
+- PeerCompute lane manager:
+  `node --test tests/unit/gpuResidentLaneManager.test.js` passed `10/10`. The
+  new coverage proves `preflightGpuResidentLaneStagePlacement()` reports the
+  same dependency batches and state-family conflict deferrals as execution,
+  plus GPUHub executor sources, Worker residency status, Worker ready/fallback
+  counts, missing executor count, and max concurrent stage count.
+- ULG PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs` passed
+  `16/16`. The mechanics-only stage chain reports placement batches
+  `[['p2g'], ['gridUpdate'], ['g2p']]` with blocked Worker fallback statuses,
+  while the pressure/thermal/reaction Worker-ready chain reports
+  `[['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]`
+  with six Worker-ready stages and no missing executors.
+- Fast physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `3` expected opt-in
+  skips.
+- Recurring visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-stage-placement-preflight-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and two frames each under
+  `/tmp/ulg-visual-sanity-matrix/codex-stage-placement-preflight-20260617`.
+
 ## Current Focused Result - 2026-06-17 GPU Resident State-Family Conflict Batching
 
 PeerCompute ready batches now respect declared state-family read/write

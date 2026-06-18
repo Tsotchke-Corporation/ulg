@@ -2,6 +2,16 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 ComputeManager placement preflight: state-family
+read/write metadata now has an admission-facing pre-execution report.
+PeerCompute's GPU resident lane preflight uses the same dependency and
+conflict planner as execution, then reports which stages may share a placement
+batch and which Worker/GPUHub executor policy applies. ULG records the report
+before mechanics stage execution. This keeps state-authority reasoning ahead
+of mutation: the next gap is to make NodeKernel/ComputeManager placement
+reject non-advisory distributed or cross-Worker plans that cannot honor these
+state-family and retained-ref constraints.
+
 Status update, 2026-06-17 Worker-retained access contract: admitted
 Worker-retained publications now state how their buffers may be consumed.
 `peercompute.ulg.worker-retained-access-contract.v0` is included in mechanics,

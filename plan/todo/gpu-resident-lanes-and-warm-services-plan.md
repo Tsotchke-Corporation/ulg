@@ -2,6 +2,20 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 ComputeManager stage-placement preflight:
+PeerCompute now exposes
+`peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0` before
+resident stage execution. The preflight reuses the same dependency batching
+and state-family conflict planner as the lane executor, then adds placement
+evidence: GPUHub executor source, Worker policy status, Worker ready/fallback
+counts, missing executors, placement batches, and max concurrent stage count.
+ULG records this in mechanics stage-chain telemetry for both mechanics-only
+and pressure/thermal/reaction Worker-ready chains. This completes the
+reporting surface for the current architecture slice; the next warm-service
+work is to make ComputeManager/NodeKernel act on the report across
+Worker/lane/device/peer placement and fail closed when non-advisory
+distributed resident placement is requested.
+
 Status update, 2026-06-17 Worker-retained access contract: Worker-retained
 law-family publications now carry a shared
 `peercompute.ulg.worker-retained-access-contract.v0`. Mechanics, thermal/phase,

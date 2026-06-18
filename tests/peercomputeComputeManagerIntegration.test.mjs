@@ -1287,6 +1287,45 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount,
     0
   );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightSchema,
+    'peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0'
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightStatus,
+    'placement-preflight-ready'
+  );
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightCanExecute, true);
+  assert.deepEqual(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightBatches,
+    [['p2g'], ['gridUpdate'], ['g2p']]
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightMaxConcurrentStageCount,
+    1
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightStateFamilyConflictPolicy,
+    'defer-read-write-conflicting-ready-stages'
+  );
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightStateFamilyConflictDeferralCount,
+    0
+  );
+  assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightExecutorSources, {
+    p2g: 'gpu-hub-resident-stage-executor',
+    gridUpdate: 'gpu-hub-resident-stage-executor',
+    g2p: 'gpu-hub-resident-stage-executor'
+  });
+  assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerResidencyStatuses, {
+    p2g: 'blocked-worker-backend-missing',
+    gridUpdate: 'blocked-worker-backend-missing',
+    g2p: 'blocked-worker-backend-missing'
+  });
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerRequestedCount, 3);
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerReadyCount, 0);
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerFallbackCount, 3);
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightMissingExecutorCount, 0);
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode, 'registered');
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 3);
   assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {
@@ -1857,6 +1896,34 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount,
     0
   );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightSchema,
+    'peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0'
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightStatus,
+    'placement-preflight-ready'
+  );
+  assert.deepEqual(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightBatches,
+    [['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]
+  );
+  assert.equal(
+    gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightMaxConcurrentStageCount,
+    2
+  );
+  assert.deepEqual(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerResidencyStatuses, {
+    p2g: 'worker-ready',
+    pressureInterface: 'worker-ready',
+    gridUpdate: 'worker-ready',
+    g2p: 'worker-ready',
+    thermalPhase: 'worker-ready',
+    reactionProduct: 'worker-ready'
+  });
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerRequestedCount, 6);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerReadyCount, 6);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerFallbackCount, 0);
+  assert.equal(gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightMissingExecutorCount, 0);
   assert.equal(
     gpuHubWorkerThermalStageChainStep.mechanicsStageTaskChain.workerRetainedContinuationPlanSchema,
     ULG_WORKER_RETAINED_CONTINUATION_PLAN_SCHEMA

@@ -1,5 +1,99 @@
 # ULG Implementation Log
 
+## 2026-06-17 16:15:23 AKDT - ComputeManager GPU resident stage-placement preflight
+
+Prompt time/date: 2026-06-17 16:15 AKDT, after the user asked whether the
+WebGPU work is sufficiently concurrent and then said "alright go for it" to
+continue the architecture refactor.
+
+Summary:
+
+- Added a ComputeManager-owned GPU resident stage-placement preflight in
+  sibling PeerCompute.
+- The preflight returns
+  `peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0` before
+  stage handlers run.
+- It reuses the same dependency-ready batches and state-family conflict
+  deferrals used by real lane execution, then reports GPUHub executor source,
+  Worker residency status, Worker ready/fallback counts, missing executors,
+  placement batches, and max concurrent stage count.
+- ULG calls `computeManager.preflightGpuResidentLaneStagePlacement()` before
+  executing the MLS-MPM mechanics stage plan and records the report in
+  mechanics stage-chain telemetry.
+- Integration coverage now proves the mechanics-only chain reports
+  `[['p2g'], ['gridUpdate'], ['g2p']]` and blocked Worker fallback statuses,
+  while the pressure/thermal/reaction Worker-ready chain reports
+  `[['p2g', 'pressureInterface'], ['gridUpdate'], ['g2p'], ['thermalPhase'], ['reactionProduct']]`
+  with six Worker-ready stages and no missing executors.
+- This is still an advisory/audit surface. It does not claim that one ordered
+  WebGPU queue is truly parallel or that remote retained GPU refs are local
+  handles.
+
+Files touched:
+
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/computeManager/ComputeManager.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/index.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/tests/unit/gpuResidentLaneManager.test.js`
+- sibling PeerCompute docs:
+  `/home/cos/projects/peercompute/plan/plan.md`
+- sibling PeerCompute docs:
+  `/home/cos/projects/peercompute/plan/tests.md`
+- sibling PeerCompute docs:
+  `/home/cos/projects/peercompute/plan/log.md`
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/todo/resident-state-authority-contract-plan.md`
+- `plan/done/gpu-resident-stage-placement-preflight-2026-06-17.md`
+- `plan/log.md`
+
+Commands run:
+
+- PeerCompute: `node --check peercompute/src/peercompute/computeManager/GpuResidentLaneManager.js`
+- PeerCompute: `node --check peercompute/src/peercompute/computeManager/ComputeManager.js`
+- PeerCompute: `node --check peercompute/src/peercompute/index.js`
+- PeerCompute: `node --check peercompute/tests/unit/gpuResidentLaneManager.test.js`
+- PeerCompute: `node --test peercompute/tests/unit/gpuResidentLaneManager.test.js`
+- ULG: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- ULG: `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG: `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+- ULG: `npm run test:physics-atomics`
+- ULG: `git diff --check`
+- PeerCompute: `git diff --check`
+- ULG visual:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-stage-placement-preflight-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+
+Validation:
+
+- PASS: PeerCompute syntax checks.
+- PASS: PeerCompute lane manager test passed `10/10`.
+- PASS: ULG syntax checks.
+- PASS: ULG PeerCompute integration passed `16/16`.
+- PASS: ULG physics atomics passed `11` checks with `3` expected opt-in
+  skips.
+- PASS: ULG visual matrix `codex-stage-placement-preflight-20260617` passed
+  `3/3` with `failedCount=0`, empty issue counts, empty visual-surface issue
+  counts, and two frame artifacts per row.
+
+Open:
+
+- Next architecture work is to make this preflight drive actual
+  NodeKernel/ComputeManager placement across Workers/devices/peers and fail
+  closed for non-advisory distributed resident placement that cannot honor
+  retained-ref locality or state-family conflicts.
+- The remaining physics behavior bugs stay tracked separately; this slice
+  changes scheduling authority and evidence, not liquid/ice mechanics.
+
 ## 2026-06-17 15:53:07 AKDT - GPU resident state-family conflict batching
 
 Prompt time/date: 2026-06-17 15:53 AKDT, continuing the WebGPU concurrency

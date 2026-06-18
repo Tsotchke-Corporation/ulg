@@ -2,6 +2,16 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 ComputeManager placement preflight: the law-stage
+dependency and state-family conflict policy is now visible before execution,
+not only after. `ComputeManager.preflightGpuResidentLaneStagePlacement()`
+returns a GPU resident placement report with dependency batches, conflict
+deferrals, executor sources, Worker residency status, and missing-executor
+counts. ULG records this report before running the mechanics lane. This is the
+right authority boundary for the larger law graph: next, NodeKernel and
+ComputeManager placement should consume this same report when choosing
+same-Worker continuations, local device lanes, or remote peer execution.
+
 Status update, 2026-06-17 Worker-retained authority contract: the graph-level
 cache/placement/lease slice is already implemented, so the current authority
 work moved to the next missing boundary: admitted Worker-retained law-family

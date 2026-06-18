@@ -7616,6 +7616,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
   const stageResults = {};
   let nativeTaskGraph = null;
   let gpuResidentLaneStagePlanLease = null;
+  let gpuResidentLaneStagePlacementPreflight = null;
   let gpuResidentLaneStagePlanExecution = null;
   let gpuResidentLaneStagePlanLeaseExecution = null;
   let gpuResidentLaneStagePlanRejected = null;
@@ -7856,48 +7857,55 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
           fullReadbackReason: null
         }
       });
+      const stagePlanExecutionOptions = {
+        input: {
+          source: 'ulg-mechanics-stage-chain-native-task-graph-results',
+          taskIdPrefix
+        },
+        context: {
+          nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
+          nativeTaskGraphSchema: nativeTaskGraph?.schema || null,
+          nativeTaskGraphStatus: nativeTaskGraph?.status || null
+        },
+        stageExecutors: {
+          p2g: () => ({
+            value: stageResults.p2g,
+            retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('p2g', stageResults.p2g),
+            summary: {
+              computeTaskResultSchema: stageResults.p2g?.computeTaskResultSchema || null,
+              evidencePassed: stageResults.p2g?.mechanicsP2gStageTaskEvidence?.passed === true,
+              ...summarizeMechanicsStageLaneResult('p2g', stageResults.p2g)
+            }
+          }),
+          gridUpdate: () => ({
+            value: stageResults.gridUpdate,
+            retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('gridUpdate', stageResults.gridUpdate),
+            summary: {
+              computeTaskResultSchema: stageResults.gridUpdate?.computeTaskResultSchema || null,
+              evidencePassed: stageResults.gridUpdate?.mechanicsGridUpdateStageTaskEvidence?.passed === true,
+              ...summarizeMechanicsStageLaneResult('gridUpdate', stageResults.gridUpdate)
+            }
+          }),
+          g2p: () => ({
+            value: stageResults.g2p,
+            retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('g2p', stageResults.g2p),
+            summary: {
+              computeTaskResultSchema: stageResults.g2p?.computeTaskResultSchema || null,
+              evidencePassed: stageResults.g2p?.mechanicsG2pStageTaskEvidence?.passed === true,
+              ...summarizeMechanicsStageLaneResult('g2p', stageResults.g2p)
+            }
+          })
+        }
+      };
+      if (typeof computeManager.preflightGpuResidentLaneStagePlacement === 'function') {
+        gpuResidentLaneStagePlacementPreflight = computeManager.preflightGpuResidentLaneStagePlacement(
+          gpuResidentLaneStagePlanLease.leaseId,
+          stagePlanExecutionOptions
+        );
+      }
       gpuResidentLaneStagePlanExecution = await computeManager.executeGpuResidentLaneStagePlan(
         gpuResidentLaneStagePlanLease.leaseId,
-        {
-          input: {
-            source: 'ulg-mechanics-stage-chain-native-task-graph-results',
-            taskIdPrefix
-          },
-          context: {
-            nodeKernelOwned: nativeTaskGraph?.nodeKernelOwned === true,
-            nativeTaskGraphSchema: nativeTaskGraph?.schema || null,
-            nativeTaskGraphStatus: nativeTaskGraph?.status || null
-          },
-          stageExecutors: {
-            p2g: () => ({
-              value: stageResults.p2g,
-              retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('p2g', stageResults.p2g),
-              summary: {
-                computeTaskResultSchema: stageResults.p2g?.computeTaskResultSchema || null,
-                evidencePassed: stageResults.p2g?.mechanicsP2gStageTaskEvidence?.passed === true,
-                ...summarizeMechanicsStageLaneResult('p2g', stageResults.p2g)
-              }
-            }),
-            gridUpdate: () => ({
-              value: stageResults.gridUpdate,
-              retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('gridUpdate', stageResults.gridUpdate),
-              summary: {
-                computeTaskResultSchema: stageResults.gridUpdate?.computeTaskResultSchema || null,
-                evidencePassed: stageResults.gridUpdate?.mechanicsGridUpdateStageTaskEvidence?.passed === true,
-                ...summarizeMechanicsStageLaneResult('gridUpdate', stageResults.gridUpdate)
-              }
-            }),
-            g2p: () => ({
-              value: stageResults.g2p,
-              retainedBufferRefs: retainedBufferRefsForMechanicsStageResult('g2p', stageResults.g2p),
-              summary: {
-                computeTaskResultSchema: stageResults.g2p?.computeTaskResultSchema || null,
-                evidencePassed: stageResults.g2p?.mechanicsG2pStageTaskEvidence?.passed === true,
-                ...summarizeMechanicsStageLaneResult('g2p', stageResults.g2p)
-              }
-            })
-          }
-        }
+        stagePlanExecutionOptions
       );
       gpuResidentLaneStagePlanLeaseExecution = computeManager.completeGpuResidentLaneLease(
         gpuResidentLaneStagePlanLease.leaseId,
@@ -8613,6 +8621,12 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       if (!useRegisteredGpuHubStageExecutors) {
         stagePlanExecutionOptions.stageExecutors = laneStageExecutors;
       }
+      if (typeof computeManager.preflightGpuResidentLaneStagePlacement === 'function') {
+        gpuResidentLaneStagePlacementPreflight = computeManager.preflightGpuResidentLaneStagePlacement(
+          gpuResidentLaneStagePlanLease.leaseId,
+          stagePlanExecutionOptions
+        );
+      }
       gpuResidentLaneStagePlanExecution = await computeManager.executeGpuResidentLaneStagePlan(
         gpuResidentLaneStagePlanLease.leaseId,
         stagePlanExecutionOptions
@@ -8967,6 +8981,33 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
         .map((entry) => ({ ...entry })),
     gpuResidentLaneStageExecutionStateFamilyConflictDeferralCount:
       gpuResidentLaneStagePlanExecution?.stateFamilyConflictDeferralCount ?? 0,
+    gpuResidentLaneStagePlacementPreflight,
+    gpuResidentLaneStagePlacementPreflightSchema: gpuResidentLaneStagePlacementPreflight?.schema || null,
+    gpuResidentLaneStagePlacementPreflightStatus: gpuResidentLaneStagePlacementPreflight?.status || null,
+    gpuResidentLaneStagePlacementPreflightCanExecute: gpuResidentLaneStagePlacementPreflight?.canExecute === true,
+    gpuResidentLaneStagePlacementPreflightBatches: (gpuResidentLaneStagePlacementPreflight?.placementBatches || [])
+      .map((batch) => [...batch]),
+    gpuResidentLaneStagePlacementPreflightMaxConcurrentStageCount:
+      gpuResidentLaneStagePlacementPreflight?.maxConcurrentStageCount ?? 0,
+    gpuResidentLaneStagePlacementPreflightStateFamilyConflictPolicy:
+      gpuResidentLaneStagePlacementPreflight?.stateFamilyConflictPolicy || null,
+    gpuResidentLaneStagePlacementPreflightStateFamilyConflictDeferrals:
+      (gpuResidentLaneStagePlacementPreflight?.stateFamilyConflictDeferrals || [])
+        .map((entry) => ({ ...entry })),
+    gpuResidentLaneStagePlacementPreflightStateFamilyConflictDeferralCount:
+      gpuResidentLaneStagePlacementPreflight?.stateFamilyConflictDeferralCount ?? 0,
+    gpuResidentLaneStagePlacementPreflightExecutorSources:
+      { ...(gpuResidentLaneStagePlacementPreflight?.executorSources || {}) },
+    gpuResidentLaneStagePlacementPreflightWorkerResidencyStatuses:
+      { ...(gpuResidentLaneStagePlacementPreflight?.workerResidencyStatuses || {}) },
+    gpuResidentLaneStagePlacementPreflightWorkerRequestedCount:
+      gpuResidentLaneStagePlacementPreflight?.workerRequestedCount ?? 0,
+    gpuResidentLaneStagePlacementPreflightWorkerReadyCount:
+      gpuResidentLaneStagePlacementPreflight?.workerReadyCount ?? 0,
+    gpuResidentLaneStagePlacementPreflightWorkerFallbackCount:
+      gpuResidentLaneStagePlacementPreflight?.workerFallbackCount ?? 0,
+    gpuResidentLaneStagePlacementPreflightMissingExecutorCount:
+      gpuResidentLaneStagePlacementPreflight?.missingExecutorCount ?? 0,
     gpuResidentLaneStageExecutionExecutorSources: stageExecutionExecutorSources,
     gpuResidentLaneStageExecutionUsedGpuHubExecutors: Object.values(stageExecutionExecutorSources).length > 0
       ? Object.values(stageExecutionExecutorSources).every((source) => source === 'gpu-hub-resident-stage-executor')
@@ -9162,6 +9203,29 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithComputeManagerStageT
       gpuResidentLaneStageExecutionStatus: stageTaskChain.gpuResidentLaneStageExecutionStatus,
       gpuResidentLaneStageExecutionCompletedStageCount: stageTaskChain.gpuResidentLaneStageExecutionCompletedStageCount,
       gpuResidentLaneStageExecutionStageOrder: [...stageTaskChain.gpuResidentLaneStageExecutionStageOrder],
+      gpuResidentLaneStagePlacementPreflightSchema: stageTaskChain.gpuResidentLaneStagePlacementPreflightSchema,
+      gpuResidentLaneStagePlacementPreflightStatus: stageTaskChain.gpuResidentLaneStagePlacementPreflightStatus,
+      gpuResidentLaneStagePlacementPreflightCanExecute: stageTaskChain.gpuResidentLaneStagePlacementPreflightCanExecute,
+      gpuResidentLaneStagePlacementPreflightBatches:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightBatches.map((batch) => [...batch]),
+      gpuResidentLaneStagePlacementPreflightMaxConcurrentStageCount:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightMaxConcurrentStageCount,
+      gpuResidentLaneStagePlacementPreflightStateFamilyConflictPolicy:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightStateFamilyConflictPolicy,
+      gpuResidentLaneStagePlacementPreflightStateFamilyConflictDeferralCount:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightStateFamilyConflictDeferralCount,
+      gpuResidentLaneStagePlacementPreflightExecutorSources:
+        { ...stageTaskChain.gpuResidentLaneStagePlacementPreflightExecutorSources },
+      gpuResidentLaneStagePlacementPreflightWorkerResidencyStatuses:
+        { ...stageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerResidencyStatuses },
+      gpuResidentLaneStagePlacementPreflightWorkerRequestedCount:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerRequestedCount,
+      gpuResidentLaneStagePlacementPreflightWorkerReadyCount:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerReadyCount,
+      gpuResidentLaneStagePlacementPreflightWorkerFallbackCount:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerFallbackCount,
+      gpuResidentLaneStagePlacementPreflightMissingExecutorCount:
+        stageTaskChain.gpuResidentLaneStagePlacementPreflightMissingExecutorCount,
       gpuResidentLaneStageExecutionExecutorSources: { ...stageTaskChain.gpuResidentLaneStageExecutionExecutorSources },
       gpuResidentLaneStageExecutionUsedGpuHubExecutors: stageTaskChain.gpuResidentLaneStageExecutionUsedGpuHubExecutors,
       gpuResidentLaneStageExecutionWorkerResidency: { ...stageTaskChain.gpuResidentLaneStageExecutionWorkerResidency },

@@ -2,6 +2,21 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the active roadmap split is now explicit.
+The GPU-resident surface extraction / native WebGPU marching-cubes work is
+owned in the sibling `/home/cos/projects/webgpu-marching-cubes` extension so it
+can become a vanilla-JS, device-owned, swappable adapter before ULG consumes
+it. ULG-side work in this checkpoint advanced the surrounding lanes: the
+benchmark has opt-in performance gates for active-grid dispatch, queue-fenced
+resident timing, resident step throughput, and readback budget; the browser
+resident authority host reports Worker constructor/config/policy/inline
+fallback evidence; the first non-authoritative precomputed material-property
+JSON bank validates `H`, `O`, `Na`, `Fe`, and `Cs`; and wall contact can derive
+elasticity-inclusive barrier stiffness from bulk/shear modulus plus grid
+support length. This is not a GUI FPS victory yet; it makes the next resident
+renderer and material/contact integrations testable without hiding console or
+worker failures.
+
 Current checkpoint, 2026-06-18 AKDT: the mobile MLS-MPM render path has been
 put back through the normal Three.js renderer-owned scene instead of any
 separate canvas path. `sphPhaseScene` now resolves phone viewport dimensions

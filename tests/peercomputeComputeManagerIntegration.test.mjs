@@ -155,6 +155,36 @@ const ULG_PEERCOMPUTE_BROWSER_RESIDENT_HOST_MODULE_URL = new URL(
   import.meta.url
 );
 
+test('resident authority host summary exposes browser Worker capability blockers', () => {
+  const summary = summarizePeerComputeResidentAuthorityHost({
+    status: 'ready',
+    hostId: 'ulg:test:worker-capability',
+    workerCapability: {
+      schema: 'peercompute.ulg.browser-worker-capability.v0',
+      status: 'worker-capability-blocked',
+      blocker: 'worker-constructor-unavailable',
+      workerConstructorAvailable: false,
+      requestedEnableWorkers: true,
+      effectiveEnableWorkers: true,
+      workerCount: 0,
+      targetWorkers: 4
+    },
+    solverRegistration: { descriptors: [] },
+    lawGraphManifest: null,
+    computeManager: {},
+    stateManager: {}
+  });
+
+  assert.equal(summary.workerCapabilitySchema, 'peercompute.ulg.browser-worker-capability.v0');
+  assert.equal(summary.workerCapabilityStatus, 'worker-capability-blocked');
+  assert.equal(summary.workerCapabilityBlocker, 'worker-constructor-unavailable');
+  assert.equal(summary.workerConstructorAvailable, false);
+  assert.equal(summary.workerRequestedEnableWorkers, true);
+  assert.equal(summary.workerEffectiveEnableWorkers, true);
+  assert.equal(summary.workerCount, 0);
+  assert.equal(summary.workerTargetWorkers, 4);
+});
+
 async function importPeerComputeManager(t) {
   try {
     await access(fileURLToPath(PEERCOMPUTE_COMPUTE_MANAGER_URL));

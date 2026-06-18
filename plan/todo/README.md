@@ -117,6 +117,16 @@ records as versioned, unit-bearing, provenance-rich warm inputs for
 initialization, PBR, table packing, and resolver caches, not as unvalidated
 source-of-truth constants.
 
+Current routing note, 2026-06-18 AKDT: after the resident MLS-MPM and native
+WebGPU marching-cubes implementation lands, adapt material-property derivation
+for the algorithms that consume those rows. Track this in
+`plan/todo/algorithm-derived-material-properties-plan.md`. MLS-MPM mechanics,
+contact, timestep/CFL policy, particle mass/support/spacing, marching-cubes
+isovalue/smoothing/normal policy, and surface PBR rows should become
+algorithm-shaped derived views of fundamental closures, not new hand-tuned
+constants. The precomputed JSON bank can seed/cache these rows only with
+schema, unit, validity-domain, and provenance gates intact.
+
 Current routing note, 2026-06-18 AKDT: the cold same-material CPU-SPH
 solid-H2O static row remains stable under the current dense visual sequence
 harness. `codex-solid-h2o-static-sequence-20260618` passed with nine frames

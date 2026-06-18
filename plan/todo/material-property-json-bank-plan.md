@@ -2,6 +2,17 @@
 
 Date: 2026-06-18 AKDT
 
+Status update, 2026-06-18 AKDT: Phase 1 has a first checked-in seed, not a
+complete bank. `data/material-properties/elements.json` now contains
+non-authoritative warm-input records for the currently exercised elements
+`H`, `O`, `Na`, `Fe`, and `Cs`; JSON schemas and
+`scripts/material-properties/validate-material-property-bank.mjs` validate
+those rows; `src/runtime/material/materialPropertyBank.js` normalizes lookup
+and emits provenance-preserving warm inputs. Next: wire the loader through the
+material resolver/cache path, expand to all selectable elements, add stale
+schema/provenance rejection tests, then add crystalline structures before
+starting the top-1000 compound import.
+
 ## Purpose
 
 Add a versioned repo-local JSON material property bank that gives ULG a fast,

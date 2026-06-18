@@ -71,6 +71,26 @@ const measureGpuQueueFence = booleanEnv(
   'ULG_BENCH_MEASURE_GPU_QUEUE_FENCE',
   probeMode === 'direct-resident'
 );
+const requireActiveGridGate = booleanEnv(
+  'ULG_BENCH_REQUIRE_ACTIVE_GRID',
+  probeMode === 'direct-resident' && fuseResidentMechanicsActiveGrid
+);
+const requireQueueFenceGate = booleanEnv(
+  'ULG_BENCH_REQUIRE_QUEUE_FENCE',
+  probeMode === 'direct-resident' && measureGpuQueueFence
+);
+const minResidentStageStepsPerSecond = Number.isFinite(Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND))
+  && Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND) > 0
+  ? Number(process.env.ULG_BENCH_MIN_RESIDENT_STAGE_STEPS_PER_SECOND)
+  : null;
+const maxResidentGpuCompletedStageMs = Number.isFinite(Number(process.env.ULG_BENCH_MAX_RESIDENT_GPU_COMPLETED_STAGE_MS))
+  && Number(process.env.ULG_BENCH_MAX_RESIDENT_GPU_COMPLETED_STAGE_MS) > 0
+  ? Number(process.env.ULG_BENCH_MAX_RESIDENT_GPU_COMPLETED_STAGE_MS)
+  : null;
+const maxReadbackBytesPerStep = Number.isFinite(Number(process.env.ULG_BENCH_MAX_READBACK_BYTES_PER_STEP))
+  && Number(process.env.ULG_BENCH_MAX_READBACK_BYTES_PER_STEP) >= 0
+  ? Number(process.env.ULG_BENCH_MAX_READBACK_BYTES_PER_STEP)
+  : null;
 
 function edgeForApproxParticleCount(targetCount) {
   return Math.max(1, Math.round(Math.cbrt(Math.max(1, targetCount) / 2)));
@@ -161,6 +181,71 @@ function sumKnownNumbers(values) {
   return known ? sum : null;
 }
 
+function scenarioPerformanceGate({
+  residentGpuCompletedStageMs,
+  residentStageStepsPerSecond,
+  estimatedReadbackBytesPerStep,
+  activeGridDispatch,
+  residentStageTiming
+}) {
+  const blockers = [];
+  if (requireActiveGridGate && activeGridDispatch?.useActiveGrid !== true) {
+    blockers.push('active-grid-dispatch-required');
+  }
+  if (
+    requireQueueFenceGate
+    && residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence !== 'complete'
+  ) {
+    blockers.push('queue-fenced-resident-sequence-required');
+  }
+  if (
+    minResidentStageStepsPerSecond !== null
+    && !(
+      Number.isFinite(Number(residentStageStepsPerSecond))
+      && Number(residentStageStepsPerSecond) >= minResidentStageStepsPerSecond
+    )
+  ) {
+    blockers.push('resident-stage-steps-per-second-below-threshold');
+  }
+  if (
+    maxResidentGpuCompletedStageMs !== null
+    && !(
+      Number.isFinite(Number(residentGpuCompletedStageMs))
+      && Number(residentGpuCompletedStageMs) <= maxResidentGpuCompletedStageMs
+    )
+  ) {
+    blockers.push('resident-gpu-completed-stage-ms-above-threshold');
+  }
+  if (
+    maxReadbackBytesPerStep !== null
+    && !(
+      Number.isFinite(Number(estimatedReadbackBytesPerStep))
+      && Number(estimatedReadbackBytesPerStep) <= maxReadbackBytesPerStep
+    )
+  ) {
+    blockers.push('readback-bytes-per-step-above-threshold');
+  }
+  return {
+    schema: 'peercompute.ulg.sph-performance-benchmark-gate.v0',
+    status: blockers.length === 0 ? 'pass' : 'fail',
+    blockers,
+    requireActiveGrid: requireActiveGridGate,
+    requireQueueFence: requireQueueFenceGate,
+    thresholds: {
+      minResidentStageStepsPerSecond,
+      maxResidentGpuCompletedStageMs,
+      maxReadbackBytesPerStep
+    },
+    observed: {
+      residentGpuCompletedStageMs,
+      residentStageStepsPerSecond,
+      estimatedReadbackBytesPerStep,
+      activeGridUsed: activeGridDispatch?.useActiveGrid === true,
+      queueFenceStatus: residentStageTiming?.queueFenceStatus?.fusedMechanicsSequence ?? null
+    }
+  };
+}
+
 function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const analysis = result?.analysis || {};
   const metric = lastMetricWithRenderState(result);
@@ -247,6 +332,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     )
   );
   const activeGridDispatch = residentStageTiming?.activeGridDispatch ?? null;
+  const performanceGate = scenarioPerformanceGate({
+    residentGpuCompletedStageMs,
+    residentStageStepsPerSecond,
+    estimatedReadbackBytesPerStep,
+    activeGridDispatch,
+    residentStageTiming
+  });
   const validDirectResidentLoop = effectiveProbeMode === 'direct-resident'
     && residentSteps?.status === 'resident-steps-executed'
     && residentStep?.status === 'resident-step-webgpu-executed'
@@ -287,6 +379,7 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     residentGpuQueueFenceMs,
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
+    performanceGate,
     residentStageTiming,
     residentStepsStatus: residentSteps?.status ?? null,
     residentStepStatus: residentStep?.status ?? null,
@@ -424,6 +517,18 @@ async function main() {
     fusedResidentMechanicsActiveGrid: fuseResidentMechanicsActiveGrid,
     fusedActiveGridSafetyCells,
     measureGpuQueueFence,
+    performanceGate: {
+      schema: 'peercompute.ulg.sph-performance-benchmark-suite-gate.v0',
+      status: scenarios.every((scenario) => scenario.performanceGate?.status === 'pass') ? 'pass' : 'fail',
+      failedScenarioCount: scenarios.filter((scenario) => scenario.performanceGate?.status !== 'pass').length,
+      requireActiveGrid: requireActiveGridGate,
+      requireQueueFence: requireQueueFenceGate,
+      thresholds: {
+        minResidentStageStepsPerSecond,
+        maxResidentGpuCompletedStageMs,
+        maxReadbackBytesPerStep
+      }
+    },
     scenarios
   };
   await mkdir(path.dirname(outputPath), { recursive: true });
@@ -431,7 +536,11 @@ async function main() {
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (
     process.env.ULG_BENCH_FAIL_ON_ERROR === '1'
-    && (report.status !== 'complete' || scenarios.some((scenario) => scenario.status !== 'good'))
+    && (
+      report.status !== 'complete'
+      || report.performanceGate.status !== 'pass'
+      || scenarios.some((scenario) => scenario.status !== 'good')
+    )
   ) {
     process.exitCode = 1;
   }

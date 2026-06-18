@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "peercompute.ulg.material-property-bank.schema.v0",
+  "type": "object",
+  "required": [
+    "schema",
+    "schemaVersion",
+    "bankFamily",
+    "generatorFingerprint",
+    "records"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "peercompute.ulg.material-property-bank.elements.v0" },
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "bankFamily": { "const": "elements" },
+    "generatorFingerprint": { "type": "string", "minLength": 1 },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "element.schema.json" }
+    }
+  }
+}

@@ -1,5 +1,44 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Resident Gates, Material Bank, Worker Telemetry, And Wall Contact
+
+This slice covers the non-renderer lanes around the current MLS-MPM push:
+resident performance gates, browser Worker capability reporting, the first
+precomputed material-property bank seed, and elasticity-inclusive wall contact.
+The GPU-resident marching-cubes extension work is tracked separately through
+the `/home/cos/projects/webgpu-marching-cubes` adapter/refactor lane.
+
+Focused checks:
+
+- Syntax:
+  `node --check scripts/sph-performance-benchmark.mjs`,
+  `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`,
+  `node --check src/runtime/peercomputeBrowserResidentHost.js`,
+  `node --check scripts/material-properties/validate-material-property-bank.mjs`,
+  and `node --check src/runtime/material/materialPropertyBank.js` passed.
+- Focused resident/material/contact tests:
+  `node --test tests/sphGridUpdateGpuKernel.test.mjs tests/materialPropertyBank.test.mjs tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "wall barrier|floor no-slip|floor row|material property bank|Worker capability"`
+  passed `34/34`.
+- Material bank validator:
+  `npm run validate:material-properties` passed with `5` element records:
+  `H`, `O`, `Na`, `Fe`, and `Cs`.
+- Physics atomics:
+  `npm run test:physics-atomics` passed `11/14`, with the `3` long-horizon
+  liquid acceptance gates skipped because they remain opt-in behind
+  `ULG_RUN_LONG_LIQUID_ATOMIC=1`.
+
+Known residual risk:
+
+- The material JSON bank is a warm-input seed only; it is not yet the default
+  `MaterialRegistry` resolver source and does not yet include crystalline
+  structures or common compounds.
+- Wall contact now has a bulk/shear-derived stiffness route, but material pair
+  and interface contact still need a physics-engine integration after wall
+  behavior stays stable.
+- The browser Worker telemetry makes inline fallback explicit; it does not by
+  itself make PeerCompute run this Node test environment in real browser
+  Workers.
+
 ## Current Focused Result - 2026-06-18 Mobile Three Renderer Viewport Integration
 
 The mobile MLS-MPM visibility fix now lives in the normal Three scene rather

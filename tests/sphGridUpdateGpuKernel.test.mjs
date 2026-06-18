@@ -14,6 +14,7 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
   createMlsMpmGridUpdateParityReport,
+  estimateMlsMpmWallBarrierElasticStiffness,
   mlsMpmWallBarrierContactResponse,
   runMlsMpmGridUpdateWebGpu,
   runMlsMpmGridUpdateWithOptionalWebGpu,
@@ -203,6 +204,11 @@ test('MLS-MPM wall barrier response applies cubic-barrier dynamic stiffness', ()
     dtSeconds: 0.01,
     elasticNormalStiffnessNPerM: 100000
   });
+  const estimatedElasticity = estimateMlsMpmWallBarrierElasticStiffness({
+    bulkModulusPa: 2.2e9,
+    shearModulusPa: 1.1e9,
+    supportLengthM: 0.02
+  });
 
   assert.equal(loose.schema, 'peercompute.ulg.mls-mpm-wall-barrier-contact.v0');
   assert.equal(loose.mode, 'cubic-barrier-dynamic-grid-wall-response');
@@ -211,6 +217,9 @@ test('MLS-MPM wall barrier response applies cubic-barrier dynamic stiffness', ()
   assert.ok(tight.responseAlpha > loose.responseAlpha);
   assert.ok(elastic.responseAlpha > loose.responseAlpha);
   assert.ok(tight.correctedNormalVelocityMPerS > loose.correctedNormalVelocityMPerS);
+  assert.equal(estimatedElasticity.status, 'wall-barrier-elastic-stiffness-estimated');
+  assert.equal(estimatedElasticity.mode, 'elasticity-inclusive-dynamic-stiffness-estimate');
+  assert.ok(estimatedElasticity.elasticNormalStiffnessNPerM > 0);
 });
 
 test('CPU MLS-MPM grid update converts momentum to velocity and applies gravity', () => {
@@ -252,12 +261,19 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
     dt: 0.1,
     gravityMPerS2: [0, 0, 0],
     boxDimsM: [5, 5, 5],
-    cflFactor: 10
+    cflFactor: 10,
+    wallBarrierMaterialBulkModulusPa: 2.2e9,
+    wallBarrierMaterialShearModulusPa: 1.1e9
   });
   nearlyEqual(wall.updatedGridNodes[1], 0);
   nearlyEqual(wall.updatedGridNodes[2], 0);
   nearlyEqual(wall.updatedGridNodes[3], 0);
   assert.equal(wall.wallBarrierContactStatus, 'wall-barrier-contact-applied-cpu-reference');
+  assert.equal(wall.wallBarrierElasticStiffnessSource, 'bulk-shear-modulus-grid-support');
+  assert.equal(wall.wallBarrierBulkModulusPa, 2.2e9);
+  assert.equal(wall.wallBarrierShearModulusPa, 1.1e9);
+  assert.equal(wall.wallBarrierSupportLengthM, 1);
+  assert.ok(wall.wallBarrierElasticStiffnessNPerM > 0);
   assert.equal(wall.wallBarrierContactNodeCount, 1);
   assert.ok(wall.wallBarrierContactMaxResponseAlpha > 0.999);
   assert.ok(wall.wallBarrierContactMaxNormalStiffness > 0);

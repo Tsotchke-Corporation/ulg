@@ -2,6 +2,18 @@
 
 Date: 2026-06-18 AKDT
 
+Status update, 2026-06-18 AKDT: the first wall-contact slice is implemented in
+the MLS-MPM grid update path. `mlsMpmWallBarrierContactResponse()` remains the
+small cubic-barrier dynamic response helper, and
+`estimateMlsMpmWallBarrierElasticStiffness()` now derives an
+elasticity-inclusive normal stiffness from material bulk/shear modulus and grid
+support length when an explicit wall stiffness is not supplied. CPU and WebGPU
+grid-update summaries carry the stiffness source and material modulus fields.
+Focused tests cover the stiffness estimate and floor/wall contact propagation.
+Next: connect representative material mechanics rows into the runtime wall
+parameters, then extend the same approach to material-interface/contact pairs
+inside the physics update path.
+
 ## Source
 
 - Local reference read: `plan/cubic-barrier.pdf`.

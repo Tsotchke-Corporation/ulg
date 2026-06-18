@@ -4924,6 +4924,42 @@ function summarizeNodeKernelAuthority({
   };
 }
 
+function summarizeWorkerCapability({
+  computeManager,
+  nodeKernel,
+  enableWorkers
+} = {}) {
+  const workerConstructorAvailable = typeof globalThis.Worker === 'function';
+  const workerPolicy = computeManager?.getWorkerPolicy?.() || null;
+  const stats = computeManager?.getStats?.() || null;
+  const capabilities = computeManager?.getCapabilities?.() || null;
+  const nodeKernelStatus = nodeKernel?.getStatus?.() || null;
+  const effectiveEnableWorkers = computeManager?.config?.enableWorkers ?? enableWorkers;
+  const supported = workerConstructorAvailable && effectiveEnableWorkers !== false;
+  return {
+    schema: 'peercompute.ulg.browser-worker-capability.v0',
+    status: supported ? 'worker-capability-ready' : 'worker-capability-blocked',
+    requestedEnableWorkers: enableWorkers !== false,
+    effectiveEnableWorkers: effectiveEnableWorkers !== false,
+    workerConstructorAvailable,
+    globalScope: typeof globalThis.WorkerGlobalScope === 'function'
+      && globalThis.self
+      && globalThis.self instanceof globalThis.WorkerGlobalScope
+      ? 'worker'
+      : 'window-or-node',
+    crossOriginIsolated: globalThis.crossOriginIsolated === true,
+    workerPolicy,
+    workerCount: stats?.workerCount ?? capabilities?.workers ?? null,
+    targetWorkers: stats?.targetWorkers ?? capabilities?.targetWorkers ?? workerPolicy?.targetWorkers ?? null,
+    workerTasksCompleted: stats?.workerTasksCompleted ?? null,
+    inlineTasksCompleted: stats?.inlineTasksCompleted ?? null,
+    nodeKernelComputeWorkers: nodeKernelStatus?.compute?.stats?.workerCount ?? null,
+    blocker: supported
+      ? null
+      : (!workerConstructorAvailable ? 'worker-constructor-unavailable' : 'enable-workers-false')
+  };
+}
+
 export async function createPeerComputeResidentAuthorityHost({
   peercomputeModuleUrl = null,
   nodeKernelModuleUrl = DEFAULT_PEERCOMPUTE_NODE_KERNEL_MODULE_URL,
@@ -5170,6 +5206,7 @@ export async function createPeerComputeResidentAuthorityHost({
     peercomputeResidentStageWorkerBridgeAvailable: typeof createResidentStageWorkerBackend === 'function',
     createUlgMechanicsResidentStageWorkerRunner,
     ulgMechanicsResidentStageWorkerModulePath: DEFAULT_ULG_MECHANICS_RESIDENT_STAGE_WORKER_MODULE_PATH,
+    workerCapability: summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers }),
     nodeKernelMode,
     nodeKernelAuthority: summarizeNodeKernelAuthority({
       nodeKernel,
@@ -5603,6 +5640,7 @@ export async function createPeerComputeResidentAuthorityHost({
         fallbackReason: nodeKernelInitializationError,
         networkGateStatus: nodeKernelNetworkGateStatus
       });
+      host.workerCapability = summarizeWorkerCapability({ computeManager, nodeKernel, enableWorkers });
       return host.nodeKernelAuthority;
     },
     refreshRemotePlacementGateStatus() {
@@ -5964,6 +6002,14 @@ export function summarizePeerComputeResidentAuthorityHost(host = null) {
       || typeof host?.submitGasCellEosProducerStageTask === 'function',
     residentMechanicsStageTaskChainReady: typeof host?.computeManager?.runUlgMechanicsStageTaskChain === 'function'
       || typeof host?.runMechanicsStageTaskChain === 'function',
+    workerCapabilitySchema: host?.workerCapability?.schema || null,
+    workerCapabilityStatus: host?.workerCapability?.status || null,
+    workerCapabilityBlocker: host?.workerCapability?.blocker || null,
+    workerConstructorAvailable: host?.workerCapability?.workerConstructorAvailable ?? null,
+    workerRequestedEnableWorkers: host?.workerCapability?.requestedEnableWorkers ?? null,
+    workerEffectiveEnableWorkers: host?.workerCapability?.effectiveEnableWorkers ?? null,
+    workerCount: host?.workerCapability?.workerCount ?? null,
+    workerTargetWorkers: host?.workerCapability?.targetWorkers ?? null,
     peercomputeResidentStageWorkerBridgeAvailable: host?.peercomputeResidentStageWorkerBridgeAvailable === true,
     residentMechanicsStageWorkerRunnerFactoryReady: typeof host?.createUlgMechanicsResidentStageWorkerRunner === 'function',
     residentMechanicsStageWorkerModulePath: host?.ulgMechanicsResidentStageWorkerModulePath || null,

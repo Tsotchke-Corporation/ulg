@@ -1,5 +1,79 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Resident Gates, Worker Capability, Material Bank Seed, Wall Contact, And Marching-Cubes Adapter
+
+Summary:
+
+- Refactored the sibling `/home/cos/projects/webgpu-marching-cubes` checkout
+  through a sub-agent into a DOM-free vanilla JS adapter layer. The extension
+  now accepts caller-owned `GPUDevice` instances, exposes swappable
+  adapter/factory exports, tracks practical buffer/texture device ownership,
+  returns structured execution/status objects, and keeps Three-specific binding
+  separate from extraction.
+- Added ULG-side adapter-boundary code that consumes the extension execution
+  contract without wiring it into rendering yet. It identifies compact
+  `float32x4-position` extension outputs as hot-loop-safe retained buffers that
+  still need translation into ULG's richer 16-float surface vertex rows plus
+  draw/indirect metadata.
+- This pass did not add an overlay path and did not route rendering outside
+  the existing engine-owned scene.
+- Tightened the resident performance benchmark with explicit pass/fail gates
+  for active-grid dispatch, queue-fenced resident timing, resident step
+  throughput, and readback bytes per step. `ULG_BENCH_FAIL_ON_ERROR=1` now
+  fails when requested performance gates fail, not only when the probe exits
+  badly.
+- Added browser Worker capability telemetry to the resident authority host
+  summary so the console harness can distinguish `Worker` constructor absence,
+  disabled worker config, worker policy, target worker count, and inline task
+  fallback evidence.
+- Added the first checked-in precomputed material-property bank slice:
+  versioned JSON schemas, `elements.json` seeds for the currently exercised
+  elements, a provenance-preserving loader, and a validator script. The bank is
+  marked as non-authoritative warm input for the resolver/cache path.
+- Added an elasticity-inclusive wall-barrier stiffness estimate for MLS-MPM
+  wall contact. Explicit wall stiffness still wins; otherwise wall contact can
+  derive normal stiffness from material bulk/shear modulus and grid support
+  length, with diagnostics carried through CPU/WebGPU grid update summaries.
+
+Validation:
+
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check src/runtime/sph/sphGridUpdateGpuKernel.js`.
+- PASS: `node --check src/runtime/peercomputeBrowserResidentHost.js`.
+- PASS: `node --check scripts/material-properties/validate-material-property-bank.mjs`.
+- PASS: `node --check src/runtime/material/materialPropertyBank.js`.
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --test tests/sphGridUpdateGpuKernel.test.mjs --test-name-pattern "wall barrier|floor no-slip|floor row"`
+  reported `15/15` pass.
+- PASS: `node --test tests/materialPropertyBank.test.mjs` reported `2/2`
+  pass.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `3/3` pass.
+- PASS: `npm run validate:material-properties` validated `5` element rows:
+  `H`, `O`, `Na`, `Fe`, and `Cs`.
+- PASS: `node --test tests/peercomputeComputeManagerIntegration.test.mjs --test-name-pattern "Worker capability"`
+  reported `17/17` pass and preserved the current Node inline-worker fallback
+  evidence as a warning, not a browser console issue.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm test` reported
+  `5/5` pass.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm run build` passed
+  with the existing large chunk warning.
+
+Open:
+
+- This is a plumbing and validation slice, not the full FPS fix. The mounted
+  GUI still needs sidecars and rendering folded into the resident lane or
+  replaced by the later GPU-resident renderer.
+- ULG still needs a translation/consumer stage from extension compact
+  `float32x4-position` vertices into `peercompute.ulg.sph-gpu-render-surface-vertices.v0`
+  rows, surface draw rows, and indirect draw rows before enabling the extension
+  in the scene.
+- The material bank is not yet wired into `MaterialRegistry` as a default
+  source and does not yet cover crystalline structures or compounds.
+- The wall barrier slice handles wall/floor contact first. Pair/interface
+  contact still needs an engine-owned physics integration after the wall path
+  stays stable in visual and atomic probes.
+
 ## 2026-06-18 AKDT - Todo Folder Hygiene And Physics Bug Routing
 
 Summary:

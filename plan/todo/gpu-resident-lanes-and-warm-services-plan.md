@@ -2,6 +2,14 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-18 Worker capability telemetry: the browser resident
+authority host summary now exposes Worker constructor availability, requested
+and effective worker enablement, ComputeManager worker policy, target worker
+count, observed worker count, and inline/worker task counters. This does not
+make Node-based tests run in browser Workers, but it gives the console harness
+and resident summaries a stable blocker surface for the user's worker-disabled
+reports.
+
 Status update, 2026-06-18 NodeKernel execution authority consumption: ULG now
 uses `nodeKernel.executeGpuResidentLaneStagePlan()` for mechanics stage-chain
 execution when a real NodeKernel owns the resident ComputeManager. The raw

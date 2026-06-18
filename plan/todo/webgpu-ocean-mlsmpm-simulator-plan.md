@@ -299,6 +299,27 @@ Native WebGPU Marching Cubes checkout assessment, 2026-06-18 AKDT:
   counts, draw ranges, and draw metadata resident or update them through
   budgeted diagnostics.
 
+Extension refactor routing, 2026-06-18 AKDT:
+
+- The native checkout is now the right place to build the swappable extraction
+  adapter before ULG consumes it. Required adapter shape:
+  - vanilla JS ES module exports, no TypeScript/React requirement;
+  - accepts a caller-owned `GPUDevice` and never requests a second device in
+    the default ULG path;
+  - validates or reports same-device buffer ownership instead of binding stale
+    cross-device handles;
+  - accepts ULG-style storage buffers for scalar/render fields and
+    material/phase/optical metadata, not only the reference `texture_3d<f32>`;
+  - emits resident compact vertex, normal/material rows, per-surface draw
+    metadata, and indirect draw inputs through stable status objects;
+  - keeps DOM/canvas/Three binding optional so ULG can swap between
+    metadata-only, Three/WebGPU, or future screen-space fluid renderers;
+  - includes tests or a mock-device contract proving factory swapability,
+    caller-owned-device behavior, and no hidden readback/overlay requirement.
+- ULG integration should wait for that adapter boundary, then add one engine
+  bridge inside the existing `sphPhaseScene` resident surface path. Do not
+  introduce a separate canvas overlay as the completion target.
+
 Interim status, 2026-06-18 AKDT:
 
 - `three-render-row-points` removes CPU `MarchingCubes` construction from the

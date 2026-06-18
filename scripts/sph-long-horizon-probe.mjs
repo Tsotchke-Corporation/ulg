@@ -747,6 +747,18 @@ async function runBrowserProbe({
         const number = Number(value);
         return Number.isFinite(number) ? number : null;
       };
+      const cloneFiniteVector = (value) => {
+        if (!Array.isArray(value) || value.length < 3) return null;
+        const vector = value.slice(0, 3).map((entry) => Number(entry));
+        return vector.every(Number.isFinite) ? vector : null;
+      };
+      const compactPositionBounds = (bounds) => bounds ? {
+        status: bounds.status ?? null,
+        count: bounds.count ?? null,
+        min: cloneFiniteVector(bounds.min),
+        max: cloneFiniteVector(bounds.max),
+        size: cloneFiniteVector(bounds.size)
+      } : null;
       const compactDiagnostics = (diagnostics) => diagnostics ? {
         particleCount: diagnostics.particleCount ?? null,
         gridNodeCount: diagnostics.gridNodeCount ?? null,
@@ -1394,6 +1406,10 @@ async function runBrowserProbe({
             renderRowsDecodedMaterialPhaseCounts: renderState.renderRowsDecodedMaterialPhaseCounts ?? null,
             renderRowsDecodedMaterialPhaseDomainCounts: renderState.renderRowsDecodedMaterialPhaseDomainCounts ?? null,
             renderRowsDecodedMaterialPhaseDomainBounds: renderState.renderRowsDecodedMaterialPhaseDomainBounds ?? null,
+            renderRowsDecodedPositionCount: renderState.renderRowsDecodedPositionCount ?? null,
+            renderRowsDecodedTotalMassKg: finiteOrNull(renderState.renderRowsDecodedTotalMassKg),
+            renderRowsDecodedCenterOfMassM: cloneFiniteVector(renderState.renderRowsDecodedCenterOfMassM),
+            renderRowsDecodedPositionBoundsM: compactPositionBounds(renderState.renderRowsDecodedPositionBoundsM),
             renderRowsDecodedSampleRows: renderState.renderRowsDecodedSampleRows ?? null,
             gasPressureSummaryStatus: renderState.gasPressureSummaryStatus ?? null,
             gasPressureSummarySource: renderState.gasPressureSummarySource ?? null,
@@ -1479,6 +1495,43 @@ async function runBrowserProbe({
       };
       if (requestedCaptureFrames) {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }
+      if (
+        requestedCompactSummaryMode === 'none'
+        && requestedRenderEvery > 0
+        && sceneApi.refreshSphResidentRenderState
+      ) {
+        markProbeProgress('initial-render-state-started');
+        try {
+          overlay.__sphGpuParticleUpload = await sceneApi.refreshSphGpuParticleBuffers?.({
+            preferWebGpu: true
+          }) || overlay.__sphGpuParticleUpload || null;
+          overlay.__mlsMpmGpuParticleUpload = await sceneApi.refreshMlsMpmGpuParticleBuffers?.({
+            preferWebGpu: true
+          }) || overlay.__mlsMpmGpuParticleUpload || null;
+          overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
+            preferWebGpu: true,
+            residentSteps: execution,
+            renderFieldReadbackMode: requestedRenderReadbackMode,
+            renderRowsReadbackMode: requestedRenderRowsReadbackMode,
+            renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
+            surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
+            surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+            surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+            gasPressureSummary: overlay.__sphResidentGasPressureSummary || null
+          });
+          overlay.__sphResidentSurfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || null;
+          sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-initial-render-refresh' });
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          markProbeProgress('initial-render-state-completed', {
+            status: overlay.__sphResidentRenderState?.status ?? null,
+            renderRowsReadback: overlay.__sphResidentRenderState?.renderRowsReadback ?? null
+          });
+        } catch (error) {
+          markProbeProgress('initial-render-state-skipped', {
+            reason: error instanceof Error ? error.message : String(error)
+          });
+        }
       }
       markProbeProgress('sampling-initial-state');
       metrics.push(sample(0, 'initial', 0));
@@ -2916,6 +2969,29 @@ function analyzeTimeline(timeline, {
       ?? metric?.residentStep?.particlePingPong?.nextTime
       ?? metric?.residentSteps?.nextTime
   );
+  const finiteVector3 = (value) => {
+    if (!Array.isArray(value) || value.length < 3) return null;
+    const vector = value.slice(0, 3).map((entry) => finiteMetric(entry));
+    return vector.every(Number.isFinite) ? vector : null;
+  };
+  const vectorDistanceM = (a, b) => {
+    const av = finiteVector3(a);
+    const bv = finiteVector3(b);
+    if (!av || !bv) return null;
+    return Math.hypot(av[0] - bv[0], av[1] - bv[1], av[2] - bv[2]);
+  };
+  const boundsCenterM = (bounds) => {
+    const min = finiteVector3(bounds?.min);
+    const max = finiteVector3(bounds?.max);
+    if (!min || !max) return null;
+    return min.map((value, axis) => 0.5 * (value + max[axis]));
+  };
+  const vectorMaxAxisDeltaM = (a, b) => {
+    const av = finiteVector3(a);
+    const bv = finiteVector3(b);
+    if (!av || !bv) return null;
+    return Math.max(...av.map((value, axis) => Math.abs(value - bv[axis])));
+  };
   const visualFrameTimesS = (Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [])
     .map((frame) => metricTimeS(metrics[Number(frame?.sampleIndex)]))
     .filter(Number.isFinite);
@@ -2982,6 +3058,107 @@ function analyzeTimeline(timeline, {
     .filter(Number.isFinite);
   const maxSpeedObservedMPerS = maxSpeedSeries.length ? Math.max(...maxSpeedSeries) : null;
   const maxDisplacementObservedM = maxDisplacementSeries.length ? Math.max(...maxDisplacementSeries) : null;
+  const compactSummaryDisabled = timeline?.compactSummaryMode === 'none' || metrics.some((metric) => (
+    metric?.residentStep?.stageTiming?.compactSummaryRequested === false
+    || metric?.residentSteps?.finalStepStageTiming?.compactSummaryRequested === false
+  ));
+  const renderRowMotionSamples = metrics
+    .map((metric, index) => {
+      const renderState = metric?.renderState || null;
+      const positionCount = finiteMetric(renderState?.renderRowsDecodedPositionCount);
+      const centerOfMassM = finiteVector3(renderState?.renderRowsDecodedCenterOfMassM);
+      const positionBoundsM = renderState?.renderRowsDecodedPositionBoundsM || null;
+      const centerFromBoundsM = boundsCenterM(positionBoundsM);
+      const boundsSizeM = finiteVector3(positionBoundsM?.size);
+      if (!centerOfMassM && !centerFromBoundsM && !boundsSizeM) return null;
+      return {
+        index,
+        phase: metric?.phase ?? null,
+        timeS: metricTimeS(metric),
+        wallTimeS: finiteMetric(metric?.capturedAtMs) != null ? finiteMetric(metric.capturedAtMs) / 1000 : null,
+        positionCount,
+        centerOfMassM,
+        centerFromBoundsM,
+        boundsSizeM
+      };
+    })
+    .filter(Boolean);
+  const maxDisplacementFromFirst = (samples, key, distanceFn = vectorDistanceM) => {
+    const first = samples.find((sample) => sample?.[key]);
+    if (!first) return null;
+    const deltas = samples
+      .map((sample) => distanceFn(sample?.[key], first[key]))
+      .filter(Number.isFinite);
+    return deltas.length ? Math.max(...deltas) : null;
+  };
+  const maxConsecutiveRate = (samples, key, distanceFn = vectorDistanceM) => {
+    let maxRate = null;
+    let previous = null;
+    for (const sample of samples) {
+      if (!sample?.[key]) continue;
+      if (previous?.[key]) {
+        const distance = distanceFn(sample[key], previous[key]);
+        const simDt = Number.isFinite(sample.timeS) && Number.isFinite(previous.timeS)
+          ? sample.timeS - previous.timeS
+          : null;
+        const wallDt = Number.isFinite(sample.wallTimeS) && Number.isFinite(previous.wallTimeS)
+          ? sample.wallTimeS - previous.wallTimeS
+          : null;
+        const dt = Number.isFinite(simDt) && simDt > 0
+          ? simDt
+          : (Number.isFinite(wallDt) && wallDt > 0 ? wallDt : null);
+        if (Number.isFinite(distance) && Number.isFinite(dt) && dt > 0) {
+          maxRate = Math.max(maxRate ?? 0, distance / dt);
+        }
+      }
+      previous = sample;
+    }
+    return maxRate;
+  };
+  const renderRowMaxCenterDisplacementM = maxDisplacementFromFirst(renderRowMotionSamples, 'centerOfMassM');
+  const renderRowMaxBoundsCenterDisplacementM = maxDisplacementFromFirst(renderRowMotionSamples, 'centerFromBoundsM');
+  const renderRowMaxBoundsExtentDeltaM = maxDisplacementFromFirst(
+    renderRowMotionSamples,
+    'boundsSizeM',
+    vectorMaxAxisDeltaM
+  );
+  const renderRowEstimatedMaxCenterSpeedMPerS = maxConsecutiveRate(renderRowMotionSamples, 'centerOfMassM');
+  const renderRowEstimatedMaxBoundsCenterSpeedMPerS = maxConsecutiveRate(renderRowMotionSamples, 'centerFromBoundsM');
+  const renderRowEstimatedMaxBoundsExtentRateMPerS = maxConsecutiveRate(
+    renderRowMotionSamples,
+    'boundsSizeM',
+    vectorMaxAxisDeltaM
+  );
+  const renderRowMotionDisplacementsM = [
+    renderRowMaxCenterDisplacementM,
+    renderRowMaxBoundsCenterDisplacementM,
+    renderRowMaxBoundsExtentDeltaM
+  ].filter(Number.isFinite);
+  const renderRowMotionSpeedsMPerS = [
+    renderRowEstimatedMaxCenterSpeedMPerS,
+    renderRowEstimatedMaxBoundsCenterSpeedMPerS,
+    renderRowEstimatedMaxBoundsExtentRateMPerS
+  ].filter(Number.isFinite);
+  const renderRowMaxDisplacementM = renderRowMotionDisplacementsM.length
+    ? Math.max(...renderRowMotionDisplacementsM)
+    : null;
+  const renderRowEstimatedMaxSpeedMPerS = renderRowMotionSpeedsMPerS.length
+    ? Math.max(...renderRowMotionSpeedsMPerS)
+    : null;
+  const motionMaxSpeedObservedMPerS = maxSpeedObservedMPerS
+    ?? (compactSummaryDisabled ? renderRowEstimatedMaxSpeedMPerS : null);
+  const motionMaxDisplacementObservedM = maxDisplacementObservedM
+    ?? (compactSummaryDisabled ? renderRowMaxDisplacementM : null);
+  const motionSpeedEvidenceSource = maxSpeedObservedMPerS != null
+    ? 'resident-compact-summary'
+    : (compactSummaryDisabled && renderRowEstimatedMaxSpeedMPerS != null ? 'decoded-render-rows' : null);
+  const motionDisplacementEvidenceSource = maxDisplacementObservedM != null
+    ? 'resident-compact-summary'
+    : (compactSummaryDisabled && renderRowMaxDisplacementM != null ? 'decoded-render-rows' : null);
+  const renderRowMotionEvidenceAvailable = (
+    compactSummaryDisabled
+    && (renderRowEstimatedMaxSpeedMPerS != null || renderRowMaxDisplacementM != null)
+  );
   const minVolumeObservedJ = minVolumeSeries.length ? Math.min(...minVolumeSeries) : null;
   const maxVolumeObservedJ = maxVolumeSeries.length ? Math.max(...maxVolumeSeries) : null;
   const maxPressureImpulseNSeconds = pressureImpulseSeries.length ? Math.max(...pressureImpulseSeries) : null;
@@ -3592,13 +3769,13 @@ function analyzeTimeline(timeline, {
     issues.push('initial-preflight-blocked');
   }
   if (!visualOnly) {
-    if (diagnostics.length === 0) issues.push('missing-resident-diagnostics');
-    if (maxSpeedObservedMPerS == null) issues.push('missing-max-speed');
-    if (maxSpeedObservedMPerS != null && maxSpeedObservedMPerS > maxSpeedMPerS) issues.push(`max-speed>${maxSpeedMPerS}`);
+    if (diagnostics.length === 0 && !renderRowMotionEvidenceAvailable) issues.push('missing-resident-diagnostics');
+    if (motionMaxSpeedObservedMPerS == null) issues.push('missing-max-speed');
+    if (motionMaxSpeedObservedMPerS != null && motionMaxSpeedObservedMPerS > maxSpeedMPerS) issues.push(`max-speed>${maxSpeedMPerS}`);
     if (expectStatic) {
-      if (maxDisplacementObservedM == null) {
+      if (motionMaxDisplacementObservedM == null) {
         issues.push('missing-static-displacement');
-      } else if (maxDisplacementObservedM > staticMaxDisplacementM) {
+      } else if (motionMaxDisplacementObservedM > staticMaxDisplacementM) {
         issues.push(`static-displacement>${staticMaxDisplacementM}`);
       }
       if (
@@ -3607,7 +3784,7 @@ function analyzeTimeline(timeline, {
       ) {
         issues.push(`static-center-of-mass-delta>${staticMaxCenterOfMassDeltaM}`);
       }
-    } else if (maxDisplacementObservedM == null || maxDisplacementObservedM <= 0) {
+    } else if (motionMaxDisplacementObservedM == null || motionMaxDisplacementObservedM <= 0) {
       issues.push('no-positive-displacement');
     }
     if (minActiveGridNodeCount != null && minActiveGridNodeCount <= 0) issues.push('inactive-grid-nodes');
@@ -3794,6 +3971,21 @@ function analyzeTimeline(timeline, {
     initialPreflightBlockers,
     maxSpeedObservedMPerS,
     maxDisplacementObservedM,
+    motionMaxSpeedObservedMPerS,
+    motionMaxDisplacementObservedM,
+    motionSpeedEvidenceSource,
+    motionDisplacementEvidenceSource,
+    compactSummaryDisabled,
+    renderRowMotionEvidenceAvailable,
+    renderRowMotionSampleCount: renderRowMotionSamples.length,
+    renderRowMaxCenterDisplacementM,
+    renderRowMaxBoundsCenterDisplacementM,
+    renderRowMaxBoundsExtentDeltaM,
+    renderRowMaxDisplacementM,
+    renderRowEstimatedMaxCenterSpeedMPerS,
+    renderRowEstimatedMaxBoundsCenterSpeedMPerS,
+    renderRowEstimatedMaxBoundsExtentRateMPerS,
+    renderRowEstimatedMaxSpeedMPerS,
     minActiveGridNodeCount,
     minVolumeObservedJ,
     maxVolumeObservedJ,

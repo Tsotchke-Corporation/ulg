@@ -2616,6 +2616,7 @@ export function mountSphPhaseDemoOverlay({
   let pendingMlsMpmResidentStepsSignature = null;
   let pendingMlsMpmResidentStepsToken = 0;
   let particleSyncGeneration = 0;
+  let resetRebuildPending = false;
   let residentRenderReadbackSequence = 0;
   let residentRenderReadbackCount = 0;
   let residentRenderReadbackSkippedCount = 0;
@@ -3859,9 +3860,9 @@ export function mountSphPhaseDemoOverlay({
       ) {
         pendingMlsMpmResidentStepsSignature = null;
       }
-      if (scheduleLatestGeneration && overlay.isConnected) {
+      if (scheduleLatestGeneration && overlay.isConnected && !resetRebuildPending) {
         window.requestAnimationFrame(() => {
-          if (!overlay.isConnected) return;
+          if (!overlay.isConnected || resetRebuildPending) return;
           scheduleMlsMpmResidentSteps({
             stepCount: normalizedStepCount,
             readbackMode,
@@ -3918,6 +3919,50 @@ export function mountSphPhaseDemoOverlay({
     pendingMlsMpmGridUpdateSignature = null;
     pendingMlsMpmG2pReconstructionSignature = null;
     pendingMlsMpmResidentStepsSignature = null;
+  }
+
+  function invalidateResidentRuntimeForReset(reason = 'demo-rebuild') {
+    resetRebuildPending = true;
+    particleSyncGeneration += 1;
+    pendingMlsMpmResidentStepsToken += 1;
+    clearSceneDerivedSignatures();
+    scene.resetResidentStateForParticleReset?.({ reason, clearOverlay: true });
+    overlay.__sphLastStepResult = null;
+    overlay.__sphResidentRenderState = null;
+    overlay.__sphResidentRenderStateError = null;
+    overlay.__sphResidentRenderReadbackCadence = null;
+    overlay.__sphResidentMaterialInterfaceState = null;
+    overlay.__sphResidentMaterialInterfaceStateError = null;
+    overlay.__sphResidentPressureInterfaceState = null;
+    overlay.__sphResidentPressureInterfaceStateError = null;
+    overlay.__sphResidentSurfaceDraw = null;
+    overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+    overlay.__sphResidentGasPressureSummary = null;
+    overlay.__mlsMpmP2gGridProjection = null;
+    overlay.__mlsMpmGridUpdate = null;
+    overlay.__mlsMpmG2pReconstruction = null;
+    overlay.__mlsMpmResidentStep = null;
+    overlay.__mlsMpmResidentSteps = null;
+    overlay.__mlsMpmResidentStepsError = null;
+    overlay.__mlsMpmResidentStepsPending = null;
+    overlay.__mlsMpmResidentStepsSlow = null;
+    overlay.__mlsMpmResidentStepsStale = null;
+    overlay.__mlsMpmResidentSourceMode = 'reset-pending-rebuild';
+    overlay.__mlsMpmResidentContinuedFromResidentState = false;
+    overlay.__mlsMpmResidentContinuationAvailable = false;
+    overlay.__sphResetStatus = {
+      schema: 'peercompute.ulg.sph-demo-reset-status.v0',
+      status: 'resident-state-invalidated-for-reset',
+      reason,
+      generation: particleSyncGeneration,
+      updatedAtMs: performance.now()
+    };
+    residentRenderReadbackSequence = 0;
+    residentRenderReadbackCount = 0;
+    residentRenderReadbackSkippedCount = 0;
+    residentAccumulatedSubvisibleMotionM = 0;
+    residentSubvisibleMotionBurstCount = 0;
+    resetResidentPerf(reason);
   }
 
   function resetSceneForDimensions(boxDimsM, resetReason) {
@@ -4244,6 +4289,7 @@ export function mountSphPhaseDemoOverlay({
     if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
     playing = false;
     overlay.querySelector('#sph-play').textContent = 'Play';
+    invalidateResidentRuntimeForReset('demo-rebuild');
     const canUseWorkerRebuild = typeof runtime?.runSphPhaseRebuild === 'function';
     const rebuildLocation = canUseWorkerRebuild ? 'ulg-runtime worker' : 'main thread';
     setCpuClosureTask({
@@ -4356,6 +4402,14 @@ export function mountSphPhaseDemoOverlay({
       wallTemperaturesK: viewState.wallTemperaturesK || viewState.scenario?.walls?.faces || null,
       staticTableCache
     });
+    resetRebuildPending = false;
+    if (overlay.__sphResetStatus?.status === 'resident-state-invalidated-for-reset') {
+      overlay.__sphResetStatus = {
+        ...overlay.__sphResetStatus,
+        status: 'particle-state-resynced-after-reset',
+        completedAtMs: performance.now()
+      };
+    }
     overlay.__sphPhysicalLawGroups = physicalLawGroupsFromControls();
     overlay.__sphOpticalGpuLookup = scene.getOpticalGpuLookup?.() || null;
     overlay.__sphThermalMaterialTable = scene.getSphThermalMaterialTable?.() || null;

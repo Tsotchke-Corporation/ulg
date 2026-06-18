@@ -3710,9 +3710,11 @@ export function createSphPhaseScene(container, {
       || null;
     const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
       || finalStep?.nextParticleUploads?.sphParticleUpload
+      || sphGpuParticleUpload
       || null;
     const nextMlsMpmUpload = residentSteps?.nextParticleUploads?.mlsMpmParticleUpload
       || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
+      || mlsMpmGpuParticleUpload
       || null;
     if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
       return publishSphResidentMaterialInterfaceState({
@@ -4484,6 +4486,31 @@ export function createSphPhaseScene(container, {
       sphResidentSurfaceDrawRenderBridge = null;
       scene.userData.sphResidentSurfaceDrawRenderBridge = null;
     }
+  }
+
+  function resetResidentStateForParticleReset({
+    reason = 'particle-reset',
+    clearOverlay = true
+  } = {}) {
+    clearMlsMpmResidentExecutionArtifacts();
+    clearSphResidentSurfaceDrawArtifacts({ clearOverlay });
+    publishSphResidentMaterialInterfaceState(null);
+    publishSphResidentPressureInterfaceState(null);
+    destroyPressureInterfaceForceRowsUpload();
+    sphResidentRenderState = null;
+    scene.userData.sphResidentRenderState = null;
+    scene.userData.sphResidentReset = {
+      schema: 'peercompute.ulg.sph-resident-reset.v0',
+      status: 'resident-state-reset',
+      reason,
+      clearOverlay: Boolean(clearOverlay),
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    };
+    return scene.userData.sphResidentReset;
   }
 
   function clearSphResidentSurfaceDrawOverlayCanvas(bridge = sphResidentSurfaceDrawRenderBridge) {
@@ -8103,6 +8130,16 @@ export function createSphPhaseScene(container, {
     const materialPhaseCounts = {};
     const materialPhaseDomainCounts = {};
     const materialPhaseDomainBounds = {};
+    const positionBoundsM = {
+      status: 'position-bounds-ready',
+      count: 0,
+      min: [Infinity, Infinity, Infinity],
+      max: [-Infinity, -Infinity, -Infinity]
+    };
+    const positionSumM = [0, 0, 0];
+    const massWeightedPositionSumM = [0, 0, 0];
+    let positionCount = 0;
+    let totalMassKg = 0;
     let minParticleRadiusM = Number.POSITIVE_INFINITY;
     let maxParticleRadiusM = Number.NEGATIVE_INFINITY;
     for (const row of decoded.rows) {
@@ -8112,6 +8149,12 @@ export function createSphPhaseScene(container, {
       materialPhaseDomainCounts[domainKey] = (materialPhaseDomainCounts[domainKey] || 0) + 1;
       const position = row.positionM;
       if (Array.isArray(position) && position.length >= 3) {
+        const finitePositionM = [
+          Number(position[0]),
+          Number(position[1]),
+          Number(position[2])
+        ];
+        const hasFinitePosition = finitePositionM.every(Number.isFinite);
         const bounds = materialPhaseDomainBounds[domainKey] || (materialPhaseDomainBounds[domainKey] = {
           status: 'position-bounds-ready',
           count: 0,
@@ -8125,6 +8168,23 @@ export function createSphPhaseScene(container, {
           bounds.min[axis] = Math.min(bounds.min[axis], value);
           bounds.max[axis] = Math.max(bounds.max[axis], value);
         }
+        if (hasFinitePosition) {
+          positionCount += 1;
+          positionBoundsM.count += 1;
+          for (let axis = 0; axis < 3; axis += 1) {
+            const value = finitePositionM[axis];
+            positionSumM[axis] += value;
+            positionBoundsM.min[axis] = Math.min(positionBoundsM.min[axis], value);
+            positionBoundsM.max[axis] = Math.max(positionBoundsM.max[axis], value);
+          }
+          const massKg = Number(row.massKg);
+          if (Number.isFinite(massKg) && massKg > 0) {
+            totalMassKg += massKg;
+            for (let axis = 0; axis < 3; axis += 1) {
+              massWeightedPositionSumM[axis] += finitePositionM[axis] * massKg;
+            }
+          }
+        }
       }
       const particleRadiusM = Number(row.particleRadiusM);
       if (Number.isFinite(particleRadiusM) && particleRadiusM > 0) {
@@ -8135,12 +8195,22 @@ export function createSphPhaseScene(container, {
     for (const bounds of Object.values(materialPhaseDomainBounds)) {
       bounds.size = bounds.max.map((value, axis) => value - bounds.min[axis]);
     }
+    if (positionBoundsM.count > 0) {
+      positionBoundsM.size = positionBoundsM.max.map((value, axis) => value - positionBoundsM.min[axis]);
+    }
+    const centerOfMassM = totalMassKg > 0
+      ? massWeightedPositionSumM.map((value) => value / totalMassKg)
+      : (positionCount > 0 ? positionSumM.map((value) => value / positionCount) : null);
     const sampleRows = decoded.rows.length <= 12
       ? decoded.rows
       : [...decoded.rows.slice(0, 6), ...decoded.rows.slice(-6)];
     return {
       schema: 'peercompute.ulg.sph-render-row-decoded-summary.v0',
       particleCount: decoded.rows.length,
+      positionCount,
+      totalMassKg: totalMassKg > 0 ? totalMassKg : null,
+      centerOfMassM,
+      positionBoundsM: positionBoundsM.count > 0 ? positionBoundsM : null,
       materialPhaseCounts,
       materialPhaseDomainCounts,
       materialPhaseDomainBounds,
@@ -9294,9 +9364,11 @@ export function createSphPhaseScene(container, {
       || null;
     const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
       || finalStep?.nextParticleUploads?.sphParticleUpload
+      || sphGpuParticleUpload
       || null;
     const nextMlsMpmUpload = residentSteps?.nextParticleUploads?.mlsMpmParticleUpload
       || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
+      || mlsMpmGpuParticleUpload
       || null;
     markSphResidentRenderProgress('resident-render-refresh-started', {
       stage: 'resident-render-refresh',
@@ -10366,6 +10438,10 @@ export function createSphPhaseScene(container, {
         renderRowsDecodedMaterialPhaseCounts: decodedRenderRowsSummary?.materialPhaseCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainCounts: decodedRenderRowsSummary?.materialPhaseDomainCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainBounds: decodedRenderRowsSummary?.materialPhaseDomainBounds ?? null,
+        renderRowsDecodedPositionCount: decodedRenderRowsSummary?.positionCount ?? null,
+        renderRowsDecodedTotalMassKg: decodedRenderRowsSummary?.totalMassKg ?? null,
+        renderRowsDecodedCenterOfMassM: decodedRenderRowsSummary?.centerOfMassM ?? null,
+        renderRowsDecodedPositionBoundsM: decodedRenderRowsSummary?.positionBoundsM ?? null,
         renderRowsDecodedMinParticleRadiusM: decodedRenderRowsSummary?.minParticleRadiusM ?? null,
         renderRowsDecodedMaxParticleRadiusM: decodedRenderRowsSummary?.maxParticleRadiusM ?? null,
         renderRowsDecodedSampleRows: decodedRenderRowsSummary?.sampleRows ?? null,
@@ -10959,6 +11035,7 @@ export function createSphPhaseScene(container, {
       return resolveSceneResidentAuthorityHost();
     },
     setResidentAuthorityHost,
+    resetResidentStateForParticleReset,
     refreshOpticalGpuLookup,
     refreshSphGpuParticleBuffers,
     refreshMlsMpmGpuParticleBuffers,

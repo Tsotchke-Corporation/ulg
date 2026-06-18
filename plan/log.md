@@ -1,5 +1,33 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Todo Folder Hygiene And Physics Bug Routing
+
+Summary:
+
+- Moved completed planning artifacts out of the active todo folder:
+  - `plan/todo/6-16-audit.md` -> `plan/done/6-16-audit.md`
+  - `plan/todo/critique.md` -> `plan/done/critique.md`
+- Moved the older broad performance plan to moot because active performance
+  routing now lives in the WebGPU-Ocean and GPU-resident-lane plans:
+  - `plan/todo/perf-upgrade.md` -> `plan/moot/perf-upgrade.md`
+- Added `plan/moot/README.md` to make clear that moot files are historical
+  context, not current implementation order.
+- Updated active todo references so hot-loop/performance work points to
+  `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md` and
+  `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`.
+
+Routing:
+
+- Fix physics bugs now when they affect acceptance gates, conservation,
+  state ownership, buffer lifetime, console cleanliness, or visual trust. The
+  MLS-MPM migration needs those tests as its guardrails.
+- Defer optimization work that only improves the current bridge/readback path
+  and will be replaced by the WebGPU-Ocean resident lane or GPU-resident
+  renderer.
+- For fluid-quality bugs that are ambiguous, add/keep dense visual and atomic
+  gates now, then make the migrated MLS-MPM path pass them before it becomes
+  the default.
+
 ## 2026-06-18 AKDT - Mobile Three Renderer Viewport And Bridge Integration
 
 Summary:

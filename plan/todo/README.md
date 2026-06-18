@@ -35,6 +35,12 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Todo hygiene note, 2026-06-18 AKDT: completed planning artifacts
+`6-16-audit.md` and `critique.md` have moved to `plan/done/`. The older broad
+`perf-upgrade.md` has moved to `plan/moot/` because the active performance
+routing now lives in `webgpu-ocean-mlsmpm-simulator-plan.md` and
+`gpu-resident-lanes-and-warm-services-plan.md`.
+
 Current routing note, 2026-06-18 AKDT: WebGPU-Ocean Phase 1 audit is complete
 and it confirms the fundamental performance fix already in
 `webgpu-ocean-mlsmpm-simulator-plan.md`. The reference loop is particle-
@@ -1715,7 +1721,6 @@ still hard-times out before writing a full result.
 2. **ULG resident-loop bug remediation**
    - `resident-state-authority-contract-plan.md`
    - `webgpu-ocean-mlsmpm-simulator-plan.md`
-   - `perf-upgrade.md`
    - Goal: repair the bugs introduced during the WebGPU-resident refactor:
      no-op law output overwrites, render/physics coupling, stale CPU mirrors,
      buffer lifetime mistakes, cadence mismatches, per-substep readback/fence
@@ -1735,7 +1740,6 @@ still hard-times out before writing a full result.
 5. **WebGPU hot-loop and surface generation**
    - `webgpu-ocean-mlsmpm-simulator-plan.md`
    - `gpu-resident-lanes-and-warm-services-plan.md`
-   - `perf-upgrade.md`
    - Goal: keep particle, grid, gas, wall, product, phase, and surface fields
      GPU resident; use compact summaries instead of full readback.
 6. **Material/closure resolver migration**

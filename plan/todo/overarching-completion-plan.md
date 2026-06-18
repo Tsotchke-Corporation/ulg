@@ -26,9 +26,9 @@ Active inputs examined:
 - `plan/todo/phase-resolved-steam-optics-plan.md`
 - `plan/todo/webgpu-material-property-resolvers-plan.md`
 - `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
-- `plan/todo/perf-upgrade.md`
 - `plan/todo/sphphasedemo.md`
 - `plan/todo/frontier-todo.md`
+- `plan/moot/perf-upgrade.md` as superseded background only
 - unchecked ULG, PeerCompute, Eshkol, MoonLab, and tooling items in
   `plan/plan.md`
 
@@ -142,7 +142,7 @@ Updated status on 2026-06-11 17:19 AKDT:
 Primary plans:
 
 - `plan/todo/cold-start-cache-performance-plan.md`
-- `plan/todo/perf-upgrade.md` cache/warning sections
+- cache/warning background now archived in `plan/moot/perf-upgrade.md`
 
 Why limited now:
 
@@ -373,8 +373,9 @@ Completion gate:
 
 Primary plans:
 
-- `plan/todo/perf-upgrade.md`
 - `plan/todo/sphphasedemo.md`
+- `plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
 - thermal/mechanics sections of
   `plan/todo/webgpu-material-property-resolvers-plan.md`
 
@@ -437,7 +438,7 @@ Completion gate:
 Primary plans:
 
 - `plan/todo/cold-start-cache-performance-plan.md`
-- `plan/todo/perf-upgrade.md` cache sections
+- cache background in `plan/moot/perf-upgrade.md`
 
 Why after hot-loop work:
 
@@ -457,7 +458,6 @@ Work:
 Primary plans:
 
 - `plan/todo/webgpu-material-property-resolvers-plan.md`
-- `plan/todo/perf-upgrade.md`
 - `plan/todo/frontier-todo.md`
 
 Why sixth:
@@ -550,7 +550,6 @@ Completion gate:
 Primary plans:
 
 - nuclear/radiation sections of `plan/todo/sphphasedemo.md`
-- `plan/todo/perf-upgrade.md`
 - `plan/todo/webgpu-material-property-resolvers-plan.md`
 
 Why eighth:

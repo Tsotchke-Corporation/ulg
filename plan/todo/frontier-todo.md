@@ -43,6 +43,7 @@ quantitative. Everything below is honestly flagged in code (validation = false) 
 - **Performance**: the SPH carrier + thermal conduction are O(N²) with per-pair array allocations
   (vsub/vdot/kernelGradient) — ~64 ms/step at 152 particles. De-allocate the inner loops; add a
   cell/neighbour list for scaling; GPU hot loop is the real-time endgame
-  (`plan/todo/perf-upgrade.md`).
+  (`plan/todo/webgpu-ocean-mlsmpm-simulator-plan.md` and
+  `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`).
 - Multi-material EOS is weakly-compressible (sound speeds ~180 m/s), not the true stiff EOS —
   reduced reference, sphValidation stays false.

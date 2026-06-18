@@ -114,6 +114,7 @@ export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_FINAL_ONLY = 'final-only';
 export const MLS_MPM_RESIDENT_COMPACT_SUMMARY_MODE_NONE = 'none';
 const P2G_ACCUMULATOR_COMPONENTS = 4;
 const ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA = 'peercompute.ulg.mls-mpm-resident-stage-timing.v0';
+const ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA = 'peercompute.ulg.mls-mpm-resident-dispatch-topology.v0';
 const ULG_MLS_MPM_RESIDENT_GPU_LANE_ADAPTER_SCHEMA = 'peercompute.ulg.mls-mpm-resident-gpu-lane-adapter.v0';
 const ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA = 'peercompute.ulg.mls-mpm-fused-active-grid-dispatch.v0';
 const ULG_MLS_MPM_ACTIVE_GRID_DISPATCH_POLICY_SCHEMA = 'peercompute.ulg.mls-mpm-active-grid-dispatch-policy.v0';
@@ -544,6 +545,107 @@ function finiteVector3(value, fallback) {
     finiteNumber(source?.[1], fallback[1]),
     finiteNumber(source?.[2], fallback[2])
   ];
+}
+
+function createResidentDispatchTopology({
+  particleCount = 0,
+  gridSpec = null,
+  activeGridDispatch = null,
+  substepCount = 1,
+  fusedResidentMechanics = false,
+  fusedResidentSequence = false
+} = {}) {
+  const boundedParticleCount = Math.max(0, Math.floor(finiteNumber(particleCount, 0)));
+  const workgroupSize = 64;
+  const gridNodeCount = Math.max(0, Math.floor(finiteNumber(gridSpec?.gridNodeCount, 0)));
+  const useActiveGrid = activeGridDispatch?.useActiveGrid === true;
+  const activeGridNodeCount = useActiveGrid
+    ? Math.max(0, Math.floor(finiteNumber(activeGridDispatch?.activeNodeCount, 0)))
+    : gridNodeCount;
+  const boundedSubstepCount = Math.max(1, Math.floor(finiteNumber(substepCount, 1)));
+  const particleWorkgroups = Math.max(1, Math.ceil(boundedParticleCount / workgroupSize));
+  const gridWorkgroups = Math.max(1, Math.ceil(activeGridNodeCount / workgroupSize));
+  const activeGridAxis = useActiveGrid ? 'active-grid-node' : 'grid-node';
+  const p2g = {
+    stageId: 'p2g',
+    topology: 'particle-parallel-scatter',
+    entryPoint: 'main',
+    dispatchAxis: 'particle',
+    dispatchWorkgroupsPerSubstep: particleWorkgroups,
+    invocationLimitPerSubstep: boundedParticleCount,
+    workgroupSize,
+    particleCount: boundedParticleCount,
+    particleLoopInShader: false,
+    perParticleLocalStencil: 'quadratic-3x3x3-grid-stencil',
+    perParticleLocalStencilNodeCount: 27,
+    gridWriteMode: 'atomic-grid-accumulator-scatter',
+    gridAccumulatorComponents: P2G_ACCUMULATOR_COMPONENTS
+  };
+  const p2gFinalize = {
+    stageId: 'p2gFinalize',
+    topology: 'grid-node-parallel-finalize',
+    entryPoint: 'finalize_grid',
+    dispatchAxis: activeGridAxis,
+    dispatchWorkgroupsPerSubstep: gridWorkgroups,
+    invocationLimitPerSubstep: activeGridNodeCount,
+    workgroupSize,
+    fullGridNodeCount: gridNodeCount,
+    activeGridNodeCount,
+    activeGridEnabled: useActiveGrid,
+    particleLoopInShader: false
+  };
+  const gridUpdate = {
+    stageId: 'gridUpdate',
+    topology: 'grid-node-parallel-update',
+    entryPoint: 'main',
+    dispatchAxis: activeGridAxis,
+    dispatchWorkgroupsPerSubstep: gridWorkgroups,
+    invocationLimitPerSubstep: activeGridNodeCount,
+    workgroupSize,
+    fullGridNodeCount: gridNodeCount,
+    activeGridNodeCount,
+    activeGridEnabled: useActiveGrid,
+    particleLoopInShader: false
+  };
+  const g2p = {
+    stageId: 'g2p',
+    topology: 'particle-parallel-gather',
+    entryPoint: 'main',
+    dispatchAxis: 'particle',
+    dispatchWorkgroupsPerSubstep: particleWorkgroups,
+    invocationLimitPerSubstep: boundedParticleCount,
+    workgroupSize,
+    particleCount: boundedParticleCount,
+    particleLoopInShader: false,
+    perParticleLocalStencil: 'quadratic-3x3x3-grid-stencil',
+    perParticleLocalStencilNodeCount: 27,
+    gridReadMode: 'grid-node-gather'
+  };
+  return {
+    schema: ULG_MLS_MPM_RESIDENT_DISPATCH_TOPOLOGY_SCHEMA,
+    status: 'resident-dispatch-topology-ready',
+    backend: 'webgpu',
+    fusedResidentMechanics: fusedResidentMechanics === true,
+    fusedResidentSequence: fusedResidentSequence === true,
+    substepCount: boundedSubstepCount,
+    workgroupSize,
+    particleCount: boundedParticleCount,
+    fullGridNodeCount: gridNodeCount,
+    activeGridNodeCount,
+    activeGridEnabled: useActiveGrid,
+    activeGridDispatchStatus: activeGridDispatch?.status || null,
+    particleParallelStages: ['p2g', 'g2p'],
+    gridParallelStages: ['p2gFinalize', 'gridUpdate'],
+    cpuParticleLoopInHotPath: false,
+    p2g,
+    p2gFinalize,
+    gridUpdate,
+    g2p,
+    dispatchesPerSubstep: 4,
+    totalDispatches: boundedSubstepCount * 4,
+    workgroupsPerSubstep: particleWorkgroups + gridWorkgroups + gridWorkgroups + particleWorkgroups,
+    totalWorkgroups: boundedSubstepCount * (particleWorkgroups + gridWorkgroups + gridWorkgroups + particleWorkgroups)
+  };
 }
 
 function writeGpuBuffer(device, label, data, usage = GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST) {
@@ -1553,6 +1655,13 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
+  const dispatchTopology = createResidentDispatchTopology({
+    particleCount,
+    gridSpec,
+    activeGridDispatch,
+    substepCount: 1,
+    fusedResidentMechanics: true
+  });
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-out',
     size: Math.max(4, gridByteLength),
@@ -1798,6 +1907,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         status: 'not-run-no-full-readback',
         reason: 'fused no-full resident mechanics skipped P2G readback'
       },
+      dispatchTopology: dispatchTopology.p2g,
+      residentDispatchTopology: dispatchTopology,
       fusedResidentMechanics: true,
       activeGridDispatch
     };
@@ -1830,6 +1941,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         reason: 'fused no-full resident mechanics skipped grid-update readback'
       },
       ...pressureFields,
+      dispatchTopology: dispatchTopology.gridUpdate,
+      residentDispatchTopology: dispatchTopology,
       fusedResidentMechanics: true,
       activeGridDispatch
     };
@@ -1875,6 +1988,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
           outMechanicsBuffer.destroy?.();
         }
       },
+      dispatchTopology: dispatchTopology.g2p,
+      residentDispatchTopology: dispatchTopology,
       destroyOutputParticleBuffers: () => {
         outStateBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
@@ -1887,6 +2002,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       backend: 'webgpu',
       status: 'fused-mechanics-webgpu-executed-no-full-readback',
       activeGridDispatch,
+      dispatchTopology,
       p2gGridProjection,
       gridUpdate,
       g2pReconstruction
@@ -1951,6 +2067,13 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
+  const dispatchTopology = createResidentDispatchTopology({
+    particleCount,
+    gridSpec,
+    activeGridDispatch,
+    substepCount: count,
+    fusedResidentSequence: true
+  });
   const stageTimingStartMs = nowMs();
   const stageMs = {
     deviceAcquire: 0,
@@ -2283,6 +2406,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         status: 'not-run-no-full-readback',
         reason: 'fused no-full resident mechanics sequence skipped P2G readback'
       },
+      dispatchTopology: dispatchTopology.p2g,
+      residentDispatchTopology: dispatchTopology,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
       activeGridDispatch
@@ -2317,6 +2442,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         reason: 'fused no-full resident mechanics sequence skipped grid-update readback'
       },
       ...pressureFields,
+      dispatchTopology: dispatchTopology.gridUpdate,
+      residentDispatchTopology: dispatchTopology,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
       activeGridDispatch
@@ -2363,6 +2490,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           finalMechanicsBuffer.destroy?.();
         }
       },
+      dispatchTopology: dispatchTopology.g2p,
+      residentDispatchTopology: dispatchTopology,
       destroyOutputParticleBuffers: () => {
         finalStateBuffer.destroy?.();
         finalMechanicsBuffer.destroy?.();
@@ -2469,6 +2598,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       compactSummaryTiming: compactGpuSummary?.timing ?? null,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
+      dispatchTopology,
       activeGridDispatch,
       requestedReadbackMode: NO_FULL_READBACK_MODE,
       preferWebGpu,
@@ -2526,6 +2656,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       queueFenceMs: fusedMechanicsSequenceQueueFenceMs,
       queueFenceStatus: fusedMechanicsSequenceQueueFenceStatus,
       queueFenceMethod: fusedMechanicsSequenceQueueFenceMethod,
+      dispatchTopology,
       activeGridDispatch,
       residentPositionBoundsSource: continuationBounds.source,
       retainedBufferMode: 'ping-pong-state-mechanics-single-grid',
@@ -2820,6 +2951,35 @@ function wallBarrierContactDiagnostics(gridUpdate) {
   };
 }
 
+function residentDispatchTopologyDiagnostics({
+  dispatchTopology = null,
+  p2gGridProjection = null,
+  gridUpdate = null,
+  g2pReconstruction = null
+} = {}) {
+  const resolved = dispatchTopology
+    || p2gGridProjection?.residentDispatchTopology
+    || gridUpdate?.residentDispatchTopology
+    || g2pReconstruction?.residentDispatchTopology
+    || null;
+  return {
+    dispatchTopology: resolved,
+    dispatchTopologyStatus: resolved?.status || null,
+    dispatchTopologySchema: resolved?.schema || null,
+    cpuParticleLoopInHotPath: resolved?.cpuParticleLoopInHotPath ?? null,
+    particleParallelStages: [...(resolved?.particleParallelStages || [])],
+    gridParallelStages: [...(resolved?.gridParallelStages || [])],
+    dispatchesPerSubstep: resolved?.dispatchesPerSubstep ?? null,
+    totalDispatches: resolved?.totalDispatches ?? null,
+    workgroupsPerSubstep: resolved?.workgroupsPerSubstep ?? null,
+    totalWorkgroups: resolved?.totalWorkgroups ?? null,
+    p2gDispatchTopology: p2gGridProjection?.dispatchTopology || resolved?.p2g || null,
+    p2gFinalizeDispatchTopology: resolved?.p2gFinalize || null,
+    gridUpdateDispatchTopology: gridUpdate?.dispatchTopology || resolved?.gridUpdate || null,
+    g2pDispatchTopology: g2pReconstruction?.dispatchTopology || resolved?.g2p || null
+  };
+}
+
 export function compactMlsMpmResidentStepDiagnostics({
   sphParticleState,
   mlsMpmParticleState,
@@ -2828,12 +2988,19 @@ export function compactMlsMpmResidentStepDiagnostics({
   g2pReconstruction,
   reactionStep = null,
   compactGpuSummary = null,
-  readbackMode = FULL_READBACK_MODE
+  readbackMode = FULL_READBACK_MODE,
+  dispatchTopology = null
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const reactionSummary = reactionSummaryDiagnostics(reactionStep);
   const pressureInterfaceGridForce = pressureInterfaceGridForceDiagnostics(gridUpdate);
   const wallBarrierContact = wallBarrierContactDiagnostics(gridUpdate);
+  const topologyDiagnostics = residentDispatchTopologyDiagnostics({
+    dispatchTopology,
+    p2gGridProjection,
+    gridUpdate,
+    g2pReconstruction
+  });
   if (compactGpuSummary?.compactGpuSummaryAvailable) {
     return {
       particleCount: compactGpuSummary.particleCount,
@@ -2880,6 +3047,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       compactSummaryTiming: compactGpuSummary.timing ?? null,
       compactSummaryMapAsyncWaitMs: compactGpuSummary.mapAsyncWaitMs ?? compactGpuSummary.timing?.mapAsyncWaitMs ?? null,
       compactSummaryQueueFenceAttribution: compactGpuSummary.queueFenceAttribution ?? compactGpuSummary.timing?.queueFenceAttribution ?? null,
+      ...topologyDiagnostics,
       ...pressureInterfaceGridForce,
       ...wallBarrierContact,
       ...reactionSummary,
@@ -2931,6 +3099,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       compactSummaryTiming: compactGpuSummary?.timing ?? null,
       compactSummaryMapAsyncWaitMs: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
       compactSummaryQueueFenceAttribution: compactGpuSummary?.queueFenceAttribution ?? compactGpuSummary?.timing?.queueFenceAttribution ?? null,
+      ...topologyDiagnostics,
       ...pressureInterfaceGridForce,
       ...wallBarrierContact,
       ...reactionSummary,
@@ -2974,6 +3143,7 @@ export function compactMlsMpmResidentStepDiagnostics({
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     compactSummaryMapAsyncWaitMs: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
     compactSummaryQueueFenceAttribution: compactGpuSummary?.queueFenceAttribution ?? compactGpuSummary?.timing?.queueFenceAttribution ?? null,
+    ...topologyDiagnostics,
     ...pressureInterfaceGridForce,
     ...wallBarrierContact,
     ...reactionSummary,
@@ -10664,6 +10834,11 @@ async function residentStepEnvelope({
   const noFullReadback = residentBuffersRetained
     && stages.every((stage) => stage?.backend === 'webgpu' && stage?.readbackMode === NO_FULL_READBACK_MODE);
   const readbackMode = noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE;
+  const dispatchTopology = stageTiming?.dispatchTopology
+    || p2gGridProjection?.residentDispatchTopology
+    || gridUpdate?.residentDispatchTopology
+    || g2pReconstruction?.residentDispatchTopology
+    || null;
   const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
   const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
   const particlePingPong = {
@@ -10697,7 +10872,8 @@ async function residentStepEnvelope({
     thermalStep,
     reactionStep,
     compactGpuSummary,
-    readbackMode
+    readbackMode,
+    dispatchTopology
   });
   const stageStatusSummary = {
     p2g: stageStatus(p2gGridProjection),
@@ -10853,6 +11029,9 @@ async function residentStepEnvelope({
     wallBarrierContactTotalVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactTotalVelocityCorrectionMPerS ?? 0,
     wallBarrierContactMaxVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactMaxVelocityCorrectionMPerS ?? 0,
     internalPressureScale,
+    dispatchTopology,
+    dispatchTopologyStatus: dispatchTopology?.status || null,
+    cpuParticleLoopInHotPath: dispatchTopology?.cpuParticleLoopInHotPath ?? null,
     stageStatus: stageStatusSummary,
     stageBackends: stageBackendSummary,
     residentAuthorityLedger,
@@ -11352,6 +11531,11 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     },
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     fusedResidentMechanics: Boolean(fusedMechanics),
+    dispatchTopology: fusedMechanics?.dispatchTopology
+      || p2gGridProjection?.residentDispatchTopology
+      || gridUpdate?.residentDispatchTopology
+      || g2pReconstruction?.residentDispatchTopology
+      || null,
     activeGridDispatch: fusedMechanics?.activeGridDispatch
       || gridUpdate?.activeGridDispatch
       || p2gGridProjection?.activeGridDispatch
@@ -11947,6 +12131,7 @@ function summarizeResidentStepForSequence(step, index) {
           stageMs: { ...(step.stageTiming.stageMs || {}) },
           backend: step.stageTiming.backend || step.backend,
           readbackMode: step.stageTiming.readbackMode || step.readbackMode,
+          dispatchTopology: step.stageTiming.dispatchTopology || step.dispatchTopology || null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null
         }
       : null,
@@ -11997,6 +12182,11 @@ function summarizeResidentStepForSequence(step, index) {
     diagnostics: {
       particleCount: step.diagnostics?.particleCount ?? 0,
       gridNodeCount: step.diagnostics?.gridNodeCount ?? 0,
+      dispatchTopologyStatus: step.diagnostics?.dispatchTopologyStatus ?? null,
+      cpuParticleLoopInHotPath: step.diagnostics?.cpuParticleLoopInHotPath ?? null,
+      particleParallelStages: [...(step.diagnostics?.particleParallelStages || [])],
+      dispatchesPerSubstep: step.diagnostics?.dispatchesPerSubstep ?? null,
+      totalDispatches: step.diagnostics?.totalDispatches ?? null,
       activeGridNodeCount: step.diagnostics?.activeGridNodeCount ?? null,
       activeGridNodeCountAvailable: step.diagnostics?.activeGridNodeCountAvailable ?? null,
       activeGridNodeSummaryStatus: step.diagnostics?.activeGridNodeSummaryStatus ?? null,
@@ -12026,7 +12216,7 @@ function summarizeResidentStepForSequence(step, index) {
       reactionSealedBoxGasProductMoles: step.diagnostics?.reactionSealedBoxGasProductMoles ?? null,
       reactionHeatJ: step.diagnostics?.reactionHeatJ ?? null,
       reactionLedgerMassResidualKg: step.diagnostics?.reactionLedgerMassResidualKg ?? null,
-	      reactionCompactLedgerAvailable: step.diagnostics?.reactionCompactLedgerAvailable ?? false,
+      reactionCompactLedgerAvailable: step.diagnostics?.reactionCompactLedgerAvailable ?? false,
       reactionProductInventoryCount: step.diagnostics?.reactionProductInventoryCount ?? 0,
       reactionProductInventoryReadbackByteLength: step.diagnostics?.reactionProductInventoryReadbackByteLength ?? 0,
       reactionProductEventRowCount: step.diagnostics?.reactionProductEventRowCount ?? 0,

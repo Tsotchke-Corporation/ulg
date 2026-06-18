@@ -139,6 +139,17 @@ Tactical status, 2026-06-18 AKDT:
   `48778` particles, with zero browser-console issues. The path is dispatched
   particle-parallel, but the active-grid expansion and per-substep full
   mechanics sequence are not yet Ocean-fast.
+- Runtime MLS-MPM dispatch topology is now explicit in both the resident step
+  diagnostics and browser probe output. The console-clean mobile scene artifact
+  `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports
+  `cpuParticleLoopInHotPath=false`, P2G `particle-parallel-scatter`, and G2P
+  `particle-parallel-gather`. The console-clean direct resident diagnostic
+  artifact `artifacts/sph-direct-resident-dispatch-topology-sequence.json`
+  exercises a two-substep fused mechanics sequence with `totalDispatches=8`
+  and active-grid finalize/update over `active-grid-node` axes. This shifts
+  the next throughput work away from proving basic particle parallelism and
+  toward sparse/indirect active-grid dispatch, GPU-side bounds reduction,
+  thermal/reaction sidecar fusion, and no-readback surface rendering.
 - Mounted phone scene rows can now request the same queue-fence measurement
   with `residentQueueFence=1`. The warm 390x844 DPR 3 row at
   `artifacts/sph-performance-benchmark-mobile-spheres-no-thermal-queue-fenced-warm.json`
@@ -511,6 +522,13 @@ Interim status, 2026-06-18 AKDT:
   bridge, but it does not change the larger roadmap: final bounds, draw counts,
   and surface data still need to stay resident so the GUI avoids hidden
   readback fences.
+- 2026-06-18 dispatch-topology update: resident MLS-MPM fused WebGPU paths now
+  report a `peercompute.ulg.mls-mpm-resident-dispatch-topology.v0` contract.
+  P2G is `particle-parallel-scatter`, G2P is `particle-parallel-gather`, and
+  P2G-finalize/grid-update are grid-node or active-grid-node passes with
+  per-substep workgroup counts. This confirms the next throughput target is
+  resident surface/render generation and readback removal, not replacing the
+  current P2G/G2P dispatch shape.
 
 ## ULG-Specific Constraints
 

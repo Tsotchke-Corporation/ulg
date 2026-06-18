@@ -1728,6 +1728,23 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(step.p2gGridProjection.fusedResidentMechanics, true);
   assert.equal(step.gridUpdate.fusedResidentMechanics, true);
   assert.equal(step.g2pReconstruction.fusedResidentMechanics, true);
+  assert.equal(step.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
+  assert.equal(step.cpuParticleLoopInHotPath, false);
+  assert.equal(step.stageTiming.dispatchTopology.status, 'resident-dispatch-topology-ready');
+  assert.equal(step.stageTiming.dispatchTopology.p2g.topology, 'particle-parallel-scatter');
+  assert.equal(step.stageTiming.dispatchTopology.p2g.dispatchAxis, 'particle');
+  assert.equal(step.stageTiming.dispatchTopology.p2g.particleLoopInShader, false);
+  assert.equal(step.stageTiming.dispatchTopology.p2g.perParticleLocalStencilNodeCount, 27);
+  assert.equal(step.stageTiming.dispatchTopology.g2p.topology, 'particle-parallel-gather');
+  assert.equal(step.stageTiming.dispatchTopology.g2p.dispatchAxis, 'particle');
+  assert.deepEqual(step.stageTiming.dispatchTopology.particleParallelStages, ['p2g', 'g2p']);
+  assert.equal(step.stageTiming.dispatchTopology.cpuParticleLoopInHotPath, false);
+  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 4);
+  assert.equal(step.p2gGridProjection.dispatchTopology.topology, 'particle-parallel-scatter');
+  assert.equal(step.p2gGridProjection.residentDispatchTopology, step.stageTiming.dispatchTopology);
+  assert.equal(step.diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
+  assert.equal(step.diagnostics.cpuParticleLoopInHotPath, false);
+  assert.deepEqual(step.diagnostics.particleParallelStages, ['p2g', 'g2p']);
   assert.equal(step.nextParticleBufferMode, 'retained-g2p-output-buffers');
   assert.equal(step.nextParticleStateBufferByteLength, buffers.sphParticleState.state.byteLength);
   assert.equal(step.nextParticleMechanicsBufferByteLength, buffers.mlsMpmParticleState.mechanics.byteLength);
@@ -1775,6 +1792,13 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
   assert.equal(step.p2gGridProjection.activeGridDispatch.useActiveGrid, true);
   assert.equal(step.gridUpdate.activeGridDispatch.useActiveGrid, true);
   assert.equal(step.g2pReconstruction.activeGridDispatch.useActiveGrid, true);
+  assert.equal(step.stageTiming.dispatchTopology.gridUpdate.dispatchAxis, 'active-grid-node');
+  assert.equal(step.stageTiming.dispatchTopology.p2gFinalize.dispatchAxis, 'active-grid-node');
+  assert.equal(
+    step.stageTiming.dispatchTopology.p2gFinalize.dispatchWorkgroupsPerSubstep,
+    Math.ceil(activeGridDispatch.activeNodeCount / 64)
+  );
+  assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 4);
   assert.equal(device.dispatches.length, 4);
   assert.equal(device.dispatches[0].count, 1);
   assert.equal(device.dispatches[1].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
@@ -5411,6 +5435,14 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(execution.finalStep.p2gGridProjection.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.gridUpdate.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.substepCount, 2);
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.totalDispatches, 8);
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.p2g.topology, 'particle-parallel-scatter');
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.g2p.dispatchAxis, 'particle');
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.gridUpdate.dispatchAxis, 'active-grid-node');
+  assert.equal(execution.finalStep.fusedResidentSequence.dispatchTopology.totalDispatches, 8);
+  assert.equal(execution.stepSummaries[0].diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
+  assert.equal(execution.stepSummaries[0].diagnostics.cpuParticleLoopInHotPath, false);
   assert.equal(execution.finalStep.residentPositionBoundsSource, 'compact-gpu-summary-next-bounds');
   assert.equal(execution.nextSphParticleState.residentPositionBoundsSource, 'compact-gpu-summary-next-bounds');
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.min, [1.125, 1.2, 1.175]);

@@ -9939,3 +9939,28 @@ ULG marching-cubes extension preflight boundary, 2026-06-18 13:02 AKDT:
   - Passed: `11/11`.
   - Covers ready extension preflight propagation and blocked preflight stopping
     extraction before renderer integration.
+
+MLS-MPM dispatch topology contract, 2026-06-18 13:11 AKDT:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check tests/sphMlsMpmGpuStep.test.mjs`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "fused no-full mechanics dispatch|active-grid fused no-full mechanics dispatch|fused mechanics sequence can opt into active-grid dispatch"`
+  - Passed: `56/56`.
+  - The assertions now prove the resident WebGPU fused hot path reports
+    `dispatchTopologyStatus=resident-dispatch-topology-ready`,
+    `cpuParticleLoopInHotPath=false`, P2G
+    `particle-parallel-scatter`, G2P `particle-parallel-gather`, and
+    active-grid finalize/update dispatch over `active-grid-node` axes when
+    enabled.
+- `ULG_PROBE_VISUAL_ONLY=1 ... ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-dispatch-topology-2.json ... npm run probe:sph-long-horizon`
+  - Passed with `status=good`, `browserConsoleIssueCount=0`, three captured
+    mobile frames, P2G `particle-parallel-scatter`, G2P
+    `particle-parallel-gather`, and `cpuParticleLoopInHotPath=false`.
+- `ULG_PROBE_MODE=direct-resident ULG_PROBE_DIRECT_RESIDENT=1 ULG_PROBE_VISUAL_ONLY=1 ... ULG_PROBE_OUTPUT=artifacts/sph-direct-resident-dispatch-topology-sequence.json ... npm run probe:sph-long-horizon`
+  - Passed with `status=good`, `browserConsoleIssueCount=0`,
+    `normalHotLoopReadbackFree=true`, `fusedResidentSequence=true`,
+    `fusedResidentSequenceStepCount=2`, `totalDispatches=8`, P2G
+    `particle-parallel-scatter`, G2P `particle-parallel-gather`, and
+    active-grid finalize/update dispatch over `active-grid-node` axes.

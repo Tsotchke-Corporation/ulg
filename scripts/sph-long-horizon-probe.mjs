@@ -795,9 +795,56 @@ async function runBrowserProbe({
         max: cloneFiniteVector(bounds.max),
         size: cloneFiniteVector(bounds.size)
       } : null;
+      const compactDispatchStageTopology = (stage) => stage ? {
+        stageId: stage.stageId ?? null,
+        topology: stage.topology ?? null,
+        entryPoint: stage.entryPoint ?? null,
+        dispatchAxis: stage.dispatchAxis ?? null,
+        dispatchWorkgroupsPerSubstep: stage.dispatchWorkgroupsPerSubstep ?? null,
+        invocationLimitPerSubstep: stage.invocationLimitPerSubstep ?? null,
+        workgroupSize: stage.workgroupSize ?? null,
+        particleLoopInShader: stage.particleLoopInShader ?? null,
+        perParticleLocalStencilNodeCount: stage.perParticleLocalStencilNodeCount ?? null,
+        gridWriteMode: stage.gridWriteMode ?? null,
+        gridReadMode: stage.gridReadMode ?? null,
+        activeGridEnabled: stage.activeGridEnabled ?? null
+      } : null;
+      const compactDispatchTopology = (topology) => topology ? {
+        schema: topology.schema ?? null,
+        status: topology.status ?? null,
+        backend: topology.backend ?? null,
+        substepCount: topology.substepCount ?? null,
+        particleCount: topology.particleCount ?? null,
+        fullGridNodeCount: topology.fullGridNodeCount ?? null,
+        activeGridNodeCount: topology.activeGridNodeCount ?? null,
+        activeGridEnabled: topology.activeGridEnabled ?? null,
+        cpuParticleLoopInHotPath: topology.cpuParticleLoopInHotPath ?? null,
+        particleParallelStages: Array.isArray(topology.particleParallelStages) ? [...topology.particleParallelStages] : [],
+        gridParallelStages: Array.isArray(topology.gridParallelStages) ? [...topology.gridParallelStages] : [],
+        dispatchesPerSubstep: topology.dispatchesPerSubstep ?? null,
+        totalDispatches: topology.totalDispatches ?? null,
+        workgroupsPerSubstep: topology.workgroupsPerSubstep ?? null,
+        totalWorkgroups: topology.totalWorkgroups ?? null,
+        p2g: compactDispatchStageTopology(topology.p2g),
+        p2gFinalize: compactDispatchStageTopology(topology.p2gFinalize),
+        gridUpdate: compactDispatchStageTopology(topology.gridUpdate),
+        g2p: compactDispatchStageTopology(topology.g2p)
+      } : null;
       const compactDiagnostics = (diagnostics) => diagnostics ? {
         particleCount: diagnostics.particleCount ?? null,
         gridNodeCount: diagnostics.gridNodeCount ?? null,
+        dispatchTopologyStatus: diagnostics.dispatchTopologyStatus ?? null,
+        dispatchTopologySchema: diagnostics.dispatchTopologySchema ?? null,
+        dispatchTopology: compactDispatchTopology(diagnostics.dispatchTopology),
+        cpuParticleLoopInHotPath: diagnostics.cpuParticleLoopInHotPath ?? null,
+        particleParallelStages: Array.isArray(diagnostics.particleParallelStages) ? [...diagnostics.particleParallelStages] : [],
+        gridParallelStages: Array.isArray(diagnostics.gridParallelStages) ? [...diagnostics.gridParallelStages] : [],
+        dispatchesPerSubstep: diagnostics.dispatchesPerSubstep ?? null,
+        totalDispatches: diagnostics.totalDispatches ?? null,
+        p2gDispatchTopology: compactDispatchStageTopology(diagnostics.p2gDispatchTopology),
+        p2gFinalizeDispatchTopology: compactDispatchStageTopology(diagnostics.p2gFinalizeDispatchTopology),
+        gridUpdateDispatchTopology: compactDispatchStageTopology(diagnostics.gridUpdateDispatchTopology),
+        g2pDispatchTopology: compactDispatchStageTopology(diagnostics.g2pDispatchTopology),
         activeGridNodeCount: diagnostics.activeGridNodeCount ?? null,
         activeGridNodeCountAvailable: diagnostics.activeGridNodeCountAvailable ?? null,
         activeGridNodeSummaryStatus: diagnostics.activeGridNodeSummaryStatus ?? null,
@@ -857,6 +904,7 @@ async function runBrowserProbe({
         fusedResidentMechanics: stageTiming.fusedResidentMechanics ?? null,
         fusedResidentSequence: stageTiming.fusedResidentSequence ?? null,
         fusedResidentSequenceStepCount: stageTiming.fusedResidentSequenceStepCount ?? null,
+        dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
           : null,
@@ -1417,6 +1465,16 @@ async function runBrowserProbe({
             continuedFromResidentState: steps.continuedFromResidentState ?? null,
             continuationAvailable: steps.continuationAvailable ?? null,
             residentExecutionPolicy: steps.residentExecutionPolicy || overlay?.__mlsMpmResidentExecutionPolicy || null,
+            fusedResidentSequence: steps.fusedResidentSequence ? {
+              schema: steps.fusedResidentSequence.schema ?? null,
+              status: steps.fusedResidentSequence.status ?? null,
+              stepCount: steps.fusedResidentSequence.stepCount ?? null,
+              dispatchCount: steps.fusedResidentSequence.dispatchCount ?? null,
+              dispatchTopology: compactDispatchTopology(steps.fusedResidentSequence.dispatchTopology),
+              activeGridDispatch: steps.fusedResidentSequence.activeGridDispatch
+                ? { ...steps.fusedResidentSequence.activeGridDispatch }
+                : null
+            } : null,
             finalStepStageTiming: compactStageTiming(steps.finalStep?.stageTiming),
             residentSourceMode: steps.residentSourceMode ?? null,
             nextStep: steps.nextSphParticleState?.step ?? null,
@@ -2090,9 +2148,56 @@ async function runDirectResidentProbe({
           }
         };
       };
+      const compactDispatchStageTopology = (stage) => stage ? {
+        stageId: stage.stageId ?? null,
+        topology: stage.topology ?? null,
+        entryPoint: stage.entryPoint ?? null,
+        dispatchAxis: stage.dispatchAxis ?? null,
+        dispatchWorkgroupsPerSubstep: stage.dispatchWorkgroupsPerSubstep ?? null,
+        invocationLimitPerSubstep: stage.invocationLimitPerSubstep ?? null,
+        workgroupSize: stage.workgroupSize ?? null,
+        particleLoopInShader: stage.particleLoopInShader ?? null,
+        perParticleLocalStencilNodeCount: stage.perParticleLocalStencilNodeCount ?? null,
+        gridWriteMode: stage.gridWriteMode ?? null,
+        gridReadMode: stage.gridReadMode ?? null,
+        activeGridEnabled: stage.activeGridEnabled ?? null
+      } : null;
+      const compactDispatchTopology = (topology) => topology ? {
+        schema: topology.schema ?? null,
+        status: topology.status ?? null,
+        backend: topology.backend ?? null,
+        substepCount: topology.substepCount ?? null,
+        particleCount: topology.particleCount ?? null,
+        fullGridNodeCount: topology.fullGridNodeCount ?? null,
+        activeGridNodeCount: topology.activeGridNodeCount ?? null,
+        activeGridEnabled: topology.activeGridEnabled ?? null,
+        cpuParticleLoopInHotPath: topology.cpuParticleLoopInHotPath ?? null,
+        particleParallelStages: Array.isArray(topology.particleParallelStages) ? [...topology.particleParallelStages] : [],
+        gridParallelStages: Array.isArray(topology.gridParallelStages) ? [...topology.gridParallelStages] : [],
+        dispatchesPerSubstep: topology.dispatchesPerSubstep ?? null,
+        totalDispatches: topology.totalDispatches ?? null,
+        workgroupsPerSubstep: topology.workgroupsPerSubstep ?? null,
+        totalWorkgroups: topology.totalWorkgroups ?? null,
+        p2g: compactDispatchStageTopology(topology.p2g),
+        p2gFinalize: compactDispatchStageTopology(topology.p2gFinalize),
+        gridUpdate: compactDispatchStageTopology(topology.gridUpdate),
+        g2p: compactDispatchStageTopology(topology.g2p)
+      } : null;
       const compactDiagnostics = (diagnostics) => diagnostics ? {
         particleCount: diagnostics.particleCount ?? null,
         gridNodeCount: diagnostics.gridNodeCount ?? null,
+        dispatchTopologyStatus: diagnostics.dispatchTopologyStatus ?? null,
+        dispatchTopologySchema: diagnostics.dispatchTopologySchema ?? null,
+        dispatchTopology: compactDispatchTopology(diagnostics.dispatchTopology),
+        cpuParticleLoopInHotPath: diagnostics.cpuParticleLoopInHotPath ?? null,
+        particleParallelStages: Array.isArray(diagnostics.particleParallelStages) ? [...diagnostics.particleParallelStages] : [],
+        gridParallelStages: Array.isArray(diagnostics.gridParallelStages) ? [...diagnostics.gridParallelStages] : [],
+        dispatchesPerSubstep: diagnostics.dispatchesPerSubstep ?? null,
+        totalDispatches: diagnostics.totalDispatches ?? null,
+        p2gDispatchTopology: compactDispatchStageTopology(diagnostics.p2gDispatchTopology),
+        p2gFinalizeDispatchTopology: compactDispatchStageTopology(diagnostics.p2gFinalizeDispatchTopology),
+        gridUpdateDispatchTopology: compactDispatchStageTopology(diagnostics.gridUpdateDispatchTopology),
+        g2pDispatchTopology: compactDispatchStageTopology(diagnostics.g2pDispatchTopology),
         activeGridNodeCount: diagnostics.activeGridNodeCount ?? null,
         activeGridNodeCountAvailable: diagnostics.activeGridNodeCountAvailable ?? null,
         activeGridNodeSummaryStatus: diagnostics.activeGridNodeSummaryStatus ?? null,
@@ -2455,7 +2560,17 @@ async function runDirectResidentProbe({
         residentAuthorityLedgerStatus: steps.residentAuthorityLedgerStatus ?? null,
         residentAuthorityFamilyOwners: steps.residentAuthorityFamilyOwners || null,
         residentAuthorityWarnings: [...(steps.residentAuthorityWarnings || [])],
-        residentAuthorityBlockers: [...(steps.residentAuthorityBlockers || [])]
+        residentAuthorityBlockers: [...(steps.residentAuthorityBlockers || [])],
+        fusedResidentSequence: steps.fusedResidentSequence ? {
+          schema: steps.fusedResidentSequence.schema ?? null,
+          status: steps.fusedResidentSequence.status ?? null,
+          stepCount: steps.fusedResidentSequence.stepCount ?? null,
+          dispatchCount: steps.fusedResidentSequence.dispatchCount ?? null,
+          dispatchTopology: compactDispatchTopology(steps.fusedResidentSequence.dispatchTopology),
+          activeGridDispatch: steps.fusedResidentSequence.activeGridDispatch
+            ? { ...steps.fusedResidentSequence.activeGridDispatch }
+            : null
+        } : null
       } : null;
       const summarizeStep = (step) => step ? {
         schema: step.schema ?? null,
@@ -2500,6 +2615,7 @@ async function runDirectResidentProbe({
           fusedResidentMechanics: step.stageTiming.fusedResidentMechanics ?? null,
           fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? null,
           fusedResidentSequenceStepCount: step.stageTiming.fusedResidentSequenceStepCount ?? null,
+          dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }
             : null,

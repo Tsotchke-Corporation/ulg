@@ -52,6 +52,19 @@ lane should remove. The next performance slice is an explicit Ocean-style
 resident lane: scatter/tiled P2G, resident product/gas/thermal sidecars,
 throttled compact diagnostics, and GPU surface/render generation.
 
+Current routing note, 2026-06-18 AKDT: resident MLS-MPM fused WebGPU paths now
+publish a runtime dispatch-topology contract. Probes and sequence summaries can
+read `dispatchTopologyStatus=resident-dispatch-topology-ready`,
+`cpuParticleLoopInHotPath=false`, P2G `particle-parallel-scatter`, G2P
+`particle-parallel-gather`, and active-grid finalize/update
+`active-grid-node` dispatch axes. Browser evidence:
+`artifacts/sph-long-probe-mobile-dispatch-topology-2.json` is console-clean for
+the mounted mobile scene, and
+`artifacts/sph-direct-resident-dispatch-topology-sequence.json` is
+console-clean for a two-substep fused mechanics sequence with 8 total
+dispatches. Treat poor GUI FPS as a resident surface/render/readback issue
+unless this topology contract regresses.
+
 Current routing note, 2026-06-18 AKDT: the native checkout at
 `/home/cos/projects/webgpu-marching-cubes` is a good fit as a surface
 extraction core reference, not as a drop-in renderer. Its useful pieces are

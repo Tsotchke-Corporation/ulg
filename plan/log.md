@@ -27168,3 +27168,41 @@ Validation:
 - PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
 - PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
   `11/11` pass.
+
+## 2026-06-18 13:11 AKDT - MLS-MPM Dispatch Topology Contract
+
+Status:
+
+- Added a resident MLS-MPM WebGPU dispatch-topology contract to the fused
+  no-full mechanics paths. The runtime now reports P2G as
+  `particle-parallel-scatter`, G2P as `particle-parallel-gather`, and
+  P2G-finalize/grid-update as grid-node parallel passes. Active-grid mode
+  reports `active-grid-node` dispatch axes and per-substep workgroup counts.
+- The topology is attached to `p2gGridProjection`, `gridUpdate`,
+  `g2pReconstruction`, `stageTiming`, resident step diagnostics, sequence
+  summaries, and `fusedResidentSequence`. Console/probe consumers can now see
+  `dispatchTopologyStatus=resident-dispatch-topology-ready` and
+  `cpuParticleLoopInHotPath=false` instead of inferring from raw dispatch
+  counts.
+- This confirms the current performance blocker is not a serial WebGPU
+  particle loop in resident MLS-MPM P2G/G2P. The next performance work remains
+  resident surface/render generation and readback removal, not optimizing a
+  kernel topology that is already particle-dispatched.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "fused no-full mechanics dispatch|active-grid fused no-full mechanics dispatch|fused mechanics sequence can opt into active-grid dispatch"` reported `56/56` pass.
+- PASS: mobile browser visual probe
+  `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reported
+  `status=good`, `browserConsoleIssueCount=0`, P2G
+  `particle-parallel-scatter`, G2P `particle-parallel-gather`,
+  `cpuParticleLoopInHotPath=false`, and three captured mobile frames.
+- PASS: direct resident diagnostic probe
+  `artifacts/sph-direct-resident-dispatch-topology-sequence.json` reported
+  `status=good`, `browserConsoleIssueCount=0`, `normalHotLoopReadbackFree=true`,
+  `fusedResidentSequence=true`, `fusedResidentSequenceStepCount=2`,
+  `totalDispatches=8`, P2G `particle-parallel-scatter`, G2P
+  `particle-parallel-gather`, and active-grid finalize/update dispatch over
+  `active-grid-node` axes.

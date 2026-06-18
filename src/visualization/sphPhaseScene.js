@@ -76,6 +76,7 @@ import {
   summarizeSphResidentParticleUploadWebGpu,
   summarizeSphRenderFieldSurfacesWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
+import { buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu } from '../runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 import {
   gasPressureInterfaceCouplingSummary,
   gasPressureInterfaceForcePreview,
@@ -9333,6 +9334,209 @@ export function createSphPhaseScene(container, {
     }
   }
 
+  async function refreshSphResidentSurfaceDrawFromExtension({
+    extensionExecution,
+    device = null,
+    deviceResult = null,
+    surfaceIndex = 0,
+    materialId = 0,
+    phaseId = 0,
+    opticalStateId = 0,
+    material = null,
+    phase = null,
+    renderKey = null,
+    surfaceKey = null,
+    density = 0,
+    isolation = null,
+    sourceVoxelLinearIndex = 0,
+    fallbackNormal = [0, 1, 0],
+    transparencyClassId = 0,
+    depthWriteFlag = 1,
+    renderOrder = null,
+    waitForQueueCompletion = true
+  } = {}) {
+    const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
+    const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
+    const resolvedDeviceResult = device
+      ? { status: 'webgpu-device-ready', reason: 'provided device', device }
+      : (deviceResult || null);
+    if (!resolvedDeviceResult?.device) {
+      const unavailable = residentSurfaceDrawUnavailable(
+        resolvedDeviceResult?.reason || 'caller-owned GPUDevice required for extension surface translation',
+        { overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy() }
+      );
+      unavailable.status = 'resident-extension-surface-draw-unavailable';
+      unavailable.visibleRendererBridge = 'extension-resident-surface-buffers-no-overlay';
+      unavailable.visibleRenderSource = 'webgpu-marching-cubes-extension-unavailable';
+      sphResidentSurfaceDraw = unavailable;
+      scene.userData.sphResidentSurfaceDraw = unavailable;
+      sphResidentSurfaceDrawRenderBridge = null;
+      scene.userData.sphResidentSurfaceDrawRenderBridge = null;
+      releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
+      return unavailable;
+    }
+    let translation = null;
+    try {
+      markSphResidentRenderProgress('extension-surface-draw-translation-started', {
+        stage: 'extension-surface-draw',
+        extensionStatus: extensionExecution?.status ?? null,
+        extensionVertexCount: extensionExecution?.result?.vertexCount ?? 0
+      });
+      translation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+        device: resolvedDeviceResult.device,
+        extensionExecution,
+        surfaceIndex,
+        materialId,
+        phaseId,
+        opticalStateId,
+        material,
+        phase,
+        renderKey,
+        surfaceKey,
+        density,
+        isolation,
+        sourceVoxelLinearIndex,
+        fallbackNormal,
+        transparencyClassId,
+        depthWriteFlag,
+        renderOrder,
+        readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+        compactSummaryReadback: false,
+        retainVertexRowsBuffer: true,
+        retainDrawRowsBuffer: true,
+        retainDrawIndirectRowsBuffer: true,
+        waitForQueueCompletion,
+        onProgress(progress = {}) {
+          markSphResidentRenderProgress(progress.status || 'extension-surface-draw-progress', {
+            ...progress,
+            currentStage: progress.stage || 'extension-surface-draw'
+          });
+        }
+      });
+      const surfaceVerticesExecution = translation.surfaceVertices;
+      const surfaceDrawExecution = translation.surfaceDraw;
+      const residentDraw = {
+        schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
+        status: 'resident-extension-surface-draw-buffers-retained',
+        source: 'webgpu-marching-cubes-extension',
+        reason: null,
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
+        overlayPolicyStatus: resolveSceneResidentSurfaceDrawOverlayPolicy()?.status ?? null,
+        overlayPolicyMode: resolveSceneResidentSurfaceDrawOverlayPolicy()?.mode ?? null,
+        sourceRenderFieldSchema: null,
+        sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
+        surfaceDrawSchema: surfaceDrawExecution.schema,
+        sourceRenderFieldBackend: null,
+        sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
+        surfaceDrawBackend: surfaceDrawExecution.backend,
+        surfaceCount: surfaceDrawExecution.surfaceCount,
+        activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? null,
+        vertexCount: surfaceDrawExecution.vertexCount ?? null,
+        triangleCount: surfaceDrawExecution.triangleCount ?? null,
+        sourceVertexRowCount: surfaceDrawExecution.sourceVertexRowCount,
+        surfaceVertexRowsBufferRetained: Boolean(surfaceVerticesExecution.vertexRowsBufferRetained),
+        surfaceVertexRowsBufferByteLength: surfaceVerticesExecution.vertexRowsBufferByteLength ?? 0,
+        drawRowsBufferRetained: Boolean(surfaceDrawExecution.drawRowsBufferRetained),
+        drawRowsBufferByteLength: surfaceDrawExecution.drawRowsBufferByteLength ?? 0,
+        drawIndirectSchema: surfaceDrawExecution.drawIndirectSchema ?? null,
+        drawIndirectRowStrideUints: surfaceDrawExecution.drawIndirectRowStrideUints ?? 0,
+        drawIndirectRowsBufferRetained: Boolean(surfaceDrawExecution.drawIndirectRowsBufferRetained),
+        drawIndirectRowsBufferByteLength: surfaceDrawExecution.drawIndirectRowsBufferByteLength ?? 0,
+        compactedVertexRowsBufferRetained: Boolean(surfaceDrawExecution.compactedVertexRowsBufferRetained),
+        compactedVertexRowsBufferByteLength: surfaceDrawExecution.compactedVertexRowsBufferByteLength ?? 0,
+        residentBufferLeaseLedgerStatus: translation.residentBufferLeaseLedgerStatus ?? null,
+        residentBufferLeaseResourceCount: translation.residentBufferLeaseResourceCount ?? 0,
+        residentBufferLeaseActiveLeaseCount: translation.residentBufferLeaseActiveLeaseCount ?? 0,
+        residentBufferLeaseSummary: translation.residentBufferLeaseSummary ?? null,
+        readbackMode: translation.readbackMode,
+        surfaceDrawReadback: Boolean(surfaceDrawExecution.surfaceDrawReadback),
+        surfaceDrawSummaryReadback: Boolean(surfaceDrawExecution.surfaceDrawSummaryReadback),
+        surfaceDrawSummaryReadbackByteLength: surfaceDrawExecution.surfaceDrawSummaryReadbackByteLength ?? 0,
+        fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
+        compactionMode: surfaceDrawExecution.compactionMode,
+        renderFieldBufferMode: 'not-used-extension-surface',
+        surfaceVertexBufferMode: 'retained-extension-surface-vertex-buffer',
+        surfaceDrawBufferMode: 'retained-extension-surface-draw-buffers',
+        surfaceDrawInputBuffersReleased: true,
+        visibleRendererBridge: 'extension-resident-surface-buffers-no-overlay',
+        visibleRenderSource: 'webgpu-marching-cubes-extension-same-device-surface',
+        renderBridgeSchema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
+        renderBridgeStatus: 'extension-surface-buffers-retained-no-overlay',
+        renderBridgeReason: 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path',
+        renderBridgeFrameCount: 0,
+        renderBridgeLastRenderStatus: null,
+        renderBridgeEngineIntegration: 'three-renderer-owned-scene-state-no-overlay',
+        renderBridgeThreeMeshCount: 0,
+        renderBridgeThreeGeometryByteLength: 0,
+        renderBridgeDrawOrderingPolicy: null,
+        renderBridgeDrawOrderCount: 0,
+        renderBridgeDrawOrderSurfaceIndices: [],
+        renderBridgeDrawOrderIndirectOffsets: [],
+        renderBridgeDepthPolicy: null,
+        renderBridgeDepthAttachmentFormat: null,
+        renderBridgeDepthAttachmentReady: false,
+        renderBridgeTransparencyCompositeMode: null,
+        renderBridgeOitAccumFormat: null,
+        renderBridgeOitRevealFormat: null,
+        renderBridgeOitTargetsReady: false,
+        renderBridgeLastOpaqueDrawCount: 0,
+        renderBridgeLastTransparentDrawCount: 0,
+        renderBridgeOpticalRenderSource: null,
+        renderBridgeOpticalRecordCount: 0,
+        renderBridgeOpticalRecordStrideFloats: 0,
+        renderBridgeOpticalSpectralSampleCount: 0,
+        renderBridgeOpticalSpectralSampleStrideFloats: 0,
+        renderBridgeTemporalSwapPolicy: null,
+        renderBridgeRetainedPreviousOverlay: false,
+        extensionSurfaceTranslation: translation,
+        surfaceVertices: surfaceVerticesExecution,
+        surfaceDraw: surfaceDrawExecution,
+        scientificValidation: false,
+        sphValidation: false,
+        surfaceExtractionValidation: false,
+        fullPhysicsValidation: false
+      };
+      sphResidentSurfaceDraw = residentDraw;
+      scene.userData.sphResidentSurfaceDraw = residentDraw;
+      sphResidentSurfaceDrawRenderBridge = null;
+      scene.userData.sphResidentSurfaceDrawRenderBridge = null;
+      releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
+      markSphResidentRenderProgress('extension-surface-draw-translation-complete', {
+        stage: 'extension-surface-draw',
+        surfaceCount: residentDraw.surfaceCount,
+        sourceVertexRowCount: residentDraw.sourceVertexRowCount,
+        drawRowsBufferRetained: residentDraw.drawRowsBufferRetained,
+        drawIndirectRowsBufferRetained: residentDraw.drawIndirectRowsBufferRetained,
+        compactedVertexRowsBufferRetained: residentDraw.compactedVertexRowsBufferRetained
+      });
+      return residentDraw;
+    } catch (error) {
+      translation?.releaseExtensionSurfaceBufferLeases?.({
+        status: 'released-after-extension-surface-draw-error'
+      });
+      translation?.destroyExtensionSurfaceBuffers?.({
+        releaseLeases: true,
+        reason: 'extension-surface-draw-error-cleanup'
+      });
+      const unavailable = residentSurfaceDrawUnavailable(error instanceof Error ? error.message : String(error), {
+        overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy()
+      });
+      unavailable.status = 'resident-extension-surface-draw-error';
+      unavailable.visibleRendererBridge = 'extension-resident-surface-buffers-no-overlay';
+      unavailable.visibleRenderSource = 'webgpu-marching-cubes-extension-error';
+      sphResidentSurfaceDraw = unavailable;
+      scene.userData.sphResidentSurfaceDraw = unavailable;
+      sphResidentSurfaceDrawRenderBridge = null;
+      scene.userData.sphResidentSurfaceDrawRenderBridge = null;
+      releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
+      markSphResidentRenderProgress('extension-surface-draw-translation-error', {
+        stage: 'extension-surface-draw',
+        reason: unavailable.reason
+      });
+      return unavailable;
+    }
+  }
+
   async function refreshSphResidentRenderState({
     preferWebGpu = true,
     navigatorRef: overrideNavigatorRef = navigatorRef,
@@ -11047,6 +11251,7 @@ export function createSphPhaseScene(container, {
     refreshMlsMpmResidentSteps,
     refreshSphResidentMaterialInterfaceState,
     refreshSphResidentPressureInterfaceState,
+    refreshSphResidentSurfaceDrawFromExtension,
     refreshSphResidentRenderState,
     debugSphResidentParticleUpload,
     requestOpticalGpuDevice: requestCachedOpticalGpuDevice

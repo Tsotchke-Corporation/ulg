@@ -367,7 +367,11 @@ export const SPH_GPU_RENDER_ROW_LAYOUT = Object.freeze([
   'restDensityKgPerM3:f32',
   'phaseFractionGas:f32',
   'representedEntityCount:f32',
-  'renderDomainId:f32'
+  'renderDomainId:f32',
+  'currentVolumeM3:f32',
+  'particleRadiusM:f32',
+  'volumeRatioJ:f32',
+  'pressurePa:f32'
 ]);
 export const SPH_GPU_RENDER_SURFACE_ROW_LAYOUT = Object.freeze([
   'materialId:f32',

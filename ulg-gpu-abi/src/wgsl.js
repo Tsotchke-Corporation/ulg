@@ -3001,13 +3001,23 @@ struct RenderRowsParams {
   particle_count: u32,
   render_domain_base_count: u32,
   render_domain_drop_count: u32,
-  _pad2: u32,
+  has_mechanics: u32,
 };
 
 @group(0) @binding(0) var<storage, read> sph_state: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> sph_thermo: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> render_rows: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: RenderRowsParams;
+@group(0) @binding(4) var<storage, read> mls_mpm_mechanics: array<vec4<f32>>;
+
+const RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+
+fn radius_from_volume_m(volume_m3: f32) -> f32 {
+  if (volume_m3 <= 0.0) {
+    return 0.0;
+  }
+  return pow((3.0 * volume_m3) / (4.0 * 3.141592653589793), 1.0 / 3.0);
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -3020,6 +3030,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let thermo0 = sph_thermo[particle_index * 3u];
   let thermo1 = sph_thermo[particle_index * 3u + 1u];
   let thermo2 = sph_thermo[particle_index * 3u + 2u];
+  var volume_ratio_j = 1.0;
+  var rest_volume_m3 = 0.0;
+  var pressure_pa = 0.0;
+  if (thermo0.w > 0.0 && pos_mass.w > 0.0) {
+    rest_volume_m3 = pos_mass.w / thermo0.w;
+  }
+  if (params.has_mechanics != 0u) {
+    let mechanics4 = mls_mpm_mechanics[particle_index * 8u + 4u];
+    let mechanics7 = mls_mpm_mechanics[particle_index * 8u + 7u];
+    volume_ratio_j = max(mechanics4.z, 1.0e-9);
+    if (mechanics4.w > 0.0) {
+      rest_volume_m3 = mechanics4.w;
+    }
+    pressure_pa = max(mechanics7.x, 0.0);
+  }
+  let current_volume_m3 = max(rest_volume_m3 * max(volume_ratio_j, 1.0e-9), 0.0);
+  let particle_radius_m = radius_from_volume_m(current_volume_m3);
   var render_domain_id: f32 = 0.0;
   if (params.render_domain_base_count > 0u && particle_index < params.render_domain_base_count) {
     render_domain_id = 1.0;
@@ -3032,9 +3059,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   ) {
     render_domain_id = 2.0;
   }
-  render_rows[particle_index * 3u] = pos_mass;
-  render_rows[particle_index * 3u + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
-  render_rows[particle_index * 3u + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, render_domain_id);
+  let render_row_base = particle_index * RENDER_ROW_VEC4_STRIDE;
+  render_rows[render_row_base] = pos_mass;
+  render_rows[render_row_base + 1u] = vec4<f32>(thermo0.x, thermo0.y, thermo0.z, thermo2.z);
+  render_rows[render_row_base + 2u] = vec4<f32>(thermo0.w, thermo1.z, thermo2.y, render_domain_id);
+  render_rows[render_row_base + 3u] = vec4<f32>(current_volume_m3, particle_radius_m, volume_ratio_j, pressure_pa);
 }
 `;
 
@@ -3052,20 +3081,22 @@ struct RenderFieldParams {
 
 @group(0) @binding(0) var<storage, read> render_rows: array<vec4<f32>>;
 	@group(0) @binding(1) var<storage, read> render_surfaces: array<vec4<f32>>;
-	@group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> render_field_cells: array<vec4<f32>>;
 	@group(0) @binding(3) var<uniform> params: RenderFieldParams;
 	@group(0) @binding(4) var<storage, read> product_events: array<vec4<f32>>;
 
+const RENDER_FIELD_RENDER_ROW_VEC4_STRIDE: u32 = 4u;
+
 fn render_row0(particle_index: u32) -> vec4<f32> {
-  return render_rows[particle_index * 3u];
+  return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE];
 }
 
 fn render_row1(particle_index: u32) -> vec4<f32> {
-  return render_rows[particle_index * 3u + 1u];
+  return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 1u];
 }
 
 fn render_row2(particle_index: u32) -> vec4<f32> {
-  return render_rows[particle_index * 3u + 2u];
+  return render_rows[particle_index * RENDER_FIELD_RENDER_ROW_VEC4_STRIDE + 2u];
 }
 
 fn surface_row0(surface_index: u32) -> vec4<f32> {

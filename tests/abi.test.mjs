@@ -699,7 +699,7 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
     ULG_SPH_GPU_RENDER_ROWS_EXECUTION_SCHEMA,
     'peercompute.ulg.sph-gpu-render-rows-execution.v0'
   );
-  assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length, 12);
+  assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length, 16);
   assert.equal(SPH_GPU_RENDER_ROW_LAYOUT.length % 4, 0);
   assert.deepEqual(SPH_GPU_RENDER_ROW_LAYOUT.slice(0, 8), [
     'positionXM:f32',
@@ -715,12 +715,17 @@ test('SPH GPU render rows ABI exposes compact render-state rows', () => {
     'restDensityKgPerM3:f32',
     'phaseFractionGas:f32',
     'representedEntityCount:f32',
-    'renderDomainId:f32'
+    'renderDomainId:f32',
+    'currentVolumeM3:f32',
+    'particleRadiusM:f32',
+    'volumeRatioJ:f32',
+    'pressurePa:f32'
   ]);
   assert.match(sphRenderRowsWgsl, /struct RenderRowsParams/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(0\) var<storage, read> sph_state/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(1\) var<storage, read> sph_thermo/);
   assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(2\) var<storage, read_write> render_rows/);
+  assert.match(sphRenderRowsWgsl, /@group\(0\) @binding\(4\) var<storage, read> mls_mpm_mechanics/);
   assert.match(sphRenderRowsWgsl, /@compute @workgroup_size\(64\)/);
 });
 

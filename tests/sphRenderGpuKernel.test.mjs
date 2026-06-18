@@ -5,6 +5,7 @@ import {
 } from '../ulg-gpu-abi/src/index.js';
 import { GPU_PHASE_IDS, stableOpticalMaterialId } from '../src/runtime/material/opticalGpuBuffers.js';
 import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from '../src/runtime/sph/sphGpuBuffers.js';
@@ -372,7 +373,7 @@ test('SPH render rows CPU extraction compacts position, thermo, and phase state'
   assert.equal(result.schema, ULG_SPH_GPU_RENDER_ROWS_SCHEMA);
   assert.equal(result.backend, 'cpu-reference');
   assert.equal(result.particleCount, 3);
-  assert.equal(result.rowStrideFloats, 12);
+  assert.equal(result.rowStrideFloats, 16);
   assert.equal(result.renderRows.length, 3 * SPH_GPU_RENDER_ROW_FLOATS);
   assert.deepEqual(Array.from(result.renderRows.slice(0, 12)), [
     1,
@@ -388,6 +389,32 @@ test('SPH render rows CPU extraction compacts position, thermo, and phase state'
     100000002004087730000,
     0
   ]);
+  assert.ok(result.renderRows[12] > 0);
+  assert.ok(result.renderRows[13] > 0);
+  assert.equal(result.renderRows[14], 1);
+  assert.equal(result.renderRows[15], 0);
+});
+
+test('SPH render rows carry MLS-MPM current volume, radius, J, and pressure when mechanics are available', () => {
+  const packed = packedRenderParticles();
+  const mechanics = new Float32Array(3 * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS);
+  mechanics[18] = 8;
+  mechanics[19] = 0.001;
+  mechanics[28] = 125000;
+  const result = extractSphRenderRowsCpu({
+    sphParticleState: packed,
+    mlsMpmParticleState: {
+      particleCount: 3,
+      mechanics
+    }
+  });
+  const expectedVolume = 0.008;
+  const expectedRadius = Math.cbrt((3 * expectedVolume) / (4 * Math.PI));
+
+  assert.ok(Math.abs(result.renderRows[12] - expectedVolume) < 1e-9);
+  assert.ok(Math.abs(result.renderRows[13] - expectedRadius) < 1e-7);
+  assert.equal(result.renderRows[14], 8);
+  assert.equal(result.renderRows[15], 125000);
 });
 
 test('SPH render rows encode base/drop render domains without changing material identity', () => {

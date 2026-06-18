@@ -4545,7 +4545,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect(derivedSummary.sphResidentRenderState.backend).toBe('webgpu');
     expect(derivedSummary.sphResidentRenderState.particleCount).toBe(derivedSummary.sphGpuParticleState.particleCount);
     expect(derivedSummary.sphResidentRenderState.surfaceCount).toBeGreaterThan(0);
-    expect(derivedSummary.sphResidentRenderState.rowStrideFloats).toBe(12);
+    expect(derivedSummary.sphResidentRenderState.rowStrideFloats).toBe(16);
     expect(derivedSummary.sphResidentRenderState.renderRowByteLength).toBeGreaterThan(0);
     expect(derivedSummary.sphResidentRenderState.renderFieldCellStrideFloats).toBe(4);
     expect(derivedSummary.sphResidentRenderState.renderFieldByteLength).toBeGreaterThan(0);

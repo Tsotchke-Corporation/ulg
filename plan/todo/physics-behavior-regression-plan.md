@@ -12,6 +12,19 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-18 AKDT update: the local reference paper
+  `plan/cubic-barrier.pdf` was read and routed into
+  `plan/todo/cubic-barrier-contact-integration-plan.md`. The PPF/Cubic
+  Barrier contact solver is relevant to ULG, but not as a full solver
+  replacement before the MLS-MPM migration lands. The near-term useful piece is
+  elasticity-inclusive dynamic contact stiffness:
+  `k_bar = m / g^2 + n dot H n`, evaluated semi-implicitly from a finite gap,
+  contact normal, representative mass, and local material stiffness. Apply it
+  first to MLS-MPM wall/floor contact, then material-interface contact, with
+  bounded-J/contact-gap/browser-console probes as gates. The paper's cubic
+  energy is most important for extremely small gaps and strain limiting; for
+  ordinary contact, dynamic stiffness is the part that should drive our next
+  physics integration.
 - 2026-06-18 AKDT update: the user's MLS-MPM water/water console report
   included a concrete browser WGSL parser failure:
   `ulg-sph-render-field-surface-summary` declared `let active`, and newer WGSL

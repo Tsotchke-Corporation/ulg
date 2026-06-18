@@ -26544,3 +26544,27 @@ Open:
 - The next performance target remains a pixel-validated GPU-resident renderer
   and GPU-side compact visual proof, not further optimization of the interim
   readback bridge.
+
+## 2026-06-18 07:03 AKDT - Cubic Barrier / PPF contact solver routing
+
+Summary:
+
+- Read `plan/cubic-barrier.pdf`, the 2024 ACM TOG paper "A Cubic Barrier with
+  Elasticity-Inclusive Dynamic Stiffness". The paper cites the implementation
+  reference `st-tech/ppf-contact-solver`.
+- Created `plan/todo/cubic-barrier-contact-integration-plan.md` to route this
+  into ULG without derailing the MLS-MPM migration.
+- Decision: do not replace ULG's MLS-MPM path with a full PPF/IPC-style solver
+  rewrite right now. Use the paper's dynamic barrier stiffness as a concrete
+  design input for MLS-MPM wall/floor and material-interface contact:
+  `k_bar = m / g^2 + n dot H n`.
+- The cubic barrier energy itself is most compelling for tiny gaps and strain
+  limiting; for ordinary contact, the paper's dynamic stiffness is the useful
+  near-term piece for our contact/settling bugs.
+
+Open:
+
+- Implement the first slice inside the MLS-MPM contact/wall update path, not as
+  an overlay or post-hoc render correction.
+- Gate it with bounded `mpmJ`, contact-gap closure, high-speed impulse guards,
+  and the browser console harness.

@@ -2293,10 +2293,22 @@ function estimateGlobalParticleSpacingM(positionsM, particleCount) {
   return Number.isFinite(densityLength) && densityLength > 0 ? densityLength : null;
 }
 
+function estimateSurfaceRadiusFromParticleRadiiM(radii = []) {
+  const finite = radii
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b);
+  if (!finite.length) return null;
+  const median = finite[Math.floor(finite.length / 2)];
+  const mean = finite.reduce((sum, value) => sum + value, 0) / finite.length;
+  return Math.max(median, mean);
+}
+
 export function createContinuousSurfaceBatches({
   positionsM,
   colorsRgb,
   materials = null,
+  particleRadiiM = null,
   boxEdgeM = 10,
   boxDimsM = null,
   smoothingLengthM = null,
@@ -2334,6 +2346,7 @@ export function createContinuousSurfaceBatches({
         positionsM: [],
         normalizedPositions: [],
         colorsRgb: [],
+        particleRadiiM: [],
         bounds: emptyBounds(),
         count: 0
       };
@@ -2358,12 +2371,17 @@ export function createContinuousSurfaceBatches({
       clamp(colorsRgb[i * 3 + 1], 0, 1),
       clamp(colorsRgb[i * 3 + 2], 0, 1)
     );
+    const particleRadiusM = Number(particleRadiiM?.[i]);
+    if (Number.isFinite(particleRadiusM) && particleRadiusM > 0) {
+      batch.particleRadiiM.push(particleRadiusM);
+    }
     expandBounds(batch.bounds, x, y, z);
     batch.count += 1;
   }
   return [...batches.values()].map((batch) => ({
     ...batch,
-    surfaceRadiusM: estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM)
+    surfaceRadiusM: estimateSurfaceRadiusFromParticleRadiiM(batch.particleRadiiM)
+      ?? estimateSurfaceRadiusM(batch.bounds, batch.count, spacingHintM)
   }));
 }
 
@@ -3583,8 +3601,14 @@ export function createSphPhaseScene(container, {
   } = {}) {
     const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
     const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
+    const nextMlsMpmParticleState = residentSteps?.nextMlsMpmParticleState
+      || finalStep?.nextMlsMpmParticleState
+      || null;
     const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
       || finalStep?.nextParticleUploads?.sphParticleUpload
+      || null;
+    const nextMlsMpmUpload = residentSteps?.nextParticleUploads?.mlsMpmParticleUpload
+      || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
       || null;
     if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
       return publishSphResidentMaterialInterfaceState({
@@ -3642,9 +3666,16 @@ export function createSphPhaseScene(container, {
       renderRowsExecution = await extractSphRenderRowsWebGpu({
         device: resolvedDeviceResult.device,
         sphParticleState: nextSphParticleState,
+        mlsMpmParticleState: residentSteps?.nextMlsMpmParticleState || finalStep?.nextMlsMpmParticleState || null,
         sphParticleUpload: nextSphUpload,
+        mlsMpmParticleUpload: residentSteps?.nextParticleUploads?.mlsMpmParticleUpload
+          || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
+          || null,
         sourceStateBuffer: nextSphUpload.stateBuffer,
         sourceThermoBuffer: nextSphUpload.thermoBuffer,
+        sourceMechanicsBuffer: residentSteps?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+          || finalStep?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+          || null,
         retainRenderRowsBuffer: true,
         readbackMode: needsSurfaceTableSeed ? 'full-parity-readback' : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
         ...renderDomainExtractionOptions(currentRenderDomainCounts)
@@ -3661,6 +3692,7 @@ export function createSphPhaseScene(container, {
           positionsM: decoded.positionsM,
           colorsRgb: decoded.colorsRgb,
           materials: decoded.materials,
+          particleRadiiM: decoded.particleRadiiM,
           boxEdgeM,
           boxDimsM: dims,
           smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
@@ -4710,60 +4742,124 @@ export function createSphPhaseScene(container, {
     let group = null;
     let bridgeReused = false;
     let bridgeUpdateCount = 0;
+    let threeMeshes = null;
+    let bridgeMaterialKeys = [];
+    let minParticleRadiusM = null;
+    let maxParticleRadiusM = null;
     const previousBridge = sphResidentSurfaceDrawRenderBridge;
 
     if (useSphereBridge) {
-      const sphereRadius = Math.max(0.025, Math.min(0.16, smoothingLength * 0.32));
-      let mesh = null;
-      const previousMesh = previousBridge?.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
-        ? previousBridge?.threeMeshes?.[0]
+      const fallbackSphereRadius = Math.max(0.025, Math.min(0.16, smoothingLength * 0.32));
+      const rowData = Array.isArray(decoded?.rows) ? decoded.rows : [];
+      const groupsBySurface = new Map();
+      for (let index = 0; index < pointCount; index += 1) {
+        const descriptor = renderDescriptorOf(decoded?.materials?.[index] || rowData[index] || null);
+        let entry = groupsBySurface.get(descriptor.surfaceKey);
+        if (!entry) {
+          entry = { descriptor, indices: [] };
+          groupsBySurface.set(descriptor.surfaceKey, entry);
+        }
+        entry.indices.push(index);
+      }
+      group = previousBridge?.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+        ? previousBridge.threeSurfaceGroup || null
         : null;
-      const previousCapacity = previousMesh?.instanceMatrix?.array
-        ? Math.floor(previousMesh.instanceMatrix.array.length / 16)
-        : 0;
-      if (previousMesh?.isInstancedMesh && previousCapacity >= pointCount) {
-        mesh = previousMesh;
-        group = previousBridge.threeSurfaceGroup || null;
+      if (group) {
+        for (const child of [...group.children]) {
+          group.remove(child);
+          child.geometry?.dispose?.();
+          if (Array.isArray(child.material)) {
+            for (const material of child.material) material?.dispose?.();
+          } else {
+            child.material?.dispose?.();
+          }
+        }
         bridgeReused = true;
         bridgeUpdateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
-        mesh.count = pointCount;
       } else {
-        const sphereGeometry = new THREE.SphereGeometry(sphereRadius, 8, 6);
-        const sphereMaterial = new THREE.MeshBasicMaterial({
-          color: 0x9ed8ff,
-          vertexColors: false,
-          transparent: true,
-          opacity: 0.9,
-          depthWrite: true,
-          depthTest: true
-        });
-        sphereMaterial.userData.optical = {
-          alpha: sphereMaterial.opacity,
-          transparencyClassId: 1,
-          depthWriteFlag: 1
-        };
-        mesh = new THREE.InstancedMesh(sphereGeometry, sphereMaterial, pointCount);
-        mesh.name = 'ulg-sph-three-render-row-spheres';
-        mesh.frustumCulled = false;
-        mesh.renderOrder = 1200;
+        group = new THREE.Group();
+        group.name = 'ulg-sph-resident-render-row-three-spheres';
+        group.frustumCulled = false;
+        scene.add(group);
+      }
+      if (previousBridge?.threeSurfaceGroup && previousBridge.threeSurfaceGroup !== group) {
+        previousBridge.threeSurfaceGroup.visible = false;
       }
       const temp = new THREE.Object3D();
-      for (let index = 0; index < pointCount; index += 1) {
-        const offset = index * 3;
-        temp.position.set(positionsM[offset], positionsM[offset + 1], positionsM[offset + 2]);
-        temp.updateMatrix();
-        mesh.setMatrixAt(index, temp.matrix);
+      const meshes = [];
+      let transparentGroups = 0;
+      let opaqueGroups = 0;
+      for (const entry of groupsBySurface.values()) {
+        const { descriptor, indices } = entry;
+        const properties = materialPropertiesForSurfaceDescriptor(descriptor, currentMaterialProperties);
+        const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, descriptor);
+        const material = makeSurfaceMaterial(descriptor, properties, cachedOptics);
+        const emissive = decoded?.emissiveByMaterial?.[descriptor.material]
+          ?? decoded?.emissiveByMaterial?.[descriptor.renderKey]
+          ?? null;
+        if (emissive && material.emissive) {
+          material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
+          material.emissiveIntensity = 1.8;
+        }
+        const sphereGeometry = new THREE.SphereGeometry(1, 8, 6);
+        const mesh = new THREE.InstancedMesh(sphereGeometry, material, indices.length);
+        mesh.name = `ulg-sph-three-render-row-spheres-${descriptor.surfaceKey}`;
+        mesh.frustumCulled = false;
+        applySurfaceRenderOrdering(mesh, material.userData.optical, descriptor);
+        mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
+        mesh.userData.renderSource = visibleRenderSource;
+        mesh.userData.pointCount = indices.length;
+        mesh.userData.materialKey = descriptor.material;
+        mesh.userData.renderKey = descriptor.renderKey;
+        mesh.userData.phase = descriptor.phase;
+        mesh.userData.optical = material.userData.optical;
+        mesh.userData.opticalState = descriptor.opticalState || null;
+        mesh.userData.opticalStateKey = descriptor.opticalStateKey || 'default';
+        mesh.userData.renderDomainId = descriptor.renderDomainId;
+        mesh.userData.renderDomainKey = descriptor.renderDomainKey;
+        let groupMinRadius = Number.POSITIVE_INFINITY;
+        let groupMaxRadius = Number.NEGATIVE_INFINITY;
+        for (let localIndex = 0; localIndex < indices.length; localIndex += 1) {
+          const index = indices[localIndex];
+          const offset = index * 3;
+          const rowRadius = Number(rowData[index]?.particleRadiusM);
+          const particleRadius = Number.isFinite(rowRadius) && rowRadius > 0
+            ? rowRadius
+            : fallbackSphereRadius;
+          groupMinRadius = Math.min(groupMinRadius, particleRadius);
+          groupMaxRadius = Math.max(groupMaxRadius, particleRadius);
+          minParticleRadiusM = minParticleRadiusM == null
+            ? particleRadius
+            : Math.min(minParticleRadiusM, particleRadius);
+          maxParticleRadiusM = maxParticleRadiusM == null
+            ? particleRadius
+            : Math.max(maxParticleRadiusM, particleRadius);
+          temp.position.set(positionsM[offset], positionsM[offset + 1], positionsM[offset + 2]);
+          temp.scale.setScalar(particleRadius);
+          temp.updateMatrix();
+          mesh.setMatrixAt(localIndex, temp.matrix);
+        }
+        temp.scale.setScalar(1);
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.userData.sphereRadiusM = Number.isFinite(groupMaxRadius) ? groupMaxRadius : fallbackSphereRadius;
+        mesh.userData.minParticleRadiusM = Number.isFinite(groupMinRadius) ? groupMinRadius : fallbackSphereRadius;
+        mesh.userData.maxParticleRadiusM = Number.isFinite(groupMaxRadius) ? groupMaxRadius : fallbackSphereRadius;
+        mesh.computeBoundingSphere?.();
+        group.add(mesh);
+        meshes.push(mesh);
+        bridgeMaterialKeys.push(descriptor.material || descriptor.renderKey || 'unknown');
+        geometryByteLength += (
+          sphereGeometry.attributes?.position?.array?.byteLength || 0
+        ) + indices.length * 16 * Float32Array.BYTES_PER_ELEMENT;
+        if (material.transparent || material.depthWrite === false) transparentGroups += 1;
+        else opaqueGroups += 1;
       }
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
-      mesh.userData.renderSource = visibleRenderSource;
-      mesh.userData.pointCount = pointCount;
-      mesh.userData.sphereRadiusM = sphereRadius;
-      mesh.computeBoundingSphere?.();
-      renderObject = mesh;
-      geometryByteLength += pointCount * 16 * Float32Array.BYTES_PER_ELEMENT;
-      transparencyCompositeMode = 'three-instanced-spheres-depth-buffer';
-      drawOrderingPolicy = 'three-instanced-spheres-depth-policy';
+      threeMeshes = meshes;
+      renderObject = meshes[0] || null;
+      lastOpaqueDrawCount = opaqueGroups;
+      lastTransparentDrawCount = transparentGroups;
+      transparencyCompositeMode = 'three-instanced-spheres-material-pbr-depth-buffer';
+      drawOrderingPolicy = 'three-instanced-spheres-material-pbr-depth-policy';
     } else {
       let positions = null;
       let colors = null;
@@ -4842,6 +4938,7 @@ export function createSphPhaseScene(container, {
       points.userData.renderSource = visibleRenderSource;
       points.userData.pointCount = pointCount;
       renderObject = points;
+      threeMeshes = [points];
     }
     if (!group) {
       group = new THREE.Group();
@@ -4849,9 +4946,9 @@ export function createSphPhaseScene(container, {
         ? 'ulg-sph-resident-render-row-three-spheres'
         : 'ulg-sph-resident-render-row-three-points';
       group.frustumCulled = false;
-      group.add(renderObject);
+      if (renderObject) group.add(renderObject);
       scene.add(group);
-    } else if (renderObject.parent !== group) {
+    } else if (renderObject && renderObject.parent !== group) {
       group.add(renderObject);
     }
     group.visible = true;
@@ -4865,15 +4962,15 @@ export function createSphPhaseScene(container, {
       reason: renderReason,
       overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy(),
       threeSurfaceGroup: group,
-      threeMeshes: [renderObject],
-      threeMeshCount: 1,
+      threeMeshes: threeMeshes || (renderObject ? [renderObject] : []),
+      threeMeshCount: (threeMeshes || (renderObject ? [renderObject] : [])).length,
       threeGeometryByteLength: geometryByteLength,
       frameCount: 0,
       lastRenderStatus: useSphereBridge
         ? 'three-render-row-spheres-submitted'
         : 'three-render-row-points-submitted',
       drawOrderingPolicy,
-      drawOrderCount: 1,
+      drawOrderCount: Math.max(1, (threeMeshes || []).length),
       drawOrderSurfaceIndices: [],
       drawOrderIndirectOffsets: [],
       depthPolicy: 'three-managed-depth-buffer',
@@ -4885,7 +4982,7 @@ export function createSphPhaseScene(container, {
       oitTargetsReady: false,
       lastOpaqueDrawCount,
       lastTransparentDrawCount,
-      opticalRenderSource: useSphereBridge ? 'fixed-water-sphere-material' : 'render-row-vertex-colors',
+      opticalRenderSource: useSphereBridge ? 'render-row-material-pbr' : 'render-row-vertex-colors',
       opticalRecordCount: opticalGpuTable?.recordCount ?? 0,
       opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
       opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
@@ -4898,6 +4995,9 @@ export function createSphPhaseScene(container, {
       sphereBridgeRequested: requestedSphereBridge,
       sphereBridgeUsed: useSphereBridge,
       sphereBridgeMaxInstances: SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES,
+      sphereBridgeMaterialKeys: bridgeMaterialKeys,
+      minParticleRadiusM,
+      maxParticleRadiusM,
       renderRowsReadback: Boolean(renderRowsExecution?.renderRowsReadback),
       engineIntegration: 'three-renderer-owned-scene-object',
       threeRenderBridgeReused: bridgeReused,
@@ -7884,6 +7984,8 @@ export function createSphPhaseScene(container, {
     const materialPhaseCounts = {};
     const materialPhaseDomainCounts = {};
     const materialPhaseDomainBounds = {};
+    let minParticleRadiusM = Number.POSITIVE_INFINITY;
+    let maxParticleRadiusM = Number.NEGATIVE_INFINITY;
     for (const row of decoded.rows) {
       const key = `${row.material ?? 'unknown'}|${row.phase ?? 'unknown'}`;
       materialPhaseCounts[key] = (materialPhaseCounts[key] || 0) + 1;
@@ -7905,6 +8007,11 @@ export function createSphPhaseScene(container, {
           bounds.max[axis] = Math.max(bounds.max[axis], value);
         }
       }
+      const particleRadiusM = Number(row.particleRadiusM);
+      if (Number.isFinite(particleRadiusM) && particleRadiusM > 0) {
+        minParticleRadiusM = Math.min(minParticleRadiusM, particleRadiusM);
+        maxParticleRadiusM = Math.max(maxParticleRadiusM, particleRadiusM);
+      }
     }
     for (const bounds of Object.values(materialPhaseDomainBounds)) {
       bounds.size = bounds.max.map((value, axis) => value - bounds.min[axis]);
@@ -7918,6 +8025,8 @@ export function createSphPhaseScene(container, {
       materialPhaseCounts,
       materialPhaseDomainCounts,
       materialPhaseDomainBounds,
+      minParticleRadiusM: Number.isFinite(minParticleRadiusM) ? minParticleRadiusM : null,
+      maxParticleRadiusM: Number.isFinite(maxParticleRadiusM) ? maxParticleRadiusM : null,
       sampleRows: sampleRows.map((row) => ({
         index: row.index,
         materialId: row.materialId,
@@ -7927,6 +8036,9 @@ export function createSphPhaseScene(container, {
         renderDomainId: row.renderDomainId,
         renderDomainKey: row.renderDomainKey,
         temperatureK: row.temperatureK,
+        particleRadiusM: row.particleRadiusM,
+        volumeRatioJ: row.volumeRatioJ,
+        pressurePa: row.pressurePa,
         status: row.status,
         positionM: row.positionM
       }))
@@ -9053,8 +9165,14 @@ export function createSphPhaseScene(container, {
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
     const finalStep = residentSteps?.finalStep || mlsMpmResidentStep || null;
     const nextSphParticleState = residentSteps?.nextSphParticleState || sphGpuParticleState;
+    const nextMlsMpmParticleState = residentSteps?.nextMlsMpmParticleState
+      || finalStep?.nextMlsMpmParticleState
+      || null;
     const nextSphUpload = residentSteps?.nextParticleUploads?.sphParticleUpload
       || finalStep?.nextParticleUploads?.sphParticleUpload
+      || null;
+    const nextMlsMpmUpload = residentSteps?.nextParticleUploads?.mlsMpmParticleUpload
+      || finalStep?.nextParticleUploads?.mlsMpmParticleUpload
       || null;
     markSphResidentRenderProgress('resident-render-refresh-started', {
       stage: 'resident-render-refresh',
@@ -9140,9 +9258,12 @@ export function createSphPhaseScene(container, {
       const extractRenderRowsForMode = (readbackMode) => extractSphRenderRowsWebGpu({
         device: resolvedDeviceResult.device,
         sphParticleState: nextSphParticleState,
+        mlsMpmParticleState: nextMlsMpmParticleState,
         sphParticleUpload: nextSphUpload,
+        mlsMpmParticleUpload: nextMlsMpmUpload,
         sourceStateBuffer: nextSphUpload.stateBuffer,
         sourceThermoBuffer: nextSphUpload.thermoBuffer,
+        sourceMechanicsBuffer: nextMlsMpmUpload?.mechanicsBuffer || null,
         retainRenderRowsBuffer: true,
         readbackMode,
         ...renderDomainExtractionOptions(currentRenderDomainCounts)
@@ -9241,6 +9362,7 @@ export function createSphPhaseScene(container, {
             positionsM: decoded.positionsM,
             colorsRgb: decoded.colorsRgb,
             materials: decoded.materials,
+            particleRadiiM: decoded.particleRadiiM,
             boxEdgeM,
             boxDimsM: dims,
             smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null
@@ -9857,6 +9979,9 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeOpticalRecordStrideFloats = renderBridge?.opticalRecordStrideFloats ?? 0;
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleCount = renderBridge?.opticalSpectralSampleCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeOpticalSpectralSampleStrideFloats = renderBridge?.opticalSpectralSampleStrideFloats ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereMaterialKeys = [...(renderBridge?.sphereBridgeMaterialKeys || [])];
+          nextResidentSurfaceDraw.renderBridgeMinParticleRadiusM = renderBridge?.minParticleRadiusM ?? null;
+          nextResidentSurfaceDraw.renderBridgeMaxParticleRadiusM = renderBridge?.maxParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = renderBridge?.temporalSwapPolicy ?? null;
           nextResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay = Boolean(renderBridge?.retainedPreviousOverlay);
         } else if (
@@ -10115,6 +10240,8 @@ export function createSphPhaseScene(container, {
         renderRowsDecodedMaterialPhaseCounts: decodedRenderRowsSummary?.materialPhaseCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainCounts: decodedRenderRowsSummary?.materialPhaseDomainCounts ?? null,
         renderRowsDecodedMaterialPhaseDomainBounds: decodedRenderRowsSummary?.materialPhaseDomainBounds ?? null,
+        renderRowsDecodedMinParticleRadiusM: decodedRenderRowsSummary?.minParticleRadiusM ?? null,
+        renderRowsDecodedMaxParticleRadiusM: decodedRenderRowsSummary?.maxParticleRadiusM ?? null,
         renderRowsDecodedSampleRows: decodedRenderRowsSummary?.sampleRows ?? null,
         renderFieldCellStrideFloats: renderFieldExecution?.rowStrideFloats ?? null,
         renderFieldByteLength: renderFieldExecution?.fieldRowByteLength ?? 0,
@@ -10251,6 +10378,9 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeOpticalRecordStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalRecordStrideFloats ?? 0,
         surfaceDrawRenderBridgeOpticalSpectralSampleCount: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleCount ?? 0,
         surfaceDrawRenderBridgeOpticalSpectralSampleStrideFloats: sphResidentSurfaceDraw?.renderBridgeOpticalSpectralSampleStrideFloats ?? 0,
+        surfaceDrawRenderBridgeSphereMaterialKeys: [...(sphResidentSurfaceDraw?.renderBridgeSphereMaterialKeys || [])],
+        surfaceDrawRenderBridgeMinParticleRadiusM: sphResidentSurfaceDraw?.renderBridgeMinParticleRadiusM ?? null,
+        surfaceDrawRenderBridgeMaxParticleRadiusM: sphResidentSurfaceDraw?.renderBridgeMaxParticleRadiusM ?? null,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDraw?.renderBridgeTemporalSwapPolicy
           ?? sphResidentSurfaceDrawRenderBridge?.temporalSwapPolicy
           ?? null,

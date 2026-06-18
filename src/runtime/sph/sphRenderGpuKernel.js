@@ -50,6 +50,7 @@ import { opticalRenderParams } from '../material/opticalClosure.js';
 import { incandescentColor } from '../material/radiationClosure.js';
 import { computeBufferBinding, createExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
+  MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
   SPH_GPU_PARTICLE_STATE_FLOATS,
   SPH_GPU_PARTICLE_THERMO_FLOATS
 } from './sphGpuBuffers.js';
@@ -244,6 +245,8 @@ export function decodeSphRenderRows(renderRows, {
   const particleCount = renderRows.length / SPH_GPU_RENDER_ROW_FLOATS;
   const positionsM = new Float32Array(particleCount * 3);
   const colorsRgb = new Float32Array(particleCount * 3);
+  const currentVolumesM3 = new Float32Array(particleCount);
+  const particleRadiiM = new Float32Array(particleCount);
   const materials = new Array(particleCount);
   const rows = [];
 
@@ -256,6 +259,10 @@ export function decodeSphRenderRows(renderRows, {
     const renderKey = renderKeyFor(material, phase);
     const temperatureK = renderRows[offset + 6];
     const renderDomainId = Math.max(0, Math.round(finiteNumber(renderRows[offset + 11], 0)));
+    const currentVolumeM3 = finiteNumber(renderRows[offset + 12], 0);
+    const particleRadiusM = finiteNumber(renderRows[offset + 13], 0);
+    const volumeRatioJ = finiteNumber(renderRows[offset + 14], 1);
+    const pressurePa = finiteNumber(renderRows[offset + 15], 0);
     const renderDomainKey = renderDomainKeyForId(renderDomainId);
     const h2oGas = gasPressureSummary?.bySpecies?.h2o || null;
     const opticalState = material === 'h2o' && phase === 'gas' && h2oGas
@@ -269,6 +276,8 @@ export function decodeSphRenderRows(renderRows, {
     const rgb = colorFor({ material, phase, temperatureK, materialProperties });
     positionsM.set([renderRows[offset], renderRows[offset + 1], renderRows[offset + 2]], index * 3);
     colorsRgb.set(rgb, index * 3);
+    currentVolumesM3[index] = currentVolumeM3;
+    particleRadiiM[index] = particleRadiusM;
     const descriptor = opticalState
       ? { material, phase, renderKey, opticalState }
       : { material, phase, renderKey };
@@ -292,6 +301,10 @@ export function decodeSphRenderRows(renderRows, {
       representedEntityCount: renderRows[offset + 10],
       renderDomainId,
       renderDomainKey,
+      currentVolumeM3,
+      particleRadiusM,
+      volumeRatioJ,
+      pressurePa,
       renderKey,
       opticalState
     });
@@ -303,6 +316,8 @@ export function decodeSphRenderRows(renderRows, {
     particleCount,
     positionsM,
     colorsRgb,
+    currentVolumesM3,
+    particleRadiiM,
     materials,
     rows,
     emissiveByMaterial: emissiveByMaterialFromSphRenderRows(rows),
@@ -324,8 +339,57 @@ function renderDomainIdForParticleIndex(index, {
   return 0;
 }
 
+function particleVolumeM3FromMassDensity(massKg, restDensityKgPerM3) {
+  const mass = finiteNumber(massKg, 0);
+  const restDensity = finiteNumber(restDensityKgPerM3, 0);
+  return mass > 0 && restDensity > 0 ? mass / restDensity : 0;
+}
+
+function particleRadiusMFromVolume(volumeM3) {
+  const volume = finiteNumber(volumeM3, 0);
+  if (!(volume > 0)) return 0;
+  return Math.cbrt((3 * volume) / (4 * Math.PI));
+}
+
+function renderVolumeStateForParticle({
+  sphParticleState,
+  mlsMpmParticleState = null,
+  particleIndex,
+  massKg,
+  restDensityKgPerM3
+} = {}) {
+  const fallbackRestVolumeM3 = particleVolumeM3FromMassDensity(massKg, restDensityKgPerM3);
+  let restVolumeM3 = fallbackRestVolumeM3;
+  let volumeRatioJ = 1;
+  let pressurePa = 0;
+  const mechanics = mlsMpmParticleState?.mechanics;
+  if (
+    mechanics instanceof Float32Array
+    && particleIndex >= 0
+    && particleIndex < finiteNumber(sphParticleState?.particleCount, 0)
+  ) {
+    const mechanicsOffset = particleIndex * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+    if (mechanicsOffset + 28 < mechanics.length) {
+      const mechanicsJ = finiteNumber(mechanics[mechanicsOffset + 18], 1);
+      const mechanicsRestVolumeM3 = finiteNumber(mechanics[mechanicsOffset + 19], 0);
+      const mechanicsPressurePa = finiteNumber(mechanics[mechanicsOffset + 28], 0);
+      volumeRatioJ = mechanicsJ > 0 ? mechanicsJ : 1;
+      if (mechanicsRestVolumeM3 > 0) restVolumeM3 = mechanicsRestVolumeM3;
+      pressurePa = Math.max(mechanicsPressurePa, 0);
+    }
+  }
+  const currentVolumeM3 = Math.max(restVolumeM3 * Math.max(volumeRatioJ, 1e-9), 0);
+  return {
+    currentVolumeM3,
+    particleRadiusM: particleRadiusMFromVolume(currentVolumeM3),
+    volumeRatioJ,
+    pressurePa
+  };
+}
+
 export function extractSphRenderRowsCpu({
   sphParticleState,
+  mlsMpmParticleState = null,
   renderDomainBaseCount = 0,
   renderDomainDropCount = 0
 } = {}) {
@@ -335,19 +399,32 @@ export function extractSphRenderRowsCpu({
     const stateOffset = index * SPH_GPU_PARTICLE_STATE_FLOATS;
     const thermoOffset = index * SPH_GPU_PARTICLE_THERMO_FLOATS;
     const renderOffset = index * SPH_GPU_RENDER_ROW_FLOATS;
+    const massKg = sphParticleState.state[stateOffset + 3];
+    const restDensityKgPerM3 = sphParticleState.thermo[thermoOffset + 3];
+    const volumeState = renderVolumeStateForParticle({
+      sphParticleState,
+      mlsMpmParticleState,
+      particleIndex: index,
+      massKg,
+      restDensityKgPerM3
+    });
     renderRows.set([
       sphParticleState.state[stateOffset],
       sphParticleState.state[stateOffset + 1],
       sphParticleState.state[stateOffset + 2],
-      sphParticleState.state[stateOffset + 3],
+      massKg,
       sphParticleState.thermo[thermoOffset],
       sphParticleState.thermo[thermoOffset + 1],
       sphParticleState.thermo[thermoOffset + 2],
       sphParticleState.thermo[thermoOffset + 10],
-      sphParticleState.thermo[thermoOffset + 3],
+      restDensityKgPerM3,
       sphParticleState.thermo[thermoOffset + 6],
       sphParticleState.thermo[thermoOffset + 9],
-      renderDomainIdForParticleIndex(index, { renderDomainBaseCount, renderDomainDropCount })
+      renderDomainIdForParticleIndex(index, { renderDomainBaseCount, renderDomainDropCount }),
+      volumeState.currentVolumeM3,
+      volumeState.particleRadiusM,
+      volumeState.volumeRatioJ,
+      volumeState.pressurePa
     ], renderOffset);
   }
   return {
@@ -407,14 +484,15 @@ function assertWebGpuStorageBufferBindingSizeFitsDevice(device, label, byteLengt
 function createParamsArray({
   particleCount,
   renderDomainBaseCount = 0,
-  renderDomainDropCount = 0
+  renderDomainDropCount = 0,
+  hasMechanics = false
 } = {}) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, particleCount, true);
   view.setUint32(4, Math.max(0, Math.round(finiteNumber(renderDomainBaseCount, 0))), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(renderDomainDropCount, 0))), true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, hasMechanics ? 1 : 0, true);
   return buffer;
 }
 
@@ -660,6 +738,8 @@ function summarizeSphRenderRowData(renderRows, { maxSampleRows = 8 } = {}) {
   let totalMassKg = 0;
   let minTemperatureK = Number.POSITIVE_INFINITY;
   let maxTemperatureK = Number.NEGATIVE_INFINITY;
+  let minParticleRadiusM = Number.POSITIVE_INFINITY;
+  let maxParticleRadiusM = Number.NEGATIVE_INFINITY;
   for (let index = 0; index < particleCount; index += 1) {
     const offset = index * SPH_GPU_RENDER_ROW_FLOATS;
     const positionM = [
@@ -672,6 +752,7 @@ function summarizeSphRenderRowData(renderRows, { maxSampleRows = 8 } = {}) {
     const phaseId = finiteNumber(renderRows[offset + 5], 0);
     const temperatureK = finiteNumber(renderRows[offset + 6], NaN);
     const status = finiteNumber(renderRows[offset + 7], 0);
+    const particleRadiusM = finiteNumber(renderRows[offset + 13], NaN);
     if (positionM.every(Number.isFinite)) {
       finitePositionCount += 1;
       expandBounds3(bounds, positionM);
@@ -685,6 +766,10 @@ function summarizeSphRenderRowData(renderRows, { maxSampleRows = 8 } = {}) {
       minTemperatureK = Math.min(minTemperatureK, temperatureK);
       maxTemperatureK = Math.max(maxTemperatureK, temperatureK);
     }
+    if (Number.isFinite(particleRadiusM) && particleRadiusM > 0) {
+      minParticleRadiusM = Math.min(minParticleRadiusM, particleRadiusM);
+      maxParticleRadiusM = Math.max(maxParticleRadiusM, particleRadiusM);
+    }
     const countKey = materialPhaseCountKey(materialId, phaseId);
     materialPhaseCounts[countKey] = (materialPhaseCounts[countKey] || 0) + 1;
     if (sampleRows.length < maxSampleRows) {
@@ -695,7 +780,8 @@ function summarizeSphRenderRowData(renderRows, { maxSampleRows = 8 } = {}) {
         materialId,
         phaseId,
         temperatureK: Number.isFinite(temperatureK) ? temperatureK : null,
-        status
+        status,
+        particleRadiusM: Number.isFinite(particleRadiusM) ? particleRadiusM : null
       });
     }
   }
@@ -708,6 +794,8 @@ function summarizeSphRenderRowData(renderRows, { maxSampleRows = 8 } = {}) {
     boundsM: finalizeBounds3(bounds),
     minTemperatureK: Number.isFinite(minTemperatureK) ? minTemperatureK : null,
     maxTemperatureK: Number.isFinite(maxTemperatureK) ? maxTemperatureK : null,
+    minParticleRadiusM: Number.isFinite(minParticleRadiusM) ? minParticleRadiusM : null,
+    maxParticleRadiusM: Number.isFinite(maxParticleRadiusM) ? maxParticleRadiusM : null,
     materialPhaseCounts,
     sampleRows
   };
@@ -5094,9 +5182,12 @@ export async function buildSphRenderFieldWithOptionalWebGpu({
 export async function extractSphRenderRowsWebGpu({
   device,
   sphParticleState,
+  mlsMpmParticleState = null,
   sphParticleUpload = null,
+  mlsMpmParticleUpload = null,
   sourceStateBuffer = null,
   sourceThermoBuffer = null,
+  sourceMechanicsBuffer = null,
   retainRenderRowsBuffer = false,
   readbackMode = FULL_READBACK_MODE,
   renderDomainBaseCount = 0,
@@ -5109,8 +5200,17 @@ export async function extractSphRenderRowsWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const borrowedStateBuffer = sourceStateBuffer || sphParticleUpload?.stateBuffer || null;
   const borrowedThermoBuffer = sourceThermoBuffer || sphParticleUpload?.thermoBuffer || null;
+  const mechanicsReady = mlsMpmParticleState?.mechanics instanceof Float32Array
+    && mlsMpmParticleState.mechanics.length >= sphParticleState.particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS;
+  const borrowedMechanicsBuffer = sourceMechanicsBuffer || mlsMpmParticleUpload?.mechanicsBuffer || null;
   const stateBuffer = borrowedStateBuffer || writeStorageBuffer(device, 'ulg-sph-render-source-state', sphParticleState.state);
   const thermoBuffer = borrowedThermoBuffer || writeStorageBuffer(device, 'ulg-sph-render-source-thermo', sphParticleState.thermo);
+  const mechanicsBuffer = borrowedMechanicsBuffer
+    || writeStorageBuffer(
+      device,
+      mechanicsReady ? 'ulg-sph-render-source-mechanics' : 'ulg-sph-render-source-mechanics-empty',
+      mechanicsReady ? mlsMpmParticleState.mechanics : new Float32Array(MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS)
+    );
   const renderRowsBuffer = writeStorageBuffer(
     device,
     'ulg-sph-render-rows',
@@ -5136,7 +5236,8 @@ export async function extractSphRenderRowsWebGpu({
   device.queue.writeBuffer(paramsBuffer, 0, createParamsArray({
     particleCount: sphParticleState.particleCount,
     renderDomainBaseCount,
-    renderDomainDropCount
+    renderDomainDropCount,
+    hasMechanics: Boolean(borrowedMechanicsBuffer || mechanicsReady)
   }));
 
   const module = device.createShaderModule({ label: 'ulg-sph-render-rows', code: sphRenderRowsWgsl });
@@ -5148,7 +5249,8 @@ export async function extractSphRenderRowsWebGpu({
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -5157,7 +5259,8 @@ export async function extractSphRenderRowsWebGpu({
       { binding: 0, resource: { buffer: stateBuffer } },
       { binding: 1, resource: { buffer: thermoBuffer } },
       { binding: 2, resource: { buffer: renderRowsBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
+      { binding: 3, resource: { buffer: paramsBuffer } },
+      { binding: 4, resource: { buffer: mechanicsBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -5192,6 +5295,7 @@ export async function extractSphRenderRowsWebGpu({
 
   if (!borrowedStateBuffer) stateBuffer.destroy?.();
   if (!borrowedThermoBuffer) thermoBuffer.destroy?.();
+  if (!borrowedMechanicsBuffer) mechanicsBuffer.destroy?.();
   if (useGpuHandoffBuffer) renderRowsBuffer.destroy?.();
   if (!retainRenderRowsBuffer) destroyRetainedRenderRowsBuffer();
   paramsBuffer.destroy?.();
@@ -5214,6 +5318,7 @@ export async function extractSphRenderRowsWebGpu({
     compactRenderReadback: !noFullReadback,
     fullReadbackPerformed: !noFullReadback,
     normalHotLoopReadbackFree: noFullReadback,
+    renderRowsIncludeMechanicsVolume: Boolean(borrowedMechanicsBuffer || mechanicsReady),
     renderRowsGpuHandoffCopy: useGpuHandoffBuffer,
     renderRowsHandoffMode: useGpuHandoffBuffer ? 'gpu-copy-barrier' : 'direct-render-row-buffer',
     scientificValidation: false,

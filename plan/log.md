@@ -26756,3 +26756,23 @@ Validation:
 - PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `39/39`
   pass.
+
+## 2026-06-18 11:19 AKDT - Reset Worker Generation Race Guard
+
+Status:
+
+- Fixed a reset race in the mounted SPH phase demo: `scheduleDemoRebuild()`
+  now invalidates any in-flight worker rebuild generation synchronously before
+  queuing the next worker rebuild.
+- This prevents an old worker result from landing in the short reset/timer
+  window and republishing stale particle/view state as a completed reset.
+- Added a pure reset-gate helper so the generation invalidation is covered
+  without mounting the full UI.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/sphPhaseDemoMountRemoteRefresh.test.mjs`.
+- PASS: `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs` reported
+  `5/5` pass.
+- PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_DERIVED_E2E_TIMEOUT_MS=300000 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default"` reported `1/1` pass.

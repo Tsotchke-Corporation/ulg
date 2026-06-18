@@ -78,6 +78,7 @@ const MECHANICS_MODE_DEFAULT = 'sph';
 const DROP_MATERIAL_DEFAULT = 'Na';
 const BASE_MATERIAL_DEFAULT = 'h2o';
 const PEER_CLOSURE_CACHE_STORAGE_KEY = 'peercompute.ulg.sph-derived-closure-cache.v1';
+export const SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA = 'peercompute.ulg.sph-phase-rebuild-worker-status.v0';
 const PEER_CLOSURE_CACHE_SCHEMA = 'peercompute.ulg.local-derived-closure-cache.v2';
 const PEER_CLOSURE_CACHE_RECORD_SCHEMA = 'peercompute.ulg.local-derived-material-closure-cache-record.v2';
 const PEER_CLOSURE_CACHE_GENERATOR_SCHEMA = 'peercompute.ulg.material-closure-generator-fingerprint.v1';
@@ -282,6 +283,35 @@ export function residentMotionDiagnostic({
     sphValidation: false,
     phaseChangeValidation: false,
     fullPhysicsValidation: false
+  };
+}
+
+export function workerRebuildResetGate({
+  currentGeneration = 0,
+  activeTask = null,
+  reason = 'demo-rebuild',
+  nowMs = 0
+} = {}) {
+  const generation = Math.max(0, Math.round(Number(currentGeneration) || 0)) + 1;
+  const cancelledGeneration = Number.isFinite(Number(activeTask?.generation))
+    ? Math.round(Number(activeTask.generation))
+    : null;
+  return {
+    generation,
+    activeWorkerRebuildTask: null,
+    workerStatus: {
+      schema: SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
+      status: 'cancelled-by-reset',
+      generation,
+      cancelledGeneration,
+      reason,
+      previousStatus: activeTask?.status || null,
+      updatedAtMs: Number.isFinite(Number(nowMs)) ? Number(nowMs) : 0,
+      scientificValidation: false,
+      sphValidation: false,
+      phaseChangeValidation: false,
+      fullPhysicsValidation: false
+    }
   };
 }
 
@@ -2560,7 +2590,7 @@ export function mountSphPhaseDemoOverlay({
     };
     overlay.__sphCpuClosureTask = cpuClosureTask;
     overlay.__sphPhaseRebuildWorker = {
-      schema: 'peercompute.ulg.sph-phase-rebuild-worker-status.v0',
+      schema: SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
       ...activeWorkerRebuildTask
     };
     statusEl.textContent = 'submitting initial material state and derived chemistry to ulg-runtime worker...';
@@ -4143,7 +4173,7 @@ export function mountSphPhaseDemoOverlay({
     publishPeerClosureCacheState();
     overlay.__sphPhaseWorkerTiming = workerTiming;
     overlay.__sphPhaseRebuildWorker = {
-      schema: 'peercompute.ulg.sph-phase-rebuild-worker-status.v0',
+      schema: SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
       status: 'complete',
       rootTaskId: result?.rootTaskId || activeWorkerRebuildTask?.rootTaskId || null,
       artifactRef: result?.artifactRef || null,
@@ -4206,6 +4236,19 @@ export function mountSphPhaseDemoOverlay({
     return true;
   }
 
+  function cancelWorkerRebuildForReset(reason = 'demo-rebuild') {
+    const gate = workerRebuildResetGate({
+      currentGeneration: workerRebuildGeneration,
+      activeTask: activeWorkerRebuildTask,
+      reason,
+      nowMs: performance.now()
+    });
+    workerRebuildGeneration = gate.generation;
+    activeWorkerRebuildTask = gate.activeWorkerRebuildTask;
+    overlay.__sphPhaseRebuildWorker = gate.workerStatus;
+    return gate;
+  }
+
   function scheduleWorkerDemoRebuild({ reason = 'control-rebuild' } = {}) {
     const generation = workerRebuildGeneration + 1;
     workerRebuildGeneration = generation;
@@ -4225,7 +4268,7 @@ export function mountSphPhaseDemoOverlay({
       submittedAtMs
     };
     overlay.__sphPhaseRebuildWorker = {
-      schema: 'peercompute.ulg.sph-phase-rebuild-worker-status.v0',
+      schema: SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
       ...activeWorkerRebuildTask
     };
     setCpuClosureTask({
@@ -4261,7 +4304,7 @@ export function mountSphPhaseDemoOverlay({
         error: error instanceof Error ? error.message : String(error)
       });
       overlay.__sphPhaseRebuildWorker = {
-        schema: 'peercompute.ulg.sph-phase-rebuild-worker-status.v0',
+        schema: SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
         status: 'fallback-main-thread',
         generation,
         reason: error instanceof Error ? error.message : String(error),
@@ -4291,6 +4334,7 @@ export function mountSphPhaseDemoOverlay({
     overlay.querySelector('#sph-play').textContent = 'Play';
     invalidateResidentRuntimeForReset('demo-rebuild');
     const canUseWorkerRebuild = typeof runtime?.runSphPhaseRebuild === 'function';
+    if (canUseWorkerRebuild) cancelWorkerRebuildForReset('demo-rebuild');
     const rebuildLocation = canUseWorkerRebuild ? 'ulg-runtime worker' : 'main thread';
     setCpuClosureTask({
       label: 'material/reaction/closure rebuild',
@@ -5004,7 +5048,7 @@ export function mountSphPhaseDemoOverlay({
           error: error instanceof Error ? error.message : String(error)
         });
         overlay.__sphPhaseRebuildWorker = {
-          schema: 'peercompute.ulg.sph-phase-rebuild-worker-status.v0',
+          schema: SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
           status: 'fallback-main-thread',
           generation,
           reason: error instanceof Error ? error.message : String(error),

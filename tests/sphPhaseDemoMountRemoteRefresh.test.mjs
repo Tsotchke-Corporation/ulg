@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA,
   SPH_REMOTE_RESIDENT_TASK_GRAPH_REFRESH_SCHEMA,
-  runRemoteResidentTaskGraphRefreshPrelude
+  runRemoteResidentTaskGraphRefreshPrelude,
+  workerRebuildResetGate
 } from '../src/visualization/sphPhaseDemoMount.js';
 
 test('remote resident task-graph refresh prelude is disabled by default', async () => {
@@ -128,4 +130,28 @@ test('remote resident task-graph refresh prelude keeps local resident execution 
   assert.equal(report.submitted, false);
   assert.equal(report.refreshed, false);
   assert.match(report.error, /remote refresh unavailable/);
+});
+
+test('worker rebuild reset gate invalidates stale in-flight rebuild generations', () => {
+  const gate = workerRebuildResetGate({
+    currentGeneration: 7,
+    activeTask: {
+      generation: 7,
+      status: 'submitted',
+      rootTaskId: 'old-worker-task'
+    },
+    reason: 'reset-button',
+    nowMs: 123.5
+  });
+
+  assert.equal(gate.generation, 8);
+  assert.equal(gate.activeWorkerRebuildTask, null);
+  assert.equal(gate.workerStatus.schema, SPH_PHASE_REBUILD_WORKER_STATUS_SCHEMA);
+  assert.equal(gate.workerStatus.status, 'cancelled-by-reset');
+  assert.equal(gate.workerStatus.cancelledGeneration, 7);
+  assert.equal(gate.workerStatus.generation, 8);
+  assert.equal(gate.workerStatus.reason, 'reset-button');
+  assert.equal(gate.workerStatus.previousStatus, 'submitted');
+  assert.equal(gate.workerStatus.updatedAtMs, 123.5);
+  assert.notEqual(7, gate.generation);
 });

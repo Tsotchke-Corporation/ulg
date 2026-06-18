@@ -1,5 +1,45 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Solid H2O static sequence recheck
+
+Prompt time/date: 2026-06-18 AKDT, continuing the P0 physics behavior and
+visual-sequence validation work after the CPU-SPH flow and resident MLS-MPM
+smoke gates.
+
+Summary:
+
+- Rechecked the cold same-material CPU-SPH solid-H2O static/support row under
+  the current dense visual sequence harness.
+- The row remains stable: this does not close all ice/solid behavior, but it
+  narrows the next investigation away from the already-passing static CPU-SPH
+  same-material fixture.
+- Updated the active plan, todo routing, behavior-regression plan, test plan,
+  implementation status, and done folder with the current evidence.
+
+Files touched:
+
+- `plan/plan.md`
+- `plan/todo/README.md`
+- `plan/todo/physics-behavior-regression-plan.md`
+- `plan/implementation-status.md`
+- `plan/tests.md`
+- `plan/done/solid-h2o-static-sequence-recheck-2026-06-18.md`
+- `plan/log.md`
+
+Validation:
+
+- PASS: visual matrix run `codex-solid-h2o-static-sequence-20260618` reported
+  `failedCount=0`, nine captured frames, `visualFrameTimeSpanS=0.9216`, max
+  displacement `1.19e-7 m`, max speed `0.00147 m/s`, first/last H2O visible
+  surfaces `2 -> 2`, one connected component per visible surface, empty issue
+  lists, and final particles `{h2o:152}`.
+
+Open:
+
+- Mixed solid/liquid contact, resident/mounted solid mechanics, phase-transition
+  solid behavior, live-render cadence, mobile focus-resume flashing, and raw
+  WebGPU overlay depth sharing remain open behavior/visual-trust work.
+
 ## 2026-06-17 16:31:56 AKDT - NodeKernel GPU resident stage placement routing
 
 Prompt time/date: 2026-06-17 16:31 AKDT, continuing the architecture refactor

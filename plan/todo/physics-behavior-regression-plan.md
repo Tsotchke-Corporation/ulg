@@ -12,6 +12,18 @@ state that moves on screen is the state the laws actually mutated.
 
 ## Failure Classes To Audit First
 
+- 2026-06-18 AKDT update: the current dense visual harness does not reproduce
+  "ice flows like water" in the cold same-material CPU-SPH static H2O/H2O
+  support fixture. Run `codex-solid-h2o-static-sequence-20260618` passed with
+  `failedCount=0`, nine captured frames spanning `0.9216 s` of simulated time,
+  max solid displacement `1.19e-7 m`, max speed `0.00147 m/s`, two H2O visible
+  surfaces from first to last frame, one connected component per visible
+  surface, empty issue lists, and final inventory `{h2o:152}`. Keep the broad
+  ice/solid bug class open, but route it more precisely: mixed solid/liquid
+  contact, resident/mounted solid mechanics, phase-transition solid behavior,
+  and live-render cadence still need their own gates. Do not spend the next
+  pass retuning the already-stable cold same-material CPU-SPH static row unless
+  new evidence directly breaks that fixture.
 - 2026-06-17 AKDT update: CPU-SPH H2O/H2O now has a close-spaced visual flow
   sequence gate instead of relying on short screenshot rows. The opt-in matrix
   scenario `liquid-liquid-h2o-cpu-sph-flow-sequence` captures nine frames over

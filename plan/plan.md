@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the cold same-material CPU-SPH solid-H2O
+static fixture has been rechecked under the current dense visual sequence
+harness. Run `codex-solid-h2o-static-sequence-20260618` passed with
+`failedCount=0`, nine captured frames over `0.9216 s` of simulated time, max
+solid displacement `1.19e-7 m`, max speed `0.00147 m/s`, two H2O visible
+surfaces from first to last frame, one connected component per visible
+surface, empty issue lists, and final material inventory `{h2o:152}`. This
+narrows the reported "ice flows like water" class: the current CPU-SPH static
+cold H2O/H2O support row is stable, while mixed solid/liquid contacts,
+resident/mounted solid behavior, phase-transition solid behavior, and live
+renderer cadence remain open.
+
 Current checkpoint, 2026-06-18 AKDT: dense visual flow validation now covers
 CPU-SPH H2O/H2O and a practical resident MLS-MPM smoke row. The probe records
 simulated time for captured frames and the matrix reports

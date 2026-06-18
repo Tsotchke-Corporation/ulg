@@ -1,5 +1,21 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Solid H2O Static Sequence Recheck
+
+The cold same-material CPU-SPH solid-H2O static/support row still passes under
+the current dense visual sequence harness. This narrows, but does not close,
+the reported ice/solid behavior bug class.
+
+Focused check:
+
+- Solid H2O static sequence:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-solid-h2o-static-sequence-20260618 ULG_VISUAL_MATRIX_SCENARIOS=solid-h2o-cpu-sph ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=10 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=360000 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, nine captured frames,
+  `visualFrameTimeSpanS=0.9216`, max displacement `1.19e-7 m`, max speed
+  `0.00147 m/s`, first/last H2O visible surface count `2 -> 2`, one connected
+  component per visible surface, empty issue lists, and final particles
+  `{h2o:152}`.
+
 ## Current Focused Result - 2026-06-18 CPU-SPH And Resident MLS-MPM Visual Flow Sequence Gates
 
 CPU-SPH same-material H2O/H2O and a practical lower-resolution resident

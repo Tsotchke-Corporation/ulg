@@ -35,6 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-18 AKDT: the cold same-material CPU-SPH
+solid-H2O static row remains stable under the current dense visual sequence
+harness. `codex-solid-h2o-static-sequence-20260618` passed with nine frames
+over `0.9216 s`, max displacement `1.19e-7 m`, max speed `0.00147 m/s`,
+two H2O visible surfaces from first to last frame, and empty issue lists. Keep
+the ice/solid bug class open, but focus the next evidence on mixed
+solid/liquid contacts, resident/mounted solid mechanics, phase-transition
+solid behavior, and live-render cadence rather than the already-passing static
+same-material CPU-SPH fixture.
+
 Current routing note, 2026-06-18 AKDT: CPU-SPH visible water flow and a
 practical resident MLS-MPM smoke path now have opt-in dense visual sequence
 gates. `codex-cpu-sph-flow-sequence-20260617` passed the CPU-SPH H2O/H2O row

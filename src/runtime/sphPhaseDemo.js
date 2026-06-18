@@ -51,6 +51,8 @@ const H2O_VAPOR_OPTICAL_STATE_GENERATOR = `${WATER_DROPLET_OPTICAL_MICROPHYSICS_
 const REDUCED_H2O_DROPLET_RADIUS_M = 1e-6;
 const AVOGADRO_R = 8.314462618;
 const TAIT_EXPONENT = 7;
+const DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT = 64;
+const DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO = 1.8;
 const DEFAULT_SPH_PHYSICAL_LAW_GROUPS = Object.freeze({
   mechanics: true,
   gravity: true,
@@ -123,6 +125,12 @@ export function pendingSphPhysicalLawGroups(groups = null) {
     }));
 }
 
+function volumeEquivalentSphereRadiusM(volumeM3) {
+  const volume = Number(volumeM3);
+  if (!(volume > 0)) return 0;
+  return Math.cbrt((3 * volume) / (4 * Math.PI));
+}
+
 function fillCube({ material, role = null, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
   const particles = [];
   // particlesPerEdge sets the resolution directly (N -> N^3 particles); else derive from spacing.
@@ -130,6 +138,7 @@ function fillCube({ material, role = null, min, size, spacing, particlesPerEdge,
   const step = size / n;
   const cellVolume = step * step * step;
   const massKg = densityKgPerM3 * cellVolume;
+  const particleRadiusM = volumeEquivalentSphereRadiusM(cellVolume);
   const u = specificInternalEnergyJPerKg(properties, temperatureK);
   for (let i = 0; i < n; i += 1) {
     for (let j = 0; j < n; j += 1) {
@@ -142,7 +151,10 @@ function fillCube({ material, role = null, min, size, spacing, particlesPerEdge,
           massKg,
           specificInternalEnergyJPerKg: u,
           temperatureK,
-          restDensityKgPerM3: densityKgPerM3 // initial rest density (sets the MLS-MPM particle volume)
+          restDensityKgPerM3: densityKgPerM3, // initial rest density (sets the MLS-MPM particle volume)
+          initialParticleSpacingM: step,
+          initialCellVolumeM3: cellVolume,
+          particleRadiusM
         });
       }
     }
@@ -165,6 +177,13 @@ function cappedAdaptiveParticleEdge({ desiredEdge, requestedEdge }) {
   return clampInteger(desiredEdge, minEdge, maxEdge);
 }
 
+function smoothingLengthRatioForTargetNeighborCount(targetNeighborCount) {
+  const count = Math.max(1, Number(targetNeighborCount) || DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT);
+  // Approximate simple-cubic neighbor count inside the cubic-spline support sphere:
+  // N ~= (4 / 3) * pi * (2h / dx)^3.
+  return Math.cbrt((3 * count) / (32 * Math.PI));
+}
+
 function resolveInitialParticleSpacingPlan({
   dropSizeM,
   baseSizeM,
@@ -172,10 +191,15 @@ function resolveInitialParticleSpacingPlan({
   baseDensityKgPerM3,
   dropRequestedParticlesPerEdge,
   baseRequestedParticlesPerEdge,
-  adaptiveParticleSpacing = true
+  adaptiveParticleSpacing = true,
+  targetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
+  maxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO
 }) {
   const dropRequested = positiveParticleEdge(dropRequestedParticlesPerEdge, 3);
   const baseRequested = positiveParticleEdge(baseRequestedParticlesPerEdge, 5);
+  const neighborTarget = Math.max(1, Number(targetNeighborCount) || DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT);
+  const smoothingLengthRatio = smoothingLengthRatioForTargetNeighborCount(neighborTarget);
+  const smoothingLengthRatioCap = Math.max(smoothingLengthRatio, Number(maxSmoothingLengthRatio) || DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO);
   const dropVolumeM3 = Math.max(dropSizeM, 0) ** 3;
   const baseVolumeM3 = Math.max(baseSizeM, 0) ** 3;
   const dropDensity = Math.max(Number(dropDensityKgPerM3) || 0, 1e-9);
@@ -186,8 +210,18 @@ function resolveInitialParticleSpacingPlan({
 
   const resolveRole = ({ role, sizeM, densityKgPerM3, requestedParticlesPerEdge }) => {
     const uniformSpacingM = sizeM / requestedParticlesPerEdge;
-    if (!adaptiveParticleSpacing) {
+    const withSupportMetadata = (row) => {
+      const spacingM = Number(row.spacingM);
+      const targetSmoothingLengthM = spacingM > 0 ? spacingM * smoothingLengthRatio : 0;
       return {
+        ...row,
+        targetSmoothingLengthM,
+        targetNeighborCount: neighborTarget,
+        volumeEquivalentParticleRadiusM: volumeEquivalentSphereRadiusM(spacingM ** 3)
+      };
+    };
+    if (!adaptiveParticleSpacing) {
+      return withSupportMetadata({
         role,
         requestedParticlesPerEdge,
         particlesPerEdge: requestedParticlesPerEdge,
@@ -195,7 +229,7 @@ function resolveInitialParticleSpacingPlan({
         uniformSpacingM,
         desiredParticlesPerEdge: requestedParticlesPerEdge,
         densityKgPerM3
-      };
+      });
     }
     const desiredSpacingM = Math.cbrt(targetParticleMassKg / Math.max(densityKgPerM3, 1e-9));
     const desiredParticlesPerEdge = Math.max(1, sizeM / Math.max(desiredSpacingM, 1e-9));
@@ -203,7 +237,7 @@ function resolveInitialParticleSpacingPlan({
       desiredEdge: desiredParticlesPerEdge,
       requestedEdge: requestedParticlesPerEdge
     });
-    return {
+    return withSupportMetadata({
       role,
       requestedParticlesPerEdge,
       particlesPerEdge,
@@ -212,7 +246,7 @@ function resolveInitialParticleSpacingPlan({
       desiredSpacingM,
       desiredParticlesPerEdge,
       densityKgPerM3
-    };
+    });
   };
 
   const drop = resolveRole({
@@ -227,13 +261,34 @@ function resolveInitialParticleSpacingPlan({
     densityKgPerM3: baseDensity,
     requestedParticlesPerEdge: baseRequested
   });
+  const roleSpacingM = [drop.spacingM, base.spacingM].filter((value) => Number.isFinite(value) && value > 0);
+  const minSpacingM = roleSpacingM.length ? Math.min(...roleSpacingM) : 0;
+  const uncappedSmoothingLengthM = Math.max(drop.targetSmoothingLengthM, base.targetSmoothingLengthM);
+  const smoothingLengthCapM = minSpacingM > 0 ? minSpacingM * smoothingLengthRatioCap : uncappedSmoothingLengthM;
+  const smoothingLengthM = Math.min(uncappedSmoothingLengthM, smoothingLengthCapM || uncappedSmoothingLengthM);
+  const estimateNeighborCount = (spacingM) => {
+    if (!(spacingM > 0) || !(smoothingLengthM > 0)) return 0;
+    return (4 / 3) * Math.PI * ((2 * smoothingLengthM) / spacingM) ** 3;
+  };
+  for (const row of [drop, base]) {
+    row.globalSmoothingLengthM = smoothingLengthM;
+    row.globalSmoothingLengthRatio = row.spacingM > 0 ? smoothingLengthM / row.spacingM : 0;
+    row.estimatedNeighborCount = estimateNeighborCount(row.spacingM);
+  }
 
   return {
     schema: 'peercompute.ulg.sph-initial-particle-spacing-plan.v0',
     status: adaptiveParticleSpacing
-      ? 'material-temperature-equal-mass-capped'
+      ? 'material-temperature-target-neighbor-capped'
       : 'fixed-requested-particles-per-edge',
     adaptiveParticleSpacing,
+    targetNeighborCount: neighborTarget,
+    smoothingLengthRatio,
+    maxSmoothingLengthRatio: smoothingLengthRatioCap,
+    smoothingLengthM,
+    uncappedSmoothingLengthM,
+    smoothingLengthCapM,
+    smoothingLengthCapped: smoothingLengthM < uncappedSmoothingLengthM - 1e-12,
     requestedParticleBudget,
     targetParticleMassKg,
     totalMassKg,
@@ -409,6 +464,8 @@ export function buildSphPhaseDemoState({
   dropParticleEdge = 3, // N -> N^3 particles in the drop block
   baseParticleEdge = 5, // N -> N^3 particles in the base block
   adaptiveParticleSpacing = true,
+  initialTargetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
+  initialMaxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO,
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
@@ -481,7 +538,9 @@ export function buildSphPhaseDemoState({
     baseDensityKgPerM3,
     dropRequestedParticlesPerEdge: dropParticleEdge,
     baseRequestedParticlesPerEdge: baseParticleEdge,
-    adaptiveParticleSpacing
+    adaptiveParticleSpacing,
+    targetNeighborCount: initialTargetNeighborCount,
+    maxSmoothingLengthRatio: initialMaxSmoothingLengthRatio
   });
 
   const dropParticles = fillCube({
@@ -506,10 +565,7 @@ export function buildSphPhaseDemoState({
   });
 
   const all = [...baseParticles, ...dropParticles];
-  const smoothingLengthM = 1.6 * Math.min(
-    initialParticleSpacing.drop.spacingM,
-    initialParticleSpacing.base.spacingM
-  );
+  const smoothingLengthM = initialParticleSpacing.smoothingLengthM;
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
@@ -517,6 +573,9 @@ export function buildSphPhaseDemoState({
     p.role = all[index].role;
     p.temperatureK = all[index].temperatureK;
     p.restDensityKgPerM3 = all[index].restDensityKgPerM3;
+    p.initialParticleSpacingM = all[index].initialParticleSpacingM;
+    p.initialCellVolumeM3 = all[index].initialCellVolumeM3;
+    p.particleRadiusM = all[index].particleRadiusM;
   });
   return {
     scenario,

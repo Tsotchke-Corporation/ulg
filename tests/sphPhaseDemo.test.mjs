@@ -80,23 +80,34 @@ test('demo initial particle spacing adapts to material density at role temperatu
   const spacing = demo.initialParticleSpacing;
   const dropMass = demo.state.particles.find((p) => p.role === 'drop').massKg;
   const baseMass = demo.state.particles.find((p) => p.role === 'base').massKg;
+  const dropParticle = demo.state.particles.find((p) => p.role === 'drop');
+  const baseParticle = demo.state.particles.find((p) => p.role === 'base');
 
   assert.equal(spacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
-  assert.equal(spacing.status, 'material-temperature-equal-mass-capped');
+  assert.equal(spacing.status, 'material-temperature-target-neighbor-capped');
   assert.equal(spacing.drop.requestedParticlesPerEdge, 3);
   assert.equal(spacing.base.requestedParticlesPerEdge, 5);
+  assert.equal(spacing.targetNeighborCount, 64);
+  assert.ok(spacing.smoothingLengthM > 0);
+  assert.ok(spacing.smoothingLengthRatio > 0);
+  assert.ok(spacing.drop.targetSmoothingLengthM > 0);
+  assert.ok(spacing.base.targetSmoothingLengthM > 0);
   assert.ok(spacing.drop.densityKgPerM3 > spacing.base.densityKgPerM3);
   assert.ok(spacing.drop.particlesPerEdge > spacing.drop.requestedParticlesPerEdge);
   assert.ok(spacing.base.particlesPerEdge < spacing.base.requestedParticlesPerEdge);
   assert.ok(spacing.drop.spacingM < spacing.drop.uniformSpacingM);
   assert.ok(spacing.base.spacingM > spacing.base.uniformSpacingM);
+  assert.ok(spacing.drop.estimatedNeighborCount >= spacing.targetNeighborCount);
+  assert.ok(spacing.base.estimatedNeighborCount > 0);
   assert.ok(Math.abs(dropMass / baseMass - 1) < 0.15);
+  near(dropParticle.initialParticleSpacingM, spacing.drop.spacingM);
+  near(baseParticle.initialParticleSpacingM, spacing.base.spacingM);
+  near(dropParticle.initialCellVolumeM3, spacing.drop.spacingM ** 3);
+  assert.ok(dropParticle.particleRadiusM < dropParticle.initialParticleSpacingM);
+  assert.ok(baseParticle.particleRadiusM < baseParticle.initialParticleSpacingM);
   assert.equal(demo.counts.drop, spacing.drop.particlesPerEdge ** 3);
   assert.equal(demo.counts.base, spacing.base.particlesPerEdge ** 3);
-  near(
-    demo.state.smoothingLengthM,
-    1.6 * Math.min(spacing.drop.spacingM, spacing.base.spacingM)
-  );
+  near(demo.state.smoothingLengthM, spacing.smoothingLengthM);
 });
 
 test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {
@@ -435,8 +446,14 @@ test('SPH phase view state exposes resolved initial particle spacing', () => {
 
   assert.deepEqual(viewState.counts, demo.counts);
   assert.equal(viewState.initialParticleSpacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
+  assert.equal(viewState.initialParticleSpacing.targetNeighborCount, 64);
+  assert.equal(viewState.initialParticleSpacing.smoothingLengthM, demo.initialParticleSpacing.smoothingLengthM);
   assert.equal(viewState.initialParticleSpacing.drop.particlesPerEdge, demo.initialParticleSpacing.drop.particlesPerEdge);
   assert.equal(viewState.initialParticleSpacing.base.particlesPerEdge, demo.initialParticleSpacing.base.particlesPerEdge);
+  assert.equal(
+    viewState.initialParticleSpacing.drop.volumeEquivalentParticleRadiusM,
+    demo.initialParticleSpacing.drop.volumeEquivalentParticleRadiusM
+  );
   assert.notEqual(viewState.initialParticleSpacing.drop, demo.initialParticleSpacing.drop);
 });
 

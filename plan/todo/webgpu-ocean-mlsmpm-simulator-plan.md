@@ -265,6 +265,40 @@ Completion gate:
   in the normal path.
 - Transparent material depth/z-order behavior is explicitly tested.
 
+Native WebGPU Marching Cubes checkout assessment, 2026-06-18 AKDT:
+
+- Local source: `/home/cos/projects/webgpu-marching-cubes`.
+- Useful references:
+  - `src/marching_cubes.ts`;
+  - `src/exclusive_scan.ts`;
+  - `src/stream_compact_ids.ts`;
+  - `src/mark_active_voxel.wgsl`;
+  - `src/compute_num_verts.wgsl`;
+  - `src/compute_vertices.wgsl`;
+  - `src/three_webgpu_marching_cubes.ts`.
+- Fit decision: good fit for the extraction algorithm, not a direct renderer
+  replacement. The pipeline marks active voxels, stream-compacts voxel ids,
+  scans per-voxel vertex counts, and emits a compact GPU vertex buffer. That
+  directly targets ULG's current retained surface path, which still allocates
+  fixed slots from `totalFieldCells * maxVertsPerCell` and disables compact
+  surface vertices in normal browser probes because full surface vertex and
+  metadata readback can wedge the GUI.
+- Required adaptation: use ULG storage-buffer render fields and per-surface
+  material/phase/optical metadata instead of the reference's single
+  `texture_3d<f32>` volume and one-isovalue mesh. Output rows need material
+  ids, PBR/optical table ids, normals or normal-reconstruction inputs,
+  draw-order/depth policy, and indirect draw metadata.
+- Renderer boundary: the reference's Three integration assigns a generated
+  `GPUBuffer` through `renderer.backend.get(interleaved).buffer`, which
+  depends on Three `WebGPURenderer` and same-device ownership. ULG currently
+  still uses the normal Three scene path for mounted browser rendering, so
+  this should not be introduced as a separate overlay or a second GPU device.
+- Hot-loop requirement: remove or hide the reference readback/fence points
+  before using the pattern in the normal frame loop. Counter readback is
+  acceptable for diagnostics, but the production path should keep compact
+  counts, draw ranges, and draw metadata resident or update them through
+  budgeted diagnostics.
+
 Interim status, 2026-06-18 AKDT:
 
 - `three-render-row-points` removes CPU `MarchingCubes` construction from the

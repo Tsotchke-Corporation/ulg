@@ -52,6 +52,17 @@ lane should remove. The next performance slice is an explicit Ocean-style
 resident lane: scatter/tiled P2G, resident product/gas/thermal sidecars,
 throttled compact diagnostics, and GPU surface/render generation.
 
+Current routing note, 2026-06-18 AKDT: the native checkout at
+`/home/cos/projects/webgpu-marching-cubes` is a good fit as a surface
+extraction core reference, not as a drop-in renderer. Its useful pieces are
+active-voxel classification, GPU exclusive scan, active-id stream compaction,
+vertex-count scan, and compact vertex-buffer emission. Port those ideas into
+ULG's resident render-field/surface ABI to replace fixed
+`totalFieldCells * maxVertsPerCell` allocation and readback-heavy surface
+paths. Do not use it as a separate canvas overlay, and do not treat its
+Three.js WebGPURenderer adapter as ready until ULG has a same-device,
+engine-owned Three/WebGPU bridge with material/PBR metadata and shared depth.
+
 Current routing note, 2026-06-18 AKDT: browser visual probes now treat
 DevTools console WebGPU validation as first-class evidence. The probe captures
 page console/pageerror events, analysis emits `browser-console:*` issues, and

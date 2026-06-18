@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `333`
-- total lines indexed: `199860`
+- total lines indexed: `199905`
 - languages: `{"markdown": 127, "javascript": 106, "text": 85, "json": 14, "c": 1}`
 
 ## Important Files
@@ -51,7 +51,7 @@
 - `src/runtime`: 31 files, 18130 lines, symbols=398, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 27 files, 34319 lines, symbols=784, tests=0, languages={"javascript": 27}
 - `src/runtime/material`: 18 files, 4770 lines, symbols=206, tests=0, languages={"javascript": 18}
-- `plan/todo`: 18 files, 9953 lines, symbols=0, tests=0, languages={"markdown": 18}
+- `plan/todo`: 18 files, 9998 lines, symbols=0, tests=0, languages={"markdown": 18}
 - `.`: 10 files, 2161 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
@@ -91,7 +91,7 @@
 | 2522 | `plan/plan.md` | markdown |
 | 2172 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2172 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
-| 2074 | `plan/todo/README.md` | markdown |
+| 2085 | `plan/todo/README.md` | markdown |
 | 2047 | `tests/orchestration.test.mjs` | text |
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
 | 1943 | `tests/sphPhaseRenderer.test.mjs` | text |

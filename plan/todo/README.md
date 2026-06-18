@@ -35,17 +35,16 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
-Current routing note, 2026-06-17 AKDT: CPU-SPH visible water flow now has an
-opt-in dense visual sequence gate. `liquid-liquid-h2o-cpu-sph-flow-sequence`
-captures close-spaced frames and fails if they do not span enough simulated
-time; `codex-cpu-sph-flow-sequence-20260617` passed with nine frames over
-`0.9216 s`, final H2O tallness `0.587`, footprint fill `0.297`, and empty
-visual issues. The live overlay top chip now shows `sim t` so slow visual
-motion can be diagnosed from simulation-time progress. Next behavior item:
-make the resident MLS-MPM flow-sequence path cheap enough to run headlessly or
-run it under a hardware-backed browser. The current headless SwiftShader row
-was actively computing for about five minutes without an artifact, so resident
-visual-flow evidence remains open.
+Current routing note, 2026-06-18 AKDT: CPU-SPH visible water flow and a
+practical resident MLS-MPM smoke path now have opt-in dense visual sequence
+gates. `codex-cpu-sph-flow-sequence-20260617` passed the CPU-SPH H2O/H2O row
+with nine frames over `0.9216 s`, final tallness `0.587`, and footprint fill
+`0.297`. `codex-mlsmpm-flow-smoke-pass-20260618` passed the lower-resolution
+resident MLS-MPM smoke row with nine frames over `1.024 s`, one H2O
+surface/component, final tallness `0.767`, and footprint fill `0.151`. The
+full 3x5 resident MLS-MPM row remains the stricter gate and is still costly
+under headless WebGPU/SwiftShader; keep it for deeper validation, but use the
+smoke row for periodic visual sanity.
 
 Current routing note, 2026-06-17 AKDT: reaction execution and product
 visibility now have a focused CPU/plain-SPH visual contract, but live fluid

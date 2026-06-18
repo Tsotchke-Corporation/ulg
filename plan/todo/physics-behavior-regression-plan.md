@@ -22,10 +22,13 @@ state that moves on screen is the state the laws actually mutated.
   fill `0.297`, and frame times
   `0, 0.1152, 0.2304, ..., 0.9216 s`. The live top status chip now includes
   `sim t` so "not moving" reports can be separated from too-little simulated
-  time. Resident MLS-MPM still needs a cheaper visual-flow sequence: the
-  shortened headless WebGPU/SwiftShader row stayed busy for about five minutes
-  without producing an artifact, so treat that as harness cost/open resident
-  validation, not as a fresh physics pass or fail.
+  time. Resident MLS-MPM now has a practical lower-resolution smoke companion:
+  `liquid-liquid-h2o-mlsmpm-flow-smoke` passed in
+  `codex-mlsmpm-flow-smoke-pass-20260618` with nine frames over `1.024 s`,
+  one H2O surface/component, final tallness `0.767` under the smoke-specific
+  `0.8` cap, and footprint fill `0.151`. Keep the full 3x5 resident row as the
+  stricter gate; it still takes several minutes under headless
+  WebGPU/SwiftShader because compact-summary mapAsync dominates.
 - 2026-06-17 AKDT update: Na/H2O plain-SPH reactions are not dead in the
   mounted CPU state, but the UI and visual harness were hiding the evidence.
   Direct mounted stepping and the new focused visual contract now show eight

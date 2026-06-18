@@ -29,6 +29,19 @@ const SCENARIOS = [
     defaultEnabled: false
   },
   {
+    label: 'liquid-liquid-h2o-mlsmpm-flow-smoke',
+    url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&dropn=2&basen=4&boxx=5&boxy=5&boxz=5&mech=mlsmpm',
+    expectedMechanics: 'mlsmpm',
+    expectedH2oVisibleSurfaceCount: 1,
+    expectLiquidFreeSurface: true,
+    liquidFreeSurfaceMinTimeS: 0.8,
+    liquidFreeSurfaceMaxTallnessRatio: 0.8,
+    minVisualFrameTimeSpanS: 0.8,
+    batches: 8,
+    batchSteps: 256,
+    defaultEnabled: false
+  },
+  {
     label: 'liquid-liquid-h2o-cpu-sph',
     url: '/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1.01&dropn=3&basen=5&boxx=5&boxy=5&boxz=5&mech=sph',
     expectedMechanics: 'sph',

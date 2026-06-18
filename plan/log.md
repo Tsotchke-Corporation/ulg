@@ -24967,6 +24967,11 @@ Validation:
   in headless WebGPU/SwiftShader for several minutes without writing artifacts.
   This is recorded as a resident visual-harness performance blocker, not a
   physics pass or fail.
+- PASS: added and validated lower-resolution resident MLS-MPM smoke row
+  `codex-mlsmpm-flow-smoke-pass-20260618`, with nine frames over `1.024 s`,
+  final tallness `0.767` under the smoke-specific `0.8` cap, footprint fill
+  `0.151`, one H2O visible surface/component, and empty visual issues. The
+  full 3x5 row remains stricter and slower.
 
 ## 2026-06-15 14:37 AKDT - Free-Surface Shape Visual Gate
 

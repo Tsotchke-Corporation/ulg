@@ -20,6 +20,7 @@ const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'metadata',
   'off',
   'three-compact-vertices',
+  'three-webgpu-surface-buffers',
   'three-render-row-points',
   'three-render-row-spheres',
   'webgpu-render-row-points',

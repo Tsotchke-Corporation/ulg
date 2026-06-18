@@ -177,6 +177,25 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(webgpu.sameDeviceGpuBufferGeometrySupported, true);
   assert.equal(webgpu.visibleNoReadbackSupported, true);
 
+  const presentationDisabled = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: { label: 'renderer-device' },
+        get() { return { buffer: {} }; }
+      },
+      userData: { sphWebGpuPresentationEnabled: false },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(
+    presentationDisabled.status,
+    'same-device-gpu-buffer-geometry-blocked-three-webgpu-presentation-disabled'
+  );
+  assert.equal(presentationDisabled.rendererPresentationDisabled, true);
+  assert.equal(presentationDisabled.visibleNoReadbackSupported, false);
+
   const readbackBridge = resolveResidentExtensionSurfaceRendererCapability({
     renderer: { isWebGLRenderer: true, domElement: {} },
     renderBridgeMode: 'three-compact-vertices',
@@ -1199,6 +1218,31 @@ test('SPH render-row sphere bridge stabilizes transmissive PBR for mobile proxy 
   assert.equal(material.userData.renderRowSphereTransmissionProxy, true);
   assert.deepEqual(material.userData.renderRowSphereFallbackColor, [0.44, 0.76, 0.91]);
   assert.ok(material.version > previousVersion);
+});
+
+test('SPH render-row sphere bridge brightens dark transmissive proxy materials on mobile', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.015, 0.018, 0.02),
+    transmission: 0.92,
+    thickness: 0.45,
+    transparent: true,
+    opacity: 0.12
+  });
+  material.userData.optical = {
+    blocked: false,
+    transmission: 0.92,
+    vertexColorPolicyId: 0
+  };
+
+  stabilizeRenderRowSphereBridgeMaterial(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    fallbackColorSrgb: [0.44, 0.76, 0.91]
+  });
+
+  assert.equal(material.transmission, 0);
+  assert.ok(material.opacity >= 0.72);
+  assert.ok(material.color.r + material.color.g + material.color.b > 0.4);
+  assert.equal(material.userData.renderRowSphereFallbackReason, 'transmissive-proxy-low-luminance');
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

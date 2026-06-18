@@ -41,6 +41,10 @@ diagnostics.
 - Material/phase/optical ids, transparency/depth policy, absorption,
   scattering, IOR, roughness, metalness, emissive/blackbody coupling, and
   temperature-dependent PBR rows.
+- Presentation-safe proxy PBR rows for interim renderers and mobile devices:
+  transmissive/metallic closures may need reduced diffuse color, opacity,
+  depth, and transmission flags for point/sphere/diagnostic bridges while the
+  full surface renderer consumes the richer optical rows.
 - Interface classification hints for mixed materials, products, gas/vapor, and
   transient reaction volumes.
 - Draw-order and validation metadata needed by the engine bridge without
@@ -88,7 +92,8 @@ diagnostics.
 - Same material and temperature produce consistent drop/base particle mass,
   support, spacing/size, and render surface scale.
 - Material-specific PBR survives mobile and desktop render paths without flat
-  black fallback.
+  black presentation, with fallback/proxy reasons reported separately from
+  closure authority.
 - MLS-MPM wall and material-interface contact use derived stiffness/viscosity
   rows with bounded impulses.
 - GPU marching-cubes extraction uses derived isovalue/smoothing/normal/optical

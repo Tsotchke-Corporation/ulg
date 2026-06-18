@@ -96,6 +96,17 @@ ULG disabled-by-default setting: the browser resident host passes
 the captured context. Treat it as Worker capability/bootstrap work, not as a
 WebGPU memory-limit or shader issue.
 
+Current routing note, 2026-06-18 AKDT: Three WebGPU presentation remains an
+explicit experiment, not a default path. The non-overlay
+`three-webgpu-surface-buffers` bridge is wired through the engine-owned
+surface-draw state and the probe harness can request it, but mounted probes
+still fail before bridge construction with `Instance dropped in popErrorScope`
+and `A valid external Instance reference no longer exists.` Keep default
+rendering on the console-clean Three WebGL engine path while the next
+architecture work targets resident MLS-MPM, native WebGPU marching-cubes
+surface extraction, and an engine-owned buffer bridge that passes console plus
+pixel validation.
+
 Current routing note, 2026-06-18 AKDT: ULG now follows NodeKernel for both GPU
 resident stage placement and execution when a real NodeKernel owns the
 resident ComputeManager. The mechanics stage chain records

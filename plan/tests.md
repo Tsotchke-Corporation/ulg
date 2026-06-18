@@ -9887,3 +9887,35 @@ Scheduler resident fence and mobile render recovery, 2026-06-18 05:04 AKDT:
   - Passed: `toggleFpsOverlap=false`, `toggleWarningOverlap=false`,
     render bridge `three-render-row-spheres`, `meshCount=1`, and no WebGPU
     validation console issues.
+
+Three WebGPU presentation gate plus reset/PBR repair, 2026-06-18 12:56 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|extension surface renderer capability|external interleaved|surface draw|render-row sphere|depth policy"`
+  - Passed: `43/43`.
+  - Covers the WebGPU presentation-disabled capability gate and the
+    low-luminance transmissive sphere proxy fallback used for mobile black-PBR
+    reports.
+- `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs --test-name-pattern "reset gate"`
+  - Passed: `5/5`.
+- `ULG_PROBE_VISUAL_ONLY=1 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-three-spheres-reset-pbr-visual.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-three-spheres-reset-pbr-visual-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_MAX=3 ULG_PROBE_FAIL_ON_BAD=1 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5242 ULG_PROBE_TIMEOUT_MS=180000 npm run probe:sph-long-horizon`
+  - Passed with `status=good`, `browserConsoleIssueCount=0`,
+    `surfaceDrawVisibleRendererBridge=three-render-row-spheres`,
+    `surfaceDrawRenderBridgeStatus=three-render-row-spheres-ready`, and three
+    captured mobile frames.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default"`
+  - Passed: `1/1`.
+  - This is the reset browser gate: it clicks `#sph-reset`, confirms static
+    table cache reuse, waits for resident/render state to return, and asserts
+    `resetStatus.status=particle-state-resynced-after-reset`.
+- Three WebGPU presentation probes remain failing and are intentionally not
+  promoted:
+  - `artifacts/sph-probe-three-webgpu-surface-buffers-frame-pause-visual.json`
+    reports `status=bad`, page error `Instance dropped in popErrorScope`, and
+    `resident-render-rows-error` reason
+    `A valid external Instance reference no longer exists.`

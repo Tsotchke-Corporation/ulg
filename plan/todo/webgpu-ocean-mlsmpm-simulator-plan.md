@@ -83,6 +83,14 @@ Tactical status, 2026-06-18 AKDT:
   popErrorScope`. The next renderer task is a dedicated Three WebGPU
   presentation lifetime fix, followed by browser pixel and console validation
   before enabling the external-buffer surface bridge.
+- Follow-up probes have wired `three-webgpu-surface-buffers` through the
+  non-overlay `sphResidentSurfaceDraw` bridge and can prefer the renderer-owned
+  device, but the browser still fails during resident render-row extraction
+  with `Instance dropped in popErrorScope` /
+  `A valid external Instance reference no longer exists.` Keep this path
+  experimental. The console-clean mobile path is currently
+  `three-render-row-spheres`, which is a correctness and PBR fallback, not a
+  throughput solution.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

@@ -1660,6 +1660,15 @@ export function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('threeRenderer')
       ?? 'webgl'
   );
+  const initialThreeWebGpuRendererPresentationEnabled = booleanUrlParam(
+    initialHash.get('rendererPresentation')
+      ?? initialQuery.get('rendererPresentation')
+      ?? initialHash.get('threeWebGpuPresentation')
+      ?? initialQuery.get('threeWebGpuPresentation')
+      ?? initialHash.get('webgpuPresentation')
+      ?? initialQuery.get('webgpuPresentation'),
+    false
+  );
   const defaultThreeResidentSurfaceDrawMode = window.innerWidth < 700
     ? 'three-render-row-spheres'
     : 'three-render-row-points';
@@ -1688,6 +1697,7 @@ export function mountSphPhaseDemoOverlay({
     if (!initialResidentWorkersEnabled) q.set('residentWorkers', '0');
     q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
     if (initialSphRendererBackend !== 'webgl') q.set('renderer', initialSphRendererBackend);
+    if (initialThreeWebGpuRendererPresentationEnabled) q.set('rendererPresentation', '1');
     q.set('surfaceDraw', residentSurfaceDrawDiagnosticMode);
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
@@ -2620,6 +2630,7 @@ export function mountSphPhaseDemoOverlay({
     surfaceRadiusScale: blobScaleOf(),
     preserveDrawingBuffer: preserveDrawingBufferForCapture,
     rendererBackend: initialSphRendererBackend,
+    rendererWebGpuPresentation: initialThreeWebGpuRendererPresentationEnabled,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
@@ -4015,7 +4026,21 @@ export function mountSphPhaseDemoOverlay({
     if (dimensionsEqual(sceneBoxDimsM, nextDims)) {
       scene.setResidentAuthorityHost?.(currentResidentAuthorityHostForScene());
       scene.setSurfaceRadiusScale(blobScaleOf());
+      scene.resetResidentStateForParticleReset?.({
+        reason: `${resetReason}-scene-reused`,
+        clearOverlay: true
+      });
       clearSceneDerivedSignatures();
+      overlay.__sphResidentRenderState = null;
+      overlay.__sphResidentRenderStateError = null;
+      overlay.__sphResidentMaterialInterfaceState = null;
+      overlay.__sphResidentMaterialInterfaceStateError = null;
+      overlay.__sphResidentPressureInterfaceState = null;
+      overlay.__sphResidentPressureInterfaceStateError = null;
+      overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
+      overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
+      overlay.__sphGpuParticleUpload = scene.getSphGpuParticleUpload?.() || null;
+      overlay.__mlsMpmGpuParticleUpload = scene.getMlsMpmGpuParticleUpload?.() || null;
       resetResidentPerf(`${resetReason}-scene-reused`);
       overlay.__sphSceneReuseStatus = {
         schema: 'peercompute.ulg.sph-scene-reuse-status.v0',
@@ -4032,6 +4057,8 @@ export function mountSphPhaseDemoOverlay({
       boxDimsM: nextDims,
       surfaceRadiusScale: blobScaleOf(),
       preserveDrawingBuffer: preserveDrawingBufferForCapture,
+      rendererBackend: initialSphRendererBackend,
+      rendererWebGpuPresentation: initialThreeWebGpuRendererPresentationEnabled,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode,
       residentAuthorityHost: currentResidentAuthorityHostForScene()

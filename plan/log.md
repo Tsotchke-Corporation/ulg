@@ -27090,3 +27090,51 @@ Validation:
 - PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
 - PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
   `10/10` pass.
+
+## 2026-06-18 12:56 AKDT - Three WebGPU Presentation Gate And Reset/PBR Repair
+
+Status:
+
+- Kept same-device Three WebGPU presentation behind explicit
+  `renderer=webgpu&rendererPresentation=1` opt-in. The scene now reports
+  whether presentation was requested/enabled, the probe harness accepts
+  `surfaceDraw=three-webgpu-surface-buffers`, and the surface-draw bridge can
+  route that mode through the non-overlay retained engine path.
+- Probed the opt-in Three WebGPU path repeatedly. The renderer initializes, but
+  resident render-row extraction fails before bridge construction with
+  `Instance dropped in popErrorScope` /
+  `A valid external Instance reference no longer exists.` That path stays
+  experimental and must not replace the default WebGL-backed engine route.
+- Fixed reset state handling in the mounted demo: reused scenes now explicitly
+  reset resident state before particles are repacked, recreated scenes preserve
+  renderer backend/presentation options, and reset/setParticles destroy stale
+  WebGPU particle uploads while invalidating pending upload generations.
+- Tightened the mobile render-row sphere PBR fallback. Transmissive proxy
+  spheres still use closure-derived material optics, but if the proxy would be
+  near-black on mobile it now takes the derived bridge/fallback color and
+  records `renderRowSphereFallbackReason`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|extension surface renderer capability|external interleaved|surface draw|render-row sphere|depth policy"` reported `43/43` pass.
+- PASS: `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs --test-name-pattern "reset gate"` reported `5/5` pass.
+- PASS: mobile browser visual probe
+  `artifacts/sph-long-probe-mobile-three-spheres-reset-pbr-visual.json`
+  reported `status=good`, `browserConsoleIssueCount=0`,
+  `surfaceDrawVisibleRendererBridge=three-render-row-spheres`, and three
+  captured frames under
+  `artifacts/sph-long-probe-mobile-three-spheres-reset-pbr-visual-frames/`.
+- PASS: reset browser e2e:
+  `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default"` reported `1/1` pass.
+
+Remaining:
+
+- Do not enable Three WebGPU presentation by default until the
+  `popErrorScope`/external-instance lifetime failure is fixed and browser
+  console plus pixel evidence are clean.
+- The mobile sphere bridge is still a correctness fallback with CPU render-row
+  readback. The performance fix remains the resident MLS-MPM plus native
+  WebGPU marching-cubes/engine-owned buffer bridge in `plan/todo/`.

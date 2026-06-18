@@ -195,6 +195,70 @@ const SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE = 'webgpu-render-row-spheres';
 const SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_STATUS = 'webgpu-render-row-spheres-ready';
 const SPH_RENDER_ROW_WEBGPU_OVERLAY_CAMERA_FLOATS = 20;
 const SPH_WEBGPU_RENDER_ROW_OVERLAY_PRESENTATION_ENABLED = false;
+
+export function resolveResidentExtensionSurfaceRendererCapability({
+  renderer = null,
+  renderBridgeMode = null,
+  readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+} = {}) {
+  const mode = String(renderBridgeMode || '').trim().toLowerCase() || null;
+  const normalizedReadbackMode = String(readbackMode || SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT).trim().toLowerCase();
+  const rendererBackend = renderer?.isWebGPURenderer
+    ? 'three-webgpu'
+    : renderer?.isWebGLRenderer
+    ? 'three-webgl'
+    : renderer?.domElement
+    ? 'three-unknown'
+    : 'none';
+  const backendBufferBindingAvailable = Boolean(
+    renderer?.backend
+    && typeof renderer.backend.get === 'function'
+  );
+  const sameDeviceGpuBufferGeometrySupported = Boolean(
+    rendererBackend === 'three-webgpu'
+    && backendBufferBindingAvailable
+  );
+  const requestedThreeCompactReadbackBridge = mode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
+  const noFullReadback = normalizedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE;
+  const visibleNoReadbackSupported = Boolean(noFullReadback && sameDeviceGpuBufferGeometrySupported);
+  let status = 'extension-surface-renderer-capability-blocked';
+  let reason = 'extension surface renderer capability unavailable';
+  if (visibleNoReadbackSupported) {
+    status = 'same-device-gpu-buffer-geometry-supported';
+    reason = null;
+  } else if (requestedThreeCompactReadbackBridge && !noFullReadback) {
+    status = 'three-compact-readback-bridge-supported';
+    reason = 'requested bridge uses full readback into Three geometry';
+  } else if (rendererBackend === 'three-webgl') {
+    status = 'same-device-gpu-buffer-geometry-blocked-webgl-renderer';
+    reason = 'same-device GPUBuffer geometry requires Three WebGPU renderer; current scene renderer is WebGLRenderer';
+  } else if (rendererBackend === 'three-webgpu' && !backendBufferBindingAvailable) {
+    status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-backend-api';
+    reason = 'Three WebGPU renderer did not expose backend buffer binding API';
+  } else if (rendererBackend === 'none') {
+    status = 'same-device-gpu-buffer-geometry-blocked-missing-renderer';
+    reason = 'no engine-owned Three renderer is available';
+  } else {
+    status = 'same-device-gpu-buffer-geometry-blocked-unknown-renderer';
+    reason = 'engine-owned renderer does not advertise a supported same-device GPUBuffer geometry path';
+  }
+  return {
+    schema: 'peercompute.ulg.sph-resident-extension-surface-renderer-capability.v0',
+    status,
+    reason,
+    rendererBackend,
+    rendererIsWebGL: rendererBackend === 'three-webgl',
+    rendererIsWebGPU: rendererBackend === 'three-webgpu',
+    backendBufferBindingAvailable,
+    sameDeviceGpuBufferGeometrySupported,
+    visibleNoReadbackSupported,
+    requestedRenderBridgeMode: mode,
+    requestedThreeCompactReadbackBridge,
+    readbackMode: normalizedReadbackMode,
+    noFullReadback
+  };
+}
+
 function isThreeResidentSurfaceBridgeMode(value) {
   const mode = String(value || '').trim().toLowerCase();
   return mode === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
@@ -2914,6 +2978,14 @@ export function createSphPhaseScene(container, {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
   container.appendChild(renderer.domElement);
+  scene.userData.sphRendererBackend = renderer.isWebGPURenderer
+    ? 'three-webgpu'
+    : renderer.isWebGLRenderer
+    ? 'three-webgl'
+    : 'three-unknown';
+  scene.userData.sphResidentExtensionSurfaceRendererCapability = resolveResidentExtensionSurfaceRendererCapability({
+    renderer
+  });
   resolveSceneResidentSurfaceDrawOverlayPolicy();
 
   let pmrem = null;
@@ -9501,6 +9573,12 @@ export function createSphPhaseScene(container, {
       const translationReadbackMode = requestedThreeCompactBridge
         ? RESIDENT_FULL_READBACK_MODE
         : normalizeResidentReadbackMode(readbackMode);
+      const rendererCapability = resolveResidentExtensionSurfaceRendererCapability({
+        renderer,
+        renderBridgeMode,
+        readbackMode: translationReadbackMode
+      });
+      scene.userData.sphResidentExtensionSurfaceRendererCapability = rendererCapability;
       translation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         device: resolvedDeviceResult.device,
         extensionExecution,
@@ -9584,6 +9662,14 @@ export function createSphPhaseScene(container, {
         surfaceVertexBufferMode: 'retained-extension-surface-vertex-buffer',
         surfaceDrawBufferMode: 'retained-extension-surface-draw-buffers',
         surfaceDrawInputBuffersReleased: true,
+        renderBridgeCapabilitySchema: rendererCapability.schema,
+        renderBridgeCapabilityStatus: rendererCapability.status,
+        renderBridgeCapabilityReason: rendererCapability.reason,
+        renderBridgeRendererBackend: rendererCapability.rendererBackend,
+        renderBridgeBackendBufferBindingAvailable: rendererCapability.backendBufferBindingAvailable,
+        renderBridgeSameDeviceGpuBufferGeometrySupported: rendererCapability.sameDeviceGpuBufferGeometrySupported,
+        renderBridgeVisibleNoReadbackSupported: rendererCapability.visibleNoReadbackSupported,
+        renderBridgeRequestedThreeCompactReadbackBridge: rendererCapability.requestedThreeCompactReadbackBridge,
         visibleRendererBridge: renderBridgeReady
           ? renderBridge.rendererBridge
           : 'extension-resident-surface-buffers-no-overlay',
@@ -9598,7 +9684,7 @@ export function createSphPhaseScene(container, {
           ? renderBridge.reason
           : (requestedThreeCompactBridge
             ? (renderBridge?.reason || 'extension surface rows were not available for the Three compact bridge')
-            : 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path'),
+            : (rendererCapability.reason || 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path')),
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
         renderBridgeEngineIntegration: renderBridgeReady
@@ -10891,6 +10977,20 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeSchema: sphResidentSurfaceDraw?.renderBridgeSchema ?? null,
         surfaceDrawRenderBridgeStatus: sphResidentSurfaceDraw?.renderBridgeStatus ?? null,
         surfaceDrawRenderBridgeReason: sphResidentSurfaceDraw?.renderBridgeReason ?? null,
+        surfaceDrawRenderBridgeCapabilitySchema: sphResidentSurfaceDraw?.renderBridgeCapabilitySchema ?? null,
+        surfaceDrawRenderBridgeCapabilityStatus: sphResidentSurfaceDraw?.renderBridgeCapabilityStatus ?? null,
+        surfaceDrawRenderBridgeCapabilityReason: sphResidentSurfaceDraw?.renderBridgeCapabilityReason ?? null,
+        surfaceDrawRenderBridgeRendererBackend: sphResidentSurfaceDraw?.renderBridgeRendererBackend ?? scene.userData.sphRendererBackend ?? null,
+        surfaceDrawRenderBridgeBackendBufferBindingAvailable: Boolean(sphResidentSurfaceDraw?.renderBridgeBackendBufferBindingAvailable),
+        surfaceDrawRenderBridgeSameDeviceGpuBufferGeometrySupported: Boolean(
+          sphResidentSurfaceDraw?.renderBridgeSameDeviceGpuBufferGeometrySupported
+        ),
+        surfaceDrawRenderBridgeVisibleNoReadbackSupported: Boolean(
+          sphResidentSurfaceDraw?.renderBridgeVisibleNoReadbackSupported
+        ),
+        surfaceDrawRenderBridgeRequestedThreeCompactReadbackBridge: Boolean(
+          sphResidentSurfaceDraw?.renderBridgeRequestedThreeCompactReadbackBridge
+        ),
         surfaceDrawRenderBridgeFrameCount: sphResidentSurfaceDraw?.renderBridgeFrameCount ?? 0,
         surfaceDrawRenderBridgeLastRenderStatus: sphResidentSurfaceDraw?.renderBridgeLastRenderStatus ?? null,
         surfaceDrawRenderBridgeThreeMeshCount: sphResidentSurfaceDraw?.renderBridgeThreeMeshCount ?? 0,

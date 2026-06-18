@@ -1,5 +1,33 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Extension Surface Renderer Capability Gate
+
+The resident marching-cubes extension surface path now reports an explicit
+renderer capability contract. The browser/probe/benchmark telemetry can tell
+the difference between retained GPU-resident extension buffers and a visible
+same-device surface bridge. The current mounted scene is Three WebGL-backed,
+so no-full visible GPUBuffer geometry is intentionally blocked with a concrete
+reason instead of silently looking like a renderer success.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-performance-benchmark.mjs` passed.
+- Renderer regression coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "extension surface renderer capability|sphere bridge|render-row|depth policy|surface draw"`
+  passed `40/40`.
+- Marching-cubes adapter coverage:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` passed `10/10`.
+
+Known residual risk:
+
+- This is a gate and telemetry slice, not yet the visible no-readback renderer.
+  The next slice needs the engine-owned Three WebGPU renderer path and a bridge
+  that consumes retained extension buffers without CPU readback or overlay
+  presentation.
+
 ## Current Focused Result - 2026-06-18 No-Fence Probe Defaults And Sphere Bridge Reuse
 
 This slice removes two accidental mounted-scene costs from the interim

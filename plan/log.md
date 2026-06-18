@@ -1,5 +1,45 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Extension Surface Renderer Capability Gate
+
+Summary:
+
+- Added an explicit capability resolver for the resident marching-cubes
+  extension surface path. It reports whether the engine-owned renderer can
+  consume same-device GPU buffers without full readback, which renderer backend
+  is mounted, and why the no-readback visible bridge is blocked when it is not
+  available.
+- Wired the capability status into the mounted scene resident surface-draw
+  telemetry, the long-horizon browser probe sampler, and the performance
+  benchmark summary.
+- Confirmed the current live scene is still Three WebGL-backed. That means the
+  extension can retain translated surface/draw buffers, but a visible
+  no-readback mesh bridge is correctly blocked until the scene has an
+  engine-owned Three WebGPU renderer/backend buffer-binding path.
+- Kept the current path inside the normal engine scene. No overlay or separate
+  presentation canvas was added.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "extension surface renderer capability|sphere bridge|render-row|depth policy|surface draw"`
+  reported `40/40` pass.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  reported `10/10` pass.
+
+Open:
+
+- The next implementation slice is the actual Three WebGPU storage-buffer
+  surface bridge and renderer-selection path. Until that is mounted, the
+  no-full extension route reports retained resident buffers with
+  `same-device-gpu-buffer-geometry-blocked-webgl-renderer`.
+- The bridge must consume `surfaceDrawExecution.compactedVertexRowsBuffer` and
+  draw metadata through the engine-owned renderer; it should not fall back to a
+  canvas overlay.
+
 ## 2026-06-18 AKDT - No-Fence Probe Defaults And Sphere Bridge Mesh Reuse
 
 Summary:

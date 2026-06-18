@@ -277,6 +277,18 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     : null;
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
+  const surfaceDrawBridgeCapabilityStatus = renderState?.surfaceDrawRenderBridgeCapabilityStatus
+    ?? surfaceDraw?.renderBridgeCapabilityStatus
+    ?? null;
+  const surfaceDrawBridgeCapabilityReason = renderState?.surfaceDrawRenderBridgeCapabilityReason
+    ?? surfaceDraw?.renderBridgeCapabilityReason
+    ?? null;
+  const surfaceDrawBridgeRendererBackend = renderState?.surfaceDrawRenderBridgeRendererBackend
+    ?? surfaceDraw?.renderBridgeRendererBackend
+    ?? null;
+  const surfaceDrawBridgeVisibleNoReadbackSupported = renderState?.surfaceDrawRenderBridgeVisibleNoReadbackSupported
+    ?? surfaceDraw?.renderBridgeVisibleNoReadbackSupported
+    ?? null;
   const surfaceDrawRequestedDiagnosticMode = renderState?.surfaceDrawRequestedDiagnosticMode
     ?? surfaceDraw?.requestedDiagnosticMode
     ?? null;
@@ -399,6 +411,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     browserConsoleWarningCounts: analysis.browserConsoleWarningCounts || {},
     surfaceDrawStatus,
     surfaceDrawBridge,
+    surfaceDrawBridgeCapabilityStatus,
+    surfaceDrawBridgeCapabilityReason,
+    surfaceDrawBridgeRendererBackend,
+    surfaceDrawBridgeVisibleNoReadbackSupported,
     surfaceDrawRequestedDiagnosticMode,
     surfaceDrawDiagnosticFallbackReason,
     surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,

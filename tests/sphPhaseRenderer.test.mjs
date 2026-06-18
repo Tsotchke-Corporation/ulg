@@ -31,6 +31,7 @@ import {
   hideRenderFieldSurfaceAfterGrace,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
+  resolveResidentExtensionSurfaceRendererCapability,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
   submitSceneGasCellEosProducerStageForPressureInterface,
@@ -142,6 +143,38 @@ test('SPH scene viewport sizing clamps DPR and falls back from zero mobile layou
   assert.equal(recovered.width, 390);
   assert.equal(recovered.height, 844);
   assert.equal(recovered.aspect, 390 / 844);
+});
+
+test('SPH extension surface renderer capability blocks no-readback GPU buffers on WebGL scenes', () => {
+  const webgl = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: { isWebGLRenderer: true, domElement: {} },
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(webgl.rendererBackend, 'three-webgl');
+  assert.equal(webgl.status, 'same-device-gpu-buffer-geometry-blocked-webgl-renderer');
+  assert.equal(webgl.visibleNoReadbackSupported, false);
+  assert.match(webgl.reason, /WebGLRenderer/);
+
+  const webgpu = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: { get() { return { buffer: {} }; } },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(webgpu.rendererBackend, 'three-webgpu');
+  assert.equal(webgpu.status, 'same-device-gpu-buffer-geometry-supported');
+  assert.equal(webgpu.sameDeviceGpuBufferGeometrySupported, true);
+  assert.equal(webgpu.visibleNoReadbackSupported, true);
+
+  const readbackBridge = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: { isWebGLRenderer: true, domElement: {} },
+    renderBridgeMode: 'three-compact-vertices',
+    readbackMode: 'full-parity-readback'
+  });
+  assert.equal(readbackBridge.status, 'three-compact-readback-bridge-supported');
+  assert.equal(readbackBridge.visibleNoReadbackSupported, false);
 });
 
 test('resident motion diagnostic treats batch-visible motion as a refresh trigger', () => {

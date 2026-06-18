@@ -66,6 +66,12 @@ Tactical status, 2026-06-18 AKDT:
   so the normal visual/performance harness does not hide a compact-summary
   `mapAsync` fence inside the batch timing. Diagnostic and parity runs can
   still request compact summaries explicitly.
+- The resident marching-cubes extension path now publishes retained translated
+  surface/draw buffers and a renderer-capability contract. Current mounted
+  scenes report `same-device-gpu-buffer-geometry-blocked-webgl-renderer`
+  because they are still Three WebGL-backed. The next no-readback visible
+  surface milestone is therefore an engine-owned Three WebGPU renderer path
+  plus a storage-buffer geometry bridge, not another canvas overlay.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

@@ -27138,3 +27138,33 @@ Remaining:
 - The mobile sphere bridge is still a correctness fallback with CPU render-row
   readback. The performance fix remains the resident MLS-MPM plus native
   WebGPU marching-cubes/engine-owned buffer bridge in `plan/todo/`.
+
+## 2026-06-18 13:02 AKDT - ULG Marching-Cubes Extension Preflight Boundary
+
+Status:
+
+- Committed the sibling `/home/cos/projects/webgpu-marching-cubes` adapter
+  preflight/capability slice as `454686d Add PeerCompute surface adapter
+  preflight`.
+- ULG now consumes that boundary explicitly: the wrapper exposes
+  `preflight()`, attaches preflight status to extension executions, and blocks
+  extraction before renderer integration when the extension reports a failed
+  preflight.
+- This keeps cross-device/shape failures out of the render bridge path and
+  makes future native surface extraction failures visible as adapter contract
+  issues rather than late bind-group or renderer errors.
+
+Validation:
+
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm test` reported
+  `10/10` pass.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm run smoke:adapter`
+  reported `ok=true`, `preflightStatus=ready`, and
+  `executionStatus=surface-ready`.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm run build` passed
+  with the existing large-chunk warning.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `git diff --check`.
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `11/11` pass.

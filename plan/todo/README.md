@@ -107,6 +107,14 @@ architecture work targets resident MLS-MPM, native WebGPU marching-cubes
 surface extraction, and an engine-owned buffer bridge that passes console plus
 pixel validation.
 
+Current routing note, 2026-06-18 AKDT: the sibling WebGPU marching-cubes
+adapter now exposes a renderer-free preflight/capability contract, and ULG's
+wrapper consumes it before extraction. Future extension surface failures should
+surface as `extension-preflight-blocked` / adapter-contract issues before
+renderer integration, not as late WebGPU bind-group errors. This is still a
+boundary/safety gate; the throughput win requires resident surface rows to be
+consumed by the engine-owned GPU renderer path without full geometry readback.
+
 Current routing note, 2026-06-18 AKDT: ULG now follows NodeKernel for both GPU
 resident stage placement and execution when a real NodeKernel owns the
 resident ComputeManager. The mechanics stage chain records

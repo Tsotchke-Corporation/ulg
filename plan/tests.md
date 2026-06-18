@@ -9919,3 +9919,23 @@ Three WebGPU presentation gate plus reset/PBR repair, 2026-06-18 12:56 AKDT:
     reports `status=bad`, page error `Instance dropped in popErrorScope`, and
     `resident-render-rows-error` reason
     `A valid external Instance reference no longer exists.`
+
+ULG marching-cubes extension preflight boundary, 2026-06-18 13:02 AKDT:
+
+- In `/home/cos/projects/webgpu-marching-cubes`, `npm test`
+  - Passed: `10/10`.
+- In `/home/cos/projects/webgpu-marching-cubes`, `npm run smoke:adapter`
+  - Passed with `ok=true`, `adapterStatus=adapter-ready`,
+    `preflightStatus=ready`, `executionStatus=surface-ready`.
+- In `/home/cos/projects/webgpu-marching-cubes`, `npm run build`
+  - Passed with the known large-chunk warning.
+- In `/home/cos/projects/webgpu-marching-cubes`, `git diff --check`
+  - Passed.
+- `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  - Passed.
+- `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `11/11`.
+  - Covers ready extension preflight propagation and blocked preflight stopping
+    extraction before renderer integration.

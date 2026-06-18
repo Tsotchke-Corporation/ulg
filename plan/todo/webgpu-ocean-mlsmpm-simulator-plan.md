@@ -91,6 +91,10 @@ Tactical status, 2026-06-18 AKDT:
   experimental. The console-clean mobile path is currently
   `three-render-row-spheres`, which is a correctness and PBR fallback, not a
   throughput solution.
+- The sibling marching-cubes adapter now exposes preflight/capability helpers,
+  and ULG's wrapper consumes extension preflight before extraction. This moves
+  cross-device and malformed-volume failures to the adapter boundary before
+  render bridge construction.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

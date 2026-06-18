@@ -11,8 +11,10 @@ import {
 import {
   ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
+  ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
   WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
+  WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
@@ -251,6 +253,7 @@ test('ULG wrapper preserves caller-owned device and adapter swapability', async 
   const device = { label: 'scene-device' };
   const volume = { label: 'resident-render-field-volume' };
   let factoryCalled = 0;
+  let preflightCalled = 0;
   const wrapper = createUlgWebGpuMarchingCubesExtensionAdapter({
     device,
     volume,
@@ -260,6 +263,17 @@ test('ULG wrapper preserves caller-owned device and adapter swapability', async 
       assert.equal(receivedVolume, volume);
       return {
         schema: 'peercompute.webgpu-marching-cubes.surface-adapter.v0',
+        preflight(request) {
+          preflightCalled += 1;
+          assert.equal(request.volume, volume);
+          assert.equal(request.isovalue, 0.5);
+          return {
+            schema: WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
+            ok: true,
+            status: 'ready',
+            deviceChecks: [{ ok: true, status: 'same-device', label: 'volume.device' }]
+          };
+        },
         async extractSurface(request) {
           assert.equal(request.volume, volume);
           assert.equal(request.isovalue, 0.5);
@@ -273,13 +287,54 @@ test('ULG wrapper preserves caller-owned device and adapter swapability', async 
   const execution = await wrapper.extractSurface({ isovalue: 0.5 });
 
   assert.equal(factoryCalled, 1);
+  assert.equal(preflightCalled, 1);
   assert.equal(execution.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA);
   assert.equal(execution.status, 'extension-surface-ready-needs-ulg-row-translation');
   assert.equal(execution.ownsDevice, false);
+  assert.equal(execution.preflight.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA);
+  assert.equal(execution.preflight.status, 'extension-preflight-ready');
+  assert.equal(execution.preflight.extensionPreflightSchema, WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA);
   assert.equal(execution.extensionAdapterSchema, 'peercompute.webgpu-marching-cubes.surface-adapter.v0');
   assert.equal(execution.readyForUlgSurfaceVertexRows, false);
   assert.equal(execution.requiresUlgVertexRowTranslation, true);
   assert.equal(execution.hotLoopSafe, true);
+});
+
+test('ULG wrapper stops extraction when extension preflight blocks', async () => {
+  let extractCalled = false;
+  const wrapper = createUlgWebGpuMarchingCubesExtensionAdapter({
+    device: { label: 'expected-device' },
+    volume: { label: 'foreign-volume' },
+    adapter: {
+      schema: 'peercompute.webgpu-marching-cubes.surface-adapter.v0',
+      preflight() {
+        return {
+          schema: WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
+          ok: false,
+          status: 'preflight-check-failed',
+          deviceChecks: [
+            { ok: false, status: 'cross-device-volume', label: 'volume.device' }
+          ]
+        };
+      },
+      async extractSurface() {
+        extractCalled = true;
+        return extensionExecution();
+      }
+    }
+  });
+
+  const execution = await wrapper.extractSurface({ isovalue: 0.25 });
+
+  assert.equal(extractCalled, false);
+  assert.equal(execution.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA);
+  assert.equal(execution.status, 'extension-surface-preflight-blocked');
+  assert.equal(execution.reason, 'preflight-check-failed');
+  assert.equal(execution.preflight.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA);
+  assert.equal(execution.preflight.status, 'extension-preflight-blocked');
+  assert.equal(execution.preflight.deviceChecks[0].status, 'cross-device-volume');
+  assert.equal(execution.readyForUlgSurfaceVertexRows, false);
+  assert.equal(execution.hotLoopSafe, false);
 });
 
 test('ULG wrapper propagates extension same-device blockers before renderer integration', async () => {

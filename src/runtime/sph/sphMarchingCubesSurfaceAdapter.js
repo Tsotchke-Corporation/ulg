@@ -20,8 +20,12 @@ export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_ADAPTER_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-adapter.v0';
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-execution.v0';
+export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA =
+  'peercompute.ulg.sph-webgpu-marching-cubes-extension-preflight.v0';
 export const WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-execution.v0';
+export const WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA =
+  'peercompute.webgpu-marching-cubes.surface-preflight.v0';
 export const WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface.v0';
 export const WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA =
@@ -559,6 +563,16 @@ export function createUlgWebGpuMarchingCubesExtensionAdapter({
     throw new TypeError('createUlgWebGpuMarchingCubesExtensionAdapter requires an adapter or adapterFactory');
   }
   let extensionAdapter = adapter;
+  const ensureExtensionAdapter = async () => {
+    if (!extensionAdapter) {
+      extensionAdapter = await adapterFactory({
+        device,
+        volume,
+        adapterId
+      });
+    }
+    return extensionAdapter;
+  };
   const wrapper = {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_ADAPTER_SCHEMA,
     adapterId,
@@ -569,15 +583,103 @@ export function createUlgWebGpuMarchingCubesExtensionAdapter({
     get adapter() {
       return extensionAdapter;
     },
-    async extractSurface(input = {}) {
-      if (!extensionAdapter) {
-        extensionAdapter = await adapterFactory({
-          device,
-          volume,
-          adapterId
-        });
+    getStatus() {
+      return {
+        schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_ADAPTER_SCHEMA,
+        status: extensionAdapter ? 'extension-adapter-ready' : 'extension-adapter-pending',
+        adapterSchema: extensionAdapter?.schema ?? null,
+        adapterStatus: extensionAdapter?.getStatus?.() ?? null,
+        adapterId,
+        backend,
+        ownsDevice: false
+      };
+    },
+    getCapabilities() {
+      return extensionAdapter?.getCapabilities?.() ?? {
+        schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_ADAPTER_SCHEMA,
+        status: extensionAdapter ? 'extension-capabilities-unavailable' : 'extension-adapter-pending',
+        adapterSchema: extensionAdapter?.schema ?? null,
+        adapterId,
+        backend,
+        ownsDevice: false
+      };
+    },
+    async preflight(input = {}) {
+      const resolvedAdapter = await ensureExtensionAdapter();
+      if (typeof resolvedAdapter.preflight !== 'function') {
+        return {
+          schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA,
+          ok: true,
+          status: 'extension-preflight-unavailable',
+          reason: 'extension adapter does not expose preflight; extraction will rely on adapter extractSurface checks',
+          backend,
+          adapterSchema: resolvedAdapter?.schema ?? null,
+          adapterId,
+          ownsDevice: false,
+          extensionPreflight: null
+        };
       }
-      const extensionExecution = await extensionAdapter.extractSurface({
+      const extensionPreflight = await resolvedAdapter.preflight({
+        ...input,
+        volume: input.volume || volume
+      });
+      const ok = extensionPreflight?.ok !== false;
+      return {
+        schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA,
+        ok,
+        status: ok ? 'extension-preflight-ready' : 'extension-preflight-blocked',
+        reason: ok ? null : (extensionPreflight?.status || 'extension preflight blocked surface extraction'),
+        backend,
+        adapterSchema: resolvedAdapter?.schema ?? null,
+        adapterId,
+        ownsDevice: false,
+        extensionPreflightSchema: extensionPreflight?.schema ?? null,
+        extensionPreflightStatus: extensionPreflight?.status ?? null,
+        deviceChecks: extensionPreflight?.deviceChecks || [],
+        extensionPreflight
+      };
+    },
+    async extractSurface(input = {}) {
+      const resolvedAdapter = await ensureExtensionAdapter();
+      const preflight = await wrapper.preflight(input);
+      if (preflight.ok === false) {
+        const summary = {
+          schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
+          status: 'extension-surface-preflight-blocked',
+          reason: preflight.reason,
+          extensionOk: false,
+          extensionStatus: preflight.extensionPreflightStatus,
+          extensionExecutionSchema: null,
+          extensionSurfaceSchema: null,
+          readyForUlgSurfaceVertexRows: false,
+          requiresUlgVertexRowTranslation: true,
+          requiresUlgDrawMetadata: true,
+          hotLoopSafe: false,
+          rendererIntegration: 'blocked-before-extension-extraction'
+        };
+        return {
+          schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
+          status: summary.status,
+          reason: summary.reason,
+          backend,
+          adapterSchema: wrapper.schema,
+          extensionAdapterSchema: resolvedAdapter?.schema ?? null,
+          adapterId,
+          ownsDevice: false,
+          preflight,
+          summary,
+          extensionExecution: null,
+          surfaceVertexSchema: null,
+          surfaceDrawSchema: null,
+          surfaceDrawIndirectSchema: null,
+          readyForUlgSurfaceVertexRows: false,
+          requiresUlgVertexRowTranslation: true,
+          requiresUlgDrawMetadata: true,
+          hotLoopSafe: false,
+          rendererIntegration: summary.rendererIntegration
+        };
+      }
+      const extensionExecution = await resolvedAdapter.extractSurface({
         ...input,
         volume: input.volume || volume
       });
@@ -587,9 +689,10 @@ export function createUlgWebGpuMarchingCubesExtensionAdapter({
         status: summary.status,
         backend,
         adapterSchema: wrapper.schema,
-        extensionAdapterSchema: extensionAdapter?.schema ?? null,
+        extensionAdapterSchema: resolvedAdapter?.schema ?? null,
         adapterId,
         ownsDevice: false,
+        preflight,
         summary,
         extensionExecution,
         surfaceVertexSchema: summary.surfaceVertexSchema,

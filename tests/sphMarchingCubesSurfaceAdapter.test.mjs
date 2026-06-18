@@ -11,10 +11,12 @@ import {
 import {
   ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
+  ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
   createUlgWebGpuMarchingCubesExtensionAdapter,
-  summarizeWebGpuMarchingCubesExtensionExecution
+  summarizeWebGpuMarchingCubesExtensionExecution,
+  translateWebGpuMarchingCubesSurfaceToUlgRows
 } from '../src/runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 
 function extensionExecution({
@@ -52,6 +54,13 @@ function extensionExecution({
       resourceOwnership: { status: resourceOwnershipStatus }
     }
   };
+}
+
+function assertApprox(actual, expected, epsilon = 1e-6) {
+  assert.ok(
+    Math.abs(actual - expected) <= epsilon,
+    `expected ${actual} to be within ${epsilon} of ${expected}`
+  );
 }
 
 test('ULG summarizes extension compact position buffers as translation-ready but not direct row-compatible', () => {
@@ -149,4 +158,134 @@ test('ULG wrapper propagates extension same-device blockers before renderer inte
   assert.equal(execution.requiresUlgVertexRowTranslation, true);
   assert.equal(execution.hotLoopSafe, false);
   assert.equal(execution.summary.reason, 'same-device-check-failed');
+});
+
+test('ULG translates extension compact position rows into native surface vertices and draw metadata', () => {
+  const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
+    extensionExecution: extensionExecution(),
+    positionRows: new Float32Array([
+      0, 0, 0, 1,
+      1, 0, 0, 1,
+      0, 1, 0, 1
+    ]),
+    surfaceIndex: 2,
+    materialId: 42,
+    phaseId: 3,
+    opticalStateId: 7,
+    material: 'h2o',
+    phase: 'liquid',
+    density: 1000,
+    isolation: 0.5,
+    sourceVoxelLinearIndex: 11,
+    transparencyClassId: 4,
+    depthWriteFlag: 1,
+    renderOrder: 9
+  });
+
+  assert.equal(translation.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA);
+  assert.equal(translation.status, 'extension-surface-translated-to-ulg-rows');
+  assert.equal(translation.hotLoopGpuTranslationRequired, false);
+  assert.equal(translation.sourceVertexCount, 3);
+  assert.equal(translation.translatedVertexCount, 3);
+  assert.equal(translation.ignoredTrailingVertexCount, 0);
+
+  const vertices = translation.surfaceVertices;
+  assert.equal(vertices.schema, ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA);
+  assert.equal(vertices.status, 'surface-vertices-ready');
+  assert.equal(vertices.vertexCount, 3);
+  assert.equal(vertices.triangleCount, 1);
+  assert.deepEqual(vertices.rowLayout, [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT]);
+  assert.equal(vertices.rowStrideFloats, SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length);
+  assert.equal(vertices.surfaceVertexReadback, true);
+  assert.equal(vertices.surfaces.length, 1);
+  assert.equal(vertices.surfaces[0].surfaceIndex, 2);
+  assert.equal(vertices.surfaces[0].material, 'h2o');
+  assert.equal(vertices.surfaces[0].phase, 'liquid');
+
+  const rowStride = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
+  const firstVertex = [...vertices.vertexRows.slice(0, rowStride)];
+  assert.deepEqual(firstVertex.slice(0, 8), [
+    2,
+    42,
+    3,
+    0,
+    0,
+    0,
+    0,
+    0
+  ]);
+  assert.deepEqual(firstVertex.slice(8, 16), [
+    0,
+    0,
+    1,
+    7,
+    1000,
+    0.5,
+    11,
+    1
+  ]);
+  assert.deepEqual([...vertices.vertexRows.slice(rowStride + 5, rowStride + 8)], [1, 0, 0]);
+  assert.deepEqual([...vertices.vertexRows.slice(rowStride * 2 + 5, rowStride * 2 + 8)], [0, 1, 0]);
+
+  const draw = translation.surfaceDraw;
+  assert.equal(draw.schema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA);
+  assert.equal(draw.drawIndirectSchema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA);
+  assert.equal(draw.status, 'surface-draw-metadata-ready');
+  assert.equal(draw.surfaceCount, 1);
+  assert.equal(draw.activeSurfaceCount, 1);
+  assert.equal(draw.vertexCount, 3);
+  assert.equal(draw.triangleCount, 1);
+  assert.deepEqual(draw.rowLayout, [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT]);
+  assert.deepEqual(draw.drawIndirectRowLayout, [...SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT]);
+
+  const drawRow = [...draw.drawRows];
+  assert.deepEqual(drawRow.slice(0, 12), [
+    2,
+    42,
+    3,
+    7,
+    0,
+    3,
+    0,
+    1,
+    9,
+    4,
+    1,
+    1
+  ]);
+  assertApprox(drawRow[12], 0.5);
+  assertApprox(drawRow[13], 0.5);
+  assertApprox(drawRow[14], 0);
+  assertApprox(drawRow[15], Math.hypot(0.5, 0.5, 0));
+  assert.deepEqual([...draw.drawIndirectRows], [3, 1, 0, 2]);
+});
+
+test('ULG reports retained extension buffers need a GPU translation kernel when CPU positions are absent', () => {
+  const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
+    extensionExecution: extensionExecution()
+  });
+
+  assert.equal(translation.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA);
+  assert.equal(translation.status, 'extension-surface-translation-needs-position-readback-or-gpu-kernel');
+  assert.equal(translation.sourceBufferRetained, true);
+  assert.equal(translation.hotLoopGpuTranslationRequired, true);
+  assert.equal(translation.surfaceVertices, null);
+  assert.equal(translation.surfaceDraw, null);
+});
+
+test('ULG translation preserves extension blockers instead of manufacturing render rows', () => {
+  const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
+    extensionExecution: extensionExecution({
+      ok: false,
+      status: 'same-device-check-failed',
+      vertexCount: 0,
+      bufferRetained: false
+    })
+  });
+
+  assert.equal(translation.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA);
+  assert.equal(translation.status, 'extension-surface-translation-blocked');
+  assert.equal(translation.surfaceVertices, null);
+  assert.equal(translation.surfaceDraw, null);
+  assert.equal(translation.summary.status, 'extension-surface-same-device-check-failed');
 });

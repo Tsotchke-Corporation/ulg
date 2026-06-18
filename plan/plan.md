@@ -2,6 +2,26 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the mounted UI scheduler now reaches the
+MLS-MPM resident renderer again on phone-sized viewports. The blocking bug was
+the resident ComputeManager task returning a GPU fence with
+`queue-submitted-cleanup-deferred` from the retained no-full WebGPU mechanics
+chain; PeerCompute rejected that as unsatisfied, so the scheduler never
+published resident steps or render state. ULG now marks that exact retained
+WebGPU/no-full chain as `fenceSatisfied=true` while preserving the raw queue
+status and `satisfactionReason` in diagnostics. The scheduler harness at
+`artifacts/scheduler-after-fence-fix-20260618/report.json` reports
+`resident-steps-executed`, `computeExecution.gpuFenceSatisfied=true`,
+StateManager commit `accepted`, render state
+`surfaceDrawVisibleRendererBridge=three-render-row-spheres`, `meshCount=1`, and
+no WebGPU validation console issues. Mobile perspective/resize captures under
+`artifacts/scheduler-perspective-after-fence-fix-20260618/` stayed visible
+across portrait, front-low, side-high, top, landscape, and portrait-return
+views. The phone HUD now keeps the menu button separate from FPS/warning chips.
+Remaining performance work is still the same architectural target: eliminate
+the Three render-row readback bridge with a pixel-validated GPU-resident
+renderer, and replace no-full compact-motion gaps with GPU-side visual proof.
+
 Current checkpoint, 2026-06-18 AKDT: the performance harness now has a
 direct-resident MLS-MPM hot-loop lane that bypasses scene rendering and compact
 summary readback so it can measure the WebGPU mechanics sequence. The first

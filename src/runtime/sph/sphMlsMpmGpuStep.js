@@ -3014,6 +3014,16 @@ function rejectResidentGpuLaneLease(manager, leaseId, reason) {
 }
 
 function queueEvidenceFromResidentStep(step) {
+  const retainedNoFullWebGpuChain = Boolean(
+    step?.backend === 'webgpu'
+    && step?.readbackMode === NO_FULL_READBACK_MODE
+    && (
+      step?.normalHotLoopReadbackFree === true
+      || step?.residentBuffersRetained === true
+      || step?.nextParticleUploads?.sphParticleUpload?.stateBuffer
+      || step?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+    )
+  );
   const candidates = [
     step?.compactGpuSummary,
     step?.residentProductMass,
@@ -3034,9 +3044,19 @@ function queueEvidenceFromResidentStep(step) {
       ?? candidate?.gpuResult?.queueCompletionMethod
       ?? null;
     if (status || method) {
+      const resolvedStatus = status || 'queue-work-completed';
+      const resolvedMethod = method || 'queue.onSubmittedWorkDone';
+      if (resolvedStatus === 'queue-submitted-cleanup-deferred' && retainedNoFullWebGpuChain) {
+        return {
+          status: resolvedStatus,
+          method: resolvedMethod,
+          fenceSatisfied: true,
+          satisfactionReason: 'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup'
+        };
+      }
       return {
-        status: status || 'queue-work-completed',
-        method: method || 'queue.onSubmittedWorkDone'
+        status: resolvedStatus,
+        method: resolvedMethod
       };
     }
   }
@@ -3074,11 +3094,13 @@ export function createMlsMpmResidentStepGpuFenceReport(step, requirement = {}) {
   const status = queueEvidence.status || 'gpu-fence-report-missing';
   const method = queueEvidence.method || null;
   const retainedBufferRefs = retainedBufferRefsFromResidentStep(step);
+  const fenceSatisfied = queueEvidence.fenceSatisfied === true
+    || residentStepFenceSatisfied(status);
   return {
     schema: PEERCOMPUTE_GPU_FENCE_REPORT_SCHEMA,
     status,
     method,
-    fenceSatisfied: residentStepFenceSatisfied(status),
+    fenceSatisfied,
     required: requirement?.required !== false,
     laneId: requirement?.laneId || requirement?.gpuLaneId || null,
     stateKey: requirement?.stateKey || requirement?.gpuStateKey || null,
@@ -3089,6 +3111,7 @@ export function createMlsMpmResidentStepGpuFenceReport(step, requirement = {}) {
     source: 'ulg-mls-mpm-resident-step-compute-task',
     backend: step?.backend || null,
     readbackMode: step?.readbackMode || null,
+    satisfactionReason: queueEvidence.satisfactionReason || null,
     step: step?.step ?? null,
     sequence: step?.sequence ?? null
   };
@@ -11242,6 +11265,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
       queueCompletionStatus: queueEvidence.status,
       queueCompletionMethod: queueEvidence.method,
       retainedBufferRefs: retainedBufferRefsFromResidentStep(step),
+      completed: queueEvidence.fenceSatisfied === true ? true : undefined,
       source: 'ulg-mls-mpm-resident-step'
     });
     attachResidentGpuLaneExecution(step, {
@@ -11600,6 +11624,7 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
         queueCompletionStatus: queueEvidence.status,
         queueCompletionMethod: queueEvidence.method,
         retainedBufferRefs: retainedBufferRefsFromResidentStep(step),
+        completed: queueEvidence.fenceSatisfied === true ? true : undefined,
         source: 'ulg-mls-mpm-mechanics-only-step'
       });
       attachResidentGpuLaneExecution(step, {

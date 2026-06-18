@@ -9576,3 +9576,38 @@ WebGPU render-row overlay fallback gate, 2026-06-18 04:25 AKDT:
     `surfaceDrawVisibleRendererBridge=three-render-row-spheres`, and a visible
     mobile frame at
     `artifacts/sph-long-probe-mobile-three-spheres-post-fallback-frames/0001-b001-resident-batch.png`.
+
+Scheduler resident fence and mobile render recovery, 2026-06-18 05:04 AKDT:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident step fence accepts deferred cleanup|resident steps compute task handler returns fence evidence|fused resident sequence can run active-grid"`
+  - Passed: `55/55`.
+  - The new focused assertion covers
+    `queue-submitted-cleanup-deferred` as satisfied only for retained WebGPU
+    no-full resident chains.
+- Mobile UI scheduler harness:
+  `artifacts/scheduler-after-fence-fix-20260618/report.json`
+  - Passed: resident scheduler error `null`, render error `null`.
+  - Resident batch: `status=resident-steps-executed`, `backend=webgpu`,
+    `completedStepCount=16`, `readbackMode=no-full-readback`,
+    `computeExecution.gpuFenceSatisfied=true`, StateManager commit `accepted`.
+  - Render: `surfaceDrawVisibleRendererBridge=three-render-row-spheres`,
+    `surfaceDrawRenderBridgeStatus=three-render-row-spheres-ready`,
+    `surfaceDrawRenderBridgeThreeMeshCount=1`.
+  - Console: no WebGPU validation issues; remaining warnings were local HTTPS
+    certificate and WebGL `ReadPixels` capture stalls.
+- Mobile perspective/resize harness:
+  `artifacts/scheduler-perspective-after-fence-fix-20260618/report.json`
+  - Passed: portrait-initial, front-low, side-high, top, landscape-side, and
+    portrait-return all kept `meshCount=1`, render errors `null`, and no
+    WebGPU validation console issues.
+  - Screenshot pixel statistics were nonblank for all captures, with means
+    around `0.119..0.140`.
+- Mobile HUD harness:
+  `artifacts/mobile-hud-after-fence-fix-20260618/report.json`
+  - Passed: `toggleFpsOverlap=false`, `toggleWarningOverlap=false`,
+    render bridge `three-render-row-spheres`, `meshCount=1`, and no WebGPU
+    validation console issues.

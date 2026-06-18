@@ -1837,6 +1837,43 @@ test('MLS-MPM resident step compute task handler returns explicit GPU fence evid
   assert.equal(directFence.laneId, 'ulg:test:sph-resident');
 });
 
+test('MLS-MPM resident step fence accepts deferred cleanup for retained WebGPU no-full chains', () => {
+  const fence = createMlsMpmResidentStepGpuFenceReport({
+    backend: 'webgpu',
+    status: 'resident-step-webgpu-executed',
+    readbackMode: 'no-full-readback',
+    normalHotLoopReadbackFree: true,
+    residentBuffersRetained: true,
+    gridUpdate: {
+      queueCompletionStatus: 'queue-submitted-cleanup-deferred',
+      queueCompletionMethod: 'deferred unified fused mechanics cleanup'
+    },
+    nextParticleUploads: {
+      sphParticleUpload: {
+        stateBuffer: { label: 'retained-state-buffer' },
+        thermoBuffer: { label: 'retained-thermo-buffer' }
+      },
+      mlsMpmParticleUpload: {
+        mechanicsBuffer: { label: 'retained-mechanics-buffer' }
+      }
+    }
+  }, {
+    required: true,
+    laneId: 'ulg:test:sph-resident',
+    stateKey: 'ulg:test:sph-state'
+  });
+
+  assert.equal(fence.status, 'queue-submitted-cleanup-deferred');
+  assert.equal(fence.method, 'deferred unified fused mechanics cleanup');
+  assert.equal(fence.fenceSatisfied, true);
+  assert.equal(
+    fence.satisfactionReason,
+    'retained-webgpu-no-full-readback-chain-submitted-before-deferred-cleanup'
+  );
+  assert.equal(fence.laneId, 'ulg:test:sph-resident');
+  assert.equal(fence.stateKey, 'ulg:test:sph-state');
+});
+
 test('SPH thermal phase stage compute task declares retained thermo lane output without authority mutation', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

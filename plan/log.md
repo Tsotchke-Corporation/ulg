@@ -26411,3 +26411,57 @@ Open:
   black-prone overlay canvas.
 - The safe fallback reintroduces render-row readback, so it fixes rendering and
   console cleanliness but not the remaining sub-1-FPS GUI throughput problem.
+
+## 2026-06-18 05:04 AKDT - Scheduler resident fence and mobile render recovery
+
+Summary:
+
+- Fixed the mounted MLS-MPM UI scheduler path that stayed visually blank after
+  resident physics submission. The ComputeManager resident task was returning a
+  fence with `queue-submitted-cleanup-deferred` from the retained WebGPU
+  no-full mechanics chain; PeerCompute rejected it as unsatisfied, so
+  `__mlsMpmResidentSteps`, render state, and the render bridge were never
+  published.
+- ULG now treats that exact retained WebGPU/no-full resident chain as satisfied
+  fence evidence while preserving the raw queue status and a
+  `satisfactionReason` for diagnostics.
+- The mounted scheduler now forces the first resident render-state refresh even
+  when playback is paused, so a successful resident batch creates a visible
+  render bridge immediately.
+- Tightened the mobile top HUD layout so the menu button no longer overlaps the
+  FPS and warning chips.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "resident step fence accepts deferred cleanup|resident steps compute task handler returns fence evidence|fused resident sequence can run active-grid"`
+  reported `55/55` pass.
+- PASS: mobile UI scheduler harness
+  `artifacts/scheduler-after-fence-fix-20260618/report.json` reports
+  `error=null`, `renderError=null`,
+  `computeExecution.gpuFenceSatisfied=true`, StateManager commit
+  `accepted`, `surfaceDrawVisibleRendererBridge=three-render-row-spheres`,
+  `surfaceDrawRenderBridgeThreeMeshCount=1`, and no WebGPU validation console
+  issues. Remaining console warnings are the expected local HTTPS certificate
+  warning plus WebGL `ReadPixels` stalls from capture/readback.
+- PASS: mobile perspective/resize harness
+  `artifacts/scheduler-perspective-after-fence-fix-20260618/report.json`
+  stayed visible across portrait, front-low, side-high, top, landscape-side,
+  and portrait-return views with `meshCount=1`, no render errors, and no
+  WebGPU validation console issues.
+- PASS: mobile HUD harness
+  `artifacts/mobile-hud-after-fence-fix-20260618/report.json` reports
+  `toggleFpsOverlap=false`, `toggleWarningOverlap=false`, render bridge
+  `three-render-row-spheres`, `meshCount=1`, and no WebGPU validation console
+  issues.
+
+Open:
+
+- This restores scheduler rendering and removes the fence rejection, but it
+  still uses the Three render-row sphere bridge and `full-parity-readback` for
+  render rows.
+- The next performance target remains a pixel-validated GPU-resident renderer
+  and GPU-side compact visual proof, not further optimization of the interim
+  readback bridge.

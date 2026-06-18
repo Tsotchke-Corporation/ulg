@@ -1152,16 +1152,17 @@ function buildOverlayShell() {
       .sph-legend-chip { border:1px solid #245447;padding:3px 6px;background:#0a1418; }
       #sph-panel { transition:transform .25s ease; }
       #sph-panel.collapsed { transform:translateX(110%); }
-      #sph-warning-bar { position:absolute;top:0;left:0;right:0;z-index:65;display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 12px 8px 62px;box-sizing:border-box;pointer-events:none; }
+      #sph-toggle { position:absolute;top:12px;left:12px;z-index:72; }
+      #sph-warning-bar { position:absolute;top:0;left:0;right:0;z-index:65;display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;padding:8px 12px 8px 128px;box-sizing:border-box;pointer-events:none; }
       .sph-warning-chip { border:1px solid #f7c675;background:rgba(46,30,8,.92);color:#ffe7b2;padding:4px 7px;font-size:11px;line-height:1.25; }
-      .sph-fps-chip { border:1px solid #1d8b6d;background:rgba(4,12,14,.88);color:#75f7b4;padding:4px 7px;font-size:11px;line-height:1.25; }
-      @media (max-width:700px) { #sph-panel { width:min(340px,92vw); } #sph-status { font-size:13px; } .sph-element-grid { grid-template-columns:repeat(18,42px);grid-auto-rows:42px; } #sph-phase-overlay .sph-element-cell { min-height:42px; } .sph-element-name { display:none; } }
+      .sph-fps-chip { border:1px solid #1d8b6d;background:rgba(4,12,14,.88);color:#75f7b4;padding:4px 7px;font-size:11px;line-height:1.25;max-width:calc(100vw - 152px);white-space:normal;overflow-wrap:anywhere; }
+      @media (max-width:700px) { #sph-panel { width:min(340px,92vw); } #sph-status { font-size:13px; } #sph-warning-bar { padding-left:118px;padding-right:8px; } .sph-fps-chip { max-width:calc(100vw - 134px);font-size:10px; } .sph-warning-chip { max-width:calc(100vw - 24px); } .sph-element-grid { grid-template-columns:repeat(18,42px);grid-auto-rows:42px; } #sph-phase-overlay .sph-element-cell { min-height:42px; } .sph-element-name { display:none; } }
     </style>
     <div id="sph-scene" style="position:absolute;inset:0;"></div>
     <div id="sph-warning-bar" aria-live="polite">
       <span id="sph-fps" class="sph-fps-chip">render fps -- | physics fps --</span>
     </div>
-    <button id="sph-toggle" type="button" aria-label="Toggle controls" style="position:absolute;top:12px;left:12px;z-index:60;">☰ menu</button>
+    <button id="sph-toggle" type="button" aria-label="Toggle controls">☰ menu</button>
     <aside id="sph-panel" style="position:absolute;top:0;right:0;height:100%;width:min(360px,92vw);box-sizing:border-box;border-left:1px solid #14342c;padding:14px;padding-top:56px;overflow:auto;-webkit-overflow-scrolling:touch;background:rgba(5,11,14,0.96);z-index:55;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
         <strong style="color:#75f7b4;">SPH PHASE — two materials interacting</strong>
@@ -3729,22 +3730,26 @@ export function mountSphPhaseDemoOverlay({
       );
       if (execution?.backend === 'webgpu') {
         const hasResidentRenderState = Boolean(scene.getSphResidentRenderState?.()?.schema);
+        const forceInitialRenderStateRefresh = !hasResidentRenderState;
         const forceMotionProvenRefresh = renderMotion.status === 'motion-proven';
         const forceBatchMotionEstimateRefresh = renderMotion.batchMotionEstimateVisible === true;
         const forceAccumulatedMotionRefresh = accumulatedMotion.accumulatedMotionVisible;
+        const forceResidentRenderRefreshReason = forceInitialRenderStateRefresh
+          ? 'resident-initial-visual-refresh'
+          : forceMotionProvenRefresh
+          ? 'resident-motion-proven-visual-refresh'
+          : forceBatchMotionEstimateRefresh
+          ? 'resident-batch-motion-estimate-visual-refresh'
+          : forceAccumulatedMotionRefresh
+          ? 'resident-accumulated-motion-visual-refresh'
+          : 'playback-initial-visual-refresh';
         const cadence = residentRenderReadbackDecision({
           continueFromResidentState,
-          forceDue: (playing && !hasResidentRenderState)
+          forceDue: forceInitialRenderStateRefresh
             || forceMotionProvenRefresh
             || forceBatchMotionEstimateRefresh
             || forceAccumulatedMotionRefresh,
-          forceReason: forceMotionProvenRefresh
-            ? 'resident-motion-proven-visual-refresh'
-            : forceBatchMotionEstimateRefresh
-            ? 'resident-batch-motion-estimate-visual-refresh'
-            : forceAccumulatedMotionRefresh
-            ? 'resident-accumulated-motion-visual-refresh'
-            : 'playback-initial-visual-refresh',
+          forceReason: forceResidentRenderRefreshReason,
           suppressDue: suppressSubvisiblePlaybackRender,
           suppressReason: 'resident-motion-below-visible-threshold'
         });

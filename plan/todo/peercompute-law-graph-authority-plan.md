@@ -2,6 +2,14 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 NodeKernel resident-stage placement wrapper:
+PeerCompute now has the NodeKernel-side authority envelope for GPU resident
+stage placement preflight. This is the law-graph boundary ULG needs before
+distributed resident stages: local and advisory distributed plans report local
+ComputeManager placement, while non-advisory distributed resident placement is
+blocked until an executor exists. The next ULG step is to prefer this
+NodeKernel wrapper when a real kernel owns the resident ComputeManager.
+
 Status update, 2026-06-17 ComputeManager placement preflight: the law-stage
 dependency and state-family conflict policy is now visible before execution,
 not only after. `ComputeManager.preflightGpuResidentLaneStagePlacement()`

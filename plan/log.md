@@ -1,5 +1,66 @@
 # ULG Implementation Log
 
+## 2026-06-17 16:24:14 AKDT - PeerCompute NodeKernel resident-stage placement wrapper noted
+
+Prompt time/date: 2026-06-17 16:24 AKDT, continuing the architecture refactor
+after adding ComputeManager GPU resident stage-placement preflight.
+
+Summary:
+
+- Sibling PeerCompute now exposes
+  `peercompute.nodekernel.gpu-resident-stage-placement-preflight.v0` through
+  `NodeKernel.preflightGpuResidentLaneStagePlacement()`.
+- The NodeKernel wrapper records placement authority for local and advisory
+  distributed GPU resident stage placement.
+- Non-advisory distributed resident stage placement now fails closed with
+  `ERR_NODEKERNEL_DISTRIBUTED_GPU_RESIDENT_STAGE_PLACEMENT_UNAVAILABLE` until
+  a real remote resident-stage placement executor exists.
+- ULG docs now route the next code item: when a real NodeKernel owns the
+  resident ComputeManager, ULG should call the NodeKernel wrapper and retain
+  the raw ComputeManager preflight inside that authority envelope. Injected or
+  local-only ComputeManagers should keep the direct ComputeManager preflight.
+
+Files touched:
+
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/nodeKernel/NodeKernel.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/src/peercompute/index.js`
+- sibling PeerCompute:
+  `/home/cos/projects/peercompute/peercompute/tests/unit/nodeKernel.start.test.js`
+- sibling PeerCompute docs:
+  `/home/cos/projects/peercompute/plan/plan.md`
+- sibling PeerCompute docs:
+  `/home/cos/projects/peercompute/plan/tests.md`
+- sibling PeerCompute docs:
+  `/home/cos/projects/peercompute/plan/log.md`
+- `plan/implementation-status.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/log.md`
+
+Commands run:
+
+- PeerCompute: `node --check peercompute/src/peercompute/nodeKernel/NodeKernel.js`
+- PeerCompute: `node --check peercompute/src/peercompute/index.js`
+- PeerCompute: `node --check peercompute/tests/unit/nodeKernel.start.test.js`
+- PeerCompute: `node --test peercompute/tests/unit/nodeKernel.start.test.js`
+
+Validation:
+
+- PASS: PeerCompute syntax checks.
+- PASS: PeerCompute `nodeKernel.start.test.js` passed `11/11`.
+- No ULG runtime code changed in this docs-only routing note, so no new ULG
+  visual matrix was run beyond the immediately preceding
+  `codex-stage-placement-preflight-20260617` matrix.
+
+Open:
+
+- Next ULG code item: route mechanics stage placement preflight through
+  NodeKernel when available and record both NodeKernel authority and raw
+  ComputeManager preflight telemetry.
+
 ## 2026-06-17 16:15:23 AKDT - ComputeManager GPU resident stage-placement preflight
 
 Prompt time/date: 2026-06-17 16:15 AKDT, after the user asked whether the

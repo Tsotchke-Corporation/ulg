@@ -35,6 +35,18 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-17 AKDT: sibling PeerCompute now has
+`NodeKernel.preflightGpuResidentLaneStagePlacement()`. Local and advisory
+distributed resident stage placement wrap the ComputeManager preflight with
+NodeKernel authority metadata; non-advisory distributed resident placement
+fails closed with
+`ERR_NODEKERNEL_DISTRIBUTED_GPU_RESIDENT_STAGE_PLACEMENT_UNAVAILABLE` until a
+real remote resident-stage executor exists. Next ULG code item: when a real
+NodeKernel owns the ComputeManager, route mechanics stage placement preflight
+through NodeKernel and record both NodeKernel authority and raw ComputeManager
+preflight in telemetry. Keep injected/local-only ComputeManagers on the direct
+ComputeManager preflight path.
+
 Current routing note, 2026-06-17 AKDT: ComputeManager now owns an advisory
 GPU resident stage-placement preflight. Before ULG executes the mechanics
 stage plan, it asks PeerCompute for

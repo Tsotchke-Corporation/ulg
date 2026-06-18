@@ -56,7 +56,7 @@ const compactSummaryMode = ['none', 'final-only', 'every-step'].includes(
   String(process.env.ULG_BENCH_COMPACT_SUMMARY_MODE || '').toLowerCase()
 )
   ? String(process.env.ULG_BENCH_COMPACT_SUMMARY_MODE).toLowerCase()
-  : (probeMode === 'direct-resident' ? 'none' : 'final-only');
+  : 'none';
 const fuseResidentMechanicsSequence = !['0', 'false', 'off', 'no'].includes(
   String(process.env.ULG_BENCH_FUSE_RESIDENT_MECHANICS_SEQUENCE || '1').toLowerCase()
 );

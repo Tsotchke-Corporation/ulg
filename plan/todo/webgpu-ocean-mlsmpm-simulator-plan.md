@@ -62,6 +62,10 @@ Tactical status, 2026-06-18 AKDT:
   bridge. This is an interim console-clean surface path for live debugging; it
   is not the final GPU surface renderer because it still reads render rows
   back to CPU-owned Three geometry.
+- No-full browser probes and benchmarks now default to `compactSummaryMode=none`
+  so the normal visual/performance harness does not hide a compact-summary
+  `mapAsync` fence inside the batch timing. Diagnostic and parity runs can
+  still request compact summaries explicitly.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is
@@ -372,6 +376,10 @@ Interim status, 2026-06-18 AKDT:
   artifacts while keeping the object in the normal Three camera/depth path.
   The sphere bridge is capped at 4096 instances and falls back to the point
   bridge above that count.
+- The sphere bridge now reuses per-surface `InstancedMesh` objects across
+  resident refreshes and exposes reuse/create/dispose counters to the harness.
+  It refreshes the material when the closure-derived optical signature changes
+  so mesh reuse does not freeze PBR state.
 - The compact surface-vertex bridge remains disabled for the normal path
   because full surface vertex/metadata readback still wedges in browser probes.
 - The raw WebGPU render-row overlay remains disabled for the normal path after
@@ -435,6 +443,10 @@ Interim status, 2026-06-18 AKDT:
 - The report now carries grid-node count, active-grid availability, render-row
   readback byte length, surface draw byte counters, and estimated readback bytes
   per batch/step.
+- The browser probe report also carries Three sphere bridge mesh
+  reuse/create/dispose counts. Current H2O/H2O `three-render-row-spheres`
+  evidence is console-clean, disables compact summary readback by default, and
+  reuses both sphere meshes on resident refreshes.
 - The report now also carries requested/effective surface draw modes and a
   fallback reason. This prevents `webgpu-render-row-*` requests from looking
   like a successful direct-GPU renderer when they were intentionally routed to

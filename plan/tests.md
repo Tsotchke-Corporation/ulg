@@ -1,5 +1,42 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 No-Fence Probe Defaults And Sphere Bridge Reuse
+
+This slice removes two accidental mounted-scene costs from the interim
+MLS-MPM render path: no-full browser probes and benchmarks no longer default
+to compact-summary readback fences, and the Three render-row sphere bridge
+reuses per-surface `InstancedMesh` objects across resident refreshes. Reused
+sphere meshes still refresh their material when the closure-derived optical
+signature changes, so PBR state is not frozen by geometry reuse.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-performance-benchmark.mjs` passed.
+- Renderer regression coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "sphere bridge|render-row|depth policy|surface draw"`
+  passed `39/39`.
+- Browser console probe:
+  `artifacts/sph-probe-sphere-bridge-reuse-material-refresh-water-water.json`
+  completed with `status=good`, `analysis.status=good`, no analysis issues,
+  browser console `issueCount=0`, `compactSummaryDisabled=true`,
+  `meanCompactSummaryMs=0`, and render-row motion evidence.
+- Bridge reuse evidence:
+  initial draw created `2` sphere meshes; both resident batches reused `2`
+  meshes with `0` created and `0` disposed. The second resident batch reported
+  `batchMs=20.1` after the cold refresh batch.
+
+Known residual risk:
+
+- The bridge still reads render rows back into Three-owned geometry. It is a
+  mobile visibility and diagnostics path while the proper same-device GPU
+  surface consumer is built.
+- No-full default compact-summary suppression is correct for performance and
+  visual probes, but parity/scientific runs must explicitly request compact or
+  full readback evidence.
+
 ## Current Focused Result - 2026-06-18 Resident Gates, Material Bank, Worker Telemetry, And Wall Contact
 
 This slice covers the non-renderer lanes around the current MLS-MPM push:

@@ -1,5 +1,55 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - No-Fence Probe Defaults And Sphere Bridge Mesh Reuse
+
+Summary:
+
+- Changed the browser long-horizon probe default so no-full-readback runs use
+  `compactSummaryMode=none` unless explicitly overridden. This keeps the live
+  no-full path from spending the batch on a compact-summary `mapAsync` fence
+  when the probe is collecting render-row visual evidence instead.
+- Changed the performance benchmark default compact-summary mode to `none`.
+  Parity/diagnostic runs can still request `final-only` or `every-step`
+  explicitly, but the default benchmark path now measures the resident hot
+  loop and mounted scene without a hidden summary readback.
+- Updated the Three render-row sphere bridge to reuse per-surface
+  `InstancedMesh` objects across resident refreshes when capacity permits,
+  instead of disposing and recreating the group children every batch.
+- Added an optical material signature on the reused sphere bridge materials.
+  The bridge keeps the mesh/geometry stable, but refreshes the material if the
+  derived optical/PBR row changes for the same surface key.
+- Added probe telemetry for sphere bridge mesh reuse/create/dispose counts so
+  browser console runs can prove whether refreshes are reusing engine-owned
+  scene objects.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "sphere bridge|render-row|depth policy|surface draw"`
+  reported `39/39` pass.
+- PASS browser probe:
+  `ULG_PROBE_OUTPUT=artifacts/sph-probe-sphere-bridge-reuse-material-refresh-water-water.json ULG_PROBE_FRAME_DIR=artifacts/sph-probe-sphere-bridge-reuse-material-refresh-water-water-frames ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_VIEWPORT_WIDTH=900 ULG_PROBE_VIEWPORT_HEIGHT=680 ULG_PROBE_ENABLE_UNSAFE_WEBGPU=1 ULG_PROBE_PORT=5221 npm run probe:sph-long-horizon`
+  on H2O/H2O MLS-MPM with `surfaceDraw=three-render-row-spheres` completed
+  with `status=good`, `analysis.status=good`, browser console
+  `issueCount=0`, `compactSummaryDisabled=true`,
+  `meanCompactSummaryMs=0`, render-row motion evidence, and four captured
+  frames.
+- The same probe reported initial bridge creation of `2` sphere meshes, then
+  resident batches reusing `2` meshes with `0` created and `0` disposed. The
+  final resident batch wall time was `20.1ms` after the cold refresh batch.
+
+Open:
+
+- This removes a hidden fence and scene-object churn from the interim bridge,
+  but the broad FPS fix remains the same-device GPU surface/screen-space
+  renderer that consumes resident buffers without render-row readback.
+- The mounted scene still reports render-row readback for
+  `three-render-row-spheres`; that bridge stays a mobile correctness fallback,
+  not the final performance target.
+
 ## 2026-06-18 AKDT - Resident Gates, Worker Capability, Material Bank Seed, Wall Contact, And Marching-Cubes Adapter
 
 Summary:

@@ -1447,6 +1447,9 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeEngineIntegration: renderState.surfaceDrawRenderBridgeEngineIntegration ?? null,
             surfaceDrawRenderBridgeReused: renderState.surfaceDrawRenderBridgeReused ?? null,
             surfaceDrawRenderBridgeUpdateCount: renderState.surfaceDrawRenderBridgeUpdateCount ?? null,
+            surfaceDrawRenderBridgeSphereReusedMeshCount: renderState.surfaceDrawRenderBridgeSphereReusedMeshCount ?? null,
+            surfaceDrawRenderBridgeSphereCreatedMeshCount: renderState.surfaceDrawRenderBridgeSphereCreatedMeshCount ?? null,
+            surfaceDrawRenderBridgeSphereDisposedMeshCount: renderState.surfaceDrawRenderBridgeSphereDisposedMeshCount ?? null,
               materialKeys: Array.isArray(renderState.materialKeys) ? [...renderState.materialKeys] : []
             } : null,
             residentParticleUploadDebug: overlay.__sphResidentParticleUploadDebug || null,
@@ -1487,6 +1490,9 @@ async function runBrowserProbe({
               : [],
             renderBridgeSphereTransmissionProxyCount: surfaceDraw.renderBridgeSphereTransmissionProxyCount ?? null,
             renderBridgeSphereFallbackColorCount: surfaceDraw.renderBridgeSphereFallbackColorCount ?? null,
+            renderBridgeSphereReusedMeshCount: surfaceDraw.renderBridgeSphereReusedMeshCount ?? null,
+            renderBridgeSphereCreatedMeshCount: surfaceDraw.renderBridgeSphereCreatedMeshCount ?? null,
+            renderBridgeSphereDisposedMeshCount: surfaceDraw.renderBridgeSphereDisposedMeshCount ?? null,
             renderBridgeMinParticleRadiusM: surfaceDraw.renderBridgeMinParticleRadiusM ?? null,
             renderBridgeMaxParticleRadiusM: surfaceDraw.renderBridgeMaxParticleRadiusM ?? null
           } : null,
@@ -4071,7 +4077,7 @@ async function main() {
     String(process.env.ULG_PROBE_COMPACT_SUMMARY_MODE || '').toLowerCase()
   )
     ? String(process.env.ULG_PROBE_COMPACT_SUMMARY_MODE).toLowerCase()
-    : 'final-only';
+    : (readbackMode === 'no-full-readback' ? 'none' : 'final-only');
   const fuseResidentMechanicsSequence = process.env.ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE === '1'
     || process.env.ULG_PROBE_FUSE_NO_FULL_RESIDENT_MECHANICS_SEQUENCE === '1';
   const fuseResidentMechanicsActiveGrid = process.env.ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID === '1'

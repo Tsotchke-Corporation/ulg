@@ -4948,15 +4948,29 @@ export function createSphPhaseScene(container, {
       group = previousBridge?.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
         ? previousBridge.threeSurfaceGroup || null
         : null;
+      const previousMeshesBySurfaceKey = new Map();
+      let reusedSphereMeshCount = 0;
+      let createdSphereMeshCount = 0;
+      let disposedSphereMeshCount = 0;
+      const disposeSphereMaterial = (material) => {
+        if (Array.isArray(material)) {
+          for (const item of material) item?.dispose?.();
+        } else {
+          material?.dispose?.();
+        }
+      };
+      const disposeSphereMesh = (mesh) => {
+        if (!mesh) return;
+        group?.remove(mesh);
+        mesh.geometry?.dispose?.();
+        disposeSphereMaterial(mesh.material);
+        disposedSphereMeshCount += 1;
+      };
       if (group) {
         for (const child of [...group.children]) {
-          group.remove(child);
-          child.geometry?.dispose?.();
-          if (Array.isArray(child.material)) {
-            for (const material of child.material) material?.dispose?.();
-          } else {
-            child.material?.dispose?.();
-          }
+          const key = child?.userData?.surfaceKey;
+          if (key && child.isInstancedMesh) previousMeshesBySurfaceKey.set(key, child);
+          else disposeSphereMesh(child);
         }
         bridgeReused = true;
         bridgeUpdateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
@@ -4975,9 +4989,44 @@ export function createSphPhaseScene(container, {
       let opaqueGroups = 0;
       for (const entry of groupsBySurface.values()) {
         const { descriptor, indices } = entry;
+        const surfaceKey = descriptor.surfaceKey || `${descriptor.material || 'unknown'}:${descriptor.phase || 'unknown'}:${descriptor.renderDomainKey || 'domain'}`;
         const properties = materialPropertiesForSurfaceDescriptor(descriptor, currentMaterialProperties);
         const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, descriptor);
-        const material = makeSurfaceMaterial(descriptor, properties, cachedOptics);
+        const nextOptics = cachedOptics || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
+        const nextMaterialSignature = opticalSignatureForMaterial(nextOptics);
+        let mesh = previousMeshesBySurfaceKey.get(surfaceKey) || null;
+        previousMeshesBySurfaceKey.delete(surfaceKey);
+        const instanceCapacity = Math.max(0, Math.round(Number(mesh?.instanceMatrix?.count) || Number(mesh?.count) || 0));
+        const canReuseMesh = Boolean(
+          mesh?.isInstancedMesh
+          && mesh.geometry
+          && mesh.material
+          && instanceCapacity >= indices.length
+        );
+        if (!canReuseMesh) {
+          if (mesh) disposeSphereMesh(mesh);
+          const sphereGeometry = new THREE.SphereGeometry(1, 8, 6);
+          const material = makeSurfaceMaterial(descriptor, properties, nextOptics);
+          material.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
+          mesh = new THREE.InstancedMesh(sphereGeometry, material, indices.length);
+          mesh.name = `ulg-sph-three-render-row-spheres-${surfaceKey}`;
+          mesh.frustumCulled = false;
+          group.add(mesh);
+          createdSphereMeshCount += 1;
+        } else {
+          reusedSphereMeshCount += 1;
+        }
+        let material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+        const previousMaterialSignature = material?.userData?.renderRowSphereMaterialSignature
+          || opticalSignatureForMaterial(material?.userData?.optical);
+        if (previousMaterialSignature !== nextMaterialSignature) {
+          const replacementMaterial = makeSurfaceMaterial(descriptor, properties, nextOptics);
+          replacementMaterial.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
+          const oldMaterial = mesh.material;
+          mesh.material = replacementMaterial;
+          disposeSphereMaterial(oldMaterial);
+          material = replacementMaterial;
+        }
         const bridgeFallbackColorSrgb = averageRenderRowColorSrgb(colorsRgb, indices, descriptor);
         const emissive = decoded?.emissiveByMaterial?.[descriptor.material]
           ?? decoded?.emissiveByMaterial?.[descriptor.renderKey]
@@ -4986,17 +5035,15 @@ export function createSphPhaseScene(container, {
           material.emissive.setRGB(emissive[0], emissive[1], emissive[2], THREE.SRGBColorSpace);
           material.emissiveIntensity = 1.8;
         }
-        const sphereGeometry = new THREE.SphereGeometry(1, 8, 6);
-        const mesh = new THREE.InstancedMesh(sphereGeometry, material, indices.length);
-        mesh.name = `ulg-sph-three-render-row-spheres-${descriptor.surfaceKey}`;
-        mesh.frustumCulled = false;
         applySurfaceRenderOrdering(mesh, material.userData.optical, descriptor);
         stabilizeRenderRowSphereBridgeMaterial(material, {
           descriptor,
           fallbackColorSrgb: bridgeFallbackColorSrgb
         });
+        mesh.count = indices.length;
         mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
         mesh.userData.renderSource = visibleRenderSource;
+        mesh.userData.surfaceKey = surfaceKey;
         mesh.userData.pointCount = indices.length;
         mesh.userData.materialKey = descriptor.material;
         mesh.userData.renderKey = descriptor.renderKey;
@@ -5038,15 +5085,15 @@ export function createSphPhaseScene(container, {
         mesh.userData.minParticleRadiusM = Number.isFinite(groupMinRadius) ? groupMinRadius : fallbackSphereRadius;
         mesh.userData.maxParticleRadiusM = Number.isFinite(groupMaxRadius) ? groupMaxRadius : fallbackSphereRadius;
         mesh.computeBoundingSphere?.();
-        group.add(mesh);
         meshes.push(mesh);
         bridgeMaterialKeys.push(descriptor.material || descriptor.renderKey || 'unknown');
         geometryByteLength += (
-          sphereGeometry.attributes?.position?.array?.byteLength || 0
+          mesh.geometry?.attributes?.position?.array?.byteLength || 0
         ) + indices.length * 16 * Float32Array.BYTES_PER_ELEMENT;
         if (material.transparent || material.depthWrite === false) transparentGroups += 1;
         else opaqueGroups += 1;
       }
+      for (const staleMesh of previousMeshesBySurfaceKey.values()) disposeSphereMesh(staleMesh);
       threeMeshes = meshes;
       renderObject = meshes[0] || null;
       lastOpaqueDrawCount = opaqueGroups;
@@ -5055,6 +5102,9 @@ export function createSphPhaseScene(container, {
       drawOrderingPolicy = 'three-instanced-spheres-material-pbr-depth-policy';
       group.userData.sphereBridgeTransmissionProxyCount = sphereBridgeTransmissionProxyCount;
       group.userData.sphereBridgeFallbackColorCount = sphereBridgeFallbackColorCount;
+      group.userData.sphereBridgeReusedMeshCount = reusedSphereMeshCount;
+      group.userData.sphereBridgeCreatedMeshCount = createdSphereMeshCount;
+      group.userData.sphereBridgeDisposedMeshCount = disposedSphereMeshCount;
     } else {
       let positions = null;
       let colors = null;
@@ -5193,6 +5243,15 @@ export function createSphPhaseScene(container, {
       sphereBridgeMaterialKeys: bridgeMaterialKeys,
       sphereBridgeTransmissionProxyCount,
       sphereBridgeFallbackColorCount,
+      sphereBridgeReusedMeshCount: useSphereBridge
+        ? (group?.userData?.sphereBridgeReusedMeshCount ?? 0)
+        : 0,
+      sphereBridgeCreatedMeshCount: useSphereBridge
+        ? (group?.userData?.sphereBridgeCreatedMeshCount ?? 0)
+        : 0,
+      sphereBridgeDisposedMeshCount: useSphereBridge
+        ? (group?.userData?.sphereBridgeDisposedMeshCount ?? 0)
+        : 0,
       minParticleRadiusM,
       maxParticleRadiusM,
       renderRowsReadback: Boolean(renderRowsExecution?.renderRowsReadback),
@@ -9332,6 +9391,9 @@ export function createSphPhaseScene(container, {
         renderBridgeSphereMaterialKeys: [...(renderBridge?.sphereBridgeMaterialKeys || [])],
         renderBridgeSphereTransmissionProxyCount: renderBridge?.sphereBridgeTransmissionProxyCount ?? 0,
         renderBridgeSphereFallbackColorCount: renderBridge?.sphereBridgeFallbackColorCount ?? 0,
+        renderBridgeSphereReusedMeshCount: renderBridge?.sphereBridgeReusedMeshCount ?? 0,
+        renderBridgeSphereCreatedMeshCount: renderBridge?.sphereBridgeCreatedMeshCount ?? 0,
+        renderBridgeSphereDisposedMeshCount: renderBridge?.sphereBridgeDisposedMeshCount ?? 0,
         renderBridgeMinParticleRadiusM: renderBridge?.minParticleRadiusM ?? null,
         renderBridgeMaxParticleRadiusM: renderBridge?.maxParticleRadiusM ?? null,
         renderBridgeTemporalSwapPolicy: renderBridge?.temporalSwapPolicy ?? null,
@@ -10460,6 +10522,9 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeSphereMaterialKeys = [...(renderBridge?.sphereBridgeMaterialKeys || [])];
           nextResidentSurfaceDraw.renderBridgeSphereTransmissionProxyCount = renderBridge?.sphereBridgeTransmissionProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereFallbackColorCount = renderBridge?.sphereBridgeFallbackColorCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereReusedMeshCount = renderBridge?.sphereBridgeReusedMeshCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereCreatedMeshCount = renderBridge?.sphereBridgeCreatedMeshCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereDisposedMeshCount = renderBridge?.sphereBridgeDisposedMeshCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeMinParticleRadiusM = renderBridge?.minParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeMaxParticleRadiusM = renderBridge?.maxParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = renderBridge?.temporalSwapPolicy ?? null;
@@ -10865,6 +10930,9 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeSphereMaterialKeys: [...(sphResidentSurfaceDraw?.renderBridgeSphereMaterialKeys || [])],
         surfaceDrawRenderBridgeSphereTransmissionProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereTransmissionProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereFallbackColorCount: sphResidentSurfaceDraw?.renderBridgeSphereFallbackColorCount ?? 0,
+        surfaceDrawRenderBridgeSphereReusedMeshCount: sphResidentSurfaceDraw?.renderBridgeSphereReusedMeshCount ?? 0,
+        surfaceDrawRenderBridgeSphereCreatedMeshCount: sphResidentSurfaceDraw?.renderBridgeSphereCreatedMeshCount ?? 0,
+        surfaceDrawRenderBridgeSphereDisposedMeshCount: sphResidentSurfaceDraw?.renderBridgeSphereDisposedMeshCount ?? 0,
         surfaceDrawRenderBridgeMinParticleRadiusM: sphResidentSurfaceDraw?.renderBridgeMinParticleRadiusM ?? null,
         surfaceDrawRenderBridgeMaxParticleRadiusM: sphResidentSurfaceDraw?.renderBridgeMaxParticleRadiusM ?? null,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDraw?.renderBridgeTemporalSwapPolicy

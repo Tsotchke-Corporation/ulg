@@ -131,6 +131,39 @@ function volumeEquivalentSphereRadiusM(volumeM3) {
   return Math.cbrt((3 * volume) / (4 * Math.PI));
 }
 
+function particleSizeStateFromVolume({
+  material = null,
+  role = null,
+  temperatureK = null,
+  restDensityKgPerM3 = null,
+  restVolumeM3,
+  volumeRatioJ = 1,
+  pressurePa = 0,
+  source = 'material-temperature-rest-density'
+} = {}) {
+  const restVolume = Math.max(Number(restVolumeM3) || 0, 0);
+  const volumeRatio = Math.max(Number(volumeRatioJ) || 1, 1e-12);
+  const currentVolumeM3 = restVolume * volumeRatio;
+  return {
+    schema: 'peercompute.ulg.sph-particle-size-state.v0',
+    status: pressurePa > 0
+      ? 'pressure-adjusted-current-volume'
+      : 'rest-volume',
+    source,
+    material,
+    role,
+    temperatureK: Number.isFinite(Number(temperatureK)) ? Number(temperatureK) : null,
+    restDensityKgPerM3: Number.isFinite(Number(restDensityKgPerM3)) ? Number(restDensityKgPerM3) : null,
+    pressurePa: Math.max(Number(pressurePa) || 0, 0),
+    restVolumeM3: restVolume,
+    currentVolumeM3,
+    volumeRatioJ: volumeRatio,
+    restParticleRadiusM: volumeEquivalentSphereRadiusM(restVolume),
+    particleRadiusM: volumeEquivalentSphereRadiusM(currentVolumeM3),
+    currentParticleRadiusM: volumeEquivalentSphereRadiusM(currentVolumeM3)
+  };
+}
+
 function fillCube({ material, role = null, min, size, spacing, particlesPerEdge, temperatureK, properties, densityKgPerM3 }) {
   const particles = [];
   // particlesPerEdge sets the resolution directly (N -> N^3 particles); else derive from spacing.
@@ -138,11 +171,20 @@ function fillCube({ material, role = null, min, size, spacing, particlesPerEdge,
   const step = size / n;
   const cellVolume = step * step * step;
   const massKg = densityKgPerM3 * cellVolume;
-  const particleRadiusM = volumeEquivalentSphereRadiusM(cellVolume);
+  const initialParticleSizeState = particleSizeStateFromVolume({
+    material,
+    role,
+    temperatureK,
+    restDensityKgPerM3: densityKgPerM3,
+    restVolumeM3: cellVolume,
+    source: 'initial-lattice-material-temperature-rest-density'
+  });
+  const particleRadiusM = initialParticleSizeState.restParticleRadiusM;
   const u = specificInternalEnergyJPerKg(properties, temperatureK);
   for (let i = 0; i < n; i += 1) {
     for (let j = 0; j < n; j += 1) {
       for (let k = 0; k < n; k += 1) {
+        const particleSizeState = { ...initialParticleSizeState };
         particles.push({
           material,
           role,
@@ -154,7 +196,11 @@ function fillCube({ material, role = null, min, size, spacing, particlesPerEdge,
           restDensityKgPerM3: densityKgPerM3, // initial rest density (sets the MLS-MPM particle volume)
           initialParticleSpacingM: step,
           initialCellVolumeM3: cellVolume,
-          particleRadiusM
+          particleRadiusM,
+          restParticleRadiusM: particleRadiusM,
+          currentCellVolumeM3: particleSizeState.currentVolumeM3,
+          currentParticleRadiusM: particleSizeState.currentParticleRadiusM,
+          particleSizeState
         });
       }
     }
@@ -280,11 +326,16 @@ function resolveInitialParticleSpacingPlan({
   const withSupportMetadata = (row) => {
     const spacingM = Number(row.spacingM);
     const targetSmoothingLengthM = spacingM > 0 ? spacingM * smoothingLengthRatio : 0;
+    const restVolumeM3 = spacingM > 0 ? spacingM ** 3 : 0;
     return {
       ...row,
       targetSmoothingLengthM,
       targetNeighborCount: neighborTarget,
-      volumeEquivalentParticleRadiusM: volumeEquivalentSphereRadiusM(spacingM ** 3)
+      restVolumeM3,
+      pressurePa: 0,
+      volumeRatioJ: 1,
+      volumeEquivalentParticleRadiusM: volumeEquivalentSphereRadiusM(restVolumeM3),
+      pressureAdjustedParticleRadiusM: volumeEquivalentSphereRadiusM(restVolumeM3)
     };
   };
   const resolveRole = ({ role, sizeM, densityKgPerM3, requestedParticlesPerEdge }) => {
@@ -397,6 +448,22 @@ function resolveInitialParticleSpacingPlan({
         budgetDeviation: matchingMaterialStateEdges.budgetDeviation
       }
       : null,
+    particleSizePolicy: {
+      schema: 'peercompute.ulg.sph-initial-particle-size-policy.v0',
+      status: 'material-temperature-pressure-rest-density-derived',
+      source: 'initial-particle-spacing-plan',
+      roleInputs: [
+        'material',
+        'temperature',
+        'phase-rest-density',
+        'target-neighbor-count',
+        'box-support-constraints'
+      ],
+      restVolumeModel: 'particle-mass / phase-rest-density',
+      currentVolumeModel: 'restVolumeM3 * volumeRatioJ',
+      pressureModel: 'zero-gauge-before-optional-hydrostatic-initialization',
+      dynamicPressureSupported: true
+    },
     requestedParticleBudget,
     targetParticleMassKg,
     targetSpacingM,
@@ -522,6 +589,21 @@ function initializeSupportedHydrostaticMpmState(demo, {
       particle.mpmF = isotropicMpmFForJ(volumeRatioJ);
       particle.mpmC = new Float64Array(9);
       particle.hydrostaticPressurePa = pressurePa;
+      const particleSizeState = particleSizeStateFromVolume({
+        material: particle.material,
+        role,
+        temperatureK: particle.temperatureK,
+        restDensityKgPerM3: restDensity,
+        restVolumeM3,
+        volumeRatioJ,
+        pressurePa,
+        source: 'hydrostatic-material-temperature-pressure-rest-density'
+      });
+      particle.restParticleRadiusM = particleSizeState.restParticleRadiusM;
+      particle.currentCellVolumeM3 = particleSizeState.currentVolumeM3;
+      particle.currentParticleRadiusM = particleSizeState.currentParticleRadiusM;
+      particle.pressureAdjustedParticleRadiusM = particleSizeState.particleRadiusM;
+      particle.particleSizeState = particleSizeState;
       particle.hydrostaticInitialization = {
         schema: 'peercompute.ulg.sph-initial-hydrostatic-state.v0',
         status: 'initialized-supported-condensed-block',
@@ -529,6 +611,10 @@ function initializeSupportedHydrostaticMpmState(demo, {
         depthM,
         pressurePa,
         volumeRatioJ,
+        restVolumeM3,
+        currentVolumeM3: particleSizeState.currentVolumeM3,
+        restParticleRadiusM: particleSizeState.restParticleRadiusM,
+        currentParticleRadiusM: particleSizeState.currentParticleRadiusM,
         volumeRatioModel: 'raw-closure-bulk-modulus'
       };
       initializedParticleCount += 1;
@@ -689,6 +775,10 @@ export function buildSphPhaseDemoState({
     p.initialParticleSpacingM = all[index].initialParticleSpacingM;
     p.initialCellVolumeM3 = all[index].initialCellVolumeM3;
     p.particleRadiusM = all[index].particleRadiusM;
+    p.restParticleRadiusM = all[index].restParticleRadiusM;
+    p.currentCellVolumeM3 = all[index].currentCellVolumeM3;
+    p.currentParticleRadiusM = all[index].currentParticleRadiusM;
+    p.particleSizeState = all[index].particleSizeState ? { ...all[index].particleSizeState } : null;
   });
   return {
     scenario,

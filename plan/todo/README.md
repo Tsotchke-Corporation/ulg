@@ -113,12 +113,16 @@ buffer cleanup can touch them. Keep watching browser console issue counts for
 regressions.
 
 Current routing note, 2026-06-18 AKDT: initial particle spacing should be
-treated as physics setup, not rendering density. The next initialization pass
-should derive drop/base lattice spacing from material, initial temperature,
-phase/rest-density closure, target neighbor count, and box/support constraints.
-This matters before broad performance tuning because bad initial packing
-inflates neighbor/interface work and produces incoherent contact, pressure, and
-thermal coupling.
+treated as physics setup, not rendering density. ULG now records an explicit
+initial particle-size policy and per-particle size state: rest size comes from
+material, initial temperature, phase/rest-density closure, target neighbor
+count, and box/support constraints, while current size can follow pressure
+through `restVolumeM3 * volumeRatioJ`. Same-material/same-temperature
+drop/base particles keep matching rest radius; supported base particles report
+pressure-adjusted current radius through hydrostatic initialization and render
+rows. The remaining initialization work is to make MLS-MPM/contact/timestep
+and marching-cubes rows consume these algorithm-derived size views directly,
+not to tune role-specific visual scale.
 
 Current routing note, 2026-06-18 AKDT: add a precomputed material-property JSON
 bank as an explicit material resolver/cache todo. The scope ladder is elements

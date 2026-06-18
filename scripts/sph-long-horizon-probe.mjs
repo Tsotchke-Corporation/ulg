@@ -517,6 +517,18 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
     const trace = overlay?.__sphPerformanceTrace || null;
     const pending = overlay?.__mlsMpmResidentStepsPending || null;
     const residentSteps = sceneApi?.getMlsMpmResidentSteps?.() || overlay?.__mlsMpmResidentSteps || null;
+    const residentAuthorityHost = overlay?.__sphPeerComputeResidentAuthorityHost || null;
+    const residentComputeManager = overlay?.__sphResidentComputeManager || null;
+    const compactWorkerCapability = (source) => source ? {
+      schema: source.workerCapabilitySchema ?? null,
+      status: source.workerCapabilityStatus ?? null,
+      blocker: source.workerCapabilityBlocker ?? null,
+      constructorAvailable: source.workerConstructorAvailable ?? null,
+      requestedEnableWorkers: source.workerRequestedEnableWorkers ?? null,
+      effectiveEnableWorkers: source.workerEffectiveEnableWorkers ?? null,
+      workerCount: source.workerCount ?? null,
+      targetWorkers: source.workerTargetWorkers ?? null
+    } : null;
     return {
       schema: 'peercompute.ulg.sph-probe-browser-snapshot.v0',
       status: 'captured',
@@ -540,6 +552,27 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
         backend: residentSteps.backend ?? null,
         completedStepCount: residentSteps.completedStepCount ?? null,
         readbackMode: residentSteps.readbackMode ?? null
+      } : null,
+      residentAuthorityHost: residentAuthorityHost ? {
+        schema: residentAuthorityHost.schema ?? null,
+        status: residentAuthorityHost.status ?? null,
+        source: residentAuthorityHost.source ?? null,
+        hostId: residentAuthorityHost.hostId ?? null,
+        computeManagerReady: residentAuthorityHost.computeManagerReady ?? null,
+        stateManagerReady: residentAuthorityHost.stateManagerReady ?? null,
+        nodeKernelMode: residentAuthorityHost.nodeKernelMode ?? null,
+        nodeKernelReady: residentAuthorityHost.nodeKernelReady ?? null,
+        nodeKernelStarted: residentAuthorityHost.nodeKernelStarted ?? null,
+        workerCapability: compactWorkerCapability(residentAuthorityHost),
+        peercomputeResidentStageWorkerBridgeAvailable: residentAuthorityHost.peercomputeResidentStageWorkerBridgeAvailable ?? null,
+        residentMechanicsStageWorkerRunnerFactoryReady: residentAuthorityHost.residentMechanicsStageWorkerRunnerFactoryReady ?? null
+      } : null,
+      residentWorkerCapability: compactWorkerCapability(residentAuthorityHost),
+      residentComputeManager: residentComputeManager ? {
+        schema: residentComputeManager.schema ?? null,
+        status: residentComputeManager.status ?? null,
+        source: residentComputeManager.source ?? null,
+        submitTask: residentComputeManager.submitTask ?? null
       } : null,
       cpuClosureTask: overlay?.__sphCpuClosureTask || null,
       workerRebuild: worker ? {
@@ -1282,12 +1315,41 @@ async function runBrowserProbe({
         if (!(particleCount > 0)) return false;
         return (metric?.surfaces?.visibleCount ?? 0) === 0;
       };
+      const compactWorkerCapability = (source) => source ? {
+        schema: source.workerCapabilitySchema ?? null,
+        status: source.workerCapabilityStatus ?? null,
+        blocker: source.workerCapabilityBlocker ?? null,
+        constructorAvailable: source.workerConstructorAvailable ?? null,
+        requestedEnableWorkers: source.workerRequestedEnableWorkers ?? null,
+        effectiveEnableWorkers: source.workerEffectiveEnableWorkers ?? null,
+        workerCount: source.workerCount ?? null,
+        targetWorkers: source.workerTargetWorkers ?? null
+      } : null;
+      const compactResidentAuthorityHost = (host) => host ? {
+        schema: host.schema ?? null,
+        status: host.status ?? null,
+        source: host.source ?? null,
+        hostId: host.hostId ?? null,
+        computeManagerReady: host.computeManagerReady ?? null,
+        stateManagerReady: host.stateManagerReady ?? null,
+        nodeKernelMode: host.nodeKernelMode ?? null,
+        nodeKernelReady: host.nodeKernelReady ?? null,
+        nodeKernelStarted: host.nodeKernelStarted ?? null,
+        nodeKernelNetworkConnected: host.nodeKernelNetworkConnected ?? null,
+        nodeKernelNetworkGateStatus: host.nodeKernelNetworkGateStatus ?? null,
+        residentSolverRegistrationStatus: host.residentSolverRegistrationStatus ?? null,
+        peercomputeResidentStageWorkerBridgeAvailable: host.peercomputeResidentStageWorkerBridgeAvailable ?? null,
+        residentMechanicsStageWorkerRunnerFactoryReady: host.residentMechanicsStageWorkerRunnerFactoryReady ?? null,
+        workerCapability: compactWorkerCapability(host)
+      } : null;
       const sample = (batchIndex, phase, batchMs = null) => {
         const steps = sceneApi.getMlsMpmResidentSteps?.() || overlay.__mlsMpmResidentSteps || execution || null;
         const residentStep = sceneApi.getMlsMpmResidentStep?.() || overlay.__mlsMpmResidentStep || steps?.finalStep || null;
         const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
         const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
         const plainSphStepResult = overlay.__sphLastStepResult || null;
+        const residentAuthorityHost = overlay.__sphPeerComputeResidentAuthorityHost || null;
+        const residentComputeManager = overlay.__sphResidentComputeManager || null;
         const sceneTimeS = finiteOrNull(
           plainSphStepResult?.time
             ?? residentStep?.particlePingPong?.nextTime
@@ -1303,6 +1365,14 @@ async function runBrowserProbe({
           sceneTimeS,
           initial: batchIndex === 0 ? {
             preflight: overlay.__sphPhasePreflight || null
+          } : null,
+          residentAuthorityHost: compactResidentAuthorityHost(residentAuthorityHost),
+          residentWorkerCapability: compactWorkerCapability(residentAuthorityHost),
+          residentComputeManager: residentComputeManager ? {
+            schema: residentComputeManager.schema ?? null,
+            status: residentComputeManager.status ?? null,
+            source: residentComputeManager.source ?? null,
+            submitTask: residentComputeManager.submitTask ?? null
           } : null,
         statusText: overlay.querySelector('#sph-status')?.textContent ?? '',
         warningText: overlay.querySelector('#sph-warning-bar')?.textContent ?? '',

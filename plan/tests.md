@@ -1,5 +1,39 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Pressure-Aware Particle Size Metadata
+
+Initial particle size is now an explicit physics setup contract rather than an
+implicit render-only value. `buildSphPhaseDemoState()` records rest/current
+particle-size rows from material, temperature, phase/rest-density, target
+neighbor count, and box/support constraints; hydrostatic MLS-MPM
+initialization updates current radius/volume from pressure and `J` while
+preserving rest radius. Browser probe snapshots now also report resident
+authority and Worker capability fields, so future Worker fallback captures are
+visible in the artifact.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sphPhaseDemo.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Demo initialization coverage:
+  `node --test tests/sphPhaseDemo.test.mjs` passed `34/34`.
+- Diff hygiene:
+  `git diff --check -- src/runtime/sphPhaseDemo.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseDemo.test.mjs`
+  passed.
+- Browser console probe:
+  `artifacts/sph-probe-worker-size-metadata-resident-auto.json` completed with
+  `status=good`, `analysis.status=good`, browser console `issueCount=0`,
+  `warningCount=0`, resident Worker capability `worker-capability-ready`,
+  Worker constructor available, requested/effective workers true, and `12`
+  target workers.
+
+Known residual risk:
+
+- The visible fallback remains `three-render-row-spheres`, which still reads
+  render rows back for Three-owned geometry. The particle-size contract fixes
+  initialization semantics and evidence, not the no-readback renderer.
+
 ## Current Focused Result - 2026-06-18 Per-Step Active-Grid Fused Mechanics
 
 The thermal-enabled no-full resident route can now use active-grid dispatch

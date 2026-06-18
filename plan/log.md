@@ -1,5 +1,53 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Pressure-Aware Particle Size Metadata And Worker Probe Telemetry
+
+Status:
+
+- Added an explicit `peercompute.ulg.sph-particle-size-state.v0` row to initial
+  particles. The row records material, role, temperature, rest density, rest
+  volume, current volume, pressure, volume ratio `J`, rest radius, and current
+  radius.
+- Extended the initial particle-spacing plan with a
+  `peercompute.ulg.sph-initial-particle-size-policy.v0` contract. This makes
+  the initialization rule explicit: particle rest size is derived from
+  material, temperature, phase/rest-density, target neighbor count, and
+  box/support constraints, while current size can follow pressure through
+  `restVolumeM3 * volumeRatioJ`.
+- Wired hydrostatic MLS-MPM initialization to update `currentCellVolumeM3`,
+  `currentParticleRadiusM`, and `pressureAdjustedParticleRadiusM` without
+  changing the rest radius. Same-material/same-temperature drop/base particles
+  therefore keep matching rest size, while supported base particles can report
+  pressure-adjusted current size.
+- Added resident Worker/authority telemetry to browser probe snapshots and
+  sampled metrics. Probe artifacts now expose resident authority source,
+  ComputeManager source, Worker constructor availability, requested/effective
+  worker flags, worker count, and target worker count alongside console issue
+  counts.
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseDemo.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs` reported `34/34` pass.
+- PASS: `git diff --check -- src/runtime/sphPhaseDemo.js scripts/sph-long-horizon-probe.mjs tests/sphPhaseDemo.test.mjs`.
+- PASS browser probe:
+  `artifacts/sph-probe-worker-size-metadata-resident-auto.json` completed with
+  `status=good`, `analysis.status=good`, browser console issue/warning counts
+  `0/0`, resident Worker capability `worker-capability-ready`, Worker
+  constructor available, requested/effective workers true, and `12` target
+  workers. The same run reported render-row sphere radii from about
+  `0.155094m` to `0.155258m` on a same-material H2O/H2O MLS-MPM smoke route,
+  reflecting current pressure/volume state rather than role-specific hardcoded
+  visual scale.
+
+Open:
+
+- This pins the particle-size contract and harness evidence, but the next
+  performance fix remains GPU-side bounds/dispatch metadata plus no-readback
+  surface consumption. The current visible sphere bridge still reads render
+  rows back for Three-owned geometry.
+
 ## 2026-06-18 AKDT - Active-Grid Dispatch For Per-Step Fused Mechanics
 
 Status:

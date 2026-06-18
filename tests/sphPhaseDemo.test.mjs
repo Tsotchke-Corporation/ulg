@@ -85,6 +85,12 @@ test('demo initial particle spacing adapts to material density at role temperatu
 
   assert.equal(spacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
   assert.equal(spacing.status, 'material-temperature-target-neighbor-capped');
+  assert.equal(spacing.particleSizePolicy.schema, 'peercompute.ulg.sph-initial-particle-size-policy.v0');
+  assert.equal(spacing.particleSizePolicy.dynamicPressureSupported, true);
+  assert.equal(spacing.drop.pressurePa, 0);
+  assert.equal(spacing.base.pressurePa, 0);
+  assert.equal(spacing.drop.volumeRatioJ, 1);
+  assert.equal(spacing.base.volumeRatioJ, 1);
   assert.equal(spacing.drop.requestedParticlesPerEdge, 3);
   assert.equal(spacing.base.requestedParticlesPerEdge, 5);
   assert.equal(spacing.targetNeighborCount, 64);
@@ -103,6 +109,12 @@ test('demo initial particle spacing adapts to material density at role temperatu
   near(dropParticle.initialParticleSpacingM, spacing.drop.spacingM);
   near(baseParticle.initialParticleSpacingM, spacing.base.spacingM);
   near(dropParticle.initialCellVolumeM3, spacing.drop.spacingM ** 3);
+  assert.equal(dropParticle.particleSizeState.schema, 'peercompute.ulg.sph-particle-size-state.v0');
+  assert.equal(dropParticle.particleSizeState.status, 'rest-volume');
+  near(dropParticle.particleSizeState.restVolumeM3, spacing.drop.restVolumeM3);
+  near(dropParticle.particleSizeState.currentVolumeM3, spacing.drop.restVolumeM3);
+  near(dropParticle.restParticleRadiusM, spacing.drop.volumeEquivalentParticleRadiusM);
+  near(dropParticle.currentParticleRadiusM, dropParticle.restParticleRadiusM);
   assert.ok(dropParticle.particleRadiusM < dropParticle.initialParticleSpacingM);
   assert.ok(baseParticle.particleRadiusM < baseParticle.initialParticleSpacingM);
   assert.equal(demo.counts.drop, spacing.drop.particlesPerEdge ** 3);
@@ -224,6 +236,13 @@ test('demo initializes hydrostatic pressure only for wall-supported condensed bl
   assert.ok(minBaseJ > 0.999, `hydrostatic pre-compression is too large for liquid water: ${minBaseJ}`);
   assert.ok(base.every((p) => p.hydrostaticInitialization?.status === 'initialized-supported-condensed-block'));
   assert.ok(base.every((p) => p.hydrostaticInitialization?.volumeRatioModel === 'raw-closure-bulk-modulus'));
+  assert.ok(base.some((p) => p.particleSizeState?.status === 'pressure-adjusted-current-volume'));
+  assert.ok(base.every((p) => p.particleSizeState?.source === 'hydrostatic-material-temperature-pressure-rest-density'));
+  assert.ok(base.every((p) => p.restParticleRadiusM === p.particleRadiusM));
+  assert.ok(base.some((p) => p.currentParticleRadiusM < p.restParticleRadiusM));
+  assert.ok(base.every((p) => p.hydrostaticInitialization?.currentVolumeM3 <= p.hydrostaticInitialization?.restVolumeM3));
+  assert.ok(drop.every((p) => p.particleSizeState?.status === 'rest-volume'));
+  assert.ok(drop.every((p) => p.currentParticleRadiusM === p.restParticleRadiusM));
   assert.ok(drop.every((p) => p.mpmJ === undefined));
 });
 

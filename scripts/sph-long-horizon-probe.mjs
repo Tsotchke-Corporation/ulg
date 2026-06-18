@@ -15,6 +15,21 @@ const DEFAULT_BASE_PARTICLE_EDGE = 5;
 const DEFAULT_CHROMIUM_ARGS = ['--enable-unsafe-webgpu'];
 const BROWSER_CONSOLE_ENTRY_LIMIT = 500;
 const BROWSER_CONSOLE_ISSUE_LIMIT = 200;
+const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
+  'auto',
+  'metadata',
+  'off',
+  'three-compact-vertices',
+  'three-render-row-points',
+  'three-render-row-spheres',
+  'webgpu-render-row-points',
+  'webgpu-render-row-spheres',
+  'three-points',
+  'three-spheres',
+  'webgpu-points',
+  'webgpu-spheres',
+  'three'
+]);
 
 const BROWSER_CONSOLE_ISSUE_PATTERNS = [
   {
@@ -244,6 +259,32 @@ function commaList(value) {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function surfaceDrawModeFromScenarioUrl(scenarioUrl) {
+  try {
+    const url = new URL(String(scenarioUrl || ''), 'http://ulg-probe.local/');
+    const candidates = [
+      url.searchParams.get('surfaceDraw'),
+      url.searchParams.get('surfaceDrawDiagnosticMode'),
+      url.searchParams.get('surfaceDrawMode')
+    ];
+    if (url.hash && url.hash.length > 1) {
+      const hashParams = new URLSearchParams(url.hash.slice(1));
+      candidates.push(
+        hashParams.get('surfaceDraw'),
+        hashParams.get('surfaceDrawDiagnosticMode'),
+        hashParams.get('surfaceDrawMode')
+      );
+    }
+    for (const candidate of candidates) {
+      const normalized = String(candidate || '').toLowerCase();
+      if (SURFACE_DRAW_DIAGNOSTIC_MODES.has(normalized)) return normalized;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function probePageOptions() {
@@ -3852,25 +3893,13 @@ async function main() {
   )
     ? String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE).toLowerCase()
     : 'auto';
-  const surfaceDrawDiagnosticMode = [
-    'auto',
-    'metadata',
-    'off',
-    'three-compact-vertices',
-    'three-render-row-points',
-    'three-render-row-spheres',
-    'webgpu-render-row-points',
-    'webgpu-render-row-spheres',
-    'three-points',
-    'three-spheres',
-    'webgpu-points',
-    'webgpu-spheres',
-    'three'
-  ].includes(
-    String(process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || '').toLowerCase()
-  )
-    ? String(process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE).toLowerCase()
-    : 'auto';
+  const surfaceDrawDiagnosticModeEnv = String(
+    process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || ''
+  ).toLowerCase();
+  const surfaceDrawDiagnosticModeFromUrl = surfaceDrawModeFromScenarioUrl(scenarioUrl);
+  const surfaceDrawDiagnosticMode = SURFACE_DRAW_DIAGNOSTIC_MODES.has(surfaceDrawDiagnosticModeEnv)
+    ? surfaceDrawDiagnosticModeEnv
+    : (surfaceDrawDiagnosticModeFromUrl || 'auto');
   const surfaceDrawDiagnosticMaxFieldCells = positiveInteger(
     process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS,
     100000

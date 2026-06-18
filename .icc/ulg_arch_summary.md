@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `331`
-- total lines indexed: `197930`
+- total lines indexed: `197959`
 - languages: `{"markdown": 125, "javascript": 106, "text": 85, "json": 14, "c": 1}`
 
 ## Important Files
@@ -54,7 +54,7 @@
 - `.`: 10 files, 2161 lines, symbols=0, tests=0, languages={"markdown": 4, "text": 4, "json": 2}
 - `src/runtime/electronicStructure`: 7 files, 2421 lines, symbols=122, tests=0, languages={"javascript": 7}
 - `ulg-gpu-abi/src/schemas`: 7 files, 210 lines, symbols=0, tests=0, languages={"json": 7}
-- `scripts`: 6 files, 6573 lines, symbols=0, tests=0, languages={"text": 6}
+- `scripts`: 6 files, 6602 lines, symbols=0, tests=0, languages={"text": 6}
 - `src/services`: 5 files, 2195 lines, symbols=57, tests=0, languages={"javascript": 5}
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
 - `plan`: 5 files, 44628 lines, symbols=0, tests=0, languages={"markdown": 5}
@@ -85,7 +85,7 @@
 | 5307 | `src/runtime/sph/sphRenderGpuKernel.js` | javascript |
 | 5057 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
 | 5007 | `src/visualization/sphPhaseDemoMount.js` | javascript |
-| 4094 | `scripts/sph-long-horizon-probe.mjs` | text |
+| 4123 | `scripts/sph-long-horizon-probe.mjs` | text |
 | 2904 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2522 | `plan/plan.md` | markdown |
 | 2172 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |

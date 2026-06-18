@@ -2,6 +2,24 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the mobile MLS-MPM render path has been
+put back through the normal Three.js renderer-owned scene instead of any
+separate canvas path. `sphPhaseScene` now resolves phone viewport dimensions
+from container layout, bounding rect, and `visualViewport`, clamps device pixel
+ratio to `2`, keeps the canvas CSS size at `100%`, and resizes only the Three
+backing buffer. The resident render-row sphere bridge now reuses its existing
+Three `InstancedMesh`/group where capacity allows and reports
+`renderBridgeEngineIntegration=three-renderer-owned-scene-object` plus reuse
+telemetry. The mobile visual probe
+`artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual.json`
+passes with `analysis.status=good`, zero console issues/warnings,
+`renderBridgeStatus=three-render-row-spheres-ready`,
+`renderBridgeLastRenderStatus=three-render-row-spheres-submitted`, one Three
+mesh, a composited page frame at `390x844`, and renderer sizing
+`css=397x860`, `backing=794x1720`, `pixelRatio=2`. This addresses the
+phone-scale blank render bug and perspective integration; it is still an
+interim Three readback bridge, not the final GPU-resident fluid renderer.
+
 Current checkpoint, 2026-06-18 AKDT: the mounted UI scheduler now reaches the
 MLS-MPM resident renderer again on phone-sized viewports. The blocking bug was
 the resident ComputeManager task returning a GPU fence with

@@ -543,6 +543,7 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       setParticlesTiming: overlay?.__sphSetParticlesTiming || sceneUserData.sphSetParticlesTiming || null,
       surfaceApplyTiming: overlay?.__sphSurfaceApplyTiming || sceneUserData.sphSurfaceApplyTiming || null,
       viewportRefresh: sceneUserData.sphViewportRefresh || null,
+      viewportResize: sceneUserData.sphViewportResize || null,
       frameCounters: overlay?.__sphFrameCounters || null,
       statusText: overlay?.querySelector?.('#sph-status')?.textContent || null,
       warningText: overlay?.querySelector?.('#sph-warning-bar')?.textContent || null
@@ -1167,13 +1168,31 @@ async function runBrowserProbe({
       };
       const captureFrame = (batchIndex, phase, sampleIndex) => {
         if (!shouldCaptureFrame(batchIndex, phase)) return;
-        const canvas = document.querySelector('canvas');
+        const canvases = Array.from(document.querySelectorAll('canvas'));
+        const visibleCanvases = canvases.filter((candidate) => {
+          const rect = candidate.getBoundingClientRect?.();
+          const style = window.getComputedStyle?.(candidate);
+          return rect
+            && rect.width > 0
+            && rect.height > 0
+            && style?.display !== 'none'
+            && style?.visibility !== 'hidden'
+            && Number(style?.opacity ?? 1) !== 0;
+        });
+        const canvas = visibleCanvases.at(-1) || canvases.at(-1) || canvases[0] || null;
+        const canvasRect = canvas?.getBoundingClientRect?.() || null;
         const base = {
           schema: 'peercompute.ulg.sph-probe-visual-frame.v0',
           batchIndex,
           phase,
           sampleIndex,
-          capturedAtMs: performance.now()
+          capturedAtMs: performance.now(),
+          captureSource: 'canvas-data-url',
+          canvasCount: canvases.length,
+          visibleCanvasCount: visibleCanvases.length,
+          canvasIndex: canvas ? canvases.indexOf(canvas) : null,
+          canvasCssWidth: canvasRect?.width ?? null,
+          canvasCssHeight: canvasRect?.height ?? null
         };
         if (!canvas) {
           visualFrames.push({ ...base, status: 'missing-canvas', reason: 'no-canvas-element' });
@@ -1366,11 +1385,15 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeFrameCount: renderState.surfaceDrawRenderBridgeFrameCount ?? null,
             surfaceDrawRenderBridgeThreeMeshCount: renderState.surfaceDrawRenderBridgeThreeMeshCount ?? null,
             surfaceDrawRenderBridgeThreeGeometryByteLength: renderState.surfaceDrawRenderBridgeThreeGeometryByteLength ?? null,
+            surfaceDrawRenderBridgeEngineIntegration: renderState.surfaceDrawRenderBridgeEngineIntegration ?? null,
+            surfaceDrawRenderBridgeReused: renderState.surfaceDrawRenderBridgeReused ?? null,
+            surfaceDrawRenderBridgeUpdateCount: renderState.surfaceDrawRenderBridgeUpdateCount ?? null,
               materialKeys: Array.isArray(renderState.materialKeys) ? [...renderState.materialKeys] : []
             } : null,
             residentParticleUploadDebug: overlay.__sphResidentParticleUploadDebug || null,
             residentAutoSchedule: overlay.__mlsMpmResidentAutoSchedule || null,
             viewportRefresh: sceneApi.scene?.userData?.sphViewportRefresh || null,
+            viewportResize: sceneApi.scene?.userData?.sphViewportResize || null,
             surfaceDraw: surfaceDraw ? {
             schema: surfaceDraw.schema ?? null,
             status: surfaceDraw.status ?? null,
@@ -1396,7 +1419,10 @@ async function runBrowserProbe({
             renderBridgeLastRenderStatus: surfaceDraw.renderBridgeLastRenderStatus ?? null,
             renderBridgeFrameCount: surfaceDraw.renderBridgeFrameCount ?? null,
             renderBridgeThreeMeshCount: surfaceDraw.renderBridgeThreeMeshCount ?? null,
-            renderBridgeThreeGeometryByteLength: surfaceDraw.renderBridgeThreeGeometryByteLength ?? null
+            renderBridgeThreeGeometryByteLength: surfaceDraw.renderBridgeThreeGeometryByteLength ?? null,
+            renderBridgeEngineIntegration: surfaceDraw.renderBridgeEngineIntegration ?? null,
+            renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
+            renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null
           } : null,
           surfaces: surfaceSnapshot(sceneApi)
         };
@@ -1731,6 +1757,51 @@ async function runBrowserProbe({
     });
     try {
       const timeline = await Promise.race([inPageProbe, timeoutProbe]);
+      if (
+        captureFrames
+        && timeline
+        && Array.isArray(timeline.visualFrames)
+        && timeline.visualFrames.length < captureFrameMax
+      ) {
+        try {
+          await page.evaluate(() => new Promise((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+          }));
+          const screenshot = await page.screenshot({ type: 'png', fullPage: false });
+          const viewport = page.viewportSize?.() || {};
+          timeline.visualFrames.push({
+            schema: 'peercompute.ulg.sph-probe-visual-frame.v0',
+            status: 'captured',
+            batchIndex: timeline.batchCount ?? batches,
+            phase: 'post-probe-composited-page',
+            sampleIndex: Array.isArray(timeline.metrics) ? Math.max(0, timeline.metrics.length - 1) : null,
+            capturedAtMs: Date.now(),
+            captureSource: 'playwright-composited-page',
+            width: viewport.width ?? null,
+            height: viewport.height ?? null,
+            dataUrl: `data:image/png;base64,${screenshot.toString('base64')}`
+          });
+          if (timeline.visualFrameCapture) {
+            timeline.visualFrameCapture.frameCount = timeline.visualFrames.length;
+            timeline.visualFrameCapture.compositedPageCapture = true;
+          }
+        } catch (error) {
+          timeline.visualFrames.push({
+            schema: 'peercompute.ulg.sph-probe-visual-frame.v0',
+            status: 'capture-error',
+            batchIndex: timeline.batchCount ?? batches,
+            phase: 'post-probe-composited-page',
+            sampleIndex: Array.isArray(timeline.metrics) ? Math.max(0, timeline.metrics.length - 1) : null,
+            capturedAtMs: Date.now(),
+            captureSource: 'playwright-composited-page',
+            error: error instanceof Error ? error.message : String(error)
+          });
+          if (timeline.visualFrameCapture) {
+            timeline.visualFrameCapture.frameCount = timeline.visualFrames.length;
+            timeline.visualFrameCapture.compositedPageCapture = false;
+          }
+        }
+      }
       return attachBrowserConsoleTelemetry(timeline, consoleCapture);
     } finally {
       if (timeoutProbeTimer) clearTimeout(timeoutProbeTimer);
@@ -2737,6 +2808,7 @@ function analyzeTimeline(timeline, {
   expectedMaterialAbsent = [],
   minReactionEventsTotal = null,
   minVisualFrameTimeSpanS = null,
+  visualOnly = false,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   scenarioUrl = DEFAULT_URL,
   visibleBoundsToleranceM = 0.05,
@@ -3465,30 +3537,33 @@ function analyzeTimeline(timeline, {
   ) {
     issues.push('initial-preflight-blocked');
   }
-  if (diagnostics.length === 0) issues.push('missing-resident-diagnostics');
-  if (maxSpeedObservedMPerS == null) issues.push('missing-max-speed');
-  if (maxSpeedObservedMPerS != null && maxSpeedObservedMPerS > maxSpeedMPerS) issues.push(`max-speed>${maxSpeedMPerS}`);
-  if (expectStatic) {
-    if (maxDisplacementObservedM == null) {
-      issues.push('missing-static-displacement');
-    } else if (maxDisplacementObservedM > staticMaxDisplacementM) {
-      issues.push(`static-displacement>${staticMaxDisplacementM}`);
+  if (!visualOnly) {
+    if (diagnostics.length === 0) issues.push('missing-resident-diagnostics');
+    if (maxSpeedObservedMPerS == null) issues.push('missing-max-speed');
+    if (maxSpeedObservedMPerS != null && maxSpeedObservedMPerS > maxSpeedMPerS) issues.push(`max-speed>${maxSpeedMPerS}`);
+    if (expectStatic) {
+      if (maxDisplacementObservedM == null) {
+        issues.push('missing-static-displacement');
+      } else if (maxDisplacementObservedM > staticMaxDisplacementM) {
+        issues.push(`static-displacement>${staticMaxDisplacementM}`);
+      }
+      if (
+        Number.isFinite(nextCenterOfMassYDeltaM)
+        && Math.abs(nextCenterOfMassYDeltaM) > staticMaxCenterOfMassDeltaM
+      ) {
+        issues.push(`static-center-of-mass-delta>${staticMaxCenterOfMassDeltaM}`);
+      }
+    } else if (maxDisplacementObservedM == null || maxDisplacementObservedM <= 0) {
+      issues.push('no-positive-displacement');
     }
-    if (
-      Number.isFinite(nextCenterOfMassYDeltaM)
-      && Math.abs(nextCenterOfMassYDeltaM) > staticMaxCenterOfMassDeltaM
-    ) {
-      issues.push(`static-center-of-mass-delta>${staticMaxCenterOfMassDeltaM}`);
-    }
-  } else if (maxDisplacementObservedM == null || maxDisplacementObservedM <= 0) {
-    issues.push('no-positive-displacement');
+    if (minActiveGridNodeCount != null && minActiveGridNodeCount <= 0) issues.push('inactive-grid-nodes');
+    if (minVolumeObservedJ != null && minVolumeObservedJ < minVolumeRatioJ) issues.push(`min-J<${minVolumeRatioJ}`);
+    if (maxVolumeObservedJ != null && maxVolumeObservedJ > maxVolumeRatioJ) issues.push(`max-J>${maxVolumeRatioJ}`);
   }
-  if (minActiveGridNodeCount != null && minActiveGridNodeCount <= 0) issues.push('inactive-grid-nodes');
-  if (minVolumeObservedJ != null && minVolumeObservedJ < minVolumeRatioJ) issues.push(`min-J<${minVolumeRatioJ}`);
-  if (maxVolumeObservedJ != null && maxVolumeObservedJ > maxVolumeRatioJ) issues.push(`max-J>${maxVolumeRatioJ}`);
   const liquidEosActive = internalPressureScaleSeries.some((value) => value > 0.5);
   if (
-    expectedLiquidH2oSameMaterial
+    !visualOnly
+    && expectedLiquidH2oSameMaterial
     && liquidEosActive
     && Number.isFinite(maxNextTimeS)
     && maxNextTimeS >= 0.05
@@ -3507,7 +3582,7 @@ function analyzeTimeline(timeline, {
       issues.push('missing-same-material-cohort-diagnostics');
     }
   }
-  if (maxPressureImpulseNSeconds != null && maxPressureImpulseNSeconds > 1e-5) issues.push('same-material-pressure-impulse-applied');
+  if (!visualOnly && maxPressureImpulseNSeconds != null && maxPressureImpulseNSeconds > 1e-5) issues.push('same-material-pressure-impulse-applied');
   if (Number.isFinite(minReactionEventsTotal)) {
     if (!Number.isFinite(maxReactionEventsTotal)) {
       issues.push('missing-reaction-events-total');
@@ -3533,7 +3608,8 @@ function analyzeTimeline(timeline, {
     }
   }
   if (
-    expectedLiquidH2oSameMaterial
+    !visualOnly
+    && expectedLiquidH2oSameMaterial
     && Number.isFinite(maxNextTimeS)
     && maxNextTimeS >= 0.1
     && Number.isFinite(firstDropBaseSupportGapM)
@@ -3544,7 +3620,7 @@ function analyzeTimeline(timeline, {
   ) {
     issues.push('same-material-contact-gap-not-closing');
   }
-  if (expectedLiquidH2oSameMaterial && expectLiquidMerge) {
+  if (!visualOnly && expectedLiquidH2oSameMaterial && expectLiquidMerge) {
     if (!Number.isFinite(lastDropBaseSupportGapM)) {
       issues.push('liquid-merge-missing-support-gap');
     } else if (lastDropBaseSupportGapM > liquidMergeMaxFinalSupportGapM) {
@@ -3558,7 +3634,7 @@ function analyzeTimeline(timeline, {
       }
     }
   }
-  if (expectedLiquidH2oSameMaterial && expectLiquidSettled) {
+  if (!visualOnly && expectedLiquidH2oSameMaterial && expectLiquidSettled) {
     if (!Number.isFinite(maxNextTimeS)) {
       issues.push('liquid-settle-missing-sim-time');
     } else if (maxNextTimeS < liquidSettledMinTimeS) {
@@ -3575,7 +3651,7 @@ function analyzeTimeline(timeline, {
       issues.push(`liquid-settle-final-drop-speed>${liquidSettledMaxFinalDropSpeedMPerS}`);
     }
   }
-  if (expectedLiquidH2oSameMaterial && expectLiquidFreeSurface) {
+  if (!visualOnly && expectedLiquidH2oSameMaterial && expectLiquidFreeSurface) {
     if (!Number.isFinite(maxNextTimeS)) {
       issues.push('liquid-free-surface-missing-sim-time');
     } else if (maxNextTimeS < liquidFreeSurfaceMinTimeS) {
@@ -3652,6 +3728,7 @@ function analyzeTimeline(timeline, {
     expectedMaterialAbsent,
     minReactionEventsTotal: Number.isFinite(minReactionEventsTotal) ? minReactionEventsTotal : null,
     minVisualFrameTimeSpanS: Number.isFinite(minVisualFrameTimeSpanS) ? minVisualFrameTimeSpanS : null,
+    visualOnly,
     visibleBoundsToleranceM,
     particleBoundsToleranceM,
     issues,
@@ -3865,6 +3942,8 @@ async function main() {
   const minVisualFrameTimeSpanS = process.env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S == null
     ? null
     : finiteNumber(process.env.ULG_PROBE_MIN_VISUAL_FRAME_TIME_SPAN_S, null);
+  const visualOnly = process.env.ULG_PROBE_VISUAL_ONLY === '1'
+    || process.env.ULG_PROBE_EXPECT_VISUAL_ONLY === '1';
   const visibleBoundsToleranceM = finiteNumber(process.env.ULG_PROBE_VISIBLE_BOUNDS_TOLERANCE_M, 0.05);
   const particleBoundsToleranceM = finiteNumber(process.env.ULG_PROBE_PARTICLE_BOUNDS_TOLERANCE_M, 0.2);
   const thresholds = {
@@ -3889,6 +3968,7 @@ async function main() {
     expectedMaterialAbsent,
     minReactionEventsTotal,
     minVisualFrameTimeSpanS,
+    visualOnly,
     visibleBoundsToleranceM,
     particleBoundsToleranceM
   };
@@ -3969,6 +4049,8 @@ async function main() {
       expectedMaterialPresent,
       expectedMaterialAbsent,
       minReactionEventsTotal,
+      minVisualFrameTimeSpanS,
+      visualOnly,
       visibleBoundsToleranceM,
       particleBoundsToleranceM,
       boxDimsM: boxDimsFromScenarioUrl(scenarioUrl),

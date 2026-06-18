@@ -1,5 +1,56 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Mobile Three Renderer Viewport And Bridge Integration
+
+Summary:
+
+- Reworked the MLS-MPM mobile render recovery through the existing Three.js
+  scene/render loop. No separate render canvas is introduced for this path.
+- Added viewport helpers that choose stable CSS dimensions from container
+  client size, bounding rect, and `visualViewport`, then clamp DPR to a maximum
+  of `2` for the renderer backing buffer.
+- Kept the Three canvas styled as a full-size scene surface while
+  `renderer.setSize(width, height, false)` updates the backing buffer. Resize,
+  `visualViewport`, orientation, page visibility, pageshow, and
+  `ResizeObserver` paths now all refresh the same renderer-owned scene.
+- Changed the resident render-row sphere/point bridge to retain and update the
+  existing Three group, geometry, and instanced mesh when capacity allows,
+  instead of tearing down the render object during resident state refresh.
+- Added render bridge telemetry for engine integration, reuse, and update
+  count so the browser harness can distinguish normal scene integration from a
+  debug rendering path.
+- Added a visual-only probe analysis mode and composited Playwright page frame
+  capture. This lets mobile render regressions fail on visible pixels while
+  keeping no-full physics-readback gaps out of the visual verdict.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "viewport sizing|resident overlay policy|render-row overlay shader|renderer depth policy"`
+  reported `37/37` pass.
+- PASS mobile visual-only browser probe:
+  `ULG_PROBE_VISUAL_ONLY=1 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual-frames ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_FAIL_ON_BAD=1 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5209 ULG_PROBE_TIMEOUT_MS=180000 npm run probe:sph-long-horizon`
+  completed with `status=good`, `analysis.status=good`, no analysis issues,
+  `analysis.browserConsoleIssueCount=0`, `analysis.browserConsoleWarningCount=0`,
+  `renderBridgeEngineIntegration=three-renderer-owned-scene-object`,
+  `renderBridgeReused=true`, `renderBridgeUpdateCount=1`,
+  `renderBridgeThreeMeshCount=1`, `renderBridgeLastRenderStatus=three-render-row-spheres-submitted`,
+  viewport `css=397x860`, backing `794x1720`, DPR `2`, and composited page
+  frame
+  `artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual-frames/0003-b002-post-probe-composited-page.png`
+  at `390x844`.
+
+Open:
+
+- The visible mobile path still uses render-row readback into a Three
+  instanced sphere bridge. That is correct integration for the current engine,
+  but the broad FPS fix remains the GPU-resident renderer and GPU-side visual
+  proof work.
+- The visual-only harness is for render visibility. Scientific/physics
+  validation still requires compact or full readback modes.
+
 ## 2026-06-18 AKDT - Direct Resident Fused-Sequence Active-Grid Benchmark
 
 Summary:

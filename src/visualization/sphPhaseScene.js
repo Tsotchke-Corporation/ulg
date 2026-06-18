@@ -120,11 +120,60 @@ export const SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT = 'rgba8unorm';
 export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overlay-until-replacement-ready';
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
+export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
     ? globalThis.performance.now()
     : Date.now();
+}
+
+export function resolveSphScenePixelRatio(devicePixelRatio = globalThis.devicePixelRatio) {
+  const ratio = Number(devicePixelRatio);
+  if (!Number.isFinite(ratio) || ratio <= 0) return 1;
+  return Math.max(1, Math.min(ratio, SPH_SCENE_MAX_DEVICE_PIXEL_RATIO));
+}
+
+export function resolveSphSceneViewportSize(container, {
+  fallbackWidth = 800,
+  fallbackHeight = 520,
+  visualViewport = globalThis.visualViewport
+} = {}) {
+  const rect = typeof container?.getBoundingClientRect === 'function'
+    ? container.getBoundingClientRect()
+    : null;
+  const candidates = {
+    clientWidth: Number(container?.clientWidth),
+    clientHeight: Number(container?.clientHeight),
+    rectWidth: Number(rect?.width),
+    rectHeight: Number(rect?.height),
+    visualViewportWidth: Number(visualViewport?.width),
+    visualViewportHeight: Number(visualViewport?.height)
+  };
+  const firstPositive = (...values) => {
+    for (const value of values) {
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return 1;
+  };
+  const width = firstPositive(
+    candidates.clientWidth,
+    candidates.rectWidth,
+    candidates.visualViewportWidth,
+    fallbackWidth
+  );
+  const height = firstPositive(
+    candidates.clientHeight,
+    candidates.rectHeight,
+    candidates.visualViewportHeight,
+    fallbackHeight
+  );
+  return {
+    width,
+    height,
+    aspect: width / height,
+    ...candidates
+  };
 }
 
 const RESIDENT_FULL_READBACK_MODE = 'full-parity-readback';
@@ -2674,8 +2723,9 @@ export function createSphPhaseScene(container, {
   // surfaces without faking opacity.
   scene.background = new THREE.Color(0x18222b);
 
-  const width = container.clientWidth || 800;
-  const height = container.clientHeight || 520;
+  const initialViewport = resolveSphSceneViewportSize(container);
+  const width = initialViewport.width;
+  const height = initialViewport.height;
   const camera = new THREE.PerspectiveCamera(46, width / height, 0.05, 500);
   // Aim at the box centre and pull back proportionally to the largest box edge so the whole sealed
   // box (and everything contained in it) is framed, instead of looking at the floor and cropping.
@@ -2683,8 +2733,13 @@ export function createSphPhaseScene(container, {
   camera.position.set(center.x + refEdgeM * 0.85, center.y + refEdgeM * 0.55, center.z + refEdgeM * 1.15);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: Boolean(preserveDrawingBuffer) });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.setSize(width, height);
+  renderer.setPixelRatio(resolveSphScenePixelRatio(window.devicePixelRatio));
+  renderer.setSize(width, height, false);
+  renderer.domElement.style.position = 'absolute';
+  renderer.domElement.style.inset = '0';
+  renderer.domElement.style.display = 'block';
+  renderer.domElement.style.width = '100%';
+  renderer.domElement.style.height = '100%';
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.08;
@@ -4194,6 +4249,15 @@ export function createSphPhaseScene(container, {
 
   function releasePreviousSphResidentSurfaceDrawResources(previousSurfaceDraw, previousRenderBridge) {
     if (!previousSurfaceDraw && !previousRenderBridge) return;
+    if (previousRenderBridge && previousRenderBridge === sphResidentSurfaceDrawRenderBridge) {
+      releaseSphResidentSurfaceDrawResources({
+        surfaceDraw: previousSurfaceDraw,
+        renderBridge: null,
+        clearOverlay: false,
+        status: 'surface-draw-metadata-swapped-engine-bridge-retained'
+      });
+      return;
+    }
     if (
       previousSurfaceDraw === sphResidentSurfaceDraw
       && previousRenderBridge === sphResidentSurfaceDrawRenderBridge
@@ -4618,8 +4682,7 @@ export function createSphPhaseScene(container, {
       };
     }
     const pointCount = Math.floor(positionsM.length / 3);
-    const positions = new Float32Array(pointCount * 3);
-    positions.set(positionsM.subarray(0, pointCount * 3));
+    const requiredFloats = pointCount * 3;
     const smoothingLength = Number.isFinite(Number(smoothingLengthM)) && Number(smoothingLengthM) > 0
       ? Number(smoothingLengthM)
       : 0.08;
@@ -4639,52 +4702,104 @@ export function createSphPhaseScene(container, {
     let renderReason = requestedSphereBridge && !useSphereBridge
       ? `sphere bridge skipped above ${SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES} render-row instances`
       : null;
-    let geometryByteLength = positions.byteLength;
+    let geometryByteLength = positionsM.byteLength;
     let lastOpaqueDrawCount = 0;
     let lastTransparentDrawCount = 1;
     let transparencyCompositeMode = 'three-points-alpha-depth-sort';
     let drawOrderingPolicy = 'three-points-depth-policy';
+    let group = null;
+    let bridgeReused = false;
+    let bridgeUpdateCount = 0;
+    const previousBridge = sphResidentSurfaceDrawRenderBridge;
 
     if (useSphereBridge) {
       const sphereRadius = Math.max(0.025, Math.min(0.16, smoothingLength * 0.32));
-      const sphereGeometry = new THREE.SphereGeometry(sphereRadius, 8, 6);
-      const sphereMaterial = new THREE.MeshBasicMaterial({
-        color: 0x9ed8ff,
-        vertexColors: false,
-        transparent: true,
-        opacity: 0.9,
-        depthWrite: true,
-        depthTest: true
-      });
-      sphereMaterial.userData.optical = {
-        alpha: sphereMaterial.opacity,
-        transparencyClassId: 1,
-        depthWriteFlag: 1
-      };
-      const mesh = new THREE.InstancedMesh(sphereGeometry, sphereMaterial, pointCount);
+      let mesh = null;
+      const previousMesh = previousBridge?.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+        ? previousBridge?.threeMeshes?.[0]
+        : null;
+      const previousCapacity = previousMesh?.instanceMatrix?.array
+        ? Math.floor(previousMesh.instanceMatrix.array.length / 16)
+        : 0;
+      if (previousMesh?.isInstancedMesh && previousCapacity >= pointCount) {
+        mesh = previousMesh;
+        group = previousBridge.threeSurfaceGroup || null;
+        bridgeReused = true;
+        bridgeUpdateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
+        mesh.count = pointCount;
+      } else {
+        const sphereGeometry = new THREE.SphereGeometry(sphereRadius, 8, 6);
+        const sphereMaterial = new THREE.MeshBasicMaterial({
+          color: 0x9ed8ff,
+          vertexColors: false,
+          transparent: true,
+          opacity: 0.9,
+          depthWrite: true,
+          depthTest: true
+        });
+        sphereMaterial.userData.optical = {
+          alpha: sphereMaterial.opacity,
+          transparencyClassId: 1,
+          depthWriteFlag: 1
+        };
+        mesh = new THREE.InstancedMesh(sphereGeometry, sphereMaterial, pointCount);
+        mesh.name = 'ulg-sph-three-render-row-spheres';
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 1200;
+      }
       const temp = new THREE.Object3D();
       for (let index = 0; index < pointCount; index += 1) {
         const offset = index * 3;
-        temp.position.set(positions[offset], positions[offset + 1], positions[offset + 2]);
+        temp.position.set(positionsM[offset], positionsM[offset + 1], positionsM[offset + 2]);
         temp.updateMatrix();
         mesh.setMatrixAt(index, temp.matrix);
       }
       mesh.instanceMatrix.needsUpdate = true;
-      mesh.name = 'ulg-sph-three-render-row-spheres';
-      mesh.frustumCulled = false;
-      mesh.renderOrder = 1200;
       mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
       mesh.userData.renderSource = visibleRenderSource;
       mesh.userData.pointCount = pointCount;
       mesh.userData.sphereRadiusM = sphereRadius;
+      mesh.computeBoundingSphere?.();
       renderObject = mesh;
       geometryByteLength += pointCount * 16 * Float32Array.BYTES_PER_ELEMENT;
       transparencyCompositeMode = 'three-instanced-spheres-depth-buffer';
       drawOrderingPolicy = 'three-instanced-spheres-depth-policy';
     } else {
-      const colors = new Float32Array(pointCount * 3);
-      if (colorsRgb instanceof Float32Array && colorsRgb.length >= pointCount * 3) {
-        colors.set(colorsRgb.subarray(0, pointCount * 3));
+      let positions = null;
+      let colors = null;
+      let geometry = null;
+      let points = null;
+      const previousPoints = previousBridge?.rendererBridge === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
+        ? previousBridge?.threeMeshes?.[0]
+        : null;
+      const previousGeometry = previousPoints?.geometry || null;
+      const previousPosition = previousGeometry?.getAttribute?.('position') || null;
+      const previousColor = previousGeometry?.getAttribute?.('color') || null;
+      if (
+        previousPoints?.isPoints
+        && previousPosition?.array instanceof Float32Array
+        && previousColor?.array instanceof Float32Array
+        && previousPosition.array.length >= requiredFloats
+        && previousColor.array.length >= requiredFloats
+      ) {
+        points = previousPoints;
+        geometry = previousGeometry;
+        positions = previousPosition.array;
+        colors = previousColor.array;
+        group = previousBridge.threeSurfaceGroup || null;
+        bridgeReused = true;
+        bridgeUpdateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
+      } else {
+        positions = new Float32Array(requiredFloats);
+        colors = new Float32Array(requiredFloats);
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      }
+      positions.set(positionsM.subarray(0, requiredFloats), 0);
+      if (positions.length > requiredFloats) positions.fill(0, requiredFloats);
+      if (colorsRgb instanceof Float32Array && colorsRgb.length >= requiredFloats) {
+        colors.set(colorsRgb.subarray(0, requiredFloats), 0);
       } else {
         for (let index = 0; index < pointCount; index += 1) {
           const offset = index * 3;
@@ -4693,45 +4808,56 @@ export function createSphPhaseScene(container, {
           colors[offset + 2] = 1.0;
         }
       }
+      if (colors.length > requiredFloats) colors.fill(0, requiredFloats);
       geometryByteLength += colors.byteLength;
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      const positionAttribute = geometry.getAttribute('position');
+      const colorAttribute = geometry.getAttribute('color');
+      positionAttribute.needsUpdate = true;
+      colorAttribute.needsUpdate = true;
+      geometry.setDrawRange(0, pointCount);
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
-      const pointSize = Math.max(0.025, Math.min(0.18, smoothingLength * 0.45));
-      const material = new THREE.PointsMaterial({
-        size: pointSize,
-        sizeAttenuation: true,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.82,
-        depthWrite: false,
-        depthTest: true
-      });
-      material.userData.optical = {
-        alpha: material.opacity,
-        transparencyClassId: 1,
-        depthWriteFlag: 0
-      };
-      const points = new THREE.Points(geometry, material);
-      points.name = 'ulg-sph-three-render-row-points';
-      points.frustumCulled = false;
-      points.renderOrder = 1200;
+      if (!points) {
+        const pointSize = Math.max(0.025, Math.min(0.18, smoothingLength * 0.45));
+        const material = new THREE.PointsMaterial({
+          size: pointSize,
+          sizeAttenuation: true,
+          vertexColors: true,
+          transparent: true,
+          opacity: 0.82,
+          depthWrite: false,
+          depthTest: true
+        });
+        material.userData.optical = {
+          alpha: material.opacity,
+          transparencyClassId: 1,
+          depthWriteFlag: 0
+        };
+        points = new THREE.Points(geometry, material);
+        points.name = 'ulg-sph-three-render-row-points';
+        points.frustumCulled = false;
+        points.renderOrder = 1200;
+      }
       points.userData.renderMode = SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE;
       points.userData.renderSource = visibleRenderSource;
       points.userData.pointCount = pointCount;
       renderObject = points;
     }
-    const group = new THREE.Group();
-    group.name = useSphereBridge
-      ? 'ulg-sph-resident-render-row-three-spheres'
-      : 'ulg-sph-resident-render-row-three-points';
-    group.frustumCulled = false;
-    group.add(renderObject);
-    scene.add(group);
+    if (!group) {
+      group = new THREE.Group();
+      group.name = useSphereBridge
+        ? 'ulg-sph-resident-render-row-three-spheres'
+        : 'ulg-sph-resident-render-row-three-points';
+      group.frustumCulled = false;
+      group.add(renderObject);
+      scene.add(group);
+    } else if (renderObject.parent !== group) {
+      group.add(renderObject);
+    }
+    group.visible = true;
     suppressThreeSurfaceMeshesForResidentOverlay('resident-render-row-three-points-active');
-    const bridge = {
+    const bridge = bridgeReused && previousBridge ? previousBridge : {};
+    Object.assign(bridge, {
       schema,
       status: bridgeStatus,
       rendererBridge,
@@ -4773,11 +4899,14 @@ export function createSphPhaseScene(container, {
       sphereBridgeUsed: useSphereBridge,
       sphereBridgeMaxInstances: SPH_THREE_RENDER_ROW_SPHERES_MAX_INSTANCES,
       renderRowsReadback: Boolean(renderRowsExecution?.renderRowsReadback),
+      engineIntegration: 'three-renderer-owned-scene-object',
+      threeRenderBridgeReused: bridgeReused,
+      updateCount: bridgeUpdateCount,
       scientificValidation: false,
       sphValidation: false,
       surfaceExtractionValidation: false,
       fullPhysicsValidation: false
-    };
+    });
     sphResidentSurfaceDrawRenderBridge = bridge;
     scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
     return bridge;
@@ -9705,6 +9834,9 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeLastRenderStatus = renderBridge?.lastRenderStatus ?? null;
           nextResidentSurfaceDraw.renderBridgeThreeMeshCount = renderBridge?.threeMeshCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeThreeGeometryByteLength = renderBridge?.threeGeometryByteLength ?? 0;
+          nextResidentSurfaceDraw.renderBridgeEngineIntegration = renderBridge?.engineIntegration ?? null;
+          nextResidentSurfaceDraw.renderBridgeReused = Boolean(renderBridge?.threeRenderBridgeReused);
+          nextResidentSurfaceDraw.renderBridgeUpdateCount = renderBridge?.updateCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeRenderRowsBufferRetained = Boolean(renderBridge?.renderRowsBuffer);
           nextResidentSurfaceDraw.renderBridgeRenderRowsBufferByteLength = renderBridge?.renderRowDrawState?.renderRowsBufferByteLength ?? 0;
           nextResidentSurfaceDraw.renderBridgeDrawOrderingPolicy = renderBridge?.drawOrderingPolicy ?? null;
@@ -10087,6 +10219,16 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeLastRenderStatus: sphResidentSurfaceDraw?.renderBridgeLastRenderStatus ?? null,
         surfaceDrawRenderBridgeThreeMeshCount: sphResidentSurfaceDraw?.renderBridgeThreeMeshCount ?? 0,
         surfaceDrawRenderBridgeThreeGeometryByteLength: sphResidentSurfaceDraw?.renderBridgeThreeGeometryByteLength ?? 0,
+        surfaceDrawRenderBridgeEngineIntegration: sphResidentSurfaceDraw?.renderBridgeEngineIntegration
+          ?? sphResidentSurfaceDrawRenderBridge?.engineIntegration
+          ?? null,
+        surfaceDrawRenderBridgeReused: Boolean(
+          sphResidentSurfaceDraw?.renderBridgeReused
+          || sphResidentSurfaceDrawRenderBridge?.threeRenderBridgeReused
+        ),
+        surfaceDrawRenderBridgeUpdateCount: sphResidentSurfaceDraw?.renderBridgeUpdateCount
+          ?? sphResidentSurfaceDrawRenderBridge?.updateCount
+          ?? 0,
         surfaceDrawRenderBridgeRenderRowsBufferRetained: Boolean(
           sphResidentSurfaceDraw?.renderBridgeRenderRowsBufferRetained
         ),
@@ -10170,6 +10312,9 @@ export function createSphPhaseScene(container, {
         surfaceDrawVisibleRenderSource: sphResidentSurfaceDraw?.visibleRenderSource ?? null,
         surfaceDrawVisibleRendererBridge: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
         surfaceDrawRenderBridgeStatus: sphResidentSurfaceDrawRenderBridge?.status ?? null,
+        surfaceDrawRenderBridgeEngineIntegration: sphResidentSurfaceDrawRenderBridge?.engineIntegration ?? null,
+        surfaceDrawRenderBridgeReused: Boolean(sphResidentSurfaceDrawRenderBridge?.threeRenderBridgeReused),
+        surfaceDrawRenderBridgeUpdateCount: sphResidentSurfaceDrawRenderBridge?.updateCount ?? 0,
         surfaceDrawRenderBridgeTemporalSwapPolicy: sphResidentSurfaceDrawRenderBridge?.temporalSwapPolicy ?? null,
         surfaceDrawRenderBridgeRetainedPreviousOverlay: Boolean(sphResidentSurfaceDrawRenderBridge?.retainedPreviousOverlay),
         gpuAuthoritativeState: false,
@@ -10251,28 +10396,61 @@ export function createSphPhaseScene(container, {
   }
   animate();
 
-  function resize() {
-    const w = container.clientWidth || width;
-    const h = container.clientHeight || height;
-    camera.aspect = w / h;
+  function resize({ reason = 'resize' } = {}) {
+    const viewport = resolveSphSceneViewportSize(container, {
+      fallbackWidth: width,
+      fallbackHeight: height
+    });
+    const w = viewport.width;
+    const h = viewport.height;
+    const pixelRatio = resolveSphScenePixelRatio(window.devicePixelRatio);
+    camera.aspect = viewport.aspect;
     camera.updateProjectionMatrix();
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setSize(w, h);
+    renderer.setPixelRatio(pixelRatio);
+    renderer.setSize(w, h, false);
     resizeSphResidentSurfaceDrawOverlayCanvas();
+    const drawingBufferSize = renderer.getDrawingBufferSize?.(new THREE.Vector2());
+    scene.userData.sphViewportResize = {
+      schema: 'peercompute.ulg.sph-scene-viewport-resize.v0',
+      status: 'viewport-resized',
+      reason,
+      cssWidth: w,
+      cssHeight: h,
+      backingWidth: drawingBufferSize?.x ?? renderer.domElement?.width ?? null,
+      backingHeight: drawingBufferSize?.y ?? renderer.domElement?.height ?? null,
+      pixelRatio,
+      containerClientWidth: viewport.clientWidth || null,
+      containerClientHeight: viewport.clientHeight || null,
+      containerRectWidth: viewport.rectWidth || null,
+      containerRectHeight: viewport.rectHeight || null,
+      visualViewportWidth: viewport.visualViewportWidth || null,
+      visualViewportHeight: viewport.visualViewportHeight || null,
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false
+    };
+    return scene.userData.sphViewportResize;
   }
 
   function refreshViewportAndOverlay({ reason = 'manual-refresh' } = {}) {
     try {
-      resize();
+      const resizeStatus = resize({ reason });
       controls.update();
       renderer.render(scene, camera);
       renderSphResidentSurfaceDrawOverlay();
+      const rect = renderer.domElement?.getBoundingClientRect?.();
+      const drawingBufferSize = renderer.getDrawingBufferSize?.(new THREE.Vector2());
       const status = {
         schema: 'peercompute.ulg.sph-scene-viewport-refresh.v0',
         status: 'viewport-refresh-rendered',
         reason,
-        width: renderer.domElement?.width ?? null,
-        height: renderer.domElement?.height ?? null,
+        width: drawingBufferSize?.x ?? renderer.domElement?.width ?? null,
+        height: drawingBufferSize?.y ?? renderer.domElement?.height ?? null,
+        cssWidth: rect?.width ?? resizeStatus?.cssWidth ?? null,
+        cssHeight: rect?.height ?? resizeStatus?.cssHeight ?? null,
+        pixelRatio: resizeStatus?.pixelRatio ?? resolveSphScenePixelRatio(window.devicePixelRatio),
+        resizeStatus,
         overlayCanvasWidth: sphResidentSurfaceDrawRenderBridge?.canvas?.width ?? null,
         overlayCanvasHeight: sphResidentSurfaceDrawRenderBridge?.canvas?.height ?? null,
         updatedAtMs: nowMs(),
@@ -10350,9 +10528,9 @@ export function createSphPhaseScene(container, {
     return scene.userData.sphViewportRefreshBurst;
   }
 
-  function scheduleVisibilityResumeRefresh(reason) {
+  function scheduleVisibilityResumeRefresh(reason, frameCount = 2) {
     if (!running) return;
-    forceViewportRefreshBurst({ reason, frameCount: 2 });
+    forceViewportRefreshBurst({ reason, frameCount });
   }
 
   function handleVisibilityChange() {
@@ -10365,13 +10543,40 @@ export function createSphPhaseScene(container, {
     scheduleVisibilityResumeRefresh('window-pageshow');
   }
 
-  window.addEventListener('resize', resize);
+  function handleWindowResize() {
+    scheduleVisibilityResumeRefresh('window-resize', 1);
+  }
+
+  function handleVisualViewportResize() {
+    scheduleVisibilityResumeRefresh('visual-viewport-resize', 2);
+  }
+
+  function handleOrientationChange() {
+    scheduleVisibilityResumeRefresh('window-orientationchange', 3);
+  }
+
+  let resizeObserver = null;
+  if (typeof ResizeObserver === 'function') {
+    resizeObserver = new ResizeObserver(() => {
+      scheduleVisibilityResumeRefresh('container-resize-observer', 1);
+    });
+    resizeObserver.observe(container);
+  }
+
+  window.addEventListener('resize', handleWindowResize);
+  window.visualViewport?.addEventListener?.('resize', handleVisualViewportResize);
+  window.visualViewport?.addEventListener?.('scroll', handleVisualViewportResize);
+  window.addEventListener('orientationchange', handleOrientationChange);
   container.ownerDocument?.addEventListener?.('visibilitychange', handleVisibilityChange);
   window.addEventListener('pageshow', handlePageShow);
 
   function dispose() {
     running = false;
-    window.removeEventListener('resize', resize);
+    resizeObserver?.disconnect?.();
+    window.removeEventListener('resize', handleWindowResize);
+    window.visualViewport?.removeEventListener?.('resize', handleVisualViewportResize);
+    window.visualViewport?.removeEventListener?.('scroll', handleVisualViewportResize);
+    window.removeEventListener('orientationchange', handleOrientationChange);
     container.ownerDocument?.removeEventListener?.('visibilitychange', handleVisibilityChange);
     window.removeEventListener('pageshow', handlePageShow);
     controls.dispose();

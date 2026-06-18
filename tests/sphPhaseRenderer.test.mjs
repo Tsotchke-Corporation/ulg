@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   SPH_PHASE_RENDER_MODE,
   SPH_PHASE_RENDER_ORDER,
+  SPH_SCENE_MAX_DEVICE_PIXEL_RATIO,
   SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
   SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL,
@@ -18,6 +19,8 @@ import {
   SPH_SPARSE_SURFACE_RADIUS_SCALE_MIN,
   SPH_SURFACE_RADIUS_SCALE_DEFAULT,
   createContinuousSurfaceBatches,
+  resolveSphScenePixelRatio,
+  resolveSphSceneViewportSize,
   cpuMarchingCubesCellSizeM,
   cpuMarchingCubesRadiusFloorM,
   createOpticalGpuLookupForSurfaceBatches,
@@ -85,6 +88,53 @@ test('SPH phase renderer batches particles into continuous material surfaces', (
   assert.ok(fe.surfaceRadiusM > 0);
   assert.ok(h2o.normalizedPositions.every((value) => value > 0 && value < 1));
   assert.ok(fe.normalizedPositions.every((value) => value > 0 && value < 1));
+});
+
+test('SPH scene viewport sizing clamps DPR and falls back from zero mobile layout boxes', () => {
+  assert.equal(SPH_SCENE_MAX_DEVICE_PIXEL_RATIO, 2);
+  assert.equal(resolveSphScenePixelRatio(3), 2);
+  assert.equal(resolveSphScenePixelRatio(0), 1);
+  assert.equal(resolveSphScenePixelRatio(Number.NaN), 1);
+
+  const visibleContainer = {
+    clientWidth: 390,
+    clientHeight: 844,
+    getBoundingClientRect() {
+      return { width: 390, height: 844 };
+    }
+  };
+  assert.deepEqual(
+    resolveSphSceneViewportSize(visibleContainer, {
+      visualViewport: { width: 360, height: 740 }
+    }),
+    {
+      width: 390,
+      height: 844,
+      aspect: 390 / 844,
+      clientWidth: 390,
+      clientHeight: 844,
+      rectWidth: 390,
+      rectHeight: 844,
+      visualViewportWidth: 360,
+      visualViewportHeight: 740
+    }
+  );
+
+  const zeroLayoutContainer = {
+    clientWidth: 0,
+    clientHeight: 0,
+    getBoundingClientRect() {
+      return { width: 0, height: 0 };
+    }
+  };
+  const recovered = resolveSphSceneViewportSize(zeroLayoutContainer, {
+    fallbackWidth: 800,
+    fallbackHeight: 520,
+    visualViewport: { width: 390, height: 844 }
+  });
+  assert.equal(recovered.width, 390);
+  assert.equal(recovered.height, 844);
+  assert.equal(recovered.aspect, 390 / 844);
 });
 
 test('resident motion diagnostic treats batch-visible motion as a refresh trigger', () => {

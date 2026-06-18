@@ -1,5 +1,48 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Mobile Three Renderer Viewport Integration
+
+The mobile MLS-MPM visibility fix now lives in the normal Three scene rather
+than a separate canvas path. The scene resolves mobile layout from container
+size, rect size, and `visualViewport`, clamps the renderer DPR to `2`, and
+resizes the Three backing buffer without changing the CSS scene surface. The
+resident render-row sphere bridge reuses its Three mesh/group and reports
+engine-integration telemetry.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Renderer regression coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "viewport sizing|resident overlay policy|render-row overlay shader|renderer depth policy"`
+  passed `37/37`, including DPR clamp and zero-layout mobile fallback
+  coverage.
+- Mobile visual-only probe:
+  `ULG_PROBE_VISUAL_ONLY=1 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual-frames ULG_PROBE_BATCHES=2 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=full-parity-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_COMPACT_SUMMARY_SCOPE=particle-visual ULG_PROBE_FUSE_RESIDENT_MECHANICS_SEQUENCE=1 ULG_PROBE_FUSE_RESIDENT_ACTIVE_GRID=1 ULG_PROBE_CAPTURE_FRAMES=1 ULG_PROBE_FRAME_MAX=4 ULG_PROBE_FAIL_ON_BAD=1 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5209 ULG_PROBE_TIMEOUT_MS=180000 npm run probe:sph-long-horizon`
+  passed with `status=good`, `analysis.status=good`, no issues, zero console
+  issues/warnings, and four captured frames.
+- Probe evidence:
+  final surface draw reported `visibleRendererBridge=three-render-row-spheres`,
+  `renderBridgeStatus=three-render-row-spheres-ready`,
+  `renderBridgeLastRenderStatus=three-render-row-spheres-submitted`,
+  `renderBridgeThreeMeshCount=1`,
+  `renderBridgeEngineIntegration=three-renderer-owned-scene-object`,
+  `renderBridgeReused=true`, and `renderBridgeUpdateCount=1`.
+- Mobile sizing evidence:
+  final viewport resize reported CSS `397x860`, backing `794x1720`, DPR `2`,
+  and visual viewport `390x844`; the composited page screenshot
+  `artifacts/sph-long-probe-mobile-three-spheres-engine-viewport-visual-frames/0003-b002-post-probe-composited-page.png`
+  is `390x844`.
+
+Known residual risk:
+
+- The render bridge is still an interim Three readback bridge. It fixes mobile
+  visibility and perspective integration, but not the sub-1-FPS architecture
+  problem.
+- `ULG_PROBE_VISUAL_ONLY=1` deliberately scopes the verdict to visible render
+  output. It does not replace compact/full readback for physics validation.
+
 ## Current Focused Result - 2026-06-18 Direct Resident Fused Sequence
 
 The performance harness now has a direct-resident MLS-MPM lane for measuring

@@ -2,6 +2,19 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: retained product-event buffer device
+identity is now hardened before spatial gas ledger binding. WebGPU buffers and
+resident product-mass handles are tagged with global symbols plus hidden
+fallback fields, so a duplicated module path cannot make a cross-device buffer
+look unowned. The spatial gas ledger producer blocks/falls back before
+`createBindGroup()` when a retained product-event buffer belongs to another
+GPUDevice. Focused unit coverage now includes a globally tagged cross-device
+regression, and the Cs/H2O resident fused browser probe at
+`artifacts/sph-probe-cross-device-product-event-identity-cs-h2o.json` completed
+with browser console `issueCount=0` and no WebGPU cross-device validation
+messages. The probe still classifies `bad` for missing motion/visible surface
+samples, so rendering/diagnostic work remains open.
+
 Current checkpoint, 2026-06-18 AKDT: active-grid fused MLS-MPM mechanics no
 longer issues command-encoder full-buffer clears in the active-grid path. The
 active-grid P2G shader variant now exposes `clear_accumulators`, and both the

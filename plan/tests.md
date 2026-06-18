@@ -1,5 +1,36 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Product-Event Device Identity Guard
+
+Retained product-event buffers and resident product-mass handles now carry
+WebGPU device ownership through global symbol keys and fallback object fields,
+so duplicated module paths cannot silently erase ownership before the spatial
+gas ledger producer binds the buffer. Cross-device retained buffers are blocked
+before `createBindGroup()` and fall back to aggregate/cpu ledger paths.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphGpuDeviceIdentity.js` and
+  `node --check tests/sphMlsMpmGpuStep.test.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "spatial gas ledger producer"`
+  passed `57/57` in the current Node runner, including the new globally tagged
+  cross-device retained product-event regression with zero bind groups and zero
+  dispatches on the consumer device.
+- Browser console probe:
+  `artifacts/sph-probe-cross-device-product-event-identity-cs-h2o.json`
+  completed the Cs/H2O resident fused URL class with browser console
+  `issueCount=0`, `warningCounts={}`, resident product-mass status
+  `resident-product-mass-merged-gpu-resident`, and `productEventBufferBound=false`.
+
+Known residual risk:
+
+- The same browser probe still classified `bad` for visual/motion evidence:
+  no max-speed sample, no positive displacement sample, and no visible surface
+  samples. Those remain renderer/diagnostic issues; the WebGPU cross-device
+  console failure is no longer reproduced.
+
 ## Current Focused Result - 2026-06-18 Active-Grid P2G Accumulator Clear
 
 Active-grid fused MLS-MPM mechanics no longer issues command-encoder

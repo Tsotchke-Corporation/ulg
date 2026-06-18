@@ -1,5 +1,37 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Retained Product-Event Device Identity Guard
+
+Status:
+
+- Hardened WebGPU device identity tagging for retained product-event buffers
+  and resident product-mass handles. The identity helper now uses process-wide
+  `Symbol.for(...)` keys plus hidden plain-object fallback fields, so handles
+  arriving through duplicated module paths still carry same-device ownership.
+- Spatial gas ledger producer still blocks/falls back before binding a
+  retained product-event buffer that belongs to another WebGPU device. This
+  targets the browser console failure where Chrome reported
+  `[Buffer "ulg-sph-resident-product-mass-merged-product-events"] is associated
+  with [Device], and cannot be used with [Device]`.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphGpuDeviceIdentity.js`.
+- PASS: `node --check tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "spatial gas ledger producer"` reported `57/57` pass in this Node version, including the new globally tagged cross-device retained product-event regression.
+- PASS browser console probe:
+  `artifacts/sph-probe-cross-device-product-event-identity-cs-h2o.json` used
+  the Cs/H2O resident fused URL class with reactions enabled and completed with
+  browser console `issueCount=0`, `warningCounts={}`, and no WebGPU cross-device
+  validation messages.
+
+Open:
+
+- The Cs/H2O probe still classified `bad` for non-console visual/motion reasons:
+  `missing-max-speed`, `no-positive-displacement`, `no-visible-surface-samples`,
+  and `no-visible-h2o-surface-samples`. That remains renderer/diagnostic
+  roadmap work, not a device-identity console error.
+
 ## 2026-06-18 AKDT - Active-Grid P2G Accumulator Clear
 
 Status:

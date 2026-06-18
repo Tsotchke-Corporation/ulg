@@ -2258,6 +2258,49 @@ test('SPH spatial gas ledger producer blocks cross-device retained product-event
   assert.equal(result.spatialGasSpeciesLedger.cells[0].bySpecies.h2.moles, 1);
 });
 
+test('SPH spatial gas ledger producer blocks globally tagged cross-device product-event buffers', async () => {
+  const sourceDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const consumerDevice = fakeSummaryDevice(compactSpatialGasRowsFixture());
+  const residentProductMass = residentProductMassHandle({
+    label: 'globally-tagged-product-events',
+    rowCount: 2,
+    byteLength: 2 * 32 * Float32Array.BYTES_PER_ELEMENT,
+    gasSpeciesRows: [
+      { material: 'h2', materialId: 1, massKg: 0.002016, moles: 1, unplacedMassKg: 0.002016 }
+    ]
+  });
+  Object.defineProperty(residentProductMass, Symbol.for('peercompute.ulg.webgpu.device'), {
+    value: sourceDevice,
+    configurable: true
+  });
+  Object.defineProperty(residentProductMass.productEventBuffer, Symbol.for('peercompute.ulg.webgpu.device'), {
+    value: sourceDevice,
+    configurable: true
+  });
+
+  const result = await runSphSpatialGasLedgerProducerStageComputeTask({
+    preferWebGpu: true,
+    readbackMode: 'no-full-readback',
+    residentProductMass,
+    reactionTable: {
+      schema: 'peercompute.ulg.sph-gpu-reaction-table.v0',
+      productTermMetadata: [
+        { productTermIndex: 0, material: 'h2', routing: 'gas' }
+      ]
+    },
+    boxDimsM: [2, 2, 2],
+    device: consumerDevice
+  });
+
+  assert.equal(result.webgpuStatus.status, 'blocked-cross-device-product-event-buffer');
+  assert.equal(result.productEventBufferDeviceMismatch, true);
+  assert.equal(result.productEventBufferSourceDeviceId.startsWith('ulg-webgpu-device:'), true);
+  assert.equal(result.productEventBufferConsumerDeviceId.startsWith('ulg-webgpu-device:'), true);
+  assert.notEqual(result.productEventBufferSourceDeviceId, result.productEventBufferConsumerDeviceId);
+  assert.equal(consumerDevice.bindGroups.length, 0);
+  assert.equal(consumerDevice.dispatches.length, 0);
+});
+
 test('SPH spatial gas ledger producer derives positioned gas rows when product support volume is missing', async () => {
   const productEventRows = productEventRowsFixture();
   const result = await runSphSpatialGasLedgerProducerStageComputeTask({

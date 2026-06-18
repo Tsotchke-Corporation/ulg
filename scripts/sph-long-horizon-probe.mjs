@@ -1472,6 +1472,11 @@ async function runBrowserProbe({
             surfaceDrawDiagnosticFieldCellCount: renderState.surfaceDrawDiagnosticFieldCellCount ?? null,
             renderRowsReadback: renderState.renderRowsReadback ?? null,
             renderRowsReadbackMode: renderState.renderRowsReadbackMode ?? null,
+            renderRowsReadbackRequestedMode: renderState.renderRowsReadbackRequestedMode ?? null,
+            renderRowsReadbackEffectiveMode: renderState.renderRowsReadbackEffectiveMode ?? null,
+            renderRowsReadbackCoercionReason: renderState.renderRowsReadbackCoercionReason ?? null,
+            renderRowsReadbackForcedForThreeBridge: renderState.renderRowsReadbackForcedForThreeBridge ?? null,
+            renderRowsReadbackRetainedPreviousBridge: renderState.renderRowsReadbackRetainedPreviousBridge ?? null,
             renderRowsGpuHandoffCopy: renderState.renderRowsGpuHandoffCopy ?? null,
             renderRowsHandoffMode: renderState.renderRowsHandoffMode ?? null,
             renderRowsReadbackByteLength: renderState.renderRowsReadbackByteLength ?? null,
@@ -1576,7 +1581,12 @@ async function runBrowserProbe({
             renderBridgeSphereCreatedMeshCount: surfaceDraw.renderBridgeSphereCreatedMeshCount ?? null,
             renderBridgeSphereDisposedMeshCount: surfaceDraw.renderBridgeSphereDisposedMeshCount ?? null,
             renderBridgeMinParticleRadiusM: surfaceDraw.renderBridgeMinParticleRadiusM ?? null,
-            renderBridgeMaxParticleRadiusM: surfaceDraw.renderBridgeMaxParticleRadiusM ?? null
+            renderBridgeMaxParticleRadiusM: surfaceDraw.renderBridgeMaxParticleRadiusM ?? null,
+            renderRowsReadbackRequestedMode: surfaceDraw.renderRowsReadbackRequestedMode ?? null,
+            renderRowsReadbackEffectiveMode: surfaceDraw.renderRowsReadbackEffectiveMode ?? null,
+            renderRowsReadbackCoercionReason: surfaceDraw.renderRowsReadbackCoercionReason ?? null,
+            renderRowsReadbackForcedForThreeBridge: surfaceDraw.renderRowsReadbackForcedForThreeBridge ?? null,
+            renderRowsReadbackRetainedPreviousBridge: surfaceDraw.renderRowsReadbackRetainedPreviousBridge ?? null
           } : null,
           surfaces: surfaceSnapshot(sceneApi)
         };
@@ -3352,14 +3362,19 @@ function analyzeTimeline(timeline, {
       && (
         status === 'resident-render-row-points-built'
         || status === 'resident-render-row-spheres-built'
+        || status === 'resident-render-row-three-bridge-retained-no-full-readback'
       )
       && (
         renderBridgeStatus === 'three-render-row-points-ready'
         || renderBridgeStatus === 'three-render-row-spheres-ready'
         || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'three-render-row-points-submitted'
         || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'three-render-row-spheres-submitted'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'three-render-row-points-retained-no-full-readback'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'three-render-row-spheres-retained-no-full-readback'
         || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-points-submitted'
         || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-spheres-submitted'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-points-retained-no-full-readback'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-spheres-retained-no-full-readback'
       )
       && vertexCount > 0;
     const webGpuRenderRowOverlayVisible = (

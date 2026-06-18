@@ -63,6 +63,14 @@ paths. Do not use it as a separate canvas overlay, and do not treat its
 Three.js WebGPURenderer adapter as ready until ULG has a same-device,
 engine-owned Three/WebGPU bridge with material/PBR metadata and shared depth.
 
+Current routing note, 2026-06-18 AKDT: the interim Three render-row bridge now
+reports when it forces CPU render-row readback for fresh Three geometry, and it
+can retain the previous Three bridge on later explicit no-full refreshes. Treat
+that retained mode as visual continuity and console-clean fallback evidence
+only. It is not the final no-readback renderer because it does not update
+geometry from resident GPU buffers and cannot prove fresh motion without
+separate diagnostics.
+
 Current routing note, 2026-06-18 AKDT: the marching-cubes extension boundary
 has advanced from planning to an engine-state integration. The sibling
 extension now exposes a caller-owned-device vanilla JS adapter; ULG now has

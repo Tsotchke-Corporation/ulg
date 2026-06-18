@@ -1,5 +1,44 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Three Render-Row Readback Telemetry And Retained No-Full Bridge
+
+Status:
+
+- Made the Three render-row bridge's readback behavior explicit. When a caller
+  requests `renderRowsReadbackMode=no-full-readback` but also requests a fresh
+  Three render-row point/sphere bridge, the render state now reports the
+  requested mode, effective mode, coercion reason, and whether full readback was
+  forced for CPU-owned Three geometry.
+- Added an opt-in retained-bridge path for explicit no-full refreshes after a
+  Three render-row bridge is already visible. Later refreshes can skip render
+  row readback, keep the previous engine-owned Three object visible, and report
+  `resident-render-row-three-bridge-retained-no-full-readback`.
+- Extended the browser probe sampler and analyzer so retained Three render-row
+  bridges count as visible render evidence. The analyzer still does not treat
+  retained no-full bridge samples as fresh motion evidence.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "sphere bridge|render-row|surface draw"`
+  reported `42/42` pass.
+- PASS visual browser probe:
+  `artifacts/sph-probe-three-bridge-retain-no-full-visual.json` completed with
+  `status=good`, `analysis.status=good`, browser console issue/warning counts
+  `0/0`, and three visible H2O render samples. The initial sample correctly
+  reported forced `full-parity-readback` for fresh Three sphere geometry; the
+  two resident-batch samples reported `renderRowsReadback=false`,
+  effective `no-full-readback`, and retained previous Three sphere bridge.
+
+Open:
+
+- This is a truthful interim performance mode, not the final renderer. It keeps
+  stale Three geometry visible while the resident state advances, so physics
+  motion probes still need fresh decoded rows, compact diagnostics, or the
+  future same-device no-readback surface consumer.
+
 ## 2026-06-18 AKDT - Pressure-Aware Particle Size Metadata And Worker Probe Telemetry
 
 Status:

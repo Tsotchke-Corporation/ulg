@@ -1,5 +1,35 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Retained Three Render-Row No-Full Visual Mode
+
+The interim Three render-row bridge now reports when it forces full render-row
+readback for fresh CPU-owned geometry, and it can retain an already-visible
+Three bridge on later explicit no-full refreshes. This gives the browser
+harness a console-clean visibility mode without pretending that retained
+geometry is fresh physics-motion evidence.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Renderer regression coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "sphere bridge|render-row|surface draw"`
+  passed `42/42`.
+- Browser console/visual probe:
+  `artifacts/sph-probe-three-bridge-retain-no-full-visual.json` completed with
+  `status=good`, `analysis.status=good`, browser console `issueCount=0`,
+  `warningCount=0`, no visual-surface issues, and three visible H2O samples.
+  The initial sample reported forced `full-parity-readback`; the resident batch
+  samples reported retained previous Three sphere bridge with effective
+  `no-full-readback`.
+
+Known residual risk:
+
+- Retained bridge samples are stale visual continuity, not fresh geometry.
+  Use them only for visual/console checks until the same-device GPU surface
+  renderer or a GPU-side render-row consumer is live.
+
 ## Current Focused Result - 2026-06-18 Pressure-Aware Particle Size Metadata
 
 Initial particle size is now an explicit physics setup contract rather than an

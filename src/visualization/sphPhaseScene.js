@@ -10349,14 +10349,39 @@ export function createSphPhaseScene(container, {
       const shouldUseResidentRenderRowBridge = shouldUseThreeRenderRowPointsBridge
         || shouldUseWebGpuRenderRowOverlayBridge;
       const shouldUseThreeCompactSurfaceDrawBridge = false;
+      const requestedRenderRowsReadbackModeFromCaller = renderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+        || renderRowsReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+        ? renderRowsReadbackMode
+        : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+      const previousThreeRenderRowBridgeVisible = Boolean(
+        previousResidentRenderBridge
+        && (
+          previousResidentRenderBridge.rendererBridge === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
+          || previousResidentRenderBridge.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+        )
+        && hasVisibleResidentSurfaceDrawBridge(previousResidentRenderBridge)
+      );
+      const retainPreviousThreeRenderRowBridgeNoFull = Boolean(
+        shouldUseThreeRenderRowPointsBridge
+        && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+        && previousThreeRenderRowBridgeVisible
+      );
       const requestedRenderRowsReadbackMode = shouldUseWebGpuRenderRowOverlayBridge
         ? RESIDENT_NO_FULL_READBACK_MODE
         : (shouldUseThreeRenderRowPointsBridge
-          ? RESIDENT_FULL_READBACK_MODE
-          : (renderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
-            || renderRowsReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
-            ? renderRowsReadbackMode
-            : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT));
+          ? (retainPreviousThreeRenderRowBridgeNoFull ? RESIDENT_NO_FULL_READBACK_MODE : RESIDENT_FULL_READBACK_MODE)
+          : requestedRenderRowsReadbackModeFromCaller);
+      const renderRowsReadbackModeCoercionReason = shouldUseThreeRenderRowPointsBridge
+        ? (
+          retainPreviousThreeRenderRowBridgeNoFull
+            ? 'three-render-row-bridge-retains-previous-scene-object-for-explicit-no-full-readback'
+            : (
+              requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+                ? 'three-render-row-bridge-requires-cpu-decoded-rows-for-fresh-geometry'
+                : null
+            )
+        )
+        : null;
       const requestedSurfaceDrawDiagnosticMaxFieldCells = Math.max(
         1,
         Math.round(Number(surfaceDrawDiagnosticMaxFieldCells) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT)
@@ -10923,19 +10948,30 @@ export function createSphPhaseScene(container, {
               ? 'webgpu-render-row-overlay-cleanup'
               : 'three-render-row-points-cleanup'
           });
-          const renderBridge = shouldUseWebGpuRenderRowOverlayBridge
-            ? createSphResidentRenderRowsWebGpuOverlayBridge({
+          let renderBridgeRetainedPrevious = false;
+          const renderBridge = retainPreviousThreeRenderRowBridgeNoFull && !hasRenderRowsReadback
+            ? previousResidentRenderBridge
+            : (shouldUseWebGpuRenderRowOverlayBridge
+              ? createSphResidentRenderRowsWebGpuOverlayBridge({
               device: resolvedDeviceResult.device,
               renderRowsExecution,
               smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null,
               bridgeMode: requestedSurfaceDrawDiagnosticMode
             })
-            : createSphResidentRenderRowsThreePointBridge({
+              : createSphResidentRenderRowsThreePointBridge({
               decoded,
               renderRowsExecution,
               smoothingLengthM: nextSphParticleState?.smoothingLengthM ?? null,
               bridgeMode: requestedSurfaceDrawDiagnosticMode
-            });
+            }));
+          if (retainPreviousThreeRenderRowBridgeNoFull && renderBridge === previousResidentRenderBridge) {
+            renderBridgeRetainedPrevious = true;
+            renderBridge.temporalSwapPolicy = SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY;
+            renderBridge.retainedPreviousOverlay = true;
+            renderBridge.retentionReason = renderRowsReadbackModeCoercionReason;
+            renderBridge.lastRenderStatus = `${renderBridge.rendererBridge || 'three-render-row'}-retained-no-full-readback`;
+            scene.userData.sphResidentSurfaceDrawRenderBridge = renderBridge;
+          }
           const renderBridgeReady = renderBridge?.status === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS
             || renderBridge?.status === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_STATUS
             || renderBridge?.status === SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_STATUS
@@ -10952,13 +10988,15 @@ export function createSphPhaseScene(container, {
             { renderFieldExecution, overlayPolicy: surfaceOverlayPolicy }
           );
           nextResidentSurfaceDraw.status = renderBridgeReady
-            ? (renderBridge.rendererBridge === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
+            ? (renderBridgeRetainedPrevious
+              ? 'resident-render-row-three-bridge-retained-no-full-readback'
+              : (renderBridge.rendererBridge === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
               ? 'resident-render-row-webgpu-spheres-built'
               : (renderBridge.rendererBridge === SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_MODE
                 ? 'resident-render-row-webgpu-points-built'
                 : (renderBridge.rendererBridge === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
                   ? 'resident-render-row-spheres-built'
-                  : 'resident-render-row-points-built')))
+                  : 'resident-render-row-points-built'))))
             : 'resident-render-row-points-unavailable';
           nextResidentSurfaceDraw.diagnosticOnly = false;
           nextResidentSurfaceDraw.diagnosticMode = requestedSurfaceDrawDiagnosticMode;
@@ -11022,6 +11060,15 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeMaxParticleRadiusM = renderBridge?.maxParticleRadiusM ?? null;
           nextResidentSurfaceDraw.renderBridgeTemporalSwapPolicy = renderBridge?.temporalSwapPolicy ?? null;
           nextResidentSurfaceDraw.renderBridgeRetainedPreviousOverlay = Boolean(renderBridge?.retainedPreviousOverlay);
+          nextResidentSurfaceDraw.renderRowsReadbackRequestedMode = requestedRenderRowsReadbackModeFromCaller;
+          nextResidentSurfaceDraw.renderRowsReadbackEffectiveMode = requestedRenderRowsReadbackMode;
+          nextResidentSurfaceDraw.renderRowsReadbackCoercionReason = renderRowsReadbackModeCoercionReason;
+          nextResidentSurfaceDraw.renderRowsReadbackForcedForThreeBridge = Boolean(
+            shouldUseThreeRenderRowPointsBridge
+            && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+            && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+          );
+          nextResidentSurfaceDraw.renderRowsReadbackRetainedPreviousBridge = renderBridgeRetainedPrevious;
         } else if (
           !shouldBuildRetainedSurfaceDrawDiagnostics
           && !renderFieldExecution?.renderFieldReadback
@@ -11272,6 +11319,17 @@ export function createSphPhaseScene(container, {
         renderRowsReadbackByteLength: renderRowsExecution.renderRowsReadbackByteLength ?? renderRowsExecution.renderRows?.byteLength ?? 0,
         renderRowsReadback: Boolean(renderRowsExecution.renderRowsReadback),
         renderRowsReadbackMode: renderRowsExecution.readbackMode ?? null,
+        renderRowsReadbackRequestedMode: requestedRenderRowsReadbackModeFromCaller,
+        renderRowsReadbackEffectiveMode: requestedRenderRowsReadbackMode,
+        renderRowsReadbackCoercionReason: renderRowsReadbackModeCoercionReason,
+        renderRowsReadbackForcedForThreeBridge: Boolean(
+          shouldUseThreeRenderRowPointsBridge
+          && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+          && requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+        ),
+        renderRowsReadbackRetainedPreviousBridge: Boolean(
+          sphResidentSurfaceDraw?.renderRowsReadbackRetainedPreviousBridge
+        ),
         renderRowsGpuHandoffCopy: Boolean(renderRowsExecution.renderRowsGpuHandoffCopy),
         renderRowsHandoffMode: renderRowsExecution.renderRowsHandoffMode ?? null,
         renderRowsDecodedSummary: decodedRenderRowsSummary,

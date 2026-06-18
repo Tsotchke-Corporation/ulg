@@ -30,8 +30,14 @@ export const WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface.v0';
 export const WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-row-metadata.v0';
+export const WEBGPU_MARCHING_CUBES_SURFACE_OUTPUT_DESCRIPTOR_SCHEMA =
+  'peercompute.webgpu-marching-cubes.surface-output-descriptor.v0';
 export const WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA =
   'peercompute.webgpu-marching-cubes.compact-position-rows.v0';
+export const WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA =
+  'peercompute.webgpu-marching-cubes.surface-draw-rows.v0';
+export const WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA =
+  'peercompute.webgpu-marching-cubes.indirect-draw-rows.v0';
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-translation.v0';
 
@@ -348,14 +354,20 @@ function extensionSurfaceMetadata({
 
 function assertSameDeviceExtensionSurfaceBuffer(extensionExecution) {
   const result = extensionExecution?.result || null;
-  const ownership = result?.rowMetadata?.position?.resourceOwnership || result?.resourceOwnership || null;
+  const position = result?.outputDescriptors?.rows?.position
+    || result?.rowMetadata?.position
+    || null;
+  const ownership = position?.resourceOwnership || result?.resourceOwnership || null;
   if (ownership?.ok === false || ownership?.status === 'cross-device-resource') {
     throw new TypeError(`extension surface buffer is not owned by this GPUDevice (${ownership.status})`);
   }
 }
 
 function compactPositionRowsSource(result = null) {
-  const position = result?.rowMetadata?.position || null;
+  const outputDescriptors = result?.outputDescriptors || null;
+  const outputPosition = outputDescriptors?.rows?.position || null;
+  const rowMetadataPosition = result?.rowMetadata?.position || null;
+  const position = outputPosition || rowMetadataPosition || null;
   const rowStrideFloats = Math.max(0, Math.round(finiteNumber(
     position?.rowStrideFloats ?? result?.rowStrideFloats ?? result?.vertexStrideFloats,
     0
@@ -370,9 +382,10 @@ function compactPositionRowsSource(result = null) {
     : Array.isArray(result?.rowLayout)
     ? [...result.rowLayout]
     : null;
-  const buffer = position?.buffer || result?.buffer || null;
+  const buffer = position?.buffer || outputDescriptors?.retainedBuffers?.position || result?.buffer || null;
   const bufferRetained = Boolean(
     (position?.bufferRetained && position?.buffer)
+      || (outputDescriptors?.retainedBuffers?.position && buffer)
       || (result?.bufferRetained && result?.buffer)
   );
   const bufferByteLength = Math.max(0, Math.round(finiteNumber(
@@ -380,10 +393,16 @@ function compactPositionRowsSource(result = null) {
     0
   )));
   return {
+    outputDescriptorSchema: outputDescriptors?.schema ?? null,
+    outputDescriptorStatus: outputDescriptors?.status ?? null,
+    outputDescriptorTopology: outputDescriptors?.topology ?? null,
+    outputDescriptorReadback: outputDescriptors?.readback ?? null,
+    outputDescriptorFullReadback: outputDescriptors?.fullReadback ?? null,
     rowMetadataSchema: result?.rowMetadata?.schema ?? null,
     rowMetadataStatus: result?.rowMetadata?.status ?? null,
     rowSchema,
     rowLayout,
+    rowLayoutName: position?.layoutName ?? outputDescriptors?.layoutName ?? result?.layoutName ?? null,
     rowStrideFloats,
     rowStrideBytes,
     rowCount: Math.max(0, Math.round(finiteNumber(position?.rowCount ?? result?.rowCount ?? result?.vertexCount, 0))),
@@ -394,9 +413,17 @@ function compactPositionRowsSource(result = null) {
     bufferByteLength,
     ownerDeviceId: position?.ownerDeviceId ?? result?.ownerDeviceId ?? null,
     resourceOwnership: position?.resourceOwnership ?? result?.resourceOwnership ?? null,
-    readback: position?.readback ?? result?.rowMetadata?.readback ?? result?.readback ?? null,
-    normalRowsStatus: result?.rowMetadata?.normal?.status ?? null,
-    materialRowsStatus: result?.rowMetadata?.material?.status ?? null
+    readback: position?.readback ?? outputDescriptors?.readback ?? result?.rowMetadata?.readback ?? result?.readback ?? null,
+    normalRowsStatus: outputDescriptors?.rows?.normal?.status ?? result?.rowMetadata?.normal?.status ?? null,
+    materialRowsStatus: outputDescriptors?.rows?.material?.status ?? result?.rowMetadata?.material?.status ?? null,
+    drawRowsStatus: outputDescriptors?.rows?.draw?.status ?? null,
+    drawRowsAvailable: outputDescriptors?.rows?.draw?.available ?? null,
+    indirectDrawRowsStatus: outputDescriptors?.rows?.indirect?.status ?? null,
+    indirectDrawRowsAvailable: outputDescriptors?.rows?.indirect?.available ?? null,
+    materialMetadataAvailable: outputDescriptors?.materialPayload?.available
+      ?? result?.rowMetadata?.material?.metadataAvailable
+      ?? null,
+    pbrMetadataAvailable: outputDescriptors?.pbrPayload?.available ?? null
   };
 }
 
@@ -513,6 +540,11 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionTriangleCount,
     extensionBufferRetained,
     extensionBufferByteLength: positionRows.bufferByteLength,
+    extensionOutputDescriptorSchema: positionRows.outputDescriptorSchema,
+    extensionOutputDescriptorStatus: positionRows.outputDescriptorStatus,
+    extensionOutputDescriptorTopology: positionRows.outputDescriptorTopology,
+    extensionOutputDescriptorReadback: positionRows.outputDescriptorReadback,
+    extensionOutputDescriptorFullReadback: positionRows.outputDescriptorFullReadback,
     extensionRowMetadataSchema: positionRows.rowMetadataSchema,
     extensionRowMetadataStatus: positionRows.rowMetadataStatus,
     extensionPositionRowsSchema: positionRows.rowSchema,
@@ -520,9 +552,16 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionPositionRowsAvailable: positionRows.available,
     extensionPositionRowsReadback: positionRows.readback,
     extensionPositionRowsRowLayout: positionRows.rowLayout,
+    extensionPositionRowsLayoutName: positionRows.rowLayoutName,
     extensionPositionRowsRowCount: positionRows.rowCount,
     extensionNormalRowsStatus: positionRows.normalRowsStatus,
     extensionMaterialRowsStatus: positionRows.materialRowsStatus,
+    extensionDrawRowsStatus: positionRows.drawRowsStatus,
+    extensionDrawRowsAvailable: positionRows.drawRowsAvailable,
+    extensionIndirectDrawRowsStatus: positionRows.indirectDrawRowsStatus,
+    extensionIndirectDrawRowsAvailable: positionRows.indirectDrawRowsAvailable,
+    extensionMaterialMetadataAvailable: positionRows.materialMetadataAvailable,
+    extensionPbrMetadataAvailable: positionRows.pbrMetadataAvailable,
     extensionReadback: execution.readback ?? null,
     extensionSurfaceVertexReadback: execution.surfaceVertexReadback ?? null,
     readyForUlgSurfaceVertexRows,

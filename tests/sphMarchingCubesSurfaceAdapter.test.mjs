@@ -14,8 +14,11 @@ import {
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
   WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
+  WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
+  WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
+  WEBGPU_MARCHING_CUBES_SURFACE_OUTPUT_DESCRIPTOR_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
@@ -35,6 +38,7 @@ function extensionExecution({
   readback = false,
   resourceOwnershipStatus = 'same-device',
   includeRowMetadata = false,
+  includeOutputDescriptors = false,
   topLevelBuffer = true
 } = {}) {
   const buffer = bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null;
@@ -73,6 +77,62 @@ function extensionExecution({
       available: false
     }
   } : null;
+  const outputDescriptors = includeOutputDescriptors ? {
+    schema: WEBGPU_MARCHING_CUBES_SURFACE_OUTPUT_DESCRIPTOR_SCHEMA,
+    status: buffer ? 'surface-outputs-resident' : 'surface-outputs-empty',
+    topology: 'triangle-list',
+    readback: false,
+    fullReadback: false,
+    retainedBuffers: {
+      position: buffer
+    },
+    rows: {
+      position: {
+        schema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
+        family: 'position',
+        status: buffer ? 'position-rows-resident' : 'position-rows-empty',
+        available: Boolean(buffer),
+        layoutName: 'peercompute.webgpu-marching-cubes.layout.compact-position-f32x4.v0',
+        rowLayout: ['positionX:f32', 'positionY:f32', 'positionZ:f32', 'padding:f32'],
+        rowStrideFloats: vertexStrideFloats,
+        rowStrideBytes: vertexStrideFloats * Float32Array.BYTES_PER_ELEMENT,
+        rowCount: vertexCount,
+        buffer,
+        bufferByteLength: vertexCount * vertexStrideFloats * 4,
+        bufferRetained: Boolean(bufferRetained && buffer),
+        resourceOwnership,
+        readback: false
+      },
+      normal: {
+        status: 'normal-rows-not-produced',
+        available: false
+      },
+      material: {
+        status: 'material-rows-not-produced',
+        available: false
+      },
+      draw: {
+        schema: WEBGPU_MARCHING_CUBES_SURFACE_DRAW_ROWS_SCHEMA,
+        status: 'draw-rows-not-produced',
+        available: false
+      },
+      indirect: {
+        schema: WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA,
+        status: 'indirect-draw-rows-not-produced',
+        available: false
+      }
+    },
+    materialPayload: {
+      schema: 'peercompute.webgpu-marching-cubes.material-metadata.v0',
+      available: true,
+      payload: { materialId: 7 }
+    },
+    pbrPayload: {
+      schema: 'peercompute.webgpu-marching-cubes.pbr-metadata.v0',
+      available: true,
+      payload: { roughnessFactor: 0.4 }
+    }
+  } : null;
   return {
     schema: WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
     adapterId: 'webgpu-marching-cubes',
@@ -96,7 +156,8 @@ function extensionExecution({
       bufferByteLength: vertexCount * vertexStrideFloats * 4,
       bufferRetained: topLevelBuffer ? bufferRetained : false,
       resourceOwnership: topLevelBuffer ? resourceOwnership : null,
-      rowMetadata
+      rowMetadata,
+      outputDescriptors
     }
   };
 }
@@ -247,6 +308,46 @@ test('ULG consumes extension compact position row metadata without legacy top-le
 
   assert.equal(translated.status, 'extension-surface-translated-resident-webgpu');
   assert.equal(bindGroups[0].entries[0].resource.buffer, rowBuffer);
+});
+
+test('ULG consumes extension output descriptors without row metadata or legacy top-level buffers', async () => {
+  const { device, bindGroups } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    includeOutputDescriptors: true,
+    includeRowMetadata: false,
+    topLevelBuffer: false,
+    vertexCount: 3
+  });
+  const descriptorBuffer = execution.result.outputDescriptors.rows.position.buffer;
+  const summary = summarizeWebGpuMarchingCubesExtensionExecution(execution);
+
+  assert.equal(summary.status, 'extension-surface-ready-needs-ulg-row-translation');
+  assert.equal(summary.extensionBufferRetained, true);
+  assert.equal(summary.extensionBufferByteLength, descriptorBuffer.size);
+  assert.equal(summary.extensionOutputDescriptorSchema, WEBGPU_MARCHING_CUBES_SURFACE_OUTPUT_DESCRIPTOR_SCHEMA);
+  assert.equal(summary.extensionOutputDescriptorStatus, 'surface-outputs-resident');
+  assert.equal(summary.extensionOutputDescriptorTopology, 'triangle-list');
+  assert.equal(summary.extensionRowMetadataSchema, null);
+  assert.equal(summary.extensionPositionRowsSchema, WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA);
+  assert.equal(summary.extensionPositionRowsStatus, 'position-rows-resident');
+  assert.equal(summary.extensionPositionRowsAvailable, true);
+  assert.equal(summary.extensionPositionRowsLayoutName, 'peercompute.webgpu-marching-cubes.layout.compact-position-f32x4.v0');
+  assert.equal(summary.extensionDrawRowsStatus, 'draw-rows-not-produced');
+  assert.equal(summary.extensionDrawRowsAvailable, false);
+  assert.equal(summary.extensionIndirectDrawRowsStatus, 'indirect-draw-rows-not-produced');
+  assert.equal(summary.extensionIndirectDrawRowsAvailable, false);
+  assert.equal(summary.extensionMaterialMetadataAvailable, true);
+  assert.equal(summary.extensionPbrMetadataAvailable, true);
+  assert.equal(summary.hotLoopSafe, true);
+
+  const translated = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(translated.status, 'extension-surface-translated-resident-webgpu');
+  assert.equal(bindGroups[0].entries[0].resource.buffer, descriptorBuffer);
 });
 
 test('ULG wrapper preserves caller-owned device and adapter swapability', async () => {

@@ -10027,3 +10027,20 @@ Mounted worker-stage lane guard, 2026-06-18 14:24 AKDT:
   - The row fails on `Web Workers not available`, Worker bootstrap fallback,
     invalid WebGPU buffers/bind groups/command buffers, and WGSL parse errors;
     the issue list was empty.
+
+ULG extension output descriptor consumption, 2026-06-18 14:31 AKDT:
+
+- `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  - Passed.
+- `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `12/12`.
+  - New coverage builds an extension execution with only
+    `result.outputDescriptors.rows.position`; there is no `rowMetadata` and no
+    top-level `result.buffer`.
+  - Evidence: summary reports
+    `extensionOutputDescriptorSchema=peercompute.webgpu-marching-cubes.surface-output-descriptor.v0`,
+    `extensionPositionRowsLayoutName=peercompute.webgpu-marching-cubes.layout.compact-position-f32x4.v0`,
+    draw/indirect rows as not produced, material/PBR metadata available, and
+    GPU translation binds the descriptor's retained compact position buffer.

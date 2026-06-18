@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: ULG now consumes the native
+`webgpu-marching-cubes` adapter's newer `outputDescriptors` contract. The ULG
+wrapper prefers `result.outputDescriptors.rows.position` as the retained compact
+position source, falls back to `rowMetadata.position`, then to the old top-level
+surface buffer. Summaries now expose descriptor schema/status/topology,
+position layout name, draw/indirect placeholder status, and material/PBR
+metadata availability. The descriptor-only unit row passes without legacy
+`rowMetadata` or `result.buffer`, proving the next renderer bridge can depend
+on versioned descriptor fields instead of hidden readback. This does not yet
+make the GPU-resident surface visible by itself; it removes the contract gap
+between the sibling extension and ULG's translation/import layer.
+
 Current checkpoint, 2026-06-18 AKDT: browser Workers are no longer an
 availability mystery, and the mounted scheduler now has an opt-in
 `residentStageWorkers=1` diagnostics lane. The default PeerCompute resident

@@ -27317,3 +27317,31 @@ Remaining:
 - Next architecture slice: consume the native marching-cubes/worker-retained
   output descriptors in ULG and build a main-thread render import that does not
   require full render-row readback.
+
+## 2026-06-18 14:31 AKDT - ULG Consumes Extension Output Descriptors
+
+Status:
+
+- Updated the ULG WebGPU marching-cubes wrapper to prefer the sibling
+  extension's `result.outputDescriptors.rows.position` retained buffer when it
+  exists, then fall back to `rowMetadata.position`, then the legacy top-level
+  `result.buffer`.
+- ULG summaries now expose output descriptor schema/status/topology,
+  descriptor readback flags, position layout name, draw and indirect row
+  placeholder status, plus material/PBR metadata availability.
+- Added a descriptor-only unit row with no `rowMetadata` and no top-level
+  buffer. It proves ULG can still build resident surface vertex/draw buffers
+  from the retained descriptor position buffer.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `12/12` pass.
+
+Remaining:
+
+- The descriptor contract is now wired, but the mounted renderer still needs a
+  same-device import path that consumes those translated buffers without the
+  current Three readback bridge.

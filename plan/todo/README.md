@@ -94,6 +94,9 @@ retained buffers into `sphResidentSurfaceDraw` without an overlay or second
 GPU device. The next required slice is visible renderer consumption of those
 resident extension buffers inside the engine-owned Three/WebGPU path with PBR
 metadata, depth behavior, browser-console validation, and pixel evidence.
+The capability gate now blocks that no-full-readback bridge until Three WebGPU
+has an initialized backend device and it matches the resident device; do not
+count a WebGPU renderer object alone as bridge readiness.
 
 Current routing note, 2026-06-18 AKDT: browser visual probes now treat
 DevTools console WebGPU validation as first-class evidence. The probe captures

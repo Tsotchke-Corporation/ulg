@@ -27206,3 +27206,24 @@ Validation:
   `totalDispatches=8`, P2G `particle-parallel-scatter`, G2P
   `particle-parallel-gather`, and active-grid finalize/update dispatch over
   `active-grid-node` axes.
+
+## 2026-06-18 13:25 AKDT - Three WebGPU Surface Buffer Capability Gate
+
+Status:
+
+- Tightened the native marching-cubes/extension surface renderer capability
+  gate so the no-full-readback `three-webgpu-surface-buffers` bridge does not
+  report support until the engine-owned Three WebGPU renderer has an
+  initialized backend device.
+- The capability still reports support when the renderer backend device exists
+  and matches the resident device, but it now publishes
+  `same-device-gpu-buffer-geometry-blocked-three-webgpu-device-pending` while
+  Three has not exposed the backend device. This prevents false promotion into
+  the unstable no-readback surface bridge and keeps the mounted engine path
+  away from overlay-style fallback behavior.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|extension surface renderer capability|external interleaved|surface draw"` reported `43/43` pass.

@@ -9964,3 +9964,16 @@ MLS-MPM dispatch topology contract, 2026-06-18 13:11 AKDT:
     `fusedResidentSequenceStepCount=2`, `totalDispatches=8`, P2G
     `particle-parallel-scatter`, G2P `particle-parallel-gather`, and
     active-grid finalize/update dispatch over `active-grid-node` axes.
+
+Three WebGPU surface buffer capability gate, 2026-06-18 13:25 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|extension surface renderer capability|external interleaved|surface draw"`
+  - Passed: `43/43`.
+  - The capability contract now blocks no-full-readback external GPUBuffer
+    geometry as `same-device-gpu-buffer-geometry-blocked-three-webgpu-device-pending`
+    until Three WebGPU exposes an initialized backend device, while still
+    allowing the same-device bridge when renderer and resident devices match.

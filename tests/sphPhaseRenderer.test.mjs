@@ -164,7 +164,7 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(webgl.visibleNoReadbackSupported, false);
   assert.match(webgl.reason, /WebGLRenderer/);
 
-  const webgpu = resolveResidentExtensionSurfaceRendererCapability({
+  const pendingWebGpuDevice = resolveResidentExtensionSurfaceRendererCapability({
     renderer: {
       isWebGPURenderer: true,
       backend: { get() { return { buffer: {} }; } },
@@ -172,8 +172,31 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
     },
     readbackMode: 'no-full-readback'
   });
+  assert.equal(pendingWebGpuDevice.rendererBackend, 'three-webgpu');
+  assert.equal(
+    pendingWebGpuDevice.status,
+    'same-device-gpu-buffer-geometry-blocked-three-webgpu-device-pending'
+  );
+  assert.equal(pendingWebGpuDevice.rendererBackendDeviceReady, false);
+  assert.equal(pendingWebGpuDevice.sameDeviceGpuBufferGeometrySupported, false);
+  assert.equal(pendingWebGpuDevice.visibleNoReadbackSupported, false);
+
+  const supportedDevice = { label: 'renderer-resident-device' };
+  const webgpu = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: supportedDevice,
+        get() { return { buffer: {} }; }
+      },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback',
+    device: supportedDevice
+  });
   assert.equal(webgpu.rendererBackend, 'three-webgpu');
   assert.equal(webgpu.status, 'same-device-gpu-buffer-geometry-supported');
+  assert.equal(webgpu.rendererBackendDeviceReady, true);
   assert.equal(webgpu.sameDeviceGpuBufferGeometrySupported, true);
   assert.equal(webgpu.visibleNoReadbackSupported, true);
 

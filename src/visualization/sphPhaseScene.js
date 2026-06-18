@@ -239,12 +239,13 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     && renderer?.userData?.sphWebGpuPresentationEnabled === false
   );
   const sameDeviceAsResident = Boolean(
-    !device
-    || (rendererBackendDevice && rendererBackendDevice === device)
+    rendererBackendDevice
+    && (!device || rendererBackendDevice === device)
   );
   const sameDeviceGpuBufferGeometrySupported = Boolean(
     rendererBackend === 'three-webgpu'
     && backendBufferBindingAvailable
+    && rendererBackendDeviceReady
     && !rendererPresentationDisabled
     && sameDeviceAsResident
   );
@@ -268,7 +269,7 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   } else if (rendererPresentationDisabled) {
     status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-presentation-disabled';
     reason = 'Three WebGPU renderer device is initialized, but scene presentation is disabled pending the Three WebGPU presentation lifetime fix';
-  } else if (rendererBackend === 'three-webgpu' && device && !rendererBackendDeviceReady) {
+  } else if (rendererBackend === 'three-webgpu' && !rendererBackendDeviceReady) {
     status = 'same-device-gpu-buffer-geometry-blocked-three-webgpu-device-pending';
     reason = 'Three WebGPU renderer backend device is not initialized yet';
   } else if (rendererBackend === 'three-webgpu' && device && !sameDeviceAsResident) {

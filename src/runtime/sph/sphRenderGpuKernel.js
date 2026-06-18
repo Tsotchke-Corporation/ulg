@@ -101,6 +101,7 @@ export const SPH_GPU_RENDER_SURFACE_DRAW_FLOATS = SPH_GPU_RENDER_SURFACE_DRAW_RO
 export const SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS = SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
+export const SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
 
 const RENDER_SCOPE = 'sph-resident-render-row-extraction';
 const RENDER_FIELD_SCOPE = 'sph-resident-render-field-splat';
@@ -479,6 +480,50 @@ function assertWebGpuStorageBufferBindingSizeFitsDevice(device, label, byteLengt
   if (maxStorageBufferBindingSize == null) return;
   if (byteLength <= maxStorageBufferBindingSize) return;
   throw new RangeError(`${label} byte length ${byteLength} exceeds WebGPU device maxStorageBufferBindingSize ${maxStorageBufferBindingSize}`);
+}
+
+function materialInterfaceCandidateRowsByteLength(renderField = null) {
+  const totalFieldCells = Math.max(0, Math.round(finiteNumber(renderField?.totalFieldCells, 0)));
+  return totalFieldCells * 3 * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+}
+
+function materialInterfaceCandidateReadbackBlocker({
+  device,
+  candidateRowsByteLength,
+  candidateReadbackByteBudget = SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT
+} = {}) {
+  const byteLength = Math.max(4, Math.round(finiteNumber(candidateRowsByteLength, 0)));
+  const budget = Math.max(0, Math.round(finiteNumber(
+    candidateReadbackByteBudget,
+    SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT
+  )));
+  if (budget > 0 && byteLength > budget) {
+    return {
+      status: 'candidate-readback-budget-exceeded',
+      reason: `material-interface candidate rows byte length ${byteLength} exceeds readback budget ${budget}`,
+      byteLength,
+      budget
+    };
+  }
+  const maxBufferSize = webGpuDeviceMaxBufferSize(device);
+  if (maxBufferSize != null && byteLength > maxBufferSize) {
+    return {
+      status: 'candidate-readback-max-buffer-size-exceeded',
+      reason: `material-interface candidate rows byte length ${byteLength} exceeds WebGPU device maxBufferSize ${maxBufferSize}`,
+      byteLength,
+      maxBufferSize
+    };
+  }
+  const maxStorageBufferBindingSize = webGpuDeviceMaxStorageBufferBindingSize(device);
+  if (maxStorageBufferBindingSize != null && byteLength > maxStorageBufferBindingSize) {
+    return {
+      status: 'candidate-readback-max-storage-binding-size-exceeded',
+      reason: `material-interface candidate rows byte length ${byteLength} exceeds WebGPU device maxStorageBufferBindingSize ${maxStorageBufferBindingSize}`,
+      byteLength,
+      maxStorageBufferBindingSize
+    };
+  }
+  return null;
 }
 
 function createParamsArray({
@@ -4695,7 +4740,8 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
   surfaceBuffer = null,
   isolationScale = 1,
   source = 'resident-physics-material-interface-extractor',
-  sourceCadence = 'resident-physics-stage'
+  sourceCadence = 'resident-physics-stage',
+  candidateReadbackByteBudget = SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT
 } = {}) {
   const sourceField = renderField?.schema === ULG_SPH_MATERIAL_INTERFACE_SOURCE_FIELD_SCHEMA
     ? renderField
@@ -4703,6 +4749,59 @@ export async function buildSphPhysicsMaterialInterfaceFieldWebGpu({
   const sourceRenderField = sourceField?.sourceRenderField || renderField;
   const resolvedFieldRowsBuffer = fieldRowsBuffer || sourceField?.fieldRowsBuffer || null;
   const resolvedSurfaceBuffer = surfaceBuffer || sourceField?.surfaceBuffer || null;
+  const candidateRowsByteLength = materialInterfaceCandidateRowsByteLength(sourceRenderField);
+  const candidateReadbackBlocker = materialInterfaceCandidateReadbackBlocker({
+    device,
+    candidateRowsByteLength,
+    candidateReadbackByteBudget
+  });
+  if (candidateReadbackBlocker) {
+    return {
+      schema: ULG_SPH_MATERIAL_INTERFACE_FIELD_SCHEMA,
+      status: 'material-interface-field-candidate-readback-skipped',
+      reason: candidateReadbackBlocker.reason,
+      backend: 'webgpu-candidate-readback-skipped',
+      authority: 'resident-physics-material-interface-extractor',
+      source,
+      sourceCadence,
+      sourceFieldSchema: sourceField?.schema ?? null,
+      sourceFieldStatus: sourceField?.status ?? null,
+      sourceFieldBackend: sourceField?.backend ?? null,
+      sourceRenderFieldSchema: sourceRenderField?.schema ?? null,
+      sourceRenderFieldBackend: sourceRenderField?.backend ?? null,
+      sourceRenderFieldReadback: Boolean(sourceRenderField?.renderFieldReadback),
+      sourceFieldRowsBufferBound: Boolean(resolvedFieldRowsBuffer),
+      sourceSurfaceBufferBound: Boolean(resolvedSurfaceBuffer),
+      surfaceCount: sourceRenderField?.surfaceCount ?? 0,
+      readySurfaceCount: 0,
+      totalSurfaceAreaM2: 0,
+      candidateCount: Math.max(0, Math.round(finiteNumber(sourceRenderField?.totalFieldCells, 0))) * 3,
+      activeCandidateCount: 0,
+      candidateBackend: null,
+      candidateReadback: false,
+      candidateRowsByteLength,
+      candidateReadbackByteBudget,
+      candidateReadbackBlockerStatus: candidateReadbackBlocker.status,
+      candidateReadbackBlocker: candidateReadbackBlocker,
+      elementCount: 0,
+      elementLayout: [...SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT],
+      elementStrideFloats: SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
+      elementRows: new Float32Array(),
+      elements: [],
+      forceCouplingStatus: 'blocked-material-interface-candidate-readback-skipped',
+      surfaces: [],
+      queueCompletionStatus: 'not-submitted-candidate-readback-skipped',
+      queueCompletionMethod: null,
+      normalDerivation: 'candidate-readback-skipped-budget-or-device-limit',
+      surfaceAreaDerivation: 'candidate-readback-skipped-budget-or-device-limit',
+      physicsStage: 'material-interface-extraction',
+      pressureInterfaceProducer: false,
+      scientificValidation: false,
+      sphValidation: false,
+      forceCouplingValidation: false,
+      fullPhysicsValidation: false
+    };
+  }
   const candidateField = await buildSphMaterialInterfaceCandidateFieldWebGpu({
     device,
     renderField: sourceRenderField,

@@ -4723,6 +4723,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect([
       'material-interface-field-ready',
       'material-interface-field-gpu-resident-summary-pending',
+      'material-interface-field-candidate-readback-skipped',
       ...(usesThreeRenderRowBridge ? [
         'material-interface-field-skipped-three-render-row-points',
         'material-interface-field-skipped-three-render-row-spheres'
@@ -4909,6 +4910,7 @@ test('SPH phase demo runs derived material properties by default', async ({ page
     expect([
       'material-interface-field-ready',
       'material-interface-field-gpu-resident-summary-pending',
+      'material-interface-field-candidate-readback-skipped',
       ...(usesThreeRenderRowBridge ? [
         'material-interface-field-skipped-three-render-row-points',
         'material-interface-field-skipped-three-render-row-spheres'

@@ -24,6 +24,7 @@ import {
   SPH_GPU_RENDER_SURFACE_DRAW_FLOATS,
   SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
   SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS,
+  SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT,
   SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS,
   SPH_GPU_REACTION_PRODUCT_EVENT_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
@@ -1214,6 +1215,52 @@ test('SPH physics material interface WebGPU wrapper consumes retained field buff
   sourceField.releaseMaterialInterfaceSourceFieldLeases();
   sourceField.destroyMaterialInterfaceSourceFieldBuffers();
   assert.equal(sourceField.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+});
+
+test('SPH physics material interface skips oversized visual-cadence candidate readback before allocation', async () => {
+  const totalFieldCells = Math.ceil(
+    (SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT + 1)
+      / (3 * SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const renderField = {
+    schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+    backend: 'webgpu',
+    status: 'render-field-resident',
+    surfaceCount: 1,
+    totalFieldCells,
+    renderFieldReadback: true
+  };
+  const interfaceField = await buildSphPhysicsMaterialInterfaceFieldWebGpu({
+    device: {
+      limits: {
+        maxBufferSize: 1024 * 1024 * 1024,
+        maxStorageBufferBindingSize: 1024 * 1024 * 1024
+      },
+      queue: {
+        writeBuffer() {
+          throw new Error('writeBuffer should not run after candidate readback budget gate');
+        }
+      },
+      createBuffer() {
+        throw new Error('createBuffer should not run after candidate readback budget gate');
+      }
+    },
+    renderField,
+    source: 'resident-render-refresh-physics-material-interface-extractor',
+    sourceCadence: 'visual-render-refresh'
+  });
+
+  assert.equal(interfaceField.schema, 'peercompute.ulg.sph-material-interface-field.v0');
+  assert.equal(interfaceField.status, 'material-interface-field-candidate-readback-skipped');
+  assert.equal(interfaceField.backend, 'webgpu-candidate-readback-skipped');
+  assert.equal(interfaceField.source, 'resident-render-refresh-physics-material-interface-extractor');
+  assert.equal(interfaceField.sourceCadence, 'visual-render-refresh');
+  assert.equal(interfaceField.candidateReadback, false);
+  assert.equal(interfaceField.candidateReadbackBlockerStatus, 'candidate-readback-budget-exceeded');
+  assert.ok(interfaceField.candidateRowsByteLength > SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT);
+  assert.equal(interfaceField.queueCompletionStatus, 'not-submitted-candidate-readback-skipped');
+  assert.equal(interfaceField.pressureInterfaceProducer, false);
+  assert.equal(interfaceField.elementCount, 0);
 });
 
 test('SPH render field CPU splats only unplaced product-event mass', () => {

@@ -26712,3 +26712,26 @@ Validation:
 - PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
   `9/9` pass.
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `38/38` pass.
+
+## 2026-06-18 10:37 AKDT - Material Interface Readback Budget Gate
+
+Status:
+
+- Added a visual-cadence candidate readback budget to
+  `buildSphPhysicsMaterialInterfaceFieldWebGpu()`.
+- Oversized material-interface candidate fields now publish
+  `material-interface-field-candidate-readback-skipped` before creating any
+  WebGPU buffers. This avoids the 300MB-class `ulg-sph-interface-candidates`
+  and candidate readback allocations when they would exceed browser/device
+  limits or stall the render refresh path.
+- Browser/e2e status expectations now classify the skipped-readback field as a
+  planned performance gate rather than an unknown failure.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`.
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` reported `46/46`
+  pass.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `38/38` pass.

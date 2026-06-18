@@ -368,6 +368,13 @@ Interim status, 2026-06-18 AKDT:
 - The final phase remains a GPU surface/screen-space fluid path that consumes
   resident buffers directly and shares Three/WebGPU depth without CPU
   geometry readback.
+- Material-interface extraction now has an explicit visual-cadence candidate
+  readback budget. Oversized candidate fields publish
+  `material-interface-field-candidate-readback-skipped` before any WebGPU
+  allocation, preventing the 300MB-class candidate/readback buffers from
+  spamming validation errors or stalling render refreshes. The replacement
+  target remains a compact GPU-resident material-interface summary/consumer,
+  not a larger per-frame CPU readback.
 
 ### Phase 6 - Performance Harness
 

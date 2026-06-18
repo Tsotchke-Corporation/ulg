@@ -30,6 +30,7 @@ import {
   resolveThermalStateFromGraphPhaseResponseCpu,
   resolveThermalStateFromTable,
   runSphThermalStepCpu,
+  runSphThermalStepWebGpu,
   runSphThermalStepWithOptionalWebGpu,
   uploadSphThermalResponseGraphBuffers
 } from '../src/runtime/sph/sphThermalGpuKernel.js';
@@ -81,6 +82,79 @@ function totalInternalEnergyJ(packed) {
     total += packed.state[offset + 3] * packed.state[offset + 7];
   }
   return total;
+}
+
+function fakeThermalDeviceWithFence() {
+  let resolveFence;
+  const fence = new Promise((resolve) => {
+    resolveFence = resolve;
+  });
+  const destroyed = [];
+  const buffers = [];
+  const device = {
+    destroyed,
+    buffers,
+    fenceRequestedCount: 0,
+    resolveFence,
+    queue: {
+      writeBuffer() {},
+      submit() {},
+      onSubmittedWorkDone() {
+        device.fenceRequestedCount += 1;
+        return fence;
+      }
+    },
+    createBuffer({ label, size, usage }) {
+      const buffer = {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        destroy() {
+          if (this.destroyed) return;
+          this.destroyed = true;
+          destroyed.push(label);
+        }
+      };
+      buffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule({ label, code }) {
+      return { label, code };
+    },
+    createComputePipeline() {
+      return {
+        getBindGroupLayout(index) {
+          return { index };
+        }
+      };
+    },
+    createBindGroupLayout({ label, entries }) {
+      return { label, entries };
+    },
+    createPipelineLayout({ label, bindGroupLayouts }) {
+      return { label, bindGroupLayouts };
+    },
+    createBindGroup({ layout, entries }) {
+      return { layout, entries };
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline() {},
+            setBindGroup() {},
+            dispatchWorkgroups() {},
+            end() {}
+          };
+        },
+        finish() {
+          return {};
+        }
+      };
+    }
+  };
+  return device;
 }
 
 test('SPH thermal material table packs closure-derived energy/phase segments', () => {
@@ -460,6 +534,57 @@ test('SPH thermal optional WebGPU accepts no-full retained output without CPU pa
   assert.equal(execution.result.stateBuffer.label, 'thermal-state-retained');
   assert.equal(execution.result.thermoBuffer.label, 'thermal-thermo-retained');
   assert.equal(execution.result.normalHotLoopReadbackFree, true);
+});
+
+test('SPH thermal WebGPU defers retained output buffer destruction until submitted work completes', async () => {
+  const packed = packedTwoWaterParticles();
+  const table = buildSphThermalMaterialTable(materialProperties);
+  const graphSet = buildSphThermalClosureGraphBuffers(table);
+  const responseTable = buildSphThermalPhaseResponseTable(table, graphSet);
+  const device = fakeThermalDeviceWithFence();
+  const sourceStateBuffer = { label: 'source-state' };
+  const sourceThermoBuffer = { label: 'source-thermo' };
+  const thermalResponseGraphUpload = {
+    schema: ULG_SPH_GPU_THERMAL_RESPONSE_GRAPH_BUFFER_SET_SCHEMA,
+    status: 'webgpu-uploaded',
+    responseRecordBuffer: { label: 'response-records' },
+    responseBuffer: { label: 'responses' },
+    graphNodeBuffer: { label: 'graph-nodes' },
+    graphSampleBuffer: { label: 'graph-samples' },
+    responseBufferByteLength: responseTable.responses.byteLength,
+    graphSampleBufferByteLength: graphSet.graphBank.sampleRows.byteLength
+  };
+
+  const result = await runSphThermalStepWebGpu({
+    device,
+    sphParticleState: packed,
+    thermalMaterialTable: table,
+    thermalClosureGraphSet: graphSet,
+    thermalClosureGraphBank: graphSet.graphBank,
+    thermalPhaseResponseTable: responseTable,
+    thermalResponseGraphUpload,
+    sphParticleUpload: {
+      stateBuffer: sourceStateBuffer,
+      thermoBuffer: sourceThermoBuffer
+    },
+    retainOutputParticleBuffers: true,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(result.retainedOutputParticleBuffers, true);
+  assert.equal(typeof result.destroyOutputParticleBuffers, 'function');
+  result.destroyOutputParticleBuffers();
+  result.destroyOutputParticleBuffers();
+  assert.equal(device.destroyed.includes('ulg-sph-thermal-output-state'), false);
+  assert.equal(device.destroyed.includes('ulg-sph-thermal-output-thermo'), false);
+
+  device.resolveFence();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-state').length, 1);
+  assert.equal(device.destroyed.filter((label) => label === 'ulg-sph-thermal-output-thermo').length, 1);
+  assert.equal(device.fenceRequestedCount, 2);
 });
 
 test('SPH thermal parity rejects state or thermo drift', () => {

@@ -4080,6 +4080,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
     graphCount: 3
   };
   let reactionCalls = 0;
+  let thermalDestroyCalls = 0;
   const step = await runMlsMpmResidentStepWithOptionalWebGpu({
     ...buffers,
     sphParticleUpload: {
@@ -4181,6 +4182,8 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
     },
     thermalStepRunner(args) {
       assert.equal(args.thermalResponseGraphUpload, thermalResponseGraphUpload);
+      const thermalStateBuffer = tracker.buffer('thermal-state-before-reaction');
+      const thermalThermoBuffer = tracker.buffer('thermal-thermo-before-reaction');
       return {
         schema: ULG_SPH_GPU_THERMAL_STEP_SCHEMA,
         backend: 'webgpu',
@@ -4188,16 +4191,17 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
         particleCount: buffers.sphParticleState.particleCount,
         state: new Float32Array(),
         thermo: new Float32Array(),
-        stateBuffer: tracker.buffer('thermal-state-before-reaction'),
-        thermoBuffer: tracker.buffer('thermal-thermo-before-reaction'),
+        stateBuffer: thermalStateBuffer,
+        thermoBuffer: thermalThermoBuffer,
         stateBufferByteLength: buffers.sphParticleState.state.byteLength,
         thermoBufferByteLength: buffers.sphParticleState.thermo.byteLength,
         retainedOutputParticleBuffers: true,
         readbackMode: args.readbackMode,
         normalHotLoopReadbackFree: true,
         destroyOutputParticleBuffers() {
-          this.stateBuffer.destroy();
-          this.thermoBuffer.destroy();
+          thermalDestroyCalls += 1;
+          thermalStateBuffer.destroy();
+          thermalThermoBuffer.destroy();
         }
       };
     },
@@ -4379,6 +4383,7 @@ test('MLS-MPM resident no-full step runs reaction from retained GPU buffers', as
   assert.deepEqual(step.diagnostics.reactionStrictGateBlockers, []);
   assert.equal(tracker.destroyed, 0);
   destroyMlsMpmResidentStepBuffers(step);
+  assert.equal(thermalDestroyCalls, 1);
 	  assert.equal(tracker.destroyed, 10);
 });
 

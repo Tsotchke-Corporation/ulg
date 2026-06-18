@@ -1422,6 +1422,17 @@ export async function runSphThermalStepWebGpu({
   } else {
     cleanup();
   }
+  let outputParticleBuffersDestroyed = false;
+  const destroyRetainedOutputParticleBuffers = retainOutputParticleBuffers
+    ? () => {
+      if (outputParticleBuffersDestroyed) return;
+      outputParticleBuffersDestroyed = true;
+      deferSubmittedWorkCleanup(device, () => {
+        outStateBuffer.destroy?.();
+        outThermoBuffer.destroy?.();
+      });
+    }
+    : null;
   return outputEnvelope({
     backend: 'webgpu',
     sphParticleState,
@@ -1443,12 +1454,7 @@ export async function runSphThermalStepWebGpu({
     stateBufferByteLength: sphParticleState.state.byteLength,
     thermoBufferByteLength: sphParticleState.thermo.byteLength,
     retainedOutputParticleBuffers: retainOutputParticleBuffers,
-    destroyOutputParticleBuffers: retainOutputParticleBuffers
-      ? () => {
-        outStateBuffer.destroy?.();
-        outThermoBuffer.destroy?.();
-      }
-      : null,
+    destroyOutputParticleBuffers: destroyRetainedOutputParticleBuffers,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
   });
 }

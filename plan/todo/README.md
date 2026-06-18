@@ -82,10 +82,21 @@ as local handles.
 Current routing note, 2026-06-18 AKDT: the browser WGSL parser error in
 `ulg-sph-render-field-surface-summary` is fixed. `active` was renamed to
 `has_active_cells`, and the WebGPU ABI test now guards against exact WGSL
-`let|var|const active` declarations. Keep the separate
-`ulg-sph-thermal-output-state used in submit while destroyed` warning in the
-behavior/visual-trust lane; it is likely a thermal hot-buffer lifetime or lease
-cleanup bug, not the render-field surface-summary parser failure.
+`let|var|const active` declarations. The separate
+`ulg-sph-thermal-output-state used in submit while destroyed` warning is also
+fixed: retained thermal output destruction is now idempotent and deferred until
+submitted WebGPU queue work completes, and resident cleanup releases superseded
+thermal buffers through the thermal stage destroyer before generic direct
+buffer cleanup can touch them. Keep watching browser console issue counts for
+regressions.
+
+Current routing note, 2026-06-18 AKDT: initial particle spacing should be
+treated as physics setup, not rendering density. The next initialization pass
+should derive drop/base lattice spacing from material, initial temperature,
+phase/rest-density closure, target neighbor count, and box/support constraints.
+This matters before broad performance tuning because bad initial packing
+inflates neighbor/interface work and produces incoherent contact, pressure, and
+thermal coupling.
 
 Current routing note, 2026-06-18 AKDT: the cold same-material CPU-SPH
 solid-H2O static row remains stable under the current dense visual sequence

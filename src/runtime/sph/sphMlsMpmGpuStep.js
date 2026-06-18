@@ -11648,8 +11648,17 @@ export function destroyMlsMpmResidentStepBuffers(step, {
   preserveBuffers = []
 } = {}) {
   const preserved = new Set((preserveBuffers || []).filter(Boolean));
+  const released = new Set();
+  const releaseRetainedOutputBuffers = (output, buffers) => {
+    const retainedBuffers = (buffers || []).filter(Boolean);
+    if (!retainedBuffers.length || typeof output?.destroyOutputParticleBuffers !== 'function') return false;
+    if (retainedBuffers.some((buffer) => preserved.has(buffer))) return false;
+    output.destroyOutputParticleBuffers();
+    for (const buffer of retainedBuffers) released.add(buffer);
+    return true;
+  };
   const destroyUnlessPreserved = (buffer) => {
-    if (!buffer || preserved.has(buffer)) return;
+    if (!buffer || preserved.has(buffer) || released.has(buffer)) return;
     buffer.destroy?.();
   };
   const destroySphUploadUnlessPreserved = (upload) => {
@@ -11673,6 +11682,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     const thermalOutput = retainedThermalOutputBuffers(step.thermalStep);
     const reactionOutput = retainedReactionOutputBuffers(step.reactionStep);
     const mechanicsRefreshOutput = retainedMechanicsRefreshOutputBuffers(step.mechanicsRefreshStep);
+    releaseRetainedOutputBuffers(thermalOutput, [thermalOutput.stateBuffer, thermalOutput.thermoBuffer]);
     destroySphUploadUnlessPreserved(step.nextParticleUploads.sphParticleUpload);
     destroyMlsUploadUnlessPreserved(step.nextParticleUploads.mlsMpmParticleUpload);
     if (g2pOutput.stateBuffer && g2pOutput.stateBuffer !== usedStateBuffer) destroyUnlessPreserved(g2pOutput.stateBuffer);

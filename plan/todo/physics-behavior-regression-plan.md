@@ -31,9 +31,19 @@ state that moves on screen is the state the laws actually mutated.
   `peercompute-worker-inline-fallback` warning is expected from the current
   local authority host defaulting `enableWorkers=false`. The same user console
   also showed `ulg-sph-thermal-output-state` submitted after destroy on a hot
-  Fe/H2O SPH route. Keep that as a separate open thermal hot-buffer
-  lifetime/lease bug; do not conflate it with the WGSL parser failure,
-  required-limit device setup, or water/water flow mechanics.
+  Fe/H2O SPH route. That thermal hot-buffer lifetime bug is now fixed by
+  deferring retained thermal output destruction behind `queue.onSubmittedWorkDone`
+  and routing resident cleanup through the thermal stage destroyer when thermal
+  output is superseded. Validation: thermal/resident unit tests pass, and a
+  short H2O/H2O resident browser probe completed with
+  `browserConsoleIssueCount=0`.
+- 2026-06-18 AKDT update: initial particle spacing is now an explicit physics
+  setup todo. The user's observation is correct: lattice spacing should vary by
+  material and initial temperature/phase, using closure-derived rest density
+  and target neighbor count rather than fixed drop/base edge counts alone.
+  Implement this before broad visual/performance retuning, because overpacked
+  or underpacked initial states contaminate pressure, contact, thermal, and
+  interface workloads before the GPU kernels ever run.
 - 2026-06-18 AKDT update: the current dense visual harness does not reproduce
   "ice flows like water" in the cold same-material CPU-SPH static H2O/H2O
   support fixture. Run `codex-solid-h2o-static-sequence-20260618` passed with

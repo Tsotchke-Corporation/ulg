@@ -143,16 +143,52 @@ test('demo initial particle spacing coarsens low-density hot vapor and can prese
     adaptiveParticleSpacing: false
   });
 
+  const liquidDropParticle = liquidWater.state.particles.find((p) => p.role === 'drop');
+  const liquidBaseParticle = liquidWater.state.particles.find((p) => p.role === 'base');
+  assert.equal(liquidWater.initialParticleSpacing.matchingMaterialState, true);
+  assert.equal(liquidWater.initialParticleSpacing.matchingMaterialStateSpacingUnified, true);
   assert.equal(liquidWater.initialParticleSpacing.drop.particlesPerEdge, 3);
-  assert.equal(liquidWater.initialParticleSpacing.base.particlesPerEdge, 5);
+  assert.equal(liquidWater.initialParticleSpacing.base.particlesPerEdge, 6);
+  near(liquidWater.initialParticleSpacing.drop.spacingM, liquidWater.initialParticleSpacing.base.spacingM);
+  near(liquidDropParticle.initialParticleSpacingM, liquidBaseParticle.initialParticleSpacingM);
+  near(liquidDropParticle.particleRadiusM, liquidBaseParticle.particleRadiusM);
   assert.ok(hotVapor.initialParticleSpacing.drop.densityKgPerM3 < liquidWater.initialParticleSpacing.drop.densityKgPerM3);
   assert.ok(hotVapor.initialParticleSpacing.drop.particlesPerEdge < liquidWater.initialParticleSpacing.drop.particlesPerEdge);
   assert.ok(hotVapor.initialParticleSpacing.drop.spacingM > liquidWater.initialParticleSpacing.drop.spacingM);
   assert.equal(fixed.initialParticleSpacing.status, 'fixed-requested-particles-per-edge');
+  assert.equal(fixed.initialParticleSpacing.matchingMaterialState, false);
+  assert.equal(fixed.initialParticleSpacing.matchingMaterialStateSpacingUnified, false);
   assert.equal(fixed.initialParticleSpacing.drop.particlesPerEdge, 3);
   assert.equal(fixed.initialParticleSpacing.base.particlesPerEdge, 5);
   assert.equal(fixed.counts.drop, 27);
   assert.equal(fixed.counts.base, 125);
+});
+
+test('same material and temperature initialize with matching physical particle radius', () => {
+  const demo = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 290,
+    baseTemperatureK: 290,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1.5,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const spacing = demo.initialParticleSpacing;
+  const dropParticle = demo.state.particles.find((p) => p.role === 'drop');
+  const baseParticle = demo.state.particles.find((p) => p.role === 'base');
+
+  assert.equal(spacing.matchingMaterialState, true);
+  assert.equal(spacing.matchingMaterialStateSpacingUnified, true);
+  assert.ok(spacing.base.particlesPerEdge !== spacing.base.requestedParticlesPerEdge);
+  near(spacing.drop.spacingM, spacing.base.spacingM);
+  near(spacing.drop.volumeEquivalentParticleRadiusM, spacing.base.volumeEquivalentParticleRadiusM);
+  near(dropParticle.initialParticleSpacingM, baseParticle.initialParticleSpacingM);
+  near(dropParticle.initialCellVolumeM3, baseParticle.initialCellVolumeM3);
+  near(dropParticle.particleRadiusM, baseParticle.particleRadiusM);
+  assert.equal(dropParticle.material, baseParticle.material);
+  assert.equal(dropParticle.temperatureK, baseParticle.temperatureK);
 });
 
 test('particle phase + temperature come from the closure energy', () => {
@@ -273,6 +309,7 @@ test('demo exposes plain SPH as a CPU reference mechanics mode', () => {
     ironBaseHeightM: 0.85,
     dropParticleEdge: 1,
     baseParticleEdge: 1,
+    adaptiveParticleSpacing: false,
     mechanics: 'sph'
   });
   assert.equal(driver.demo.gpuMechanics.integrator, 'sph');

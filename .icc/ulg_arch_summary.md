@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `333`
-- total lines indexed: `199710`
+- total lines indexed: `199860`
 - languages: `{"markdown": 127, "javascript": 106, "text": 85, "json": 14, "c": 1}`
 
 ## Important Files
@@ -47,8 +47,8 @@
 ## Top Modules
 
 - `plan/done`: 93 files, 5295 lines, symbols=0, tests=0, languages={"markdown": 93}
-- `tests`: 73 files, 40016 lines, symbols=0, tests=73, languages={"text": 73}
-- `src/runtime`: 31 files, 18017 lines, symbols=394, tests=0, languages={"javascript": 31}
+- `tests`: 73 files, 40053 lines, symbols=0, tests=73, languages={"text": 73}
+- `src/runtime`: 31 files, 18130 lines, symbols=398, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 27 files, 34319 lines, symbols=784, tests=0, languages={"javascript": 27}
 - `src/runtime/material`: 18 files, 4770 lines, symbols=206, tests=0, languages={"javascript": 18}
 - `plan/todo`: 18 files, 9953 lines, symbols=0, tests=0, languages={"markdown": 18}
@@ -87,7 +87,7 @@
 | 5061 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 5057 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
 | 4329 | `scripts/sph-long-horizon-probe.mjs` | text |
-| 2963 | `src/runtime/sphPhaseDemo.js` | javascript |
+| 3076 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2522 | `plan/plan.md` | markdown |
 | 2172 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2172 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
@@ -96,7 +96,7 @@
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
 | 1943 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 1624 | `src/runtime/sph/sphThermalGpuKernel.js` | javascript |
-| 1485 | `tests/sphPhaseDemo.test.mjs` | text |
+| 1522 | `tests/sphPhaseDemo.test.mjs` | text |
 | 1471 | `ulg-gpu-abi/src/index.js` | javascript |
 | 1444 | `plan/todo/physics-behavior-regression-plan.md` | markdown |
 | 1437 | `src/runtime/sph/sphReactionGpuSummary.js` | javascript |

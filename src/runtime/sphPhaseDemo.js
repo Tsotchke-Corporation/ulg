@@ -170,10 +170,15 @@ function clampInteger(value, min, max) {
   return Math.max(min, Math.min(max, Math.round(value)));
 }
 
-function cappedAdaptiveParticleEdge({ desiredEdge, requestedEdge }) {
+function adaptiveParticleEdgeBounds(requestedEdge) {
   const requested = positiveParticleEdge(requestedEdge);
   const minEdge = requested <= 1 ? 1 : Math.max(2, Math.floor(requested * 0.67));
   const maxEdge = Math.max(minEdge, Math.ceil(requested * 1.5));
+  return { requested, minEdge, maxEdge };
+}
+
+function cappedAdaptiveParticleEdge({ desiredEdge, requestedEdge }) {
+  const { minEdge, maxEdge } = adaptiveParticleEdgeBounds(requestedEdge);
   return clampInteger(desiredEdge, minEdge, maxEdge);
 }
 
@@ -184,6 +189,67 @@ function smoothingLengthRatioForTargetNeighborCount(targetNeighborCount) {
   return Math.cbrt((3 * count) / (32 * Math.PI));
 }
 
+function logSpacingError(a, b) {
+  if (!(a > 0) || !(b > 0)) return Number.POSITIVE_INFINITY;
+  return Math.abs(Math.log(a / b));
+}
+
+function relativeEdgeDeviation(edge, requestedEdge) {
+  const requested = positiveParticleEdge(requestedEdge);
+  return Math.abs(edge - requested) / Math.max(1, requested);
+}
+
+function chooseMatchingMaterialStateEdges({
+  dropSizeM,
+  baseSizeM,
+  dropRequestedParticlesPerEdge,
+  baseRequestedParticlesPerEdge,
+  targetSpacingM,
+  requestedParticleBudget
+}) {
+  if (!(dropSizeM > 0) || !(baseSizeM > 0) || !(targetSpacingM > 0)) return null;
+  const dropBounds = adaptiveParticleEdgeBounds(dropRequestedParticlesPerEdge);
+  const baseBounds = adaptiveParticleEdgeBounds(baseRequestedParticlesPerEdge);
+  let best = null;
+  for (let dropEdge = dropBounds.minEdge; dropEdge <= dropBounds.maxEdge; dropEdge += 1) {
+    const dropSpacingM = dropSizeM / dropEdge;
+    for (let baseEdge = baseBounds.minEdge; baseEdge <= baseBounds.maxEdge; baseEdge += 1) {
+      const baseSpacingM = baseSizeM / baseEdge;
+      const particleBudget = dropEdge ** 3 + baseEdge ** 3;
+      const spacingMismatch = logSpacingError(dropSpacingM, baseSpacingM);
+      const targetSpacingError = 0.5 * (
+        logSpacingError(dropSpacingM, targetSpacingM)
+        + logSpacingError(baseSpacingM, targetSpacingM)
+      );
+      const budgetDeviation = Math.abs(particleBudget - requestedParticleBudget) / Math.max(1, requestedParticleBudget);
+      const requestedDeviation = (
+        relativeEdgeDeviation(dropEdge, dropBounds.requested)
+        + relativeEdgeDeviation(baseEdge, baseBounds.requested)
+      );
+      const score = spacingMismatch * 100 + targetSpacingError * 10 + budgetDeviation + requestedDeviation * 0.25;
+      if (
+        !best
+        || score < best.score - 1e-12
+        || (Math.abs(score - best.score) <= 1e-12 && targetSpacingError < best.targetSpacingError)
+      ) {
+        best = {
+          dropEdge,
+          baseEdge,
+          dropSpacingM,
+          baseSpacingM,
+          particleBudget,
+          spacingMismatch,
+          targetSpacingError,
+          budgetDeviation,
+          requestedDeviation,
+          score
+        };
+      }
+    }
+  }
+  return best;
+}
+
 function resolveInitialParticleSpacingPlan({
   dropSizeM,
   baseSizeM,
@@ -192,6 +258,7 @@ function resolveInitialParticleSpacingPlan({
   dropRequestedParticlesPerEdge,
   baseRequestedParticlesPerEdge,
   adaptiveParticleSpacing = true,
+  matchingMaterialState = false,
   targetNeighborCount = DEFAULT_INITIAL_TARGET_NEIGHBOR_COUNT,
   maxSmoothingLengthRatio = DEFAULT_INITIAL_MAX_SMOOTHING_LENGTH_RATIO
 }) {
@@ -207,19 +274,21 @@ function resolveInitialParticleSpacingPlan({
   const requestedParticleBudget = dropRequested ** 3 + baseRequested ** 3;
   const totalMassKg = dropDensity * dropVolumeM3 + baseDensity * baseVolumeM3;
   const targetParticleMassKg = totalMassKg / Math.max(1, requestedParticleBudget);
+  const targetDensity = totalMassKg / Math.max(dropVolumeM3 + baseVolumeM3, 1e-9);
+  const targetSpacingM = Math.cbrt(targetParticleMassKg / Math.max(targetDensity, 1e-9));
 
+  const withSupportMetadata = (row) => {
+    const spacingM = Number(row.spacingM);
+    const targetSmoothingLengthM = spacingM > 0 ? spacingM * smoothingLengthRatio : 0;
+    return {
+      ...row,
+      targetSmoothingLengthM,
+      targetNeighborCount: neighborTarget,
+      volumeEquivalentParticleRadiusM: volumeEquivalentSphereRadiusM(spacingM ** 3)
+    };
+  };
   const resolveRole = ({ role, sizeM, densityKgPerM3, requestedParticlesPerEdge }) => {
     const uniformSpacingM = sizeM / requestedParticlesPerEdge;
-    const withSupportMetadata = (row) => {
-      const spacingM = Number(row.spacingM);
-      const targetSmoothingLengthM = spacingM > 0 ? spacingM * smoothingLengthRatio : 0;
-      return {
-        ...row,
-        targetSmoothingLengthM,
-        targetNeighborCount: neighborTarget,
-        volumeEquivalentParticleRadiusM: volumeEquivalentSphereRadiusM(spacingM ** 3)
-      };
-    };
     if (!adaptiveParticleSpacing) {
       return withSupportMetadata({
         role,
@@ -249,18 +318,42 @@ function resolveInitialParticleSpacingPlan({
     });
   };
 
-  const drop = resolveRole({
+  let drop = resolveRole({
     role: 'drop',
     sizeM: dropSizeM,
     densityKgPerM3: dropDensity,
     requestedParticlesPerEdge: dropRequested
   });
-  const base = resolveRole({
+  let base = resolveRole({
     role: 'base',
     sizeM: baseSizeM,
     densityKgPerM3: baseDensity,
     requestedParticlesPerEdge: baseRequested
   });
+  const matchingMaterialStateEdges = adaptiveParticleSpacing && matchingMaterialState
+    ? chooseMatchingMaterialStateEdges({
+      dropSizeM,
+      baseSizeM,
+      dropRequestedParticlesPerEdge: dropRequested,
+      baseRequestedParticlesPerEdge: baseRequested,
+      targetSpacingM,
+      requestedParticleBudget
+    })
+    : null;
+  if (matchingMaterialStateEdges) {
+    drop = withSupportMetadata({
+      ...drop,
+      particlesPerEdge: matchingMaterialStateEdges.dropEdge,
+      spacingM: matchingMaterialStateEdges.dropSpacingM,
+      matchingMaterialStateSpacingUnified: true
+    });
+    base = withSupportMetadata({
+      ...base,
+      particlesPerEdge: matchingMaterialStateEdges.baseEdge,
+      spacingM: matchingMaterialStateEdges.baseSpacingM,
+      matchingMaterialStateSpacingUnified: true
+    });
+  }
   const roleSpacingM = [drop.spacingM, base.spacingM].filter((value) => Number.isFinite(value) && value > 0);
   const minSpacingM = roleSpacingM.length ? Math.min(...roleSpacingM) : 0;
   const uncappedSmoothingLengthM = Math.max(drop.targetSmoothingLengthM, base.targetSmoothingLengthM);
@@ -289,8 +382,24 @@ function resolveInitialParticleSpacingPlan({
     uncappedSmoothingLengthM,
     smoothingLengthCapM,
     smoothingLengthCapped: smoothingLengthM < uncappedSmoothingLengthM - 1e-12,
+    matchingMaterialState: Boolean(matchingMaterialState),
+    matchingMaterialStateSpacingUnified: Boolean(matchingMaterialStateEdges),
+    matchingMaterialStateSpacingPlan: matchingMaterialStateEdges
+      ? {
+        dropParticlesPerEdge: matchingMaterialStateEdges.dropEdge,
+        baseParticlesPerEdge: matchingMaterialStateEdges.baseEdge,
+        dropSpacingM: matchingMaterialStateEdges.dropSpacingM,
+        baseSpacingM: matchingMaterialStateEdges.baseSpacingM,
+        spacingMismatch: matchingMaterialStateEdges.spacingMismatch,
+        targetSpacingError: matchingMaterialStateEdges.targetSpacingError,
+        particleBudget: matchingMaterialStateEdges.particleBudget,
+        requestedParticleBudget,
+        budgetDeviation: matchingMaterialStateEdges.budgetDeviation
+      }
+      : null,
     requestedParticleBudget,
     targetParticleMassKg,
+    targetSpacingM,
     totalMassKg,
     drop,
     base
@@ -531,6 +640,9 @@ export function buildSphPhaseDemoState({
   const baseTempK = baseTemperatureK ?? scenario.ice.initialTemperatureK;
   const dropDensityKgPerM3 = densityAtTemperatureKgPerM3(dropProps, dropTempK);
   const baseDensityKgPerM3 = densityAtTemperatureKgPerM3(baseProps, baseTempK);
+  const matchingMaterialState = String(dropMaterial).toLowerCase() === String(baseMaterial).toLowerCase()
+    && Math.abs(dropTempK - baseTempK) <= 1e-6
+    && Math.abs(dropDensityKgPerM3 - baseDensityKgPerM3) <= Math.max(1e-6, Math.abs(baseDensityKgPerM3) * 1e-6);
   const initialParticleSpacing = resolveInitialParticleSpacingPlan({
     dropSizeM: ironEdge,
     baseSizeM: iceEdge,
@@ -539,6 +651,7 @@ export function buildSphPhaseDemoState({
     dropRequestedParticlesPerEdge: dropParticleEdge,
     baseRequestedParticlesPerEdge: baseParticleEdge,
     adaptiveParticleSpacing,
+    matchingMaterialState,
     targetNeighborCount: initialTargetNeighborCount,
     maxSmoothingLengthRatio: initialMaxSmoothingLengthRatio
   });

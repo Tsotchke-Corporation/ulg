@@ -241,3 +241,12 @@ test('SPH WebGPU params structs match JS packing and uniform buffer sizes', () =
     writeUsesFactory(source, contract.label, contract.factory);
   }
 });
+
+test('SPH WGSL source avoids reserved local identifiers rejected by browsers', () => {
+  const wgslSource = readRepoText('ulg-gpu-abi/src/wgsl.js');
+  assert.doesNotMatch(
+    wgslSource,
+    /\b(?:let|var|const)\s+active\b/,
+    'WGSL parser rejects active as a reserved local identifier'
+  );
+});

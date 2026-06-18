@@ -3572,17 +3572,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       active_cell_count = active_cell_count + 1u;
     }
   }
-  let active = active_cell_count > 0u;
-  let min_active = select(vec3<f32>(0.0, 0.0, 0.0), min_pos, active);
-  let max_active = select(vec3<f32>(0.0, 0.0, 0.0), max_pos, active);
-  let center = select(vec3<f32>(0.0, 0.0, 0.0), (min_active + max_active) * 0.5, active);
-  let radius = select(0.0, length(max_active - center), active);
+  let has_active_cells = active_cell_count > 0u;
+  let min_active = select(vec3<f32>(0.0, 0.0, 0.0), min_pos, has_active_cells);
+  let max_active = select(vec3<f32>(0.0, 0.0, 0.0), max_pos, has_active_cells);
+  let center = select(vec3<f32>(0.0, 0.0, 0.0), (min_active + max_active) * 0.5, has_active_cells);
+  let radius = select(0.0, length(max_active - center), has_active_cells);
   let cell_size_m = max(params.ref_edge_m, 1.0e-12)
     / max(1.0e-12, (1.0 - 2.0 * params.field_padding) * f32(resolution));
   let base = surface_index * 5u;
   surface_summary_rows[base] = vec4<f32>(f32(surface_index), row0.x, row0.y, row3.y);
   surface_summary_rows[base + 1u] = vec4<f32>(f32(active_cell_count), f32(active_cell_count), max_density, isolation);
-  surface_summary_rows[base + 2u] = vec4<f32>(min_active, select(0.0, 1.0, active));
+  surface_summary_rows[base + 2u] = vec4<f32>(min_active, select(0.0, 1.0, has_active_cells));
   surface_summary_rows[base + 3u] = vec4<f32>(max_active, cell_size_m);
   surface_summary_rows[base + 4u] = vec4<f32>(center, radius);
 }

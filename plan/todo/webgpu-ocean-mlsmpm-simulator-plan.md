@@ -107,6 +107,19 @@ Tactical status, 2026-06-18 AKDT:
   available, but it is not yet the full GUI route or an acceptable performance
   answer: thermal/reaction sidecars, GPU-side bounds reduction, and direct GPU
   surface rendering still need to be folded into the resident sequence.
+- Thermal/reaction-enabled mounted routes can block the multi-step fused
+  resident sequence, so the single-step fused no-full mechanics path now also
+  accepts active-grid dispatch. The console-clean thermal H2O/H2O probe at
+  `artifacts/sph-probe-active-grid-per-step-thermal.json` ran with
+  `compactSummaryMode=none` and reported active dispatch over roughly
+  `2156/5832` grid nodes. This keeps per-step fallback mechanics from
+  reverting to full-grid finalize/update work.
+- A comparison probe with explicit `compactSummaryMode=final-only`
+  (`artifacts/sph-probe-active-grid-final-summary-default.json`) proves that
+  CPU-readable compact bounds are not the default performance fix: it was
+  console-clean but `mapAsync` dominated the batch. The next active-grid
+  milestone is GPU-side resident bounds reduction and indirect/sparse dispatch
+  metadata, not more default compact-summary readback.
 - Queue-fenced warm scale rows at
   `artifacts/sph-performance-benchmark-direct-resident-scale-warm-queue-fenced.json`
   show the resident mechanics lane still scales poorly: final-batch
@@ -480,6 +493,12 @@ Interim status, 2026-06-18 AKDT:
   The remaining mounted-scene bottleneck is unchanged: row-point/row-sphere
   bridges still require render-row readback, so the next architectural renderer
   slice must consume resident GPU render data directly.
+- 2026-06-18 active-grid per-step update: the per-step fused mechanics fallback
+  now uses active-grid P2G/finalize/grid-update kernels when the runtime cannot
+  use a multi-step fused sequence. This is a necessary thermal/reaction sidecar
+  bridge, but it does not change the larger roadmap: final bounds, draw counts,
+  and surface data still need to stay resident so the GUI avoids hidden
+  readback fences.
 
 ## ULG-Specific Constraints
 

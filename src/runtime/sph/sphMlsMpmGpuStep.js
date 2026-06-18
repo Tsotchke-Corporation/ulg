@@ -1317,6 +1317,39 @@ function predictedResidentBoundsFromActiveGridDispatch(activeGridDispatch) {
   return predicted ? { ...predicted, status: 'resident-active-grid-predicted-bounds' } : null;
 }
 
+function residentBoundsContinuationFromStep(step, activeGridDispatch = null, source = null) {
+  const compactBounds = normalizePositionBoundsM(step?.diagnostics?.nextPositionBoundsM);
+  if (compactBounds) {
+    return {
+      boundsM: compactBounds,
+      maxSpeedMPerS: finiteNumber(step?.diagnostics?.maxSpeedMPerS, null),
+      source: 'compact-gpu-summary-next-bounds'
+    };
+  }
+  const stepBounds = normalizePositionBoundsM(step?.residentPositionBoundsM);
+  if (stepBounds) {
+    return {
+      boundsM: stepBounds,
+      maxSpeedMPerS: finiteNumber(step?.residentMaxSpeedMPerS, null),
+      source: step?.residentPositionBoundsSource || 'resident-step-bounds'
+    };
+  }
+  const predictedBounds = predictedResidentBoundsFromActiveGridDispatch(activeGridDispatch);
+  if (predictedBounds) {
+    return {
+      boundsM: predictedBounds,
+      maxSpeedMPerS: finiteNumber(activeGridDispatch?.maxSpeedMPerS, null),
+      source: 'active-grid-predicted-bounds'
+    };
+  }
+  const sourceBounds = normalizePositionBoundsM(source?.residentPositionBoundsM);
+  return {
+    boundsM: sourceBounds,
+    maxSpeedMPerS: finiteNumber(source?.residentMaxSpeedMPerS, null),
+    source: sourceBounds ? 'source-resident-bounds' : null
+  };
+}
+
 function fullGridDispatchMetadata({ status, reason = null, gridSpec, requested = false }) {
   return {
     schema: ULG_MLS_MPM_FUSED_ACTIVE_GRID_DISPATCH_SCHEMA,
@@ -1493,7 +1526,9 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   dt = mlsMpmParticleState?.mechanicsDtS ?? 0,
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   cflFactor = DEFAULT_CFL_FACTOR,
-  internalPressureScale = 1
+  internalPressureScale = 1,
+  fuseActiveGrid = false,
+  activeGridSafetyCells = DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS
 }) {
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -1506,10 +1541,22 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const updatedGridByteLength = gridSpec.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const stateByteLength = sphParticleState.state.byteLength;
   const mechanicsByteLength = mlsMpmParticleState.mechanics.byteLength;
+  const activeGridDispatch = resolveFusedActiveGridDispatch({
+    requested: fuseActiveGrid,
+    sphParticleState,
+    gridSpec,
+    dt: dtSeconds,
+    stepCount: 1,
+    gravityMPerS2: gravity,
+    safetyCells: activeGridSafetyCells
+  });
+  const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
+    ? activeGridDispatch.activeNodeCount
+    : gridSpec.gridNodeCount;
   const gridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-out',
     size: Math.max(4, gridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const p2gAccumulatorBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-p2g-grid-accumulators',
@@ -1519,7 +1566,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const updatedGridBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-grid-update-out',
     size: Math.max(4, updatedGridByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | (activeGridDispatch.useActiveGrid ? GPU_BUFFER_USAGE.COPY_DST : 0)
   });
   const outStateBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-fused-g2p-state-out',
@@ -1534,20 +1581,32 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const p2gParamsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-p2g-params',
-    createFusedP2gParamsArray(gridSpec, particleCount, dtSeconds, internalPressureScale),
+    activeGridDispatch.useActiveGrid
+      ? createFusedActiveP2gParamsArray(gridSpec, particleCount, dtSeconds, internalPressureScale, activeGridDispatch)
+      : createFusedP2gParamsArray(gridSpec, particleCount, dtSeconds, internalPressureScale),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
   const gridUpdateParamsBuffer = writeGpuBuffer(
     device,
     'ulg-mls-mpm-fused-grid-update-params',
-    createFusedGridUpdateParamsArray({
-      gridSpec,
-      dt: dtSeconds,
-      gravityMPerS2: gravity,
-      boxDimsM: dims,
-      cflFactor,
-      pressureInterfaceForceRowCount: 0
-    }),
+    activeGridDispatch.useActiveGrid
+      ? createFusedActiveGridUpdateParamsArray({
+          gridSpec,
+          dt: dtSeconds,
+          gravityMPerS2: gravity,
+          boxDimsM: dims,
+          cflFactor,
+          pressureInterfaceForceRowCount: 0,
+          activeGridDispatch
+        })
+      : createFusedGridUpdateParamsArray({
+          gridSpec,
+          dt: dtSeconds,
+          gravityMPerS2: gravity,
+          boxDimsM: dims,
+          cflFactor,
+          pressureInterfaceForceRowCount: 0
+        }),
     GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   );
   const g2pParamsBuffer = writeGpuBuffer(
@@ -1589,16 +1648,28 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       computeBufferBinding(6, 'storage')
     ];
     const { pipeline: p2gPipeline, bindGroupLayout: p2gBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.scatter.v1',
-      label: 'ulg-mls-mpm-p2g-grid-projection',
-      code: mlsMpmP2gGridProjectionWgsl,
+      cacheKey: activeGridDispatch.useActiveGrid
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.scatter.v1'
+        : 'ulg-mls-mpm-p2g-grid-projection.scatter.v1',
+      label: activeGridDispatch.useActiveGrid
+        ? 'ulg-mls-mpm-p2g-grid-projection-active-grid'
+        : 'ulg-mls-mpm-p2g-grid-projection',
+      code: activeGridDispatch.useActiveGrid
+        ? mlsMpmP2gGridProjectionActiveGridWgsl
+        : mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'main',
       bindings: p2gBindings
     });
     const { pipeline: p2gFinalizePipeline, bindGroupLayout: p2gFinalizeBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-p2g-grid-projection.finalize.v1',
-      label: 'ulg-mls-mpm-p2g-grid-finalize',
-      code: mlsMpmP2gGridProjectionWgsl,
+      cacheKey: activeGridDispatch.useActiveGrid
+        ? 'ulg-mls-mpm-p2g-grid-projection.active-grid.finalize.v1'
+        : 'ulg-mls-mpm-p2g-grid-projection.finalize.v1',
+      label: activeGridDispatch.useActiveGrid
+        ? 'ulg-mls-mpm-p2g-grid-finalize-active-grid'
+        : 'ulg-mls-mpm-p2g-grid-finalize',
+      code: activeGridDispatch.useActiveGrid
+        ? mlsMpmP2gGridProjectionActiveGridWgsl
+        : mlsMpmP2gGridProjectionWgsl,
       entryPoint: 'finalize_grid',
       bindings: p2gBindings
     });
@@ -1614,9 +1685,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gBindGroup = device.createBindGroup({ layout: p2gBindGroupLayout, entries: p2gEntries });
     const p2gFinalizeBindGroup = device.createBindGroup({ layout: p2gFinalizeBindGroupLayout, entries: p2gEntries });
     const { pipeline: gridUpdatePipeline, bindGroupLayout: gridUpdateBindGroupLayout } = createCachedExplicitComputePipeline(device, {
-      cacheKey: 'ulg-mls-mpm-grid-update.v2',
-      label: 'ulg-mls-mpm-grid-update',
-      code: mlsMpmGridUpdateWgsl,
+      cacheKey: activeGridDispatch.useActiveGrid
+        ? 'ulg-mls-mpm-grid-update.active-grid.v2'
+        : 'ulg-mls-mpm-grid-update.v2',
+      label: activeGridDispatch.useActiveGrid
+        ? 'ulg-mls-mpm-grid-update-active-grid'
+        : 'ulg-mls-mpm-grid-update',
+      code: activeGridDispatch.useActiveGrid
+        ? mlsMpmGridUpdateActiveGridWgsl
+        : mlsMpmGridUpdateWgsl,
       entryPoint: 'main',
       bindings: [
         computeBufferBinding(0, 'read-only-storage'),
@@ -1665,6 +1742,10 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     if (typeof encoder.clearBuffer !== 'function') {
       throw new Error('Fused resident mechanics requires GPUCommandEncoder.clearBuffer for particle-parallel P2G');
     }
+    if (activeGridDispatch.useActiveGrid) {
+      encoder.clearBuffer(gridBuffer, 0, Math.max(4, gridByteLength));
+      encoder.clearBuffer(updatedGridBuffer, 0, Math.max(4, updatedGridByteLength));
+    }
     encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
     const p2gPass = encoder.beginComputePass();
     p2gPass.setPipeline(p2gPipeline);
@@ -1674,12 +1755,12 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gFinalizePass = encoder.beginComputePass();
     p2gFinalizePass.setPipeline(p2gFinalizePipeline);
     p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
-    p2gFinalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+    p2gFinalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
     p2gFinalizePass.end();
     const gridUpdatePass = encoder.beginComputePass();
     gridUpdatePass.setPipeline(gridUpdatePipeline);
     gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
-    gridUpdatePass.dispatchWorkgroups(Math.max(1, Math.ceil(gridSpec.gridNodeCount / 64)));
+    gridUpdatePass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
     gridUpdatePass.end();
     const g2pPass = encoder.beginComputePass();
     g2pPass.setPipeline(g2pPipeline);
@@ -1717,7 +1798,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         status: 'not-run-no-full-readback',
         reason: 'fused no-full resident mechanics skipped P2G readback'
       },
-      fusedResidentMechanics: true
+      fusedResidentMechanics: true,
+      activeGridDispatch
     };
     const gridUpdate = {
       schema: ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -1748,7 +1830,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         reason: 'fused no-full resident mechanics skipped grid-update readback'
       },
       ...pressureFields,
-      fusedResidentMechanics: true
+      fusedResidentMechanics: true,
+      activeGridDispatch
     };
     const g2pReconstruction = {
       schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
@@ -1796,12 +1879,14 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         outStateBuffer.destroy?.();
         outMechanicsBuffer.destroy?.();
       },
-      fusedResidentMechanics: true
+      fusedResidentMechanics: true,
+      activeGridDispatch
     };
     return {
       schema: 'peercompute.ulg.mls-mpm-fused-mechanics-step.v0',
       backend: 'webgpu',
       status: 'fused-mechanics-webgpu-executed-no-full-readback',
+      activeGridDispatch,
       p2gGridProjection,
       gridUpdate,
       g2pReconstruction
@@ -2422,8 +2507,14 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       stageTiming
     });
     finalStep.sequenceIndex = count - 1;
-    finalStep.residentPositionBoundsM = predictedResidentBoundsFromActiveGridDispatch(activeGridDispatch);
-    finalStep.residentMaxSpeedMPerS = activeGridDispatch.maxSpeedMPerS ?? null;
+    const continuationBounds = residentBoundsContinuationFromStep(
+      finalStep,
+      activeGridDispatch,
+      finalSourceSphParticleState
+    );
+    finalStep.residentPositionBoundsM = continuationBounds.boundsM;
+    finalStep.residentMaxSpeedMPerS = continuationBounds.maxSpeedMPerS;
+    finalStep.residentPositionBoundsSource = continuationBounds.source;
     finalStep.residentActiveGridDispatchHint = activeGridDispatch;
     finalStep.fusedResidentSequence = {
       schema: 'peercompute.ulg.mls-mpm-fused-resident-sequence.v0',
@@ -2436,6 +2527,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       queueFenceStatus: fusedMechanicsSequenceQueueFenceStatus,
       queueFenceMethod: fusedMechanicsSequenceQueueFenceMethod,
       activeGridDispatch,
+      residentPositionBoundsSource: continuationBounds.source,
       retainedBufferMode: 'ping-pong-state-mechanics-single-grid',
       finalSourceSlot,
       finalNextSlot: finalStep.particlePingPong?.nextSlot ?? null
@@ -10896,6 +10988,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   sequenceIndex = null,
   sequenceStepCount = null,
   fuseNoFullResidentMechanics = false,
+  fuseNoFullResidentMechanicsActiveGrid = false,
+  fuseNoFullResidentActiveGrid = false,
+  activeGridSafetyCells = undefined,
+  fusedActiveGridSafetyCells = undefined,
   onResidentStageProgress = null
 } = {}) {
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
@@ -11021,7 +11117,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         dt: dtSeconds,
         gravityMPerS2: gravity,
         cflFactor,
-        internalPressureScale
+        internalPressureScale,
+        fuseActiveGrid: Boolean(fuseNoFullResidentMechanicsActiveGrid || fuseNoFullResidentActiveGrid),
+        activeGridSafetyCells: fusedActiveGridSafetyCells ?? activeGridSafetyCells
       }));
       stageMs.p2gGridProjection = 0;
       stageMs.gridUpdate = 0;
@@ -11254,6 +11352,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     },
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     fusedResidentMechanics: Boolean(fusedMechanics),
+    activeGridDispatch: fusedMechanics?.activeGridDispatch
+      || gridUpdate?.activeGridDispatch
+      || p2gGridProjection?.activeGridDispatch
+      || null,
     requestedReadbackMode,
     preferWebGpu,
     compactSummaryRequested,
@@ -11762,13 +11864,8 @@ function cloneSphParticleStateForNext(source, step) {
     || step.gridUpdate?.activeGridDispatch
     || step.p2gGridProjection?.activeGridDispatch
     || null;
-  const residentPositionBoundsM = step.diagnostics?.nextPositionBoundsM
-    || step.residentPositionBoundsM
-    || predictedResidentBoundsFromActiveGridDispatch(activeGridDispatch)
-    || source.residentPositionBoundsM
-    || null;
-  const residentMaxSpeedMPerS = step.diagnostics?.maxSpeedMPerS
-    ?? step.residentMaxSpeedMPerS
+  const continuationBounds = residentBoundsContinuationFromStep(step, activeGridDispatch, source);
+  const residentMaxSpeedMPerS = continuationBounds.maxSpeedMPerS
     ?? activeGridDispatch?.maxSpeedMPerS
     ?? source.residentMaxSpeedMPerS
     ?? null;
@@ -11780,8 +11877,9 @@ function cloneSphParticleStateForNext(source, step) {
     state: noFullReadback ? source.state : (reactionResult?.state?.length ? reactionResult.state : (thermalResult?.state?.length ? thermalResult.state : step.state)),
     cpuStateStale: noFullReadback,
     thermo: noFullReadback ? source.thermo : (reactionResult?.thermo?.length ? reactionResult.thermo : (thermalResult?.thermo?.length ? thermalResult.thermo : source.thermo)),
-    residentPositionBoundsM,
+    residentPositionBoundsM: continuationBounds.boundsM,
     residentMaxSpeedMPerS,
+    residentPositionBoundsSource: continuationBounds.source,
     residentActiveGridDispatchHint: step.residentActiveGridDispatchHint
       || activeGridDispatch
       || source.residentActiveGridDispatchHint

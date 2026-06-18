@@ -1,5 +1,37 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 Per-Step Active-Grid Fused Mechanics
+
+The thermal-enabled no-full resident route can now use active-grid dispatch
+even when sidecars prevent the multi-step fused resident sequence. The
+single-step fused mechanics path selects active-grid P2G/finalize/grid-update
+kernels, clears only the buffers that require active-grid sparse writes, and
+reports the active dispatch through stage timing for the console harness.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/runtime/sph/sphMlsMpmGpuStep.js` passed.
+- Resident MLS-MPM regression coverage:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `56/56`.
+- Diff hygiene:
+  `git diff --check -- src/runtime/sph/sphMlsMpmGpuStep.js tests/sphMlsMpmGpuStep.test.mjs`
+  passed.
+- Browser console probe:
+  `artifacts/sph-probe-active-grid-per-step-thermal.json` completed with
+  `status=good`, `analysis.status=good`, browser console `issueCount=0`,
+  `warningCount=0`, `compactSummaryMode=none`, and per-batch active-grid
+  dispatch over about `2156/5832` grid nodes.
+
+Known residual risk:
+
+- Explicit compact-summary bounds readback remains a diagnostic path, not the
+  hot-loop default. The comparison probe
+  `artifacts/sph-probe-active-grid-final-summary-default.json` was
+  console-clean but spent most of the batch in compact-summary `mapAsync`, so
+  the next performance work should move bounds reduction/dispatch decisions
+  fully onto the GPU.
+
 ## Current Focused Result - 2026-06-18 Three WebGPU Device Gate
 
 This slice adds the engine-side contract for a future no-readback Three WebGPU

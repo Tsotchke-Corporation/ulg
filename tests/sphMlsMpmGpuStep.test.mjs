@@ -1736,6 +1736,55 @@ test('MLS-MPM resident step can opt into fused no-full mechanics dispatch', asyn
   assert.equal(device.dispatches.length, 4);
 });
 
+test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', async () => {
+  const buffers = manualBuffers({
+    position: [1.5, 1.5, 1.5],
+    velocity: [0, 0, 0],
+    smoothingLengthM: 0.25
+  });
+  const tracker = fakeBufferTracker();
+  const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const step = await runMlsMpmResidentStepWithOptionalWebGpu({
+    ...buffers,
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo'),
+      slot: 0
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics'),
+      slot: 0
+    },
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    fuseNoFullResidentMechanics: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 1,
+    summaryRunner: null
+  });
+
+  const activeGridDispatch = step.stageTiming.activeGridDispatch;
+  assert.equal(step.stageTiming.fusedResidentMechanics, true);
+  assert.equal(activeGridDispatch.useActiveGrid, true);
+  assert.ok(activeGridDispatch.activeNodeCount < activeGridDispatch.fullGridNodeCount);
+  assert.equal(step.p2gGridProjection.activeGridDispatch.useActiveGrid, true);
+  assert.equal(step.gridUpdate.activeGridDispatch.useActiveGrid, true);
+  assert.equal(step.g2pReconstruction.activeGridDispatch.useActiveGrid, true);
+  assert.equal(device.dispatches.length, 4);
+  assert.equal(device.dispatches[0].count, 1);
+  assert.equal(device.dispatches[1].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
+  assert.equal(device.dispatches[2].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
+  assert.equal(device.dispatches[3].count, 1);
+  assert.ok(device.dispatches[1].count < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
+  assert.equal(device.clears.length, 3);
+  destroyMlsMpmResidentStepBuffers(step);
+});
+
 test('MLS-MPM resident step rejects a GPU resident lane lease when WebGPU device acquisition fails', async () => {
   const buffers = manualBuffers();
   const gpuResidentLaneManager = fakeGpuResidentLaneManager();
@@ -5312,6 +5361,18 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
         activeGridNodeSummaryStatus: 'active-grid-node-summary-not-requested',
         gridNodeScanCount: 0,
         gridNodeScanSkipped: true,
+        sourcePositionBoundsM: {
+          status: 'position-bounds-ready',
+          min: [1.25, 1.25, 1.25],
+          max: [1.25, 1.25, 1.25],
+          massKg: 8
+        },
+        nextPositionBoundsM: {
+          status: 'position-bounds-ready',
+          min: [1.125, 1.2, 1.175],
+          max: [1.375, 1.4, 1.425],
+          massKg: 8
+        },
         sourceMassKg: 8,
         nextMassKg: 8,
         massDeltaKg: 0,
@@ -5350,6 +5411,11 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(execution.finalStep.p2gGridProjection.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.gridUpdate.activeGridDispatch.useActiveGrid, true);
   assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
+  assert.equal(execution.finalStep.residentPositionBoundsSource, 'compact-gpu-summary-next-bounds');
+  assert.equal(execution.nextSphParticleState.residentPositionBoundsSource, 'compact-gpu-summary-next-bounds');
+  assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.min, [1.125, 1.2, 1.175]);
+  assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.max, [1.375, 1.4, 1.425]);
+  assert.equal(execution.nextSphParticleState.residentMaxSpeedMPerS, 0);
   assert.equal(device.clears.length, 4);
   assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 4, 4, 1, 1, 4, 4, 1]);
   destroyMlsMpmResidentStepsBuffers(execution);
@@ -5401,6 +5467,7 @@ test('MLS-MPM resident fused mechanics sequence carries active-grid bounds acros
   assert.equal(first.fusedResidentSequence.activeGridDispatch.useActiveGrid, true);
   assert.equal(first.nextSphParticleState.cpuStateStale, true);
   assert.equal(first.nextSphParticleState.residentPositionBoundsM.status, 'resident-active-grid-predicted-bounds');
+  assert.equal(first.nextSphParticleState.residentPositionBoundsSource, 'active-grid-predicted-bounds');
   assert.equal(second.fusedResidentSequence.activeGridDispatch.useActiveGrid, true);
   assert.equal(second.fusedResidentSequence.activeGridDispatch.boundsSource, 'resident-position-bounds');
   assert.notEqual(second.fusedResidentSequence.activeGridDispatch.reason, 'position-bounds-unavailable');

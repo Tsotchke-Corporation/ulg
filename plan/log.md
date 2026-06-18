@@ -1,5 +1,54 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Active-Grid Dispatch For Per-Step Fused Mechanics
+
+Status:
+
+- Extended `runFusedNoFullMlsMpmMechanicsWebGpu()` so the single-step fused
+  no-full mechanics path can use the same active-grid WGSL kernels and compact
+  active-node dispatch metadata as the one-submit fused sequence.
+- Wired the active-grid option through
+  `runMlsMpmResidentStepWithOptionalWebGpu()` via
+  `fuseNoFullResidentMechanicsActiveGrid` / `fuseNoFullResidentActiveGrid`.
+  This matters for thermal/reaction enabled browser routes, where sidecars can
+  block the multi-step fused sequence and force the runtime back to per-step
+  fused mechanics.
+- Added continuation bounds provenance for unread resident batches. The runtime
+  now prefers compact GPU summary next-bounds when explicitly requested,
+  otherwise preserves resident bounds or uses active-grid predicted bounds
+  without persisting the safety-cell halo as the next physical bounds.
+- Kept compact-summary bounds readback opt-in. A browser probe with
+  `compactSummaryMode=final-only` was console-clean but spent most of the batch
+  in compact-summary `mapAsync`, so the default hot path remains
+  `compactSummaryMode=none` until bounds reduction and indirect dispatch stay
+  fully GPU-resident.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `56/56` pass.
+- PASS: `git diff --check -- src/runtime/sph/sphMlsMpmGpuStep.js tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS browser probe:
+  `artifacts/sph-probe-active-grid-per-step-thermal.json` completed with
+  `status=good`, `analysis.status=good`, browser console issue/warning counts
+  `0/0`, `compactSummaryMode=none`, per-batch active-grid dispatch present,
+  and active node dispatch about `2156/5832` grid nodes on the thermal-enabled
+  H2O/H2O MLS-MPM route.
+- PASS comparison probe:
+  `artifacts/sph-probe-active-grid-final-summary-default.json` completed
+  console-clean with `compactSummaryMode=final-only`, but recorded
+  compact-summary `mapAsync` as the dominant batch cost. That result is kept as
+  evidence against making CPU-readable compact bounds the default hot-loop
+  answer.
+
+Open:
+
+- This removes unnecessary full-grid work from per-step fused mechanics, but it
+  is not the final FPS fix. The next architectural step is GPU-side resident
+  bounds reduction plus GPU-resident surface/draw consumption, so active-grid
+  dispatch can tighten without a CPU readback fence and rendering can stop
+  paying render-row readback costs.
+
 ## 2026-06-18 AKDT - Three WebGPU Device Gate And External Surface Buffer Bridge
 
 Summary:

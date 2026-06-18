@@ -63,6 +63,17 @@ paths. Do not use it as a separate canvas overlay, and do not treat its
 Three.js WebGPURenderer adapter as ready until ULG has a same-device,
 engine-owned Three/WebGPU bridge with material/PBR metadata and shared depth.
 
+Current routing note, 2026-06-18 AKDT: the marching-cubes extension boundary
+has advanced from planning to an engine-state integration. The sibling
+extension now exposes a caller-owned-device vanilla JS adapter; ULG now has
+CPU-reference and same-device WebGPU translators from compact
+`float32x4-position` output into ULG surface vertex/draw/indirect rows; and
+`sphPhaseScene.refreshSphResidentSurfaceDrawFromExtension()` can publish those
+retained buffers into `sphResidentSurfaceDraw` without an overlay or second
+GPU device. The next required slice is visible renderer consumption of those
+resident extension buffers inside the engine-owned Three/WebGPU path with PBR
+metadata, depth behavior, browser-console validation, and pixel evidence.
+
 Current routing note, 2026-06-18 AKDT: browser visual probes now treat
 DevTools console WebGPU validation as first-class evidence. The probe captures
 page console/pageerror events, analysis emits `browser-console:*` issues, and

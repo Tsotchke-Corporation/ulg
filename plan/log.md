@@ -26642,3 +26642,49 @@ Open:
   an overlay or post-hoc render correction.
 - Gate it with bounded `mpmJ`, contact-gap closure, high-speed impulse guards,
   and the browser console harness.
+
+## 2026-06-18 10:25 AKDT - WebGPU marching-cubes extension resident integration
+
+Summary:
+
+- Continued the native WebGPU marching-cubes integration without adding an
+  overlay path.
+- Added `translateWebGpuMarchingCubesSurfaceToUlgRows()` as a CPU-reference
+  boundary for compact extension `float32x4-position` rows into ULG surface
+  vertex/draw/indirect rows.
+- Added `buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu()`, a same-device
+  WebGPU translation kernel that consumes the extension's retained compact
+  surface buffer and emits retained ULG surface vertex rows, draw rows, and
+  indirect draw rows with resident buffer leases.
+- Added a cross-device ownership guard before bind-group creation so extension
+  buffers reported on a different `GPUDevice` fail early instead of producing
+  WebGPU validation spam.
+- Added `sphPhaseScene.refreshSphResidentSurfaceDrawFromExtension()`, a
+  no-overlay engine hook that publishes retained extension surface buffers into
+  `sphResidentSurfaceDraw` and requires the caller-owned scene/extension
+  `GPUDevice` rather than requesting a new device.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `8/8` pass.
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` reported `45/45`
+  pass.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `38/38` pass.
+
+Commits:
+
+- `80abb03 Translate extension marching cubes surfaces`.
+- `91694c6 Add resident extension surface translation`.
+- `47c5a40 Add no-overlay extension surface scene hook`.
+
+Open:
+
+- The extension surface buffers are now resident and scene-state integrated,
+  but they are not yet visible through a material/PBR-preserving renderer
+  bridge. The next slice must consume the retained extension vertex/draw/
+  indirect buffers inside the existing engine-owned Three/WebGPU path and pass
+  browser console plus pixel validation.

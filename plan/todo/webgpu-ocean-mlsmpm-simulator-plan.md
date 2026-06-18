@@ -320,6 +320,29 @@ Extension refactor routing, 2026-06-18 AKDT:
   bridge inside the existing `sphPhaseScene` resident surface path. Do not
   introduce a separate canvas overlay as the completion target.
 
+Integration progress, 2026-06-18 AKDT:
+
+- The sibling `/home/cos/projects/webgpu-marching-cubes` checkout now has a
+  vanilla JS adapter boundary that accepts a caller-owned `GPUDevice`, reports
+  same-device ownership, and emits compact `float32x4-position` surface
+  buffers without taking over DOM/renderer ownership.
+- ULG now has a translation boundary in `sphMarchingCubesSurfaceAdapter.js`:
+  a CPU-reference contract for compact position rows, plus a same-device
+  WebGPU kernel that converts retained extension compact positions into ULG
+  16-float surface vertex rows, surface draw rows, and indirect draw rows.
+  The resident WebGPU path leases retained vertex/draw/indirect buffers and
+  rejects known cross-device extension buffers before bind-group creation.
+- `sphPhaseScene` now exposes
+  `refreshSphResidentSurfaceDrawFromExtension()`, which publishes those
+  retained extension buffers into the engine-owned `sphResidentSurfaceDraw`
+  state without creating a canvas overlay or requesting a second GPU device.
+- Remaining gap: the retained extension surface buffers are engine-state
+  integrated, but not yet visibly consumed by a material/PBR-preserving
+  renderer bridge. The next slice is a Three/engine-owned consumer for those
+  resident vertex/draw/indirect buffers, with browser console and pixel
+  validation. Do not count this phase complete until that visible bridge
+  exists.
+
 Interim status, 2026-06-18 AKDT:
 
 - `three-render-row-points` removes CPU `MarchingCubes` construction from the

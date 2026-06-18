@@ -934,6 +934,19 @@ test('SPH resident overlay retains the last draw buffers across same-surface ref
     hasResidentSurfaceDraw: false,
     hasResidentRenderBridge: true
   }), false);
+  assert.equal(shouldRetainResidentSurfaceDrawOverlay({
+    previousSurfaceBatchSignature: 'empty',
+    nextSurfaceBatchSignature: 'empty',
+    hasResidentSurfaceDraw: true,
+    hasResidentRenderBridge: true
+  }), false);
+  assert.equal(shouldRetainResidentSurfaceDrawOverlay({
+    previousSurfaceBatchSignature: 'empty',
+    nextSurfaceBatchSignature: 'empty',
+    hasResidentSurfaceDraw: true,
+    hasResidentRenderBridge: true,
+    allowEmptySurfaceSignature: true
+  }), true);
 });
 
 test('SPH resident overlay shader samples closure-derived optical records', () => {

@@ -9521,3 +9521,23 @@ Mobile resident sphere bridge and viewport benchmark coverage, 2026-06-18 AKDT:
   - Probe classification remains `bad` only because no-full compact motion
     diagnostics are intentionally absent:
     `missing-max-speed`, `no-positive-displacement`.
+
+Active-grid carry bounds and render-row bridge retention, 2026-06-18 03:30 AKDT:
+
+- `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "active-grid bounds|carries active-grid bounds|active-grid dispatch"`
+  - Passed: `54/54`.
+  - Covers the no-full unread resident-batch carry path: zero-motion batches now
+    keep the same active-grid node count instead of compounding the safety-cell
+    halo into persisted resident bounds.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `35/35`.
+  - Covers resident render retention for empty surface signatures, which is the
+    Three render-row bridge case used by the MLS-MPM mounted path.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=scene ULG_BENCH_PARTICLE_COUNTS=128 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=3 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_HAS_TOUCH=1 ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-mobile-render-retention.json node scripts/sph-performance-benchmark.mjs`
+  - Passed with report `status=complete`.
+  - Scenario: `status=good`, `browserConsoleIssueCount=0`,
+    `surfaceDrawBridge=three-render-row-spheres`, active-grid dispatch
+    `2744/27000`, queue-fenced resident stage `143.6 ms`, and render rows still
+    `full-parity-readback`.

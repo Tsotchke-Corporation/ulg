@@ -1301,7 +1301,9 @@ function computePackedSphStateMotionSummary(sphParticleState) {
 
 function predictedResidentBoundsFromActiveGridDispatch(activeGridDispatch) {
   const bounds = normalizePositionBoundsM(activeGridDispatch?.sourcePositionBoundsM);
-  const expansion = activeGridDispatch?.predictedExpansionM;
+  const expansion = Array.isArray(activeGridDispatch?.predictedMotionM)
+    ? activeGridDispatch.predictedMotionM
+    : activeGridDispatch?.predictedExpansionM;
   if (!bounds || !Array.isArray(expansion) || expansion.length < 3) return null;
   const predicted = normalizePositionBoundsM({
     status: 'position-bounds-ready',
@@ -1328,6 +1330,8 @@ function fullGridDispatchMetadata({ status, reason = null, gridSpec, requested =
     safetyCells: 0,
     boundsSource: null,
     sourcePositionBoundsM: null,
+    predictedMotionM: [0, 0, 0],
+    safetyMarginM: [0, 0, 0],
     predictedExpansionM: [0, 0, 0]
   };
 }
@@ -1377,9 +1381,11 @@ function resolveFusedActiveGridDispatch({
     safetyCells == null ? DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS : safetyCells,
     DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS
   )));
-  const predictedExpansionM = gravity.map((component) => {
-    return maxSpeedMPerS * horizonS + 0.5 * Math.abs(component) * horizonS * horizonS + resolvedSafetyCells * dx;
+  const predictedMotionM = gravity.map((component) => {
+    return maxSpeedMPerS * horizonS + 0.5 * Math.abs(component) * horizonS * horizonS;
   });
+  const safetyMarginM = [resolvedSafetyCells * dx, resolvedSafetyCells * dx, resolvedSafetyCells * dx];
+  const predictedExpansionM = predictedMotionM.map((motionM, axis) => motionM + safetyMarginM[axis]);
   const activeStart = [0, 0, 0];
   const activeEnd = [0, 0, 0];
   for (let axis = 0; axis < 3; axis += 1) {
@@ -1402,6 +1408,8 @@ function resolveFusedActiveGridDispatch({
       safetyCells: resolvedSafetyCells,
       boundsSource,
       sourcePositionBoundsM: boundsM,
+      predictedMotionM,
+      safetyMarginM,
       predictedExpansionM
     };
   }
@@ -1420,6 +1428,8 @@ function resolveFusedActiveGridDispatch({
     safetyCells: resolvedSafetyCells,
     boundsSource,
     sourcePositionBoundsM: boundsM,
+    predictedMotionM,
+    safetyMarginM,
     predictedExpansionM,
     maxSpeedMPerS,
     horizonS

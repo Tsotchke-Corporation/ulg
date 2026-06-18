@@ -5362,6 +5362,12 @@ test('MLS-MPM resident fused mechanics sequence carries active-grid bounds acros
   assert.equal(second.fusedResidentSequence.activeGridDispatch.useActiveGrid, true);
   assert.equal(second.fusedResidentSequence.activeGridDispatch.boundsSource, 'resident-position-bounds');
   assert.notEqual(second.fusedResidentSequence.activeGridDispatch.reason, 'position-bounds-unavailable');
+  assert.equal(
+    second.fusedResidentSequence.activeGridDispatch.activeNodeCount,
+    first.fusedResidentSequence.activeGridDispatch.activeNodeCount
+  );
+  assert.deepEqual(first.nextSphParticleState.residentPositionBoundsM.min, [2.5, 2.5, 2.5]);
+  assert.deepEqual(first.nextSphParticleState.residentPositionBoundsM.max, [2.5, 2.5, 2.5]);
   destroyMlsMpmResidentStepsBuffers(first);
   destroyMlsMpmResidentStepsBuffers(second);
 });

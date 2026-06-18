@@ -2448,16 +2448,25 @@ export function shouldRetainResidentSurfaceDrawOverlay({
   previousSurfaceBatchSignature = null,
   nextSurfaceBatchSignature = null,
   hasResidentSurfaceDraw = false,
-  hasResidentRenderBridge = false
+  hasResidentRenderBridge = false,
+  allowEmptySurfaceSignature = false
 } = {}) {
+  const signaturesMatch = Boolean(
+    previousSurfaceBatchSignature
+    && nextSurfaceBatchSignature
+    && previousSurfaceBatchSignature === nextSurfaceBatchSignature
+  );
   return Boolean(
     hasResidentSurfaceDraw
     && hasResidentRenderBridge
-    && previousSurfaceBatchSignature
-    && nextSurfaceBatchSignature
-    && previousSurfaceBatchSignature !== 'empty'
-    && nextSurfaceBatchSignature !== 'empty'
-    && previousSurfaceBatchSignature === nextSurfaceBatchSignature
+    && signaturesMatch
+    && (
+      allowEmptySurfaceSignature
+      || (
+        previousSurfaceBatchSignature !== 'empty'
+        && nextSurfaceBatchSignature !== 'empty'
+      )
+    )
   );
 }
 
@@ -4067,8 +4076,16 @@ export function createSphPhaseScene(container, {
     });
   }
 
+  function hasVisibleResidentSurfaceDrawBridge(renderBridge = sphResidentSurfaceDrawRenderBridge) {
+    return Boolean(
+      renderBridge?.drawState
+      || renderBridge?.threeSurfaceGroup
+      || renderBridge?.threeMeshCount > 0
+    );
+  }
+
   function retainedPreviousSurfaceDrawOverlay(surfaceDraw, renderBridge, reason) {
-    if (!surfaceDraw || !renderBridge?.drawState) return surfaceDraw;
+    if (!surfaceDraw || !hasVisibleResidentSurfaceDrawBridge(renderBridge)) return surfaceDraw;
     return {
       ...surfaceDraw,
       visibleRendererBridge: renderBridge.rendererBridge || 'webgpu-storage-indirect-overlay',
@@ -4104,7 +4121,7 @@ export function createSphPhaseScene(container, {
   }
 
   function markSphResidentSurfaceDrawOverlayRetained(reason) {
-    if (sphResidentSurfaceDrawRenderBridge?.drawState) {
+    if (hasVisibleResidentSurfaceDrawBridge(sphResidentSurfaceDrawRenderBridge)) {
       sphResidentSurfaceDrawRenderBridge.temporalSwapPolicy = SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY;
       sphResidentSurfaceDrawRenderBridge.retainedPreviousOverlay = true;
       sphResidentSurfaceDrawRenderBridge.retentionReason = reason;
@@ -7919,8 +7936,9 @@ export function createSphPhaseScene(container, {
     if (shouldRetainResidentSurfaceDrawOverlay({
       previousSurfaceBatchSignature: currentSurfaceBatchIdentitySignature,
       nextSurfaceBatchSignature: nextSurfaceBatchIdentitySignature,
-      hasResidentSurfaceDraw: Boolean(sphResidentSurfaceDraw?.surfaceDraw),
-      hasResidentRenderBridge: Boolean(sphResidentSurfaceDrawRenderBridge?.drawState)
+      hasResidentSurfaceDraw: Boolean(sphResidentSurfaceDraw),
+      hasResidentRenderBridge: hasVisibleResidentSurfaceDrawBridge(sphResidentSurfaceDrawRenderBridge),
+      allowEmptySurfaceSignature: skipCpuSurfaceGeometry
     })) {
       markSphResidentSurfaceDrawOverlayRetained('cpu-particle-sync-pending-resident-overlay-refresh');
     } else {

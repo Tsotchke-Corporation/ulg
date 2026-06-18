@@ -26319,3 +26319,42 @@ Open:
   proof is disabled there.
 - The true performance work remains the WebGPU-Ocean-style resident surface or
   screen-space fluid renderer that consumes GPU buffers directly.
+
+## 2026-06-18 03:30 AKDT - Active-grid carry bounds and render-row bridge retention
+
+Summary:
+
+- Fixed active-grid carry-forward for no-full unread resident batches so the
+  persisted resident AABB carries predicted particle motion only. Dispatch still
+  applies the safety-cell halo, but the halo is no longer baked into the next
+  batch's source bounds and compounded every batch.
+- Added active-grid metadata fields for `predictedMotionM` and `safetyMarginM`
+  alongside the existing `predictedExpansionM` dispatch envelope.
+- Fixed the MLS-MPM render-row bridge lifecycle: visible Three render-row
+  bridges now count as retainable resident render bridges even when the CPU
+  surface signature is `empty`. `setParticles()` keeps the last visible
+  row-point/row-sphere bridge alive until the replacement refresh is ready,
+  avoiding blank/stale visual frames during perspective or refresh changes.
+
+Validation:
+
+- PASS:
+  `node --test tests/sphMlsMpmGpuStep.test.mjs --test-name-pattern "active-grid bounds|carries active-grid bounds|active-grid dispatch"`
+  reported `54/54` pass.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `35/35` pass.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=scene ULG_BENCH_PARTICLE_COUNTS=128 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=3 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_HAS_TOUCH=1 ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-mobile-render-retention.json node scripts/sph-performance-benchmark.mjs`
+  completed with scenario `status=good`, `browserConsoleIssueCount=0`,
+  `surfaceDrawBridge=three-render-row-spheres`, `renderRowsReadback=true`,
+  `renderRowsReadbackMode=full-parity-readback`, `activeNodeCount=2744/27000`,
+  and `residentGpuCompletedStageMs=143.6`.
+
+Open:
+
+- This fixes bridge retention and one active-grid bounds inflation bug; it does
+  not remove the remaining render-row readback. The mounted scene still builds
+  Three geometry from readback rows, so visual refresh remains around `1.8 Hz`
+  on the mobile benchmark.
+- Next performance slice remains a GPU-resident renderer path that consumes
+  render rows or surface data without CPU row readback.

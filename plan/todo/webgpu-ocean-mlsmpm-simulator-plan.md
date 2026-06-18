@@ -324,6 +324,14 @@ Interim status, 2026-06-18 AKDT:
   GPU-side bounds reduction telemetry once that exists, keep scene/render rows
   separate from direct-resident rows, and add a cache warm split for closure
   table and sidecar setup costs.
+- 2026-06-18 03:30 AKDT update: active-grid carry-forward no longer persists
+  the safety-cell halo into unread resident bounds; `predictedMotionM` and
+  `safetyMarginM` are reported separately. The mounted Three render-row bridge
+  is now retained through async refresh even when CPU surface signatures are
+  `empty`, fixing blank/stale bridge frames during perspective/refresh changes.
+  The remaining mounted-scene bottleneck is unchanged: row-point/row-sphere
+  bridges still require render-row readback, so the next architectural renderer
+  slice must consume resident GPU render data directly.
 
 ## ULG-Specific Constraints
 

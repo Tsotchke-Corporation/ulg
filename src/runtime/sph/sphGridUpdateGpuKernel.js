@@ -23,6 +23,7 @@ export {
 export const MLS_MPM_GPU_GRID_VELOCITY_FLOATS = MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT.length;
 export const SPH_PRESSURE_INTERFACE_FORCE_FLOATS = SPH_PRESSURE_INTERFACE_FORCE_ROW_LAYOUT.length;
 export const ULG_PRESSURE_INTERFACE_GRID_FORCE_CONSUMPTION_ADMISSION_SCHEMA = 'peercompute.ulg.pressure-interface-grid-force-consumption-admission.v0';
+export const ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA = 'peercompute.ulg.mls-mpm-wall-barrier-contact.v0';
 
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
@@ -43,6 +44,9 @@ const GRID_UPDATE_SCOPE = 'mls-mpm-grid-velocity-update-gravity-cfl-walls';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
 const EMPTY_PRESSURE_INTERFACE_FORCE_ROWS = new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS);
+const DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M = 0;
+const DEFAULT_WALL_BARRIER_CONTACT_SCALE = 1;
+const DEFAULT_WALL_BARRIER_MIN_GAP_M = 1e-6;
 const PRESSURE_INTERFACE_GRID_APPLICATION_STATUSES = new Set([
   'apply-to-mls-mpm-grid',
   'pressure-interface-grid-force-consumer-approved'
@@ -65,6 +69,96 @@ function finiteVector3(value, fallback) {
     finiteNumber(source?.[1], fallback[1]),
     finiteNumber(source?.[2], fallback[2])
   ];
+}
+
+function clamp01(value) {
+  const number = finiteNumber(value, 0);
+  if (number <= 0) return 0;
+  if (number >= 1) return 1;
+  return number;
+}
+
+export function mlsMpmWallBarrierContactResponse({
+  gapM = 0,
+  normalVelocityMPerS = 0,
+  nodeMassKg = 0,
+  dtSeconds = 0,
+  elasticNormalStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+  minGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
+  stiffnessScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE
+} = {}) {
+  const mass = Math.max(0, finiteNumber(nodeMassKg, 0));
+  const dt = Math.max(0, finiteNumber(dtSeconds, 0));
+  const gap = Math.max(0, finiteNumber(gapM, 0));
+  const minGap = Math.max(1e-12, Math.abs(finiteNumber(minGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M)));
+  const effectiveGap = Math.max(gap, minGap);
+  const velocity = finiteNumber(normalVelocityMPerS, 0);
+  const elasticStiffness = Math.max(0, finiteNumber(elasticNormalStiffnessNPerM, 0));
+  const barrierStiffness = mass > 0 ? mass / (effectiveGap * effectiveGap) : 0;
+  const normalStiffness = Math.max(0, barrierStiffness + elasticStiffness);
+  const stiffnessRatio = mass > 0 && dt > 0
+    ? (normalStiffness * dt * dt) / mass
+    : 0;
+  const responseAlpha = clamp01((stiffnessRatio / (1 + stiffnessRatio)) * clamp01(stiffnessScale));
+  const inwardVelocityMPerS = Math.max(0, -velocity);
+  const velocityCorrectionMPerS = inwardVelocityMPerS * responseAlpha;
+  let correctedNormalVelocityMPerS = velocity + velocityCorrectionMPerS;
+  if (responseAlpha >= 1 - 1e-6 && correctedNormalVelocityMPerS < 1e-6 && velocity < 0) {
+    correctedNormalVelocityMPerS = 0;
+  }
+  return {
+    schema: ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA,
+    status: responseAlpha > 0 ? 'wall-barrier-contact-response-ready' : 'wall-barrier-contact-response-inactive',
+    mode: 'cubic-barrier-dynamic-grid-wall-response',
+    gapM: gap,
+    effectiveGapM: effectiveGap,
+    nodeMassKg: mass,
+    dtSeconds: dt,
+    barrierNormalStiffness: barrierStiffness,
+    elasticNormalStiffnessNPerM: elasticStiffness,
+    normalStiffness,
+    stiffnessRatio,
+    stiffnessScale: clamp01(stiffnessScale),
+    responseAlpha,
+    inwardVelocityMPerS,
+    velocityCorrectionMPerS,
+    normalVelocityMPerS: velocity,
+    correctedNormalVelocityMPerS,
+    contactActive: responseAlpha > 0 && (inwardVelocityMPerS > 0 || gap <= minGap)
+  };
+}
+
+function createWallBarrierContactSummary({
+  status,
+  wallBarrierElasticStiffnessNPerM,
+  wallBarrierContactScale,
+  wallBarrierMinGapM
+}) {
+  return {
+    schema: ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA,
+    status,
+    mode: 'cubic-barrier-dynamic-grid-wall-response',
+    wallBarrierElasticStiffnessNPerM,
+    wallBarrierContactScale,
+    wallBarrierMinGapM,
+    contactNodeCount: 0,
+    maxResponseAlpha: 0,
+    maxNormalStiffness: 0,
+    totalVelocityCorrectionMPerS: 0,
+    maxVelocityCorrectionMPerS: 0
+  };
+}
+
+function recordWallBarrierContact(summary, response) {
+  if (!summary || !response?.contactActive) return;
+  summary.contactNodeCount += 1;
+  summary.maxResponseAlpha = Math.max(summary.maxResponseAlpha, response.responseAlpha);
+  summary.maxNormalStiffness = Math.max(summary.maxNormalStiffness, response.normalStiffness);
+  summary.totalVelocityCorrectionMPerS += response.velocityCorrectionMPerS;
+  summary.maxVelocityCorrectionMPerS = Math.max(
+    summary.maxVelocityCorrectionMPerS,
+    response.velocityCorrectionMPerS
+  );
 }
 
 function quadraticWeights(fx) {
@@ -101,6 +195,7 @@ function outputEnvelope({
   cflFactor,
   pressureInterfaceForceSolver = null,
   pressureInterfaceForceApplication = null,
+  wallBarrierContact = null,
   readbackMode = FULL_READBACK_MODE,
   queueCompletionStatus = null,
   queueCompletionMethod = null
@@ -141,6 +236,18 @@ function outputEnvelope({
     pressureInterfaceAppliedImpulseSource: pressureInterfaceForceApplication?.appliedImpulseSource ?? null,
     pressureInterfaceImpulseProofStatus: pressureInterfaceForceApplication?.impulseProofStatus ?? null,
     pressureInterfaceForceConsumerStatus: pressureInterfaceForceApplication?.consumerStatus ?? null,
+    wallBarrierContactSchema: wallBarrierContact?.schema ?? ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA,
+    wallBarrierContactStatus: wallBarrierContact?.status ?? 'wall-barrier-contact-not-measured',
+    wallBarrierContactMode: wallBarrierContact?.mode ?? 'cubic-barrier-dynamic-grid-wall-response',
+    wallBarrierElasticStiffnessNPerM: wallBarrierContact?.wallBarrierElasticStiffnessNPerM
+      ?? DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+    wallBarrierContactScale: wallBarrierContact?.wallBarrierContactScale ?? DEFAULT_WALL_BARRIER_CONTACT_SCALE,
+    wallBarrierMinGapM: wallBarrierContact?.wallBarrierMinGapM ?? DEFAULT_WALL_BARRIER_MIN_GAP_M,
+    wallBarrierContactNodeCount: wallBarrierContact?.contactNodeCount ?? 0,
+    wallBarrierContactMaxResponseAlpha: wallBarrierContact?.maxResponseAlpha ?? 0,
+    wallBarrierContactMaxNormalStiffness: wallBarrierContact?.maxNormalStiffness ?? 0,
+    wallBarrierContactTotalVelocityCorrectionMPerS: wallBarrierContact?.totalVelocityCorrectionMPerS ?? 0,
+    wallBarrierContactMaxVelocityCorrectionMPerS: wallBarrierContact?.maxVelocityCorrectionMPerS ?? 0,
     sourceGridNodeLayout: [...MLS_MPM_GPU_GRID_NODE_ROW_LAYOUT],
     gridNodeLayout: [...MLS_MPM_GPU_GRID_VELOCITY_ROW_LAYOUT],
     gridNodeStrideFloats: MLS_MPM_GPU_GRID_VELOCITY_FLOATS,
@@ -364,7 +471,10 @@ export function updateMlsMpmGridCpu({
   boxDimsM = DEFAULT_BOX_DIMS_M,
   cflFactor = DEFAULT_CFL_FACTOR,
   pressureInterfaceForceSolver = null,
-  pressureInterfaceGridForceAdmission = null
+  pressureInterfaceGridForceAdmission = null,
+  wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+  wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
+  wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M
 } = {}) {
   const dtSeconds = finiteNumber(dt, 0);
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
@@ -390,6 +500,38 @@ export function updateMlsMpmGridCpu({
     ? pressureForceRowCountFromSolver(pressureInterfaceForceSolver, pressureForceRows)
     : 0;
   const appliedImpulseNSeconds = [0, 0, 0];
+  const wallBarrierContact = createWallBarrierContactSummary({
+    status: 'wall-barrier-contact-applied-cpu-reference',
+    wallBarrierElasticStiffnessNPerM: Math.max(0, finiteNumber(wallBarrierElasticStiffnessNPerM, 0)),
+    wallBarrierContactScale: clamp01(wallBarrierContactScale),
+    wallBarrierMinGapM: Math.max(1e-12, Math.abs(finiteNumber(wallBarrierMinGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M)))
+  });
+
+  const applyWallBarrierNormal = ({ velocity, axis, normalSign, gapM, nodeMassKg, dampTangential = false }) => {
+    const beforeNormalVelocity = velocity[axis] * normalSign;
+    const response = mlsMpmWallBarrierContactResponse({
+      gapM,
+      normalVelocityMPerS: beforeNormalVelocity,
+      nodeMassKg,
+      dtSeconds,
+      elasticNormalStiffnessNPerM: wallBarrierContact.wallBarrierElasticStiffnessNPerM,
+      minGapM: wallBarrierContact.wallBarrierMinGapM,
+      stiffnessScale: wallBarrierContact.wallBarrierContactScale
+    });
+    recordWallBarrierContact(wallBarrierContact, response);
+    velocity[axis] = response.correctedNormalVelocityMPerS * normalSign;
+    if (dampTangential && response.responseAlpha > 0) {
+      const keep = 1 - response.responseAlpha;
+      for (let component = 0; component < 3; component += 1) {
+        if (component !== axis) velocity[component] *= keep;
+      }
+      if (response.responseAlpha >= 1 - 1e-6) {
+        for (let component = 0; component < 3; component += 1) {
+          if (component !== axis) velocity[component] = 0;
+        }
+      }
+    }
+  };
 
   for (let offset = 0; offset < source.length; offset += MLS_MPM_GPU_GRID_NODE_FLOATS) {
     const mass = source[offset];
@@ -423,11 +565,50 @@ export function updateMlsMpmGridCpu({
         velocity = velocity.map((component) => component * scale);
       }
       if (nodePosition[1] < floorNoSlipLimitM) {
-        velocity = [0, 0, 0];
+        applyWallBarrierNormal({
+          velocity,
+          axis: 1,
+          normalSign: 1,
+          nodeMassKg: mass,
+          gapM: Math.max(0, nodePosition[1]),
+          dampTangential: true
+        });
       }
-      if ((nodePosition[0] <= gridSpacingM + boundaryEpsilonM && velocity[0] < 0) || (nodePosition[0] >= dims[0] - gridSpacingM - boundaryEpsilonM && velocity[0] > 0)) velocity[0] = 0;
-      if (nodePosition[1] >= dims[1] - gridSpacingM - boundaryEpsilonM && velocity[1] > 0) velocity[1] = 0;
-      if ((nodePosition[2] <= gridSpacingM + boundaryEpsilonM && velocity[2] < 0) || (nodePosition[2] >= dims[2] - gridSpacingM - boundaryEpsilonM && velocity[2] > 0)) velocity[2] = 0;
+      if (nodePosition[0] <= gridSpacingM + boundaryEpsilonM && velocity[0] < 0) applyWallBarrierNormal({
+        velocity,
+        axis: 0,
+        normalSign: 1,
+        nodeMassKg: mass,
+        gapM: Math.max(0, nodePosition[0] - gridSpacingM + boundaryEpsilonM)
+      });
+      if (nodePosition[0] >= dims[0] - gridSpacingM - boundaryEpsilonM && velocity[0] > 0) applyWallBarrierNormal({
+        velocity,
+        axis: 0,
+        normalSign: -1,
+        nodeMassKg: mass,
+        gapM: Math.max(0, dims[0] - gridSpacingM - nodePosition[0] + boundaryEpsilonM)
+      });
+      if (nodePosition[1] >= dims[1] - gridSpacingM - boundaryEpsilonM && velocity[1] > 0) applyWallBarrierNormal({
+        velocity,
+        axis: 1,
+        normalSign: -1,
+        nodeMassKg: mass,
+        gapM: Math.max(0, dims[1] - gridSpacingM - nodePosition[1] + boundaryEpsilonM)
+      });
+      if (nodePosition[2] <= gridSpacingM + boundaryEpsilonM && velocity[2] < 0) applyWallBarrierNormal({
+        velocity,
+        axis: 2,
+        normalSign: 1,
+        nodeMassKg: mass,
+        gapM: Math.max(0, nodePosition[2] - gridSpacingM + boundaryEpsilonM)
+      });
+      if (nodePosition[2] >= dims[2] - gridSpacingM - boundaryEpsilonM && velocity[2] > 0) applyWallBarrierNormal({
+        velocity,
+        axis: 2,
+        normalSign: -1,
+        nodeMassKg: mass,
+        gapM: Math.max(0, dims[2] - gridSpacingM - nodePosition[2] + boundaryEpsilonM)
+      });
       status = 1;
     }
     updatedGridNodes.set([
@@ -451,17 +632,18 @@ export function updateMlsMpmGridCpu({
     boxDimsM: dims,
     cflFactor: cfl,
     pressureInterfaceForceSolver,
-      pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
-        pressureInterfaceForceSolver,
-        pressureInterfaceGridForceAdmission,
-        forceRowCount: pressureForceRowCount,
-        appliedImpulseNSeconds,
-        appliedImpulseSource: 'grid-node-distributed-impulse',
-        impulseProofStatus: 'actual-grid-node-impulse',
-        applicationApproved: pressureForceApplicationApproved
-      })
-    });
-  }
+    wallBarrierContact,
+    pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
+      pressureInterfaceForceSolver,
+      pressureInterfaceGridForceAdmission,
+      forceRowCount: pressureForceRowCount,
+      appliedImpulseNSeconds,
+      appliedImpulseSource: 'grid-node-distributed-impulse',
+      impulseProofStatus: 'actual-grid-node-impulse',
+      applicationApproved: pressureForceApplicationApproved
+    })
+  });
+}
 
 function writeStorageBuffer(device, label, data) {
   const byteLength = Math.max(4, data.byteLength);
@@ -480,7 +662,10 @@ function createGridUpdateParamsArray({
   gravityMPerS2,
   boxDimsM,
   cflFactor,
-  pressureInterfaceForceRowCount = 0
+  pressureInterfaceForceRowCount = 0,
+  wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+  wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
+  wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M
 }) {
   const buffer = new ArrayBuffer(80);
   const view = new DataView(buffer);
@@ -500,6 +685,9 @@ function createGridUpdateParamsArray({
   view.setFloat32(56, boxDimsM[1], true);
   view.setFloat32(60, boxDimsM[2], true);
   view.setFloat32(64, cflFactor, true);
+  view.setFloat32(68, Math.max(0, finiteNumber(wallBarrierElasticStiffnessNPerM, 0)), true);
+  view.setFloat32(72, clamp01(wallBarrierContactScale), true);
+  view.setFloat32(76, Math.max(1e-12, Math.abs(finiteNumber(wallBarrierMinGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M))), true);
   return buffer;
 }
 
@@ -527,6 +715,9 @@ export async function runMlsMpmGridUpdateWebGpu({
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   cflFactor = DEFAULT_CFL_FACTOR,
+  wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+  wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
+  wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   retainUpdatedGridBuffer = false,
   readbackMode = FULL_READBACK_MODE
 } = {}) {
@@ -538,6 +729,14 @@ export async function runMlsMpmGridUpdateWebGpu({
   const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
   const dims = finiteVector3(boxDimsM, DEFAULT_BOX_DIMS_M);
   const cfl = finiteNumber(cflFactor, DEFAULT_CFL_FACTOR);
+  const wallBarrierContact = createWallBarrierContactSummary({
+    status: readbackMode === NO_FULL_READBACK_MODE
+      ? 'wall-barrier-contact-submitted-unverified-no-full-readback'
+      : 'wall-barrier-contact-submitted-webgpu-readback',
+    wallBarrierElasticStiffnessNPerM: Math.max(0, finiteNumber(wallBarrierElasticStiffnessNPerM, 0)),
+    wallBarrierContactScale: clamp01(wallBarrierContactScale),
+    wallBarrierMinGapM: Math.max(1e-12, Math.abs(finiteNumber(wallBarrierMinGapM, DEFAULT_WALL_BARRIER_MIN_GAP_M)))
+  });
   const outputByteLength = p2gGridProjection.gridNodeCount * MLS_MPM_GPU_GRID_VELOCITY_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const borrowedGridBuffer = p2gGridBuffer || p2gGridProjection.gridBuffer || p2gGridProjection.gpuResult?.gridBuffer || null;
   assertP2gGridProjection(p2gGridProjection, { requireGridNodes: !borrowedGridBuffer });
@@ -602,7 +801,10 @@ export async function runMlsMpmGridUpdateWebGpu({
       gravityMPerS2: gravity,
       boxDimsM: dims,
       cflFactor: cfl,
-      pressureInterfaceForceRowCount: pressureForceRowCount
+      pressureInterfaceForceRowCount: pressureForceRowCount,
+      wallBarrierElasticStiffnessNPerM: wallBarrierContact.wallBarrierElasticStiffnessNPerM,
+      wallBarrierContactScale: wallBarrierContact.wallBarrierContactScale,
+      wallBarrierMinGapM: wallBarrierContact.wallBarrierMinGapM
     }));
     const { pipeline, bindGroupLayout } = createCachedExplicitComputePipeline(device, {
       cacheKey: 'ulg-mls-mpm-grid-update.v2',
@@ -661,6 +863,7 @@ export async function runMlsMpmGridUpdateWebGpu({
       boxDimsM: dims,
       cflFactor: cfl,
       pressureInterfaceForceSolver,
+      wallBarrierContact,
       pressureInterfaceForceApplication: pressureInterfaceForceApplicationSummary({
         pressureInterfaceForceSolver,
         pressureInterfaceGridForceAdmission,
@@ -804,6 +1007,17 @@ function executionFromUpdate(update, {
     pressureInterfaceAppliedImpulseSource: update?.pressureInterfaceAppliedImpulseSource ?? null,
     pressureInterfaceImpulseProofStatus: update?.pressureInterfaceImpulseProofStatus ?? null,
     pressureInterfaceForceConsumerStatus: update?.pressureInterfaceForceConsumerStatus ?? null,
+    wallBarrierContactSchema: update?.wallBarrierContactSchema ?? ULG_MLS_MPM_WALL_BARRIER_CONTACT_SCHEMA,
+    wallBarrierContactStatus: update?.wallBarrierContactStatus ?? null,
+    wallBarrierContactMode: update?.wallBarrierContactMode ?? null,
+    wallBarrierElasticStiffnessNPerM: update?.wallBarrierElasticStiffnessNPerM ?? DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+    wallBarrierContactScale: update?.wallBarrierContactScale ?? DEFAULT_WALL_BARRIER_CONTACT_SCALE,
+    wallBarrierMinGapM: update?.wallBarrierMinGapM ?? DEFAULT_WALL_BARRIER_MIN_GAP_M,
+    wallBarrierContactNodeCount: update?.wallBarrierContactNodeCount ?? 0,
+    wallBarrierContactMaxResponseAlpha: update?.wallBarrierContactMaxResponseAlpha ?? 0,
+    wallBarrierContactMaxNormalStiffness: update?.wallBarrierContactMaxNormalStiffness ?? 0,
+    wallBarrierContactTotalVelocityCorrectionMPerS: update?.wallBarrierContactTotalVelocityCorrectionMPerS ?? 0,
+    wallBarrierContactMaxVelocityCorrectionMPerS: update?.wallBarrierContactMaxVelocityCorrectionMPerS ?? 0,
     updatedGridNodes: update?.updatedGridNodes ?? new Float32Array(),
     readbackMode: update?.readbackMode ?? FULL_READBACK_MODE,
     queueCompletionStatus: update?.queueCompletionStatus ?? null,
@@ -845,6 +1059,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
   gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
   boxDimsM = DEFAULT_BOX_DIMS_M,
   cflFactor = DEFAULT_CFL_FACTOR,
+  wallBarrierElasticStiffnessNPerM = DEFAULT_WALL_BARRIER_ELASTIC_STIFFNESS_N_PER_M,
+  wallBarrierContactScale = DEFAULT_WALL_BARRIER_CONTACT_SCALE,
+  wallBarrierMinGapM = DEFAULT_WALL_BARRIER_MIN_GAP_M,
   preferWebGpu = false,
   navigatorRef = globalThis.navigator,
   device = null,
@@ -865,6 +1082,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
         gravityMPerS2,
         boxDimsM,
         cflFactor,
+        wallBarrierElasticStiffnessNPerM,
+        wallBarrierContactScale,
+        wallBarrierMinGapM,
         pressureInterfaceForceSolver,
         pressureInterfaceGridForceAdmission
       });
@@ -931,6 +1151,9 @@ export async function runMlsMpmGridUpdateWithOptionalWebGpu({
       gravityMPerS2,
       boxDimsM,
       cflFactor,
+      wallBarrierElasticStiffnessNPerM,
+      wallBarrierContactScale,
+      wallBarrierMinGapM,
       retainUpdatedGridBuffer,
       readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE
     });

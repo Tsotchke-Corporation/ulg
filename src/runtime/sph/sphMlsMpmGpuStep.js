@@ -1051,9 +1051,9 @@ function createActiveGridP2gProjectionWgsl() {
 function createActiveGridUpdateWgsl() {
   const withParams = replaceRequiredWgsl(
     mlsMpmGridUpdateWgsl,
-    `  pad2: f32,
+    `  wall_barrier_min_gap_m: f32,
 };`,
-    `  pad2: f32,
+    `  wall_barrier_min_gap_m: f32,
   active_start_i: u32,
   active_start_j: u32,
   active_start_k: u32,
@@ -1159,6 +1159,9 @@ function createFusedGridUpdateParamsArray({
   view.setFloat32(56, boxDimsM[1], true);
   view.setFloat32(60, boxDimsM[2], true);
   view.setFloat32(64, finiteNumber(cflFactor, DEFAULT_CFL_FACTOR), true);
+  view.setFloat32(68, 0, true);
+  view.setFloat32(72, 1, true);
+  view.setFloat32(76, 1e-6, true);
   return buffer;
 }
 
@@ -2709,6 +2712,22 @@ function pressureInterfaceGridForceDiagnostics(gridUpdate) {
   };
 }
 
+function wallBarrierContactDiagnostics(gridUpdate) {
+  return {
+    wallBarrierContactSchema: gridUpdate?.wallBarrierContactSchema ?? null,
+    wallBarrierContactStatus: gridUpdate?.wallBarrierContactStatus ?? null,
+    wallBarrierContactMode: gridUpdate?.wallBarrierContactMode ?? null,
+    wallBarrierElasticStiffnessNPerM: gridUpdate?.wallBarrierElasticStiffnessNPerM ?? 0,
+    wallBarrierContactScale: gridUpdate?.wallBarrierContactScale ?? 0,
+    wallBarrierMinGapM: gridUpdate?.wallBarrierMinGapM ?? 0,
+    wallBarrierContactNodeCount: gridUpdate?.wallBarrierContactNodeCount ?? 0,
+    wallBarrierContactMaxResponseAlpha: gridUpdate?.wallBarrierContactMaxResponseAlpha ?? 0,
+    wallBarrierContactMaxNormalStiffness: gridUpdate?.wallBarrierContactMaxNormalStiffness ?? 0,
+    wallBarrierContactTotalVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactTotalVelocityCorrectionMPerS ?? 0,
+    wallBarrierContactMaxVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactMaxVelocityCorrectionMPerS ?? 0
+  };
+}
+
 export function compactMlsMpmResidentStepDiagnostics({
   sphParticleState,
   mlsMpmParticleState,
@@ -2722,6 +2741,7 @@ export function compactMlsMpmResidentStepDiagnostics({
   assertPackedInputs({ sphParticleState, mlsMpmParticleState });
   const reactionSummary = reactionSummaryDiagnostics(reactionStep);
   const pressureInterfaceGridForce = pressureInterfaceGridForceDiagnostics(gridUpdate);
+  const wallBarrierContact = wallBarrierContactDiagnostics(gridUpdate);
   if (compactGpuSummary?.compactGpuSummaryAvailable) {
     return {
       particleCount: compactGpuSummary.particleCount,
@@ -2769,6 +2789,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       compactSummaryMapAsyncWaitMs: compactGpuSummary.mapAsyncWaitMs ?? compactGpuSummary.timing?.mapAsyncWaitMs ?? null,
       compactSummaryQueueFenceAttribution: compactGpuSummary.queueFenceAttribution ?? compactGpuSummary.timing?.queueFenceAttribution ?? null,
       ...pressureInterfaceGridForce,
+      ...wallBarrierContact,
       ...reactionSummary,
       scientificValidation: false,
       sphValidation: false,
@@ -2819,6 +2840,7 @@ export function compactMlsMpmResidentStepDiagnostics({
       compactSummaryMapAsyncWaitMs: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
       compactSummaryQueueFenceAttribution: compactGpuSummary?.queueFenceAttribution ?? compactGpuSummary?.timing?.queueFenceAttribution ?? null,
       ...pressureInterfaceGridForce,
+      ...wallBarrierContact,
       ...reactionSummary,
       scientificValidation: false,
       sphValidation: false,
@@ -2861,6 +2883,7 @@ export function compactMlsMpmResidentStepDiagnostics({
     compactSummaryMapAsyncWaitMs: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
     compactSummaryQueueFenceAttribution: compactGpuSummary?.queueFenceAttribution ?? compactGpuSummary?.timing?.queueFenceAttribution ?? null,
     ...pressureInterfaceGridForce,
+    ...wallBarrierContact,
     ...reactionSummary,
     scientificValidation: false,
     sphValidation: false,
@@ -10726,6 +10749,17 @@ async function residentStepEnvelope({
     pressureInterfaceAppliedImpulseSource: gridUpdate?.pressureInterfaceAppliedImpulseSource ?? null,
     pressureInterfaceImpulseProofStatus: gridUpdate?.pressureInterfaceImpulseProofStatus ?? null,
     pressureInterfaceForceConsumerStatus: gridUpdate?.pressureInterfaceForceConsumerStatus ?? null,
+    wallBarrierContactSchema: gridUpdate?.wallBarrierContactSchema ?? null,
+    wallBarrierContactStatus: gridUpdate?.wallBarrierContactStatus ?? null,
+    wallBarrierContactMode: gridUpdate?.wallBarrierContactMode ?? null,
+    wallBarrierElasticStiffnessNPerM: gridUpdate?.wallBarrierElasticStiffnessNPerM ?? 0,
+    wallBarrierContactScale: gridUpdate?.wallBarrierContactScale ?? 0,
+    wallBarrierMinGapM: gridUpdate?.wallBarrierMinGapM ?? 0,
+    wallBarrierContactNodeCount: gridUpdate?.wallBarrierContactNodeCount ?? 0,
+    wallBarrierContactMaxResponseAlpha: gridUpdate?.wallBarrierContactMaxResponseAlpha ?? 0,
+    wallBarrierContactMaxNormalStiffness: gridUpdate?.wallBarrierContactMaxNormalStiffness ?? 0,
+    wallBarrierContactTotalVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactTotalVelocityCorrectionMPerS ?? 0,
+    wallBarrierContactMaxVelocityCorrectionMPerS: gridUpdate?.wallBarrierContactMaxVelocityCorrectionMPerS ?? 0,
     internalPressureScale,
     stageStatus: stageStatusSummary,
     stageBackends: stageBackendSummary,

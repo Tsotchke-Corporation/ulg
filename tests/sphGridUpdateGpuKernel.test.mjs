@@ -14,6 +14,7 @@ import {
   ULG_MLS_MPM_GPU_GRID_UPDATE_PARITY_SCHEMA,
   ULG_MLS_MPM_GPU_GRID_UPDATE_SCHEMA,
   createMlsMpmGridUpdateParityReport,
+  mlsMpmWallBarrierContactResponse,
   runMlsMpmGridUpdateWebGpu,
   runMlsMpmGridUpdateWithOptionalWebGpu,
   updateMlsMpmGridCpu
@@ -176,7 +177,40 @@ test('MLS-MPM grid update WGSL declares grid update bindings', () => {
   assert.match(mlsMpmGridUpdateWgsl, /var<storage, read> p2g_grid_nodes/);
   assert.match(mlsMpmGridUpdateWgsl, /var<storage, read_write> updated_grid_nodes/);
   assert.match(mlsMpmGridUpdateWgsl, /params.cfl_factor/);
+  assert.match(mlsMpmGridUpdateWgsl, /wall_barrier_elastic_stiffness_n_per_m: f32/);
+  assert.match(mlsMpmGridUpdateWgsl, /fn wall_barrier_response_alpha/);
+  assert.match(mlsMpmGridUpdateWgsl, /fn wall_barrier_corrected_normal_velocity/);
   assert.match(mlsMpmGridUpdateWgsl, /@compute @workgroup_size\(64\)/);
+});
+
+test('MLS-MPM wall barrier response applies cubic-barrier dynamic stiffness', () => {
+  const loose = mlsMpmWallBarrierContactResponse({
+    gapM: 0.5,
+    normalVelocityMPerS: -2,
+    nodeMassKg: 2,
+    dtSeconds: 0.01
+  });
+  const tight = mlsMpmWallBarrierContactResponse({
+    gapM: 0.001,
+    normalVelocityMPerS: -2,
+    nodeMassKg: 2,
+    dtSeconds: 0.01
+  });
+  const elastic = mlsMpmWallBarrierContactResponse({
+    gapM: 0.5,
+    normalVelocityMPerS: -2,
+    nodeMassKg: 2,
+    dtSeconds: 0.01,
+    elasticNormalStiffnessNPerM: 100000
+  });
+
+  assert.equal(loose.schema, 'peercompute.ulg.mls-mpm-wall-barrier-contact.v0');
+  assert.equal(loose.mode, 'cubic-barrier-dynamic-grid-wall-response');
+  assert.ok(loose.normalStiffness > 0);
+  assert.ok(tight.normalStiffness > loose.normalStiffness);
+  assert.ok(tight.responseAlpha > loose.responseAlpha);
+  assert.ok(elastic.responseAlpha > loose.responseAlpha);
+  assert.ok(tight.correctedNormalVelocityMPerS > loose.correctedNormalVelocityMPerS);
 });
 
 test('CPU MLS-MPM grid update converts momentum to velocity and applies gravity', () => {
@@ -223,6 +257,10 @@ test('CPU MLS-MPM grid update applies CFL clamp and floor no-slip clamp', () => 
   nearlyEqual(wall.updatedGridNodes[1], 0);
   nearlyEqual(wall.updatedGridNodes[2], 0);
   nearlyEqual(wall.updatedGridNodes[3], 0);
+  assert.equal(wall.wallBarrierContactStatus, 'wall-barrier-contact-applied-cpu-reference');
+  assert.equal(wall.wallBarrierContactNodeCount, 1);
+  assert.ok(wall.wallBarrierContactMaxResponseAlpha > 0.999);
+  assert.ok(wall.wallBarrierContactMaxNormalStiffness > 0);
 });
 
 test('CPU MLS-MPM grid update leaves the first interior floor row free for liquid spreading', () => {

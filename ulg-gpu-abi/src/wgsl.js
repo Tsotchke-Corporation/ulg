@@ -4728,9 +4728,9 @@ struct GridUpdateParams {
   box_y: f32,
   box_z: f32,
   cfl_factor: f32,
-  pad0: f32,
-  pad1: f32,
-  pad2: f32,
+  wall_barrier_elastic_stiffness_n_per_m: f32,
+  wall_barrier_contact_scale: f32,
+  wall_barrier_min_gap_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> p2g_grid_nodes: array<vec4<f32>>;
@@ -4750,6 +4750,29 @@ fn grid_update_weight_at(weights: vec3<f32>, offset: i32) -> f32 {
   if (offset == 1) { return weights.y; }
   if (offset == 2) { return weights.z; }
   return 0.0;
+}
+
+fn grid_update_clamp01(value: f32) -> f32 {
+  return clamp(value, 0.0, 1.0);
+}
+
+fn wall_barrier_response_alpha(node_mass_kg: f32, gap_m: f32) -> f32 {
+  let min_gap_m = max(1.0e-12, abs(params.wall_barrier_min_gap_m));
+  let effective_gap_m = max(max(gap_m, 0.0), min_gap_m);
+  let barrier_normal_stiffness = select(0.0, node_mass_kg / (effective_gap_m * effective_gap_m), node_mass_kg > 0.0);
+  let normal_stiffness = max(0.0, barrier_normal_stiffness + max(params.wall_barrier_elastic_stiffness_n_per_m, 0.0));
+  let stiffness_ratio = select(0.0, normal_stiffness * params.dt * params.dt / node_mass_kg, node_mass_kg > 0.0 && params.dt > 0.0);
+  return grid_update_clamp01((stiffness_ratio / (1.0 + stiffness_ratio)) * grid_update_clamp01(params.wall_barrier_contact_scale));
+}
+
+fn wall_barrier_corrected_normal_velocity(normal_velocity_m_per_s: f32, node_mass_kg: f32, gap_m: f32) -> f32 {
+  let response_alpha = wall_barrier_response_alpha(node_mass_kg, gap_m);
+  let inward_velocity_m_per_s = max(0.0, -normal_velocity_m_per_s);
+  var corrected_normal_velocity_m_per_s = normal_velocity_m_per_s + inward_velocity_m_per_s * response_alpha;
+  if (response_alpha >= 1.0 - 1.0e-6 && corrected_normal_velocity_m_per_s < 1.0e-6 && normal_velocity_m_per_s < 0.0) {
+    corrected_normal_velocity_m_per_s = 0.0;
+  }
+  return corrected_normal_velocity_m_per_s;
 }
 
 @compute @workgroup_size(64)
@@ -4804,18 +4827,54 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       velocity = velocity * (vmax / sqrt(speed2));
     }
     let node_pos = row1.xyz;
-    let floor_no_slip_limit_m = params.grid_spacing_m - max(1.0e-7, abs(params.grid_spacing_m) * 1.0e-6);
+    let boundary_epsilon_m = max(1.0e-7, abs(params.grid_spacing_m) * 1.0e-6);
+    let floor_no_slip_limit_m = params.grid_spacing_m - boundary_epsilon_m;
     if (node_pos.y < floor_no_slip_limit_m) {
-      velocity = vec3<f32>(0.0);
+      let floor_gap_m = max(0.0, node_pos.y);
+      let floor_response_alpha = wall_barrier_response_alpha(mass, floor_gap_m);
+      velocity.y = wall_barrier_corrected_normal_velocity(velocity.y, mass, floor_gap_m);
+      let tangential_keep = 1.0 - floor_response_alpha;
+      velocity.x = velocity.x * tangential_keep;
+      velocity.z = velocity.z * tangential_keep;
+      if (floor_response_alpha >= 1.0 - 1.0e-6) {
+        velocity.x = 0.0;
+        velocity.z = 0.0;
+      }
     }
-    if ((node_pos.x <= params.grid_spacing_m && velocity.x < 0.0) || (node_pos.x >= params.box_x - params.grid_spacing_m && velocity.x > 0.0)) {
-      velocity.x = 0.0;
+    if (node_pos.x <= params.grid_spacing_m + boundary_epsilon_m && velocity.x < 0.0) {
+      velocity.x = wall_barrier_corrected_normal_velocity(
+        velocity.x,
+        mass,
+        max(0.0, node_pos.x - params.grid_spacing_m + boundary_epsilon_m)
+      );
     }
-    if (node_pos.y >= params.box_y - params.grid_spacing_m && velocity.y > 0.0) {
-      velocity.y = 0.0;
+    if (node_pos.x >= params.box_x - params.grid_spacing_m - boundary_epsilon_m && velocity.x > 0.0) {
+      velocity.x = -wall_barrier_corrected_normal_velocity(
+        -velocity.x,
+        mass,
+        max(0.0, params.box_x - params.grid_spacing_m - node_pos.x + boundary_epsilon_m)
+      );
     }
-    if ((node_pos.z <= params.grid_spacing_m && velocity.z < 0.0) || (node_pos.z >= params.box_z - params.grid_spacing_m && velocity.z > 0.0)) {
-      velocity.z = 0.0;
+    if (node_pos.y >= params.box_y - params.grid_spacing_m - boundary_epsilon_m && velocity.y > 0.0) {
+      velocity.y = -wall_barrier_corrected_normal_velocity(
+        -velocity.y,
+        mass,
+        max(0.0, params.box_y - params.grid_spacing_m - node_pos.y + boundary_epsilon_m)
+      );
+    }
+    if (node_pos.z <= params.grid_spacing_m + boundary_epsilon_m && velocity.z < 0.0) {
+      velocity.z = wall_barrier_corrected_normal_velocity(
+        velocity.z,
+        mass,
+        max(0.0, node_pos.z - params.grid_spacing_m + boundary_epsilon_m)
+      );
+    }
+    if (node_pos.z >= params.box_z - params.grid_spacing_m - boundary_epsilon_m && velocity.z > 0.0) {
+      velocity.z = -wall_barrier_corrected_normal_velocity(
+        -velocity.z,
+        mass,
+        max(0.0, params.box_z - params.grid_spacing_m - node_pos.z + boundary_epsilon_m)
+      );
     }
     status = 1.0;
   }

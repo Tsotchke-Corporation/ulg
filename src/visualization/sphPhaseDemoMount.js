@@ -183,7 +183,11 @@ const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'three-points',
   'three-render-row-points',
   'three-spheres',
-  'three-render-row-spheres'
+  'three-render-row-spheres',
+  'webgpu-points',
+  'webgpu-render-row-points',
+  'webgpu-spheres',
+  'webgpu-render-row-spheres'
 ]);
 
 function normalizeResidentSurfaceDrawDiagnosticMode(value, fallback = 'three-render-row-points') {
@@ -1628,6 +1632,10 @@ export function mountSphPhaseDemoOverlay({
     || residentSurfaceDrawDiagnosticMode === 'three-points'
     || residentSurfaceDrawDiagnosticMode === 'three-render-row-spheres'
     || residentSurfaceDrawDiagnosticMode === 'three-spheres'
+    || residentSurfaceDrawDiagnosticMode === 'webgpu-render-row-points'
+    || residentSurfaceDrawDiagnosticMode === 'webgpu-points'
+    || residentSurfaceDrawDiagnosticMode === 'webgpu-render-row-spheres'
+    || residentSurfaceDrawDiagnosticMode === 'webgpu-spheres'
     || residentSurfaceDrawDiagnosticMode === 'three';
   const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
   function syncUrlFromControls() {

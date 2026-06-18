@@ -9541,3 +9541,38 @@ Active-grid carry bounds and render-row bridge retention, 2026-06-18 03:30 AKDT:
     `surfaceDrawBridge=three-render-row-spheres`, active-grid dispatch
     `2744/27000`, queue-fenced resident stage `143.6 ms`, and render rows still
     `full-parity-readback`.
+
+WebGPU render-row overlay fallback gate, 2026-06-18 04:25 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `36/36`.
+- `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=webgpu-render-row-points&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=webgpu-render-row-points ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-webgpu-request-fallback.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-webgpu-request-fallback-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5195 npm run probe:sph-long-horizon`
+  - Completed with `browserConsole.issueCount=0`.
+  - Effective bridge:
+    `surfaceDrawDiagnosticMode=three-render-row-points`,
+    `surfaceDrawRequestedDiagnosticMode=webgpu-render-row-points`,
+    `surfaceDrawDiagnosticFallbackReason=webgpu-render-row-overlay-disabled-pending-pixel-validation`,
+    `surfaceDrawVisibleRendererBridge=three-render-row-points`.
+  - Captured frame
+    `artifacts/sph-long-probe-mobile-webgpu-request-fallback-frames/0001-b001-resident-batch.png`
+    is visible. Probe classification remains `bad` only because no-full compact
+    motion proof is absent: `missing-max-speed`, `no-positive-displacement`.
+- `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=scene ULG_BENCH_PARTICLE_COUNTS=128 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=3 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_HAS_TOUCH=1 ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_SURFACE_DRAW_MODE=webgpu-render-row-points ULG_BENCH_PORT=5195 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-webgpu-request-fallback.json node scripts/sph-performance-benchmark.mjs`
+  - Passed with report `status=complete`.
+  - Scenario: `status=good`, `browserConsoleIssueCount=0`,
+    `surfaceDrawBridge=three-render-row-points`,
+    requested mode `webgpu-render-row-points`, fallback reason above, and
+    resident stage `2.5 ms`.
+- `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-three-spheres-post-fallback.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-three-spheres-post-fallback-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5195 npm run probe:sph-long-horizon`
+  - Completed with `browserConsoleIssueCount=0`,
+    `surfaceDrawVisibleRendererBridge=three-render-row-spheres`, and a visible
+    mobile frame at
+    `artifacts/sph-long-probe-mobile-three-spheres-post-fallback-frames/0001-b001-resident-batch.png`.

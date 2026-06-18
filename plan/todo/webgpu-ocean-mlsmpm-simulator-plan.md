@@ -100,6 +100,13 @@ Tactical status, 2026-06-18 AKDT:
   `residentGpuCompletedStageMs=104.2`, `visualRefreshHzEstimate=2.28`, and
   `renderRowsReadbackByteLength=6144` for only `128` particles. The mobile
   sphere bridge fixes visibility/perspective correctness, not throughput.
+- A first raw WebGPU render-row overlay experiment can retain and bind the GPU
+  render-row buffer, but mounted pixel checks showed a black presented frame
+  even when the diagnostic shader ignored storage and camera projection. Until
+  that path passes a browser pixel-present test, requests for
+  `surfaceDraw=webgpu-render-row-points` or `webgpu-render-row-spheres` are
+  routed to the safe Three render-row bridges and reported with
+  `surfaceDrawDiagnosticFallbackReason=webgpu-render-row-overlay-disabled-pending-pixel-validation`.
 - This does not replace the architecture target below. The renderer is still
   Three-managed rather than a direct GPU fluid renderer, and explicit
   compact/full readback modes are still required for diagnostics and
@@ -270,6 +277,10 @@ Interim status, 2026-06-18 AKDT:
   bridge above that count.
 - The compact surface-vertex bridge remains disabled for the normal path
   because full surface vertex/metadata readback still wedges in browser probes.
+- The raw WebGPU render-row overlay remains disabled for the normal path after
+  black-frame pixel checks. It must either be fixed inside the normal
+  Three/WebGPU presentation/depth path or replaced by the screen-space fluid
+  renderer; a separate canvas overlay is not an acceptable completion target.
 - The final phase remains a GPU surface/screen-space fluid path that consumes
   resident buffers directly and shares Three/WebGPU depth without CPU
   geometry readback.
@@ -320,6 +331,10 @@ Interim status, 2026-06-18 AKDT:
 - The report now carries grid-node count, active-grid availability, render-row
   readback byte length, surface draw byte counters, and estimated readback bytes
   per batch/step.
+- The report now also carries requested/effective surface draw modes and a
+  fallback reason. This prevents `webgpu-render-row-*` requests from looking
+  like a successful direct-GPU renderer when they were intentionally routed to
+  the Three fallback after a failed pixel check.
 - Remaining harness work: add broader 10k/50k/100k queue-fenced rows, expose
   GPU-side bounds reduction telemetry once that exists, keep scene/render rows
   separate from direct-resident rows, and add a cache warm split for closure

@@ -1315,6 +1315,8 @@ async function runBrowserProbe({
               ? renderState.renderFieldSurfaceSummarySurfaces.map((surface) => ({ ...surface }))
               : [],
             surfaceDrawDiagnosticMode: renderState.surfaceDrawDiagnosticMode ?? null,
+            surfaceDrawRequestedDiagnosticMode: renderState.surfaceDrawRequestedDiagnosticMode ?? null,
+            surfaceDrawDiagnosticFallbackReason: renderState.surfaceDrawDiagnosticFallbackReason ?? null,
             surfaceDrawDiagnosticMaxFieldCells: renderState.surfaceDrawDiagnosticMaxFieldCells ?? null,
             surfaceDrawDiagnosticMaxResolution: renderState.surfaceDrawDiagnosticMaxResolution ?? null,
             surfaceDrawDiagnosticSurfaceTableMaxResolution: renderState.surfaceDrawDiagnosticSurfaceTableMaxResolution ?? null,
@@ -1375,6 +1377,9 @@ async function runBrowserProbe({
             backend: surfaceDraw.backend ?? null,
             overlayPolicyStatus: surfaceDraw.overlayPolicyStatus ?? null,
             overlayPolicyMode: surfaceDraw.overlayPolicyMode ?? null,
+            diagnosticMode: surfaceDraw.diagnosticMode ?? null,
+            requestedDiagnosticMode: surfaceDraw.requestedDiagnosticMode ?? null,
+            diagnosticFallbackReason: surfaceDraw.diagnosticFallbackReason ?? null,
             vertexCount: surfaceDraw.vertexCount ?? null,
             triangleCount: surfaceDraw.triangleCount ?? null,
             activeSurfaceCount: surfaceDraw.activeSurfaceCount ?? null,
@@ -2966,7 +2971,28 @@ function analyzeTimeline(timeline, {
         || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'three-render-row-spheres-submitted'
       )
       && vertexCount > 0;
-    return webGpuIndirectOverlayVisible || threeRenderRowPointsVisible;
+    const webGpuRenderRowOverlayVisible = (
+        bridge === 'webgpu-render-row-points'
+        || bridge === 'webgpu-render-row-spheres'
+      )
+      && (
+        renderSource === 'resident-render-rows-webgpu-points'
+        || renderSource === 'resident-render-rows-webgpu-instanced-spheres'
+      )
+      && (
+        status === 'resident-render-row-webgpu-points-built'
+        || status === 'resident-render-row-webgpu-spheres-built'
+      )
+      && (
+        renderBridgeStatus === 'webgpu-render-row-points-ready'
+        || renderBridgeStatus === 'webgpu-render-row-spheres-ready'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'webgpu-render-row-points-rendered'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'webgpu-render-row-spheres-rendered'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'webgpu-render-row-points-rendered'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'webgpu-render-row-spheres-rendered'
+      )
+      && vertexCount > 0;
+    return webGpuIndirectOverlayVisible || threeRenderRowPointsVisible || webGpuRenderRowOverlayVisible;
   };
   const residentRenderFieldSummaryVisible = (metric) => (
     metric?.renderState?.source === 'resident-gpu-render-field'
@@ -3756,8 +3782,12 @@ async function main() {
     'three-compact-vertices',
     'three-render-row-points',
     'three-render-row-spheres',
+    'webgpu-render-row-points',
+    'webgpu-render-row-spheres',
     'three-points',
     'three-spheres',
+    'webgpu-points',
+    'webgpu-spheres',
     'three'
   ].includes(
     String(process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || '').toLowerCase()

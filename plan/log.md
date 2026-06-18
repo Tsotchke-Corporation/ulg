@@ -26358,3 +26358,56 @@ Open:
   on the mobile benchmark.
 - Next performance slice remains a GPU-resident renderer path that consumes
   render rows or surface data without CPU row readback.
+
+## 2026-06-18 04:25 AKDT - WebGPU render-row overlay gated after black-frame pixel check
+
+Summary:
+
+- Added an experimental WebGPU render-row overlay path that can retain the GPU
+  render-row buffer, create a WebGPU render pipeline, and submit instanced row
+  quads without render-row readback.
+- Browser pixel checks showed the separate WebGPU overlay canvas presented a
+  black frame in the mounted scene, even with diagnostic shaders that ignored
+  particle storage and camera projection. The pass submitted and reported
+  `webgpu-render-row-points-rendered`, but the visual output was not acceptable.
+- Gated that overlay off for normal use until it has a passing pixel-present
+  check. Requests for `surfaceDraw=webgpu-render-row-points` and
+  `surfaceDraw=webgpu-render-row-spheres` now fall back to the known-good Three
+  render-row bridges and report
+  `surfaceDrawDiagnosticFallbackReason=webgpu-render-row-overlay-disabled-pending-pixel-validation`.
+- Extended the probe and benchmark summaries with requested/effective surface
+  draw mode and fallback reason so this routing is visible in console harness
+  output.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `36/36` pass.
+- PASS:
+  `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=webgpu-render-row-points&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=webgpu-render-row-points ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-webgpu-request-fallback.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-webgpu-request-fallback-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5195 npm run probe:sph-long-horizon`
+  completed with `browserConsole.issueCount=0`, effective
+  `surfaceDrawDiagnosticMode=three-render-row-points`, requested
+  `surfaceDrawRequestedDiagnosticMode=webgpu-render-row-points`,
+  `surfaceDrawVisibleRendererBridge=three-render-row-points`, and a visible
+  mobile frame.
+- PASS:
+  `ULG_BENCH_PROFILE=smoke ULG_BENCH_PROBE_MODE=scene ULG_BENCH_PARTICLE_COUNTS=128 ULG_BENCH_BATCHES=1 ULG_BENCH_BATCH_STEPS=2 ULG_BENCH_VIEWPORT_WIDTH=390 ULG_BENCH_VIEWPORT_HEIGHT=844 ULG_BENCH_DEVICE_SCALE_FACTOR=3 ULG_BENCH_IS_MOBILE=1 ULG_BENCH_HAS_TOUCH=1 ULG_BENCH_LAW_THERMAL=0 ULG_BENCH_LAW_REACTIONS=0 ULG_BENCH_LAW_SURFACE_TENSION=0 ULG_BENCH_COMPACT_SUMMARY_MODE=none ULG_BENCH_SURFACE_DRAW_MODE=webgpu-render-row-points ULG_BENCH_PORT=5195 ULG_BENCH_OUTPUT=artifacts/sph-performance-benchmark-webgpu-request-fallback.json node scripts/sph-performance-benchmark.mjs`
+  completed with scenario `status=good`, `browserConsoleIssueCount=0`,
+  fallback reason above, `surfaceDrawBridge=three-render-row-points`, and
+  `residentStageMs=2.5`.
+- PASS:
+  `ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=300&baset=300&iceh=0&ironh=1&boxx=5&boxy=5&boxz=5&dropn=4&basen=4&mech=mlsmpm&residentAuto=0&residentFuseSequence=1&residentActiveGrid=1&visualCapture=1&surfaceDraw=three-render-row-spheres&blob=1' ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-render-row-spheres ULG_PROBE_OUTPUT=artifacts/sph-long-probe-mobile-three-spheres-post-fallback.json ULG_PROBE_FRAME_DIR=artifacts/sph-long-probe-mobile-three-spheres-post-fallback-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_VIEWPORT_WIDTH=390 ULG_PROBE_VIEWPORT_HEIGHT=844 ULG_PROBE_DEVICE_SCALE_FACTOR=3 ULG_PROBE_IS_MOBILE=1 ULG_PROBE_HAS_TOUCH=1 ULG_PROBE_PORT=5195 npm run probe:sph-long-horizon`
+  completed with `browserConsoleIssueCount=0` and a visible mobile
+  `three-render-row-spheres` frame.
+
+Open:
+
+- The direct WebGPU overlay is not counted as a completed renderer until it
+  passes a pixel-present test. The architectural target remains a GPU-resident
+  renderer integrated with the normal Three/WebGPU depth path, not a separate
+  black-prone overlay canvas.
+- The safe fallback reintroduces render-row readback, so it fixes rendering and
+  console cleanliness but not the remaining sub-1-FPS GUI throughput problem.

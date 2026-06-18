@@ -10,6 +10,7 @@ import {
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
+  SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL,
   SPH_CPU_MARCHING_CUBES_RADIUS_FLOOR_CELLS,
   SPH_CPU_MARCHING_CUBES_RESOLUTION_MIN,
   SPH_SPARSE_RENDER_FIELD_RESOLUTION_MIN,
@@ -965,6 +966,15 @@ test('SPH resident overlay shader samples closure-derived optical records', () =
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL, /scattering_coefficient_per_m/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /accum_texture/);
   assert.match(SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL, /reveal_texture/);
+});
+
+test('SPH resident render-row overlay shader draws directly from retained GPU rows', () => {
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /@binding\(0\).*render_rows/);
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /@binding\(1\).*camera_data/);
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /@builtin\(instance_index\)/);
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /RENDER_ROW_VEC4_STRIDE/);
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /clip\.z = clip\.z \* 0\.5 \+ clip\.w \* 0\.5/);
+  assert.match(SPH_RESIDENT_RENDER_ROW_OVERLAY_WGSL, /pass\.draw|fn fs_main/);
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

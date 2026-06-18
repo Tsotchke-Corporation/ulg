@@ -192,6 +192,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     : null;
   const surfaceDrawStatus = renderState?.surfaceDrawStatus ?? surfaceDraw?.status ?? null;
   const surfaceDrawBridge = renderState?.surfaceDrawVisibleRendererBridge ?? surfaceDraw?.visibleRendererBridge ?? null;
+  const surfaceDrawRequestedDiagnosticMode = renderState?.surfaceDrawRequestedDiagnosticMode
+    ?? surfaceDraw?.requestedDiagnosticMode
+    ?? null;
+  const surfaceDrawDiagnosticFallbackReason = renderState?.surfaceDrawDiagnosticFallbackReason
+    ?? surfaceDraw?.diagnosticFallbackReason
+    ?? null;
   const renderRowsReadbackByteLength = numberOrNull(renderState?.renderRowsReadbackByteLength);
   const surfaceDrawSummaryReadbackByteLength = numberOrNull(
     renderState?.surfaceDrawSummaryReadbackByteLength ?? surfaceDraw?.surfaceDrawSummaryReadbackByteLength
@@ -219,6 +225,26 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const validResidentRenderRowBridge = (
     (surfaceDrawStatus === 'resident-render-row-points-built' && surfaceDrawBridge === 'three-render-row-points')
     || (surfaceDrawStatus === 'resident-render-row-spheres-built' && surfaceDrawBridge === 'three-render-row-spheres')
+    || (
+      surfaceDrawStatus === 'resident-render-row-webgpu-points-built'
+      && surfaceDrawBridge === 'webgpu-render-row-points'
+    )
+    || (
+      surfaceDrawStatus === 'resident-render-row-webgpu-spheres-built'
+      && surfaceDrawBridge === 'webgpu-render-row-spheres'
+    )
+    || (
+      surfaceDrawDiagnosticFallbackReason === 'webgpu-render-row-overlay-disabled-pending-pixel-validation'
+      && surfaceDrawRequestedDiagnosticMode === 'webgpu-render-row-points'
+      && surfaceDrawStatus === 'resident-render-row-points-built'
+      && surfaceDrawBridge === 'three-render-row-points'
+    )
+    || (
+      surfaceDrawDiagnosticFallbackReason === 'webgpu-render-row-overlay-disabled-pending-pixel-validation'
+      && surfaceDrawRequestedDiagnosticMode === 'webgpu-render-row-spheres'
+      && surfaceDrawStatus === 'resident-render-row-spheres-built'
+      && surfaceDrawBridge === 'three-render-row-spheres'
+    )
   );
   const activeGridDispatch = residentStageTiming?.activeGridDispatch ?? null;
   const validDirectResidentLoop = effectiveProbeMode === 'direct-resident'
@@ -280,6 +306,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     browserConsoleWarningCounts: analysis.browserConsoleWarningCounts || {},
     surfaceDrawStatus,
     surfaceDrawBridge,
+    surfaceDrawRequestedDiagnosticMode,
+    surfaceDrawDiagnosticFallbackReason,
     surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,
     surfaceDrawReadback: renderState?.surfaceDrawReadback ?? surfaceDraw?.surfaceDrawReadback ?? null,
     renderRowsReadback: renderState?.renderRowsReadback ?? null,

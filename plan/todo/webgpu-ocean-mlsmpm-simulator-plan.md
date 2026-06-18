@@ -326,12 +326,20 @@ Integration progress, 2026-06-18 AKDT:
   vanilla JS adapter boundary that accepts a caller-owned `GPUDevice`, reports
   same-device ownership, and emits compact `float32x4-position` surface
   buffers without taking over DOM/renderer ownership.
+- Extension commit `62a65cc Expose compact surface row metadata` adds
+  readback-free `rowMetadata` for compact position, normal, and material
+  families. Position rows point at the retained GPU buffer; normal/material
+  rows explicitly report `*-rows-not-produced` so ULG can translate or reject
+  deliberately.
 - ULG now has a translation boundary in `sphMarchingCubesSurfaceAdapter.js`:
   a CPU-reference contract for compact position rows, plus a same-device
   WebGPU kernel that converts retained extension compact positions into ULG
   16-float surface vertex rows, surface draw rows, and indirect draw rows.
   The resident WebGPU path leases retained vertex/draw/indirect buffers and
   rejects known cross-device extension buffers before bind-group creation.
+- ULG consumes extension compact position buffers through
+  `result.rowMetadata.position` when present, while retaining compatibility
+  with the older top-level `result.buffer` shape.
 - `sphPhaseScene` now exposes
   `refreshSphResidentSurfaceDrawFromExtension()`, which publishes those
   retained extension buffers into the engine-owned `sphResidentSurfaceDraw`

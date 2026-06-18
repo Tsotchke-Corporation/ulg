@@ -12,7 +12,9 @@ import {
   ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
+  WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
+  WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
   createUlgWebGpuMarchingCubesExtensionAdapter,
@@ -29,8 +31,46 @@ function extensionExecution({
   vertexFormat = ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT,
   bufferRetained = true,
   readback = false,
-  resourceOwnershipStatus = 'same-device'
+  resourceOwnershipStatus = 'same-device',
+  includeRowMetadata = false,
+  topLevelBuffer = true
 } = {}) {
+  const buffer = bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null;
+  const resourceOwnership = {
+    ok: resourceOwnershipStatus !== 'cross-device-resource',
+    status: resourceOwnershipStatus
+  };
+  const rowMetadata = includeRowMetadata ? {
+    schema: WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA,
+    status: buffer ? 'surface-position-rows-resident' : 'surface-position-rows-empty',
+    readback: false,
+    fullReadback: false,
+    rowCount: vertexCount,
+    triangleCount: vertexCount / 3,
+    position: {
+      schema: WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
+      family: 'position',
+      status: buffer ? 'position-rows-resident' : 'position-rows-empty',
+      available: Boolean(buffer),
+      rowLayout: ['positionX:f32', 'positionY:f32', 'positionZ:f32', 'padding:f32'],
+      rowStrideFloats: vertexStrideFloats,
+      rowStrideBytes: vertexStrideFloats * Float32Array.BYTES_PER_ELEMENT,
+      rowCount: vertexCount,
+      buffer,
+      bufferByteLength: vertexCount * vertexStrideFloats * 4,
+      bufferRetained: Boolean(bufferRetained && buffer),
+      resourceOwnership,
+      readback: false
+    },
+    normal: {
+      status: 'normal-rows-not-produced',
+      available: false
+    },
+    material: {
+      status: 'material-rows-not-produced',
+      available: false
+    }
+  } : null;
   return {
     schema: WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
     adapterId: 'webgpu-marching-cubes',
@@ -50,13 +90,11 @@ function extensionExecution({
       vertexStrideFloats,
       vertexStrideBytes: vertexStrideFloats * Float32Array.BYTES_PER_ELEMENT,
       vertexFormat,
-      buffer: bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null,
+      buffer: topLevelBuffer ? buffer : null,
       bufferByteLength: vertexCount * vertexStrideFloats * 4,
-      bufferRetained,
-      resourceOwnership: {
-        ok: resourceOwnershipStatus !== 'cross-device-resource',
-        status: resourceOwnershipStatus
-      }
+      bufferRetained: topLevelBuffer ? bufferRetained : false,
+      resourceOwnership: topLevelBuffer ? resourceOwnership : null,
+      rowMetadata
     }
   };
 }
@@ -175,6 +213,38 @@ test('ULG summarizes extension compact position buffers as translation-ready but
   assert.equal(summary.surfaceDrawSchema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA);
   assert.deepEqual(summary.surfaceDrawIndirectRowLayout, [...SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT]);
   assert.equal(summary.surfaceDrawIndirectSchema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA);
+});
+
+test('ULG consumes extension compact position row metadata without legacy top-level buffers', async () => {
+  const { device, bindGroups } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({
+    includeRowMetadata: true,
+    topLevelBuffer: false,
+    vertexCount: 3
+  });
+  const rowBuffer = execution.result.rowMetadata.position.buffer;
+  const summary = summarizeWebGpuMarchingCubesExtensionExecution(execution);
+
+  assert.equal(summary.status, 'extension-surface-ready-needs-ulg-row-translation');
+  assert.equal(summary.extensionBufferRetained, true);
+  assert.equal(summary.extensionBufferByteLength, rowBuffer.size);
+  assert.equal(summary.extensionRowMetadataSchema, WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA);
+  assert.equal(summary.extensionPositionRowsSchema, WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA);
+  assert.equal(summary.extensionPositionRowsStatus, 'position-rows-resident');
+  assert.equal(summary.extensionPositionRowsAvailable, true);
+  assert.equal(summary.extensionPositionRowsReadback, false);
+  assert.equal(summary.extensionNormalRowsStatus, 'normal-rows-not-produced');
+  assert.equal(summary.extensionMaterialRowsStatus, 'material-rows-not-produced');
+  assert.equal(summary.hotLoopSafe, true);
+
+  const translated = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(translated.status, 'extension-surface-translated-resident-webgpu');
+  assert.equal(bindGroups[0].entries[0].resource.buffer, rowBuffer);
 });
 
 test('ULG wrapper preserves caller-owned device and adapter swapability', async () => {

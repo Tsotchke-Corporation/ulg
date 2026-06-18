@@ -26776,3 +26776,33 @@ Validation:
 - PASS: `node --test tests/sphPhaseDemoMountRemoteRefresh.test.mjs` reported
   `5/5` pass.
 - PASS: `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_SPH_DERIVED_E2E_TIMEOUT_MS=300000 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default"` reported `1/1` pass.
+
+## 2026-06-18 11:32 AKDT - Extension Row Metadata Consumption
+
+Status:
+
+- Committed the sibling extension adapter slice in
+  `/home/cos/projects/webgpu-marching-cubes` as `62a65cc Expose compact
+  surface row metadata`.
+- The extension now exposes readback-free compact row metadata for position,
+  normal, and material families; normal/material families explicitly report
+  `*-rows-not-produced` instead of implying renderer ownership or hidden
+  readback.
+- Updated ULG's marching-cubes surface adapter to consume retained compact
+  position rows through `result.rowMetadata.position` when present, while
+  retaining compatibility with the older top-level `result.buffer` shape.
+- ULG summaries now report row metadata schema/status plus explicit normal and
+  material row availability, so the next direct-renderer bridge can decide
+  whether to translate, reject, or wait for richer native rows.
+
+Validation:
+
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm test` reported
+  `6/6` pass.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `npm run build` passed
+  with only the existing large-chunk warning.
+- PASS in `/home/cos/projects/webgpu-marching-cubes`: `git diff --check`.
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `10/10` pass.

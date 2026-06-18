@@ -24,6 +24,10 @@ export const WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface-execution.v0';
 export const WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA =
   'peercompute.webgpu-marching-cubes.surface.v0';
+export const WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA =
+  'peercompute.webgpu-marching-cubes.surface-row-metadata.v0';
+export const WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA =
+  'peercompute.webgpu-marching-cubes.compact-position-rows.v0';
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-translation.v0';
 
@@ -339,10 +343,57 @@ function extensionSurfaceMetadata({
 }
 
 function assertSameDeviceExtensionSurfaceBuffer(extensionExecution) {
-  const ownership = extensionExecution?.result?.resourceOwnership || null;
+  const result = extensionExecution?.result || null;
+  const ownership = result?.rowMetadata?.position?.resourceOwnership || result?.resourceOwnership || null;
   if (ownership?.ok === false || ownership?.status === 'cross-device-resource') {
     throw new TypeError(`extension surface buffer is not owned by this GPUDevice (${ownership.status})`);
   }
+}
+
+function compactPositionRowsSource(result = null) {
+  const position = result?.rowMetadata?.position || null;
+  const rowStrideFloats = Math.max(0, Math.round(finiteNumber(
+    position?.rowStrideFloats ?? result?.rowStrideFloats ?? result?.vertexStrideFloats,
+    0
+  )));
+  const rowStrideBytes = Math.max(0, Math.round(finiteNumber(
+    position?.rowStrideBytes ?? result?.rowStrideBytes ?? result?.vertexStrideBytes,
+    0
+  )));
+  const rowSchema = position?.schema ?? result?.rowSchema ?? null;
+  const rowLayout = Array.isArray(position?.rowLayout)
+    ? [...position.rowLayout]
+    : Array.isArray(result?.rowLayout)
+    ? [...result.rowLayout]
+    : null;
+  const buffer = position?.buffer || result?.buffer || null;
+  const bufferRetained = Boolean(
+    (position?.bufferRetained && position?.buffer)
+      || (result?.bufferRetained && result?.buffer)
+  );
+  const bufferByteLength = Math.max(0, Math.round(finiteNumber(
+    position?.bufferByteLength ?? result?.bufferByteLength,
+    0
+  )));
+  return {
+    rowMetadataSchema: result?.rowMetadata?.schema ?? null,
+    rowMetadataStatus: result?.rowMetadata?.status ?? null,
+    rowSchema,
+    rowLayout,
+    rowStrideFloats,
+    rowStrideBytes,
+    rowCount: Math.max(0, Math.round(finiteNumber(position?.rowCount ?? result?.rowCount ?? result?.vertexCount, 0))),
+    status: position?.status ?? null,
+    available: Boolean(position?.available ?? bufferRetained),
+    buffer,
+    bufferRetained,
+    bufferByteLength,
+    ownerDeviceId: position?.ownerDeviceId ?? result?.ownerDeviceId ?? null,
+    resourceOwnership: position?.resourceOwnership ?? result?.resourceOwnership ?? null,
+    readback: position?.readback ?? result?.rowMetadata?.readback ?? result?.readback ?? null,
+    normalRowsStatus: result?.rowMetadata?.normal?.status ?? null,
+    materialRowsStatus: result?.rowMetadata?.material?.status ?? null
+  };
 }
 
 function createMissingExecutionSummary(reason) {
@@ -390,19 +441,24 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     return createMissingExecutionSummary('missing extension surface execution');
   }
   const result = execution.result || null;
+  const positionRows = compactPositionRowsSource(result);
   const extensionSurfaceSchema = result?.schema ?? null;
   const extensionOk = execution.ok === true;
   const extensionVertexCount = Math.max(0, Math.round(finiteNumber(result?.vertexCount, 0)));
   const extensionTriangleCount = Math.max(0, finiteNumber(result?.triangleCount, 0));
-  const extensionVertexStrideFloats = result?.vertexStrideFloats == null
+  const extensionVertexStrideFloats = positionRows.rowStrideFloats > 0
+    ? positionRows.rowStrideFloats
+    : result?.vertexStrideFloats == null
     ? null
     : Math.max(0, Math.round(finiteNumber(result.vertexStrideFloats, 0)));
-  const extensionVertexStrideBytes = result?.vertexStrideBytes == null
+  const extensionVertexStrideBytes = positionRows.rowStrideBytes > 0
+    ? positionRows.rowStrideBytes
+    : result?.vertexStrideBytes == null
     ? null
     : Math.max(0, Math.round(finiteNumber(result.vertexStrideBytes, 0)));
   const extensionVertexFormat = result?.vertexFormat ?? null;
-  const extensionBufferRetained = Boolean(result?.bufferRetained && result?.buffer);
-  const extensionResourceOwnershipStatus = result?.resourceOwnership?.status ?? null;
+  const extensionBufferRetained = positionRows.bufferRetained;
+  const extensionResourceOwnershipStatus = positionRows.resourceOwnership?.status ?? null;
   const blockedReason = normalizeStatusReason(execution.webgpuStatus?.reason)
     || normalizeStatusReason(result?.reason)
     || normalizeStatusReason(execution.status);
@@ -452,7 +508,17 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionVertexCount,
     extensionTriangleCount,
     extensionBufferRetained,
-    extensionBufferByteLength: Math.max(0, Math.round(finiteNumber(result?.bufferByteLength, 0))),
+    extensionBufferByteLength: positionRows.bufferByteLength,
+    extensionRowMetadataSchema: positionRows.rowMetadataSchema,
+    extensionRowMetadataStatus: positionRows.rowMetadataStatus,
+    extensionPositionRowsSchema: positionRows.rowSchema,
+    extensionPositionRowsStatus: positionRows.status,
+    extensionPositionRowsAvailable: positionRows.available,
+    extensionPositionRowsReadback: positionRows.readback,
+    extensionPositionRowsRowLayout: positionRows.rowLayout,
+    extensionPositionRowsRowCount: positionRows.rowCount,
+    extensionNormalRowsStatus: positionRows.normalRowsStatus,
+    extensionMaterialRowsStatus: positionRows.materialRowsStatus,
     extensionReadback: execution.readback ?? null,
     extensionSurfaceVertexReadback: execution.surfaceVertexReadback ?? null,
     readyForUlgSurfaceVertexRows,
@@ -468,7 +534,12 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     surfaceDrawIndirectSchema: ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
     surfaceDrawIndirectRowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT],
     surfaceDrawIndirectRowStrideUints: SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length,
-    hotLoopSafe: Boolean(readyCompactPositionBuffer && execution.readback === false && execution.surfaceVertexReadback === false),
+    hotLoopSafe: Boolean(
+      readyCompactPositionBuffer
+      && execution.readback === false
+      && execution.surfaceVertexReadback === false
+      && positionRows.readback !== true
+    ),
     rendererIntegration: 'pending-ulg-row-translation-and-engine-bridge'
   };
 }
@@ -809,7 +880,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   if (summary.extensionOk !== true) {
     throw new TypeError(summary.reason || 'extension surface execution was not successful');
   }
-  const sourceBuffer = extensionExecution?.result?.buffer || null;
+  const sourceBuffer = compactPositionRowsSource(extensionExecution?.result || null).buffer;
   if (!sourceBuffer || summary.extensionBufferRetained !== true) {
     throw new TypeError('buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu requires a retained extension surface buffer');
   }

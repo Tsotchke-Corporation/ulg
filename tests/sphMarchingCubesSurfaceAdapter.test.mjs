@@ -14,9 +14,11 @@ import {
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_EXECUTION_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
+  buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
   createUlgWebGpuMarchingCubesExtensionAdapter,
   summarizeWebGpuMarchingCubesExtensionExecution,
-  translateWebGpuMarchingCubesSurfaceToUlgRows
+  translateWebGpuMarchingCubesSurfaceToUlgRows,
+  webGpuMarchingCubesExtensionSurfaceRowsWgsl
 } from '../src/runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 
 function extensionExecution({
@@ -51,7 +53,10 @@ function extensionExecution({
       buffer: bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null,
       bufferByteLength: vertexCount * vertexStrideFloats * 4,
       bufferRetained,
-      resourceOwnership: { status: resourceOwnershipStatus }
+      resourceOwnership: {
+        ok: resourceOwnershipStatus !== 'cross-device-resource',
+        status: resourceOwnershipStatus
+      }
     }
   };
 }
@@ -61,6 +66,93 @@ function assertApprox(actual, expected, epsilon = 1e-6) {
     Math.abs(actual - expected) <= epsilon,
     `expected ${actual} to be within ${epsilon} of ${expected}`
   );
+}
+
+function fakeExtensionSurfaceDevice() {
+  const shaderModules = [];
+  const bindGroups = [];
+  const dispatches = [];
+  const copies = [];
+  const createdBuffers = [];
+  const queueWrites = [];
+  const device = {
+    queue: {
+      writeBuffer(buffer, offset, data) {
+        queueWrites.push({ buffer, offset, byteLength: data?.byteLength ?? 0 });
+      },
+      submit(commands) {
+        this.submitted = commands;
+      },
+      async onSubmittedWorkDone() {}
+    },
+    createBuffer({ label, size, usage }) {
+      const buffer = {
+        label,
+        size,
+        usage,
+        destroyed: false,
+        async mapAsync() {},
+        getMappedRange() {
+          return new ArrayBuffer(size);
+        },
+        unmap() {
+          this.unmapped = true;
+        },
+        destroy() {
+          this.destroyed = true;
+        }
+      };
+      createdBuffers.push(buffer);
+      return buffer;
+    },
+    createShaderModule({ label, code }) {
+      const module = { label, code };
+      shaderModules.push(module);
+      return module;
+    },
+    createComputePipeline({ label, layout, compute }) {
+      return {
+        label,
+        layout,
+        compute,
+        getBindGroupLayout(index) {
+          return { index, entryPoint: compute.entryPoint };
+        }
+      };
+    },
+    createBindGroup({ layout, entries }) {
+      const bindGroup = { layout, entries };
+      bindGroups.push(bindGroup);
+      return bindGroup;
+    },
+    createCommandEncoder() {
+      return {
+        beginComputePass() {
+          return {
+            setPipeline(pipeline) {
+              this.pipeline = pipeline;
+            },
+            setBindGroup(index, bindGroup) {
+              this.bindGroup = { index, bindGroup };
+            },
+            dispatchWorkgroups(count) {
+              dispatches.push({ count, pipeline: this.pipeline, bindGroup: this.bindGroup?.bindGroup });
+            },
+            end() {
+              this.ended = true;
+            }
+          };
+        },
+        copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size) {
+          copies.push({ source, sourceOffset, destination, destinationOffset, size });
+        },
+        finish() {
+          return { dispatches: [...dispatches], copies: [...copies] };
+        }
+      };
+    }
+  };
+  return { device, shaderModules, bindGroups, dispatches, copies, createdBuffers, queueWrites };
 }
 
 test('ULG summarizes extension compact position buffers as translation-ready but not direct row-compatible', () => {
@@ -288,4 +380,101 @@ test('ULG translation preserves extension blockers instead of manufacturing rend
   assert.equal(translation.surfaceVertices, null);
   assert.equal(translation.surfaceDraw, null);
   assert.equal(translation.summary.status, 'extension-surface-same-device-check-failed');
+});
+
+test('ULG GPU builder translates retained extension compact positions into resident surface draw buffers', async () => {
+  const { device, shaderModules, bindGroups, dispatches, createdBuffers, queueWrites } = fakeExtensionSurfaceDevice();
+  const execution = extensionExecution({ vertexCount: 3 });
+
+  const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    surfaceIndex: 5,
+    materialId: 12,
+    phaseId: 2,
+    opticalStateId: 8,
+    material: 'h2o',
+    phase: 'liquid',
+    density: 998,
+    isolation: 0.25,
+    readbackMode: 'no-full-readback',
+    retainVertexRowsBuffer: true,
+    retainDrawRowsBuffer: true,
+    retainDrawIndirectRowsBuffer: true
+  });
+
+  assert.equal(result.schema, ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA);
+  assert.equal(result.backend, 'webgpu');
+  assert.equal(result.status, 'extension-surface-translated-resident-webgpu');
+  assert.equal(result.sourceBufferBound, true);
+  assert.equal(result.sourceBufferRetained, true);
+  assert.equal(result.sourceVertexCount, 3);
+  assert.equal(result.translatedVertexCount, 3);
+  assert.equal(result.triangleCount, 1);
+  assert.equal(result.queueCompletionStatus, 'queue-work-completed');
+  assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.equal(result.hotLoopGpuTranslationRequired, false);
+
+  assert.equal(result.surfaceVertices.schema, ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA);
+  assert.equal(result.surfaceVertices.backend, 'webgpu');
+  assert.equal(result.surfaceVertices.vertexRowsBufferRetained, true);
+  assert.equal(result.surfaceVertices.vertexRowsBufferRowCount, 3);
+  assert.equal(result.surfaceVertices.vertexRowsBufferByteLength, 3 * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length * 4);
+  assert.equal(result.surfaceVertices.surfaceVertexReadback, false);
+  assert.equal(result.surfaceVertices.vertexRows.length, 0);
+  assert.equal(result.surfaceVertices.surfaces[0].surfaceIndex, 5);
+
+  assert.equal(result.surfaceDraw.schema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA);
+  assert.equal(result.surfaceDraw.backend, 'webgpu');
+  assert.equal(result.surfaceDraw.drawRowsBufferRetained, true);
+  assert.equal(result.surfaceDraw.drawIndirectRowsBufferRetained, true);
+  assert.equal(result.surfaceDraw.compactedVertexRowsBufferRetained, true);
+  assert.equal(result.surfaceDraw.drawRowsByteLength, SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length * 4);
+  assert.equal(result.surfaceDraw.drawIndirectRowsByteLength, SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length * 4);
+  assert.equal(result.surfaceDraw.surfaceDrawReadback, false);
+  assert.equal(result.surfaceDraw.compactedVertexRowsBuffer, result.surfaceVertices.vertexRowsBuffer);
+  assert.equal(result.surfaceDraw.surfaces[0].status, 'surface-draw-summary-not-read');
+
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
+  assert.equal(result.residentBufferLeaseResourceCount, 3);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 3);
+  assert.equal(shaderModules.length, 1);
+  assert.equal(shaderModules[0].code, webGpuMarchingCubesExtensionSurfaceRowsWgsl);
+  assert.match(shaderModules[0].code, /SurfaceTranslationParams|compact_position_rows|surface_draw_indirect_rows/);
+  assert.equal(bindGroups.length, 1);
+  assert.equal(bindGroups[0].entries.length, 5);
+  assert.equal(bindGroups[0].entries[0].resource.buffer, execution.result.buffer);
+  assert.equal(bindGroups[0].entries[1].resource.buffer.label, 'ulg-sph-extension-surface-vertices');
+  assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-extension-surface-draw');
+  assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-draw-indirect');
+  assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
+  assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'));
+  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 64));
+
+  const retainedBuffers = [
+    result.surfaceVertices.vertexRowsBuffer,
+    result.surfaceDraw.drawRowsBuffer,
+    result.surfaceDraw.drawIndirectRowsBuffer
+  ];
+  result.destroyExtensionSurfaceBuffers();
+  assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 3);
+  assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === false), true);
+  result.releaseExtensionSurfaceBufferLeases();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-ready');
+  result.destroyExtensionSurfaceBuffers();
+  assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
+  assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
+});
+
+test('ULG GPU builder rejects extension buffers reported on a different GPUDevice', async () => {
+  const { device } = fakeExtensionSurfaceDevice();
+  await assert.rejects(
+    buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution: extensionExecution({
+        resourceOwnershipStatus: 'cross-device-resource'
+      })
+    }),
+    /not owned by this GPUDevice/
+  );
 });

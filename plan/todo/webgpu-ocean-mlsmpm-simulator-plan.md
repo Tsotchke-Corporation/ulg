@@ -72,6 +72,14 @@ Tactical status, 2026-06-18 AKDT:
   because they are still Three WebGL-backed. The next no-readback visible
   surface milestone is therefore an engine-owned Three WebGPU renderer path
   plus a storage-buffer geometry bridge, not another canvas overlay.
+- The first engine-owned Three WebGPU renderer gate exists behind
+  `renderer=webgpu` and can initialize a renderer-owned `GPUDevice` for
+  resident compute to reuse. Actual WebGPU scene presentation remains disabled:
+  an ungated probe showed the current mixed `three` / `three/webgpu` scene
+  objects trip WebGPU pipeline errors. The next renderer task is to migrate the
+  mounted scene/material namespace to Three WebGPU-compatible objects, then
+  enable the external-buffer surface bridge with browser pixel and console
+  validation.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

@@ -6,7 +6,8 @@ import {
   SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
   SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   createSphPhaseScene,
-  normalizeResidentSurfaceDrawOverlayMode
+  normalizeResidentSurfaceDrawOverlayMode,
+  normalizeSphRendererBackend
 } from './sphPhaseScene.js';
 import { ELEMENT_MATERIAL_OPTIONS, MATERIAL_OPTIONS } from './sphMaterialOptions.js';
 import { hashPayload } from '../../ulg-gpu-abi/src/index.js';
@@ -170,6 +171,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'blob',
   'residentAuto',
   'residentWorkers',
+  'renderer',
   'surfaceDraw',
   'surfaceDrawDiagnostic',
   'surfaceOverlay'
@@ -181,6 +183,7 @@ const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'off',
   'three',
   'three-compact-vertices',
+  'three-webgpu-surface-buffers',
   'three-points',
   'three-render-row-points',
   'three-spheres',
@@ -1648,6 +1651,15 @@ export function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('surfaceOverlay')
       ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT
   );
+  const initialSphRendererBackend = normalizeSphRendererBackend(
+    initialHash.get('renderer')
+      ?? initialQuery.get('renderer')
+      ?? initialHash.get('sphRenderer')
+      ?? initialQuery.get('sphRenderer')
+      ?? initialHash.get('threeRenderer')
+      ?? initialQuery.get('threeRenderer')
+      ?? 'webgl'
+  );
   const defaultThreeResidentSurfaceDrawMode = window.innerWidth < 700
     ? 'three-render-row-spheres'
     : 'three-render-row-points';
@@ -1659,6 +1671,7 @@ export function mountSphPhaseDemoOverlay({
     residentSurfaceDrawOverlayMode === 'enabled' ? 'auto' : defaultThreeResidentSurfaceDrawMode
   );
   const useThreeCompactSurfaceDrawBridge = residentSurfaceDrawDiagnosticMode === 'three-compact-vertices'
+    || residentSurfaceDrawDiagnosticMode === 'three-webgpu-surface-buffers'
     || residentSurfaceDrawDiagnosticMode === 'three-render-row-points'
     || residentSurfaceDrawDiagnosticMode === 'three-points'
     || residentSurfaceDrawDiagnosticMode === 'three-render-row-spheres'
@@ -1674,6 +1687,7 @@ export function mountSphPhaseDemoOverlay({
     for (const [key, el] of Object.entries(urlControls)) q.set(key, urlValueForControl(el));
     if (!initialResidentWorkersEnabled) q.set('residentWorkers', '0');
     q.set('residentFuseSequence', initialResidentFuseSequenceEnabled ? '1' : '0');
+    if (initialSphRendererBackend !== 'webgl') q.set('renderer', initialSphRendererBackend);
     q.set('surfaceDraw', residentSurfaceDrawDiagnosticMode);
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
@@ -2605,6 +2619,7 @@ export function mountSphPhaseDemoOverlay({
     boxDimsM: sceneBoxDimsM,
     surfaceRadiusScale: blobScaleOf(),
     preserveDrawingBuffer: preserveDrawingBufferForCapture,
+    rendererBackend: initialSphRendererBackend,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode,
     residentAuthorityHost: currentResidentAuthorityHostForScene()

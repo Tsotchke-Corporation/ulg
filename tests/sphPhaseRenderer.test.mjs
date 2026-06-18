@@ -31,6 +31,8 @@ import {
   hideRenderFieldSurfaceAfterGrace,
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
+  normalizeSphRendererBackend,
+  createThreeWebGpuExternalInterleavedBufferAttribute,
   resolveResidentExtensionSurfaceRendererCapability,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
@@ -145,6 +147,13 @@ test('SPH scene viewport sizing clamps DPR and falls back from zero mobile layou
   assert.equal(recovered.aspect, 390 / 844);
 });
 
+test('SPH renderer backend option normalizes WebGPU as opt-in', () => {
+  assert.equal(normalizeSphRendererBackend('webgpu'), 'webgpu');
+  assert.equal(normalizeSphRendererBackend('three-webgpu'), 'webgpu');
+  assert.equal(normalizeSphRendererBackend('webgl'), 'webgl');
+  assert.equal(normalizeSphRendererBackend('bad-value'), 'webgl');
+});
+
 test('SPH extension surface renderer capability blocks no-readback GPU buffers on WebGL scenes', () => {
   const webgl = resolveResidentExtensionSurfaceRendererCapability({
     renderer: { isWebGLRenderer: true, domElement: {} },
@@ -175,6 +184,58 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   });
   assert.equal(readbackBridge.status, 'three-compact-readback-bridge-supported');
   assert.equal(readbackBridge.visibleNoReadbackSupported, false);
+
+  const rendererDevice = { label: 'renderer-device' };
+  const residentDevice = { label: 'resident-device' };
+  const crossDevice = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: rendererDevice,
+        get() { return {}; }
+      },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback',
+    device: residentDevice
+  });
+  assert.equal(crossDevice.status, 'same-device-gpu-buffer-geometry-blocked-cross-device');
+  assert.equal(crossDevice.visibleNoReadbackSupported, false);
+  assert.equal(crossDevice.sameDeviceAsResident, false);
+});
+
+test('SPH Three WebGPU external interleaved attributes bind retained GPU buffers', () => {
+  const gpuBuffer = { label: 'ulg-test-retained-surface-rows' };
+  const records = new Map();
+  const renderer = {
+    isWebGPURenderer: true,
+    backend: {
+      get(target) {
+        let record = records.get(target);
+        if (!record) {
+          record = {};
+          records.set(target, record);
+        }
+        return record;
+      }
+    }
+  };
+  const binding = createThreeWebGpuExternalInterleavedBufferAttribute({
+    renderer,
+    buffer: gpuBuffer,
+    count: 12,
+    stride: 16,
+    itemSize: 3,
+    offset: 5,
+    name: 'position'
+  });
+
+  assert.equal(binding.attribute.name, 'position');
+  assert.equal(binding.attribute.itemSize, 3);
+  assert.equal(binding.attribute.offset, 5);
+  assert.equal(binding.attribute.count, 12);
+  assert.equal(binding.interleavedBuffer.stride, 16);
+  assert.equal(records.get(binding.interleavedBuffer).buffer, gpuBuffer);
 });
 
 test('resident motion diagnostic treats batch-visible motion as a refresh trigger', () => {

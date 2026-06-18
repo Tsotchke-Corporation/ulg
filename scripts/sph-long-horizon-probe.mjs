@@ -583,6 +583,8 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
       } : null,
       setParticlesTiming: overlay?.__sphSetParticlesTiming || sceneUserData.sphSetParticlesTiming || null,
       surfaceApplyTiming: overlay?.__sphSurfaceApplyTiming || sceneUserData.sphSurfaceApplyTiming || null,
+      rendererInit: sceneUserData.sphRendererInit || null,
+      rendererFrame: sceneUserData.sphRendererFrame || null,
       viewportRefresh: sceneUserData.sphViewportRefresh || null,
       viewportResize: sceneUserData.sphViewportResize || null,
       frameCounters: overlay?.__sphFrameCounters || null,

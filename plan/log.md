@@ -1,5 +1,50 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Three WebGPU Device Gate And External Surface Buffer Bridge
+
+Summary:
+
+- Added an opt-in `renderer=webgpu` scene option that constructs a Three
+  `WebGPURenderer` with resident-friendly requested limits and initializes it
+  asynchronously without throwing during the render loop.
+- Changed the resident GPU device resolver so WebGPU renderer mode reuses the
+  renderer-owned `GPUDevice`. This is required before any retained surface
+  buffer can be consumed by Three without cross-device WebGPU validation
+  errors.
+- Added a same-device external interleaved-buffer bridge for translated
+  marching-cubes extension surface rows. It builds engine-owned Three meshes
+  whose position/normal attributes point at the retained ULG surface row
+  `GPUBuffer`; no CPU vertex arrays or overlay canvas are introduced.
+- Tightened the extension renderer capability gate so it blocks WebGL,
+  uninitialized Three WebGPU devices, cross-device buffers, and the current
+  WebGPU presentation hold.
+- Kept actual Three WebGPU scene presentation disabled for now. The browser
+  probe showed mixed `three` and `three/webgpu` scene objects trip WebGPU
+  pipeline errors, so the next renderer slice must migrate the scene/material
+  namespace cleanly before enabling presentation.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "renderer backend|external interleaved|extension surface renderer capability|sphere bridge|render-row|depth policy|surface draw"`
+  reported `42/42` pass.
+- PASS browser console probe:
+  `ULG_PROBE_OUTPUT=artifacts/sph-probe-three-webgpu-renderer-device-gated.json ULG_PROBE_FRAME_DIR=artifacts/sph-probe-three-webgpu-renderer-device-gated-frames ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_TIMEOUT_MS=120000 ULG_PROBE_VIEWPORT_WIDTH=900 ULG_PROBE_VIEWPORT_HEIGHT=680 ULG_PROBE_ENABLE_UNSAFE_WEBGPU=1 ULG_PROBE_PORT=5227 npm run probe:sph-long-horizon`
+  with `renderer=webgpu` completed with `status=good`,
+  `analysis.status=good`, and browser console `issueCount=0`.
+
+Open:
+
+- The first ungated WebGPU presentation probe hit Three WebGPU pipeline errors
+  when rendering the current mixed `three` / `three/webgpu` scene. WebGPU
+  presentation remains disabled until the scene objects/materials are migrated
+  to a compatible Three WebGPU namespace.
+- The extension surface bridge is ready for a same-device Three WebGPU
+  renderer, but live visibility remains on the Three render-row fallback until
+  that namespace migration is complete.
+
 ## 2026-06-18 AKDT - Extension Surface Renderer Capability Gate
 
 Summary:

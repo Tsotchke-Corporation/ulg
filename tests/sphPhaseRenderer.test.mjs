@@ -33,6 +33,7 @@ import {
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphRendererBackend,
   createThreeWebGpuExternalInterleavedBufferAttribute,
+  resolveExtensionSurfaceRenderBridgePlan,
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
   publishScenePressureInterfaceGasCellFieldImportSource,
@@ -283,6 +284,56 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(crossDevice.status, 'same-device-gpu-buffer-geometry-blocked-cross-device');
   assert.equal(crossDevice.visibleNoReadbackSupported, false);
   assert.equal(crossDevice.sameDeviceAsResident, false);
+});
+
+test('SPH extension surface bridge planner falls back to integrated Three compact geometry', () => {
+  const webglCapability = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: { isWebGLRenderer: true, domElement: {} },
+    readbackMode: 'no-full-readback'
+  });
+  const webglPlan = resolveExtensionSurfaceRenderBridgePlan({
+    rendererCapability: webglCapability,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(webglPlan.status, 'extension-surface-render-plan-three-compact-fallback');
+  assert.equal(webglPlan.useThreeCompactBridge, true);
+  assert.equal(webglPlan.useThreeWebGpuSurfaceBufferBridge, false);
+  assert.equal(webglPlan.translationReadbackMode, 'full-parity-readback');
+  assert.equal(webglPlan.fallbackThreeCompactBridge, true);
+  assert.match(webglPlan.fallbackReason, /WebGLRenderer/);
+
+  const rendererDevice = { label: 'renderer-resident-device' };
+  const webgpuCapability = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: rendererDevice,
+        get() { return { buffer: {} }; }
+      },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback',
+    device: rendererDevice
+  });
+  const webgpuPlan = resolveExtensionSurfaceRenderBridgePlan({
+    rendererCapability: webgpuCapability,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(webgpuPlan.status, 'extension-surface-render-plan-three-webgpu-surface-buffers');
+  assert.equal(webgpuPlan.useThreeCompactBridge, false);
+  assert.equal(webgpuPlan.useThreeWebGpuSurfaceBufferBridge, true);
+  assert.equal(webgpuPlan.translationReadbackMode, 'no-full-readback');
+  assert.equal(webgpuPlan.fallbackThreeCompactBridge, false);
+
+  const requestedCompactPlan = resolveExtensionSurfaceRenderBridgePlan({
+    renderBridgeMode: 'three-compact-vertices',
+    rendererCapability: webglCapability,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(requestedCompactPlan.status, 'extension-surface-render-plan-three-compact-requested');
+  assert.equal(requestedCompactPlan.useThreeCompactBridge, true);
+  assert.equal(requestedCompactPlan.translationReadbackMode, 'full-parity-readback');
+  assert.equal(requestedCompactPlan.fallbackThreeCompactBridge, false);
 });
 
 test('SPH Three WebGPU external interleaved attributes bind retained GPU buffers', () => {

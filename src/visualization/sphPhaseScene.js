@@ -347,6 +347,57 @@ export function resolveResidentExtensionSurfaceRendererCapability({
   };
 }
 
+export function resolveExtensionSurfaceRenderBridgePlan({
+  renderBridgeMode = null,
+  readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+  rendererCapability = null
+} = {}) {
+  const requestedRenderBridgeMode = String(renderBridgeMode || '').trim().toLowerCase() || null;
+  const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+  const requestedThreeCompactBridge = requestedRenderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
+  const canUseThreeWebGpuSurfaceBufferBridge = Boolean(
+    !requestedThreeCompactBridge
+    && rendererCapability?.visibleNoReadbackSupported
+  );
+  const fallbackThreeCompactBridge = Boolean(
+    !requestedThreeCompactBridge
+    && !canUseThreeWebGpuSurfaceBufferBridge
+  );
+  const useThreeCompactBridge = requestedThreeCompactBridge || fallbackThreeCompactBridge;
+  const useThreeWebGpuSurfaceBufferBridge = !useThreeCompactBridge && canUseThreeWebGpuSurfaceBufferBridge;
+  const translationReadbackMode = useThreeCompactBridge
+    ? RESIDENT_FULL_READBACK_MODE
+    : requestedReadbackMode;
+  const effectiveRenderBridgeMode = useThreeCompactBridge
+    ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
+    : (useThreeWebGpuSurfaceBufferBridge ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE : null);
+  const fallbackReason = fallbackThreeCompactBridge
+    ? (rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; using engine-owned Three compact geometry readback')
+    : null;
+  return {
+    schema: 'peercompute.ulg.sph-extension-surface-render-bridge-plan.v0',
+    status: useThreeWebGpuSurfaceBufferBridge
+      ? 'extension-surface-render-plan-three-webgpu-surface-buffers'
+      : (useThreeCompactBridge
+        ? (fallbackThreeCompactBridge
+          ? 'extension-surface-render-plan-three-compact-fallback'
+          : 'extension-surface-render-plan-three-compact-requested')
+        : 'extension-surface-render-plan-unavailable'),
+    requestedRenderBridgeMode,
+    effectiveRenderBridgeMode,
+    requestedReadbackMode,
+    translationReadbackMode,
+    requestedThreeCompactBridge,
+    useThreeCompactBridge,
+    useThreeWebGpuSurfaceBufferBridge,
+    fallbackThreeCompactBridge,
+    fallbackReason,
+    rendererCapabilityStatus: rendererCapability?.status ?? null,
+    rendererCapabilityReason: rendererCapability?.reason ?? null,
+    visibleNoReadbackSupported: Boolean(rendererCapability?.visibleNoReadbackSupported)
+  };
+}
+
 export function createThreeWebGpuExternalInterleavedBufferAttribute({
   renderer = null,
   buffer = null,
@@ -10203,16 +10254,24 @@ export function createSphPhaseScene(container, {
         extensionVertexCount: extensionExecution?.result?.vertexCount ?? 0
       });
       const requestedThreeCompactBridge = renderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
-      const translationReadbackMode = requestedThreeCompactBridge
+      const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
+      const capabilityReadbackMode = requestedThreeCompactBridge
         ? RESIDENT_FULL_READBACK_MODE
-        : normalizeResidentReadbackMode(readbackMode);
+        : requestedReadbackMode;
       const rendererCapability = resolveResidentExtensionSurfaceRendererCapability({
         renderer,
         renderBridgeMode,
-        readbackMode: translationReadbackMode,
+        readbackMode: capabilityReadbackMode,
         device: resolvedDeviceResult.device
       });
+      const renderBridgePlan = resolveExtensionSurfaceRenderBridgePlan({
+        renderBridgeMode,
+        readbackMode: requestedReadbackMode,
+        rendererCapability
+      });
+      const translationReadbackMode = renderBridgePlan.translationReadbackMode;
       scene.userData.sphResidentExtensionSurfaceRendererCapability = rendererCapability;
+      scene.userData.sphResidentExtensionSurfaceRenderBridgePlan = renderBridgePlan;
       translation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         device: resolvedDeviceResult.device,
         extensionExecution,
@@ -10246,14 +10305,12 @@ export function createSphPhaseScene(container, {
       });
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
-      const shouldUseThreeWebGpuBufferBridge = !requestedThreeCompactBridge
-        && rendererCapability.visibleNoReadbackSupported;
-      const renderBridge = requestedThreeCompactBridge
+      const renderBridge = renderBridgePlan.useThreeCompactBridge
         ? createSphResidentSurfaceDrawThreeCompactBridge({
           surfaceDrawExecution,
           materialProperties
         })
-        : (shouldUseThreeWebGpuBufferBridge
+        : (renderBridgePlan.useThreeWebGpuSurfaceBufferBridge
           ? createSphResidentSurfaceDrawThreeWebGpuBufferBridge({
             surfaceDrawExecution,
             materialProperties,
@@ -10301,10 +10358,22 @@ export function createSphPhaseScene(container, {
         surfaceDrawSummaryReadbackByteLength: surfaceDrawExecution.surfaceDrawSummaryReadbackByteLength ?? 0,
         fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
+        requestedVisibleRendererBridge: renderBridgeMode,
+        effectiveVisibleRendererBridge: renderBridgePlan.effectiveRenderBridgeMode,
+        visibleRendererBridgeFallbackReason: renderBridgePlan.fallbackReason,
         renderFieldBufferMode: 'not-used-extension-surface',
         surfaceVertexBufferMode: 'retained-extension-surface-vertex-buffer',
-        surfaceDrawBufferMode: 'retained-extension-surface-draw-buffers',
+        surfaceDrawBufferMode: renderBridgePlan.useThreeCompactBridge
+          ? 'three-compact-extension-surface-geometry-readback'
+          : 'retained-extension-surface-draw-buffers',
         surfaceDrawInputBuffersReleased: true,
+        renderBridgePlanSchema: renderBridgePlan.schema,
+        renderBridgePlanStatus: renderBridgePlan.status,
+        renderBridgePlanRequestedReadbackMode: renderBridgePlan.requestedReadbackMode,
+        renderBridgePlanTranslationReadbackMode: renderBridgePlan.translationReadbackMode,
+        renderBridgePlanEffectiveMode: renderBridgePlan.effectiveRenderBridgeMode,
+        renderBridgePlanFallbackThreeCompact: renderBridgePlan.fallbackThreeCompactBridge,
+        renderBridgePlanFallbackReason: renderBridgePlan.fallbackReason,
         renderBridgeCapabilitySchema: rendererCapability.schema,
         renderBridgeCapabilityStatus: rendererCapability.status,
         renderBridgeCapabilityReason: rendererCapability.reason,
@@ -10325,7 +10394,7 @@ export function createSphPhaseScene(container, {
           : 'extension-surface-buffers-retained-no-overlay',
         renderBridgeReason: renderBridgeReady
           ? renderBridge.reason
-          : (requestedThreeCompactBridge
+          : (renderBridgePlan.useThreeCompactBridge
             ? (renderBridge?.reason || 'extension surface rows were not available for the Three compact bridge')
             : (rendererCapability.reason || 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path')),
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
@@ -10378,7 +10447,12 @@ export function createSphPhaseScene(container, {
         sourceVertexRowCount: residentDraw.sourceVertexRowCount,
         drawRowsBufferRetained: residentDraw.drawRowsBufferRetained,
         drawIndirectRowsBufferRetained: residentDraw.drawIndirectRowsBufferRetained,
-        compactedVertexRowsBufferRetained: residentDraw.compactedVertexRowsBufferRetained
+        compactedVertexRowsBufferRetained: residentDraw.compactedVertexRowsBufferRetained,
+        renderBridgePlanStatus: residentDraw.renderBridgePlanStatus,
+        renderBridgePlanEffectiveMode: residentDraw.renderBridgePlanEffectiveMode,
+        renderBridgePlanFallbackThreeCompact: residentDraw.renderBridgePlanFallbackThreeCompact,
+        renderBridgePlanFallbackReason: residentDraw.renderBridgePlanFallbackReason,
+        translationReadbackMode: residentDraw.readbackMode
       });
       return residentDraw;
     } catch (error) {

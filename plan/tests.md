@@ -10044,3 +10044,29 @@ ULG extension output descriptor consumption, 2026-06-18 14:31 AKDT:
     `extensionPositionRowsLayoutName=peercompute.webgpu-marching-cubes.layout.compact-position-f32x4.v0`,
     draw/indirect rows as not produced, material/PBR metadata available, and
     GPU translation binds the descriptor's retained compact position buffer.
+
+Extension surface engine fallback, 2026-06-18 14:29 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `45/45`.
+  - New coverage proves a WebGL/mobile renderer capability plans
+    `extension-surface-render-plan-three-compact-fallback`,
+    `translationReadbackMode=full-parity-readback`, and no raw overlay, while a
+    same-device Three WebGPU renderer keeps
+    `extension-surface-render-plan-three-webgpu-surface-buffers` with
+    `translationReadbackMode=no-full-readback`.
+- `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  - Passed.
+- `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `57/57`.
+- `PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=http://127.0.0.1:5277 PLAYWRIGHT_WEB_SERVER_URL=http://127.0.0.1:5277 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase no-full retained surface draw diagnostics build under budget without overlay"`
+  - Failed: the browser row emitted no WebGPU validation errors, but the
+    fixture reached `resident-render-surface-table-ready surfaces=0 cells=0`
+    and failed the existing `surfaceDrawDiagnosticFieldCellCount > 0`
+    assertion. The test assertion was not changed.

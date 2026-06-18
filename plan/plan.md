@@ -2569,6 +2569,13 @@ physics work:
 - [ ] Reduce or tile retained surface-vertex/draw metadata so no-full resident
   visual correctness can produce fresh surface evidence without routine CPU
   readback.
+- [x] Give the native marching-cubes extension path an in-engine WebGL/mobile
+  fallback: blocked same-device GPUBuffer rendering now falls back to Three
+  compact geometry with an explicit full-readback marker instead of stopping at
+  retained buffers with no visible bridge.
+- [ ] Replace that compact fallback with the true no-readback renderer path:
+  Three WebGPU presentation lifetime, same-device external-buffer geometry
+  import, and browser pixel/console validation.
 - [ ] Continue long-horizon liquid/free-surface quality work, including
   explicit surface tension and representative visual sequence gates.
 - [ ] Extend Na/H2O beyond the one-step mounted gas-promotion proof to repeated

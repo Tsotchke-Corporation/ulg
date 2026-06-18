@@ -72,6 +72,11 @@ Tactical status, 2026-06-18 AKDT:
   because they are still Three WebGL-backed. The next no-readback visible
   surface milestone is therefore an engine-owned Three WebGPU renderer path
   plus a storage-buffer geometry bridge, not another canvas overlay.
+- The extension path now has a non-overlay WebGL/mobile fallback: when the
+  no-readback same-device surface-buffer bridge is blocked, ULG falls back to
+  engine-owned Three compact geometry with explicit
+  `full-parity-readback` telemetry. This should improve visibility on mobile,
+  but it is intentionally not counted as the throughput fix.
 - The first engine-owned Three WebGPU renderer gate exists behind
   `renderer=webgpu` and can initialize a renderer-owned `GPUDevice` for future
   same-device presentation/geometry bridge work. Routine resident

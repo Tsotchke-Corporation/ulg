@@ -27345,3 +27345,41 @@ Remaining:
 - The descriptor contract is now wired, but the mounted renderer still needs a
   same-device import path that consumes those translated buffers without the
   current Three readback bridge.
+
+## 2026-06-18 14:29 AKDT - Extension Surface Engine Fallback
+
+Status:
+
+- Added a testable extension surface render-bridge planner in
+  `sphPhaseScene.js`. It keeps the fast path on same-device Three WebGPU
+  surface buffers when available, but falls back to engine-owned Three compact
+  geometry when WebGL/mobile cannot bind retained GPU buffers directly.
+- Wired `refreshSphResidentSurfaceDrawFromExtension()` through that planner.
+  The WebGL/mobile path now requests full row readback only for the integrated
+  Three compact fallback, records
+  `renderBridgePlanStatus=extension-surface-render-plan-three-compact-fallback`,
+  and publishes the blocked no-readback capability reason instead of stopping at
+  `extension-surface-buffers-retained-no-overlay`.
+- This does not re-enable the raw WebGPU overlay. It is a visible, in-engine
+  fallback while the no-readback Three WebGPU external-buffer bridge remains
+  gated behind renderer/device readiness.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  reported `57/57` pass.
+- Browser harness note: the focused retained-surface-draw Playwright row emitted
+  no WebGPU validation errors, but failed its fixture assertion because that
+  H2O/H2O scenario produced `surfaceCount=0` / `totalFieldCells=0` before the
+  diagnostic assertion. The test was not weakened.
+
+Remaining:
+
+- The real throughput fix is still the no-readback same-device renderer path:
+  Three WebGPU presentation lifetime, external storage-buffer geometry import,
+  and browser pixel/console validation.

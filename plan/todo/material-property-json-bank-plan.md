@@ -13,6 +13,13 @@ material resolver/cache path, expand to all selectable elements, add stale
 schema/provenance rejection tests, then add crystalline structures before
 starting the top-1000 compound import.
 
+Particle-size integration note, 2026-06-18 AKDT: initial particle-size metadata
+now reaches the renderer as `particleRadiiM` and descriptor fields, so
+same-material/same-temperature domains use the same physical particle radius
+instead of block-bound estimates. The bank still needs Phase 2 crystal/packing
+rows and pressure/phase validity ranges before this becomes a complete
+material-state particle-size resolver.
+
 ## Purpose
 
 Add a versioned repo-local JSON material property bank that gives ULG a fast,

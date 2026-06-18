@@ -4644,6 +4644,7 @@ export function mountSphPhaseDemoOverlay({
       scene.setParticles({
         positionsM: new Float32Array(0),
         colorsRgb: new Float32Array(0),
+        particleRadiiM: new Float32Array(0),
         materials: [],
         reactions: [],
         physicalLawGroups: physicalLawGroupsFromControls()
@@ -4666,6 +4667,7 @@ export function mountSphPhaseDemoOverlay({
     scene.setParticles({
       positionsM: viewState.positionsM,
       colorsRgb: viewState.colorsRgb,
+      particleRadiiM: viewState.particleRadiiM,
       materials: viewState.materials,
       emissiveByMaterial: viewState.emissiveByMaterial,
       materialProperties: viewState.materialProperties,

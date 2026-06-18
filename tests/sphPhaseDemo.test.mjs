@@ -190,6 +190,9 @@ test('same material and temperature initialize with matching physical particle r
   const spacing = demo.initialParticleSpacing;
   const dropParticle = demo.state.particles.find((p) => p.role === 'drop');
   const baseParticle = demo.state.particles.find((p) => p.role === 'base');
+  const dropIndex = demo.state.particles.findIndex((p) => p.role === 'drop');
+  const baseIndex = demo.state.particles.findIndex((p) => p.role === 'base');
+  const viewState = createSphPhaseViewState({ demo });
 
   assert.equal(spacing.matchingMaterialState, true);
   assert.equal(spacing.matchingMaterialStateSpacingUnified, true);
@@ -201,6 +204,9 @@ test('same material and temperature initialize with matching physical particle r
   near(dropParticle.particleRadiusM, baseParticle.particleRadiusM);
   assert.equal(dropParticle.material, baseParticle.material);
   assert.equal(dropParticle.temperatureK, baseParticle.temperatureK);
+  near(viewState.particleRadiiM[dropIndex], viewState.particleRadiiM[baseIndex]);
+  near(viewState.materials[dropIndex].particleRadiusM, viewState.materials[baseIndex].particleRadiusM);
+  near(viewState.materials[dropIndex].initialParticleSpacingM, viewState.materials[baseIndex].initialParticleSpacingM);
 });
 
 test('particle phase + temperature come from the closure energy', () => {
@@ -506,6 +512,8 @@ test('SPH phase view state exposes resolved initial particle spacing', () => {
   assert.equal(viewState.initialParticleSpacing.smoothingLengthM, demo.initialParticleSpacing.smoothingLengthM);
   assert.equal(viewState.initialParticleSpacing.drop.particlesPerEdge, demo.initialParticleSpacing.drop.particlesPerEdge);
   assert.equal(viewState.initialParticleSpacing.base.particlesPerEdge, demo.initialParticleSpacing.base.particlesPerEdge);
+  assert.equal(viewState.particleRadiiM.length, demo.counts.total);
+  assert.ok(viewState.particleRadiiM.every((value) => value > 0));
   assert.equal(
     viewState.initialParticleSpacing.drop.volumeEquivalentParticleRadiusM,
     demo.initialParticleSpacing.drop.volumeEquivalentParticleRadiusM

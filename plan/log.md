@@ -27398,3 +27398,36 @@ Validation:
 
 - PASS: `node --check src/visualization/sphPhaseScene.js`.
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `45/45` pass.
+
+## 2026-06-18 14:29 AKDT - Particle Radius Reaches Surface Renderer
+
+Status:
+
+- Wired closure-derived per-particle radius metadata from
+  `createSphPhaseViewState()` through `sphPhaseDemoMount` into
+  `createContinuousSurfaceBatches()`.
+- The CPU/Three surface path now uses `particleRadiiM` before falling back to
+  bounds/count radius estimates, so same-material/same-temperature drop/base
+  domains no longer diverge just because their block bounds or particle counts
+  differ.
+- View-state material descriptors now carry `particleRadiusM`,
+  `currentParticleRadiusM`, `restParticleRadiusM`, and
+  `initialParticleSpacingM`, matching the existing particle-size state policy
+  and making renderer diagnostics inspectable.
+
+Validation:
+
+- PASS: `node --check src/runtime/sphPhaseViewState.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseDemo.test.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs`
+  reported `79/79` pass.
+
+Remaining:
+
+- The resident GPU render-row/surface-row paths already carry particle radius
+  fields, but the long-term material-size strategy still needs pressure- and
+  phase-updated GPU-side radius evolution rather than initial-state metadata
+  only.

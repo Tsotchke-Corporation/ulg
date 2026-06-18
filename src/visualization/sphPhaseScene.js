@@ -9424,6 +9424,7 @@ export function createSphPhaseScene(container, {
   function setParticles({
     positionsM,
     colorsRgb,
+    particleRadiiM = null,
     materials = null,
     emissiveByMaterial = null,
     materialProperties = null,
@@ -9453,6 +9454,7 @@ export function createSphPhaseScene(container, {
         : createContinuousSurfaceBatches({
           positionsM,
           colorsRgb,
+          particleRadiiM,
           materials,
           boxEdgeM,
           boxDimsM: dims,

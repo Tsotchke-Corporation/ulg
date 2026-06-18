@@ -85,7 +85,8 @@ test('SPH phase renderer batches particles into continuous material surfaces', (
       0.6, 0.8, 1.0,
       1.0, 0.32, 0.14
     ]),
-    materials: ['h2o', 'h2o', 'fe']
+    materials: ['h2o', 'h2o', 'fe'],
+    particleRadiiM: [0.11, 0.11, 0.4]
   });
 
   assert.equal(SPH_PHASE_RENDER_MODE, 'continuous-marching-cubes');
@@ -98,6 +99,8 @@ test('SPH phase renderer batches particles into continuous material surfaces', (
   assert.deepEqual(h2o.colorsRgb.slice(0, 3), [0.699999988079071, 0.8999999761581421, 1]);
   assert.ok(h2o.surfaceRadiusM > 0);
   assert.ok(fe.surfaceRadiusM > 0);
+  assert.ok(Math.abs(h2o.surfaceRadiusM - 0.11) < 1e-12);
+  assert.ok(Math.abs(fe.surfaceRadiusM - 0.4) < 1e-12);
   assert.ok(h2o.normalizedPositions.every((value) => value > 0 && value < 1));
   assert.ok(fe.normalizedPositions.every((value) => value > 0 && value < 1));
 });

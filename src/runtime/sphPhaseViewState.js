@@ -30,6 +30,7 @@ export function createSphPhaseViewState(driver) {
   const n = demo.state.particles.length;
   const positionsM = new Float32Array(n * 3);
   const colorsRgb = new Float32Array(n * 3);
+  const particleRadiiM = new Float32Array(n);
   const materials = new Array(n);
   const baseCount = Math.max(0, Math.round(Number(demo.counts?.base) || 0));
   const dropCount = Math.max(0, Math.round(Number(demo.counts?.drop) || 0));
@@ -44,8 +45,27 @@ export function createSphPhaseViewState(driver) {
     colorsRgb[i * 3] = colors[i].rgb[0];
     colorsRgb[i * 3 + 1] = colors[i].rgb[1];
     colorsRgb[i * 3 + 2] = colors[i].rgb[2];
+    const particleRadiusM = Number(
+      p.currentParticleRadiusM
+        ?? p.particleRadiusM
+        ?? p.restParticleRadiusM
+        ?? 0
+    );
+    particleRadiiM[i] = Number.isFinite(particleRadiusM) && particleRadiusM > 0
+      ? particleRadiusM
+      : 0;
     materials[i] = {
       ...renderDescriptors[i],
+      particleRadiusM: particleRadiiM[i],
+      currentParticleRadiusM: Number.isFinite(Number(p.currentParticleRadiusM))
+        ? Number(p.currentParticleRadiusM)
+        : null,
+      restParticleRadiusM: Number.isFinite(Number(p.restParticleRadiusM))
+        ? Number(p.restParticleRadiusM)
+        : null,
+      initialParticleSpacingM: Number.isFinite(Number(p.initialParticleSpacingM))
+        ? Number(p.initialParticleSpacingM)
+        : null,
       renderDomainId,
       renderDomainKey
     };
@@ -57,6 +77,7 @@ export function createSphPhaseViewState(driver) {
     time: demo.state.time ?? 0,
     positionsM,
     colorsRgb,
+    particleRadiiM,
     materials,
     emissiveByMaterial: surfaceEmissive(demo),
     materialProperties: demo.materialProperties,

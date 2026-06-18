@@ -10080,3 +10080,22 @@ Reset resident render bridge cleanup, 2026-06-18 14:29 AKDT:
   - The reset cleanup is a scene-closure resource invalidation fix: released
     surface draw bridges are now nulled from scene state even when no overlay
     canvas was present.
+
+Particle-radius render metadata, 2026-06-18 14:29 AKDT:
+
+- `node --check src/runtime/sphPhaseViewState.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphPhaseDemo.test.mjs`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseDemo.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `79/79`.
+  - New assertions prove same-material/same-temperature drop/base particles
+    carry matching `particleRadiiM` through the view state and that continuous
+    surface batching consumes explicit per-particle radii instead of estimating
+    radius from block bounds.

@@ -342,6 +342,11 @@ Integration progress, 2026-06-18 AKDT:
   bridge, and remain inside the engine-owned camera/depth path. This is a
   correctness/mobile fallback slice, not the final hot path, because it uses
   full row readback when that bridge mode is requested.
+- The compact surface bridge resolves numeric GPU `materialId` and `phaseId`
+  rows back through the SPH render material map before creating materials.
+  That preserves closure-derived H2O, element, and product PBR instead of
+  falling into synthetic unknown-material keys such as `material-*`/`phase-*`
+  that render as black blocked surfaces on reduced metadata paths.
 - Remaining gap: the no-full-readback extension surface buffers are resident
   and scene-state integrated, but not yet visibly consumed by a fully
   GPU-resident Three WebGPU renderer bridge. The next performance slice is a

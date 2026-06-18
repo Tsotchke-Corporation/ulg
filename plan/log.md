@@ -26735,3 +26735,24 @@ Validation:
 - PASS: `node --test tests/sphRenderGpuKernel.test.mjs` reported `46/46`
   pass.
 - PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `38/38` pass.
+
+## 2026-06-18 11:06 AKDT - Compact Surface Material Descriptor Recovery
+
+Status:
+
+- Fixed the engine-owned Three compact surface bridge so native extension
+  surfaces recover material and phase descriptors from numeric GPU
+  `materialId`/`phaseId` rows.
+- The bridge now uses the existing SPH render material map before falling back
+  to synthetic `material-*` keys, so closure-derived PBR rows for H2O, element
+  surfaces, and reaction products are preserved instead of resolving as
+  unknown/blocked black materials.
+- The compact bridge also records `materialId` and `phaseId` on mesh
+  `userData` for browser/mobile diagnostics.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `39/39`
+  pass.

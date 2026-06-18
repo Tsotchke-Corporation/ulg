@@ -42,6 +42,7 @@ import {
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
   normalizeSurfaceRadiusForRenderField,
+  renderDescriptorForSurfaceRecord,
   residentSurfaceDrawOrder,
   residentSurfaceDrawPipelineKey,
   resolveRenderFieldSurfaceVisibility,
@@ -54,6 +55,10 @@ import {
   stableSurfaceRenderOrder,
   stabilizeRenderRowSphereBridgeMaterial
 } from '../src/visualization/sphPhaseScene.js';
+import {
+  GPU_PHASE_IDS,
+  stableOpticalMaterialId
+} from '../src/runtime/material/opticalGpuBuffers.js';
 import { residentMotionDiagnostic } from '../src/visualization/sphPhaseDemoMount.js';
 import { createMlsMpmGridSpec } from '../src/runtime/sph/sphGridGpuKernel.js';
 import {
@@ -203,6 +208,48 @@ test('SPH phase renderer preserves material and phase descriptors for optical cl
   assert.equal(iron.renderKey, 'fe');
   assert.equal(iron.phase, 'liquid');
   assert.ok(new Set(batches.map((batch) => batch.surfaceKey)).size === 3);
+});
+
+test('SPH compact surface descriptor resolves numeric GPU material and phase ids', () => {
+  const materialProperties = {
+    h2o: {
+      phases: [
+        { name: 'solid' },
+        { name: 'liquid' },
+        { name: 'gas' }
+      ]
+    }
+  };
+  const h2oMaterialId = stableOpticalMaterialId('h2o');
+
+  const liquid = renderDescriptorForSurfaceRecord({
+    surfaceIndex: 0,
+    materialId: h2oMaterialId,
+    phaseId: GPU_PHASE_IDS.liquid
+  }, 0, { materialProperties });
+  const ice = renderDescriptorForSurfaceRecord({
+    surfaceIndex: 1,
+    materialId: h2oMaterialId,
+    phaseId: GPU_PHASE_IDS.solid
+  }, 1, { materialProperties });
+  const steam = renderDescriptorForSurfaceRecord({
+    surfaceIndex: 2,
+    materialId: h2oMaterialId,
+    phaseId: GPU_PHASE_IDS.gas
+  }, 2, { materialProperties });
+
+  assert.equal(liquid.material, 'h2o');
+  assert.equal(liquid.phase, 'liquid');
+  assert.equal(liquid.renderKey, 'h2o');
+  assert.equal(liquid.surfaceKey, 'h2o|h2o|liquid');
+  assert.equal(ice.material, 'h2o');
+  assert.equal(ice.phase, 'solid');
+  assert.equal(ice.renderKey, 'ice');
+  assert.equal(ice.surfaceKey, 'ice|h2o|solid');
+  assert.equal(steam.material, 'h2o');
+  assert.equal(steam.phase, 'gas');
+  assert.equal(steam.renderKey, 'steam');
+  assert.equal(steam.surfaceKey, 'steam|h2o|gas');
 });
 
 test('SPH phase renderer does not collapse arbitrary selected elements to the last material', () => {

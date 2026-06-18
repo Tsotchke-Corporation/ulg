@@ -66,6 +66,7 @@ import {
   buildSphRenderFieldCpu,
   buildSphRenderFieldSurfaceTable,
   buildSphRenderFieldWebGpu,
+  buildSphRenderMaterialMap,
   buildSphMaterialInterfaceSourceFieldWebGpu,
   buildSphPhysicsMaterialInterfaceFieldWebGpu,
   buildSphRenderSurfaceDrawMetadataWebGpu,
@@ -1863,6 +1864,52 @@ function renderDescriptorOf(value) {
     renderDomainKey: null,
     surfaceKey: surfaceKeyForDescriptor({ renderKey, material, phase })
   };
+}
+
+export function materialKeyForSurfaceMaterialId(
+  materialId,
+  materialProperties = null,
+  reactionTable = null,
+  materialMap = null
+) {
+  const id = Math.round(Number(materialId));
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const map = materialMap instanceof Map
+    ? materialMap
+    : buildSphRenderMaterialMap(materialProperties || {}, reactionTable);
+  return map.get(id) ?? null;
+}
+
+export function renderDescriptorForSurfaceRecord(
+  sourceSurface = {},
+  surfaceIndex = 0,
+  {
+    materialProperties = null,
+    reactionTable = null,
+    materialMap = null
+  } = {}
+) {
+  const surfaceMaterialId = Number(sourceSurface?.materialId);
+  const surfacePhaseId = Number(sourceSurface?.phaseId);
+  const material = sourceSurface?.material
+    ?? materialKeyForSurfaceMaterialId(surfaceMaterialId, materialProperties, reactionTable, materialMap)
+    ?? `material-${Number.isFinite(surfaceMaterialId) ? Math.round(surfaceMaterialId) : surfaceIndex}`;
+  const phase = sourceSurface?.phase
+    ?? phaseFromGpuPhaseId(surfacePhaseId)
+    ?? `phase-${Number.isFinite(surfacePhaseId) ? Math.round(surfacePhaseId) : 0}`;
+  const renderKey = sourceSurface?.renderKey
+    ?? renderKeyForMaterialPhase(material, phase)
+    ?? sourceSurface?.material
+    ?? `surface-${surfaceIndex}`;
+  return renderDescriptorOf({
+    material,
+    phase,
+    renderKey,
+    opticalState: sourceSurface?.opticalState || null,
+    opticalStateKey: sourceSurface?.opticalStateKey ?? 'default',
+    renderDomainId: sourceSurface?.renderDomainId,
+    renderDomainKey: sourceSurface?.renderDomainKey
+  });
 }
 
 function materialPropertiesForSurfaceDescriptor(descriptor, materialProperties) {
@@ -4669,6 +4716,7 @@ export function createSphPhaseScene(container, {
     const surfaceRecords = sourceSurfaces.length
       ? sourceSurfaces
       : [...activeRowsBySurface.keys()].sort((a, b) => a - b).map((surfaceIndex) => ({ surfaceIndex }));
+    const materialMap = buildSphRenderMaterialMap(materialProperties || {}, sphReactionTable);
     const group = new THREE.Group();
     group.name = 'ulg-sph-resident-surface-draw-three-compact';
     group.frustumCulled = false;
@@ -4719,14 +4767,10 @@ export function createSphPhaseScene(container, {
         normalMagnitude += Math.abs(nx) + Math.abs(ny) + Math.abs(nz);
       }
 
-      const descriptor = renderDescriptorOf({
-        material: sourceSurface.material ?? `material-${sourceSurface.materialId ?? surfaceIndex}`,
-        phase: sourceSurface.phase ?? `phase-${sourceSurface.phaseId ?? 0}`,
-        renderKey: sourceSurface.renderKey ?? sourceSurface.material ?? `surface-${surfaceIndex}`,
-        opticalState: sourceSurface.opticalState || null,
-        opticalStateKey: sourceSurface.opticalStateKey ?? 'default',
-        renderDomainId: sourceSurface.renderDomainId,
-        renderDomainKey: sourceSurface.renderDomainKey
+      const descriptor = renderDescriptorForSurfaceRecord(sourceSurface, surfaceIndex, {
+        materialProperties,
+        reactionTable: sphReactionTable,
+        materialMap
       });
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
       const geometry = new THREE.BufferGeometry();
@@ -4749,6 +4793,12 @@ export function createSphPhaseScene(container, {
       mesh.userData.materialKey = descriptor.material;
       mesh.userData.renderKey = descriptor.renderKey;
       mesh.userData.phase = descriptor.phase;
+      mesh.userData.materialId = Number.isFinite(Number(sourceSurface.materialId))
+        ? Math.round(Number(sourceSurface.materialId))
+        : null;
+      mesh.userData.phaseId = Number.isFinite(Number(sourceSurface.phaseId))
+        ? Math.round(Number(sourceSurface.phaseId))
+        : null;
       mesh.userData.surfaceIndex = surfaceIndex;
       mesh.userData.surfaceDrawVertexOffset = hasExplicitVertexRange
         ? Math.max(0, Math.round(explicitVertexOffset))

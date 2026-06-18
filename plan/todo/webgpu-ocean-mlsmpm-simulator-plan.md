@@ -336,12 +336,18 @@ Integration progress, 2026-06-18 AKDT:
   `refreshSphResidentSurfaceDrawFromExtension()`, which publishes those
   retained extension buffers into the engine-owned `sphResidentSurfaceDraw`
   state without creating a canvas overlay or requesting a second GPU device.
-- Remaining gap: the retained extension surface buffers are engine-state
-  integrated, but not yet visibly consumed by a material/PBR-preserving
-  renderer bridge. The next slice is a Three/engine-owned consumer for those
-  resident vertex/draw/indirect buffers, with browser console and pixel
-  validation. Do not count this phase complete until that visible bridge
-  exists.
+- `refreshSphResidentSurfaceDrawFromExtension()` can now be called with
+  `renderBridgeMode=three-compact-surface-geometry` to translate extension
+  compact positions into ULG rows, feed the existing Three scene material/PBR
+  bridge, and remain inside the engine-owned camera/depth path. This is a
+  correctness/mobile fallback slice, not the final hot path, because it uses
+  full row readback when that bridge mode is requested.
+- Remaining gap: the no-full-readback extension surface buffers are resident
+  and scene-state integrated, but not yet visibly consumed by a fully
+  GPU-resident Three WebGPU renderer bridge. The next performance slice is a
+  same-device WebGPU renderer/geometry consumer for those retained buffers,
+  with browser console and pixel validation. Do not count this phase complete
+  until the visible no-readback bridge exists.
 
 Interim status, 2026-06-18 AKDT:
 

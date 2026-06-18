@@ -9353,6 +9353,9 @@ export function createSphPhaseScene(container, {
     transparencyClassId = 0,
     depthWriteFlag = 1,
     renderOrder = null,
+    readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+    renderBridgeMode = null,
+    materialProperties = currentMaterialProperties,
     waitForQueueCompletion = true
   } = {}) {
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
@@ -9382,6 +9385,10 @@ export function createSphPhaseScene(container, {
         extensionStatus: extensionExecution?.status ?? null,
         extensionVertexCount: extensionExecution?.result?.vertexCount ?? 0
       });
+      const requestedThreeCompactBridge = renderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
+      const translationReadbackMode = requestedThreeCompactBridge
+        ? RESIDENT_FULL_READBACK_MODE
+        : normalizeResidentReadbackMode(readbackMode);
       translation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         device: resolvedDeviceResult.device,
         extensionExecution,
@@ -9400,7 +9407,7 @@ export function createSphPhaseScene(container, {
         transparencyClassId,
         depthWriteFlag,
         renderOrder,
-        readbackMode: SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
+        readbackMode: translationReadbackMode,
         compactSummaryReadback: false,
         retainVertexRowsBuffer: true,
         retainDrawRowsBuffer: true,
@@ -9415,6 +9422,13 @@ export function createSphPhaseScene(container, {
       });
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
+      const renderBridge = requestedThreeCompactBridge
+        ? createSphResidentSurfaceDrawThreeCompactBridge({
+          surfaceDrawExecution,
+          materialProperties
+        })
+        : null;
+      const renderBridgeReady = renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS;
       const residentDraw = {
         schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
         status: 'resident-extension-surface-draw-buffers-retained',
@@ -9458,36 +9472,48 @@ export function createSphPhaseScene(container, {
         surfaceVertexBufferMode: 'retained-extension-surface-vertex-buffer',
         surfaceDrawBufferMode: 'retained-extension-surface-draw-buffers',
         surfaceDrawInputBuffersReleased: true,
-        visibleRendererBridge: 'extension-resident-surface-buffers-no-overlay',
-        visibleRenderSource: 'webgpu-marching-cubes-extension-same-device-surface',
+        visibleRendererBridge: renderBridgeReady
+          ? renderBridge.rendererBridge
+          : 'extension-resident-surface-buffers-no-overlay',
+        visibleRenderSource: renderBridgeReady
+          ? renderBridge.visibleRenderSource
+          : 'webgpu-marching-cubes-extension-same-device-surface',
         renderBridgeSchema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
-        renderBridgeStatus: 'extension-surface-buffers-retained-no-overlay',
-        renderBridgeReason: 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path',
-        renderBridgeFrameCount: 0,
-        renderBridgeLastRenderStatus: null,
-        renderBridgeEngineIntegration: 'three-renderer-owned-scene-state-no-overlay',
-        renderBridgeThreeMeshCount: 0,
-        renderBridgeThreeGeometryByteLength: 0,
-        renderBridgeDrawOrderingPolicy: null,
-        renderBridgeDrawOrderCount: 0,
-        renderBridgeDrawOrderSurfaceIndices: [],
-        renderBridgeDrawOrderIndirectOffsets: [],
-        renderBridgeDepthPolicy: null,
-        renderBridgeDepthAttachmentFormat: null,
-        renderBridgeDepthAttachmentReady: false,
-        renderBridgeTransparencyCompositeMode: null,
-        renderBridgeOitAccumFormat: null,
-        renderBridgeOitRevealFormat: null,
-        renderBridgeOitTargetsReady: false,
-        renderBridgeLastOpaqueDrawCount: 0,
-        renderBridgeLastTransparentDrawCount: 0,
-        renderBridgeOpticalRenderSource: null,
-        renderBridgeOpticalRecordCount: 0,
-        renderBridgeOpticalRecordStrideFloats: 0,
-        renderBridgeOpticalSpectralSampleCount: 0,
-        renderBridgeOpticalSpectralSampleStrideFloats: 0,
-        renderBridgeTemporalSwapPolicy: null,
-        renderBridgeRetainedPreviousOverlay: false,
+        renderBridgeStatus: renderBridgeReady
+          ? renderBridge.status
+          : 'extension-surface-buffers-retained-no-overlay',
+        renderBridgeReason: renderBridgeReady
+          ? renderBridge.reason
+          : (requestedThreeCompactBridge
+            ? (renderBridge?.reason || 'extension surface rows were not available for the Three compact bridge')
+            : 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path'),
+        renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
+        renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
+        renderBridgeEngineIntegration: renderBridgeReady
+          ? 'three-renderer-owned-scene-object-no-overlay'
+          : 'three-renderer-owned-scene-state-no-overlay',
+        renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
+        renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
+        renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
+        renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
+        renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
+        renderBridgeDrawOrderIndirectOffsets: [...(renderBridge?.drawOrderIndirectOffsets || [])],
+        renderBridgeDepthPolicy: renderBridge?.depthPolicy ?? null,
+        renderBridgeDepthAttachmentFormat: renderBridge?.depthAttachmentFormat ?? null,
+        renderBridgeDepthAttachmentReady: Boolean(renderBridge?.depthAttachmentReady),
+        renderBridgeTransparencyCompositeMode: renderBridge?.transparencyCompositeMode ?? null,
+        renderBridgeOitAccumFormat: renderBridge?.oitAccumFormat ?? null,
+        renderBridgeOitRevealFormat: renderBridge?.oitRevealFormat ?? null,
+        renderBridgeOitTargetsReady: Boolean(renderBridge?.oitTargetsReady),
+        renderBridgeLastOpaqueDrawCount: renderBridge?.lastOpaqueDrawCount ?? 0,
+        renderBridgeLastTransparentDrawCount: renderBridge?.lastTransparentDrawCount ?? 0,
+        renderBridgeOpticalRenderSource: renderBridge?.opticalRenderSource ?? null,
+        renderBridgeOpticalRecordCount: renderBridge?.opticalRecordCount ?? 0,
+        renderBridgeOpticalRecordStrideFloats: renderBridge?.opticalRecordStrideFloats ?? 0,
+        renderBridgeOpticalSpectralSampleCount: renderBridge?.opticalSpectralSampleCount ?? 0,
+        renderBridgeOpticalSpectralSampleStrideFloats: renderBridge?.opticalSpectralSampleStrideFloats ?? 0,
+        renderBridgeTemporalSwapPolicy: renderBridge?.temporalSwapPolicy ?? null,
+        renderBridgeRetainedPreviousOverlay: Boolean(renderBridge?.retainedPreviousOverlay),
         extensionSurfaceTranslation: translation,
         surfaceVertices: surfaceVerticesExecution,
         surfaceDraw: surfaceDrawExecution,
@@ -9498,8 +9524,10 @@ export function createSphPhaseScene(container, {
       };
       sphResidentSurfaceDraw = residentDraw;
       scene.userData.sphResidentSurfaceDraw = residentDraw;
-      sphResidentSurfaceDrawRenderBridge = null;
-      scene.userData.sphResidentSurfaceDrawRenderBridge = null;
+      if (!renderBridgeReady) {
+        sphResidentSurfaceDrawRenderBridge = null;
+        scene.userData.sphResidentSurfaceDrawRenderBridge = null;
+      }
       releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
       markSphResidentRenderProgress('extension-surface-draw-translation-complete', {
         stage: 'extension-surface-draw',

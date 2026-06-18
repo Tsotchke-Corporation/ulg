@@ -466,6 +466,26 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
 });
 
+test('ULG GPU builder exposes full-readback rows for the Three compact scene bridge', async () => {
+  const { device } = fakeExtensionSurfaceDevice();
+  const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: extensionExecution({ vertexCount: 3 }),
+    readbackMode: 'full-parity-readback',
+    retainVertexRowsBuffer: false,
+    retainDrawRowsBuffer: false,
+    retainDrawIndirectRowsBuffer: false
+  });
+
+  assert.equal(result.surfaceVertices.surfaceVertexReadback, true);
+  assert.equal(result.surfaceVertices.vertexRows.length, 3 * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length);
+  assert.equal(result.surfaceDraw.surfaceDrawReadback, true);
+  assert.equal(result.surfaceDraw.compactedVertexRows, result.surfaceVertices.vertexRows);
+  assert.equal(result.surfaceDraw.compactedVertexRowsByteLength, result.surfaceVertices.vertexRows.byteLength);
+  assert.equal(result.surfaceDraw.compactedVertexRowsBufferRetained, false);
+  assert.equal(result.surfaceDraw.surfaces[0].status, 'surface-draw-ready');
+});
+
 test('ULG GPU builder rejects extension buffers reported on a different GPUDevice', async () => {
   const { device } = fakeExtensionSurfaceDevice();
   await assert.rejects(

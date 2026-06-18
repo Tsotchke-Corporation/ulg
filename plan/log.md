@@ -26688,3 +26688,27 @@ Open:
   bridge. The next slice must consume the retained extension vertex/draw/
   indirect buffers inside the existing engine-owned Three/WebGPU path and pass
   browser console plus pixel validation.
+
+## 2026-06-18 10:32 AKDT - Extension Surface Three Bridge Fallback
+
+Status:
+
+- Added a non-overlay visible fallback for extension surfaces:
+  `refreshSphResidentSurfaceDrawFromExtension()` now accepts
+  `renderBridgeMode=three-compact-surface-geometry`.
+- When that mode is requested, the extension translator uses full row readback
+  and feeds the existing Three compact surface geometry bridge, so material/PBR
+  creation, Three camera transforms, depth, and mobile WebGL presentation stay
+  in the engine path.
+- The normal extension path remains no-full-readback and resident-buffer
+  preserving. That path is still not the final visible hot path until a
+  same-device Three WebGPU consumer binds retained extension buffers directly.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `9/9` pass.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `38/38` pass.

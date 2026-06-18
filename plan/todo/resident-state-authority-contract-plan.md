@@ -2,6 +2,14 @@
 
 Date: 2026-06-12 AKDT
 
+Status update, 2026-06-17 NodeKernel placement routing: ULG now asks
+NodeKernel for mechanics GPU resident stage placement preflight when a real
+NodeKernel is present, preserving the raw ComputeManager preflight inside the
+NodeKernel authority envelope. This moves the placement decision one step
+closer to the intended state-authority owner before any resident stage mutates
+state. Direct/injected ComputeManager paths still use the ComputeManager
+preflight.
+
 Status update, 2026-06-17 ComputeManager placement preflight: state-family
 read/write metadata now has an admission-facing pre-execution report.
 PeerCompute's GPU resident lane preflight uses the same dependency and

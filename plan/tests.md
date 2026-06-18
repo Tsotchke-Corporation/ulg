@@ -1,5 +1,29 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-17 NodeKernel GPU Resident Stage-Placement Preflight Routing
+
+ULG now routes mechanics stage placement preflight through NodeKernel when a
+real NodeKernel owns the resident ComputeManager, while preserving direct
+ComputeManager preflight for injected/local-only paths.
+
+Focused checks:
+
+- ULG PeerCompute integration:
+  `node --test tests/peercomputeComputeManagerIntegration.test.mjs` passed
+  `16/16`. The NodeKernel-owned mechanics stage chain reports
+  `gpuResidentLaneStagePlacementAuthorityPath=node-kernel-preflight`,
+  `peercompute.nodekernel.gpu-resident-stage-placement-preflight.v0`,
+  `local-placement-accepted`, and raw ComputeManager status
+  `placement-preflight-ready`; the direct lane-executed path reports
+  `compute-manager-preflight` and no NodeKernel preflight schema.
+- Fast physics atomics:
+  `npm run test:physics-atomics` passed `11` checks with `3` expected opt-in
+  skips.
+- Recurring visual sanity matrix:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-nodekernel-stage-placement-preflight-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+  passed with `failedCount=0`, empty issue counts, and two frames each under
+  `/tmp/ulg-visual-sanity-matrix/codex-nodekernel-stage-placement-preflight-20260617`.
+
 ## Current Focused Result - 2026-06-17 ComputeManager GPU Resident Stage-Placement Preflight
 
 ComputeManager now reports GPU resident lane placement before execution. ULG

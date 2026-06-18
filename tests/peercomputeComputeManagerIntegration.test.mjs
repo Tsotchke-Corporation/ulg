@@ -1087,6 +1087,30 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
     scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionStageOrder,
     ['p2g', 'gridUpdate', 'g2p']
   );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementAuthorityPath,
+    'node-kernel-preflight'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelPlacementPreflightSchema,
+    'peercompute.nodekernel.gpu-resident-stage-placement-preflight.v0'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelPlacementPreflightStatus,
+    'local-placement-accepted'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelPlacementPreflightComputeManagerStatus,
+    'placement-preflight-ready'
+  );
+  assert.equal(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightSchema,
+    'peercompute.compute.gpu-resident-lane-stage-placement-preflight.v0'
+  );
+  assert.deepEqual(
+    scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightBatches,
+    [['p2g'], ['gridUpdate'], ['g2p']]
+  );
   assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageLeaseFenceStatus, 'queue-work-completed');
   assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageLeaseFenceSatisfied, true);
   assert.equal(scheduledStageChainStep.mechanicsStageTaskChain.computeManagerOwned, true);
@@ -1326,6 +1350,11 @@ test('ULG resident solver descriptors publish executable pass-DAG plus metadata 
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerReadyCount, 0);
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightWorkerFallbackCount, 3);
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementPreflightMissingExecutorCount, 0);
+  assert.equal(
+    laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStagePlacementAuthorityPath,
+    'compute-manager-preflight'
+  );
+  assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageNodeKernelPlacementPreflightSchema, null);
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorMode, 'registered');
   assert.equal(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuHubResidentStageExecutorRegisteredCount, 3);
   assert.deepEqual(laneExecutedStageChainStep.mechanicsStageTaskChain.gpuResidentLaneStageExecutionExecutorSources, {

@@ -3,13 +3,13 @@
 Date: 2026-06-12 AKDT
 
 Status update, 2026-06-17 NodeKernel placement wrapper: sibling PeerCompute
-now wraps GPU resident stage placement preflight at the NodeKernel layer.
-Local and advisory distributed requests can still use local ComputeManager
-preflight, but non-advisory distributed resident stage placement fails closed
-until a remote resident-stage executor exists. ULG should use this wrapper
-when its resident authority host has a real NodeKernel, then keep the
-ComputeManager preflight as the raw execution report inside the NodeKernel
-authority envelope.
+now wraps GPU resident stage placement preflight at the NodeKernel layer, and
+ULG now uses that wrapper when a real NodeKernel is supplied. Local and
+advisory distributed requests can still use local ComputeManager preflight,
+but non-advisory distributed resident stage placement fails closed until a
+remote resident-stage executor exists. ULG keeps the ComputeManager preflight
+as the raw execution report inside the NodeKernel authority envelope and
+preserves direct ComputeManager preflight for injected/local-only paths.
 
 Status update, 2026-06-17 ComputeManager stage-placement preflight:
 PeerCompute now exposes

@@ -7,8 +7,11 @@ PeerCompute now has the NodeKernel-side authority envelope for GPU resident
 stage placement preflight. This is the law-graph boundary ULG needs before
 distributed resident stages: local and advisory distributed plans report local
 ComputeManager placement, while non-advisory distributed resident placement is
-blocked until an executor exists. The next ULG step is to prefer this
-NodeKernel wrapper when a real kernel owns the resident ComputeManager.
+blocked until an executor exists. ULG now prefers this NodeKernel wrapper when
+a real kernel owns the resident ComputeManager and records the raw
+ComputeManager preflight inside the NodeKernel envelope. The next law-graph
+authority step is an actual remote/dedicated resident-stage placement executor
+with peer capability, retained-ref locality, and StateManager admission checks.
 
 Status update, 2026-06-17 ComputeManager placement preflight: the law-stage
 dependency and state-family conflict policy is now visible before execution,

@@ -2,15 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-17 AKDT: ULG now prefers NodeKernel for GPU
+resident stage placement preflight when a real NodeKernel owns the resident
+ComputeManager. The mechanics stage chain records
+`gpuResidentLaneStagePlacementAuthorityPath=node-kernel-preflight`,
+`peercompute.nodekernel.gpu-resident-stage-placement-preflight.v0`, local
+NodeKernel placement status, and the raw ComputeManager preflight status and
+batches from inside the authority envelope. Direct/injected ComputeManager
+paths still report `compute-manager-preflight`. Validation passed ULG
+PeerCompute integration `16/16`, physics atomics `11` pass with `3` expected
+opt-in skips, and visual matrix
+`codex-nodekernel-stage-placement-preflight-20260617` with `failedCount=0`.
+
 Current checkpoint, 2026-06-17 AKDT: sibling PeerCompute now has a
 NodeKernel-level GPU resident stage placement wrapper. Local and advisory
 distributed requests call through to local ComputeManager placement preflight
 and record `peercompute.nodekernel.gpu-resident-stage-placement-preflight.v0`;
 non-advisory distributed resident placement fails closed with
 `ERR_NODEKERNEL_DISTRIBUTED_GPU_RESIDENT_STAGE_PLACEMENT_UNAVAILABLE` until a
-real remote resident-stage executor exists. Next ULG code target: prefer this
-NodeKernel wrapper when a real NodeKernel owns the resident ComputeManager,
-while keeping direct ComputeManager preflight for injected/local-only paths.
+real remote resident-stage executor exists.
 
 Current checkpoint, 2026-06-17 AKDT: GPU resident lane placement now has a
 ComputeManager-owned preflight surface before stage execution. Sibling

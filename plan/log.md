@@ -1,5 +1,68 @@
 # ULG Implementation Log
 
+## 2026-06-17 16:31:56 AKDT - NodeKernel GPU resident stage placement routing
+
+Prompt time/date: 2026-06-17 16:31 AKDT, continuing the architecture refactor
+after sibling PeerCompute added the NodeKernel GPU resident stage placement
+preflight wrapper.
+
+Summary:
+
+- ULG mechanics stage-chain placement preflight now prefers
+  `nodeKernel.preflightGpuResidentLaneStagePlacement()` when a real NodeKernel
+  is supplied.
+- The raw ComputeManager preflight is preserved from the NodeKernel envelope as
+  the execution-level report, so existing placement batches, Worker residency
+  statuses, executor sources, and missing-executor counts remain visible.
+- Injected/local-only ComputeManager paths still use direct
+  `computeManager.preflightGpuResidentLaneStagePlacement()`.
+- Telemetry now records `gpuResidentLaneStagePlacementAuthorityPath`,
+  NodeKernel placement schema/status/requested placement/advisory flag, and
+  NodeKernel-wrapped ComputeManager status/can-execute evidence.
+- Integration coverage proves NodeKernel-owned mechanics stage chains report
+  `node-kernel-preflight`, while direct lane-executed chains report
+  `compute-manager-preflight`.
+
+Files touched:
+
+- `src/runtime/sph/sphMlsMpmGpuStep.js`
+- `tests/peercomputeComputeManagerIntegration.test.mjs`
+- `plan/implementation-status.md`
+- `plan/plan.md`
+- `plan/tests.md`
+- `plan/todo/README.md`
+- `plan/todo/gpu-resident-lanes-and-warm-services-plan.md`
+- `plan/todo/peercompute-law-graph-authority-plan.md`
+- `plan/done/nodekernel-gpu-resident-stage-placement-routing-2026-06-17.md`
+- `plan/log.md`
+
+Commands run:
+
+- `node --check src/runtime/sph/sphMlsMpmGpuStep.js`
+- `node --check tests/peercomputeComputeManagerIntegration.test.mjs`
+- `node --test tests/peercomputeComputeManagerIntegration.test.mjs`
+- `npm run test:physics-atomics`
+- `git diff --check`
+- Visual:
+  `ULG_VISUAL_MATRIX_RUN_ID=codex-nodekernel-stage-placement-preflight-20260617 ULG_VISUAL_MATRIX_SCENARIOS=liquid-liquid-h2o-mlsmpm,solid-h2o-cpu-sph,law-pressure-off-h2o-mlsmpm ULG_VISUAL_MATRIX_BATCHES=1 ULG_VISUAL_MATRIX_BATCH_STEPS=4 ULG_VISUAL_MATRIX_CAPTURE_FRAMES=1 ULG_VISUAL_MATRIX_FRAME_MAX=2 ULG_VISUAL_MATRIX_FRAME_EVERY=1 ULG_VISUAL_MATRIX_TIMEOUT_MS=240000 ULG_VISUAL_MATRIX_ALLOW_FAILURES=1 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_WEB_SERVER_URL=https://127.0.0.1:5173 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npm run probe:sph-visual-matrix`
+
+Validation:
+
+- PASS: syntax checks.
+- PASS: ULG PeerCompute integration passed `16/16`.
+- PASS: physics atomics passed `11` with `3` expected opt-in skips.
+- PASS: visual matrix
+  `codex-nodekernel-stage-placement-preflight-20260617` passed `3/3` with
+  `failedCount=0`, empty issue counts, empty visual-surface issue counts, and
+  two frame artifacts per row.
+
+Open:
+
+- Next architecture slice is a real remote/dedicated resident-stage placement
+  executor contract. It must remain fail-closed for non-advisory distributed
+  placement until peer capabilities, retained-ref locality, cache admission,
+  and StateManager authority are enforced.
+
 ## 2026-06-17 16:24:14 AKDT - PeerCompute NodeKernel resident-stage placement wrapper noted
 
 Prompt time/date: 2026-06-17 16:24 AKDT, continuing the architecture refactor

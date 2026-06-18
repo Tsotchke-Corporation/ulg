@@ -70,6 +70,13 @@ export function createSphPhaseViewState(driver) {
     gasPressureSummary: pressureSummary,
     gasPressureFeedback: pressureSummary.pressureFeedback || null,
     counts: { ...demo.counts },
+    initialParticleSpacing: demo.initialParticleSpacing
+      ? {
+          ...demo.initialParticleSpacing,
+          drop: { ...demo.initialParticleSpacing.drop },
+          base: { ...demo.initialParticleSpacing.base }
+        }
+      : null,
     scenario: {
       walls: {
         model: demo.scenario?.walls?.model ?? null,

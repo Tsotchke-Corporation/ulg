@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `331`
-- total lines indexed: `197731`
+- total lines indexed: `197930`
 - languages: `{"markdown": 125, "javascript": 106, "text": 85, "json": 14, "c": 1}`
 
 ## Important Files
@@ -46,8 +46,8 @@
 ## Top Modules
 
 - `plan/done`: 93 files, 5295 lines, symbols=0, tests=0, languages={"markdown": 93}
-- `tests`: 73 files, 39528 lines, symbols=0, tests=73, languages={"text": 73}
-- `src/runtime`: 31 files, 17845 lines, symbols=385, tests=0, languages={"javascript": 31}
+- `tests`: 73 files, 39614 lines, symbols=0, tests=73, languages={"text": 73}
+- `src/runtime`: 31 files, 17958 lines, symbols=390, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 27 files, 33957 lines, symbols=775, tests=0, languages={"javascript": 27}
 - `src/runtime/material`: 18 files, 4770 lines, symbols=206, tests=0, languages={"javascript": 18}
 - `plan/todo`: 16 files, 9738 lines, symbols=0, tests=0, languages={"markdown": 16}
@@ -86,7 +86,7 @@
 | 5057 | `tests/peercomputeComputeManagerIntegration.test.mjs` | text |
 | 5007 | `src/visualization/sphPhaseDemoMount.js` | javascript |
 | 4094 | `scripts/sph-long-horizon-probe.mjs` | text |
-| 2798 | `src/runtime/sphPhaseDemo.js` | javascript |
+| 2904 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2522 | `plan/plan.md` | markdown |
 | 2172 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |
 | 2145 | `tests/sphRenderGpuKernel.test.mjs` | text |
@@ -95,11 +95,11 @@
 | 1950 | `src/runtime/artifactSummary.js` | javascript |
 | 1910 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 1624 | `src/runtime/sph/sphThermalGpuKernel.js` | javascript |
+| 1468 | `tests/sphPhaseDemo.test.mjs` | text |
 | 1467 | `ulg-gpu-abi/src/index.js` | javascript |
 | 1437 | `src/runtime/sph/sphReactionGpuSummary.js` | javascript |
 | 1431 | `plan/todo/physics-behavior-regression-plan.md` | markdown |
 | 1399 | `plan/moot/perf-upgrade.md` | markdown |
-| 1382 | `tests/sphPhaseDemo.test.mjs` | text |
 | 1321 | `plan/todo/sphphasedemo.md` | markdown |
 | 1308 | `tests/abi.test.mjs` | text |
 | 1211 | `src/runtime/sph/sphGridGpuKernel.js` | javascript |

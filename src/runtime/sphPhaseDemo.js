@@ -150,6 +150,98 @@ function fillCube({ material, role = null, min, size, spacing, particlesPerEdge,
   return particles;
 }
 
+function positiveParticleEdge(value, fallback = 1) {
+  return Math.max(1, Math.round(Number.isFinite(Number(value)) ? Number(value) : fallback));
+}
+
+function clampInteger(value, min, max) {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function cappedAdaptiveParticleEdge({ desiredEdge, requestedEdge }) {
+  const requested = positiveParticleEdge(requestedEdge);
+  const minEdge = requested <= 1 ? 1 : Math.max(2, Math.floor(requested * 0.67));
+  const maxEdge = Math.max(minEdge, Math.ceil(requested * 1.5));
+  return clampInteger(desiredEdge, minEdge, maxEdge);
+}
+
+function resolveInitialParticleSpacingPlan({
+  dropSizeM,
+  baseSizeM,
+  dropDensityKgPerM3,
+  baseDensityKgPerM3,
+  dropRequestedParticlesPerEdge,
+  baseRequestedParticlesPerEdge,
+  adaptiveParticleSpacing = true
+}) {
+  const dropRequested = positiveParticleEdge(dropRequestedParticlesPerEdge, 3);
+  const baseRequested = positiveParticleEdge(baseRequestedParticlesPerEdge, 5);
+  const dropVolumeM3 = Math.max(dropSizeM, 0) ** 3;
+  const baseVolumeM3 = Math.max(baseSizeM, 0) ** 3;
+  const dropDensity = Math.max(Number(dropDensityKgPerM3) || 0, 1e-9);
+  const baseDensity = Math.max(Number(baseDensityKgPerM3) || 0, 1e-9);
+  const requestedParticleBudget = dropRequested ** 3 + baseRequested ** 3;
+  const totalMassKg = dropDensity * dropVolumeM3 + baseDensity * baseVolumeM3;
+  const targetParticleMassKg = totalMassKg / Math.max(1, requestedParticleBudget);
+
+  const resolveRole = ({ role, sizeM, densityKgPerM3, requestedParticlesPerEdge }) => {
+    const uniformSpacingM = sizeM / requestedParticlesPerEdge;
+    if (!adaptiveParticleSpacing) {
+      return {
+        role,
+        requestedParticlesPerEdge,
+        particlesPerEdge: requestedParticlesPerEdge,
+        spacingM: uniformSpacingM,
+        uniformSpacingM,
+        desiredParticlesPerEdge: requestedParticlesPerEdge,
+        densityKgPerM3
+      };
+    }
+    const desiredSpacingM = Math.cbrt(targetParticleMassKg / Math.max(densityKgPerM3, 1e-9));
+    const desiredParticlesPerEdge = Math.max(1, sizeM / Math.max(desiredSpacingM, 1e-9));
+    const particlesPerEdge = cappedAdaptiveParticleEdge({
+      desiredEdge: desiredParticlesPerEdge,
+      requestedEdge: requestedParticlesPerEdge
+    });
+    return {
+      role,
+      requestedParticlesPerEdge,
+      particlesPerEdge,
+      spacingM: sizeM / particlesPerEdge,
+      uniformSpacingM,
+      desiredSpacingM,
+      desiredParticlesPerEdge,
+      densityKgPerM3
+    };
+  };
+
+  const drop = resolveRole({
+    role: 'drop',
+    sizeM: dropSizeM,
+    densityKgPerM3: dropDensity,
+    requestedParticlesPerEdge: dropRequested
+  });
+  const base = resolveRole({
+    role: 'base',
+    sizeM: baseSizeM,
+    densityKgPerM3: baseDensity,
+    requestedParticlesPerEdge: baseRequested
+  });
+
+  return {
+    schema: 'peercompute.ulg.sph-initial-particle-spacing-plan.v0',
+    status: adaptiveParticleSpacing
+      ? 'material-temperature-equal-mass-capped'
+      : 'fixed-requested-particles-per-edge',
+    adaptiveParticleSpacing,
+    requestedParticleBudget,
+    targetParticleMassKg,
+    totalMassKg,
+    drop,
+    base
+  };
+}
+
 /**
  * Build the demo's initial SPH state: a larger ice cube resting on the box floor with a molten
  * iron cube on top, both filled with particles. Reduced resolution so the CPU reference carrier runs
@@ -316,6 +408,7 @@ export function buildSphPhaseDemoState({
   baseTemperatureK,
   dropParticleEdge = 3, // N -> N^3 particles in the drop block
   baseParticleEdge = 5, // N -> N^3 particles in the base block
+  adaptiveParticleSpacing = true,
   iceBaseHeightM,
   ironBaseHeightM
 } = {}) {
@@ -329,8 +422,6 @@ export function buildSphPhaseDemoState({
   const iceEdge = scenario.ice.edgeM;
   const cx = boxDims[0] / 2;
   const cz = boxDims[2] / 2;
-  const ironSpacing = ironEdge / dropParticleEdge;
-  const iceSpacing = iceEdge / baseParticleEdge;
 
   // Configurable starting elevation (bottom face) of each block. The base block defaults to resting
   // on the floor; the drop block defaults to a clear gap above it so it visibly falls.
@@ -381,30 +472,44 @@ export function buildSphPhaseDemoState({
     ? Math.max(requestedDropTempK, liquidus + 39)
     : requestedDropTempK;
   const baseTempK = baseTemperatureK ?? scenario.ice.initialTemperatureK;
+  const dropDensityKgPerM3 = densityAtTemperatureKgPerM3(dropProps, dropTempK);
+  const baseDensityKgPerM3 = densityAtTemperatureKgPerM3(baseProps, baseTempK);
+  const initialParticleSpacing = resolveInitialParticleSpacingPlan({
+    dropSizeM: ironEdge,
+    baseSizeM: iceEdge,
+    dropDensityKgPerM3,
+    baseDensityKgPerM3,
+    dropRequestedParticlesPerEdge: dropParticleEdge,
+    baseRequestedParticlesPerEdge: baseParticleEdge,
+    adaptiveParticleSpacing
+  });
 
   const dropParticles = fillCube({
     material: dropMaterial,
     role: 'drop',
     min: [cx - ironEdge / 2, ironBase, cz - ironEdge / 2],
     size: ironEdge,
-    particlesPerEdge: dropParticleEdge,
+    particlesPerEdge: initialParticleSpacing.drop.particlesPerEdge,
     temperatureK: dropTempK,
     properties: dropProps,
-    densityKgPerM3: densityAtTemperatureKgPerM3(dropProps, dropTempK)
+    densityKgPerM3: dropDensityKgPerM3
   });
   const baseParticles = fillCube({
     material: baseMaterial,
     role: 'base',
     min: [cx - iceEdge / 2, iceBase, cz - iceEdge / 2],
     size: iceEdge,
-    particlesPerEdge: baseParticleEdge,
+    particlesPerEdge: initialParticleSpacing.base.particlesPerEdge,
     temperatureK: baseTempK,
     properties: baseProps,
-    densityKgPerM3: densityAtTemperatureKgPerM3(baseProps, baseTempK)
+    densityKgPerM3: baseDensityKgPerM3
   });
 
   const all = [...baseParticles, ...dropParticles];
-  const smoothingLengthM = 1.6 * Math.min(ironSpacing, iceSpacing);
+  const smoothingLengthM = 1.6 * Math.min(
+    initialParticleSpacing.drop.spacingM,
+    initialParticleSpacing.base.spacingM
+  );
   const state = createSphState({ particles: all, smoothingLengthM, dimension: 3 });
   // Carry per-particle temperature + material alongside the SPH state for rendering.
   state.particles.forEach((p, index) => {
@@ -422,6 +527,7 @@ export function buildSphPhaseDemoState({
     dropMaterial,
     baseMaterial,
     initialTemperaturesK: { drop: dropTempK, base: baseTempK, gas: scenario.gas.initialTemperatureK },
+    initialParticleSpacing,
     counts: { drop: dropParticles.length, base: baseParticles.length, total: all.length },
     materialProperties: Object.fromEntries(Object.entries(resolved).map(([k, c]) => [k, c.properties]))
   };

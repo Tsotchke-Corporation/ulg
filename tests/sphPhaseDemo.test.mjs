@@ -72,6 +72,78 @@ test('demo initial state: hot molten-iron block on a cold ice block', () => {
   assert.ok(minIronY >= maxIceY - 1e-9);
 });
 
+test('demo initial particle spacing adapts to material density at role temperature', () => {
+  const demo = buildSphPhaseDemoState({
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const spacing = demo.initialParticleSpacing;
+  const dropMass = demo.state.particles.find((p) => p.role === 'drop').massKg;
+  const baseMass = demo.state.particles.find((p) => p.role === 'base').massKg;
+
+  assert.equal(spacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
+  assert.equal(spacing.status, 'material-temperature-equal-mass-capped');
+  assert.equal(spacing.drop.requestedParticlesPerEdge, 3);
+  assert.equal(spacing.base.requestedParticlesPerEdge, 5);
+  assert.ok(spacing.drop.densityKgPerM3 > spacing.base.densityKgPerM3);
+  assert.ok(spacing.drop.particlesPerEdge > spacing.drop.requestedParticlesPerEdge);
+  assert.ok(spacing.base.particlesPerEdge < spacing.base.requestedParticlesPerEdge);
+  assert.ok(spacing.drop.spacingM < spacing.drop.uniformSpacingM);
+  assert.ok(spacing.base.spacingM > spacing.base.uniformSpacingM);
+  assert.ok(Math.abs(dropMass / baseMass - 1) < 0.15);
+  assert.equal(demo.counts.drop, spacing.drop.particlesPerEdge ** 3);
+  assert.equal(demo.counts.base, spacing.base.particlesPerEdge ** 3);
+  near(
+    demo.state.smoothingLengthM,
+    1.6 * Math.min(spacing.drop.spacingM, spacing.base.spacingM)
+  );
+});
+
+test('demo initial particle spacing coarsens low-density hot vapor and can preserve fixed counts', () => {
+  const liquidWater = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 300,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const hotVapor = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 450,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const fixed = buildSphPhaseDemoState({
+    dropMaterial: 'h2o',
+    baseMaterial: 'h2o',
+    dropTemperatureK: 450,
+    baseTemperatureK: 300,
+    iceBaseHeightM: 0,
+    ironBaseHeightM: 1,
+    dropParticleEdge: 3,
+    baseParticleEdge: 5,
+    adaptiveParticleSpacing: false
+  });
+
+  assert.equal(liquidWater.initialParticleSpacing.drop.particlesPerEdge, 3);
+  assert.equal(liquidWater.initialParticleSpacing.base.particlesPerEdge, 5);
+  assert.ok(hotVapor.initialParticleSpacing.drop.densityKgPerM3 < liquidWater.initialParticleSpacing.drop.densityKgPerM3);
+  assert.ok(hotVapor.initialParticleSpacing.drop.particlesPerEdge < liquidWater.initialParticleSpacing.drop.particlesPerEdge);
+  assert.ok(hotVapor.initialParticleSpacing.drop.spacingM > liquidWater.initialParticleSpacing.drop.spacingM);
+  assert.equal(fixed.initialParticleSpacing.status, 'fixed-requested-particles-per-edge');
+  assert.equal(fixed.initialParticleSpacing.drop.particlesPerEdge, 3);
+  assert.equal(fixed.initialParticleSpacing.base.particlesPerEdge, 5);
+  assert.equal(fixed.counts.drop, 27);
+  assert.equal(fixed.counts.base, 125);
+});
+
 test('particle phase + temperature come from the closure energy', () => {
   const demo = buildSphPhaseDemoState();
   const thermal = particleThermalState(demo);
@@ -352,6 +424,20 @@ test('SPH phase view state carries explicit wall temperatures for resident therm
 
   assert.deepEqual(viewState.wallTemperaturesK, wallFaces);
   assert.deepEqual(viewState.scenario.walls.faces, wallFaces);
+});
+
+test('SPH phase view state exposes resolved initial particle spacing', () => {
+  const demo = buildSphPhaseDemoState({
+    dropParticleEdge: 3,
+    baseParticleEdge: 5
+  });
+  const viewState = createSphPhaseViewState({ demo });
+
+  assert.deepEqual(viewState.counts, demo.counts);
+  assert.equal(viewState.initialParticleSpacing.schema, 'peercompute.ulg.sph-initial-particle-spacing-plan.v0');
+  assert.equal(viewState.initialParticleSpacing.drop.particlesPerEdge, demo.initialParticleSpacing.drop.particlesPerEdge);
+  assert.equal(viewState.initialParticleSpacing.base.particlesPerEdge, demo.initialParticleSpacing.base.particlesPerEdge);
+  assert.notEqual(viewState.initialParticleSpacing.drop, demo.initialParticleSpacing.drop);
 });
 
 test('resident reaction gas pressure uses GPU ledger moles without particle readback', () => {

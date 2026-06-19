@@ -33,6 +33,7 @@ const SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'webgpu-spheres',
   'three'
 ]);
+const NATIVE_SURFACE_DEBUG_MODES = new Set(['none', 'clear-only']);
 
 const BROWSER_CONSOLE_ISSUE_PATTERNS = [
   {
@@ -288,6 +289,14 @@ function surfaceDrawModeFromScenarioUrl(scenarioUrl) {
     return null;
   }
   return null;
+}
+
+function normalizedNativeSurfaceDebugMode(value, fallback = 'none') {
+  if (value == null || String(value).trim() === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (NATIVE_SURFACE_DEBUG_MODES.has(normalized)) return normalized;
+  if (normalized === 'clear' || normalized === 'clearonly' || normalized === 'sentinel-clear') return 'clear-only';
+  return fallback;
 }
 
 function probePageOptions() {
@@ -872,6 +881,7 @@ async function collectBrowserSnapshot(page, label, timeoutMs = 2000) {
         source: residentComputeManager.source ?? null,
         submitTask: residentComputeManager.submitTask ?? null
       } : null,
+      residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
       cpuClosureTask: overlay?.__sphCpuClosureTask || null,
       workerRebuild: worker ? {
         schema: worker.schema ?? null,
@@ -983,24 +993,25 @@ async function runBrowserProbe({
   batches,
   batchSteps,
   renderEvery,
-  readbackMode,
-  compactSummaryMode,
-  renderReadbackMode,
-  renderRowsReadbackMode,
-  renderFieldSurfaceSummaryMode,
-  surfaceDrawDiagnosticMode,
-  surfaceDrawDiagnosticMaxFieldCells,
-  surfaceDrawDiagnosticMaxResolution,
-  disablePressureInterface,
-  anomalyRowReadback,
-  residentBufferDebug,
-  compactSummaryScope,
-  thermalWallRate,
-  measureGpuQueueFence = false,
-  captureFrames,
-  captureFrameEvery,
-  captureFrameMax,
-  initialResidentWaitMs
+	  readbackMode,
+	  compactSummaryMode,
+	  renderReadbackMode,
+	  renderRowsReadbackMode,
+	  renderFieldSurfaceSummaryMode,
+	  surfaceDrawDiagnosticMode,
+	  surfaceDrawDiagnosticMaxFieldCells,
+	  surfaceDrawDiagnosticMaxResolution,
+	  disablePressureInterface,
+	  anomalyRowReadback,
+	  residentBufferDebug,
+	  compactSummaryScope,
+	  thermalWallRate,
+	  measureGpuQueueFence = false,
+	  nativeSurfaceDebugMode = 'none',
+	  captureFrames,
+	  captureFrameEvery,
+	  captureFrameMax,
+	  initialResidentWaitMs
 }) {
   const browser = await launchProbeBrowser();
   const page = await newProbePage(browser);
@@ -1014,6 +1025,12 @@ async function runBrowserProbe({
     consoleCapture.recordPageError(error);
   });
   try {
+    if (nativeSurfaceDebugMode !== 'none') {
+      await page.addInitScript((mode) => {
+        window.__ULG_SPH_NATIVE_SURFACE_DEBUG_MODE = mode;
+        window.__ULG_SPH_NATIVE_SURFACE_CONSUMER_DEBUG_MODE = mode;
+      }, nativeSurfaceDebugMode);
+    }
     const target = new URL(withBrowserProbeParams(scenarioUrl), baseUrl).toString();
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     if (await page.locator('#sph-phase-overlay').count() === 0) {
@@ -1060,9 +1077,10 @@ async function runBrowserProbe({
       anomalyRowReadback: requestedAnomalyRowReadback,
       residentBufferDebug: requestedResidentBufferDebug,
       compactSummaryScope: requestedCompactSummaryScope,
-      thermalWallRate: requestedThermalWallRate,
-      measureGpuQueueFence: requestedMeasureGpuQueueFence,
-      captureFrames: requestedCaptureFrames,
+	      thermalWallRate: requestedThermalWallRate,
+	      measureGpuQueueFence: requestedMeasureGpuQueueFence,
+	      nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
+	      captureFrames: requestedCaptureFrames,
       captureFrameEvery: requestedCaptureFrameEvery,
       captureFrameMax: requestedCaptureFrameMax,
       preProbeSnapshots: requestedPreProbeSnapshots,
@@ -1777,6 +1795,7 @@ async function runBrowserProbe({
             submitTask: residentComputeManager.submitTask ?? null
           } : null,
         rendererInit: sceneUserData.sphRendererInit || null,
+        residentWebGpuDeviceMapSmoke: sceneUserData.sphResidentWebGpuDeviceMapSmoke || null,
         residentRenderProgress: sceneUserData.sphResidentRenderProgress || null,
         residentGpuRefreshInFlight: sceneUserData.sphResidentGpuRefreshInFlight || null,
         rendererFrame: sceneUserData.sphRendererFrame || null,
@@ -2023,6 +2042,18 @@ async function runBrowserProbe({
               renderState.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
             surfaceDrawVisibleGpuConsumerPixelValidationStatus:
               renderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+            surfaceDrawVisibleGpuConsumerValidated:
+              renderState.surfaceDrawVisibleGpuConsumerValidated ?? null,
+            surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated:
+              renderState.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated ?? null,
+            surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus:
+              renderState.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus ?? null,
+            surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus:
+              renderState.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null,
+            surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus:
+              renderState.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null,
+            surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable:
+              renderState.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
             fullSurfaceDrawReadback: renderState.fullSurfaceDrawReadback ?? null,
             surfaceDrawDiagnosticOnly: renderState.surfaceDrawDiagnosticOnly ?? null,
             surfaceDrawDiagnosticOnlyMode: renderState.surfaceDrawDiagnosticOnlyMode ?? null,
@@ -2067,6 +2098,16 @@ async function runBrowserProbe({
               Array.isArray(renderState.surfaceDrawRenderBridgeOffscreenValidationSample)
                 ? [...renderState.surfaceDrawRenderBridgeOffscreenValidationSample]
                 : null,
+            surfaceDrawRenderBridgeReadbackSmokeValidationStatus:
+              renderState.surfaceDrawRenderBridgeReadbackSmokeValidationStatus ?? null,
+            surfaceDrawRenderBridgeReadbackSmokeValidationReason:
+              renderState.surfaceDrawRenderBridgeReadbackSmokeValidationReason ?? null,
+            surfaceDrawRenderBridgeReadbackSmokeValidationSample:
+              Array.isArray(renderState.surfaceDrawRenderBridgeReadbackSmokeValidationSample)
+                ? [...renderState.surfaceDrawRenderBridgeReadbackSmokeValidationSample]
+                : null,
+            surfaceDrawRenderBridgeReadbackSmokeValidationAttemptCount:
+              renderState.surfaceDrawRenderBridgeReadbackSmokeValidationAttemptCount ?? null,
             surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount:
               renderState.surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount ?? null,
             surfaceDrawRenderBridgeOffscreenValidationPixelCount:
@@ -2111,10 +2152,46 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeDevicePixelRatio ?? null,
             surfaceDrawRenderBridgeCanvasResizePixelRatio:
               renderState.surfaceDrawRenderBridgeCanvasResizePixelRatio ?? null,
-            surfaceDrawRenderBridgeLastDrawOrderCount:
-              renderState.surfaceDrawRenderBridgeLastDrawOrderCount ?? null,
-            surfaceDrawRenderBridgePrimarySurfaceIndex:
-              renderState.surfaceDrawRenderBridgePrimarySurfaceIndex ?? null,
+            surfaceDrawRenderBridgeConfiguredCanvasWidth:
+              renderState.surfaceDrawRenderBridgeConfiguredCanvasWidth ?? null,
+            surfaceDrawRenderBridgeConfiguredCanvasHeight:
+              renderState.surfaceDrawRenderBridgeConfiguredCanvasHeight ?? null,
+            surfaceDrawRenderBridgeContextConfigureCount:
+              renderState.surfaceDrawRenderBridgeContextConfigureCount ?? null,
+            surfaceDrawRenderBridgeLastContextConfigureReason:
+              renderState.surfaceDrawRenderBridgeLastContextConfigureReason ?? null,
+            surfaceDrawRenderBridgeLastNativeContextReconfigured:
+              renderState.surfaceDrawRenderBridgeLastNativeContextReconfigured ?? null,
+            surfaceDrawRenderBridgeDeviceLost:
+              renderState.surfaceDrawRenderBridgeDeviceLost ?? null,
+            surfaceDrawRenderBridgeDeviceLostReason:
+              renderState.surfaceDrawRenderBridgeDeviceLostReason ?? null,
+            surfaceDrawRenderBridgeDeviceLostInfo:
+              renderState.surfaceDrawRenderBridgeDeviceLostInfo ?? null,
+		            surfaceDrawRenderBridgeLastDrawOrderCount:
+		              renderState.surfaceDrawRenderBridgeLastDrawOrderCount ?? null,
+	            surfaceDrawRenderBridgeTransparencyCompositeMode:
+	              renderState.surfaceDrawRenderBridgeTransparencyCompositeMode ?? null,
+	            surfaceDrawRenderBridgeLastOpaqueDrawCount:
+	              renderState.surfaceDrawRenderBridgeLastOpaqueDrawCount ?? null,
+	            surfaceDrawRenderBridgeLastTransparentDrawCount:
+	              renderState.surfaceDrawRenderBridgeLastTransparentDrawCount ?? null,
+	            surfaceDrawRenderBridgeNativeSurfaceDebugMode:
+	              renderState.surfaceDrawRenderBridgeNativeSurfaceDebugMode ?? null,
+	            surfaceDrawRenderBridgeNativeSurfaceDebugStatus:
+	              renderState.surfaceDrawRenderBridgeNativeSurfaceDebugStatus ?? null,
+	            surfaceDrawRenderBridgeNativeSurfaceDebugSkippedDrawCount:
+	              renderState.surfaceDrawRenderBridgeNativeSurfaceDebugSkippedDrawCount ?? null,
+		            surfaceDrawRenderBridgeNativeSurfaceDebugClearValue:
+		              renderState.surfaceDrawRenderBridgeNativeSurfaceDebugClearValue ?? null,
+		            surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseStatus:
+		              renderState.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseStatus ?? null,
+		            surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseReason:
+		              renderState.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleaseReason ?? null,
+		            surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleasePending:
+		              renderState.surfaceDrawRenderBridgeNativeSurfaceDeferredResourceReleasePending ?? null,
+		            surfaceDrawRenderBridgePrimarySurfaceIndex:
+		              renderState.surfaceDrawRenderBridgePrimarySurfaceIndex ?? null,
             surfaceDrawRenderBridgePrimaryBoundsCenterM:
               renderState.surfaceDrawRenderBridgePrimaryBoundsCenterM ?? null,
             surfaceDrawRenderBridgePrimaryBoundsRadiusM:
@@ -2210,6 +2287,18 @@ async function runBrowserProbe({
               surfaceDraw.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
             visibleGpuConsumerPixelValidationStatus:
               surfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
+            visibleGpuConsumerValidated:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerValidated ?? null,
+            visibleGpuConsumerNativeReadbackFallbackValidated:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated ?? null,
+            visibleGpuConsumerNativeReadbackSmokeValidationStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus ?? null,
+            visibleGpuConsumerNativeOffscreenValidationStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus ?? null,
+            visibleGpuConsumerNativeDeviceMapSmokeStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus ?? null,
+            visibleGpuConsumerNativeTextureReadbackUnavailable:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null,
             gpuOnlyAggregateIndirectReady: surfaceDraw.surfaceDrawGpuOnlyAggregateIndirectReady ?? null,
             gpuOnlyAggregateDrawRangeExact: surfaceDraw.surfaceDrawGpuOnlyAggregateDrawRangeExact ?? null,
             visibleRendererBridge: surfaceDraw.visibleRendererBridge ?? null,
@@ -2250,6 +2339,16 @@ async function runBrowserProbe({
             renderBridgeOffscreenValidationSample: Array.isArray(surfaceDraw.renderBridgeOffscreenValidationSample)
               ? [...surfaceDraw.renderBridgeOffscreenValidationSample]
               : null,
+            renderBridgeReadbackSmokeValidationStatus:
+              surfaceDraw.renderBridgeReadbackSmokeValidationStatus ?? null,
+            renderBridgeReadbackSmokeValidationReason:
+              surfaceDraw.renderBridgeReadbackSmokeValidationReason ?? null,
+            renderBridgeReadbackSmokeValidationSample:
+              Array.isArray(surfaceDraw.renderBridgeReadbackSmokeValidationSample)
+                ? [...surfaceDraw.renderBridgeReadbackSmokeValidationSample]
+                : null,
+            renderBridgeReadbackSmokeValidationAttemptCount:
+              surfaceDraw.renderBridgeReadbackSmokeValidationAttemptCount ?? null,
             renderBridgeOffscreenValidationNonzeroPixelCount:
               surfaceDraw.renderBridgeOffscreenValidationNonzeroPixelCount ?? null,
             renderBridgeOffscreenValidationPixelCount:
@@ -2280,8 +2379,38 @@ async function runBrowserProbe({
             renderBridgeCanvasClientHeight: surfaceDraw.renderBridgeCanvasClientHeight ?? null,
             renderBridgeDevicePixelRatio: surfaceDraw.renderBridgeDevicePixelRatio ?? null,
             renderBridgeCanvasResizePixelRatio: surfaceDraw.renderBridgeCanvasResizePixelRatio ?? null,
-            renderBridgeLastDrawOrderCount: surfaceDraw.renderBridgeLastDrawOrderCount ?? null,
-            renderBridgePrimarySurfaceIndex: surfaceDraw.renderBridgePrimarySurfaceIndex ?? null,
+            renderBridgeConfiguredCanvasWidth: surfaceDraw.renderBridgeConfiguredCanvasWidth ?? null,
+            renderBridgeConfiguredCanvasHeight: surfaceDraw.renderBridgeConfiguredCanvasHeight ?? null,
+            renderBridgeContextConfigureCount: surfaceDraw.renderBridgeContextConfigureCount ?? null,
+            renderBridgeLastContextConfigureReason: surfaceDraw.renderBridgeLastContextConfigureReason ?? null,
+            renderBridgeLastNativeContextReconfigured:
+              surfaceDraw.renderBridgeLastNativeContextReconfigured ?? null,
+            renderBridgeDeviceLost:
+              surfaceDraw.renderBridgeDeviceLost ?? null,
+            renderBridgeDeviceLostReason:
+              surfaceDraw.renderBridgeDeviceLostReason ?? null,
+            renderBridgeDeviceLostInfo:
+              surfaceDraw.renderBridgeDeviceLostInfo ?? null,
+		            renderBridgeLastDrawOrderCount: surfaceDraw.renderBridgeLastDrawOrderCount ?? null,
+	            renderBridgeTransparencyCompositeMode:
+	              surfaceDraw.renderBridgeTransparencyCompositeMode ?? null,
+	            renderBridgeLastOpaqueDrawCount: surfaceDraw.renderBridgeLastOpaqueDrawCount ?? null,
+	            renderBridgeLastTransparentDrawCount: surfaceDraw.renderBridgeLastTransparentDrawCount ?? null,
+	            renderBridgeNativeSurfaceDebugMode:
+	              surfaceDraw.renderBridgeNativeSurfaceDebugMode ?? null,
+	            renderBridgeNativeSurfaceDebugStatus:
+	              surfaceDraw.renderBridgeNativeSurfaceDebugStatus ?? null,
+	            renderBridgeNativeSurfaceDebugSkippedDrawCount:
+	              surfaceDraw.renderBridgeNativeSurfaceDebugSkippedDrawCount ?? null,
+		            renderBridgeNativeSurfaceDebugClearValue:
+		              surfaceDraw.renderBridgeNativeSurfaceDebugClearValue ?? null,
+		            renderBridgeNativeSurfaceDeferredResourceReleaseStatus:
+		              surfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseStatus ?? null,
+		            renderBridgeNativeSurfaceDeferredResourceReleaseReason:
+		              surfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleaseReason ?? null,
+		            renderBridgeNativeSurfaceDeferredResourceReleasePending:
+		              surfaceDraw.renderBridgeNativeSurfaceDeferredResourceReleasePending ?? null,
+		            renderBridgePrimarySurfaceIndex: surfaceDraw.renderBridgePrimarySurfaceIndex ?? null,
             renderBridgePrimaryBoundsCenterM: surfaceDraw.renderBridgePrimaryBoundsCenterM ?? null,
             renderBridgePrimaryBoundsRadiusM: surfaceDraw.renderBridgePrimaryBoundsRadiusM ?? null,
             renderBridgePrimaryBoundsClipCenter: surfaceDraw.renderBridgePrimaryBoundsClipCenter ?? null,
@@ -2622,10 +2751,11 @@ async function runBrowserProbe({
         renderReadbackMode: requestedRenderReadbackMode,
         renderRowsReadbackMode: requestedRenderRowsReadbackMode,
         renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
-        surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
-        surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
-        surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
-        pressureInterfaceDisabled: Boolean(requestedDisablePressureInterface),
+	        surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
+	        surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+	        surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+	        nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
+	        pressureInterfaceDisabled: Boolean(requestedDisablePressureInterface),
         anomalyRowReadback: Boolean(requestedAnomalyRowReadback),
         residentBufferDebug: Boolean(requestedResidentBufferDebug),
         thermalWallRateOverride: Number.isFinite(requestedThermalWallRate) ? requestedThermalWallRate : null,
@@ -2685,11 +2815,12 @@ async function runBrowserProbe({
           compactSummaryMode,
           renderReadbackMode,
           renderRowsReadbackMode,
-          renderFieldSurfaceSummaryMode,
-          surfaceDrawDiagnosticMode,
-          surfaceDrawDiagnosticMaxFieldCells,
-          surfaceDrawDiagnosticMaxResolution,
-          pressureInterfaceDisabled: Boolean(disablePressureInterface),
+	          renderFieldSurfaceSummaryMode,
+	          surfaceDrawDiagnosticMode,
+	          surfaceDrawDiagnosticMaxFieldCells,
+	          surfaceDrawDiagnosticMaxResolution,
+	          nativeSurfaceDebugMode,
+	          pressureInterfaceDisabled: Boolean(disablePressureInterface),
           anomalyRowReadback: Boolean(anomalyRowReadback),
           residentBufferDebug: Boolean(residentBufferDebug),
           renderEveryBatches: renderEvery,
@@ -5225,14 +5356,19 @@ async function main() {
   const renderRowsReadbackMode = renderRowsReadbackModeEnv === 'no-full-readback'
     ? 'no-full-readback'
     : (renderRowsReadbackModeEnv === 'full-parity-readback' ? 'full-parity-readback' : renderReadbackMode);
-  const renderFieldSurfaceSummaryMode = ['skip', 'readback', 'auto'].includes(
-    String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE || '').toLowerCase()
-  )
-    ? String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE).toLowerCase()
-    : 'auto';
-  const surfaceDrawDiagnosticModeEnv = String(
-    process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || ''
-  ).toLowerCase();
+	const renderFieldSurfaceSummaryMode = ['skip', 'readback', 'auto'].includes(
+	  String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE || '').toLowerCase()
+	)
+	  ? String(process.env.ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE).toLowerCase()
+	  : 'auto';
+	const nativeSurfaceDebugMode = normalizedNativeSurfaceDebugMode(
+	  process.env.ULG_PROBE_NATIVE_SURFACE_DEBUG_MODE
+	    ?? process.env.ULG_PROBE_NATIVE_WEBGPU_SURFACE_DEBUG_MODE,
+	  'none'
+	);
+	const surfaceDrawDiagnosticModeEnv = String(
+	  process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || ''
+	).toLowerCase();
   const surfaceDrawDiagnosticModeFromUrl = surfaceDrawModeFromScenarioUrl(scenarioUrl);
   const surfaceDrawDiagnosticMode = SURFACE_DRAW_DIAGNOSTIC_MODES.has(surfaceDrawDiagnosticModeEnv)
     ? surfaceDrawDiagnosticModeEnv
@@ -5378,9 +5514,10 @@ async function main() {
         anomalyRowReadback,
         residentBufferDebug,
         compactSummaryScope,
-        thermalWallRate,
-        measureGpuQueueFence,
-        captureFrames,
+	        thermalWallRate,
+	        measureGpuQueueFence,
+	        nativeSurfaceDebugMode,
+	        captureFrames,
         captureFrameEvery,
         captureFrameMax,
         initialResidentWaitMs

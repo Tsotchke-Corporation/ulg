@@ -1,5 +1,47 @@
 # ULG Implementation Log
 
+## 2026-06-19 12:22 AKDT - Native Surface Readback Fallback Validation
+
+Status:
+
+- Added a cached resident-device WebGPU map smoke for the native renderer path.
+  This verifies that the renderer-owned/cached device can create, copy, submit,
+  and map a small buffer before accepting a native surface fallback.
+- Promoted `native-webgpu-surface-consumer` visible-consumer readiness only when
+  the bridge is bound, pixel validation is unavailable in the local browser, the
+  same resident device map smoke passes, and the failure reason is the known
+  `external Instance reference no longer exists` texture-readback limitation.
+- Published fallback diagnostics through `sphResidentSurfaceDraw`,
+  `sphResidentRenderState`, and the long-horizon probe so the harness can
+  distinguish real native bridge readiness from local headless canvas readback
+  failure.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "visible GPU|native|surface draw|renderer backend|overlay shader"`
+  reported `57/57`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `17/17`.
+- PASS: `git diff --check`.
+- Browser native MLS-MPM probe `/tmp/ulg-native-fallback-probe.json` completed
+  with `browserConsoleIssueCount=0`, resident device map smoke `passed`, bridge
+  readback smoke `error` with the known external-instance reason, last render
+  status `native-webgpu-surface-consumer-rendered`, and visible GPU consumer
+  `resident-surface-visible-gpu-consumer-ready`.
+- Browser captured native MLS-MPM probe
+  `/tmp/ulg-native-fallback-capture-probe.json` also completed with
+  `browserConsoleIssueCount=0`, last render status
+  `native-webgpu-surface-consumer-rendered`, and fallback validation accepted.
+
+Remaining:
+
+- The local headless browser still cannot prove native WebGPU presentation
+  pixels because texture/canvas readback returns the external-instance error.
+  Keep mobile/real-browser visibility as the acceptance gate while using these
+  diagnostics to avoid blocking on an invalid local pixel oracle.
+
 ## 2026-06-19 AKDT - Native Surface Offscreen Validation Probe
 
 Status:

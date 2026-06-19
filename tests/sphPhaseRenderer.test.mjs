@@ -2094,6 +2094,29 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativePixelBlocked.runtimeConsumerReady, true);
   assert.equal(nativePixelBlocked.renderBridgeBound, true);
 
+  const nativeFallbackValidated = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerDeviceMapSmokeStatus: 'passed',
+      nativeSurfaceConsumerReadbackSmokeValidationStatus: 'error',
+      nativeSurfaceConsumerReadbackSmokeValidationReason:
+        "Failed to execute 'mapAsync' on 'GPUBuffer': A valid external Instance reference no longer exists."
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativeFallbackValidated.ready, true);
+  assert.equal(nativeFallbackValidated.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(nativeFallbackValidated.pixelValidationRequired, false);
+  assert.equal(nativeFallbackValidated.nativeReadbackFallbackValidated, true);
+  assert.equal(nativeFallbackValidated.nativeSurfaceConsumerTextureReadbackUnavailable, true);
+
   const validated = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {

@@ -1,5 +1,41 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Native Surface Readback Fallback Validation
+
+The native `native-webgpu-surface-consumer` bridge now separates local
+headless texture-readback failure from actual same-device GPU readiness. A
+small resident-device map smoke must pass before the visible GPU consumer can
+fall back when native canvas/offscreen readback reports the known external
+instance limitation.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "visible GPU|native|surface draw|renderer backend|overlay shader"`
+  passed `57/57`, including fallback readiness for the known native readback
+  failure.
+- Marching-cubes adapter coverage:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` passed `17/17`.
+- Whitespace:
+  `git diff --check` passed.
+- Browser diagnostics:
+  `/tmp/ulg-native-fallback-probe.json` and
+  `/tmp/ulg-native-fallback-capture-probe.json` completed with browser console
+  issues `0`, resident device map smoke `passed`, bridge render status
+  `native-webgpu-surface-consumer-rendered`, visible GPU consumer
+  `resident-surface-visible-gpu-consumer-ready`, and native readback fallback
+  accepted.
+
+Known residual risk:
+
+- The local headless browser still returns
+  `A valid external Instance reference no longer exists` for native texture
+  readback, so it remains unsuitable as a final canvas-pixel oracle. Real
+  browser/mobile visibility still needs direct verification.
+
 ## Current Focused Result - 2026-06-19 Native Surface Offscreen Validation Probe
 
 The native `native-webgpu-surface-consumer` bridge now has a diagnostic

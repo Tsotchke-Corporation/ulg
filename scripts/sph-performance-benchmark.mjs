@@ -325,6 +325,38 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       ?? surfaceDraw?.gpuBufferHandoffUpperBoundVertexCount
       ?? surfaceDraw?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount
   );
+  const surfaceDrawVisibleGpuConsumerReady = Boolean(
+    renderState?.surfaceDrawVisibleGpuConsumerReady
+    ?? surfaceDraw?.visibleGpuConsumerReady
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+  );
+  const surfaceDrawVisibleGpuConsumerStatus = renderState?.surfaceDrawVisibleGpuConsumerStatus
+    ?? surfaceDraw?.visibleGpuConsumerStatus
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerStatus
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerReason = renderState?.surfaceDrawVisibleGpuConsumerReason
+    ?? surfaceDraw?.visibleGpuConsumerReason
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerReason
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerInputReady = Boolean(
+    renderState?.surfaceDrawVisibleGpuConsumerInputReady
+    ?? surfaceDraw?.visibleGpuConsumerInputReady
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerInputReady
+  );
+  const surfaceDrawVisibleGpuConsumerInputKind = renderState?.surfaceDrawVisibleGpuConsumerInputKind
+    ?? surfaceDraw?.visibleGpuConsumerInputKind
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerInputKind
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerRuntimeReady = Boolean(
+    renderState?.surfaceDrawVisibleGpuConsumerRuntimeReady
+    ?? surfaceDraw?.visibleGpuConsumerRuntimeReady
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerRuntimeReady
+  );
+  const surfaceDrawVisibleGpuConsumerPixelValidationStatus =
+    renderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+    ?? surfaceDraw?.visibleGpuConsumerPixelValidationStatus
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+    ?? null;
   const surfaceDrawRequestedDiagnosticMode = renderState?.surfaceDrawRequestedDiagnosticMode
     ?? surfaceDraw?.requestedDiagnosticMode
     ?? null;
@@ -499,6 +531,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction,
     surfaceDrawGpuBufferHandoffUpperBoundVertexCount,
     validResidentSurfaceBufferHandoff,
+    surfaceDrawVisibleGpuConsumerReady,
+    surfaceDrawVisibleGpuConsumerStatus,
+    surfaceDrawVisibleGpuConsumerReason,
+    surfaceDrawVisibleGpuConsumerInputReady,
+    surfaceDrawVisibleGpuConsumerInputKind,
+    surfaceDrawVisibleGpuConsumerRuntimeReady,
+    surfaceDrawVisibleGpuConsumerPixelValidationStatus,
     surfaceDrawRequestedDiagnosticMode,
     surfaceDrawDiagnosticFallbackReason,
     surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,

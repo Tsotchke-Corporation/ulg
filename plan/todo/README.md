@@ -35,6 +35,14 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: probe and benchmark harnesses now
+surface `surfaceDrawVisibleGpuConsumer*` separately from
+`surfaceDrawGpuBufferHandoff*`. Explicit `three-webgpu-surface-buffers` probes
+must fail or flag `resident-surface-visible-gpu-consumer-not-ready` when GPU
+inputs are retained but no engine-owned visible GPU consumer is bound and pixel
+validated. This is a harness guardrail only; it does not complete the renderer
+work.
+
 Current routing note, 2026-06-19 AKDT: native marching-cubes/extension surface
 buffers now publish a separate visible-GPU-consumer gate. A run can correctly
 report `surfaceDrawGpuBufferHandoffReady=true` for retained compact surface

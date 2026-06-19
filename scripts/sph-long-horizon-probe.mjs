@@ -1697,6 +1697,21 @@ async function runBrowserProbe({
               renderState.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
             surfaceDrawGpuBufferHandoffConservativeDrawRange:
               renderState.surfaceDrawGpuBufferHandoffConservativeDrawRange ?? null,
+            surfaceDrawVisibleGpuConsumerReady: renderState.surfaceDrawVisibleGpuConsumerReady ?? null,
+            surfaceDrawVisibleGpuConsumerStatus: renderState.surfaceDrawVisibleGpuConsumerStatus ?? null,
+            surfaceDrawVisibleGpuConsumerReason: renderState.surfaceDrawVisibleGpuConsumerReason ?? null,
+            surfaceDrawVisibleGpuConsumerInputReady: renderState.surfaceDrawVisibleGpuConsumerInputReady ?? null,
+            surfaceDrawVisibleGpuConsumerInputKind: renderState.surfaceDrawVisibleGpuConsumerInputKind ?? null,
+            surfaceDrawVisibleGpuConsumerInputStatus: renderState.surfaceDrawVisibleGpuConsumerInputStatus ?? null,
+            surfaceDrawVisibleGpuConsumerRuntimeReady: renderState.surfaceDrawVisibleGpuConsumerRuntimeReady ?? null,
+            surfaceDrawVisibleGpuConsumerRenderBridgeMode:
+              renderState.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
+            surfaceDrawVisibleGpuConsumerRenderBridgeStatus:
+              renderState.surfaceDrawVisibleGpuConsumerRenderBridgeStatus ?? null,
+            surfaceDrawVisibleGpuConsumerRendererCapabilityStatus:
+              renderState.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
+            surfaceDrawVisibleGpuConsumerPixelValidationStatus:
+              renderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
             fullSurfaceDrawReadback: renderState.fullSurfaceDrawReadback ?? null,
             surfaceDrawDiagnosticOnly: renderState.surfaceDrawDiagnosticOnly ?? null,
             surfaceDrawDiagnosticOnlyMode: renderState.surfaceDrawDiagnosticOnlyMode ?? null,
@@ -1764,6 +1779,19 @@ async function runBrowserProbe({
               surfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
             gpuBufferHandoffConservativeDrawRange:
               surfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange ?? null,
+            visibleGpuConsumerReady: surfaceDraw.surfaceDrawVisibleGpuConsumerReady ?? null,
+            visibleGpuConsumerStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerStatus ?? null,
+            visibleGpuConsumerReason: surfaceDraw.surfaceDrawVisibleGpuConsumerReason ?? null,
+            visibleGpuConsumerInputReady: surfaceDraw.surfaceDrawVisibleGpuConsumerInputReady ?? null,
+            visibleGpuConsumerInputKind: surfaceDraw.surfaceDrawVisibleGpuConsumerInputKind ?? null,
+            visibleGpuConsumerInputStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerInputStatus ?? null,
+            visibleGpuConsumerRuntimeReady: surfaceDraw.surfaceDrawVisibleGpuConsumerRuntimeReady ?? null,
+            visibleGpuConsumerRenderBridgeMode: surfaceDraw.surfaceDrawVisibleGpuConsumerRenderBridgeMode ?? null,
+            visibleGpuConsumerRenderBridgeStatus: surfaceDraw.surfaceDrawVisibleGpuConsumerRenderBridgeStatus ?? null,
+            visibleGpuConsumerRendererCapabilityStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerRendererCapabilityStatus ?? null,
+            visibleGpuConsumerPixelValidationStatus:
+              surfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null,
             gpuOnlyAggregateIndirectReady: surfaceDraw.surfaceDrawGpuOnlyAggregateIndirectReady ?? null,
             gpuOnlyAggregateDrawRangeExact: surfaceDraw.surfaceDrawGpuOnlyAggregateDrawRangeExact ?? null,
             visibleRendererBridge: surfaceDraw.visibleRendererBridge ?? null,
@@ -3778,6 +3806,16 @@ function analyzeTimeline(timeline, {
     || metric?.surfaceDraw?.gpuBufferHandoffReady
     || metric?.surfaceDraw?.surfaceDrawGpuBufferHandoffReady
   );
+  const residentSurfaceVisibleGpuConsumerReady = (metric) => Boolean(
+    metric?.renderState?.surfaceDrawVisibleGpuConsumerReady
+    || metric?.surfaceDraw?.visibleGpuConsumerReady
+    || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+  );
+  const residentSurfaceVisibleGpuConsumerInputReady = (metric) => Boolean(
+    metric?.renderState?.surfaceDrawVisibleGpuConsumerInputReady
+    || metric?.surfaceDraw?.visibleGpuConsumerInputReady
+    || metric?.surfaceDraw?.surfaceDrawVisibleGpuConsumerInputReady
+  );
   const residentOverlayH2oVisible = (metric) => residentOverlayVisible(metric)
     && Array.isArray(metric?.renderState?.materialKeys)
     && metric.renderState.materialKeys.some((key) => String(key || '').toLowerCase().includes('h2o'));
@@ -3798,6 +3836,12 @@ function analyzeTimeline(timeline, {
   const residentSurfaceBufferHandoffSampleCount = metrics.filter((metric) => (
     residentSurfaceBufferHandoffReady(metric)
   )).length;
+  const residentSurfaceVisibleGpuConsumerSampleCount = metrics.filter((metric) => (
+    residentSurfaceVisibleGpuConsumerReady(metric)
+  )).length;
+  const residentSurfaceVisibleGpuConsumerInputReadySampleCount = metrics.filter((metric) => (
+    residentSurfaceVisibleGpuConsumerInputReady(metric)
+  )).length;
   const requestedSurfaceDrawMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
   const requestedRenderReadbackMode = String(timeline?.renderReadbackMode || '').toLowerCase();
   const requestedRenderFieldSurfaceSummaryMode = String(
@@ -3817,6 +3861,10 @@ function analyzeTimeline(timeline, {
   const residentSurfaceBufferHandoffAccepted = Boolean(
     residentSurfaceBufferHandoffProbe
     && residentSurfaceBufferHandoffSampleCount > 0
+  );
+  const residentSurfaceVisibleGpuConsumerAccepted = Boolean(
+    residentSurfaceBufferHandoffProbe
+    && residentSurfaceVisibleGpuConsumerSampleCount > 0
   );
   const h2oVisibleSurfaceSampleCount = metrics.filter((metric) => (
     (metric.surfaces?.h2oVisibleCount ?? 0) > 0
@@ -4408,6 +4456,13 @@ function analyzeTimeline(timeline, {
   if (residentSurfaceBufferHandoffProbe && residentSurfaceBufferHandoffSampleCount === 0) {
     issues.push('resident-surface-buffer-handoff-missing');
   }
+  if (
+    requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+    && residentSurfaceBufferHandoffSampleCount > 0
+    && residentSurfaceVisibleGpuConsumerSampleCount === 0
+  ) {
+    issues.push('resident-surface-visible-gpu-consumer-not-ready');
+  }
   if (!directResident && !residentSurfaceBufferHandoffAccepted && visibleSurfaceSampleCount === 0) {
     issues.push('no-visible-surface-samples');
   }
@@ -4549,6 +4604,9 @@ function analyzeTimeline(timeline, {
     visibleSurfaceSampleCount,
     residentSurfaceBufferHandoffSampleCount,
     residentSurfaceBufferHandoffAccepted,
+    residentSurfaceVisibleGpuConsumerSampleCount,
+    residentSurfaceVisibleGpuConsumerInputReadySampleCount,
+    residentSurfaceVisibleGpuConsumerAccepted,
     h2oVisibleSurfaceSampleCount,
     residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length
   };

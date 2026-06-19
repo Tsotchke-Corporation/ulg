@@ -10400,3 +10400,23 @@ Visible GPU consumer validation gate, 2026-06-19 00:55 AKDT:
     input-ready while
     `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-blocked-renderer-capability`
     under the current engine-owned WebGL fallback.
+
+Probe visible GPU consumer reporting, 2026-06-19 01:04 AKDT:
+
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Visual-only browser probe:
+  `ULG_PROBE_OUTPUT=/tmp/ulg-visible-gpu-consumer-visual-only-probe.json ULG_PROBE_PORT=5178 ULG_PROBE_TIMEOUT_MS=180000 ULG_PROBE_BATCHES=1 ULG_PROBE_BATCH_STEPS=2 ULG_PROBE_RENDER_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_ROWS_READBACK_MODE=no-full-readback ULG_PROBE_RENDER_FIELD_SURFACE_SUMMARY_MODE=skip ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-webgpu-surface-buffers ULG_PROBE_READBACK_MODE=no-full-readback ULG_PROBE_COMPACT_SUMMARY_MODE=none ULG_PROBE_VISUAL_ONLY=1 ULG_PROBE_FAIL_ON_BAD=0 ULG_PROBE_URL='/?drop=h2o&base=h2o&dropt=290&baset=290&iceh=0&ironh=1.5&boxx=5&boxy=5&boxz=5&dropn=3&basen=5&mech=mlsmpm&lawmech=1&lawg=1&laweos=1&lawp=1&lawt=1&lawr=1&lawv=1&lawst=1&blob=1&residentFuseSequence=1&surfaceDrawMode=three-webgpu-surface-buffers&visualCapture=1&residentAuto=0' node scripts/sph-long-horizon-probe.mjs`
+  - Expected bad status, isolated to
+    `resident-surface-visible-gpu-consumer-not-ready`.
+  - Browser console issues/warnings: `0/0`.
+  - Resident surface-buffer handoff samples: `2`.
+  - Resident visible GPU consumer samples: `0`.
+  - Resident visible GPU consumer input-ready samples: `2`.
+  - Last visible consumer status:
+    `resident-surface-visible-gpu-consumer-blocked-surface-extraction-required`;
+    input kind `render-field-buffers`; renderer capability
+    `same-device-gpu-buffer-geometry-blocked-webgl-renderer`; pixel validation
+    `not-run`.

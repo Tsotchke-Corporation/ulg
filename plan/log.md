@@ -28241,3 +28241,40 @@ Remaining:
   gate keeps retained native-MC buffers available for that path, but does not
   promote them to visible no-readback renderer status until console and pixel
   validation pass.
+
+## 2026-06-19 01:04 AKDT - Probe Visible GPU Consumer Reporting
+
+Status:
+
+- Extended the long-horizon browser probe and performance benchmark summary to
+  report resident visible GPU consumer readiness separately from resident
+  surface-buffer handoff readiness. The probe now samples
+  `surfaceDrawVisibleGpuConsumer*` fields from both resident render state and
+  resident surface-draw state.
+- The long-horizon analysis now counts visible-GPU-consumer samples and input
+  readiness samples. Explicit `three-webgpu-surface-buffers` render probes now
+  emit `resident-surface-visible-gpu-consumer-not-ready` when resident GPU
+  inputs are retained but the engine-owned visible consumer is not actually
+  ready.
+- The benchmark summary now carries the same readiness/status/reason/input
+  fields, so particle-count performance runs cannot hide renderer readiness
+  behind a successful no-readback handoff.
+
+Validation:
+
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: visual-only browser probe:
+  `ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE=three-webgpu-surface-buffers`
+  with no-full readback and skipped render-field summary wrote
+  `/tmp/ulg-visible-gpu-consumer-visual-only-probe.json`.
+  The run was console-clean with `browserConsoleIssueCount=0`, retained
+  resident input handoff samples `2`, visible consumer samples `0`, and a
+  single isolated issue `resident-surface-visible-gpu-consumer-not-ready`.
+
+Remaining:
+
+- Build the actual engine-owned WebGPU consumer and pixel validation path. The
+  current browser evidence correctly reports retained `render-field-buffers`
+  as input-ready while the visible consumer remains blocked on required surface
+  extraction / WebGL renderer capability and has `pixelValidationStatus=not-run`.

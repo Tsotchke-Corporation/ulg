@@ -65,6 +65,16 @@ Tactical status, 2026-06-19 AKDT:
   not proven. The next simulator/rendering slice is therefore main-canvas
   native WebGPU visibility/presentation and mobile validation, not another
   CPU counter-readback workaround.
+- Native surface rendering now also has a diagnostic same-device offscreen
+  validation path. It draws the retained compact vertex and indirect buffers
+  into a 64x64 WebGPU texture and publishes offscreen validation telemetry
+  without adding an overlay or changing the visible-consumer gate. Current
+  headless evidence at `/tmp/ulg-native-offscreen-validation-lifetime-probe.json`
+  remains `bad`: browser console is clean and the bridge renders, but direct
+  canvas frames are transparent black and offscreen validation is `not-run`
+  because the scene readback still hits `A valid external Instance reference no
+  longer exists`. Treat this as a renderer/device-lifetime and native
+  presentation blocker, not a reason to revive CPU mesh fallback.
 - Resident MLS-MPM render-every continuation now avoids the native surface draw
   / compute queue collision by tracking resident compute work, skipping draw
   submits while resident GPU work is in flight, and deferring native

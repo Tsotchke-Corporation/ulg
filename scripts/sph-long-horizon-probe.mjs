@@ -2057,6 +2057,26 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
             surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+            surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+              renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationStatus:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationStatus ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationReason:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationReason ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationSample:
+              Array.isArray(renderState.surfaceDrawRenderBridgeOffscreenValidationSample)
+                ? [...renderState.surfaceDrawRenderBridgeOffscreenValidationSample]
+                : null,
+            surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationPixelCount:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationPixelCount ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationWidth:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationWidth ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationHeight:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationHeight ?? null,
+            surfaceDrawRenderBridgeOffscreenValidationAttemptCount:
+              renderState.surfaceDrawRenderBridgeOffscreenValidationAttemptCount ?? null,
             surfaceDrawRenderBridgeRenderAttemptCount:
               renderState.surfaceDrawRenderBridgeRenderAttemptCount ?? null,
             surfaceDrawRenderBridgeRenderSkipCount:
@@ -2223,6 +2243,21 @@ async function runBrowserProbe({
               surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
             renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
               surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+            renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+              surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null,
+            renderBridgeOffscreenValidationStatus: surfaceDraw.renderBridgeOffscreenValidationStatus ?? null,
+            renderBridgeOffscreenValidationReason: surfaceDraw.renderBridgeOffscreenValidationReason ?? null,
+            renderBridgeOffscreenValidationSample: Array.isArray(surfaceDraw.renderBridgeOffscreenValidationSample)
+              ? [...surfaceDraw.renderBridgeOffscreenValidationSample]
+              : null,
+            renderBridgeOffscreenValidationNonzeroPixelCount:
+              surfaceDraw.renderBridgeOffscreenValidationNonzeroPixelCount ?? null,
+            renderBridgeOffscreenValidationPixelCount:
+              surfaceDraw.renderBridgeOffscreenValidationPixelCount ?? null,
+            renderBridgeOffscreenValidationWidth: surfaceDraw.renderBridgeOffscreenValidationWidth ?? null,
+            renderBridgeOffscreenValidationHeight: surfaceDraw.renderBridgeOffscreenValidationHeight ?? null,
+            renderBridgeOffscreenValidationAttemptCount:
+              surfaceDraw.renderBridgeOffscreenValidationAttemptCount ?? null,
             renderBridgeRenderAttemptCount: surfaceDraw.renderBridgeRenderAttemptCount ?? null,
             renderBridgeRenderSkipCount: surfaceDraw.renderBridgeRenderSkipCount ?? null,
             renderBridgeLastRenderAttemptReason: surfaceDraw.renderBridgeLastRenderAttemptReason ?? null,

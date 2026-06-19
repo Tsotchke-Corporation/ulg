@@ -1,5 +1,37 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Native Surface Offscreen Validation Probe
+
+The native `native-webgpu-surface-consumer` bridge now has a diagnostic
+offscreen same-device validation path. It draws the same retained surface
+buffers into a 64x64 WebGPU texture and records validation status separately
+from actual visible canvas pixel validation. The visible GPU consumer still
+fails closed unless real canvas/presentation pixels validate.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js` and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native|visible GPU|surface draw|renderer backend"`
+  passed `57/57`.
+- Whitespace:
+  `git diff --check` passed.
+- Browser diagnostics:
+  `/tmp/ulg-native-offscreen-validation-lifetime-probe.json` completed with
+  browser console issues/warnings `0/0`, retained native MC surface draw
+  buffers, bridge status `native-webgpu-surface-consumer-ready`, and last
+  render status `native-webgpu-surface-consumer-rendered`.
+
+Known residual risk:
+
+- The direct native canvas PNGs are still transparent black while the
+  composited page is nonblank. Offscreen validation is wired, but in this
+  headless Chromium scene path it remains `not-run` after two attempts because
+  `mapAsync` reports `A valid external Instance reference no longer exists`.
+  The next acceptance gate remains actual native canvas/mobile visibility.
+
 ## Current Focused Result - 2026-06-19 Conservative Native MC No-Readback Counter Bridge
 
 Native marching-cubes extraction is no longer blocked on the sibling

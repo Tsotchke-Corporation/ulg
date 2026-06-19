@@ -1,5 +1,47 @@
 # ULG Implementation Log
 
+## 2026-06-19 AKDT - Native Surface Offscreen Validation Probe
+
+Status:
+
+- Added a diagnostic-only offscreen validation pass for the
+  `native-webgpu-surface-consumer` bridge. It reuses the retained compact
+  surface vertex buffer, retained draw-indirect rows, optical GPU buffers, and
+  camera uniform to draw the same surface into a 64x64 same-device WebGPU
+  texture, then attempts a capped 16 KiB readback. This is not an overlay and
+  does not promote visible GPU consumer readiness.
+- Exposed offscreen validation telemetry through the native consumer,
+  `sphResidentSurfaceDraw`, `sphResidentRenderState`, and the long-horizon
+  probe JSON: status, reason, sample pixel, nonzero pixel count, target size,
+  and attempt count.
+- Fenced native validation readbacks with `queue.onSubmittedWorkDone()` and
+  hardened render-bridge cleanup so pending validation resources are abandoned
+  and released after the pending readback settles instead of being destroyed
+  underneath `mapAsync()`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native|visible GPU|surface draw|renderer backend"`
+  reported `57/57`.
+- PASS: `git diff --check`.
+- Browser native MLS-MPM probe
+  `/tmp/ulg-native-offscreen-validation-lifetime-probe.json` completed with
+  `browserConsoleIssueCount=0`, `browserConsoleWarningCount=0`, retained native
+  MC surface draw buffers, `native-webgpu-surface-consumer-ready`, and
+  `native-webgpu-surface-consumer-rendered`.
+
+Remaining:
+
+- The probe still classified `bad`: direct native canvas frames were
+  transparent black, the composited page was nonblank, visible GPU consumer
+  remained `resident-surface-visible-gpu-consumer-blocked-pixel-validation`,
+  and offscreen validation stayed `not-run` after two attempts because
+  `mapAsync` reported `A valid external Instance reference no longer exists`.
+  This keeps the P0 on real native main-canvas presentation/mobile visibility
+  and renderer/device lifetime, not overlays or CPU mesh fallback.
+
 ## 2026-06-19 AKDT - Conservative Native MC No-Readback Counter Bridge
 
 Status:

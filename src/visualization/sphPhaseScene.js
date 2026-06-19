@@ -132,6 +132,8 @@ export const SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT = 'depth24plus';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT = 'rgba16float';
 export const SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT = 'rgba8unorm';
 export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overlay-until-replacement-ready';
+const SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_SIZE_PX = 64;
+const SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_MAX_ATTEMPTS = 3;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
@@ -3628,6 +3630,19 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
   target.renderBridgePrimaryBoundsInFront = bridge.primarySurfaceBoundsInFront ?? null;
   target.renderBridgePrimaryBoundsCenterInsideClip = bridge.primarySurfaceBoundsCenterInsideClip ?? null;
   target.renderBridgePrimaryBoundsMaybeVisible = bridge.primarySurfaceBoundsMaybeVisible ?? null;
+  target.renderBridgeOffscreenValidationStatus = bridge.offscreenValidationStatus ?? null;
+  target.renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus =
+    bridge.nativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null;
+  target.renderBridgeOffscreenValidationReason = bridge.offscreenValidationReason ?? null;
+  target.renderBridgeOffscreenValidationSample = Array.isArray(bridge.offscreenValidationSample)
+    ? [...bridge.offscreenValidationSample]
+    : null;
+  target.renderBridgeOffscreenValidationNonzeroPixelCount =
+    bridge.offscreenValidationNonzeroPixelCount ?? null;
+  target.renderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
+  target.renderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
+  target.renderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
+  target.renderBridgeOffscreenValidationAttemptCount = bridge.offscreenValidationAttemptCount ?? null;
   return target;
 }
 
@@ -3666,6 +3681,20 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
   target.surfaceDrawRenderBridgePrimaryBoundsCenterInsideClip =
     bridge.primarySurfaceBoundsCenterInsideClip ?? null;
   target.surfaceDrawRenderBridgePrimaryBoundsMaybeVisible = bridge.primarySurfaceBoundsMaybeVisible ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationStatus = bridge.offscreenValidationStatus ?? null;
+  target.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus =
+    bridge.nativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationReason = bridge.offscreenValidationReason ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationSample = Array.isArray(bridge.offscreenValidationSample)
+    ? [...bridge.offscreenValidationSample]
+    : null;
+  target.surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount =
+    bridge.offscreenValidationNonzeroPixelCount ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
+  target.surfaceDrawRenderBridgeOffscreenValidationAttemptCount =
+    bridge.offscreenValidationAttemptCount ?? null;
   return target;
 }
 
@@ -6595,7 +6624,19 @@ export function createSphPhaseScene(container, {
       renderBridge.depthTexture?.destroy?.();
       renderBridge.oitAccumTexture?.destroy?.();
       renderBridge.oitRevealTexture?.destroy?.();
-      renderBridge.pixelValidationTexture?.destroy?.();
+      if (renderBridge.pixelValidationPending) {
+        renderBridge.pixelValidationAbandoned = true;
+      } else {
+        renderBridge.pixelValidationTexture?.destroy?.();
+        renderBridge.pixelValidationReadbackBuffer?.destroy?.();
+      }
+      if (renderBridge.offscreenValidationPending) {
+        renderBridge.offscreenValidationAbandoned = true;
+      } else {
+        renderBridge.offscreenValidationTexture?.destroy?.();
+        renderBridge.offscreenValidationDepthTexture?.destroy?.();
+        renderBridge.offscreenValidationReadbackBuffer?.destroy?.();
+      }
       if (renderBridge.renderRowsBufferOwned) {
         renderBridge.renderRowsBuffer?.destroy?.();
       }
@@ -6607,6 +6648,10 @@ export function createSphPhaseScene(container, {
       renderBridge.oitAccumTexture = null;
       renderBridge.oitRevealTexture = null;
       renderBridge.pixelValidationTexture = null;
+      renderBridge.pixelValidationReadbackBuffer = null;
+      renderBridge.offscreenValidationTexture = null;
+      renderBridge.offscreenValidationDepthTexture = null;
+      renderBridge.offscreenValidationReadbackBuffer = null;
       renderBridge.renderRowsBuffer = null;
       renderBridge.renderRowsBufferOwned = false;
       renderBridge.status = status;
@@ -6857,7 +6902,8 @@ export function createSphPhaseScene(container, {
         usesResidentDevice: true,
         device: null,
         runtimeValidated: false,
-        pixelValidationStatus: 'not-run'
+        pixelValidationStatus: 'not-run',
+        offscreenValidationStatus: 'not-run'
       };
       renderer.userData.sphNativeWebGpuSurfaceConsumer = blocked;
       scene.userData.sphNativeWebGpuSurfaceConsumer = blocked;
@@ -6898,6 +6944,15 @@ export function createSphPhaseScene(container, {
         renderTargetReady: true,
         runtimeValidated: true,
         pixelValidationStatus: previous?.pixelValidationStatus || 'not-run',
+        offscreenValidationStatus: previous?.offscreenValidationStatus || 'not-run',
+        offscreenValidationReason: previous?.offscreenValidationReason || null,
+        offscreenValidationSample: Array.isArray(previous?.offscreenValidationSample)
+          ? [...previous.offscreenValidationSample]
+          : null,
+        offscreenValidationNonzeroPixelCount: previous?.offscreenValidationNonzeroPixelCount ?? null,
+        offscreenValidationPixelCount: previous?.offscreenValidationPixelCount ?? null,
+        offscreenValidationWidth: previous?.offscreenValidationWidth ?? null,
+        offscreenValidationHeight: previous?.offscreenValidationHeight ?? null,
         getCurrentTextureView() {
           return context.getCurrentTexture().createView();
         },
@@ -6927,6 +6982,7 @@ export function createSphPhaseScene(container, {
         renderTargetReady: false,
         runtimeValidated: false,
         pixelValidationStatus: 'not-run',
+        offscreenValidationStatus: 'not-run',
         updatedAtMs: nowMs(),
         scientificValidation: false,
         sphValidation: false,
@@ -7187,10 +7243,18 @@ export function createSphPhaseScene(container, {
       );
       return () => {
         const readbackBuffer = bridge.pixelValidationReadbackBuffer;
-        readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
+        const validationTextureForReadback = validationTexture;
+        const waitForSubmittedWork = bridge.device?.queue?.onSubmittedWorkDone?.() || Promise.resolve();
+        waitForSubmittedWork
+          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
           .then(() => {
-            if (bridge.pixelValidationSerial !== serial) {
+            if (bridge.pixelValidationSerial !== serial || bridge.pixelValidationAbandoned) {
               readbackBuffer.unmap();
+              if (bridge.pixelValidationAbandoned) {
+                bridge.pixelValidationPending = false;
+                readbackBuffer.destroy?.();
+                validationTextureForReadback?.destroy?.();
+              }
               return;
             }
             const mappedRange = readbackBuffer.getMappedRange();
@@ -7212,6 +7276,11 @@ export function createSphPhaseScene(container, {
           .catch((error) => {
             if (bridge.pixelValidationSerial !== serial) return;
             bridge.pixelValidationPending = false;
+            if (bridge.pixelValidationAbandoned) {
+              readbackBuffer?.destroy?.();
+              validationTextureForReadback?.destroy?.();
+              return;
+            }
             const message = error instanceof Error ? error.message : String(error);
             if (/external Instance reference no longer exists|mapAsync/i.test(message)) {
               publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
@@ -7231,6 +7300,326 @@ export function createSphPhaseScene(container, {
       publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
         status: 'error',
         reason: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
+  }
+
+  function ensureSphNativeWebGpuSurfaceOffscreenValidationTargets(bridge = sphResidentSurfaceDrawRenderBridge) {
+    if (!bridge?.device || !bridge?.format) return null;
+    const widthPx = SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_SIZE_PX;
+    const heightPx = SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_SIZE_PX;
+    if (
+      bridge.offscreenValidationTexture
+      && bridge.offscreenValidationDepthTexture
+      && bridge.offscreenValidationTextureFormat === bridge.format
+      && bridge.offscreenValidationWidth === widthPx
+      && bridge.offscreenValidationHeight === heightPx
+    ) {
+      return {
+        texture: bridge.offscreenValidationTexture,
+        depthTexture: bridge.offscreenValidationDepthTexture,
+        widthPx,
+        heightPx
+      };
+    }
+    bridge.offscreenValidationTexture?.destroy?.();
+    bridge.offscreenValidationDepthTexture?.destroy?.();
+    bridge.offscreenValidationTexture = bridge.device.createTexture({
+      label: 'ulg-sph-native-webgpu-surface-consumer-offscreen-validation-target',
+      size: [widthPx, heightPx],
+      format: bridge.format,
+      usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC
+    });
+    bridge.offscreenValidationDepthTexture = bridge.device.createTexture({
+      label: 'ulg-sph-native-webgpu-surface-consumer-offscreen-validation-depth',
+      size: [widthPx, heightPx],
+      format: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+      usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT
+    });
+    bridge.offscreenValidationTextureFormat = bridge.format;
+    bridge.offscreenValidationWidth = widthPx;
+    bridge.offscreenValidationHeight = heightPx;
+    return {
+      texture: bridge.offscreenValidationTexture,
+      depthTexture: bridge.offscreenValidationDepthTexture,
+      widthPx,
+      heightPx
+    };
+  }
+
+  function publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+    status = 'not-run',
+    reason = null,
+    sample = null,
+    nonzeroPixelCount = null,
+    pixelCount = null,
+    width = null,
+    height = null
+  } = {}) {
+    if (!bridge || bridge.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
+    const normalizedStatus = String(status || 'not-run');
+    const normalizedSample = Array.isArray(sample) ? [...sample] : null;
+    bridge.offscreenValidationStatus = normalizedStatus;
+    bridge.nativeWebGpuSurfaceConsumerOffscreenValidationStatus = normalizedStatus;
+    bridge.offscreenValidationReason = reason;
+    bridge.nativeWebGpuSurfaceConsumerOffscreenValidationReason = reason;
+    bridge.offscreenValidationSample = normalizedSample;
+    bridge.offscreenValidationNonzeroPixelCount = nonzeroPixelCount;
+    bridge.offscreenValidationPixelCount = pixelCount;
+    bridge.offscreenValidationWidth = width ?? bridge.offscreenValidationWidth ?? null;
+    bridge.offscreenValidationHeight = height ?? bridge.offscreenValidationHeight ?? null;
+
+    const nativeConsumer = renderer.userData?.sphNativeWebGpuSurfaceConsumer || null;
+    if (nativeConsumer) {
+      nativeConsumer.offscreenValidationStatus = normalizedStatus;
+      nativeConsumer.offscreenValidationReason = reason;
+      nativeConsumer.offscreenValidationSample = normalizedSample;
+      nativeConsumer.offscreenValidationNonzeroPixelCount = nonzeroPixelCount;
+      nativeConsumer.offscreenValidationPixelCount = pixelCount;
+      nativeConsumer.offscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
+      nativeConsumer.offscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
+      nativeConsumer.updatedAtMs = nowMs();
+      scene.userData.sphNativeWebGpuSurfaceConsumer = nativeConsumer;
+    }
+
+    if (sphResidentSurfaceDraw) {
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationStatus = normalizedStatus;
+      sphResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus =
+        normalizedStatus;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationReason = reason;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationSample = normalizedSample;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationNonzeroPixelCount = nonzeroPixelCount;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationPixelCount = pixelCount;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationWidth = bridge.offscreenValidationWidth ?? null;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationHeight = bridge.offscreenValidationHeight ?? null;
+      sphResidentSurfaceDraw.renderBridgeOffscreenValidationAttemptCount =
+        bridge.offscreenValidationAttemptCount ?? null;
+    }
+
+    if (sphResidentRenderState) {
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationStatus = normalizedStatus;
+      sphResidentRenderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus =
+        normalizedStatus;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationReason = reason;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationSample = normalizedSample;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount = nonzeroPixelCount;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationPixelCount = pixelCount;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationWidth =
+        bridge.offscreenValidationWidth ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationHeight =
+        bridge.offscreenValidationHeight ?? null;
+      sphResidentRenderState.surfaceDrawRenderBridgeOffscreenValidationAttemptCount =
+        bridge.offscreenValidationAttemptCount ?? null;
+    }
+  }
+
+  function beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
+    bridge,
+    encoder,
+    {
+      drawCount = 0,
+      opaqueDraws = [],
+      transparentDraws = []
+    } = {}
+  ) {
+    if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return null;
+    if (!(drawCount > 0)) {
+      publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+        status: 'failed',
+        reason: 'native WebGPU offscreen validation submitted no drawable surface draws'
+      });
+      return null;
+    }
+    if (bridge.offscreenValidationPending) return null;
+    if (
+      bridge.offscreenValidationStatus === 'passed'
+      && bridge.offscreenValidationTextureFormat === bridge.format
+    ) {
+      return null;
+    }
+    const attemptCount = Math.max(0, Math.round(Number(bridge.offscreenValidationAttemptCount) || 0));
+    if (
+      attemptCount >= SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_MAX_ATTEMPTS
+      && bridge.offscreenValidationStatus
+      && bridge.offscreenValidationStatus !== 'pending'
+    ) {
+      return null;
+    }
+    const drawState = bridge.drawState;
+    const targets = ensureSphNativeWebGpuSurfaceOffscreenValidationTargets(bridge);
+    if (
+      !targets?.texture
+      || !targets?.depthTexture
+      || !drawState?.bindGroup
+      || !drawState?.drawIndirectRowsBuffer
+      || !bridge.opaquePipeline
+      || !bridge.transparentPipeline
+      || !encoder?.copyTextureToBuffer
+      || !bridge.device?.createBuffer
+    ) {
+      publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+        status: 'error',
+        reason: 'native WebGPU offscreen validation lacks retained draw buffers, pipelines, or texture-copy support'
+      });
+      return null;
+    }
+    const widthPx = targets.widthPx;
+    const heightPx = targets.heightPx;
+    const readbackBytesPerRow = widthPx * 4;
+    const readbackSizeBytes = readbackBytesPerRow * heightPx;
+    try {
+      if (
+        !bridge.offscreenValidationReadbackBuffer
+        || bridge.offscreenValidationReadbackBufferSize !== readbackSizeBytes
+      ) {
+        bridge.offscreenValidationReadbackBuffer?.destroy?.();
+        bridge.offscreenValidationReadbackBuffer = bridge.device.createBuffer({
+          label: 'ulg-sph-native-webgpu-surface-consumer-offscreen-validation-readback',
+          size: readbackSizeBytes,
+          usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+        });
+        bridge.offscreenValidationReadbackBufferSize = readbackSizeBytes;
+      }
+      const serial = (bridge.offscreenValidationSerial || 0) + 1;
+      bridge.offscreenValidationSerial = serial;
+      bridge.offscreenValidationPending = true;
+      bridge.offscreenValidationAttemptCount = attemptCount + 1;
+      publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+        status: 'pending',
+        reason: 'native WebGPU offscreen surface draw validation readback is pending',
+        width: widthPx,
+        height: heightPx
+      });
+      const validationPass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: targets.texture.createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: 'clear',
+          storeOp: 'store'
+        }],
+        depthStencilAttachment: {
+          view: targets.depthTexture.createView(),
+          depthClearValue: 1,
+          depthLoadOp: 'clear',
+          depthStoreOp: 'store'
+        }
+      });
+      if (opaqueDraws.length > 0) {
+        validationPass.setPipeline(bridge.opaquePipeline);
+        validationPass.setBindGroup(0, drawState.bindGroup);
+        for (const draw of opaqueDraws) {
+          validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+        }
+      }
+      if (transparentDraws.length > 0) {
+        validationPass.setPipeline(bridge.transparentPipeline);
+        validationPass.setBindGroup(0, drawState.bindGroup);
+        for (const draw of transparentDraws) {
+          validationPass.drawIndirect(drawState.drawIndirectRowsBuffer, draw.indirectOffsetBytes);
+        }
+      }
+      validationPass.end();
+      encoder.copyTextureToBuffer(
+        { texture: targets.texture },
+        {
+          buffer: bridge.offscreenValidationReadbackBuffer,
+          bytesPerRow: readbackBytesPerRow,
+          rowsPerImage: heightPx
+        },
+        {
+          width: widthPx,
+          height: heightPx,
+          depthOrArrayLayers: 1
+        }
+      );
+      return () => {
+        const readbackBuffer = bridge.offscreenValidationReadbackBuffer;
+        const validationTextureForReadback = targets.texture;
+        const validationDepthTextureForReadback = targets.depthTexture;
+        const waitForSubmittedWork = bridge.device?.queue?.onSubmittedWorkDone?.() || Promise.resolve();
+        waitForSubmittedWork
+          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
+          .then(() => {
+            if (bridge.offscreenValidationSerial !== serial || bridge.offscreenValidationAbandoned) {
+              readbackBuffer.unmap();
+              if (bridge.offscreenValidationAbandoned) {
+                bridge.offscreenValidationPending = false;
+                readbackBuffer.destroy?.();
+                validationTextureForReadback?.destroy?.();
+                validationDepthTextureForReadback?.destroy?.();
+              }
+              return;
+            }
+            const mappedRange = readbackBuffer.getMappedRange();
+            const bytes = new Uint8Array(mappedRange, 0, readbackSizeBytes);
+            let nonzeroPixelCount = 0;
+            let sample = null;
+            for (let y = 0; y < heightPx; y += 1) {
+              const rowOffset = y * readbackBytesPerRow;
+              for (let x = 0; x < widthPx; x += 1) {
+                const offset = rowOffset + x * 4;
+                const pixelNonzero = (
+                  bytes[offset] > 0
+                  || bytes[offset + 1] > 0
+                  || bytes[offset + 2] > 0
+                  || bytes[offset + 3] > 0
+                );
+                if (pixelNonzero) {
+                  nonzeroPixelCount += 1;
+                  if (!sample) sample = Array.from(bytes.slice(offset, offset + 4));
+                }
+              }
+            }
+            readbackBuffer.unmap();
+            bridge.offscreenValidationPending = false;
+            const pixelCount = widthPx * heightPx;
+            publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+              status: nonzeroPixelCount > 0 ? 'passed' : 'failed',
+              reason: nonzeroPixelCount > 0
+                ? `offscreen same-device surface draw validation observed ${nonzeroPixelCount}/${pixelCount} nonzero pixels`
+                : 'offscreen same-device surface draw validation returned transparent black for every sampled pixel',
+              sample,
+              nonzeroPixelCount,
+              pixelCount,
+              width: widthPx,
+              height: heightPx
+            });
+          })
+          .catch((error) => {
+            if (bridge.offscreenValidationSerial !== serial) return;
+            bridge.offscreenValidationPending = false;
+            if (bridge.offscreenValidationAbandoned) {
+              readbackBuffer?.destroy?.();
+              validationTextureForReadback?.destroy?.();
+              validationDepthTextureForReadback?.destroy?.();
+              return;
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            if (/external Instance reference no longer exists|mapAsync/i.test(message)) {
+              publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+                status: 'not-run',
+                reason: `native WebGPU offscreen validation readback unavailable in this browser: ${message}`,
+                width: widthPx,
+                height: heightPx
+              });
+              return;
+            }
+            publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+              status: 'error',
+              reason: message,
+              width: widthPx,
+              height: heightPx
+            });
+          });
+      };
+    } catch (error) {
+      bridge.offscreenValidationPending = false;
+      publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+        status: 'error',
+        reason: error instanceof Error ? error.message : String(error),
+        width: widthPx,
+        height: heightPx
       });
       return null;
     }
@@ -8829,6 +9218,17 @@ export function createSphPhaseScene(container, {
         pixelValidationReadbackSource: enableNativeSurfacePixelValidation
           ? 'native-canvas-current-texture'
           : 'disabled',
+        nativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+          nativeConsumer?.offscreenValidationStatus || 'not-run',
+        offscreenValidationStatus: nativeConsumer?.offscreenValidationStatus || 'not-run',
+        offscreenValidationReason: nativeConsumer?.offscreenValidationReason || null,
+        offscreenValidationSample: Array.isArray(nativeConsumer?.offscreenValidationSample)
+          ? [...nativeConsumer.offscreenValidationSample]
+          : null,
+        offscreenValidationNonzeroPixelCount:
+          nativeConsumer?.offscreenValidationNonzeroPixelCount ?? null,
+        offscreenValidationPixelCount: nativeConsumer?.offscreenValidationPixelCount ?? null,
+        offscreenValidationAttemptCount: 0,
         backgroundClearValue: useNativeConsumer
           ? { r: 0.094, g: 0.133, b: 0.169, a: 1 }
           : { r: 0, g: 0, b: 0, a: 0 },
@@ -9262,6 +9662,15 @@ export function createSphPhaseScene(container, {
           sourceTexture: canvasTexture
         }
       );
+      const completeNativeOffscreenValidation = beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
+        bridge,
+        encoder,
+        {
+          drawCount: opaqueDraws.length + transparentDraws.length,
+          opaqueDraws,
+          transparentDraws
+        }
+      );
       bridge.device.queue.submit([encoder.finish()]);
       trackResidentSurfaceDrawSubmitFence(bridge, {
         reason: 'resident-surface-draw-overlay-submit',
@@ -9270,6 +9679,7 @@ export function createSphPhaseScene(container, {
           : 'webgpu-overlay-rendered'
       });
       completeNativePixelValidation?.();
+      completeNativeOffscreenValidation?.();
       bridge.frameCount += 1;
       bridge.lastRenderStatus = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
         ? 'native-webgpu-surface-consumer-rendered'
@@ -9360,6 +9770,16 @@ export function createSphPhaseScene(container, {
       ) {
         bridge.pixelValidationPending = false;
         publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+          status: 'error',
+          reason: bridge.reason
+        });
+      }
+      if (
+        bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        && bridge.offscreenValidationPending
+      ) {
+        bridge.offscreenValidationPending = false;
+        publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
           status: 'error',
           reason: bridge.reason
         });
@@ -13168,6 +13588,19 @@ export function createSphPhaseScene(container, {
           Boolean(renderBridge?.nativeWebGpuSurfaceConsumerRuntimeValidated),
         renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
           renderBridge?.nativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+        renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+          renderBridge?.nativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null,
+        renderBridgeOffscreenValidationStatus: renderBridge?.offscreenValidationStatus ?? null,
+        renderBridgeOffscreenValidationReason: renderBridge?.offscreenValidationReason ?? null,
+        renderBridgeOffscreenValidationSample: Array.isArray(renderBridge?.offscreenValidationSample)
+          ? [...renderBridge.offscreenValidationSample]
+          : null,
+        renderBridgeOffscreenValidationNonzeroPixelCount:
+          renderBridge?.offscreenValidationNonzeroPixelCount ?? null,
+        renderBridgeOffscreenValidationPixelCount: renderBridge?.offscreenValidationPixelCount ?? null,
+        renderBridgeOffscreenValidationWidth: renderBridge?.offscreenValidationWidth ?? null,
+        renderBridgeOffscreenValidationHeight: renderBridge?.offscreenValidationHeight ?? null,
+        renderBridgeOffscreenValidationAttemptCount: renderBridge?.offscreenValidationAttemptCount ?? null,
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
@@ -13571,6 +14004,19 @@ export function createSphPhaseScene(container, {
           Boolean(renderBridge?.nativeWebGpuSurfaceConsumerRuntimeValidated),
         renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
           renderBridge?.nativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+        renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+          renderBridge?.nativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null,
+        renderBridgeOffscreenValidationStatus: renderBridge?.offscreenValidationStatus ?? null,
+        renderBridgeOffscreenValidationReason: renderBridge?.offscreenValidationReason ?? null,
+        renderBridgeOffscreenValidationSample: Array.isArray(renderBridge?.offscreenValidationSample)
+          ? [...renderBridge.offscreenValidationSample]
+          : null,
+        renderBridgeOffscreenValidationNonzeroPixelCount:
+          renderBridge?.offscreenValidationNonzeroPixelCount ?? null,
+        renderBridgeOffscreenValidationPixelCount: renderBridge?.offscreenValidationPixelCount ?? null,
+        renderBridgeOffscreenValidationWidth: renderBridge?.offscreenValidationWidth ?? null,
+        renderBridgeOffscreenValidationHeight: renderBridge?.offscreenValidationHeight ?? null,
+        renderBridgeOffscreenValidationAttemptCount: renderBridge?.offscreenValidationAttemptCount ?? null,
         renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
         renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
@@ -15734,6 +16180,26 @@ export function createSphPhaseScene(container, {
           Boolean(sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated),
         surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
           sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+        surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+          sphResidentSurfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerOffscreenValidationStatus ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationStatus:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationStatus ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationReason:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationReason ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationSample:
+          Array.isArray(sphResidentSurfaceDraw?.renderBridgeOffscreenValidationSample)
+            ? [...sphResidentSurfaceDraw.renderBridgeOffscreenValidationSample]
+            : null,
+        surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationNonzeroPixelCount ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationPixelCount:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationPixelCount ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationWidth:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationWidth ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationHeight:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationHeight ?? null,
+        surfaceDrawRenderBridgeOffscreenValidationAttemptCount:
+          sphResidentSurfaceDraw?.renderBridgeOffscreenValidationAttemptCount ?? null,
         surfaceDrawRenderBridgeReused: Boolean(
           sphResidentSurfaceDraw?.renderBridgeReused
           || sphResidentSurfaceDrawRenderBridge?.threeRenderBridgeReused

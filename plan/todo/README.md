@@ -52,6 +52,20 @@ captures remain blank. The remaining P0 is therefore main-canvas native WebGPU
 visibility/presentation and mobile rendering, not extension counter readback,
 overlay fallback, or CPU mesh optimization.
 
+Current routing note, 2026-06-19 AKDT: the native surface bridge now includes a
+diagnostic offscreen same-device validation pass. It draws the same retained
+compact vertex and indirect buffers into a 64x64 WebGPU texture and reports
+offscreen validation telemetry through the scene/probe state without creating
+an overlay or marking the visible consumer ready. Evidence:
+`/tmp/ulg-native-offscreen-validation-lifetime-probe.json` is console-clean and
+shows retained native MC surface draw buffers plus
+`native-webgpu-surface-consumer-rendered`, but the direct canvas PNGs are still
+transparent black and offscreen validation is `not-run` because this headless
+scene path still reports `A valid external Instance reference no longer
+exists` from `mapAsync`. Keep the next P0 on native main-canvas/mobile
+presentation and renderer/device lifetime; do not detour into overlays or CPU
+mesh fallback.
+
 Current routing note, 2026-06-19 AKDT: resident MLS-MPM render-every
 continuation is now console-clean on the native WebGPU surface-consumer route
 when native marching-cubes extraction is deferred until the final resident

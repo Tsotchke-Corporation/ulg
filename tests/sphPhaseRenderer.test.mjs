@@ -36,6 +36,7 @@ import {
   normalizeSphRendererBackend,
   resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
+  createThreeWebGpuExternalIndirectBufferAttribute,
   resolveExtensionSurfaceRenderBridgePlan,
   resolveSphSurfaceDrawDiagnosticPresentationMode,
   resolveThreeWebGpuRendererRequiredLimits,
@@ -210,14 +211,16 @@ test('SPH Three WebGPU presentation policy is fail-closed with unsafe diagnostic
     rendererWebGpuResidentDevice: true,
     unsafeDiagnosticOverride: true
   });
-  assert.equal(unsafePolicy.status, 'three-webgpu-presentation-enabled-unsafe-diagnostic');
-  assert.equal(unsafePolicy.enabled, true);
+  assert.equal(unsafePolicy.status, 'three-webgpu-presentation-blocked-runtime-validation');
+  assert.equal(unsafePolicy.enabled, false);
   assert.equal(unsafePolicy.unsafeDiagnosticOverride, true);
+  assert.equal(unsafePolicy.blockedByRuntime, true);
 
   const missingResidentDevicePolicy = resolveThreeWebGpuPresentationPolicy({
     webGpuRendererAvailable: true,
     requestedPresentation: true,
     rendererWebGpuResidentDevice: false,
+    runtimeValidated: true,
     unsafeDiagnosticOverride: true
   });
   assert.equal(missingResidentDevicePolicy.status, 'three-webgpu-presentation-blocked-resident-device');
@@ -254,13 +257,23 @@ test('SPH Three WebGPU renderer-owned resident device is explicit opt-in', () =>
   assert.equal(pendingPolicy.status, 'renderer-owned-resident-device-blocked-device-pending');
   assert.equal(pendingPolicy.rendererOwnedDeviceAllowed, false);
 
-  const enabledPolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
+  const blockedRuntimePolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
     renderer: readyRenderer,
     requested: true
+  });
+  assert.equal(blockedRuntimePolicy.status, 'renderer-owned-resident-device-blocked-runtime-validation');
+  assert.equal(blockedRuntimePolicy.rendererOwnedDeviceAllowed, false);
+  assert.equal(blockedRuntimePolicy.runtimeValidated, false);
+
+  const enabledPolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
+    renderer: readyRenderer,
+    requested: true,
+    runtimeValidated: true
   });
   assert.equal(enabledPolicy.status, 'renderer-owned-resident-device-enabled');
   assert.equal(enabledPolicy.rendererOwnedDeviceAllowed, true);
   assert.equal(enabledPolicy.rendererBackendDeviceReady, true);
+  assert.equal(enabledPolicy.runtimeValidated, true);
 });
 
 test('SPH extension surface renderer capability blocks no-readback GPU buffers on WebGL scenes', () => {
@@ -327,11 +340,15 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
     readbackMode: 'no-full-readback',
     device: supportedDevice
   });
-  assert.equal(webgpuOptIn.status, 'same-device-gpu-buffer-geometry-supported');
+  assert.equal(
+    webgpuOptIn.status,
+    'same-device-gpu-buffer-geometry-blocked-three-webgpu-external-buffer-pipeline-unvalidated'
+  );
   assert.equal(webgpuOptIn.sameDeviceGpuBufferGeometryAvailable, true);
-  assert.equal(webgpuOptIn.sameDeviceGpuBufferGeometrySupported, true);
+  assert.equal(webgpuOptIn.sameDeviceGpuBufferGeometrySupported, false);
   assert.equal(webgpuOptIn.externalBufferPresentationEnabled, true);
-  assert.equal(webgpuOptIn.visibleNoReadbackSupported, true);
+  assert.equal(webgpuOptIn.externalBufferPipelineRuntimeValidated, false);
+  assert.equal(webgpuOptIn.visibleNoReadbackSupported, false);
 
   const presentationDisabled = resolveResidentExtensionSurfaceRendererCapability({
     renderer: {
@@ -473,11 +490,13 @@ test('SPH extension surface bridge planner keeps no-full resident buffers by def
     rendererCapability: webgpuOptInCapability,
     readbackMode: 'no-full-readback'
   });
-  assert.equal(webgpuOptInPlan.status, 'extension-surface-render-plan-three-webgpu-surface-buffers');
+  assert.equal(webgpuOptInPlan.status, 'extension-surface-render-plan-resident-surface-buffer-handoff');
   assert.equal(webgpuOptInPlan.useThreeCompactBridge, false);
-  assert.equal(webgpuOptInPlan.useThreeWebGpuSurfaceBufferBridge, true);
+  assert.equal(webgpuOptInPlan.useThreeWebGpuSurfaceBufferBridge, false);
+  assert.equal(webgpuOptInPlan.retainResidentSurfaceBufferHandoff, true);
   assert.equal(webgpuOptInPlan.translationReadbackMode, 'no-full-readback');
   assert.equal(webgpuOptInPlan.fallbackThreeCompactBridge, false);
+  assert.match(webgpuOptInPlan.handoffReason, /retained buffers/);
 
   const requestedCompactPlan = resolveExtensionSurfaceRenderBridgePlan({
     renderBridgeMode: 'three-compact-vertices',
@@ -524,6 +543,50 @@ test('SPH Three WebGPU external interleaved attributes bind retained GPU buffers
   assert.equal(binding.attribute.count, 12);
   assert.equal(binding.interleavedBuffer.stride, 16);
   assert.equal(records.get(binding.interleavedBuffer).buffer, gpuBuffer);
+});
+
+test('SPH Three WebGPU external indirect attributes bind retained draw buffers', () => {
+  const gpuBuffer = { label: 'ulg-test-retained-aggregate-indirect' };
+  const records = new Map();
+  class FakeIndirectStorageBufferAttribute {
+    constructor(count, itemSize) {
+      this.array = new Uint32Array(count * itemSize);
+      this.itemSize = itemSize;
+      this.count = count;
+      this.isIndirectStorageBufferAttribute = true;
+      this.version = 0;
+    }
+  }
+  const renderer = {
+    isWebGPURenderer: true,
+    userData: {
+      sphThreeNamespace: {
+        IndirectStorageBufferAttribute: FakeIndirectStorageBufferAttribute
+      }
+    },
+    backend: {
+      get(target) {
+        let record = records.get(target);
+        if (!record) {
+          record = {};
+          records.set(target, record);
+        }
+        return record;
+      }
+    }
+  };
+  const binding = createThreeWebGpuExternalIndirectBufferAttribute({
+    renderer,
+    buffer: gpuBuffer,
+    itemSize: 4,
+    name: 'aggregate-indirect'
+  });
+
+  assert.equal(binding.attribute.name, 'aggregate-indirect');
+  assert.equal(binding.attribute.itemSize, 4);
+  assert.equal(binding.attribute.count, 1);
+  assert.equal(binding.attribute.isIndirectStorageBufferAttribute, true);
+  assert.equal(records.get(binding.attribute).buffer, gpuBuffer);
 });
 
 test('resident motion diagnostic treats batch-visible motion as a refresh trigger', () => {

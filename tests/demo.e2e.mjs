@@ -5944,6 +5944,7 @@ test('SPH phase resident steps can submit through a ComputeManager-shaped GPU la
       completedStepCount: execution?.completedStepCount ?? null,
       computeManagerTaskStatus: execution?.computeManagerTask?.status ?? null,
       computeManagerTaskLaneId: execution?.computeManagerTask?.laneId ?? null,
+      computeManagerTaskRequestedLaneId: execution?.computeManagerTask?.requestedLaneId ?? null,
       computeTaskSchema: execution?.computeTaskSchema ?? null,
       computeTaskResultSchema: execution?.computeTaskResultSchema ?? null,
       lawGraphNodeId: execution?.lawGraphNode?.nodeId ?? null,
@@ -7562,6 +7563,7 @@ test('SPH phase resident auto scheduler can use the default PeerCompute resident
       executionSchema: execution?.schema ?? null,
       computeManagerTaskStatus: execution?.computeManagerTask?.status ?? null,
       computeManagerTaskLaneId: execution?.computeManagerTask?.laneId ?? null,
+      computeManagerTaskRequestedLaneId: execution?.computeManagerTask?.requestedLaneId ?? null,
       stateManagerCommitAccepted: execution?.computeManagerTask?.stateManagerCommitAccepted ?? null,
       stateManagerCommitStatus: execution?.stateManagerCommit?.status ?? null,
       stateManagerCommitGpuFenceSatisfied: execution?.stateManagerCommit?.gpuFenceSatisfied ?? null,
@@ -7604,7 +7606,8 @@ test('SPH phase resident auto scheduler can use the default PeerCompute resident
   expect(result.stateManager.source).toBe('peercompute-resident-authority-host');
   expect(result.executionSchema).toBe('peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0');
   expect(result.computeManagerTaskStatus).toBe('state-manager-committed-inline-execution-returned');
-  expect(result.computeManagerTaskLaneId).toBe('ulg:sph-resident:demo-auto');
+  expect(result.computeManagerTaskRequestedLaneId).toBe('ulg:sph-resident:demo-auto');
+  expect(result.computeManagerTaskLaneId).toContain('ulg:sph-resident:demo-auto:state-');
   expect(result.stateManagerCommitAccepted).toBe(true);
   expect(result.stateManagerCommitStatus).toBe('committed');
   expect(result.stateManagerCommitGpuFenceSatisfied).toBe(true);
@@ -7673,6 +7676,7 @@ test('SPH phase resident auto scheduler uses an injected ComputeManager lane hos
       executionSchema: execution?.schema ?? null,
       computeManagerTaskStatus: execution?.computeManagerTask?.status ?? null,
       computeManagerTaskLaneId: execution?.computeManagerTask?.laneId ?? null,
+      computeManagerTaskRequestedLaneId: execution?.computeManagerTask?.requestedLaneId ?? null,
       computeTaskSchema: execution?.computeTaskSchema ?? null,
       lawGraphNodeId: execution?.lawGraphNode?.nodeId ?? null,
       gpuFenceStatus: execution?.gpuFence?.status ?? null,
@@ -7688,11 +7692,12 @@ test('SPH phase resident auto scheduler uses an injected ComputeManager lane hos
   expect(result.submitted.length).toBeGreaterThan(0);
   expect(result.submitted[0].schema).toBe('peercompute.ulg.mls-mpm-resident-steps-compute-task.v0');
   expect(result.submitted[0].exportName).toBe('runMlsMpmResidentStepsComputeTask');
-  expect(result.submitted[0].laneId).toBe('ulg:sph-resident:demo-auto');
+  expect(result.submitted[0].laneId).toContain('ulg:sph-resident:demo-auto:state-');
   expect(result.submitted[0].lawGraphNodeId).toBe('ulg-mls-mpm-sph-resident-pass-dag');
   expect(result.executionSchema).toBe('peercompute.ulg.mls-mpm-gpu-resident-steps-execution.v0');
   expect(result.computeManagerTaskStatus).toBe('inline-execution-returned');
-  expect(result.computeManagerTaskLaneId).toBe('ulg:sph-resident:demo-auto');
+  expect(result.computeManagerTaskRequestedLaneId).toBe('ulg:sph-resident:demo-auto');
+  expect(result.computeManagerTaskLaneId).toContain('ulg:sph-resident:demo-auto:state-');
   expect(result.computeTaskSchema).toBe('peercompute.ulg.mls-mpm-resident-steps-compute-task.v0');
   expect(result.lawGraphNodeId).toBe('ulg-mls-mpm-sph-resident-pass-dag');
   expect(['queue-work-completed', 'readback-map-completed']).toContain(result.gpuFenceStatus);

@@ -200,6 +200,7 @@ const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'webgpu-render-row-spheres'
 ]);
 const THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED = false;
+const THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_RUNTIME_VALIDATED = false;
 
 function normalizeResidentSurfaceDrawDiagnosticMode(value, fallback = 'three-render-row-points') {
   const normalized = String(value ?? fallback).trim().toLowerCase();
@@ -1716,6 +1717,7 @@ export async function mountSphPhaseDemoOverlay({
     initialSphRendererBackend === 'webgpu'
     && initialThreeWebGpuRendererPresentationEnabled
     && initialThreeWebGpuRendererResidentDeviceEnabled
+    && THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_RUNTIME_VALIDATED
     && (
       THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
       || initialThreeWebGpuRendererPresentationUnsafe

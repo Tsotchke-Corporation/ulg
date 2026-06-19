@@ -2219,6 +2219,28 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
   assert.equal(nativePixelBlocked.runtimeConsumerReady, true);
   assert.equal(nativePixelBlocked.renderBridgeBound, true);
 
+  const nativePendingValidationWithFrame = resolveResidentSurfaceVisibleGpuConsumer({
+    handoff,
+    rendererCapability: {
+      status: 'native-webgpu-surface-consumer-supported',
+      reason: null,
+      rendererBackend: 'native-webgpu',
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerDeviceMapSmokeStatus: 'passed',
+      nativeSurfaceConsumerReadbackSmokeValidationStatus: 'pending',
+      nativeSurfaceConsumerOffscreenValidationStatus: 'pending',
+      nativeSurfaceConsumerRenderedFrameCount: 1
+    },
+    renderBridgeMode: 'native-webgpu-surface-consumer',
+    renderBridgeStatus: 'native-webgpu-surface-consumer-ready',
+    pixelValidationStatus: 'not-run'
+  });
+  assert.equal(nativePendingValidationWithFrame.ready, true);
+  assert.equal(nativePendingValidationWithFrame.status, 'resident-surface-visible-gpu-consumer-ready');
+  assert.equal(nativePendingValidationWithFrame.nativeValidationPendingWithRenderedFrame, true);
+  assert.equal(nativePendingValidationWithFrame.consumerValidated, true);
+
   const nativeFallbackValidated = resolveResidentSurfaceVisibleGpuConsumer({
     handoff,
     rendererCapability: {

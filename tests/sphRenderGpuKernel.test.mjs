@@ -1529,6 +1529,60 @@ test('SPH render field WebGPU no-full handoff can avoid a CPU queue fence', asyn
   assert.equal(result.surfaceBuffer.destroyed, false);
 });
 
+test('SPH render field WebGPU can write into a borrowed reusable field buffer', async () => {
+  const packed = packedRenderParticles();
+  const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });
+  const surfaceTable = buildSphRenderFieldSurfaceTable([
+    {
+      surfaceKey: 'Au|Au|solid',
+      material: 'Au',
+      phase: 'solid',
+      renderKey: 'Au',
+      resolution: 8,
+      isolation: 20,
+      subtract: 5,
+      radiusNorm: 0.2,
+      colorLinear: [1, 0.7, 0.1]
+    }
+  ]);
+  const { device, bindGroups } = fakeSurfaceDrawDevice({
+    drawRows: new Float32Array(),
+    compactedVertexRows: new Float32Array()
+  });
+  const targetFieldRowsBuffer = device.createBuffer({
+    label: 'test-pooled-render-field-cells',
+    size: surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+    usage: 0
+  });
+
+  const result = await buildSphRenderFieldWebGpu({
+    device,
+    renderRows: extracted.renderRows,
+    surfaceTable,
+    particleCount: packed.particleCount,
+    readbackMode: 'no-full-readback',
+    retainFieldRowsBuffer: true,
+    retainSurfaceBuffer: true,
+    waitForQueueCompletion: false,
+    deferCleanup: true,
+    useQueueFenceForCleanup: false,
+    targetFieldRowsBuffer,
+    targetFieldRowsBufferByteLength: targetFieldRowsBuffer.size
+  });
+
+  assert.equal(result.fieldRowsBuffer, targetFieldRowsBuffer);
+  assert.equal(result.fieldRowsBufferBorrowed, true);
+  assert.equal(result.fieldRowsBufferReused, true);
+  assert.equal(result.fieldRowsBufferOwnedByResult, false);
+  assert.equal(bindGroups.at(-1).entries[2].resource.buffer, targetFieldRowsBuffer);
+
+  result.releaseRenderFieldBufferLeases();
+  result.destroyRenderFieldBuffers({ releaseLeases: true });
+
+  assert.equal(targetFieldRowsBuffer.destroyed, false);
+  assert.equal(result.surfaceBuffer.destroyed, true);
+});
+
 test('SPH render field retained buffers use lease guarded cleanup', async () => {
   const packed = packedRenderParticles();
   const extracted = extractSphRenderRowsCpu({ sphParticleState: packed });

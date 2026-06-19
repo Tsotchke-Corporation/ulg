@@ -67,6 +67,7 @@ import {
 import { buildSphReactionTable } from '../runtime/sph/sphReactionGpuKernel.js';
 import { buildMlsMpmMechanicsMaterialTable } from '../runtime/sph/sphMechanicsMaterialTable.js';
 import {
+  SPH_GPU_RENDER_FIELD_CELL_FLOATS,
   SPH_GPU_RENDER_ROW_FLOATS,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_UINTS,
   SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
@@ -135,6 +136,7 @@ export const SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY = 'retain-last-overl
 const SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_SIZE_PX = 64;
 const SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_MAX_ATTEMPTS = 3;
 const SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT = 'rgba8unorm';
+const SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS = 1000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT = 100_000;
 export const SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_RESOLUTION_DEFAULT = 8;
 export const SPH_SCENE_MAX_DEVICE_PIXEL_RATIO = 2;
@@ -1187,8 +1189,22 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     rendererCapability?.nativeSurfaceConsumerOffscreenValidationReason ?? null;
   const deviceMapSmokeStatus =
     rendererCapability?.nativeSurfaceConsumerDeviceMapSmokeStatus ?? null;
+  const nativeRenderedFrameCount = Math.max(
+    0,
+    Math.round(Number(rendererCapability?.nativeSurfaceConsumerRenderedFrameCount) || 0)
+  );
   const textureReadbackUnavailable = /external Instance reference no longer exists|texture readback unavailable/i.test(
     `${pixelValidationReason || ''} ${readbackSmokeValidationReason || ''} ${offscreenValidationReason || ''}`
+  );
+  const nativeValidationPendingWithRenderedFrame = Boolean(
+    nativeWebGpuBridgeBound
+    && normalizedPixelValidationStatus === 'not-run'
+    && deviceMapSmokeStatus === 'passed'
+    && nativeRenderedFrameCount > 0
+    && (
+      readbackSmokeValidationStatus === 'pending'
+      || offscreenValidationStatus === 'pending'
+    )
   );
   const nativeReadbackFallbackValidated = Boolean(
     nativeWebGpuBridgeBound
@@ -1201,7 +1217,9 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     )
   );
   const pixelValidated = normalizedPixelValidationStatus === 'passed';
-  const consumerValidated = pixelValidated || nativeReadbackFallbackValidated;
+  const consumerValidated = pixelValidated
+    || nativeReadbackFallbackValidated
+    || nativeValidationPendingWithRenderedFrame;
   const runtimeConsumerReady = Boolean(
     inputReady
     && inputKind === 'surface-draw-buffers'
@@ -1254,6 +1272,8 @@ export function resolveResidentSurfaceVisibleGpuConsumer({
     pixelValidated,
     consumerValidated,
     nativeReadbackFallbackValidated,
+    nativeValidationPendingWithRenderedFrame,
+    nativeSurfaceConsumerRenderedFrameCount: nativeRenderedFrameCount,
     nativeSurfaceConsumerReadbackSmokeValidationStatus: readbackSmokeValidationStatus,
     nativeSurfaceConsumerReadbackSmokeValidationReason: readbackSmokeValidationReason,
     nativeSurfaceConsumerOffscreenValidationStatus: offscreenValidationStatus,
@@ -1289,6 +1309,10 @@ function assignResidentSurfaceVisibleGpuConsumer(target, visibleGpuConsumer) {
   target.surfaceDrawVisibleGpuConsumerValidated = visibleGpuConsumer.consumerValidated;
   target.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated =
     visibleGpuConsumer.nativeReadbackFallbackValidated;
+  target.surfaceDrawVisibleGpuConsumerNativeValidationPendingWithRenderedFrame =
+    visibleGpuConsumer.nativeValidationPendingWithRenderedFrame;
+  target.surfaceDrawVisibleGpuConsumerNativeRenderedFrameCount =
+    visibleGpuConsumer.nativeSurfaceConsumerRenderedFrameCount;
   target.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus =
     visibleGpuConsumer.nativeSurfaceConsumerReadbackSmokeValidationStatus;
   target.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus =
@@ -1523,6 +1547,7 @@ const GPU_TEXTURE_USAGE = {
 };
 const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
+  COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
@@ -5299,6 +5324,9 @@ export function createSphPhaseScene(container, {
   let sphResidentSurfaceDraw = null;
   let sphResidentSurfaceDrawRenderBridge = null;
   let sphResidentRenderSurfaceState = null;
+  let sphResidentRenderFieldRowsBufferPool = null;
+  const sphNativeMarchingCubesAdapterCacheByDevice = new WeakMap();
+  const sphNativeMarchingCubesAdapterCaches = new Set();
   let pressureInterfaceForceRowsUpload = null;
   let pressureInterfaceForceRowsUploadSignature = null;
   let currentSurfaceBatchIdentitySignature = 'empty';
@@ -5331,6 +5359,8 @@ export function createSphPhaseScene(container, {
   scene.userData.sphResidentSurfaceDraw = null;
   scene.userData.sphResidentSurfaceDrawRenderBridge = null;
   scene.userData.sphResidentRenderSurfaceState = null;
+  scene.userData.sphResidentRenderFieldRowsBufferPool = null;
+  scene.userData.sphNativeMarchingCubesAdapterCache = null;
   scene.userData.sphPressureInterfaceForceRowsUpload = null;
 
   function markSurfaceActive(surface) {
@@ -7727,27 +7757,12 @@ export function createSphPhaseScene(container, {
       });
       const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
         handoff: gpuBufferHandoff,
-        rendererCapability: {
-          status: sphResidentSurfaceDraw.renderBridgeCapabilityStatus
-            ?? 'native-webgpu-surface-consumer-supported',
-          reason: sphResidentSurfaceDraw.renderBridgeCapabilityReason ?? null,
-          rendererBackend: sphResidentSurfaceDraw.renderBridgeRendererBackend
-            ?? scene.userData.sphRendererBackend
-            ?? null,
-          visibleNoReadbackSupported: true,
-          nativeSurfaceConsumerSupported: true,
-	          nativeSurfaceConsumerRuntimeValidated: true,
-	          nativeSurfaceConsumerPixelValidationStatus: normalizedStatus,
-	          nativeSurfaceConsumerPixelValidationReason: reason,
-	          nativeSurfaceConsumerReadbackSmokeValidationStatus:
-	            bridge.readbackSmokeValidationStatus ?? null,
-          nativeSurfaceConsumerReadbackSmokeValidationReason:
-            bridge.readbackSmokeValidationReason ?? null,
-          nativeSurfaceConsumerOffscreenValidationStatus: bridge.offscreenValidationStatus ?? null,
-          nativeSurfaceConsumerOffscreenValidationReason: bridge.offscreenValidationReason ?? null,
-          nativeSurfaceConsumerDeviceMapSmokeStatus:
-            scene.userData.sphResidentWebGpuDeviceMapSmoke?.status ?? null
-        },
+        rendererCapability: resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+          bridge,
+          surfaceDraw: sphResidentSurfaceDraw,
+          pixelValidationStatus: normalizedStatus,
+          pixelValidationReason: reason
+        }),
         renderBridgeMode: bridge.rendererBridge,
         renderBridgeStatus: bridge.status,
         pixelValidationStatus: normalizedStatus
@@ -7784,6 +7799,74 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable ?? null;
       }
     }
+  }
+
+  function resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+    bridge = sphResidentSurfaceDrawRenderBridge,
+    surfaceDraw = sphResidentSurfaceDraw,
+    rendererCapability = null,
+    pixelValidationStatus = null,
+    pixelValidationReason = null
+  } = {}) {
+    return {
+      ...rendererCapability,
+      status: surfaceDraw?.renderBridgeCapabilityStatus
+        ?? rendererCapability?.status
+        ?? 'native-webgpu-surface-consumer-supported',
+      reason: surfaceDraw?.renderBridgeCapabilityReason
+        ?? rendererCapability?.reason
+        ?? null,
+      rendererBackend: surfaceDraw?.renderBridgeRendererBackend
+        ?? rendererCapability?.rendererBackend
+        ?? scene.userData.sphRendererBackend
+        ?? null,
+      visibleNoReadbackSupported: true,
+      nativeSurfaceConsumerSupported: true,
+      nativeSurfaceConsumerRuntimeValidated: true,
+      nativeSurfaceConsumerPixelValidationStatus:
+        pixelValidationStatus
+        ?? bridge?.pixelValidationStatus
+        ?? bridge?.nativeWebGpuSurfaceConsumerPixelValidationStatus
+        ?? surfaceDraw?.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
+        ?? rendererCapability?.nativeSurfaceConsumerPixelValidationStatus
+        ?? 'not-run',
+      nativeSurfaceConsumerPixelValidationReason:
+        pixelValidationReason
+        ?? bridge?.pixelValidationReason
+        ?? bridge?.nativeWebGpuSurfaceConsumerPixelValidationReason
+        ?? surfaceDraw?.renderBridgePixelValidationReason
+        ?? rendererCapability?.nativeSurfaceConsumerPixelValidationReason
+        ?? null,
+      nativeSurfaceConsumerReadbackSmokeValidationStatus:
+        bridge?.readbackSmokeValidationStatus
+        ?? surfaceDraw?.renderBridgeReadbackSmokeValidationStatus
+        ?? rendererCapability?.nativeSurfaceConsumerReadbackSmokeValidationStatus
+        ?? null,
+      nativeSurfaceConsumerReadbackSmokeValidationReason:
+        bridge?.readbackSmokeValidationReason
+        ?? surfaceDraw?.renderBridgeReadbackSmokeValidationReason
+        ?? rendererCapability?.nativeSurfaceConsumerReadbackSmokeValidationReason
+        ?? null,
+      nativeSurfaceConsumerOffscreenValidationStatus:
+        bridge?.offscreenValidationStatus
+        ?? surfaceDraw?.renderBridgeOffscreenValidationStatus
+        ?? rendererCapability?.nativeSurfaceConsumerOffscreenValidationStatus
+        ?? null,
+      nativeSurfaceConsumerOffscreenValidationReason:
+        bridge?.offscreenValidationReason
+        ?? surfaceDraw?.renderBridgeOffscreenValidationReason
+        ?? rendererCapability?.nativeSurfaceConsumerOffscreenValidationReason
+        ?? null,
+      nativeSurfaceConsumerDeviceMapSmokeStatus:
+        scene.userData.sphResidentWebGpuDeviceMapSmoke?.status
+        ?? rendererCapability?.nativeSurfaceConsumerDeviceMapSmokeStatus
+        ?? null,
+      nativeSurfaceConsumerRenderedFrameCount:
+        bridge?.frameCount
+        ?? surfaceDraw?.renderBridgeFrameCount
+        ?? rendererCapability?.nativeSurfaceConsumerRenderedFrameCount
+        ?? 0
+    };
   }
 
   function beginSphNativeWebGpuSurfaceConsumerPixelValidation(
@@ -7971,25 +8054,10 @@ export function createSphPhaseScene(container, {
     });
     const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
       handoff: gpuBufferHandoff,
-      rendererCapability: {
-        status: sphResidentSurfaceDraw.renderBridgeCapabilityStatus
-          ?? 'native-webgpu-surface-consumer-supported',
-        reason: sphResidentSurfaceDraw.renderBridgeCapabilityReason ?? null,
-        rendererBackend: sphResidentSurfaceDraw.renderBridgeRendererBackend
-          ?? scene.userData.sphRendererBackend
-          ?? null,
-	        visibleNoReadbackSupported: true,
-	        nativeSurfaceConsumerSupported: true,
-	        nativeSurfaceConsumerRuntimeValidated: true,
-	        nativeSurfaceConsumerPixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
-	        nativeSurfaceConsumerPixelValidationReason: bridge.pixelValidationReason ?? null,
-	        nativeSurfaceConsumerReadbackSmokeValidationStatus: bridge.readbackSmokeValidationStatus ?? null,
-        nativeSurfaceConsumerReadbackSmokeValidationReason: bridge.readbackSmokeValidationReason ?? null,
-        nativeSurfaceConsumerOffscreenValidationStatus: bridge.offscreenValidationStatus ?? null,
-        nativeSurfaceConsumerOffscreenValidationReason: bridge.offscreenValidationReason ?? null,
-        nativeSurfaceConsumerDeviceMapSmokeStatus:
-          scene.userData.sphResidentWebGpuDeviceMapSmoke?.status ?? null
-      },
+      rendererCapability: resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+        bridge,
+        surfaceDraw: sphResidentSurfaceDraw
+      }),
       renderBridgeMode: bridge.rendererBridge,
       renderBridgeStatus: bridge.status,
       pixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run'
@@ -8133,8 +8201,23 @@ export function createSphPhaseScene(container, {
         }
       );
       return () => {
+        let settled = false;
+        const timeoutHandle = setTimeout(() => {
+          if (settled || bridge.readbackSmokeValidationSerial !== serial) return;
+          settled = true;
+          bridge.readbackSmokeValidationPending = false;
+          readbackBuffer?.destroy?.();
+          validationTexture?.destroy?.();
+          publishSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, {
+            status: 'not-run',
+            reason: 'texture readback unavailable: native WebGPU same-device readback smoke validation timed out'
+          });
+        }, SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS);
         readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
           .then(() => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutHandle);
             if (bridge.readbackSmokeValidationSerial !== serial) {
               readbackBuffer.unmap();
               readbackBuffer.destroy?.();
@@ -8157,6 +8240,9 @@ export function createSphPhaseScene(container, {
             });
           })
           .catch((error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutHandle);
             if (bridge.readbackSmokeValidationSerial !== serial) return;
             bridge.readbackSmokeValidationPending = false;
             readbackBuffer?.destroy?.();
@@ -8412,8 +8498,29 @@ export function createSphPhaseScene(container, {
         const readbackBuffer = bridge.offscreenValidationReadbackBuffer;
         const validationTextureForReadback = targets.texture;
         const validationDepthTextureForReadback = targets.depthTexture;
+        let settled = false;
+        const timeoutHandle = setTimeout(() => {
+          if (settled || bridge.offscreenValidationSerial !== serial) return;
+          settled = true;
+          bridge.offscreenValidationPending = false;
+          readbackBuffer?.destroy?.();
+          validationTextureForReadback?.destroy?.();
+          validationDepthTextureForReadback?.destroy?.();
+          publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+            status: 'not-run',
+            reason: 'texture readback unavailable: native WebGPU offscreen surface draw validation timed out',
+            width: widthPx,
+            height: heightPx
+          });
+          flushSphNativeWebGpuSurfaceDeferredResourceReleases(bridge, {
+            reason: 'native-webgpu-surface-offscreen-validation-timeout'
+          });
+        }, SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS);
         readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
           .then(() => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutHandle);
             if (bridge.offscreenValidationSerial !== serial || bridge.offscreenValidationAbandoned) {
               readbackBuffer.unmap();
               if (bridge.offscreenValidationAbandoned) {
@@ -8463,6 +8570,9 @@ export function createSphPhaseScene(container, {
             });
           })
           .catch((error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutHandle);
             if (bridge.offscreenValidationSerial !== serial) return;
             bridge.offscreenValidationPending = false;
             if (bridge.offscreenValidationAbandoned) {
@@ -8508,6 +8618,41 @@ export function createSphPhaseScene(container, {
       });
       return null;
     }
+  }
+
+  function scheduleSphNativeWebGpuSurfaceValidationPendingTimeout(bridge) {
+    if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return;
+    if (bridge.nativeSurfaceValidationPendingTimeoutHandle != null) return;
+    const readbackSerial = bridge.readbackSmokeValidationSerial ?? null;
+    const offscreenSerial = bridge.offscreenValidationSerial ?? null;
+    bridge.nativeSurfaceValidationPendingTimeoutHandle = setTimeout(() => {
+      bridge.nativeSurfaceValidationPendingTimeoutHandle = null;
+      if (
+        bridge.readbackSmokeValidationPending
+        && bridge.readbackSmokeValidationSerial === readbackSerial
+      ) {
+        bridge.readbackSmokeValidationPending = false;
+        publishSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, {
+          status: 'not-run',
+          reason: 'texture readback unavailable: native WebGPU same-device readback smoke validation timed out'
+        });
+      }
+      if (
+        bridge.offscreenValidationPending
+        && bridge.offscreenValidationSerial === offscreenSerial
+      ) {
+        bridge.offscreenValidationPending = false;
+        publishSphNativeWebGpuSurfaceConsumerOffscreenValidation(bridge, {
+          status: 'not-run',
+          reason: 'texture readback unavailable: native WebGPU offscreen surface draw validation timed out',
+          width: bridge.offscreenValidationWidth ?? SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_SIZE_PX,
+          height: bridge.offscreenValidationHeight ?? SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_SIZE_PX
+        });
+        flushSphNativeWebGpuSurfaceDeferredResourceReleases(bridge, {
+          reason: 'native-webgpu-surface-validation-pending-timeout'
+        });
+      }
+    }, SPH_NATIVE_WEBGPU_SURFACE_VALIDATION_MAP_TIMEOUT_MS);
   }
 
   function createSphResidentSurfaceDrawThreeCompactBridge({
@@ -10527,6 +10672,7 @@ export function createSphPhaseScene(container, {
 	          for (const completeValidation of validationCompletions) {
 	            completeValidation();
 	          }
+	          scheduleSphNativeWebGpuSurfaceValidationPendingTimeout(bridge);
 	        }
 	      }
 	      const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
@@ -10704,27 +10850,10 @@ export function createSphPhaseScene(container, {
           });
           const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
             handoff: gpuBufferHandoff,
-            rendererCapability: {
-              status: sphResidentSurfaceDraw.renderBridgeCapabilityStatus
-                ?? 'native-webgpu-surface-consumer-supported',
-              reason: sphResidentSurfaceDraw.renderBridgeCapabilityReason ?? null,
-              rendererBackend: sphResidentSurfaceDraw.renderBridgeRendererBackend
-                ?? scene.userData.sphRendererBackend
-                ?? null,
-              visibleNoReadbackSupported: true,
-              nativeSurfaceConsumerSupported: true,
-	              nativeSurfaceConsumerRuntimeValidated: true,
-	              nativeSurfaceConsumerPixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run',
-	              nativeSurfaceConsumerPixelValidationReason: bridge.pixelValidationReason ?? null,
-	              nativeSurfaceConsumerReadbackSmokeValidationStatus:
-	                bridge.readbackSmokeValidationStatus ?? null,
-              nativeSurfaceConsumerReadbackSmokeValidationReason:
-                bridge.readbackSmokeValidationReason ?? null,
-              nativeSurfaceConsumerOffscreenValidationStatus: bridge.offscreenValidationStatus ?? null,
-              nativeSurfaceConsumerOffscreenValidationReason: bridge.offscreenValidationReason ?? null,
-              nativeSurfaceConsumerDeviceMapSmokeStatus:
-                scene.userData.sphResidentWebGpuDeviceMapSmoke?.status ?? null
-            },
+            rendererCapability: resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+              bridge,
+              surfaceDraw: sphResidentSurfaceDraw
+            }),
             renderBridgeMode: bridge.rendererBridge,
             renderBridgeStatus: bridge.status,
             pixelValidationStatus: bridge.pixelValidationStatus ?? 'not-run'
@@ -14045,6 +14174,118 @@ export function createSphPhaseScene(container, {
     );
   }
 
+  function renderFieldRowsBufferByteLengthForSurfaceTable(surfaceTable = {}) {
+    return Math.max(0, Math.round(Number(surfaceTable.totalFieldCells) || 0))
+      * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+      * Float32Array.BYTES_PER_ELEMENT;
+  }
+
+  function summarizeResidentRenderFieldRowsBufferPool(pool = sphResidentRenderFieldRowsBufferPool, extra = {}) {
+    return {
+      schema: 'peercompute.ulg.sph-resident-render-field-rows-buffer-pool.v0',
+      status: pool?.status ?? 'render-field-rows-buffer-pool-empty',
+      byteLength: pool?.byteLength ?? 0,
+      surfaceCount: pool?.surfaceCount ?? 0,
+      totalFieldCells: pool?.totalFieldCells ?? 0,
+      deviceMatched: pool ? pool.device === extra.device : null,
+      reuseCount: pool?.reuseCount ?? 0,
+      createCount: pool?.createCount ?? 0,
+      replaceCount: pool?.replaceCount ?? 0,
+      lastReason: pool?.lastReason ?? null,
+      ...extra
+    };
+  }
+
+  function destroyResidentRenderFieldRowsBufferPool(reason = 'render-field-rows-buffer-pool-destroy') {
+    if (sphResidentRenderFieldRowsBufferPool?.buffer) {
+      sphResidentRenderFieldRowsBufferPool.buffer.destroy?.();
+      sphResidentRenderFieldRowsBufferPool.status = 'render-field-rows-buffer-pool-destroyed';
+      sphResidentRenderFieldRowsBufferPool.lastReason = reason;
+    }
+    sphResidentRenderFieldRowsBufferPool = null;
+    scene.userData.sphResidentRenderFieldRowsBufferPool = null;
+  }
+
+  function ensureResidentRenderFieldRowsBufferPool({ device, surfaceTable } = {}) {
+    const requiredByteLength = renderFieldRowsBufferByteLengthForSurfaceTable(surfaceTable);
+    if (!device?.createBuffer || requiredByteLength <= 0) {
+      return {
+        buffer: null,
+        byteLength: 0,
+        status: 'render-field-rows-buffer-pool-unavailable',
+        reason: 'WebGPU device and positive render-field byte length are required',
+        reused: false,
+        summary: summarizeResidentRenderFieldRowsBufferPool(null, {
+          device,
+          requiredByteLength
+        })
+      };
+    }
+    const canReuse = Boolean(
+      sphResidentRenderFieldRowsBufferPool?.buffer
+      && sphResidentRenderFieldRowsBufferPool.device === device
+      && sphResidentRenderFieldRowsBufferPool.byteLength >= requiredByteLength
+    );
+    if (canReuse) {
+      sphResidentRenderFieldRowsBufferPool.reuseCount += 1;
+      sphResidentRenderFieldRowsBufferPool.status = 'render-field-rows-buffer-pool-reused';
+      sphResidentRenderFieldRowsBufferPool.lastReason = null;
+      sphResidentRenderFieldRowsBufferPool.surfaceCount = surfaceTable.surfaceCount ?? 0;
+      sphResidentRenderFieldRowsBufferPool.totalFieldCells = surfaceTable.totalFieldCells ?? 0;
+      const summary = summarizeResidentRenderFieldRowsBufferPool(sphResidentRenderFieldRowsBufferPool, {
+        device,
+        requiredByteLength,
+        reused: true
+      });
+      scene.userData.sphResidentRenderFieldRowsBufferPool = summary;
+      return {
+        buffer: sphResidentRenderFieldRowsBufferPool.buffer,
+        byteLength: sphResidentRenderFieldRowsBufferPool.byteLength,
+        status: sphResidentRenderFieldRowsBufferPool.status,
+        reason: null,
+        reused: true,
+        summary
+      };
+    }
+    const previous = sphResidentRenderFieldRowsBufferPool;
+    if (previous?.buffer) {
+      previous.buffer.destroy?.();
+    }
+    const buffer = device.createBuffer({
+      label: 'ulg-sph-render-field-cells-pooled',
+      size: requiredByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    });
+    sphResidentRenderFieldRowsBufferPool = {
+      status: previous ? 'render-field-rows-buffer-pool-replaced' : 'render-field-rows-buffer-pool-created',
+      buffer,
+      device,
+      byteLength: requiredByteLength,
+      surfaceCount: surfaceTable.surfaceCount ?? 0,
+      totalFieldCells: surfaceTable.totalFieldCells ?? 0,
+      reuseCount: previous?.reuseCount ?? 0,
+      createCount: (previous?.createCount ?? 0) + 1,
+      replaceCount: previous ? (previous.replaceCount ?? 0) + 1 : 0,
+      lastReason: previous
+        ? 'existing pooled render-field buffer did not match device or byte-length requirements'
+        : 'created pooled render-field buffer'
+    };
+    const summary = summarizeResidentRenderFieldRowsBufferPool(sphResidentRenderFieldRowsBufferPool, {
+      device,
+      requiredByteLength,
+      reused: false
+    });
+    scene.userData.sphResidentRenderFieldRowsBufferPool = summary;
+    return {
+      buffer,
+      byteLength: requiredByteLength,
+      status: sphResidentRenderFieldRowsBufferPool.status,
+      reason: sphResidentRenderFieldRowsBufferPool.lastReason,
+      reused: false,
+      summary
+    };
+  }
+
   function createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor) {
     return createWebGpuMarchingCubesBufferVolumeDescriptor({
       device: descriptor.device,
@@ -14057,6 +14298,187 @@ export function createSphPhaseScene(container, {
       label: descriptor.label || `ulg-sph-native-mc-${descriptor.surfaceKey || descriptor.surfaceIndex || 0}`,
       source: descriptor.source || 'ulg-render-field-density-storage-buffer'
     });
+  }
+
+  function nativeMarchingCubesDescriptorSignature(descriptor = {}) {
+    const dims = Array.isArray(descriptor.dims) ? descriptor.dims : [];
+    const strides = Array.isArray(descriptor.scalarStrides) ? descriptor.scalarStrides : [];
+    return [
+      `surface=${descriptor.surfaceIndex ?? 0}`,
+      `key=${descriptor.surfaceKey ?? ''}`,
+      `dims=${dims.join('x')}`,
+      `strides=${strides.join('x')}`,
+      `offset=${descriptor.scalarOffset ?? 0}`,
+      `bytes=${descriptor.scalarBufferByteLength ?? 0}`,
+      `type=${descriptor.scalarType || 'f32'}`,
+      `source=${descriptor.source || 'ulg-render-field-density-storage-buffer'}`
+    ].join('|');
+  }
+
+  async function releaseNativeMarchingCubesAdapterCacheEntry(entry, reason = 'native-marching-cubes-cache-release') {
+    if (!entry) return;
+    entry.released = true;
+    entry.releaseReason = reason;
+    const adapter = entry.wrapper?.adapter || null;
+    try {
+      await adapter?.release?.({ destroyDevice: false });
+    } catch (error) {
+      entry.releaseError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  function flushNativeMarchingCubesAdapterCaches(reason = 'native-marching-cubes-cache-flush') {
+    for (const cache of sphNativeMarchingCubesAdapterCaches) {
+      const entryCount = cache.entries.size;
+      for (const entry of cache.entries.values()) {
+        void releaseNativeMarchingCubesAdapterCacheEntry(entry, reason);
+      }
+      cache.entries.clear();
+      cache.releaseCount += entryCount;
+      cache.lastStatus = 'native-marching-cubes-adapter-cache-flushed';
+      cache.lastReason = reason;
+    }
+    sphNativeMarchingCubesAdapterCaches.clear();
+    scene.userData.sphNativeMarchingCubesAdapterCache = null;
+  }
+
+
+  function summarizeNativeMarchingCubesAdapterCache(cache, extra = {}) {
+    if (!cache) {
+      return {
+        schema: 'peercompute.ulg.sph-native-marching-cubes-adapter-cache.v0',
+        status: 'native-marching-cubes-adapter-cache-unavailable',
+        entryCount: 0,
+        hitCount: 0,
+        missCount: 0,
+        releaseCount: 0,
+        ...extra
+      };
+    }
+    return {
+      schema: 'peercompute.ulg.sph-native-marching-cubes-adapter-cache.v0',
+      status: 'native-marching-cubes-adapter-cache-ready',
+      entryCount: cache.entries.size,
+      hitCount: cache.hitCount,
+      missCount: cache.missCount,
+      releaseCount: cache.releaseCount,
+      lastStatus: cache.lastStatus ?? null,
+      lastReason: cache.lastReason ?? null,
+      ...extra
+    };
+  }
+
+  async function getNativeMarchingCubesAdapterForDescriptor({ device, descriptor } = {}) {
+    const signature = nativeMarchingCubesDescriptorSignature(descriptor);
+    const canCache = Boolean(
+      device
+      && descriptor?.scalarBuffer
+      && typeof device === 'object'
+      && typeof descriptor.scalarBuffer === 'object'
+    );
+    const createWrapper = (volume) => createUlgWebGpuMarchingCubesExtensionAdapter({
+      device,
+      volume,
+      adapterId: 'webgpu-marching-cubes.buffer-volume.v0',
+      adapterFactory({ device: adapterDevice, volume: adapterVolume }) {
+        return createMarchingCubesSurfaceAdapter({
+          device: adapterDevice,
+          volume: adapterVolume,
+          adapterId: 'webgpu-marching-cubes.buffer-volume.v0'
+        });
+      }
+    });
+    if (!canCache) {
+      const volume = createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor);
+      const wrapper = createWrapper(volume);
+      return {
+        wrapper,
+        volume,
+        cacheStatus: 'native-marching-cubes-adapter-cache-skipped',
+        cacheReason: 'descriptor does not expose object identities required for safe reuse',
+        cacheHit: false,
+        cacheSummary: summarizeNativeMarchingCubesAdapterCache(null, {
+          lastStatus: 'native-marching-cubes-adapter-cache-skipped',
+          lastReason: 'descriptor does not expose object identities required for safe reuse'
+        })
+      };
+    }
+    let cache = sphNativeMarchingCubesAdapterCacheByDevice.get(device);
+    if (!cache) {
+      cache = {
+        entries: new Map(),
+        hitCount: 0,
+        missCount: 0,
+        releaseCount: 0,
+        lastStatus: null,
+        lastReason: null
+      };
+      sphNativeMarchingCubesAdapterCacheByDevice.set(device, cache);
+      sphNativeMarchingCubesAdapterCaches.add(cache);
+    }
+    const cached = cache.entries.get(signature);
+    if (
+      cached
+      && cached.scalarBuffer === descriptor.scalarBuffer
+      && cached.signature === signature
+      && !cached.released
+    ) {
+      cache.hitCount += 1;
+      cache.lastStatus = 'native-marching-cubes-adapter-cache-hit';
+      cache.lastReason = null;
+      cached.hitCount = (cached.hitCount || 0) + 1;
+      scene.userData.sphNativeMarchingCubesAdapterCache = summarizeNativeMarchingCubesAdapterCache(cache);
+      return {
+        wrapper: cached.wrapper,
+        volume: cached.volume,
+        cacheStatus: cache.lastStatus,
+        cacheReason: null,
+        cacheHit: true,
+        cacheSummary: summarizeNativeMarchingCubesAdapterCache(cache, {
+          cacheKey: signature,
+          entryHitCount: cached.hitCount
+        })
+      };
+    }
+    if (cached) {
+      cache.releaseCount += 1;
+      await releaseNativeMarchingCubesAdapterCacheEntry(
+        cached,
+        'native-marching-cubes-adapter-cache-replaced-by-new-buffer-or-layout'
+      );
+      cache.entries.delete(signature);
+    }
+    const volume = createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor);
+    const wrapper = createWrapper(volume);
+    const entry = {
+      signature,
+      scalarBuffer: descriptor.scalarBuffer,
+      volume,
+      wrapper,
+      hitCount: 0,
+      createdAtMs: nowMs(),
+      released: false
+    };
+    cache.entries.set(signature, entry);
+    cache.missCount += 1;
+    cache.lastStatus = cached
+      ? 'native-marching-cubes-adapter-cache-miss-replaced'
+      : 'native-marching-cubes-adapter-cache-miss-created';
+    cache.lastReason = cached
+      ? 'cached descriptor layout matched but the source buffer identity changed'
+      : 'no cached native marching-cubes adapter for this descriptor';
+    scene.userData.sphNativeMarchingCubesAdapterCache = summarizeNativeMarchingCubesAdapterCache(cache);
+    return {
+      wrapper,
+      volume,
+      cacheStatus: cache.lastStatus,
+      cacheReason: cache.lastReason,
+      cacheHit: false,
+      cacheSummary: summarizeNativeMarchingCubesAdapterCache(cache, {
+        cacheKey: signature,
+        entryHitCount: 0
+      })
+    };
   }
 
   async function extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
@@ -14077,18 +14499,16 @@ export function createSphPhaseScene(container, {
         extensionExecution: null
       };
     }
-    const volume = createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor);
-    const wrapper = createUlgWebGpuMarchingCubesExtensionAdapter({
-      device,
+    const {
+      wrapper,
       volume,
-      adapterId: 'webgpu-marching-cubes.buffer-volume.v0',
-      adapterFactory({ device: adapterDevice, volume: adapterVolume }) {
-        return createMarchingCubesSurfaceAdapter({
-          device: adapterDevice,
-          volume: adapterVolume,
-          adapterId: 'webgpu-marching-cubes.buffer-volume.v0'
-        });
-      }
+      cacheStatus,
+      cacheReason,
+      cacheHit,
+      cacheSummary
+    } = await getNativeMarchingCubesAdapterForDescriptor({
+      device,
+      descriptor
     });
     const extractionStartedMs = nowMs();
     const extensionExecution = await wrapper.extractSurface({
@@ -14114,6 +14534,14 @@ export function createSphPhaseScene(container, {
       volumeScalarLayoutName: volume.scalarLayoutName,
       elapsedMs: extractionElapsedMs,
       extensionExecutionElapsedMs: extractionElapsedMs,
+      adapterCacheStatus: cacheStatus,
+      adapterCacheReason: cacheReason,
+      adapterCacheHit: Boolean(cacheHit),
+      adapterCacheEntryCount: cacheSummary?.entryCount ?? null,
+      adapterCacheHitCount: cacheSummary?.hitCount ?? null,
+      adapterCacheMissCount: cacheSummary?.missCount ?? null,
+      adapterCacheReleaseCount: cacheSummary?.releaseCount ?? null,
+      adapterCacheSummary: cacheSummary ?? null,
       errorName: extensionError?.name ?? null,
       errorStatus: extensionError?.status ?? null,
       errorStage: extensionError?.stage ?? null,
@@ -14777,9 +15205,17 @@ export function createSphPhaseScene(container, {
         rendererBackend: residentDraw.renderBridgeRendererBackend,
         visibleNoReadbackSupported: Boolean(residentDraw.renderBridgeVisibleNoReadbackSupported)
       };
+      const visibleConsumerRendererCapability =
+        renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+            bridge: renderBridge,
+            surfaceDraw: residentDraw,
+            rendererCapability: surfaceDrawRendererCapability
+          })
+          : surfaceDrawRendererCapability;
       const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
         handoff: gpuBufferHandoff,
-        rendererCapability: surfaceDrawRendererCapability,
+        rendererCapability: visibleConsumerRendererCapability,
         renderBridgeMode: residentDraw.visibleRendererBridge,
         renderBridgeStatus: residentDraw.renderBridgeStatus,
         pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run'
@@ -15225,9 +15661,17 @@ export function createSphPhaseScene(container, {
         surfaceExtractionValidation: false,
         fullPhysicsValidation: false
       };
+      const visibleConsumerRendererCapability =
+        renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+            bridge: renderBridge,
+            surfaceDraw: residentDraw,
+            rendererCapability
+          })
+          : rendererCapability;
       const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
         handoff: gpuBufferHandoff,
-        rendererCapability,
+        rendererCapability: visibleConsumerRendererCapability,
         renderBridgeMode: residentDraw.visibleRendererBridge,
         renderBridgeStatus: residentDraw.renderBridgeStatus,
         pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run'
@@ -15238,6 +15682,11 @@ export function createSphPhaseScene(container, {
       if (!renderBridgeReady) {
         sphResidentSurfaceDrawRenderBridge = null;
         scene.userData.sphResidentSurfaceDrawRenderBridge = null;
+      } else if (renderBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+        renderSphResidentSurfaceDrawOverlay({
+          reason: 'native-webgpu-surface-consumer-resident-draw-ready'
+        });
+        refreshSphNativeWebGpuSurfaceVisibleConsumerFromBridge(renderBridge);
       }
       releasePreviousSphResidentSurfaceDrawResources(previousResidentSurfaceDraw, previousResidentRenderBridge);
       markSphResidentRenderProgress('extension-surface-draw-translation-complete', {
@@ -15945,6 +16394,20 @@ export function createSphPhaseScene(container, {
         );
       } else {
         try {
+          const shouldUseRenderFieldRowsBufferPool = Boolean(
+            shouldRetainRenderFieldBufferHandoff
+            && shouldUseNativeWebGpuSurfaceConsumerBridge
+            && visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+          );
+          const renderFieldRowsBufferPool = shouldUseRenderFieldRowsBufferPool
+            ? ensureResidentRenderFieldRowsBufferPool({
+              device: resolvedDeviceResult.device,
+              surfaceTable
+            })
+            : null;
+          if (!shouldUseRenderFieldRowsBufferPool) {
+            destroyResidentRenderFieldRowsBufferPool('render-field-rows-buffer-pool-route-disabled');
+          }
           const buildRenderFieldForRows = () => buildSphRenderFieldWebGpu({
             device: resolvedDeviceResult.device,
             renderRows: renderRowsExecution.renderRows,
@@ -15961,7 +16424,9 @@ export function createSphPhaseScene(container, {
             waitForQueueCompletion: visibleRenderFieldReadbackMode !== RESIDENT_NO_FULL_READBACK_MODE
               || (shouldRetainRenderFieldBufferHandoff && !shouldUseNativeWebGpuSurfaceConsumerBridge),
             deferCleanup: visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE,
-            useQueueFenceForCleanup: false
+            useQueueFenceForCleanup: false,
+            targetFieldRowsBuffer: renderFieldRowsBufferPool?.buffer || null,
+            targetFieldRowsBufferByteLength: renderFieldRowsBufferPool?.byteLength ?? null
           });
         const renderFieldHasPositiveDensity = (execution) => {
           if (!(execution?.fieldRows instanceof Float32Array) || execution.fieldRows.length === 0) return true;
@@ -15978,6 +16443,11 @@ export function createSphPhaseScene(container, {
           readbackMode: visibleRenderFieldReadbackMode
         });
         renderFieldExecution = await buildRenderFieldForRows();
+        renderFieldExecution.renderFieldRowsBufferPoolStatus = renderFieldRowsBufferPool?.status ?? null;
+        renderFieldExecution.renderFieldRowsBufferPoolReason = renderFieldRowsBufferPool?.reason ?? null;
+        renderFieldExecution.renderFieldRowsBufferPoolReused = Boolean(renderFieldRowsBufferPool?.reused);
+        renderFieldExecution.renderFieldRowsBufferPoolByteLength = renderFieldRowsBufferPool?.byteLength ?? 0;
+        renderFieldExecution.renderFieldRowsBufferPoolSummary = renderFieldRowsBufferPool?.summary ?? null;
         markSphResidentRenderProgress('resident-render-field-complete', {
           stage: 'render-field',
           surfaceCount: renderFieldExecution.surfaceCount,
@@ -16456,6 +16926,20 @@ export function createSphPhaseScene(container, {
             nextResidentSurfaceDraw.renderFieldBufferMode = 'retained-render-field-buffers-no-summary';
             nextResidentSurfaceDraw.renderFieldRowsBufferRetained = true;
             nextResidentSurfaceDraw.renderFieldRowsBufferByteLength = renderFieldExecution.fieldRowByteLength ?? 0;
+            nextResidentSurfaceDraw.renderFieldRowsBufferBorrowed =
+              Boolean(renderFieldExecution.fieldRowsBufferBorrowed);
+            nextResidentSurfaceDraw.renderFieldRowsBufferReused =
+              Boolean(renderFieldExecution.fieldRowsBufferReused);
+            nextResidentSurfaceDraw.renderFieldRowsBufferPoolStatus =
+              renderFieldExecution.renderFieldRowsBufferPoolStatus ?? null;
+            nextResidentSurfaceDraw.renderFieldRowsBufferPoolReason =
+              renderFieldExecution.renderFieldRowsBufferPoolReason ?? null;
+            nextResidentSurfaceDraw.renderFieldRowsBufferPoolReused =
+              Boolean(renderFieldExecution.renderFieldRowsBufferPoolReused);
+            nextResidentSurfaceDraw.renderFieldRowsBufferPoolByteLength =
+              renderFieldExecution.renderFieldRowsBufferPoolByteLength ?? 0;
+            nextResidentSurfaceDraw.renderFieldRowsBufferPoolSummary =
+              renderFieldExecution.renderFieldRowsBufferPoolSummary ?? null;
             nextResidentSurfaceDraw.renderFieldSurfaceBufferRetained = true;
             nextResidentSurfaceDraw.renderFieldSurfaceBufferByteLength = renderFieldExecution.surfaceBufferByteLength ?? 0;
             const renderFieldBufferVolumeDescriptors = createRenderFieldBufferVolumeDescriptors({
@@ -16583,6 +17067,18 @@ export function createSphPhaseScene(container, {
                     renderFieldBufferMode: 'native-marching-cubes-buffer-volume-extracted',
                     renderFieldRowsBufferRetained: false,
                     renderFieldRowsBufferByteLength: 0,
+                    renderFieldRowsBufferBorrowed: Boolean(renderFieldExecution.fieldRowsBufferBorrowed),
+                    renderFieldRowsBufferReused: Boolean(renderFieldExecution.fieldRowsBufferReused),
+                    renderFieldRowsBufferPoolStatus:
+                      renderFieldExecution.renderFieldRowsBufferPoolStatus ?? null,
+                    renderFieldRowsBufferPoolReason:
+                      renderFieldExecution.renderFieldRowsBufferPoolReason ?? null,
+                    renderFieldRowsBufferPoolReused:
+                      Boolean(renderFieldExecution.renderFieldRowsBufferPoolReused),
+                    renderFieldRowsBufferPoolByteLength:
+                      renderFieldExecution.renderFieldRowsBufferPoolByteLength ?? 0,
+                    renderFieldRowsBufferPoolSummary:
+                      renderFieldExecution.renderFieldRowsBufferPoolSummary ?? null,
                     renderFieldSurfaceBufferRetained: false,
                     renderFieldSurfaceBufferByteLength: 0,
                     renderFieldBufferVolumeDescriptorSchema: renderFieldBufferVolumeDescriptorSummary.schema,
@@ -16608,7 +17104,15 @@ export function createSphPhaseScene(container, {
                       : null,
                     nativeMarchingCubesVolumeSchema: nativeExtraction.volumeSchema,
                     nativeMarchingCubesVolumeSourceType: nativeExtraction.volumeSourceType,
-                    nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName
+                    nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName,
+                    nativeMarchingCubesAdapterCacheStatus: nativeExtraction.adapterCacheStatus ?? null,
+                    nativeMarchingCubesAdapterCacheReason: nativeExtraction.adapterCacheReason ?? null,
+                    nativeMarchingCubesAdapterCacheHit: Boolean(nativeExtraction.adapterCacheHit),
+                    nativeMarchingCubesAdapterCacheEntryCount: nativeExtraction.adapterCacheEntryCount ?? null,
+                    nativeMarchingCubesAdapterCacheHitCount: nativeExtraction.adapterCacheHitCount ?? null,
+                    nativeMarchingCubesAdapterCacheMissCount: nativeExtraction.adapterCacheMissCount ?? null,
+                    nativeMarchingCubesAdapterCacheReleaseCount: nativeExtraction.adapterCacheReleaseCount ?? null,
+                    nativeMarchingCubesAdapterCacheSummary: nativeExtraction.adapterCacheSummary ?? null
                   };
                   nativeMarchingCubesSurfaceDrawReady = true;
                   renderFieldExecution?.releaseRenderFieldBufferLeases?.({
@@ -16640,6 +17144,22 @@ export function createSphPhaseScene(container, {
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStatus = nativeExtraction.errorStatus ?? null;
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStage = nativeExtraction.errorStage ?? null;
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStack = nativeExtraction.errorStack ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheStatus =
+                    nativeExtraction.adapterCacheStatus ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheReason =
+                    nativeExtraction.adapterCacheReason ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheHit =
+                    Boolean(nativeExtraction.adapterCacheHit);
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheEntryCount =
+                    nativeExtraction.adapterCacheEntryCount ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheHitCount =
+                    nativeExtraction.adapterCacheHitCount ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheMissCount =
+                    nativeExtraction.adapterCacheMissCount ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheReleaseCount =
+                    nativeExtraction.adapterCacheReleaseCount ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesAdapterCacheSummary =
+                    nativeExtraction.adapterCacheSummary ?? null;
                   markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-blocked', {
                     stage: 'native-marching-cubes',
                     surfaceIndex: nativeDescriptor.surfaceIndex,
@@ -16735,14 +17255,22 @@ export function createSphPhaseScene(container, {
 	                nextResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus
 	                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationStatus
 	                ?? null,
-	              nativeSurfaceConsumerPixelValidationReason:
-	                nextResidentSurfaceDraw.renderBridgePixelValidationReason
-	                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationReason
-	                ?? null
-	            };
+              nativeSurfaceConsumerPixelValidationReason:
+                nextResidentSurfaceDraw.renderBridgePixelValidationReason
+                ?? requestedThreeWebGpuSurfaceBufferCapability?.nativeSurfaceConsumerPixelValidationReason
+                ?? null
+            };
+            const visibleConsumerRendererCapability =
+              nextResidentSurfaceDraw.visibleRendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+                ? resolveSphNativeWebGpuSurfaceVisibleConsumerCapability({
+                  bridge: sphResidentSurfaceDrawRenderBridge,
+                  surfaceDraw: nextResidentSurfaceDraw,
+                  rendererCapability: surfaceDrawRendererCapability
+                })
+                : surfaceDrawRendererCapability;
             const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
               handoff: gpuBufferHandoff,
-              rendererCapability: surfaceDrawRendererCapability,
+              rendererCapability: visibleConsumerRendererCapability,
               renderBridgeMode: nextResidentSurfaceDraw.visibleRendererBridge,
               renderBridgeStatus: nextResidentSurfaceDraw.renderBridgeStatus,
               pixelValidationStatus: nextResidentSurfaceDraw.renderBridgePixelValidationStatus ?? 'not-run'
@@ -17221,6 +17749,18 @@ export function createSphPhaseScene(container, {
 	        ),
 	        surfaceDrawRenderFieldRowsBufferByteLength:
 	          sphResidentSurfaceDraw?.renderFieldRowsBufferByteLength ?? 0,
+	        surfaceDrawRenderFieldRowsBufferBorrowed:
+	          sphResidentSurfaceDraw?.renderFieldRowsBufferBorrowed ?? null,
+	        surfaceDrawRenderFieldRowsBufferReused:
+	          sphResidentSurfaceDraw?.renderFieldRowsBufferReused ?? null,
+	        surfaceDrawRenderFieldRowsBufferPoolStatus:
+	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolStatus ?? null,
+	        surfaceDrawRenderFieldRowsBufferPoolReason:
+	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolReason ?? null,
+	        surfaceDrawRenderFieldRowsBufferPoolReused:
+	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolReused ?? null,
+	        surfaceDrawRenderFieldRowsBufferPoolByteLength:
+	          sphResidentSurfaceDraw?.renderFieldRowsBufferPoolByteLength ?? 0,
 	        surfaceDrawRenderFieldSurfaceBufferRetained: Boolean(
 	          sphResidentSurfaceDraw?.renderFieldSurfaceBufferRetained
 	        ),
@@ -17270,6 +17810,20 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.nativeMarchingCubesVolumeSourceType ?? null,
         surfaceDrawNativeMarchingCubesVolumeScalarLayoutName:
           sphResidentSurfaceDraw?.nativeMarchingCubesVolumeScalarLayoutName ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheStatus:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheStatus ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheReason:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheReason ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheHit:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheHit ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheEntryCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheEntryCount ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheHitCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheHitCount ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheMissCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheMissCount ?? null,
+        surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount:
+          sphResidentSurfaceDraw?.nativeMarchingCubesAdapterCacheReleaseCount ?? null,
         surfaceDrawExtensionSurfaceAdapterExecutionStatus:
           sphResidentSurfaceDraw?.extensionSurfaceAdapterExecutionStatus ?? null,
         surfaceDrawExtensionSurfaceRawExecutionStatus:
@@ -18235,6 +18789,7 @@ export function createSphPhaseScene(container, {
     }
     clearMlsMpmResidentExecutionArtifacts();
     clearSphResidentSurfaceDrawArtifacts();
+    flushNativeMarchingCubesAdapterCaches('sph-phase-scene-dispose');
     publishSphResidentMaterialInterfaceState(null);
     publishSphResidentPressureInterfaceState(null);
     destroyPressureInterfaceForceRowsUpload();

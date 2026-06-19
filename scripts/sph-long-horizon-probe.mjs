@@ -1009,6 +1009,7 @@ async function runBrowserProbe({
 	  thermalWallRate,
 	  measureGpuQueueFence = false,
 	  nativeSurfaceDebugMode = 'none',
+	  nativeSurfaceValidationWaitMs = 0,
 	  captureFrames,
 	  captureFrameEvery,
 	  captureFrameMax,
@@ -1081,6 +1082,7 @@ async function runBrowserProbe({
 	      thermalWallRate: requestedThermalWallRate,
 	      measureGpuQueueFence: requestedMeasureGpuQueueFence,
 	      nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
+	      nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
 	      captureFrames: requestedCaptureFrames,
       captureFrameEvery: requestedCaptureFrameEvery,
       captureFrameMax: requestedCaptureFrameMax,
@@ -1726,6 +1728,97 @@ async function runBrowserProbe({
           });
         }
       };
+      const nativeSurfaceValidationSnapshot = () => {
+        const renderState = sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState || null;
+        const surfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw || null;
+        const bridge = sceneApi.getSphResidentSurfaceDrawRenderBridge?.() || null;
+        const bridgeMode = renderState?.surfaceDrawVisibleRendererBridge
+          ?? surfaceDraw?.visibleRendererBridge
+          ?? bridge?.rendererBridge
+          ?? null;
+        const native = bridgeMode === 'native-webgpu-surface-consumer'
+          || requestedSurfaceDrawDiagnosticMode === 'native-webgpu-surface-consumer';
+        if (!native) {
+          return {
+            native: false,
+            ready: false,
+            pending: false,
+            status: 'native-surface-validation-not-requested'
+          };
+        }
+        const ready = Boolean(
+          renderState?.surfaceDrawVisibleGpuConsumerReady
+          || surfaceDraw?.surfaceDrawVisibleGpuConsumerReady
+        );
+        const pixelValidationStatus =
+          renderState?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
+          ?? bridge?.pixelValidationStatus
+          ?? null;
+        const readbackSmokeValidationStatus =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus
+          ?? renderState?.surfaceDrawRenderBridgeReadbackSmokeValidationStatus
+          ?? surfaceDraw?.renderBridgeReadbackSmokeValidationStatus
+          ?? bridge?.readbackSmokeValidationStatus
+          ?? null;
+        const offscreenValidationStatus =
+          renderState?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
+          ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
+          ?? renderState?.surfaceDrawRenderBridgeOffscreenValidationStatus
+          ?? surfaceDraw?.renderBridgeOffscreenValidationStatus
+          ?? bridge?.offscreenValidationStatus
+          ?? null;
+        const frameCount = Number(
+          renderState?.surfaceDrawRenderBridgeFrameCount
+          ?? surfaceDraw?.renderBridgeFrameCount
+          ?? bridge?.frameCount
+          ?? 0
+        ) || 0;
+        const pending = [pixelValidationStatus, readbackSmokeValidationStatus, offscreenValidationStatus]
+          .some((status) => status === 'pending');
+        return {
+          native: true,
+          ready,
+          pending,
+          status: ready
+            ? 'native-surface-visible-consumer-ready'
+            : (pending ? 'native-surface-validation-pending' : 'native-surface-validation-settled-not-ready'),
+          bridgeMode,
+          pixelValidationStatus,
+          readbackSmokeValidationStatus,
+          offscreenValidationStatus,
+          frameCount
+        };
+      };
+      const waitForNativeSurfaceValidation = async (batchIndex) => {
+        const timeout = Math.max(0, Number(requestedNativeSurfaceValidationWaitMs) || 0);
+        let snapshot = nativeSurfaceValidationSnapshot();
+        if (!snapshot.native || timeout <= 0 || snapshot.ready) return snapshot;
+        const started = performance.now();
+        let observedPending = Boolean(snapshot.pending);
+        markProbeProgress('native-surface-validation-wait-started', {
+          batchIndex,
+          timeoutMs: timeout,
+          ...snapshot
+        });
+        while ((performance.now() - started) < timeout) {
+          await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+          overlay.__sphResidentRenderState =
+            sceneApi.getSphResidentRenderState?.() || overlay.__sphResidentRenderState;
+          overlay.__sphResidentSurfaceDraw =
+            sceneApi.getSphResidentSurfaceDraw?.() || overlay.__sphResidentSurfaceDraw;
+          snapshot = nativeSurfaceValidationSnapshot();
+          observedPending = observedPending || Boolean(snapshot.pending);
+          if (snapshot.ready || (observedPending && !snapshot.pending)) break;
+        }
+        markProbeProgress('native-surface-validation-wait-completed', {
+          batchIndex,
+          elapsedMs: performance.now() - started,
+          ...snapshot
+        });
+        return snapshot;
+      };
       const shouldRunAnomalyRowReadback = (metric) => {
         if (!requestedAnomalyRowReadback) return false;
         if (!sceneApi?.refreshSphResidentRenderState) return false;
@@ -2063,6 +2156,20 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesExtractionErrorStage ?? null,
             surfaceDrawNativeMarchingCubesExtractionErrorStack:
               renderState.surfaceDrawNativeMarchingCubesExtractionErrorStack ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheStatus:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheStatus ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheReason:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheReason ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheHit:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheHit ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheEntryCount:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheEntryCount ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheHitCount:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheHitCount ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheMissCount:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheMissCount ?? null,
+            surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount:
+              renderState.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount ?? null,
             surfaceDrawExtensionSurfaceTranslationElapsedMs:
               renderState.surfaceDrawExtensionSurfaceTranslationElapsedMs ?? null,
             surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs:
@@ -2338,6 +2445,12 @@ async function runBrowserProbe({
             compactedVertexRowsBufferByteLength: surfaceDraw.compactedVertexRowsBufferByteLength ?? null,
             renderFieldRowsBufferRetained: surfaceDraw.renderFieldRowsBufferRetained ?? null,
             renderFieldRowsBufferByteLength: surfaceDraw.renderFieldRowsBufferByteLength ?? null,
+            renderFieldRowsBufferBorrowed: surfaceDraw.renderFieldRowsBufferBorrowed ?? null,
+            renderFieldRowsBufferReused: surfaceDraw.renderFieldRowsBufferReused ?? null,
+            renderFieldRowsBufferPoolStatus: surfaceDraw.renderFieldRowsBufferPoolStatus ?? null,
+            renderFieldRowsBufferPoolReason: surfaceDraw.renderFieldRowsBufferPoolReason ?? null,
+            renderFieldRowsBufferPoolReused: surfaceDraw.renderFieldRowsBufferPoolReused ?? null,
+            renderFieldRowsBufferPoolByteLength: surfaceDraw.renderFieldRowsBufferPoolByteLength ?? null,
             renderFieldSurfaceBufferRetained: surfaceDraw.renderFieldSurfaceBufferRetained ?? null,
             renderFieldSurfaceBufferByteLength: surfaceDraw.renderFieldSurfaceBufferByteLength ?? null,
             gpuBufferHandoffReady: surfaceDraw.surfaceDrawGpuBufferHandoffReady ?? null,
@@ -2791,6 +2904,7 @@ async function runBrowserProbe({
               markProbeProgress('resident-render-refresh-viewport-started', { batchIndex });
               sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-render-refresh' });
               await new Promise((resolve) => requestAnimationFrame(resolve));
+              await waitForNativeSurfaceValidation(batchIndex);
               markProbeProgress('resident-render-refresh-viewport-completed', { batchIndex });
             }
           }
@@ -2852,6 +2966,7 @@ async function runBrowserProbe({
 	        surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
 	        surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
 	        nativeSurfaceDebugMode: requestedNativeSurfaceDebugMode,
+	        nativeSurfaceValidationWaitMs: requestedNativeSurfaceValidationWaitMs,
 	        pressureInterfaceDisabled: Boolean(requestedDisablePressureInterface),
         anomalyRowReadback: Boolean(requestedAnomalyRowReadback),
         residentBufferDebug: Boolean(requestedResidentBufferDebug),
@@ -5601,6 +5716,11 @@ async function main() {
 	    ?? process.env.ULG_PROBE_NATIVE_WEBGPU_SURFACE_DEBUG_MODE,
 	  'none'
 	);
+  const nativeSurfaceValidationWaitMs = positiveInteger(
+    process.env.ULG_PROBE_NATIVE_SURFACE_VALIDATION_WAIT_MS
+      ?? process.env.ULG_PROBE_NATIVE_WEBGPU_SURFACE_VALIDATION_WAIT_MS,
+    0
+  );
 	const surfaceDrawDiagnosticModeEnv = String(
 	  process.env.ULG_PROBE_SURFACE_DRAW_DIAGNOSTIC_MODE || ''
 	).toLowerCase();
@@ -5752,6 +5872,7 @@ async function main() {
 	        thermalWallRate,
 	        measureGpuQueueFence,
 	        nativeSurfaceDebugMode,
+	        nativeSurfaceValidationWaitMs,
 	        captureFrames,
         captureFrameEvery,
         captureFrameMax,

@@ -5115,7 +5115,9 @@ export async function buildSphRenderFieldWebGpu({
   retainSurfaceBuffer = false,
   waitForQueueCompletion = true,
   deferCleanup = true,
-  useQueueFenceForCleanup = true
+  useQueueFenceForCleanup = true,
+  targetFieldRowsBuffer = null,
+  targetFieldRowsBufferByteLength = null
 } = {}) {
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('buildSphRenderFieldWebGpu requires a WebGPU-like device');
@@ -5157,7 +5159,25 @@ export async function buildSphRenderFieldWebGpu({
     'ulg-sph-render-field-surfaces',
     surfaceTable.records
   );
-  const fieldRowsBuffer = writeStorageBuffer(
+  const fieldRowByteLength = surfaceTable.totalFieldCells
+    * SPH_GPU_RENDER_FIELD_CELL_FLOATS
+    * Float32Array.BYTES_PER_ELEMENT;
+  const targetFieldRowsByteLength = targetFieldRowsBuffer
+    ? Math.max(0, Math.round(finiteNumber(
+      targetFieldRowsBufferByteLength
+        ?? targetFieldRowsBuffer.size
+        ?? targetFieldRowsBuffer.byteLength
+        ?? 0,
+      0
+    )))
+    : 0;
+  if (targetFieldRowsBuffer && targetFieldRowsByteLength < fieldRowByteLength) {
+    throw new RangeError(
+      `targetFieldRowsBuffer is too small (${targetFieldRowsByteLength}) for render field (${fieldRowByteLength})`
+    );
+  }
+  const fieldRowsBufferBorrowed = Boolean(targetFieldRowsBuffer);
+  const fieldRowsBuffer = targetFieldRowsBuffer || writeStorageBuffer(
     device,
     'ulg-sph-render-field-cells',
     new Float32Array(surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS),
@@ -5251,7 +5271,7 @@ export async function buildSphRenderFieldWebGpu({
     if (!borrowedRenderRowsBuffer) sourceRowsBuffer.destroy?.();
     if (!borrowedProductEventBuffer) sourceProductEventBuffer.destroy?.();
     if (!retainSurfaceBuffer) surfaceBuffer.destroy?.();
-    if (!retainFieldRowsBuffer) fieldRowsBuffer.destroy?.();
+    if (!retainFieldRowsBuffer && !fieldRowsBufferBorrowed) fieldRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
   };
   let renderFieldDeferredCleanup = false;
@@ -5263,7 +5283,6 @@ export async function buildSphRenderFieldWebGpu({
     cleanup();
   }
 
-  const fieldRowByteLength = surfaceTable.totalFieldCells * SPH_GPU_RENDER_FIELD_CELL_FLOATS * Float32Array.BYTES_PER_ELEMENT;
   const renderFieldLeaseLedger = createResidentBufferLeaseLedger({
     ledgerId: `sph-render-field:${surfaceTable.surfaceCount}:${surfaceTable.totalFieldCells}:buffer-leases`,
     stateKey: 'sph-render-field',
@@ -5354,6 +5373,9 @@ export async function buildSphRenderFieldWebGpu({
     normalHotLoopReadbackFree: noFullReadback,
     fieldRowsBufferRetained: Boolean(retainFieldRowsBuffer),
     fieldRowsBufferByteLength: retainFieldRowsBuffer ? fieldRowByteLength : 0,
+    fieldRowsBufferBorrowed,
+    fieldRowsBufferReused: fieldRowsBufferBorrowed,
+    fieldRowsBufferOwnedByResult: !fieldRowsBufferBorrowed,
     surfaceBufferRetained: Boolean(retainSurfaceBuffer),
     surfaceBufferByteLength: retainSurfaceBuffer ? surfaceTable.records.byteLength : 0,
     residentBufferLeaseLedger: renderFieldLeaseLedger,
@@ -5397,7 +5419,9 @@ export async function buildSphRenderFieldWebGpu({
       if (releaseLeases) result.releaseRenderFieldBufferLeases();
       if (retainFieldRowsBuffer) {
         destroyResidentBufferWithLease(renderFieldLeaseLedger, fieldRowsResourceKey, () => {
-          destroyRenderFieldBufferOnce(fieldRowsResourceKey, fieldRowsBuffer);
+          if (!fieldRowsBufferBorrowed) {
+            destroyRenderFieldBufferOnce(fieldRowsResourceKey, fieldRowsBuffer);
+          }
         }, { force, reason });
       }
       if (retainSurfaceBuffer) {

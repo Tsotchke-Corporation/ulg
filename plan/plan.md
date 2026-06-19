@@ -2,15 +2,18 @@
 
 ## Current Target
 
-Current checkpoint, 2026-06-19 AKDT: native surface timing diagnostics now
-separate MLS-MPM stepping from native marching-cubes extraction, ULG row
-translation, render-bridge construction, and total native surface refresh. A
-10k-ish no-full native benchmark is console-clean with zero readback bytes, but
-it confirms the current bottleneck is the sibling native marching-cubes
-extraction call: about `3763 ms` for extraction versus `1.2 ms` for ULG
-translation, `0.6 ms` for bridge construction, and `9.2 ms` for resident
-physics. Next optimization should target `/home/cos/projects/webgpu-marching-cubes`,
-not ULG row translation or CPU readback.
+Current checkpoint, 2026-06-19 AKDT: native no-full surface extraction now
+reuses the sibling marching-cubes adapter/volume wrapper by descriptor and
+borrows a persistent ULG render-field rows buffer for the native visible
+consumer handoff. The 10k-ish native benchmark is now `status=good`,
+`probeStatus=good`, browser-console clean, zero readback bytes, cache-hit,
+pool-reused, and visible-consumer ready: actual particles `9826`, mean batch
+`139.8 ms`, estimated visual refresh `7.15 Hz`, resident stage `12.1 ms`,
+surface total `24.1 ms`, extraction `1.4 ms`, extension execution `1.4 ms`,
+translation `21.5 ms`, and surface refresh `22.7 ms`. This supersedes the
+earlier extraction hotspot: the next no-readback performance slice should
+target GPU-side extension-to-ULG draw-buffer translation and render-bridge
+refresh, not CPU readback or adapter construction.
 
 Current checkpoint, 2026-06-19 AKDT: the performance benchmark now carries
 active-grid node counts from the resident dispatch/topology records when the

@@ -357,6 +357,61 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.visibleGpuConsumerPixelValidationStatus
     ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
     ?? null;
+  const surfaceDrawVisibleGpuConsumerValidated =
+    renderState?.surfaceDrawVisibleGpuConsumerValidated
+    ?? surfaceDraw?.visibleGpuConsumerValidated
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerValidated
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated =
+    renderState?.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated
+    ?? surfaceDraw?.visibleGpuConsumerNativeReadbackFallbackValidated
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus =
+    renderState?.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus
+    ?? surfaceDraw?.visibleGpuConsumerNativeReadbackSmokeValidationStatus
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus =
+    renderState?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
+    ?? surfaceDraw?.visibleGpuConsumerNativeOffscreenValidationStatus
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus =
+    renderState?.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus
+    ?? surfaceDraw?.visibleGpuConsumerNativeDeviceMapSmokeStatus
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus
+    ?? null;
+  const surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable =
+    renderState?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable
+    ?? surfaceDraw?.visibleGpuConsumerNativeTextureReadbackUnavailable
+    ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable
+    ?? null;
+  const surfaceDrawRenderBridgeFrameCount = numberOrNull(
+    renderState?.surfaceDrawRenderBridgeFrameCount
+      ?? surfaceDraw?.renderBridgeFrameCount
+      ?? surfaceDraw?.surfaceDrawRenderBridgeFrameCount
+  );
+  const surfaceDrawRenderBridgeLastRenderStatus =
+    renderState?.surfaceDrawRenderBridgeLastRenderStatus
+    ?? surfaceDraw?.renderBridgeLastRenderStatus
+    ?? surfaceDraw?.surfaceDrawRenderBridgeLastRenderStatus
+    ?? null;
+  const surfaceDrawRenderBridgeReadbackSmokeValidationStatus =
+    renderState?.surfaceDrawRenderBridgeReadbackSmokeValidationStatus
+    ?? surfaceDraw?.renderBridgeReadbackSmokeValidationStatus
+    ?? surfaceDraw?.surfaceDrawRenderBridgeReadbackSmokeValidationStatus
+    ?? null;
+  const surfaceDrawRenderBridgeOffscreenValidationStatus =
+    renderState?.surfaceDrawRenderBridgeOffscreenValidationStatus
+    ?? surfaceDraw?.renderBridgeOffscreenValidationStatus
+    ?? surfaceDraw?.surfaceDrawRenderBridgeOffscreenValidationStatus
+    ?? null;
+  const surfaceDrawRenderBridgeLastRenderSkipReason =
+    renderState?.surfaceDrawRenderBridgeLastRenderSkipReason
+    ?? surfaceDraw?.renderBridgeLastRenderSkipReason
+    ?? surfaceDraw?.surfaceDrawRenderBridgeLastRenderSkipReason
+    ?? null;
   const surfaceDrawNativeMarchingCubesExtractionElapsedMs = numberOrNull(
     renderState?.surfaceDrawNativeMarchingCubesExtractionElapsedMs
       ?? surfaceDraw?.nativeMarchingCubesExtractionElapsedMs
@@ -371,6 +426,41 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     renderState?.surfaceDrawNativeMarchingCubesTotalElapsedMs
       ?? surfaceDraw?.nativeMarchingCubesTotalElapsedMs
       ?? surfaceDraw?.surfaceDrawNativeMarchingCubesTotalElapsedMs
+  );
+  const surfaceDrawNativeMarchingCubesAdapterCacheStatus =
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheStatus
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheStatus
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheStatus
+      ?? null;
+  const surfaceDrawNativeMarchingCubesAdapterCacheReason =
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheReason
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheReason
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheReason
+      ?? null;
+  const surfaceDrawNativeMarchingCubesAdapterCacheHit =
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheHit
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheHit
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheHit
+      ?? null;
+  const surfaceDrawNativeMarchingCubesAdapterCacheEntryCount = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheEntryCount
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheEntryCount
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheEntryCount
+  );
+  const surfaceDrawNativeMarchingCubesAdapterCacheHitCount = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheHitCount
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheHitCount
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheHitCount
+  );
+  const surfaceDrawNativeMarchingCubesAdapterCacheMissCount = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheMissCount
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheMissCount
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheMissCount
+  );
+  const surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount
+      ?? surfaceDraw?.nativeMarchingCubesAdapterCacheReleaseCount
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount
   );
   const surfaceDrawExtensionSurfaceTranslationElapsedMs = numberOrNull(
     renderState?.surfaceDrawExtensionSurfaceTranslationElapsedMs
@@ -408,6 +498,30 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   );
   const surfaceDrawRenderFieldRowsBufferByteLength = numberOrNull(
     renderState?.surfaceDrawRenderFieldRowsBufferByteLength ?? surfaceDraw?.renderFieldRowsBufferByteLength
+  );
+  const surfaceDrawRenderFieldRowsBufferBorrowed =
+    renderState?.surfaceDrawRenderFieldRowsBufferBorrowed
+      ?? surfaceDraw?.renderFieldRowsBufferBorrowed
+      ?? null;
+  const surfaceDrawRenderFieldRowsBufferReused =
+    renderState?.surfaceDrawRenderFieldRowsBufferReused
+      ?? surfaceDraw?.renderFieldRowsBufferReused
+      ?? null;
+  const surfaceDrawRenderFieldRowsBufferPoolStatus =
+    renderState?.surfaceDrawRenderFieldRowsBufferPoolStatus
+      ?? surfaceDraw?.renderFieldRowsBufferPoolStatus
+      ?? null;
+  const surfaceDrawRenderFieldRowsBufferPoolReason =
+    renderState?.surfaceDrawRenderFieldRowsBufferPoolReason
+      ?? surfaceDraw?.renderFieldRowsBufferPoolReason
+      ?? null;
+  const surfaceDrawRenderFieldRowsBufferPoolReused =
+    renderState?.surfaceDrawRenderFieldRowsBufferPoolReused
+      ?? surfaceDraw?.renderFieldRowsBufferPoolReused
+      ?? null;
+  const surfaceDrawRenderFieldRowsBufferPoolByteLength = numberOrNull(
+    renderState?.surfaceDrawRenderFieldRowsBufferPoolByteLength
+      ?? surfaceDraw?.renderFieldRowsBufferPoolByteLength
   );
   const surfaceDrawRenderFieldSurfaceBufferByteLength = numberOrNull(
     renderState?.surfaceDrawRenderFieldSurfaceBufferByteLength ?? surfaceDraw?.renderFieldSurfaceBufferByteLength
@@ -595,9 +709,27 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawVisibleGpuConsumerInputKind,
     surfaceDrawVisibleGpuConsumerRuntimeReady,
     surfaceDrawVisibleGpuConsumerPixelValidationStatus,
+    surfaceDrawVisibleGpuConsumerValidated,
+    surfaceDrawVisibleGpuConsumerNativeReadbackFallbackValidated,
+    surfaceDrawVisibleGpuConsumerNativeReadbackSmokeValidationStatus,
+    surfaceDrawVisibleGpuConsumerNativeOffscreenValidationStatus,
+    surfaceDrawVisibleGpuConsumerNativeDeviceMapSmokeStatus,
+    surfaceDrawVisibleGpuConsumerNativeTextureReadbackUnavailable,
+    surfaceDrawRenderBridgeFrameCount,
+    surfaceDrawRenderBridgeLastRenderStatus,
+    surfaceDrawRenderBridgeReadbackSmokeValidationStatus,
+    surfaceDrawRenderBridgeOffscreenValidationStatus,
+    surfaceDrawRenderBridgeLastRenderSkipReason,
     surfaceDrawNativeMarchingCubesExtractionElapsedMs,
     surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs,
     surfaceDrawNativeMarchingCubesTotalElapsedMs,
+    surfaceDrawNativeMarchingCubesAdapterCacheStatus,
+    surfaceDrawNativeMarchingCubesAdapterCacheReason,
+    surfaceDrawNativeMarchingCubesAdapterCacheHit,
+    surfaceDrawNativeMarchingCubesAdapterCacheEntryCount,
+    surfaceDrawNativeMarchingCubesAdapterCacheHitCount,
+    surfaceDrawNativeMarchingCubesAdapterCacheMissCount,
+    surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount,
     surfaceDrawExtensionSurfaceTranslationElapsedMs,
     surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs,
     surfaceDrawExtensionSurfaceRefreshElapsedMs,
@@ -614,6 +746,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawIndirectRowsBufferByteLength,
     surfaceDrawCompactedVertexRowsBufferByteLength,
     surfaceDrawRenderFieldRowsBufferByteLength,
+    surfaceDrawRenderFieldRowsBufferBorrowed,
+    surfaceDrawRenderFieldRowsBufferReused,
+    surfaceDrawRenderFieldRowsBufferPoolStatus,
+    surfaceDrawRenderFieldRowsBufferPoolReason,
+    surfaceDrawRenderFieldRowsBufferPoolReused,
+    surfaceDrawRenderFieldRowsBufferPoolByteLength,
     surfaceDrawRenderFieldSurfaceBufferByteLength,
     estimatedReadbackBytesPerBatch,
     estimatedReadbackBytesPerStep,

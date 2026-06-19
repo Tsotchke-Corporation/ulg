@@ -52,6 +52,20 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Native no-full surface extraction no longer spends the benchmark frame in
+  adapter setup or render-field row allocation. ULG now caches the sibling
+  marching-cubes adapter/volume wrapper by the retained render-field descriptor
+  and borrows a persistent render-field rows GPU buffer for the native visible
+  consumer bridge. The latest 10k-ish native benchmark is `status=good` and
+  `probeStatus=good` with zero browser console issues, zero readback bytes,
+  cache hit, pool reused, visible native consumer ready, actual particles
+  `9826`, mean batch `139.8 ms`, resident stage `12.1 ms`, surface total
+  `24.1 ms`, extraction `1.4 ms`, extension execution `1.4 ms`, translation
+  `21.5 ms`, and surface refresh `22.7 ms`. The active hot path has shifted
+  from native extraction to extension-to-ULG draw-buffer translation and bridge
+  refresh, so the next simulator/rendering slice should push that translation
+  onto retained GPU draw state instead of reopening CPU readback or adapter
+  lifetime work.
 - Native marching-cubes extraction now has a conservative no-readback mode in
   the sibling extension and ULG consumes its retained GPU vertex counter when
   translating compact MC vertices into ULG surface rows. The extension can fill

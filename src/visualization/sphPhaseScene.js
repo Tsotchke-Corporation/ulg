@@ -1722,7 +1722,78 @@ export function buildSphResidentPressureInterfaceStateSummary({
   };
 }
 
+function compactResidentBufferLeaseSummary(summary = null) {
+  if (!summary) return null;
+  return {
+    schema: summary.schema ?? null,
+    ledgerId: summary.ledgerId ?? null,
+    stateKey: summary.stateKey ?? null,
+    scope: summary.scope ?? null,
+    status: summary.status ?? null,
+    resourceCount: summary.resourceCount ?? 0,
+    activeLeaseCount: summary.activeLeaseCount ?? 0,
+    destroyedResourceCount: summary.destroyedResourceCount ?? 0,
+    skippedDestroyCount: summary.skippedDestroyCount ?? 0,
+    warnings: [...(summary.warnings || [])],
+    blockers: [...(summary.blockers || [])]
+  };
+}
+
+function compactPressureStateObject(value = null, fields = []) {
+  if (!value) return null;
+  const compact = {
+    schema: value.schema ?? null,
+    status: value.status ?? null
+  };
+  for (const field of fields) {
+    if (value[field] !== undefined) compact[field] = value[field];
+  }
+  return compact;
+}
+
+function compactPressureInterfaceForceRowsUploadFields(fields = {}) {
+  return {
+    ...fields,
+    pressureInterfaceForceRowsLeaseSummary: compactResidentBufferLeaseSummary(
+      fields.pressureInterfaceForceRowsLeaseSummary
+    )
+  };
+}
+
+function compactMaterialInterfaceFieldSummary(field = null) {
+  if (!field) return null;
+  return {
+    schema: field.schema ?? null,
+    status: field.status ?? null,
+    reason: field.reason ?? null,
+    sourceRenderFieldSchema: field.sourceRenderFieldSchema ?? null,
+    sourceRenderFieldStatus: field.sourceRenderFieldStatus ?? null,
+    sourceRenderFieldReadback: Boolean(field.sourceRenderFieldReadback),
+    sourceRenderFieldReadbackMode: field.sourceRenderFieldReadbackMode ?? null,
+    renderRowsReadback: Boolean(field.renderRowsReadback),
+    renderRowsReadbackMode: field.renderRowsReadbackMode ?? null,
+    renderFieldReadback: Boolean(field.renderFieldReadback),
+    renderFieldReadbackMode: field.renderFieldReadbackMode ?? null,
+    renderFieldSurfaceSummaryMode: field.renderFieldSurfaceSummaryMode ?? null,
+    renderFieldSurfaceSummaryStatus: field.renderFieldSurfaceSummaryStatus ?? null,
+    renderFieldSurfaceSummaryActiveSurfaceCount: field.renderFieldSurfaceSummaryActiveSurfaceCount ?? 0,
+    renderFieldSurfaceSummaryActiveCellCount: field.renderFieldSurfaceSummaryActiveCellCount ?? 0,
+    renderFieldSurfaceSummarySkipped: Boolean(field.renderFieldSurfaceSummarySkipped),
+    renderFieldSurfaceSummarySkipReason: field.renderFieldSurfaceSummarySkipReason ?? null,
+    surfaceCount: field.surfaceCount ?? 0,
+    readySurfaceCount: field.readySurfaceCount ?? 0,
+    totalSurfaceAreaM2: field.totalSurfaceAreaM2 ?? 0,
+    elementCount: field.elementCount ?? 0,
+    forceCouplingStatus: field.forceCouplingStatus ?? null,
+    gpuAuthoritativeState: Boolean(field.gpuAuthoritativeState),
+    compactRenderReadback: Boolean(field.compactRenderReadback)
+  };
+}
+
 function pressureInterfaceRenderStateFields(pressureState = null) {
+  const forceRowsUploadFields = compactPressureInterfaceForceRowsUploadFields(
+    pressureInterfaceForceRowsUploadFields(pressureState)
+  );
   return {
     residentPressureInterfaceStateSchema: pressureState?.schema ?? null,
     residentPressureInterfaceStateStatus: pressureState?.status ?? null,
@@ -1730,46 +1801,107 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
     residentPressureInterfaceStateSourceCadence: pressureState?.sourceCadence ?? null,
     pressureAuthority: pressureState?.pressureAuthority ?? null,
     materialInterfaceForceCouplingStatus: pressureState?.materialInterfaceForceCouplingStatus ?? null,
-    pressureInterfaceCoupling: pressureState?.pressureInterfaceCoupling ?? null,
+    pressureInterfaceCoupling: compactPressureStateObject(pressureState?.pressureInterfaceCoupling, [
+      'forceCouplingStatus',
+      'pressureFieldMode',
+      'pressureFieldResolution',
+      'localPressureGradientReady',
+      'localPressureGradientStatus',
+      'localPressureGradientForceCouplingStatus',
+      'materialInterfaceReadySurfaceCount',
+      'materialInterfaceTotalSurfaceAreaM2'
+    ]),
     pressureInterfaceCouplingSchema: pressureState?.pressureInterfaceCouplingSchema ?? null,
     pressureInterfaceCouplingStatus: pressureState?.pressureInterfaceCouplingStatus ?? null,
     pressureInterfaceCouplingPreSolverStatus: pressureState?.pressureInterfaceCouplingPreSolverStatus ?? null,
     pressureInterfaceForceCouplingStatus: pressureState?.pressureInterfaceForceCouplingStatus ?? null,
-    pressureInterfaceForcePreview: pressureState?.pressureInterfaceForcePreview ?? null,
+    pressureInterfaceForcePreview: compactPressureStateObject(pressureState?.pressureInterfaceForcePreview, [
+      'forceApplicationStatus',
+      'previewedElementCount',
+      'totalAbsInterfaceForceN',
+      'pressureFieldMode',
+      'pressureFieldResolution'
+    ]),
     pressureInterfaceForcePreviewSchema: pressureState?.pressureInterfaceForcePreviewSchema ?? null,
     pressureInterfaceForcePreviewStatus: pressureState?.pressureInterfaceForcePreviewStatus ?? null,
     pressureInterfaceForceApplicationStatus: pressureState?.pressureInterfaceForceApplicationStatus ?? null,
     pressureInterfacePreviewedElementCount: pressureState?.pressureInterfacePreviewedElementCount ?? 0,
     pressureInterfaceTotalAbsForceN: pressureState?.pressureInterfaceTotalAbsForceN ?? 0,
-    pressureInterfaceForceSolver: pressureState?.pressureInterfaceForceSolver ?? null,
+    pressureInterfaceForceSolver: compactPressureStateObject(pressureState?.pressureInterfaceForceSolver, [
+      'forceApplicationStatus',
+      'forceCouplingStatus',
+      'forceRowCount',
+      'forceRowStrideFloats',
+      'forceRowByteLength',
+      'conservationStatus',
+      'conservationResidualMagnitudeN',
+      'pressureFieldMode',
+      'pressureFieldResolution',
+      'pressureGradientStatus',
+      'localPressureGradientReady',
+      'localPressureGradientStatus',
+      'localPressureGradientForceCouplingStatus',
+      'gasPressureCellRowCount',
+      'gasPressureCellRowsBufferRetained',
+      'gridForceApplicationApproved'
+    ]),
     pressureInterfaceForceSolverSchema: pressureState?.pressureInterfaceForceSolverSchema ?? null,
     pressureInterfaceForceSolverStatus: pressureState?.pressureInterfaceForceSolverStatus ?? null,
     pressureInterfaceSolverApplicationStatus: pressureState?.pressureInterfaceSolverApplicationStatus ?? null,
     pressureInterfaceSolverForceRowCount: pressureState?.pressureInterfaceSolverForceRowCount ?? 0,
     pressureInterfaceSolverConservationStatus: pressureState?.pressureInterfaceSolverConservationStatus ?? null,
     pressureInterfaceSolverConservationResidualMagnitudeN: pressureState?.pressureInterfaceSolverConservationResidualMagnitudeN ?? 0,
-    pressureInterfaceGridForceAdmission: pressureState?.pressureInterfaceGridForceAdmission ?? null,
+    pressureInterfaceGridForceAdmission: compactPressureStateObject(pressureState?.pressureInterfaceGridForceAdmission, [
+      'publicationStatus',
+      'admittedStatus',
+      'sourceHotBufferKey',
+      'hotBufferKey'
+    ]),
     pressureInterfaceGridForceAdmissionSchema: pressureState?.pressureInterfaceGridForceAdmissionSchema ?? null,
     pressureInterfaceGridForceAdmissionStatus: pressureState?.pressureInterfaceGridForceAdmissionStatus ?? null,
     pressureInterfaceGridForceAdmissionApproved: pressureState?.pressureInterfaceGridForceAdmissionApproved ?? false,
     pressureInterfaceGridForceAdmissionDescriptorStatus: pressureState?.pressureInterfaceGridForceAdmissionDescriptorStatus ?? null,
     pressureInterfaceGridForceAdmissionSourceHotBufferKey: pressureState?.pressureInterfaceGridForceAdmissionSourceHotBufferKey ?? null,
-    pressureInterfaceGasCellFieldImportPublication: pressureState?.pressureInterfaceGasCellFieldImportPublication ?? null,
+    pressureInterfaceGasCellFieldImportPublication: compactPressureStateObject(pressureState?.pressureInterfaceGasCellFieldImportPublication, [
+      'blocker',
+      'committed',
+      'hotBufferKey',
+      'pressureInterfaceGasCellFieldImportStatus',
+      'pressureInterfaceGasCellFieldImportReady',
+      'pressureInterfaceGasCellFieldAdmissionStatus',
+      'pressureInterfaceGasCellFieldAdmissionApproved'
+    ]),
     pressureInterfaceGasCellFieldImportPublicationSchema: pressureState?.pressureInterfaceGasCellFieldImportPublicationSchema ?? null,
     pressureInterfaceGasCellFieldImportPublicationStatus: pressureState?.pressureInterfaceGasCellFieldImportPublicationStatus ?? null,
     pressureInterfaceGasCellFieldImportPublicationBlocker: pressureState?.pressureInterfaceGasCellFieldImportPublicationBlocker ?? null,
     pressureInterfaceGasCellFieldImportPublicationCommitted: pressureState?.pressureInterfaceGasCellFieldImportPublicationCommitted ?? false,
     pressureInterfaceGasCellFieldImportPublicationHotBufferKey: pressureState?.pressureInterfaceGasCellFieldImportPublicationHotBufferKey ?? null,
-    pressureInterfaceGasCellFieldImport: pressureState?.pressureInterfaceGasCellFieldImport ?? null,
+    pressureInterfaceGasCellFieldImport: compactPressureStateObject(pressureState?.pressureInterfaceGasCellFieldImport, [
+      'cellCount',
+      'rowCount',
+      'sourceHotBufferKey',
+      'hotBufferKey',
+      'bufferRetained'
+    ]),
     pressureInterfaceGasCellFieldImportSchema: pressureState?.pressureInterfaceGasCellFieldImportSchema ?? null,
     pressureInterfaceGasCellFieldImportStatus: pressureState?.pressureInterfaceGasCellFieldImportStatus ?? null,
     pressureInterfaceGasCellFieldImportReady: pressureState?.pressureInterfaceGasCellFieldImportReady ?? false,
     pressureInterfaceGasCellFieldImportSourceHotBufferKey: pressureState?.pressureInterfaceGasCellFieldImportSourceHotBufferKey ?? null,
-    pressureInterfaceGasCellFieldAdmission: pressureState?.pressureInterfaceGasCellFieldAdmission ?? null,
+    pressureInterfaceGasCellFieldAdmission: compactPressureStateObject(pressureState?.pressureInterfaceGasCellFieldAdmission, [
+      'publicationStatus',
+      'admittedStatus',
+      'sourceHotBufferKey',
+      'hotBufferKey'
+    ]),
     pressureInterfaceGasCellFieldAdmissionSchema: pressureState?.pressureInterfaceGasCellFieldAdmissionSchema ?? null,
     pressureInterfaceGasCellFieldAdmissionStatus: pressureState?.pressureInterfaceGasCellFieldAdmissionStatus ?? null,
     pressureInterfaceGasCellFieldAdmissionApproved: pressureState?.pressureInterfaceGasCellFieldAdmissionApproved ?? false,
-    pressureInterfaceGasCellFieldAdmissionPublication: pressureState?.pressureInterfaceGasCellFieldAdmissionPublication ?? null,
+    pressureInterfaceGasCellFieldAdmissionPublication: compactPressureStateObject(pressureState?.pressureInterfaceGasCellFieldAdmissionPublication, [
+      'publicationStatus',
+      'admittedStatus',
+      'sourceHotBufferKey',
+      'hotBufferKey'
+    ]),
     pressureInterfaceGasCellFieldAdmissionPublicationSchema: pressureState?.pressureInterfaceGasCellFieldAdmissionPublicationSchema ?? null,
     pressureInterfaceGasCellFieldAdmissionPublicationStatus: pressureState?.pressureInterfaceGasCellFieldAdmissionPublicationStatus ?? null,
     pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey: pressureState?.pressureInterfaceGasCellFieldAdmissionPublicationHotBufferKey ?? null,
@@ -1779,7 +1911,7 @@ function pressureInterfaceRenderStateFields(pressureState = null) {
     pressureInterfaceGasCellFieldWorkerRetainedGasPressureBufferRefs: [
       ...(pressureState?.pressureInterfaceGasCellFieldWorkerRetainedGasPressureBufferRefs || [])
     ],
-    ...pressureInterfaceForceRowsUploadFields(pressureState)
+    ...forceRowsUploadFields
   };
 }
 
@@ -10506,10 +10638,7 @@ export function createSphPhaseScene(container, {
       if (rendererCapability) {
         scene.userData.sphResidentExtensionSurfaceRendererCapability = rendererCapability;
       }
-      const fallbackThreeWebGpuSurfaceBuffersToCompact = Boolean(
-        useThreeWebGpuSurfaceBufferBridge
-        && !rendererCapability?.visibleNoReadbackSupported
-      );
+      const fallbackThreeWebGpuSurfaceBuffersToCompact = false;
       const useEffectiveThreeCompactVertexBridge = Boolean(
         useThreeCompactVertexBridge || fallbackThreeWebGpuSurfaceBuffersToCompact
       );
@@ -10727,6 +10856,11 @@ export function createSphPhaseScene(container, {
       const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
         surfaceDraw: surfaceDrawExecution
       });
+      const retainedResidentSurfaceBufferHandoff = Boolean(
+        useThreeWebGpuSurfaceBufferBridge
+        && !renderBridgeReady
+        && gpuBufferHandoff.ready
+      );
       markSphResidentRenderProgress('surface-draw-render-bridge-complete', {
         stage: 'surface-draw-render-bridge',
         surfaceCount: surfaceDrawExecution.surfaceCount,
@@ -10790,9 +10924,16 @@ export function createSphPhaseScene(container, {
         fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
         requestedVisibleRendererBridge: renderBridgeMode,
+        effectiveVisibleRendererBridge: retainedResidentSurfaceBufferHandoff
+          ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
+          : (renderBridgeReady
+            ? renderBridge.rendererBridge
+            : null),
         visibleRendererBridgeFallbackReason: fallbackThreeWebGpuSurfaceBuffersToCompact
           ? rendererCapability?.reason ?? 'same-device Three WebGPU surface buffers unavailable'
-          : null,
+          : (retainedResidentSurfaceBufferHandoff
+            ? rendererCapability?.reason ?? renderBridge?.reason ?? 'resident GPU surface buffers retained until renderer binding is available'
+            : null),
         renderFieldBufferMode: 'released-after-surface-draw',
         surfaceVertexBufferMode: 'released-after-surface-draw',
         surfaceDrawBufferMode: useEffectiveThreeCompactVertexBridge
@@ -10803,24 +10944,46 @@ export function createSphPhaseScene(container, {
         surfaceDrawInputBuffersReleased: true,
         visibleRendererBridge: renderBridgeReady
           ? renderBridge.rendererBridge
-          : (useEffectiveThreeCompactVertexBridge
+          : (retainedResidentSurfaceBufferHandoff
+            ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
+            : (useEffectiveThreeCompactVertexBridge
             ? 'three-marching-cubes-fallback'
-            : (renderBridge?.rendererBridge || 'pending-three-webgpu-binding')),
+            : (renderBridge?.rendererBridge || 'pending-three-webgpu-binding'))),
         visibleRenderSource: renderBridgeReady
           ? renderBridge.visibleRenderSource
-          : 'three-marching-cubes-fallback',
+          : (retainedResidentSurfaceBufferHandoff
+            ? 'resident-surface-draw-buffers'
+            : 'three-marching-cubes-fallback'),
         renderBridgeSchema: renderBridge?.schema ?? null,
-        renderBridgeStatus: renderBridge?.status ?? null,
-        renderBridgeReason: renderBridge?.reason ?? null,
+        renderBridgeStatus: retainedResidentSurfaceBufferHandoff
+          ? 'resident-surface-buffers-retained-no-overlay'
+          : (renderBridge?.status ?? null),
+        renderBridgeReason: retainedResidentSurfaceBufferHandoff
+          ? rendererCapability?.reason ?? renderBridge?.reason ?? 'resident GPU surface buffers retained until renderer binding is available'
+          : (renderBridge?.reason ?? null),
+        renderBridgeCapabilitySchema: rendererCapability?.schema ?? null,
+        renderBridgeCapabilityStatus: rendererCapability?.status ?? null,
+        renderBridgeCapabilityReason: rendererCapability?.reason ?? null,
+        renderBridgeRendererBackend: rendererCapability?.rendererBackend ?? scene.userData.sphRendererBackend ?? null,
+        renderBridgeBackendBufferBindingAvailable: Boolean(rendererCapability?.backendBufferBindingAvailable),
+        renderBridgeSameDeviceGpuBufferGeometrySupported: Boolean(
+          rendererCapability?.sameDeviceGpuBufferGeometrySupported
+        ),
+        renderBridgeVisibleNoReadbackSupported: Boolean(rendererCapability?.visibleNoReadbackSupported),
+        renderBridgeRequestedThreeCompactReadbackBridge: Boolean(
+          rendererCapability?.requestedThreeCompactReadbackBridge
+        ),
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
         renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
         renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
         renderBridgeEngineIntegration: renderBridge?.externalGpuBufferGeometry
           ? 'three-webgpu-renderer-owned-scene-object-external-buffer'
-          : (renderBridgeReady
+          : (retainedResidentSurfaceBufferHandoff
+            ? 'engine-resident-surface-buffer-handoff-no-overlay'
+            : (renderBridgeReady
             ? 'three-renderer-owned-scene-object-no-overlay'
-            : null),
+            : null)),
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
@@ -11456,17 +11619,15 @@ export function createSphPhaseScene(container, {
       if (requestedThreeWebGpuSurfaceBufferCapability) {
         scene.userData.sphResidentExtensionSurfaceRendererCapability = requestedThreeWebGpuSurfaceBufferCapability;
       }
-      const threeWebGpuSurfaceBufferFallbackToRenderRows = Boolean(
+      const threeWebGpuSurfaceBufferRetainResidentHandoff = Boolean(
         requestedThreeWebGpuSurfaceBufferBridge
         && !requestedThreeWebGpuSurfaceBufferCapability?.visibleNoReadbackSupported
       );
-      const requestedSurfaceDrawDiagnosticMode = threeWebGpuSurfaceBufferFallbackToRenderRows
-        ? SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
-        : normalizedSurfaceDrawDiagnosticMode;
+      const requestedSurfaceDrawDiagnosticMode = normalizedSurfaceDrawDiagnosticMode;
       const surfaceDrawDiagnosticFallbackReason = webGpuRenderRowOverlayRequestedButDisabled
         ? 'webgpu-render-row-overlay-disabled-pending-pixel-validation'
-        : (threeWebGpuSurfaceBufferFallbackToRenderRows
-          ? `three-webgpu-surface-buffers-disabled: ${requestedThreeWebGpuSurfaceBufferCapability?.reason ?? 'same-device GPUBuffer geometry unavailable'}`
+        : (threeWebGpuSurfaceBufferRetainResidentHandoff
+          ? `three-webgpu-surface-buffers-retained-resident-handoff: ${requestedThreeWebGpuSurfaceBufferCapability?.reason ?? 'same-device GPUBuffer geometry unavailable'}`
           : null);
       const shouldUseWebGpuRenderRowOverlayBridge = isWebGpuResidentRenderRowBridgeMode(
         requestedSurfaceDrawDiagnosticMode
@@ -12345,6 +12506,7 @@ export function createSphPhaseScene(container, {
               nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay'
               || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
               || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+              || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
             ) {
               suppressThreeSurfaceMeshesForResidentOverlay(
                 nextResidentSurfaceDraw.visibleRendererBridge === 'three-compact-surface-geometry'
@@ -12384,6 +12546,7 @@ export function createSphPhaseScene(container, {
         nextResidentSurfaceDraw?.visibleRendererBridge === 'webgpu-storage-indirect-overlay'
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+        || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-points'
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-spheres'
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_MODE
@@ -12455,6 +12618,23 @@ export function createSphPhaseScene(container, {
         source: 'resident-render-refresh',
         skipped: shouldSkipPressureInterfaceRefresh,
         status: pressureInterfaceState?.status ?? null
+      });
+      markSphResidentRenderProgress('resident-render-state-assembly-started', {
+        stage: 'resident-render-state',
+        source: 'resident-render-refresh',
+        surfaceDrawBridge: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
+        pressureInterfaceStatus: pressureInterfaceState?.status ?? null
+      });
+      const pressureInterfaceStateFields = pressureInterfaceRenderStateFields(pressureInterfaceState);
+      const materialInterfaceFieldSummary = compactMaterialInterfaceFieldSummary(materialInterfaceField);
+      const surfaceDrawLeaseSummary = compactResidentBufferLeaseSummary(
+        sphResidentSurfaceDraw?.residentBufferLeaseSummary
+      );
+      markSphResidentRenderProgress('resident-render-state-assembly-fields-ready', {
+        stage: 'resident-render-state',
+        source: 'resident-render-refresh',
+        surfaceDrawBridge: sphResidentSurfaceDraw?.visibleRendererBridge ?? null,
+        pressureInterfaceStatus: pressureInterfaceStateFields.residentPressureInterfaceStateStatus ?? null
       });
       sphResidentRenderState = {
         schema: 'peercompute.ulg.sph-resident-render-state.v0',
@@ -12583,7 +12763,7 @@ export function createSphPhaseScene(container, {
         surfaceDrawLeaseStatus: sphResidentSurfaceDraw?.residentBufferLeaseLedgerStatus ?? null,
         surfaceDrawLeaseResourceCount: sphResidentSurfaceDraw?.residentBufferLeaseResourceCount ?? 0,
         surfaceDrawLeaseActiveCount: sphResidentSurfaceDraw?.residentBufferLeaseActiveLeaseCount ?? 0,
-        surfaceDrawLeaseSummary: sphResidentSurfaceDraw?.residentBufferLeaseSummary ?? null,
+        surfaceDrawLeaseSummary,
         surfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawReadback),
         surfaceDrawSummaryReadback: Boolean(sphResidentSurfaceDraw?.surfaceDrawSummaryReadback),
         surfaceDrawSummaryReadbackByteLength: sphResidentSurfaceDraw?.surfaceDrawSummaryReadbackByteLength ?? 0,
@@ -12718,12 +12898,12 @@ export function createSphPhaseScene(container, {
         gasPressureSummaryStatus: gasPressureSummary?.status ?? null,
         gasPressureSummarySource: gasPressureSummary?.source ?? null,
         residentPressureOpticalStateApplied: decoded.materials.some((descriptor) => Boolean(descriptor.opticalState)),
-        materialInterfaceField,
+        materialInterfaceField: materialInterfaceFieldSummary,
         materialInterfaceFieldSchema: materialInterfaceField?.schema ?? null,
         materialInterfaceFieldStatus: materialInterfaceField?.status ?? null,
         materialInterfaceReadySurfaceCount: materialInterfaceField?.readySurfaceCount ?? 0,
         materialInterfaceTotalSurfaceAreaM2: materialInterfaceField?.totalSurfaceAreaM2 ?? 0,
-        ...pressureInterfaceRenderStateFields(pressureInterfaceState),
+        ...pressureInterfaceStateFields,
         gpuAuthoritativeState: true,
         scientificValidation: false,
         sphValidation: false,
@@ -12731,6 +12911,13 @@ export function createSphPhaseScene(container, {
         fullPhysicsValidation: false
       };
       scene.userData.sphResidentRenderState = sphResidentRenderState;
+      markSphResidentRenderProgress('resident-render-state-published', {
+        stage: 'resident-render-state',
+        source: 'resident-render-refresh',
+        status: sphResidentRenderState.status,
+        surfaceDrawBridge: sphResidentRenderState.surfaceDrawVisibleRendererBridge,
+        gpuBufferHandoffReady: sphResidentRenderState.surfaceDrawGpuBufferHandoffReady
+      });
       return sphResidentRenderState;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

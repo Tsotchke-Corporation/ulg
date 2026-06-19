@@ -1906,6 +1906,7 @@ async function runBrowserProbe({
           overlay.__mlsMpmResidentStep = sceneApi.getMlsMpmResidentStep?.() || execution?.finalStep || null;
           overlay.__sphUpdateResidentGasPressureSummary?.(overlay.__mlsMpmResidentStep);
           if ((batchIndex % requestedRenderEvery === 0 || batchIndex === requestedBatches) && sceneApi.refreshSphResidentRenderState) {
+            markProbeProgress('resident-render-refresh-started', { batchIndex });
             overlay.__sphResidentRenderState = await sceneApi.refreshSphResidentRenderState({
               preferWebGpu: true,
               residentSteps: execution,
@@ -1917,6 +1918,12 @@ async function runBrowserProbe({
             surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
             gasPressureSummary: overlay.__sphResidentGasPressureSummary || null
             });
+            markProbeProgress('resident-render-refresh-completed', {
+              batchIndex,
+              status: overlay.__sphResidentRenderState?.status ?? null,
+              bridge: overlay.__sphResidentRenderState?.surfaceDrawVisibleRendererBridge ?? null,
+              gpuBufferHandoffReady: overlay.__sphResidentRenderState?.surfaceDrawGpuBufferHandoffReady ?? null
+            });
             if (requestedResidentBufferDebug && sceneApi.debugSphResidentParticleUpload) {
               overlay.__sphResidentParticleUploadDebug = await sceneApi.debugSphResidentParticleUpload({
                 preferWebGpu: true,
@@ -1925,9 +1932,24 @@ async function runBrowserProbe({
               });
             }
             overlay.__sphResidentSurfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || null;
-            sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-render-refresh' });
-            await new Promise((resolve) => requestAnimationFrame(resolve));
+            const skipNoOverlayHandoffViewportRefresh = Boolean(
+              requestedSurfaceDrawDiagnosticMode === 'three-webgpu-surface-buffers'
+              && overlay.__sphResidentRenderState?.surfaceDrawVisibleRendererBridge === 'resident-surface-buffers-no-overlay'
+              && overlay.__sphResidentRenderState?.surfaceDrawGpuBufferHandoffReady === true
+            );
+            if (skipNoOverlayHandoffViewportRefresh) {
+              markProbeProgress('resident-render-refresh-viewport-skipped', {
+                batchIndex,
+                reason: 'resident-surface-buffer-handoff-no-visible-overlay'
+              });
+            } else {
+              markProbeProgress('resident-render-refresh-viewport-started', { batchIndex });
+              sceneApi.refreshViewportAndOverlay?.({ reason: 'sph-long-horizon-probe-render-refresh' });
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+              markProbeProgress('resident-render-refresh-viewport-completed', { batchIndex });
+            }
           }
+          markProbeProgress('resident-batch-sampling-started', { batchIndex });
           const metric = sample(batchIndex, 'resident-batch', performance.now() - started);
           metrics.push(metric);
           captureFrame(batchIndex, 'resident-batch', metrics.length - 1);
@@ -3599,6 +3621,16 @@ function analyzeTimeline(timeline, {
   const residentSurfaceBufferHandoffSampleCount = metrics.filter((metric) => (
     residentSurfaceBufferHandoffReady(metric)
   )).length;
+  const requestedSurfaceDrawMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
+  const requestedRenderReadbackMode = String(timeline?.renderReadbackMode || '').toLowerCase();
+  const residentSurfaceBufferHandoffProbe = Boolean(
+    requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+    && requestedRenderReadbackMode === 'no-full-readback'
+  );
+  const residentSurfaceBufferHandoffAccepted = Boolean(
+    residentSurfaceBufferHandoffProbe
+    && residentSurfaceBufferHandoffSampleCount > 0
+  );
   const h2oVisibleSurfaceSampleCount = metrics.filter((metric) => (
     (metric.surfaces?.h2oVisibleCount ?? 0) > 0
     || residentOverlayH2oVisible(metric)
@@ -3702,7 +3734,7 @@ function analyzeTimeline(timeline, {
   let lastH2oLiquidSurfaceHeightM = null;
   let lastH2oLiquidSurfaceTallnessRatio = null;
   let lastH2oLiquidSurfaceFootprintFillRatio = null;
-  if (!directResident) {
+  if (!directResident && !residentSurfaceBufferHandoffAccepted) {
     const alphaTransparentRenderLayers = new Set(['vapor-surface', 'alpha-surface']);
     const knownSurfaceRenderLayers = new Set(['opaque-surface', 'transmissive-surface', ...alphaTransparentRenderLayers]);
     const pushRenderVisualIssue = (issue, metricIndex, surface, extra = {}) => {
@@ -4186,8 +4218,15 @@ function analyzeTimeline(timeline, {
       issues.push(`liquid-free-surface-height>${liquidFreeSurfaceMaxHeightM}`);
     }
   }
-  if (!directResident && visibleSurfaceSampleCount === 0) issues.push('no-visible-surface-samples');
-  if (!directResident && h2oVisibleSurfaceSampleCount === 0) issues.push('no-visible-h2o-surface-samples');
+  if (residentSurfaceBufferHandoffProbe && residentSurfaceBufferHandoffSampleCount === 0) {
+    issues.push('resident-surface-buffer-handoff-missing');
+  }
+  if (!directResident && !residentSurfaceBufferHandoffAccepted && visibleSurfaceSampleCount === 0) {
+    issues.push('no-visible-surface-samples');
+  }
+  if (!directResident && !residentSurfaceBufferHandoffAccepted && h2oVisibleSurfaceSampleCount === 0) {
+    issues.push('no-visible-h2o-surface-samples');
+  }
   if (visualSurfaceIssues.some((item) => item.issue === 'visible-surface-outside-box')) issues.push('visible-surface-outside-box');
   if (visualSurfaceIssues.some((item) => item.issue === 'visible-surface-larger-than-box')) issues.push('visible-surface-larger-than-box');
   if (visualSurfaceIssues.some((item) => item.issue === 'visible-surface-expanded-beyond-particle-bounds')) {
@@ -4322,6 +4361,7 @@ function analyzeTimeline(timeline, {
     lastH2oLiquidSurfaceFootprintFillRatio,
     visibleSurfaceSampleCount,
     residentSurfaceBufferHandoffSampleCount,
+    residentSurfaceBufferHandoffAccepted,
     h2oVisibleSurfaceSampleCount,
     residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length
   };

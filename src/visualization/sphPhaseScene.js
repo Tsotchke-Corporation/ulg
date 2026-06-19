@@ -2871,7 +2871,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
   let row2 = surface_vertices[base + 2u];
   let position_m = vec3<f32>(row1.y, row1.z, row1.w);
   var out: VertexOut;
-  out.position = camera_data.view_projection * vec4<f32>(position_m, 1.0);
+  var clip = camera_data.view_projection * vec4<f32>(position_m, 1.0);
+  clip.z = clip.z * 0.5 + clip.w * 0.5;
+  if (clip.w <= 0.0) {
+    clip = vec4<f32>(2.0, 2.0, 1.0, 1.0);
+  }
+  out.position = clip;
   out.normal = normalize(row2.xyz + vec3<f32>(0.0001, 0.0002, 0.0003));
   out.material_id = row0.y;
   out.phase_id = row0.z;

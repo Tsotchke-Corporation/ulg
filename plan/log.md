@@ -28968,3 +28968,42 @@ Remaining:
 - Continue the native/marching-cubes integration roadmap. The harness can now
   distinguish a real fresh no-readback native path from stale retained buffers,
   which should make the next rendering regressions easier to isolate.
+
+## 2026-06-19 14:30 AKDT - Native Surface Clip-Depth Mapping
+
+Status:
+
+- Updated the native WebGPU resident surface draw vertex shader to remap
+  Three's projection output into WebGPU clip-depth space, matching the existing
+  particle WebGPU draw path.
+- Added a behind-camera clip guard so resident surface rows do not project
+  unstable geometry when perspective shifts.
+- Kept the fix in the engine-owned native surface consumer path. No overlay or
+  renderer fallback was introduced.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay shader|render source|visible GPU|surface buffer handoff|native|depth policy"`
+  reported `60/60`.
+- PASS: `git diff --check -- src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs scripts/sph-long-horizon-probe.mjs plan/log.md plan/tests.md`.
+- PASS: `/tmp/ulg-native-depth-remap-probe.json` completed `status=good`
+  with browser console issues/warnings `0/0`,
+  `native-webgpu-surface-consumer-rendered`,
+  `residentRenderSourceCurrentSampleCount=3`,
+  `residentRenderSourceStaleSampleCount=0`, and
+  `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+- PASS: `/tmp/ulg-native-depth-remap-mobile-probe.json` completed
+  `status=good` with mobile-shaped viewport `397x860`, DPR `2`, browser
+  console issues/warnings `0/0`,
+  `native-webgpu-surface-consumer-rendered`,
+  `residentRenderSourceCurrentSampleCount=3`,
+  `residentRenderSourceStaleSampleCount=0`, and
+  `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+
+Remaining:
+
+- Continue the P0 native/marching-cubes renderer path with pixel evidence and
+  performance work. Local headless WebGPU canvas pixel readback still remains
+  unreliable, so probe status is based on pipeline/render-source evidence.

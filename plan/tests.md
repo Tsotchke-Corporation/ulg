@@ -10919,3 +10919,40 @@ Resident render-source freshness contract, 2026-06-19 14:00 AKDT:
     `residentRenderSourceStepDelta=4`,
     `residentRenderSourceTimeDeltaS=0.002`, and
     `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+
+Native surface clip-depth mapping, 2026-06-19 14:30 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "resident overlay shader|render source|visible GPU|surface buffer handoff|native|depth policy"`
+  - Passed: `60/60`.
+  - New coverage pins the native resident surface shader to the WebGPU
+    clip-depth remap used by the particle WebGPU draw path.
+- `git diff --check -- src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs scripts/sph-long-horizon-probe.mjs plan/log.md plan/tests.md`
+  - Passed.
+- Browser desktop-shaped native probe:
+  `/tmp/ulg-native-depth-remap-probe.json`
+  - Passed with `status=good`.
+  - Browser console issues/warnings: `0/0`.
+  - Native bridge: `native-webgpu-surface-consumer-rendered`.
+  - Analysis source evidence:
+    `residentRenderSourceCurrentSampleCount=3`,
+    `residentRenderSourceStaleSampleCount=0`,
+    `residentRenderSourceStepDelta=4`,
+    `residentRenderSourceTimeDeltaS=0.002`, and
+    `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+- Browser mobile-shaped native probe:
+  `/tmp/ulg-native-depth-remap-mobile-probe.json`
+  - Passed with `status=good`.
+  - Viewport/canvas evidence: viewport `397x860`, DPR `2`, canvas
+    `794x1720`.
+  - Browser console issues/warnings: `0/0`.
+  - Native bridge: `native-webgpu-surface-consumer-rendered`.
+  - Analysis source evidence:
+    `residentRenderSourceCurrentSampleCount=3`,
+    `residentRenderSourceStaleSampleCount=0`,
+    `residentRenderSourceStepDelta=4`,
+    `residentRenderSourceTimeDeltaS=0.002`, and
+    `residentNoReadbackRenderSourceEvidenceAvailable=true`.

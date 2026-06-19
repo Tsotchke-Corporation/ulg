@@ -2,6 +2,15 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-19 AKDT: the native WebGPU surface consumer now
+uses WebGPU clip-depth mapping for resident MLS-MPM surface rows. The surface
+vertex shader now mirrors the particle WebGPU path by remapping Three's
+OpenGL-style projection depth from `-w..w` into WebGPU's `0..w` clip-depth
+range and rejects vertices behind the camera. This is an engine-owned renderer
+integration fix, not an overlay: desktop and mobile-shaped no-full-readback
+native probes both complete browser-console clean with fresh resident
+render-source evidence and `native-webgpu-surface-consumer-rendered`.
+
 Current checkpoint, 2026-06-18 AKDT: native marching-cubes surface rows are now
 clipped back into the simulation box during extension-to-ULG translation. The
 old CPU MarchingCubes path always clamped generated surfaces to the container;

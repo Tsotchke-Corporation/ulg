@@ -1599,6 +1599,19 @@ async function runBrowserProbe({
             surfaceDrawGpuOnlyUpperBoundVertexCount: renderState.surfaceDrawGpuOnlyUpperBoundVertexCount ?? null,
             surfaceDrawGpuOnlyUpperBoundTriangleCount: renderState.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
             surfaceDrawGpuOnlyDrawRangeConservative: renderState.surfaceDrawGpuOnlyDrawRangeConservative ?? null,
+            surfaceDrawGpuBufferHandoffReady: renderState.surfaceDrawGpuBufferHandoffReady ?? null,
+            surfaceDrawGpuBufferHandoffStatus: renderState.surfaceDrawGpuBufferHandoffStatus ?? null,
+            surfaceDrawGpuBufferHandoffReason: renderState.surfaceDrawGpuBufferHandoffReason ?? null,
+            surfaceDrawGpuBufferHandoffReadbackMode: renderState.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
+            surfaceDrawGpuBufferHandoffNoFullReadback: renderState.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
+            surfaceDrawGpuBufferHandoffNoSummaryReadback:
+              renderState.surfaceDrawGpuBufferHandoffNoSummaryReadback ?? null,
+            surfaceDrawGpuBufferHandoffUpperBoundVertexCount:
+              renderState.surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? null,
+            surfaceDrawGpuBufferHandoffUpperBoundTriangleCount:
+              renderState.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
+            surfaceDrawGpuBufferHandoffConservativeDrawRange:
+              renderState.surfaceDrawGpuBufferHandoffConservativeDrawRange ?? null,
             fullSurfaceDrawReadback: renderState.fullSurfaceDrawReadback ?? null,
             surfaceDrawDiagnosticOnly: renderState.surfaceDrawDiagnosticOnly ?? null,
             surfaceDrawDiagnosticOnlyMode: renderState.surfaceDrawDiagnosticOnlyMode ?? null,
@@ -1643,6 +1656,16 @@ async function runBrowserProbe({
             drawIndirectRowsBufferByteLength: surfaceDraw.drawIndirectRowsBufferByteLength ?? null,
             compactedVertexRowsBufferRetained: surfaceDraw.compactedVertexRowsBufferRetained ?? null,
             compactedVertexRowsBufferByteLength: surfaceDraw.compactedVertexRowsBufferByteLength ?? null,
+            gpuBufferHandoffReady: surfaceDraw.surfaceDrawGpuBufferHandoffReady ?? null,
+            gpuBufferHandoffStatus: surfaceDraw.surfaceDrawGpuBufferHandoffStatus ?? null,
+            gpuBufferHandoffReason: surfaceDraw.surfaceDrawGpuBufferHandoffReason ?? null,
+            gpuBufferHandoffReadbackMode: surfaceDraw.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
+            gpuBufferHandoffUpperBoundVertexCount:
+              surfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? null,
+            gpuBufferHandoffUpperBoundTriangleCount:
+              surfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
+            gpuBufferHandoffConservativeDrawRange:
+              surfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange ?? null,
             visibleRendererBridge: surfaceDraw.visibleRendererBridge ?? null,
             visibleRenderSource: surfaceDraw.visibleRenderSource ?? null,
             renderBridgeStatus: surfaceDraw.renderBridgeStatus ?? null,
@@ -3551,6 +3574,11 @@ function analyzeTimeline(timeline, {
     && metric?.renderState?.renderFieldSurfaceSummaryReadback === true
     && Number(metric?.renderState?.renderFieldSurfaceSummaryActiveSurfaceCount ?? 0) > 0
   );
+  const residentSurfaceBufferHandoffReady = (metric) => Boolean(
+    metric?.renderState?.surfaceDrawGpuBufferHandoffReady
+    || metric?.surfaceDraw?.gpuBufferHandoffReady
+    || metric?.surfaceDraw?.surfaceDrawGpuBufferHandoffReady
+  );
   const residentOverlayH2oVisible = (metric) => residentOverlayVisible(metric)
     && Array.isArray(metric?.renderState?.materialKeys)
     && metric.renderState.materialKeys.some((key) => String(key || '').toLowerCase().includes('h2o'));
@@ -3567,6 +3595,9 @@ function analyzeTimeline(timeline, {
     (metric.surfaces?.visibleCount ?? 0) > 0
     || residentOverlayVisible(metric)
     || residentRenderFieldSummaryVisible(metric)
+  )).length;
+  const residentSurfaceBufferHandoffSampleCount = metrics.filter((metric) => (
+    residentSurfaceBufferHandoffReady(metric)
   )).length;
   const h2oVisibleSurfaceSampleCount = metrics.filter((metric) => (
     (metric.surfaces?.h2oVisibleCount ?? 0) > 0
@@ -4290,6 +4321,7 @@ function analyzeTimeline(timeline, {
     lastH2oLiquidSurfaceTallnessRatio,
     lastH2oLiquidSurfaceFootprintFillRatio,
     visibleSurfaceSampleCount,
+    residentSurfaceBufferHandoffSampleCount,
     h2oVisibleSurfaceSampleCount,
     residentOverlayVisibleSampleCount: metrics.filter(residentOverlayVisible).length
   };

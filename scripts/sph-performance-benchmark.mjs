@@ -294,6 +294,24 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const surfaceDrawBridgeVisibleNoReadbackSupported = renderState?.surfaceDrawRenderBridgeVisibleNoReadbackSupported
     ?? surfaceDraw?.renderBridgeVisibleNoReadbackSupported
     ?? null;
+  const surfaceDrawGpuBufferHandoffReady = Boolean(
+    renderState?.surfaceDrawGpuBufferHandoffReady
+    ?? surfaceDraw?.gpuBufferHandoffReady
+    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffReady
+  );
+  const surfaceDrawGpuBufferHandoffStatus = renderState?.surfaceDrawGpuBufferHandoffStatus
+    ?? surfaceDraw?.gpuBufferHandoffStatus
+    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffStatus
+    ?? null;
+  const surfaceDrawGpuBufferHandoffReason = renderState?.surfaceDrawGpuBufferHandoffReason
+    ?? surfaceDraw?.gpuBufferHandoffReason
+    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffReason
+    ?? null;
+  const surfaceDrawGpuBufferHandoffUpperBoundVertexCount = numberOrNull(
+    renderState?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount
+      ?? surfaceDraw?.gpuBufferHandoffUpperBoundVertexCount
+      ?? surfaceDraw?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount
+  );
   const surfaceDrawRequestedDiagnosticMode = renderState?.surfaceDrawRequestedDiagnosticMode
     ?? surfaceDraw?.requestedDiagnosticMode
     ?? null;
@@ -348,6 +366,13 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       && surfaceDrawBridge === 'three-render-row-spheres'
     )
   );
+  const validResidentSurfaceBufferHandoff = (
+    surfaceDrawGpuBufferHandoffReady
+    && surfaceDrawStatus !== 'resident-render-row-three-bridge-retained-no-full-readback'
+    && Number(surfaceDrawCompactedVertexRowsBufferByteLength ?? 0) > 0
+    && Number(surfaceDrawIndirectRowsBufferByteLength ?? 0) > 0
+    && Number(surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? 0) >= 3
+  );
   const activeGridDispatch = residentStageTiming?.activeGridDispatch ?? null;
   const performanceGate = scenarioPerformanceGate({
     residentGpuCompletedStageMs,
@@ -370,7 +395,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const benchmarkStatus = exit.code === 0
     && Number(browserConsoleIssueCount ?? 0) === 0
     && Number.isFinite(residentStageMs)
-    && (effectiveProbeMode === 'direct-resident' ? validDirectResidentLoop : validResidentRenderRowBridge)
+    && (effectiveProbeMode === 'direct-resident'
+      ? validDirectResidentLoop
+      : (validResidentRenderRowBridge || validResidentSurfaceBufferHandoff))
     ? 'good'
     : (exit.code === 0 ? 'bad' : 'probe-error');
   return {
@@ -435,6 +462,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawBridgeCapabilityReason,
     surfaceDrawBridgeRendererBackend,
     surfaceDrawBridgeVisibleNoReadbackSupported,
+    surfaceDrawGpuBufferHandoffReady,
+    surfaceDrawGpuBufferHandoffStatus,
+    surfaceDrawGpuBufferHandoffReason,
+    surfaceDrawGpuBufferHandoffUpperBoundVertexCount,
+    validResidentSurfaceBufferHandoff,
     surfaceDrawRequestedDiagnosticMode,
     surfaceDrawDiagnosticFallbackReason,
     surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,

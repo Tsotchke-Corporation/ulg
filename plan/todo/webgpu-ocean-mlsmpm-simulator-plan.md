@@ -109,6 +109,18 @@ Tactical status, 2026-06-18 AKDT:
   draw ranges through `surfaceDrawGpuOnly*` telemetry. This is not a visible
   renderer by itself, but it removes the need for a CPU summary as the contract
   boundary for the future engine-owned GPU surface consumer.
+- Explicit native/extension `three-webgpu-surface-buffers` requests now keep
+  no-full-readback resident surface buffers as a direct-consumer handoff when
+  the visible Three WebGPU bridge is blocked, rather than silently forcing
+  compact Three geometry readback. The mounted WebGL fallback remains
+  console-clean through `three-render-row-spheres`; the new
+  `surfaceDrawGpuBufferHandoff*` and
+  `analysis.residentSurfaceBufferHandoffSampleCount` fields distinguish that
+  fallback from actual direct GPU consumer readiness. Current probe evidence:
+  `artifacts/sph-probe-surface-buffer-handoff-1.json` is `status=good` with
+  zero browser console/page errors and `residentSurfaceBufferHandoffSampleCount=0`
+  because the mounted path still fell back visibly instead of exercising the
+  direct consumer.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

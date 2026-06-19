@@ -39,6 +39,7 @@ import {
   resolveThreeWebGpuRendererRequiredLimits,
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
+  resolveResidentSurfaceBufferHandoff,
   summarizeThreeWebGpuDeviceLimits,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
@@ -384,6 +385,22 @@ test('SPH extension surface bridge planner falls back to integrated Three compac
   assert.equal(webgpuPlan.translationReadbackMode, 'full-parity-readback');
   assert.equal(webgpuPlan.fallbackThreeCompactBridge, true);
   assert.match(webgpuPlan.fallbackReason, /pipeline validation/);
+
+  const requestedSurfaceBufferHandoffPlan = resolveExtensionSurfaceRenderBridgePlan({
+    renderBridgeMode: 'three-webgpu-surface-buffers',
+    rendererCapability: webgpuCapability,
+    readbackMode: 'no-full-readback'
+  });
+  assert.equal(
+    requestedSurfaceBufferHandoffPlan.status,
+    'extension-surface-render-plan-resident-surface-buffer-handoff'
+  );
+  assert.equal(requestedSurfaceBufferHandoffPlan.useThreeCompactBridge, false);
+  assert.equal(requestedSurfaceBufferHandoffPlan.useThreeWebGpuSurfaceBufferBridge, false);
+  assert.equal(requestedSurfaceBufferHandoffPlan.retainResidentSurfaceBufferHandoff, true);
+  assert.equal(requestedSurfaceBufferHandoffPlan.translationReadbackMode, 'no-full-readback');
+  assert.equal(requestedSurfaceBufferHandoffPlan.effectiveRenderBridgeMode, 'resident-surface-buffers-no-overlay');
+  assert.match(requestedSurfaceBufferHandoffPlan.handoffReason, /pipeline validation/);
 
   const webgpuOptInCapability = resolveResidentExtensionSurfaceRendererCapability({
     renderer: {
@@ -1607,6 +1624,47 @@ test('SPH Three WebGPU surface buffers can use conservative aggregate draw recor
   assert.equal(records.records[0].triangleCount, 6);
   assert.equal(records.records[0].material, 'h2o');
   assert.equal(records.records[0].phase, 'liquid');
+});
+
+test('SPH resident surface buffer handoff requires retained no-readback draw buffers', () => {
+  const ready = resolveResidentSurfaceBufferHandoff({
+    surfaceDraw: {
+      readbackMode: 'no-full-readback',
+      surfaceDrawReadback: false,
+      surfaceDrawSummaryReadback: false,
+      fullSurfaceDrawReadback: false,
+      drawRowsBufferRetained: true,
+      drawRowsBufferByteLength: 2 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      drawIndirectRowsBufferRetained: true,
+      drawIndirectRowsBufferByteLength: 4 * Uint32Array.BYTES_PER_ELEMENT,
+      compactedVertexRowsBufferRetained: true,
+      compactedVertexRowsBufferByteLength: 19 * 16 * Float32Array.BYTES_PER_ELEMENT,
+      sourceVertexRowCount: 19,
+      surfaceDrawGpuOnlyHandoff: true,
+      surfaceDrawGpuOnlyHandoffStatus: 'surface-draw-gpu-resident-draw-range-available',
+      surfaceDrawGpuOnlyUpperBoundVertexCount: 18,
+      surfaceDrawGpuOnlyUpperBoundTriangleCount: 6,
+      surfaceDrawGpuOnlyDrawRangeConservative: true
+    }
+  });
+
+  assert.equal(ready.status, 'resident-surface-buffer-direct-consumer-ready');
+  assert.equal(ready.ready, true);
+  assert.equal(ready.noFullReadback, true);
+  assert.equal(ready.noSummaryReadback, true);
+  assert.equal(ready.upperBoundVertexCount, 18);
+  assert.equal(ready.upperBoundTriangleCount, 6);
+  assert.equal(ready.conservativeDrawRange, true);
+
+  const readback = resolveResidentSurfaceBufferHandoff({
+    surfaceDraw: {
+      ...ready,
+      readbackMode: 'full-parity-readback',
+      surfaceDrawReadback: true
+    }
+  });
+  assert.equal(readback.ready, false);
+  assert.equal(readback.status, 'resident-surface-buffer-direct-consumer-blocked-readback-mode');
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

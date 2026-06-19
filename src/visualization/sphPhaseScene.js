@@ -295,6 +295,7 @@ const SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE = 'three-compact-vertices';
 const SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS = 'three-compact-surface-geometry-ready';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE = 'three-webgpu-surface-buffers';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS = 'three-webgpu-surface-buffers-ready';
+const SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'resident-surface-buffers-no-overlay';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED = false;
 const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE = 'three-render-row-points';
 const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS = 'three-render-row-points-ready';
@@ -463,13 +464,21 @@ export function resolveExtensionSurfaceRenderBridgePlan({
   const requestedRenderBridgeMode = String(renderBridgeMode || '').trim().toLowerCase() || null;
   const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
   const requestedThreeCompactBridge = requestedRenderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
+  const requestedThreeWebGpuSurfaceBufferBridge =
+    requestedRenderBridgeMode === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
   const canUseThreeWebGpuSurfaceBufferBridge = Boolean(
     !requestedThreeCompactBridge
     && rendererCapability?.visibleNoReadbackSupported
   );
+  const retainResidentSurfaceBufferHandoff = Boolean(
+    requestedThreeWebGpuSurfaceBufferBridge
+    && requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+    && !canUseThreeWebGpuSurfaceBufferBridge
+  );
   const fallbackThreeCompactBridge = Boolean(
     !requestedThreeCompactBridge
     && !canUseThreeWebGpuSurfaceBufferBridge
+    && !retainResidentSurfaceBufferHandoff
   );
   const useThreeCompactBridge = requestedThreeCompactBridge || fallbackThreeCompactBridge;
   const useThreeWebGpuSurfaceBufferBridge = !useThreeCompactBridge && canUseThreeWebGpuSurfaceBufferBridge;
@@ -478,9 +487,14 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     : requestedReadbackMode;
   const effectiveRenderBridgeMode = useThreeCompactBridge
     ? SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE
-    : (useThreeWebGpuSurfaceBufferBridge ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE : null);
+    : (useThreeWebGpuSurfaceBufferBridge
+      ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
+      : (retainResidentSurfaceBufferHandoff ? SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE : null));
   const fallbackReason = fallbackThreeCompactBridge
     ? (rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; using engine-owned Three compact geometry readback')
+    : null;
+  const handoffReason = retainResidentSurfaceBufferHandoff
+    ? (rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; retaining resident GPU buffers for direct renderer handoff')
     : null;
   return {
     schema: 'peercompute.ulg.sph-extension-surface-render-bridge-plan.v0',
@@ -490,19 +504,121 @@ export function resolveExtensionSurfaceRenderBridgePlan({
         ? (fallbackThreeCompactBridge
           ? 'extension-surface-render-plan-three-compact-fallback'
           : 'extension-surface-render-plan-three-compact-requested')
-        : 'extension-surface-render-plan-unavailable'),
+        : (retainResidentSurfaceBufferHandoff
+          ? 'extension-surface-render-plan-resident-surface-buffer-handoff'
+          : 'extension-surface-render-plan-unavailable')),
     requestedRenderBridgeMode,
     effectiveRenderBridgeMode,
     requestedReadbackMode,
     translationReadbackMode,
     requestedThreeCompactBridge,
+    requestedThreeWebGpuSurfaceBufferBridge,
     useThreeCompactBridge,
     useThreeWebGpuSurfaceBufferBridge,
+    retainResidentSurfaceBufferHandoff,
     fallbackThreeCompactBridge,
     fallbackReason,
+    handoffReason,
     rendererCapabilityStatus: rendererCapability?.status ?? null,
     rendererCapabilityReason: rendererCapability?.reason ?? null,
     visibleNoReadbackSupported: Boolean(rendererCapability?.visibleNoReadbackSupported)
+  };
+}
+
+export function resolveResidentSurfaceBufferHandoff({
+  surfaceDraw = null,
+  readbackMode = null
+} = {}) {
+  const normalizedReadbackMode = normalizeResidentReadbackMode(
+    readbackMode ?? surfaceDraw?.readbackMode ?? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
+  );
+  const sourceVertexRowCount = Math.max(0, Math.floor(Number(surfaceDraw?.sourceVertexRowCount) || 0));
+  const drawRowsBufferByteLength = Math.max(0, Math.round(Number(surfaceDraw?.drawRowsBufferByteLength) || 0));
+  const drawIndirectRowsBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.drawIndirectRowsBufferByteLength) || 0)
+  );
+  const compactedVertexRowsBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.compactedVertexRowsBufferByteLength) || 0)
+  );
+  const compactedRowsFromBytes = Math.floor(
+    compactedVertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT)
+  );
+  const upperBoundVertexCount = Math.max(
+    0,
+    Math.floor(Number(surfaceDraw?.surfaceDrawGpuOnlyUpperBoundVertexCount) || 0),
+    sourceVertexRowCount,
+    compactedRowsFromBytes
+  );
+  const alignedUpperBoundVertexCount = upperBoundVertexCount - (upperBoundVertexCount % 3);
+  const upperBoundTriangleCount = Math.max(
+    0,
+    Math.floor(Number(surfaceDraw?.surfaceDrawGpuOnlyUpperBoundTriangleCount) || 0),
+    Math.floor(alignedUpperBoundVertexCount / 3)
+  );
+  const drawRowsBufferRetained = Boolean(surfaceDraw?.drawRowsBufferRetained);
+  const drawIndirectRowsBufferRetained = Boolean(surfaceDraw?.drawIndirectRowsBufferRetained);
+  const compactedVertexRowsBufferRetained = Boolean(surfaceDraw?.compactedVertexRowsBufferRetained);
+  const noFullReadback = normalizedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+    && !surfaceDraw?.surfaceDrawReadback
+    && !surfaceDraw?.fullSurfaceDrawReadback;
+  const noSummaryReadback = !surfaceDraw?.surfaceDrawSummaryReadback;
+  const hasRetainedBuffers = drawRowsBufferRetained
+    && drawRowsBufferByteLength > 0
+    && drawIndirectRowsBufferRetained
+    && drawIndirectRowsBufferByteLength > 0
+    && compactedVertexRowsBufferRetained
+    && compactedVertexRowsBufferByteLength > 0;
+  const hasDrawableRange = alignedUpperBoundVertexCount >= 3 && upperBoundTriangleCount > 0;
+  let status = 'resident-surface-buffer-direct-consumer-blocked-unavailable';
+  let reason = 'resident surface draw buffers are unavailable';
+  if (!surfaceDraw) {
+    status = 'resident-surface-buffer-direct-consumer-blocked-missing-surface-draw';
+    reason = 'surface draw metadata is missing';
+  } else if (!noFullReadback) {
+    status = 'resident-surface-buffer-direct-consumer-blocked-readback-mode';
+    reason = 'direct GPU consumer handoff requires no-full-readback resident buffers';
+  } else if (!noSummaryReadback) {
+    status = 'resident-surface-buffer-direct-consumer-blocked-summary-readback';
+    reason = 'surface draw summary readback was used; this is diagnostic/parity mode, not the direct hot path';
+  } else if (!hasRetainedBuffers) {
+    status = 'resident-surface-buffer-direct-consumer-blocked-missing-retained-buffers';
+    reason = 'retained draw, indirect, and compact vertex GPU buffers are required';
+  } else if (!hasDrawableRange) {
+    status = 'resident-surface-buffer-direct-consumer-blocked-empty-draw-range';
+    reason = 'retained surface buffers do not expose a non-empty conservative draw range';
+  } else {
+    status = 'resident-surface-buffer-direct-consumer-ready';
+    reason = null;
+  }
+  return {
+    schema: 'peercompute.ulg.sph-resident-surface-buffer-handoff.v0',
+    status,
+    reason,
+    ready: status === 'resident-surface-buffer-direct-consumer-ready',
+    readbackMode: normalizedReadbackMode,
+    noFullReadback,
+    noSummaryReadback,
+    drawRowsBufferRetained,
+    drawRowsBufferByteLength,
+    drawIndirectRowsBufferRetained,
+    drawIndirectRowsBufferByteLength,
+    compactedVertexRowsBufferRetained,
+    compactedVertexRowsBufferByteLength,
+    sourceVertexRowCount,
+    upperBoundVertexCount: alignedUpperBoundVertexCount,
+    upperBoundTriangleCount,
+    conservativeDrawRange: Boolean(
+      surfaceDraw?.surfaceDrawGpuOnlyDrawRangeConservative
+      || surfaceDraw?.surfaceDrawGpuOnlyHandoff
+      || surfaceDraw?.surfaceDrawGpuOnlyHandoffStatus === 'surface-draw-gpu-resident-draw-range-available'
+      || (
+        (surfaceDraw?.activeSurfaceCount ?? null) == null
+        && (surfaceDraw?.vertexCount ?? null) == null
+        && hasDrawableRange
+      )
+    )
   };
 }
 
@@ -10608,6 +10724,9 @@ export function createSphPhaseScene(container, {
         || renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
         || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS;
       const overlayPolicy = renderBridge?.overlayPolicy || resolveSceneResidentSurfaceDrawOverlayPolicy();
+      const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
+        surfaceDraw: surfaceDrawExecution
+      });
       markSphResidentRenderProgress('surface-draw-render-bridge-complete', {
         stage: 'surface-draw-render-bridge',
         surfaceCount: surfaceDrawExecution.surfaceCount,
@@ -10658,6 +10777,16 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
           surfaceDrawExecution.surfaceDrawGpuOnlyDrawRangeConservative
         ),
+        surfaceDrawGpuBufferHandoffSchema: gpuBufferHandoff.schema,
+        surfaceDrawGpuBufferHandoffReady: gpuBufferHandoff.ready,
+        surfaceDrawGpuBufferHandoffStatus: gpuBufferHandoff.status,
+        surfaceDrawGpuBufferHandoffReason: gpuBufferHandoff.reason,
+        surfaceDrawGpuBufferHandoffReadbackMode: gpuBufferHandoff.readbackMode,
+        surfaceDrawGpuBufferHandoffNoFullReadback: gpuBufferHandoff.noFullReadback,
+        surfaceDrawGpuBufferHandoffNoSummaryReadback: gpuBufferHandoff.noSummaryReadback,
+        surfaceDrawGpuBufferHandoffUpperBoundVertexCount: gpuBufferHandoff.upperBoundVertexCount,
+        surfaceDrawGpuBufferHandoffUpperBoundTriangleCount: gpuBufferHandoff.upperBoundTriangleCount,
+        surfaceDrawGpuBufferHandoffConservativeDrawRange: gpuBufferHandoff.conservativeDrawRange,
         fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
         requestedVisibleRendererBridge: renderBridgeMode,
@@ -10885,6 +11014,9 @@ export function createSphPhaseScene(container, {
           : null);
       const renderBridgeReady = renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
         || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS;
+      const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
+        surfaceDraw: surfaceDrawExecution
+      });
       const residentDraw = {
         schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
         status: 'resident-extension-surface-draw-buffers-retained',
@@ -10930,6 +11062,16 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
           surfaceDrawExecution.surfaceDrawGpuOnlyDrawRangeConservative
         ),
+        surfaceDrawGpuBufferHandoffSchema: gpuBufferHandoff.schema,
+        surfaceDrawGpuBufferHandoffReady: gpuBufferHandoff.ready,
+        surfaceDrawGpuBufferHandoffStatus: gpuBufferHandoff.status,
+        surfaceDrawGpuBufferHandoffReason: gpuBufferHandoff.reason,
+        surfaceDrawGpuBufferHandoffReadbackMode: gpuBufferHandoff.readbackMode,
+        surfaceDrawGpuBufferHandoffNoFullReadback: gpuBufferHandoff.noFullReadback,
+        surfaceDrawGpuBufferHandoffNoSummaryReadback: gpuBufferHandoff.noSummaryReadback,
+        surfaceDrawGpuBufferHandoffUpperBoundVertexCount: gpuBufferHandoff.upperBoundVertexCount,
+        surfaceDrawGpuBufferHandoffUpperBoundTriangleCount: gpuBufferHandoff.upperBoundTriangleCount,
+        surfaceDrawGpuBufferHandoffConservativeDrawRange: gpuBufferHandoff.conservativeDrawRange,
         fullSurfaceDrawReadback: Boolean(surfaceDrawExecution.fullSurfaceDrawReadback),
         compactionMode: surfaceDrawExecution.compactionMode,
         requestedVisibleRendererBridge: renderBridgeMode,
@@ -10946,6 +11088,8 @@ export function createSphPhaseScene(container, {
         renderBridgePlanRequestedReadbackMode: renderBridgePlan.requestedReadbackMode,
         renderBridgePlanTranslationReadbackMode: renderBridgePlan.translationReadbackMode,
         renderBridgePlanEffectiveMode: renderBridgePlan.effectiveRenderBridgeMode,
+        renderBridgePlanRetainResidentSurfaceBufferHandoff: renderBridgePlan.retainResidentSurfaceBufferHandoff,
+        renderBridgePlanHandoffReason: renderBridgePlan.handoffReason,
         renderBridgePlanFallbackThreeCompact: renderBridgePlan.fallbackThreeCompactBridge,
         renderBridgePlanFallbackReason: renderBridgePlan.fallbackReason,
         renderBridgeCapabilitySchema: rendererCapability.schema,
@@ -12450,6 +12594,23 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuOnlyUpperBoundTriangleCount: sphResidentSurfaceDraw?.surfaceDrawGpuOnlyUpperBoundTriangleCount ?? null,
         surfaceDrawGpuOnlyDrawRangeConservative: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawGpuOnlyDrawRangeConservative
+        ),
+        surfaceDrawGpuBufferHandoffReady: Boolean(sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReady),
+        surfaceDrawGpuBufferHandoffStatus: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffStatus ?? null,
+        surfaceDrawGpuBufferHandoffReason: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReason ?? null,
+        surfaceDrawGpuBufferHandoffReadbackMode: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
+        surfaceDrawGpuBufferHandoffNoFullReadback: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffNoFullReadback
+        ),
+        surfaceDrawGpuBufferHandoffNoSummaryReadback: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffNoSummaryReadback
+        ),
+        surfaceDrawGpuBufferHandoffUpperBoundVertexCount:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? null,
+        surfaceDrawGpuBufferHandoffUpperBoundTriangleCount:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount ?? null,
+        surfaceDrawGpuBufferHandoffConservativeDrawRange: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffConservativeDrawRange
         ),
         fullSurfaceDrawReadback: Boolean(sphResidentSurfaceDraw?.fullSurfaceDrawReadback),
         surfaceDrawReadbackMode: sphResidentSurfaceDraw?.readbackMode ?? null,

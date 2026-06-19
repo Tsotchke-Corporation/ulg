@@ -154,6 +154,16 @@ of pretending it knows exact active surface counts. This is the contract the
 future direct renderer/native marching-cubes consumer should use; exact CPU
 summaries remain diagnostic/parity tools, not a hot-loop requirement.
 
+Current routing note, 2026-06-18 AKDT: explicit native/extension
+`three-webgpu-surface-buffers` requests now preserve the no-full-readback
+resident surface-buffer handoff instead of forcing compact Three geometry
+readback when the visible Three WebGPU bridge is blocked. The new
+`surfaceDrawGpuBufferHandoff*` telemetry marks when retained draw, indirect,
+and compacted-vertex buffers are ready for a direct GPU consumer. Mounted
+WebGL fallback probes can still show H2O through `three-render-row-spheres`;
+those visible fallbacks do not satisfy the direct GPU consumer gate unless the
+handoff counter is nonzero.
+
 Current routing note, 2026-06-18 AKDT: ULG now follows NodeKernel for both GPU
 resident stage placement and execution when a real NodeKernel owns the
 resident ComputeManager. The mechanics stage chain records

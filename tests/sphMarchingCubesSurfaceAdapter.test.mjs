@@ -480,7 +480,7 @@ test('ULG consumes extension output descriptors without row metadata or legacy t
   assert.equal(translated.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
   assert.equal(translated.surfaceVertices.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
   assert.equal(translated.surfaceDraw.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
-  assert.equal(createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params')?.size, 96);
+  assert.equal(createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params')?.size, 144);
   assert.equal(bindGroups[0].entries[0].resource.buffer, descriptorBuffer);
 });
 
@@ -744,6 +744,34 @@ test('ULG maps extension grid-local compact positions into render-field world me
   assert.deepEqual([...translation.surfaceDraw.drawIndirectRows], [3, 1, 0, 0]);
 });
 
+test('ULG clamps extension compact positions to world-space surface bounds', () => {
+  const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
+    extensionExecution: extensionExecution(),
+    positionRows: new Float32Array([
+      0.5, 0.5, 0.5, 1,
+      2.5, 0.5, 0.5, 1,
+      0.5, 1.5, 0.5, 1
+    ]),
+    positionTransformResolution: 8,
+    fieldPadding: 0.22,
+    refEdgeM: 5,
+    positionClampMinM: [0, 0, 0],
+    positionClampMaxM: [5, 5, 5]
+  });
+
+  const rowStride = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
+  const firstVertexPosition = [...translation.surfaceVertices.vertexRows.slice(5, 8)];
+  const secondVertexPosition = [...translation.surfaceVertices.vertexRows.slice(rowStride + 5, rowStride + 8)];
+
+  assert.equal(translation.positionClampStatus, 'position-clamp-ready');
+  assert.deepEqual(firstVertexPosition, [0, 0, 0]);
+  assert.ok(secondVertexPosition[0] > 0);
+  assert.equal(secondVertexPosition[1], 0);
+  assert.equal(secondVertexPosition[2], 0);
+  assert.ok(translation.surfaceDraw.surfaces[0].boundsCenterM.every((value) => value >= 0 && value <= 5));
+  assert.ok(translation.surfaceDraw.surfaces[0].boundsRadiusM > 0);
+});
+
 test('ULG reports retained extension buffers need a GPU translation kernel when CPU positions are absent', () => {
   const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
     extensionExecution: extensionExecution()
@@ -789,6 +817,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
     phase: 'liquid',
     density: 998,
     isolation: 0.25,
+    positionClampMinM: [0, 0, 0],
+    positionClampMaxM: [5, 5, 5],
     readbackMode: 'no-full-readback',
     retainVertexRowsBuffer: true,
     retainDrawRowsBuffer: true,
@@ -807,15 +837,22 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
   assert.equal(result.hotLoopGpuTranslationRequired, false);
   assert.equal(result.positionTransformStatus, 'position-transform-disabled');
+  assert.equal(result.positionClampStatus, 'position-clamp-ready');
 
   assert.equal(result.surfaceVertices.schema, ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA);
   assert.equal(result.surfaceVertices.backend, 'webgpu');
+  assert.equal(result.surfaceVertices.vertexCount, 3);
+  assert.equal(result.surfaceVertices.triangleCount, 1);
   assert.equal(result.surfaceVertices.vertexRowsBufferRetained, true);
   assert.equal(result.surfaceVertices.vertexRowsBufferRowCount, 3);
   assert.equal(result.surfaceVertices.vertexRowsBufferByteLength, 3 * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length * 4);
   assert.equal(result.surfaceVertices.surfaceVertexReadback, false);
   assert.equal(result.surfaceVertices.vertexRows.length, 0);
   assert.equal(result.surfaceVertices.surfaces[0].surfaceIndex, 5);
+  assert.equal(result.surfaceVertices.surfaces[0].vertexOffset, 0);
+  assert.equal(result.surfaceVertices.surfaces[0].vertexCount, 3);
+  assert.deepEqual(result.surfaceVertices.surfaces[0].boundsCenterM, [2.5, 2.5, 2.5]);
+  assertApprox(result.surfaceVertices.surfaces[0].boundsRadiusM, Math.hypot(2.5, 2.5, 2.5));
   assert.equal(
     (createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-vertices')?.usage
       & GPU_BUFFER_USAGE_VERTEX),
@@ -824,6 +861,9 @@ test('ULG GPU builder translates retained extension compact positions into resid
 
   assert.equal(result.surfaceDraw.schema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA);
   assert.equal(result.surfaceDraw.backend, 'webgpu');
+  assert.equal(result.surfaceDraw.activeSurfaceCount, 1);
+  assert.equal(result.surfaceDraw.vertexCount, 3);
+  assert.equal(result.surfaceDraw.triangleCount, 1);
   assert.equal(result.surfaceDraw.drawRowsBufferRetained, true);
   assert.equal(result.surfaceDraw.drawIndirectRowsBufferRetained, true);
   assert.equal(result.surfaceDraw.compactedVertexRowsBufferRetained, true);
@@ -832,6 +872,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.surfaceDraw.surfaceDrawReadback, false);
   assert.equal(result.surfaceDraw.compactedVertexRowsBuffer, result.surfaceVertices.vertexRowsBuffer);
   assert.equal(result.surfaceDraw.surfaces[0].status, 'surface-draw-summary-not-read');
+  assert.equal(result.surfaceDraw.surfaces[0].vertexOffset, 0);
+  assert.equal(result.surfaceDraw.surfaces[0].vertexCount, 3);
 
   assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
   assert.equal(result.residentBufferLeaseResourceCount, 3);
@@ -847,7 +889,7 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-draw-indirect');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'));
-  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 96));
+  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 144));
 
   const retainedBuffers = [
     result.surfaceVertices.vertexRowsBuffer,

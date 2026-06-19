@@ -10332,3 +10332,27 @@ Direct renderer vertex-usage preflight, 2026-06-18 22:55 AKDT:
   - Passed: `2/2`.
 - `git diff --check`
   - Passed.
+
+Native MC clamp and exact no-readback draw ranges, 2026-06-18 23:16 AKDT:
+
+- `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `69/69`.
+  - New coverage proves the extension-to-ULG translator can clamp compact MC
+    world positions into a supplied simulation box, preserves exact no-readback
+    vertex/triangle ranges, widens the translation params buffer to 144 bytes,
+    and carries conservative surface bounds for retained GPU draw buffers.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH WebGPU extension surface translation maps MC grid positions into ULG world meters|SPH phase no-full retained surface draw diagnostics build under budget without overlay"`
+  - Passed: `2/2`.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase no-full render refresh can skip compact surface summary readback"`
+  - Passed: `1/1`.
+  - Browser coverage now asserts native MC no-summary handoff reports
+    `position-clamp-ready`, exact retained vertex/triangle ranges, and
+    conservative `[2.5,2.5,2.5]`/box-diagonal bounds for the 5m test box.

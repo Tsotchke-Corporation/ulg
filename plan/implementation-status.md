@@ -5778,3 +5778,21 @@ Still open:
   a retained GPU draw/summary lane.
 - The first mounted Na/H2O gas-promotion slice is complete; repeated-horizon
   product/gas orchestration remains open.
+
+## 2026-06-18 Status Update - Native MC Clamp And Exact Draw Ranges
+
+Current state:
+
+- Native marching-cubes extension output is now clamped into the simulation
+  box during extension-to-ULG translation, matching the older CPU
+  MarchingCubes container-clipping behavior.
+- The GPU translation params block is 144 bytes and carries transform, clamp,
+  and conservative bounds metadata. Retained no-summary handoffs now preserve
+  exact vertex/triangle ranges without compact surface-summary readback.
+- The scene passes `[0,0,0]..boxDims` into the native MC no-summary handoff.
+  This remains an engine-owned resident surface-buffer path with no overlay.
+
+Still open:
+
+- The visible performance/correctness gate is the same-device WebGPU renderer
+  consumer plus console-clean pixel validation, especially on mobile.

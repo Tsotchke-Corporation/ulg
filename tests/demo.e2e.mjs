@@ -5378,6 +5378,9 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
     overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
     scene.refreshViewportAndOverlay?.({ reason: 'test-no-full-render-summary-skip' });
     await new Promise((resolve) => requestAnimationFrame(resolve));
+    const residentSurfaceDraw = overlay.__sphResidentSurfaceDraw;
+    const residentSurfaceDrawExecution = residentSurfaceDraw?.surfaceDraw || null;
+    const residentSurface = residentSurfaceDrawExecution?.surfaces?.[0] || null;
     return {
       stepBackend: execution?.backend ?? null,
       stepReadbackMode: execution?.readbackMode ?? null,
@@ -5462,6 +5465,15 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
         renderState?.surfaceDrawExtensionSurfacePositionTransformStatus ?? null,
       surfaceDrawExtensionSurfacePositionTransform:
         renderState?.surfaceDrawExtensionSurfacePositionTransform ?? null,
+      residentSurfaceDrawActiveSurfaceCount: residentSurfaceDrawExecution?.activeSurfaceCount ?? null,
+      residentSurfaceDrawVertexCount: residentSurfaceDrawExecution?.vertexCount ?? null,
+      residentSurfaceDrawTriangleCount: residentSurfaceDrawExecution?.triangleCount ?? null,
+      residentSurfaceDrawPositionClampStatus: residentSurfaceDrawExecution?.positionClampStatus ?? null,
+      residentSurfaceVertexOffset: residentSurface?.vertexOffset ?? null,
+      residentSurfaceVertexCount: residentSurface?.vertexCount ?? null,
+      residentSurfaceTriangleCount: residentSurface?.triangleCount ?? null,
+      residentSurfaceBoundsCenterM: residentSurface?.boundsCenterM ?? null,
+      residentSurfaceBoundsRadiusM: residentSurface?.boundsRadiusM ?? null,
       surfaceDrawRenderBridgeStatus: renderState?.surfaceDrawRenderBridgeStatus ?? null,
       surfaceDrawRenderBridgeEngineIntegration: renderState?.surfaceDrawRenderBridgeEngineIntegration ?? null,
       surfaceDrawSummaryReadback: renderState?.surfaceDrawSummaryReadback ?? null,
@@ -5541,6 +5553,15 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.surfaceDrawExtensionSurfacePositionTransformStatus)
     .toBe('ulg-render-field-grid-to-world-transform-ready');
   expect(result.surfaceDrawExtensionSurfacePositionTransform?.enabled).toBe(true);
+  expect(result.residentSurfaceDrawActiveSurfaceCount).toBe(1);
+  expect(result.residentSurfaceDrawVertexCount).toBeGreaterThan(0);
+  expect(result.residentSurfaceDrawTriangleCount).toBeGreaterThan(0);
+  expect(result.residentSurfaceDrawPositionClampStatus).toBe('position-clamp-ready');
+  expect(result.residentSurfaceVertexOffset).toBe(0);
+  expect(result.residentSurfaceVertexCount).toBe(result.residentSurfaceDrawVertexCount);
+  expect(result.residentSurfaceTriangleCount).toBe(result.residentSurfaceDrawTriangleCount);
+  expect(result.residentSurfaceBoundsCenterM).toEqual([2.5, 2.5, 2.5]);
+  expect(result.residentSurfaceBoundsRadiusM).toBeCloseTo(Math.hypot(2.5, 2.5, 2.5), 5);
   expect(result.surfaceDrawRenderBridgeStatus).toBe('extension-surface-buffers-retained-no-overlay');
   expect(result.surfaceDrawRenderBridgeEngineIntegration).toBe('three-renderer-owned-scene-state-no-overlay');
   expect(result.surfaceDrawSummaryReadback).toBe(false);

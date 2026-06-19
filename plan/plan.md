@@ -2,6 +2,16 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: native marching-cubes surface rows are now
+clipped back into the simulation box during extension-to-ULG translation. The
+old CPU MarchingCubes path always clamped generated surfaces to the container;
+the retained native MC path was handing padded render-field coordinates directly
+to resident draw buffers, which could make the mesh look bizarre as the camera
+changed. The translation shader now accepts world-space clamp bounds and
+conservative bounds metadata, writes exact no-readback vertex/triangle ranges,
+and the scene passes `[0,0,0]..boxDims` for the native no-summary handoff. This
+keeps the fix in the engine-owned resident buffer path, with no overlay.
+
 Current checkpoint, 2026-06-18 AKDT: retained native MC compact surface vertex
 buffers now include `GPUBufferUsage.VERTEX`. This is a direct renderer
 integration preflight, not a fallback optimization: the extension-translated

@@ -95,6 +95,18 @@ struct SurfaceTranslationParams {
   position_transform_enabled: f32,
   position_transform_pad0: f32,
   position_transform_pad1: f32,
+  position_clamp_min_x_m: f32,
+  position_clamp_min_y_m: f32,
+  position_clamp_min_z_m: f32,
+  position_clamp_max_x_m: f32,
+  position_clamp_max_y_m: f32,
+  position_clamp_max_z_m: f32,
+  position_clamp_enabled: f32,
+  position_clamp_pad0: f32,
+  bounds_center_x_m: f32,
+  bounds_center_y_m: f32,
+  bounds_center_z_m: f32,
+  bounds_radius_m: f32,
 };
 
 @group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;
@@ -121,6 +133,25 @@ fn ulg_world_position(p: vec3<f32>) -> vec3<f32> {
     params.position_origin_y_m,
     params.position_origin_z_m
   ) + (p + vec3<f32>(params.position_grid_bias)) * params.position_scale_m;
+}
+
+fn clamp_world_position(p: vec3<f32>) -> vec3<f32> {
+  if (params.position_clamp_enabled <= 0.5) {
+    return p;
+  }
+  return clamp(
+    p,
+    vec3<f32>(
+      params.position_clamp_min_x_m,
+      params.position_clamp_min_y_m,
+      params.position_clamp_min_z_m
+    ),
+    vec3<f32>(
+      params.position_clamp_max_x_m,
+      params.position_clamp_max_y_m,
+      params.position_clamp_max_z_m
+    )
+  );
 }
 
 fn normalize_or_fallback(v: vec3<f32>) -> vec3<f32> {
@@ -168,10 +199,10 @@ fn write_draw_metadata() {
   surface_draw_rows[9u] = params.transparency_class_id;
   surface_draw_rows[10u] = params.depth_write_flag;
   surface_draw_rows[11u] = select(0.0, 1.0, params.triangle_count > 0u);
-  surface_draw_rows[12u] = 0.0;
-  surface_draw_rows[13u] = 0.0;
-  surface_draw_rows[14u] = 0.0;
-  surface_draw_rows[15u] = 0.0;
+  surface_draw_rows[12u] = params.bounds_center_x_m;
+  surface_draw_rows[13u] = params.bounds_center_y_m;
+  surface_draw_rows[14u] = params.bounds_center_z_m;
+  surface_draw_rows[15u] = params.bounds_radius_m;
   surface_draw_indirect_rows[0u] = params.triangle_count * 3u;
   surface_draw_indirect_rows[1u] = select(0u, 1u, params.triangle_count > 0u);
   surface_draw_indirect_rows[2u] = 0u;
@@ -185,9 +216,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
   let vertex_base = triangle_index * 3u;
-  let p0 = ulg_world_position(compact_position(vertex_base + 0u));
-  let p1 = ulg_world_position(compact_position(vertex_base + 1u));
-  let p2 = ulg_world_position(compact_position(vertex_base + 2u));
+  let p0 = clamp_world_position(ulg_world_position(compact_position(vertex_base + 0u)));
+  let p1 = clamp_world_position(ulg_world_position(compact_position(vertex_base + 1u)));
+  let p2 = clamp_world_position(ulg_world_position(compact_position(vertex_base + 2u)));
   let normal = normalize_or_fallback(cross(p1 - p0, p2 - p0));
   write_vertex(vertex_base + 0u, triangle_index, p0, normal);
   write_vertex(vertex_base + 1u, triangle_index, p1, normal);
@@ -218,6 +249,33 @@ function vector3(value, fallback = [0, 1, 0]) {
     finiteNumber(source[0], fallback[0]),
     finiteNumber(source[1], fallback[1]),
     finiteNumber(source[2], fallback[2])
+  ];
+}
+
+function validBoundsPair(min, max) {
+  return min.every(Number.isFinite)
+    && max.every(Number.isFinite)
+    && min.every((value, axis) => value <= max[axis]);
+}
+
+function resolvePositionClamp({ min = null, max = null } = {}) {
+  const clampMin = vector3(min, [NaN, NaN, NaN]);
+  const clampMax = vector3(max, [NaN, NaN, NaN]);
+  const enabled = validBoundsPair(clampMin, clampMax);
+  return {
+    enabled,
+    status: enabled ? 'position-clamp-ready' : 'position-clamp-disabled',
+    minM: enabled ? clampMin : [0, 0, 0],
+    maxM: enabled ? clampMax : [0, 0, 0]
+  };
+}
+
+function clampPositionToBounds(position, clampBounds) {
+  if (!clampBounds?.enabled) return position;
+  return [
+    Math.min(clampBounds.maxM[0], Math.max(clampBounds.minM[0], position[0])),
+    Math.min(clampBounds.maxM[1], Math.max(clampBounds.minM[1], position[1])),
+    Math.min(clampBounds.maxM[2], Math.max(clampBounds.minM[2], position[2]))
   ];
 }
 
@@ -281,6 +339,39 @@ function transformCompactPositionToUlgWorld(position, transform) {
     originM[1] + (position[1] + gridBias) * scaleM,
     originM[2] + (position[2] + gridBias) * scaleM
   ];
+}
+
+function boundsFromMinMax(minM, maxM) {
+  if (!validBoundsPair(minM, maxM)) return null;
+  const center = [
+    (minM[0] + maxM[0]) * 0.5,
+    (minM[1] + maxM[1]) * 0.5,
+    (minM[2] + maxM[2]) * 0.5
+  ];
+  return {
+    minM: [...minM],
+    maxM: [...maxM],
+    centerM: center,
+    radiusM: Math.hypot(maxM[0] - center[0], maxM[1] - center[1], maxM[2] - center[2])
+  };
+}
+
+function conservativeSurfaceBounds({ positionTransform = null, positionClamp = null } = {}) {
+  if (positionClamp?.enabled) {
+    return boundsFromMinMax(positionClamp.minM, positionClamp.maxM);
+  }
+  if (positionTransform?.enabled) {
+    const scaleM = finiteNumber(positionTransform.scaleM, 1);
+    const originM = vector3(positionTransform.originM, [0, 0, 0]);
+    const resolution = Math.max(1, Math.round(finiteNumber(positionTransform.resolution, 1)));
+    const maxOffset = Math.max(0, resolution - 1) * scaleM;
+    return boundsFromMinMax(originM, [
+      originM[0] + maxOffset,
+      originM[1] + maxOffset,
+      originM[2] + maxOffset
+    ]);
+  }
+  return null;
 }
 
 function triangleNormal(a, b, c, fallbackNormal) {
@@ -547,14 +638,26 @@ function createExtensionSurfaceTranslationParamsArray({
   depthWriteFlag,
   renderOrder,
   fallbackNormal,
-  positionTransform = null
+  positionTransform = null,
+  positionClamp = null,
+  surfaceBounds = null
 }) {
-  const buffer = new ArrayBuffer(96);
+  const buffer = new ArrayBuffer(144);
   const view = new DataView(buffer);
   const resolvedTransform = positionTransform?.enabled
     ? positionTransform
     : null;
+  const resolvedClamp = positionClamp?.enabled
+    ? positionClamp
+    : null;
+  const resolvedBounds = surfaceBounds || conservativeSurfaceBounds({
+    positionTransform: resolvedTransform,
+    positionClamp: resolvedClamp
+  });
   const originM = vector3(resolvedTransform?.originM, [0, 0, 0]);
+  const clampMinM = vector3(resolvedClamp?.minM, [0, 0, 0]);
+  const clampMaxM = vector3(resolvedClamp?.maxM, [0, 0, 0]);
+  const boundsCenterM = vector3(resolvedBounds?.centerM, [0, 0, 0]);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(vertexCount, 0))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(sourceStrideFloats, 4))), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(surfaceIndex, 0))), true);
@@ -579,6 +682,18 @@ function createExtensionSurfaceTranslationParamsArray({
   view.setFloat32(84, resolvedTransform ? 1 : 0, true);
   view.setFloat32(88, 0, true);
   view.setFloat32(92, 0, true);
+  view.setFloat32(96, clampMinM[0], true);
+  view.setFloat32(100, clampMinM[1], true);
+  view.setFloat32(104, clampMinM[2], true);
+  view.setFloat32(108, clampMaxM[0], true);
+  view.setFloat32(112, clampMaxM[1], true);
+  view.setFloat32(116, clampMaxM[2], true);
+  view.setFloat32(120, resolvedClamp ? 1 : 0, true);
+  view.setFloat32(124, 0, true);
+  view.setFloat32(128, boundsCenterM[0], true);
+  view.setFloat32(132, boundsCenterM[1], true);
+  view.setFloat32(136, boundsCenterM[2], true);
+  view.setFloat32(140, finiteNumber(resolvedBounds?.radiusM, 0), true);
   return buffer;
 }
 
@@ -612,8 +727,19 @@ function extensionSurfaceMetadata({
   renderOrder,
   transparencyClassId,
   depthWriteFlag,
-  status = 'surface-draw-summary-not-read'
+  status = 'surface-draw-summary-not-read',
+  boundsCenterM = null,
+  boundsRadiusM = null
 }) {
+  const resolvedBoundsCenterM = vector3(boundsCenterM, [0, 0, 0]);
+  const resolvedBoundsRadiusM = finiteNumber(boundsRadiusM, 0);
+  const resolvedVertexCount = Number.isFinite(Number(vertexCount))
+    ? Math.max(0, Math.round(Number(vertexCount)))
+    : null;
+  const resolvedTriangleCount = Number.isFinite(Number(triangleCount))
+    ? Math.max(0, Math.round(Number(triangleCount)))
+    : null;
+  const hasDrawableRange = (resolvedVertexCount ?? 0) >= 3;
   return {
     surfaceKey: surfaceKey || `extension-surface-${surfaceIndex}`,
     material,
@@ -623,15 +749,15 @@ function extensionSurfaceMetadata({
     materialId,
     phaseId,
     opticalStateId,
-    vertexOffset: status === 'surface-draw-ready' ? 0 : null,
-    vertexCount,
-    triangleOffset: status === 'surface-draw-ready' ? 0 : null,
-    triangleCount,
+    vertexOffset: hasDrawableRange ? 0 : null,
+    vertexCount: resolvedVertexCount,
+    triangleOffset: hasDrawableRange ? 0 : null,
+    triangleCount: resolvedTriangleCount,
     renderOrder,
     transparencyClassId,
     depthWriteFlag,
-    boundsCenterM: [0, 0, 0],
-    boundsRadiusM: status === 'surface-draw-ready' ? 0 : null,
+    boundsCenterM: resolvedBoundsCenterM,
+    boundsRadiusM: resolvedBoundsRadiusM > 0 ? resolvedBoundsRadiusM : null,
     status
   };
 }
@@ -1054,7 +1180,9 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
   positionTransformResolution = null,
   fieldPadding = null,
   refEdgeM = null,
-  positionGridBias = -0.5
+  positionGridBias = -0.5,
+  positionClampMinM = null,
+  positionClampMaxM = null
 } = {}) {
   const summary = summarizeWebGpuMarchingCubesExtensionExecution(extensionExecution);
   if (summary.extensionOk !== true) {
@@ -1131,6 +1259,10 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     refEdgeM,
     positionGridBias
   });
+  const resolvedPositionClamp = resolvePositionClamp({
+    min: positionClampMinM,
+    max: positionClampMaxM
+  });
   const triangleCount = Math.floor(vertexCount / 3);
   const alignedVertexCount = triangleCount * 3;
   const vertexRows = new Float32Array(alignedVertexCount * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length);
@@ -1144,7 +1276,10 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
       finiteNumber(sourceRows[sourceOffset + 1], 0),
       finiteNumber(sourceRows[sourceOffset + 2], 0)
     ];
-    const p = transformCompactPositionToUlgWorld(sourcePosition, resolvedPositionTransform);
+    const p = clampPositionToBounds(
+      transformCompactPositionToUlgWorld(sourcePosition, resolvedPositionTransform),
+      resolvedPositionClamp
+    );
     positions.push(p);
     for (let axis = 0; axis < 3; axis += 1) {
       min[axis] = Math.min(min[axis], p[axis]);
@@ -1231,6 +1366,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     compactionMode: 'extension-compact-position-to-ulg-rows',
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
+    positionClamp: resolvedPositionClamp,
+    positionClampStatus: resolvedPositionClamp.status,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length,
     vertexRows,
@@ -1265,6 +1402,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     compactionMode: 'extension-compact-position-to-ulg-draw-metadata',
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
+    positionClamp: resolvedPositionClamp,
+    positionClampStatus: resolvedPositionClamp.status,
     surfaces: [surface],
     scientificValidation: false,
     sphValidation: false,
@@ -1282,6 +1421,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     summary,
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
+    positionClamp: resolvedPositionClamp,
+    positionClampStatus: resolvedPositionClamp.status,
     sourceVertexCount: vertexCount,
     translatedVertexCount: alignedVertexCount,
     ignoredTrailingVertexCount: vertexCount - alignedVertexCount,
@@ -1314,6 +1455,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   fieldPadding = null,
   refEdgeM = null,
   positionGridBias = -0.5,
+  positionClampMinM = null,
+  positionClampMaxM = null,
   readbackMode = NO_FULL_READBACK_MODE,
   compactSummaryReadback = false,
   retainVertexRowsBuffer = true,
@@ -1354,6 +1497,14 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     fieldPadding,
     refEdgeM,
     positionGridBias
+  });
+  const resolvedPositionClamp = resolvePositionClamp({
+    min: positionClampMinM,
+    max: positionClampMaxM
+  });
+  const resolvedSurfaceBounds = conservativeSurfaceBounds({
+    positionTransform: resolvedPositionTransform,
+    positionClamp: resolvedPositionClamp
   });
   const resolvedRenderOrder = renderOrder == null
     ? resolvedSurfaceIndex
@@ -1417,7 +1568,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   device.queue.writeBuffer(drawIndirectRowsBuffer, 0, new Uint32Array(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length));
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-extension-surface-translation-params',
-    size: 96,
+    size: 144,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createExtensionSurfaceTranslationParamsArray({
@@ -1435,7 +1586,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     depthWriteFlag: resolvedDepthWriteFlag,
     renderOrder: resolvedRenderOrder,
     fallbackNormal: resolvedFallbackNormal,
-    positionTransform: resolvedPositionTransform
+    positionTransform: resolvedPositionTransform,
+    positionClamp: resolvedPositionClamp,
+    surfaceBounds: resolvedSurfaceBounds
   }));
   markProgress('extension-surface-translation-buffers-ready');
 
@@ -1568,12 +1721,14 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     phase,
     renderKey,
     surfaceKey,
-    vertexCount: noFullReadback && !compactSummaryReadback ? null : translatedVertexCount,
-    triangleCount: noFullReadback && !compactSummaryReadback ? null : triangleCount,
+    vertexCount: translatedVertexCount,
+    triangleCount,
     renderOrder: resolvedRenderOrder,
     transparencyClassId: resolvedTransparencyClassId,
     depthWriteFlag: resolvedDepthWriteFlag,
-    status: surfaceStatus
+    status: surfaceStatus,
+    boundsCenterM: resolvedSurfaceBounds?.centerM ?? null,
+    boundsRadiusM: resolvedSurfaceBounds?.radiusM ?? null
   });
   const surfaceVertices = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
@@ -1585,13 +1740,15 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactionMode: 'webgpu-extension-compact-position-to-ulg-rows',
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
+    positionClamp: resolvedPositionClamp,
+    positionClampStatus: resolvedPositionClamp.status,
     surfaceCount: 1,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length,
     vertexRows,
     vertexRowsByteLength: vertexRows.byteLength,
-    vertexCount: noFullReadback ? null : translatedVertexCount,
-    triangleCount: noFullReadback ? null : triangleCount,
+    vertexCount: translatedVertexCount,
+    triangleCount,
     maxVertexRows: translatedVertexCount,
     vertexRowsBufferByteLength: keepVertexRowsBuffer ? vertexRowsByteLength : 0,
     vertexRowsBufferRowCount: keepVertexRowsBuffer ? translatedVertexCount : 0,
@@ -1621,9 +1778,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceSurfaceVertexSchema: surfaceVertices.schema,
     sourceSurfaceVertexBackend: surfaceVertices.backend,
     surfaceCount: 1,
-    activeSurfaceCount: noFullReadback && !compactSummaryReadback ? null : (triangleCount > 0 ? 1 : 0),
-    vertexCount: noFullReadback && !compactSummaryReadback ? null : translatedVertexCount,
-    triangleCount: noFullReadback && !compactSummaryReadback ? null : triangleCount,
+    activeSurfaceCount: triangleCount > 0 ? 1 : 0,
+    vertexCount: translatedVertexCount,
+    triangleCount,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length,
     drawRows,
@@ -1653,6 +1810,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     compactionMode: 'webgpu-extension-compact-position-to-ulg-draw-metadata',
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
+    positionClamp: resolvedPositionClamp,
+    positionClampStatus: resolvedPositionClamp.status,
     surfaces: [surface],
     scientificValidation: false,
     sphValidation: false,
@@ -1747,6 +1906,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     surfaceDraw,
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
+    positionClamp: resolvedPositionClamp,
+    positionClampStatus: resolvedPositionClamp.status,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,

@@ -217,6 +217,15 @@ of pretending it knows exact active surface counts. This is the contract the
 future direct renderer/native marching-cubes consumer should use; exact CPU
 summaries remain diagnostic/parity tools, not a hot-loop requirement.
 
+Current routing note, 2026-06-18 AKDT: native marching-cubes retained surface
+rows now use the same container-clipping contract as the CPU MarchingCubes
+path. The extension-to-ULG translation shader accepts `[0,0,0]..boxDims`,
+clamps transformed compact MC positions before writing ULG surface rows, and
+publishes exact no-readback vertex/triangle ranges plus conservative bounds.
+This targets the weird/perspective-dependent native MC mesh artifact without
+adding an overlay or CPU geometry fallback. Remaining work is still the
+engine-owned same-device WebGPU renderer consumer and pixel validation.
+
 Current routing note, 2026-06-18 AKDT: explicit native/extension
 `three-webgpu-surface-buffers` requests now preserve the no-full-readback
 resident surface-buffer handoff instead of forcing compact Three geometry

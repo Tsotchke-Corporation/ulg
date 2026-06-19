@@ -28116,3 +28116,48 @@ Remaining:
 - The Three WebGPU external-buffer presentation gate still needs browser
   console and pixel validation before it can be enabled by default. This slice
   removes a concrete WebGPU buffer-usage blocker for that path.
+
+## 2026-06-18 23:16 AKDT - Native MC Clamp And Exact Draw Ranges
+
+Status:
+
+- Fixed another native marching-cubes rendering mismatch in the retained
+  surface-buffer path. The sibling extension emits compact MC positions from
+  padded render-field coordinates, while the old CPU MarchingCubes renderer
+  clamped generated geometry to the simulation container before presentation.
+  The no-readback native path now applies the same world-space box clamp during
+  extension-to-ULG translation instead of letting padded-field vertices leak
+  into the renderer.
+- Widened the extension surface translation uniform block to 144 bytes so the
+  GPU kernel receives transform, clamp, and conservative bounds metadata in one
+  dispatch. The shader clamps world positions before writing ULG surface vertex
+  rows and writes bounds center/radius into the draw row.
+- No-summary native MC handoffs now carry exact vertex/triangle ranges from the
+  extension result without requiring a compact-summary readback. That keeps the
+  direct consumer from using a stale or overly conservative aggregate draw range
+  for this single-surface native path.
+- The scene passes `[0,0,0]..boxDims` into the native MC translation call. This
+  is an engine integration fix, not an overlay or detached visual fallback.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`
+  reported `69/69`.
+- PASS: focused Playwright shader/native pair against
+  `https://127.0.0.1:5173` reported `2/2`:
+  `SPH WebGPU extension surface translation maps MC grid positions into ULG world meters`
+  and
+  `SPH phase no-full retained surface draw diagnostics build under budget without overlay`.
+- PASS: focused Playwright native no-summary handoff test against
+  `https://127.0.0.1:5173` reported `1/1`:
+  `SPH phase no-full render refresh can skip compact surface summary readback`.
+
+Remaining:
+
+- The native MC retained surface buffers are now transformed, clamped, and
+  vertex-bindable. The remaining visible-renderer gate is still the same-device
+  engine-owned WebGPU consumer plus console-clean pixel validation across
+  desktop and mobile.

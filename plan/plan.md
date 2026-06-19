@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-19 AKDT: native WebGPU surface presentation now
+reuses the existing main-canvas render bridge across compatible resident
+surface refreshes. The bridge compatibility check requires the same resident
+GPU device, canvas context, format, native renderer mode, and optical GPU
+table before reusing the static shader modules, layouts, render pipelines,
+sampler, camera buffer, and optical lookup buffers; each refresh still creates
+a fresh bind group for the latest compacted vertex and indirect draw buffers.
+The performance harness now reports `surfaceDrawRenderBridgeReused`,
+`surfaceDrawRenderBridgeUpdateCount`, and
+`surfaceDrawRenderBridgeNativeSurfaceReuseStatus`. Fresh 10k-ish three-batch
+native evidence is `status=good`, `probeStatus=good`, zero browser console
+issues, zero render-row readback, visible native GPU consumer ready, bridge
+`reused=true`, update count `1`, actual particles `9826`, mean batch
+`96.17 ms`, resident completed stage `3.0 ms`, native extraction `4.6 ms`,
+translation `1.6 ms`, bridge refresh `3.2 ms`, and render status
+`native-webgpu-surface-consumer-rendered`. This removes repeated static
+renderer setup from the hot path; remaining frame time is now cadence/noise in
+native extraction, surface refresh, and thermal-aware resident sequencing.
+
 Current checkpoint, 2026-06-19 AKDT: retained thermal and mechanics-refresh
 outputs no longer pay full zero-upload costs before the shader overwrites
 them. The thermal WebGPU kernel now allocates output state/thermo storage

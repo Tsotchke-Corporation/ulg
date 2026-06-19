@@ -412,6 +412,24 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.renderBridgeLastRenderSkipReason
     ?? surfaceDraw?.surfaceDrawRenderBridgeLastRenderSkipReason
     ?? null;
+  const surfaceDrawRenderBridgeReused =
+    renderState?.surfaceDrawRenderBridgeReused
+    ?? surfaceDraw?.renderBridgeReused
+    ?? surfaceDraw?.surfaceDrawRenderBridgeReused
+    ?? null;
+  const surfaceDrawRenderBridgeUpdateCount = numberOrNull(
+    renderState?.surfaceDrawRenderBridgeUpdateCount
+      ?? surfaceDraw?.renderBridgeUpdateCount
+      ?? surfaceDraw?.surfaceDrawRenderBridgeUpdateCount
+  );
+  const surfaceDrawRenderBridgeNativeSurfaceReuseStatus =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceReuseStatus
+    ?? surfaceDraw?.renderBridgeNativeSurfaceReuseStatus
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceReuseStatus
+    ?? (surfaceDrawRenderBridgeReused === true && surfaceDrawBridge === 'native-webgpu-surface-consumer'
+      ? 'native-webgpu-surface-consumer-bridge-reused'
+      : null)
+    ?? null;
   const surfaceDrawNativeMarchingCubesExtractionElapsedMs = numberOrNull(
     renderState?.surfaceDrawNativeMarchingCubesExtractionElapsedMs
       ?? surfaceDraw?.nativeMarchingCubesExtractionElapsedMs
@@ -730,6 +748,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawRenderBridgeReadbackSmokeValidationStatus,
     surfaceDrawRenderBridgeOffscreenValidationStatus,
     surfaceDrawRenderBridgeLastRenderSkipReason,
+    surfaceDrawRenderBridgeReused,
+    surfaceDrawRenderBridgeUpdateCount,
+    surfaceDrawRenderBridgeNativeSurfaceReuseStatus,
     surfaceDrawNativeMarchingCubesExtractionElapsedMs,
     surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs,
     surfaceDrawNativeMarchingCubesTotalElapsedMs,

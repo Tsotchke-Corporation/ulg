@@ -3889,6 +3889,9 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
   target.renderBridgeLastRenderAttemptAtMs = bridge.lastRenderAttemptAtMs ?? null;
   target.renderBridgeLastRenderSkipStatus = bridge.lastRenderSkipStatus ?? null;
   target.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason ?? null;
+  target.renderBridgeReused = Boolean(bridge.threeRenderBridgeReused);
+  target.renderBridgeUpdateCount = bridge.updateCount ?? 0;
+  target.renderBridgeNativeSurfaceReuseStatus = bridge.nativeSurfaceRenderBridgeReuseStatus ?? null;
   target.renderBridgeNativeSurfaceConsumerRafSustain = Boolean(bridge.nativeSurfaceConsumerRafSustain);
   target.renderBridgeLastNativeSurfaceConsumerRafReason = bridge.lastNativeSurfaceConsumerRafReason ?? null;
   target.renderBridgeLastNativeSurfaceConsumerRafScheduleReason =
@@ -10034,6 +10037,174 @@ export function createSphPhaseScene(container, {
           alphaMode: 'premultiplied'
         });
       }
+      const bridgeOpticalGpuTable = opticalGpuTable?.recordCount > 0
+        ? opticalGpuTable
+        : buildOpticalGpuTable([{ material: 'unknown', phase: 'unknown' }], {
+            materialProperties: currentMaterialProperties || {}
+          });
+      const bridgeOpticalGpuTableReuseKey = [
+        bridgeOpticalGpuTable.recordCount,
+        bridgeOpticalGpuTable.recordStrideFloats,
+        bridgeOpticalGpuTable.spectralSampleCount,
+        bridgeOpticalGpuTable.spectralSampleStrideFloats
+      ].join(':');
+      const previousBridge = sphResidentSurfaceDrawRenderBridge;
+      const canReuseNativeBridge = Boolean(
+        useNativeConsumer
+        && previousBridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+        && previousBridge.device === device
+        && previousBridge.context === context
+        && previousBridge.format === format
+        && previousBridge.bindGroupLayout
+        && previousBridge.cameraBuffer
+        && previousBridge.opaquePipeline
+        && previousBridge.transparentPipeline
+        && previousBridge.transparentOitPipeline
+        && previousBridge.oitCompositePipeline
+        && previousBridge.oitCompositeBindGroupLayout
+        && previousBridge.oitSampler
+        && previousBridge.opticalGpuBuffers?.recordsBuffer
+        && previousBridge.opticalGpuBuffers?.spectralSamplesBuffer
+        && previousBridge.opticalGpuTable === bridgeOpticalGpuTable
+        && previousBridge.opticalGpuTableReuseKey === bridgeOpticalGpuTableReuseKey
+      );
+      if (canReuseNativeBridge) {
+        const bindGroup = device.createBindGroup({
+          label: 'ulg-sph-resident-surface-draw-overlay-bind-group',
+          layout: previousBridge.bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: surfaceDrawExecution.compactedVertexRowsBuffer } },
+            { binding: 1, resource: { buffer: previousBridge.cameraBuffer } },
+            { binding: 2, resource: { buffer: previousBridge.opticalGpuBuffers.recordsBuffer } },
+            { binding: 3, resource: { buffer: previousBridge.opticalGpuBuffers.spectralSamplesBuffer } }
+          ]
+        });
+        const indirectStrideBytes = 4 * Uint32Array.BYTES_PER_ELEMENT;
+        const drawOrder = residentSurfaceDrawOrder(surfaceDrawExecution.surfaces || [], {
+          indirectStrideBytes
+        });
+        const surfaceDrawSurfaces = compactResidentSurfaceDrawSurfaces(surfaceDrawExecution.surfaces || []);
+        const nativeSurfaceDebugMode = resolveSphNativeWebGpuSurfaceConsumerDebugMode();
+        const updateCount = Math.max(0, Math.round(Number(previousBridge.updateCount) || 0)) + 1;
+        const drawState = {
+          bindGroup,
+          drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
+          surfaceCount: surfaceDrawExecution.surfaceCount,
+          sourceSurfaceCount: surfaceDrawExecution.surfaceCount,
+          surfaces: surfaceDrawSurfaces,
+          drawOrder,
+          drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
+          drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
+          drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
+          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+          transparencyCompositeMode: 'weighted-blended-oit',
+          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
+          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          opticalRenderSource: 'closure-derived-optical-gpu-table',
+          opticalRecordCount: bridgeOpticalGpuTable.recordCount,
+          opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
+          opticalSpectralSampleCount: bridgeOpticalGpuTable.spectralSampleCount,
+          opticalSpectralSampleStrideFloats: bridgeOpticalGpuTable.spectralSampleStrideFloats,
+          temporalSwapPolicy: SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
+          indirectStrideBytes
+        };
+        Object.assign(previousBridge, {
+          status: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS,
+          rendererBridge: SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE,
+          visibleRenderSource: 'resident-surface-draw-native-webgpu-consumer',
+          reason: null,
+          overlayPolicy,
+          canvas,
+          context,
+          device,
+          format,
+          engineIntegration: 'native-webgpu-engine-main-canvas-no-overlay',
+          externalGpuBufferGeometry: true,
+          externalGpuBufferByteLength: surfaceDrawExecution?.compactedVertexRowsBufferByteLength ?? 0,
+          externalGpuBufferVertexRowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS,
+          externalGpuBufferNormalAttribute: false,
+          externalGpuBufferNormalAttributeDisabledReason:
+            'native WebGPU surface consumer reads packed normals directly from retained compact vertex rows',
+          externalGpuBufferIndirect: Boolean(surfaceDrawExecution?.drawIndirectRowsBufferRetained),
+          externalGpuBufferIndirectRuntimeValidated: true,
+          externalGpuBufferIndirectDisabledReason: null,
+          nativeWebGpuSurfaceConsumer: true,
+          nativeWebGpuSurfaceConsumerEngineIntegration: nativeConsumer?.engineIntegration ?? null,
+          nativeWebGpuSurfaceConsumerRuntimeValidated: Boolean(nativeConsumer?.runtimeValidated),
+          deviceLost: Boolean(nativeConsumer?.deviceLost),
+          deviceLostReason: nativeConsumer?.deviceLostReason ?? null,
+          deviceLostInfo: nativeConsumer?.deviceLostInfo ?? null,
+          nativeWebGpuSurfaceConsumerPixelValidationStatus:
+            nativeConsumer?.pixelValidationStatus || previousBridge.nativeWebGpuSurfaceConsumerPixelValidationStatus || 'not-run',
+          configuredCanvasWidth: nativeConsumer?.configuredCanvasWidth ?? canvas.width ?? null,
+          configuredCanvasHeight: nativeConsumer?.configuredCanvasHeight ?? canvas.height ?? null,
+          configuredFormat: nativeConsumer?.configuredFormat ?? format,
+          configuredDevice: nativeConsumer?.configuredDevice ?? device,
+          contextConfigureCount: nativeConsumer?.contextConfigureCount ?? previousBridge.contextConfigureCount ?? 0,
+          lastContextConfigureReason:
+            nativeConsumer?.lastContextConfigureReason ?? previousBridge.lastContextConfigureReason ?? null,
+          pixelValidationStatus:
+            nativeConsumer?.pixelValidationStatus || previousBridge.pixelValidationStatus || 'not-run',
+          nativeWebGpuSurfaceConsumerOffscreenValidationStatus:
+            nativeConsumer?.offscreenValidationStatus || previousBridge.nativeWebGpuSurfaceConsumerOffscreenValidationStatus || 'not-run',
+          nativeSurfaceDebugMode,
+          lastNativeSurfaceDebugMode: nativeSurfaceDebugMode,
+          lastNativeSurfaceDebugStatus: null,
+          lastNativeSurfaceDebugSkippedDrawCount: null,
+          lastNativeSurfaceDebugClearValue: null,
+          readbackSmokeValidationStatus:
+            nativeConsumer?.readbackSmokeValidationStatus || previousBridge.readbackSmokeValidationStatus || 'not-run',
+          readbackSmokeValidationReason:
+            nativeConsumer?.readbackSmokeValidationReason || previousBridge.readbackSmokeValidationReason || null,
+          readbackSmokeValidationSample: Array.isArray(nativeConsumer?.readbackSmokeValidationSample)
+            ? [...nativeConsumer.readbackSmokeValidationSample]
+            : (Array.isArray(previousBridge.readbackSmokeValidationSample)
+              ? [...previousBridge.readbackSmokeValidationSample]
+              : null),
+          offscreenValidationStatus:
+            nativeConsumer?.offscreenValidationStatus || previousBridge.offscreenValidationStatus || 'not-run',
+          offscreenValidationReason:
+            nativeConsumer?.offscreenValidationReason || previousBridge.offscreenValidationReason || null,
+          offscreenValidationSample: Array.isArray(nativeConsumer?.offscreenValidationSample)
+            ? [...nativeConsumer.offscreenValidationSample]
+            : (Array.isArray(previousBridge.offscreenValidationSample)
+              ? [...previousBridge.offscreenValidationSample]
+              : null),
+          offscreenValidationNonzeroPixelCount:
+            nativeConsumer?.offscreenValidationNonzeroPixelCount ?? previousBridge.offscreenValidationNonzeroPixelCount ?? null,
+          offscreenValidationPixelCount:
+            nativeConsumer?.offscreenValidationPixelCount ?? previousBridge.offscreenValidationPixelCount ?? null,
+          backgroundClearValue: { r: 0.094, g: 0.133, b: 0.169, a: 1 },
+          drawState,
+          drawOrderingPolicy: 'resident-surface-render-order-depth-policy',
+          drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
+          drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
+          drawOrderCount: drawOrder.length,
+          depthPolicy: 'opaque-depth-write-transparent-depth-test',
+          depthAttachmentFormat: SPH_RESIDENT_SURFACE_DRAW_DEPTH_FORMAT,
+          transparencyCompositeMode: 'weighted-blended-oit',
+          oitAccumFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_ACCUM_FORMAT,
+          oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
+          opticalRenderSource: 'closure-derived-optical-gpu-table',
+          opticalRecordCount: bridgeOpticalGpuTable.recordCount,
+          opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
+          opticalSpectralSampleCount: bridgeOpticalGpuTable.spectralSampleCount,
+          opticalSpectralSampleStrideFloats: bridgeOpticalGpuTable.spectralSampleStrideFloats,
+          temporalSwapPolicy: SPH_RESIDENT_SURFACE_DRAW_TEMPORAL_SWAP_POLICY,
+          retainedPreviousOverlay: false,
+          lastRenderStatus: 'native-webgpu-surface-consumer-pending',
+          threeRenderBridgeReused: true,
+          updateCount,
+          nativeSurfaceRenderBridgeReuseStatus: 'native-webgpu-surface-consumer-bridge-reused'
+        });
+        sphResidentSurfaceDrawRenderBridge = previousBridge;
+        scene.userData.sphResidentSurfaceDrawRenderBridge = previousBridge;
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({
+          reason: 'native-webgpu-surface-consumer-bridge-reused'
+        });
+        return previousBridge;
+      }
       const module = device.createShaderModule({
         label: 'ulg-sph-resident-surface-draw-overlay',
         code: SPH_RESIDENT_SURFACE_DRAW_OVERLAY_WGSL
@@ -10042,11 +10213,6 @@ export function createSphPhaseScene(container, {
         label: 'ulg-sph-resident-surface-draw-oit-composite',
         code: SPH_RESIDENT_SURFACE_DRAW_OIT_COMPOSITE_WGSL
       });
-      const bridgeOpticalGpuTable = opticalGpuTable?.recordCount > 0
-        ? opticalGpuTable
-        : buildOpticalGpuTable([{ material: 'unknown', phase: 'unknown' }], {
-            materialProperties: currentMaterialProperties || {}
-          });
       const opticalGpuBuffers = uploadOpticalGpuTable(device, bridgeOpticalGpuTable);
       const bindGroupLayout = device.createBindGroupLayout({
         label: 'ulg-sph-resident-surface-draw-overlay-bind-group-layout',
@@ -10309,8 +10475,11 @@ export function createSphPhaseScene(container, {
         opaquePipeline,
         transparentPipeline,
         transparentOitPipeline,
+        bindGroupLayout,
+        pipelineLayout,
         oitCompositePipeline,
         oitCompositeBindGroupLayout,
+        oitCompositePipelineLayout,
         oitSampler,
         cameraBuffer,
         drawState: {
@@ -10348,6 +10517,8 @@ export function createSphPhaseScene(container, {
         oitRevealFormat: SPH_RESIDENT_SURFACE_DRAW_OIT_REVEAL_FORMAT,
         oitTargetsReady: false,
         opticalGpuBuffers,
+        opticalGpuTable: bridgeOpticalGpuTable,
+        opticalGpuTableReuseKey: bridgeOpticalGpuTableReuseKey,
         opticalRenderSource: 'closure-derived-optical-gpu-table',
         opticalRecordCount: bridgeOpticalGpuTable.recordCount,
         opticalRecordStrideFloats: bridgeOpticalGpuTable.recordStrideFloats,
@@ -10357,6 +10528,11 @@ export function createSphPhaseScene(container, {
         retainedPreviousOverlay: false,
         frameCount: 0,
         lastRenderStatus: useNativeConsumer ? 'native-webgpu-surface-consumer-pending' : 'pending',
+        threeRenderBridgeReused: false,
+        updateCount: 0,
+        nativeSurfaceRenderBridgeReuseStatus: useNativeConsumer
+          ? 'native-webgpu-surface-consumer-bridge-created'
+          : 'webgpu-overlay-bridge-created',
         scientificValidation: false,
         sphValidation: false,
         surfaceExtractionValidation: false,
@@ -15070,6 +15246,10 @@ export function createSphPhaseScene(container, {
         ),
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
+        renderBridgeReused: Boolean(renderBridge?.threeRenderBridgeReused),
+        renderBridgeUpdateCount: renderBridge?.updateCount ?? 0,
+        renderBridgeNativeSurfaceReuseStatus:
+          renderBridge?.nativeSurfaceRenderBridgeReuseStatus ?? null,
         renderBridgeThreeMeshCount: renderBridge?.threeMeshCount ?? 0,
         renderBridgeThreeGeometryByteLength: renderBridge?.threeGeometryByteLength ?? 0,
         renderBridgeEngineIntegration: renderBridge?.externalGpuBufferGeometry
@@ -15548,6 +15728,10 @@ export function createSphPhaseScene(container, {
             : (rendererCapability.reason || 'extension surface buffers are resident; renderer bridge not bound in this no-overlay path')),
         renderBridgeFrameCount: renderBridge?.frameCount ?? 0,
         renderBridgeLastRenderStatus: renderBridge?.lastRenderStatus ?? null,
+        renderBridgeReused: Boolean(renderBridge?.threeRenderBridgeReused),
+        renderBridgeUpdateCount: renderBridge?.updateCount ?? 0,
+        renderBridgeNativeSurfaceReuseStatus:
+          renderBridge?.nativeSurfaceRenderBridgeReuseStatus ?? null,
         renderBridgeEngineIntegration: renderBridgeReady
           ? (renderBridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
             ? 'native-webgpu-engine-main-canvas-no-overlay'
@@ -18085,6 +18269,10 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeUpdateCount: sphResidentSurfaceDraw?.renderBridgeUpdateCount
           ?? sphResidentSurfaceDrawRenderBridge?.updateCount
           ?? 0,
+        surfaceDrawRenderBridgeNativeSurfaceReuseStatus:
+          sphResidentSurfaceDraw?.renderBridgeNativeSurfaceReuseStatus
+          ?? sphResidentSurfaceDrawRenderBridge?.nativeSurfaceRenderBridgeReuseStatus
+          ?? null,
         surfaceDrawRenderBridgeRenderRowsBufferRetained: Boolean(
           sphResidentSurfaceDraw?.renderBridgeRenderRowsBufferRetained
         ),

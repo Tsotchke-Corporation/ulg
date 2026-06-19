@@ -52,6 +52,21 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Native WebGPU surface presentation now reuses compatible main-canvas render
+  bridges instead of rebuilding static shader modules, layouts, render
+  pipelines, sampler, camera buffer, and optical lookup buffers on every
+  resident surface refresh. Reuse is gated on the same resident GPU device,
+  canvas context, canvas format, native renderer mode, and optical GPU table;
+  dynamic compacted vertex and indirect draw buffers still get a fresh bind
+  group. The benchmark harness now flattens bridge reuse/update telemetry.
+  Fresh 10k-ish three-batch native evidence is `status=good`,
+  `probeStatus=good`, zero browser console issues, zero render-row readback,
+  visible native GPU consumer ready, `surfaceDrawRenderBridgeReused=true`,
+  update count `1`, actual particles `9826`, mean batch `96.17 ms`, resident
+  completed stage `3.0 ms`, extraction `4.6 ms`, translation `1.6 ms`, and
+  bridge refresh `3.2 ms`. This closes repeated static render-bridge setup as
+  a likely churn source; the next higher-leverage work remains resident
+  cadence/thermal-aware fused sequencing plus native extraction variability.
 - Retained thermal and mechanics-refresh output buffers now skip CPU-side
   zero uploads in the resident no-full GUI path. The thermal shader owns every
   output state/thermo row write and reports

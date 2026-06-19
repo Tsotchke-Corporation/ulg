@@ -216,6 +216,25 @@ Tactical status, 2026-06-18 AKDT:
   clear before the final step. This proves the handoff contract, but it still
   depends on compact-summary planning; the next throughput fix is a no-readback
   GPU planner that can refresh sparse dispatch args every hot-loop step.
+- Active-grid planning now has that no-readback hot-loop planner mode. Commit
+  `e9f6b0c` lets resident summaries submit the GPU planner passes with
+  `readCompactSummary=false`, retain the same 12-byte indirect args plus
+  64-byte metadata sidecar, skip the compact readback buffer/copy/map/decode,
+  and defer temporary cleanup behind submitted GPU work. Single-step and
+  fused-sequence active-grid MLS-MPM now request this planner even when
+  `compactSummaryMode=none`. Direct-resident evidence
+  `artifacts/sph-direct-active-grid-planner-only-nosummary-1.json` is
+  console-clean and shows batches 2/3 borrowing
+  `source=compact-summary-gpu-sidecar`, `dispatchPlanHintBorrowed=true`, and
+  `mapAsync=null`. Mounted evidence
+  `artifacts/sph-probe-active-grid-planner-only-mounted-nosummary-2.json` is
+  also console-clean, reports worker capability ready with `workerCount=12`,
+  and shows `resident-render-field-applied`; it remains visually `bad` because
+  surface-summary readback was skipped and the current WebGL-backed surface
+  draw path has no visible surface samples. This moves the active-grid planner
+  out of the compact-summary map fence; remaining throughput work is the
+  no-readback surface renderer/consumer, thermal/reaction sidecar fusion, and
+  Ocean-style sparse P2G/grid optimizations.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

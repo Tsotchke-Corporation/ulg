@@ -2,6 +2,30 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: active-grid dispatch planning no longer
+needs compact-summary CPU readback in the normal no-full resident path. Commit
+`e9f6b0c` adds a planner-only mode to the compact resident summary runner:
+it submits the GPU summary/planner passes, retains the 12-byte indirect args
+plus 64-byte metadata sidecar, skips the readback buffer/copy/map/decode path,
+and defers temporary cleanup until submitted work is complete. Single-step and
+fused-sequence active-grid MLS-MPM paths now request that no-readback planner
+when `compactSummaryMode=none`, carry fresh planner hints into the next
+resident state/upload, and surface `activeGridDispatchPlanOnlyRequested`,
+`readbackMode=no-compact-summary-readback`, and `mapAsync=null` in diagnostics
+and probe artifacts. Direct-resident evidence
+`artifacts/sph-direct-active-grid-planner-only-nosummary-1.json` is
+browser-console clean; batch 1 CPU-seeds the initial dispatch args, while
+batches 2 and 3 borrow `source=compact-summary-gpu-sidecar` with
+`dispatchPlanHintBorrowed=true` and no compact-summary map wait. Mounted scene
+evidence `artifacts/sph-probe-active-grid-planner-only-mounted-nosummary-2.json`
+is also browser-console clean and reports browser worker capability ready
+(`workerCount=12`), `resident-render-field-applied`, and the same planner-only
+handoff. The mounted probe still classifies `bad` because surface-summary
+readback was intentionally skipped and the current WebGL-backed render path
+has no visible surface samples. Next throughput work should therefore move to
+the no-readback renderer/surface consumer and thermal/reaction sidecar fusion,
+not more active-grid compact-summary readback optimization.
+
 Current checkpoint, 2026-06-18 AKDT: active-grid mechanics can now consume the
 compact-summary GPU dispatch-planner sidecar. Commit `3b438f7` carries retained
 12-byte dispatch args plus 64-byte metadata from the compact summary into the

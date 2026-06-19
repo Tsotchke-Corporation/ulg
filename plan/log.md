@@ -27744,3 +27744,53 @@ Remaining:
   pass, not from compact-summary readback machinery, so final-only and
   no-summary batches can keep every active-grid step on GPU-generated sparse
   dispatch args without paying a `mapAsync` fence.
+
+## 2026-06-18 20:57 AKDT - No-Readback Active-Grid Planner Mode
+
+Status:
+
+- Committed `e9f6b0c Plan active-grid dispatch without compact readback`.
+  The resident summary runner now accepts `readCompactSummary=false`: it
+  creates/submits the summary and active-grid planner passes, retains the
+  GPU-generated 12-byte indirect args plus 64-byte metadata buffers, and skips
+  the compact readback buffer, copy, `mapAsync`, and decode work.
+- Single-step and fused-sequence no-full active-grid MLS-MPM paths now request
+  this planner-only mode when no compact summary runner is active. The next
+  resident state/upload receives a fresh sidecar hint, so later active-grid
+  mechanics batches can borrow GPU-generated dispatch args even under
+  `compactSummaryMode=none`.
+- Diagnostics and `scripts/sph-long-horizon-probe.mjs` now expose
+  `activeGridDispatchPlanOnlyRequested`, the planner-only compact summary
+  status/readback mode, retained args/metadata byte lengths, and next planner
+  hints in both direct-resident and mounted scene artifacts.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuSummary.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `git diff --check -- src/runtime/sph/sphMlsMpmGpuSummary.js src/runtime/sph/sphMlsMpmGpuStep.js scripts/sph-long-horizon-probe.mjs tests/sphMlsMpmGpuStep.test.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `59/59`.
+- PASS with expected no-summary analysis gaps: direct-resident browser probe
+  `artifacts/sph-direct-active-grid-planner-only-nosummary-1.json` had
+  `browserConsole.issueCount=0`, no warning counts, `mapAsync=null`,
+  `summaryStatus=compact-summary-plan-only-ready`, and batches 2/3 borrowed
+  `source=compact-summary-gpu-sidecar` with
+  `dispatchPlanHintBorrowed=true`.
+- PASS with expected no-visible-surface analysis gaps: mounted scene probe
+  `artifacts/sph-probe-active-grid-planner-only-mounted-nosummary-2.json` had
+  `browserConsole.issueCount=0`, no warning counts,
+  `workerCapability.status=worker-capability-ready`, `workerCount=12`,
+  `resident-render-field-applied`, `surfaceDraw=resident-surface-draw-summary-skipped`,
+  and batches 2/3 borrowed the compact-summary GPU sidecar with
+  `mapAsync=null`.
+
+Remaining:
+
+- The active-grid planner is now off the compact-summary CPU readback fence,
+  so the next performance bottleneck is the visible renderer/surface path:
+  the mounted no-summary route still reports no visible surface samples when
+  surface-summary readback is skipped.
+- Continue with same-device/no-readback surface rendering and fold
+  thermal/reaction sidecars into the resident sequence before spending more
+  time shaving this planner pass.

@@ -67,6 +67,15 @@ function nowMs() {
     : Date.now();
 }
 
+function deferSubmittedSummaryCleanup(device, cleanup) {
+  if (typeof cleanup !== 'function') return;
+  if (typeof device?.queue?.onSubmittedWorkDone === 'function') {
+    device.queue.onSubmittedWorkDone().then(cleanup, cleanup);
+    return;
+  }
+  setTimeout(cleanup, 0);
+}
+
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -423,9 +432,11 @@ export async function runMlsMpmResidentSummaryWebGpu({
   reactionStep = null,
   cohortRanges = null,
   summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
-  activeGridDispatchPlan = false
+  activeGridDispatchPlan = false,
+  readCompactSummary = true
 } = {}) {
   const summaryTimingStartMs = nowMs();
+  const shouldReadCompactSummary = readCompactSummary !== false;
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
     throw new TypeError('runMlsMpmResidentSummaryWebGpu requires a WebGPU-like device with queue.writeBuffer');
   }
@@ -474,11 +485,13 @@ export async function runMlsMpmResidentSummaryWebGpu({
     size: summaryByteLength,
     usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC
   });
-  const readBuffer = device.createBuffer({
-    label: 'ulg-mls-mpm-resident-summary-readback',
-    size: summaryByteLength,
-    usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
-  });
+  const readBuffer = shouldReadCompactSummary
+    ? device.createBuffer({
+      label: 'ulg-mls-mpm-resident-summary-readback',
+      size: summaryByteLength,
+      usage: GPU_BUFFER_USAGE.MAP_READ | GPU_BUFFER_USAGE.COPY_DST
+    })
+    : null;
   const paramsBuffer = device.createBuffer({
     label: 'ulg-mls-mpm-resident-summary-params',
     size: 32,
@@ -588,7 +601,7 @@ export async function runMlsMpmResidentSummaryWebGpu({
   };
   const partialsResourceKey = `compact-summary:partials:${partialCount}:${partialsByteLength}`;
   const summaryResourceKey = `compact-summary:summary:${summaryByteLength}`;
-  const readbackResourceKey = `compact-summary:readback:${summaryByteLength}`;
+  const readbackResourceKey = shouldReadCompactSummary ? `compact-summary:readback:${summaryByteLength}` : null;
   registerCompactSummaryBuffer({
     resourceKey: partialsResourceKey,
     resourceKind: 'compact-summary-partials-buffer',
@@ -605,15 +618,18 @@ export async function runMlsMpmResidentSummaryWebGpu({
     rowCount: 1,
     expectedConsumers: ['compact-summary-readback']
   });
-  registerCompactSummaryBuffer({
-    resourceKey: readbackResourceKey,
-    resourceKind: 'compact-summary-readback-buffer',
-    buffer: readBuffer,
-    byteLength: summaryByteLength,
-    rowCount: 1,
-    expectedConsumers: ['compact-summary-cpu-decode']
-  });
+  if (shouldReadCompactSummary) {
+    registerCompactSummaryBuffer({
+      resourceKey: readbackResourceKey,
+      resourceKind: 'compact-summary-readback-buffer',
+      buffer: readBuffer,
+      byteLength: summaryByteLength,
+      rowCount: 1,
+      expectedConsumers: ['compact-summary-cpu-decode']
+    });
+  }
   let compactSummaryResult = null;
+  let deferTemporaryCleanup = false;
   let compactSummaryLeasesReleased = false;
   const releaseCompactSummaryLeases = (status = 'released-after-compact-summary-readback') => {
     if (compactSummaryLeasesReleased) return;
@@ -724,11 +740,78 @@ export async function runMlsMpmResidentSummaryWebGpu({
       activeGridPlanPass.dispatchWorkgroups(1);
       activeGridPlanPass.end();
     }
-    encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
+    if (shouldReadCompactSummary) {
+      encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
+    }
     const encodeMs = Math.max(0, nowMs() - encodeStartMs);
     const submitStartMs = nowMs();
     device.queue.submit([encoder.finish()]);
     const submitMs = Math.max(0, nowMs() - submitStartMs);
+    if (!shouldReadCompactSummary) {
+      const timing = {
+        schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
+        totalMs: Math.max(0, nowMs() - summaryTimingStartMs),
+        setupMs,
+        encodeMs,
+        submitMs,
+        mapAsyncWaitMs: null,
+        decodeMs: 0,
+        queueFenceAttribution: 'none-no-compact-summary-readback',
+        summaryKernelDispatchCount: activeGridPlanPipeline ? 3 : 2,
+        summaryWorkgroupCount: partialCount + 1 + (activeGridPlanPipeline ? 1 : 0),
+        compactReadbackByteLength: 0
+      };
+      compactSummaryResult = {
+        schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: activeGridPlanState?.status === 'gpu-active-grid-summary-dispatch-plan-ready'
+          ? 'compact-summary-plan-only-ready'
+          : 'compact-summary-plan-only-unavailable',
+        reason: activeGridPlanState?.reason ?? null,
+        particleCount,
+        gridNodeCount,
+        readbackMode: 'no-compact-summary-readback',
+        compactGpuSummaryAvailable: false,
+        compactGpuSummaryStatus: 'not-read-no-compact-summary-readback',
+        summaryScope: resolvedSummaryScope,
+        gridNodeScanCount,
+        gridNodeScanSkipped: gridNodeScanCount < gridNodeCount,
+        activeGridNodeCountAvailable: false,
+        activeGridNodeSummaryStatus: 'active-grid-node-summary-not-read',
+        compactReadbackFloatCount: 0,
+        compactReadbackByteLength: 0,
+        queueCompletionStatus: 'submitted-no-compact-summary-readback',
+        queueCompletionMethod: 'queue.submit',
+        compactPartialSummaryCount: partialCount,
+        compactPartialSummaryByteLength: partialsByteLength,
+        compactReductionWorkgroupSize: SUMMARY_WORKGROUP_SIZE,
+        timing,
+        mapAsyncWaitMs: null,
+        queueFenceAttribution: timing.queueFenceAttribution,
+        sourceStateBufferMode: borrowedSourceStateBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
+        thermoBufferMode: nextThermoBufferMode,
+        sourceMechanicsBufferMode: borrowedSourceMechanicsBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
+        sourceStateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
+        thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
+        sourceMechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+        activeGridDispatchPlan: activeGridDispatchPlanDescriptor(activeGridPlanState),
+        activeGridDispatchPlanDispatchArgsBuffer: activeGridPlanState?.dispatchArgsBuffer ?? null,
+        activeGridDispatchPlanMetadataBuffer: activeGridPlanState?.metadataBuffer ?? null,
+        activeGridDispatchPlanDispatchArgsBufferByteLength: activeGridPlanState?.dispatchArgsBufferByteLength ?? 0,
+        activeGridDispatchPlanMetadataBufferByteLength: activeGridPlanState?.metadataBufferByteLength ?? 0,
+        activeGridDispatchPlanBuffersRetained: activeGridPlanState?.status === 'gpu-active-grid-summary-dispatch-plan-ready',
+        destroyActiveGridDispatchPlanBuffers: activeGridPlanState?.destroyActiveGridDispatchPlanBuffers
+          ? () => activeGridPlanState.destroyActiveGridDispatchPlanBuffers()
+          : null,
+        normalHotLoopReadbackFree: true,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+      deferTemporaryCleanup = true;
+      return compactSummaryResult;
+    }
     const mapAsyncStartMs = nowMs();
     await readBuffer.mapAsync(GPU_MAP_MODE.READ);
     const mapAsyncWaitMs = Math.max(0, nowMs() - mapAsyncStartMs);
@@ -793,23 +876,34 @@ export async function runMlsMpmResidentSummaryWebGpu({
     };
     return compactSummaryResult;
   } finally {
-    if (!borrowedSourceStateBuffer) sourceStateBuffer.destroy?.();
-    if (nextThermoBufferMode === 'temporary-source-upload') nextThermoBuffer.destroy?.();
-    if (!borrowedSourceMechanicsBuffer) sourceMechanicsBuffer.destroy?.();
-    releaseCompactSummaryLeases();
-    destroyResidentBufferWithLease(compactSummaryLeaseLedger, partialsResourceKey, () => {
-      partialsBuffer.destroy?.();
-    }, { reason: 'compact-summary-cleanup' });
-    destroyResidentBufferWithLease(compactSummaryLeaseLedger, summaryResourceKey, () => {
-      summaryBuffer.destroy?.();
-    }, { reason: 'compact-summary-cleanup' });
-    destroyResidentBufferWithLease(compactSummaryLeaseLedger, readbackResourceKey, () => {
-      readBuffer.destroy?.();
-    }, { reason: 'compact-summary-cleanup' });
-    paramsBuffer.destroy?.();
-    activeGridPlanState?.planParamsBuffer?.destroy?.();
-    if (!compactSummaryResult && activeGridPlanState?.destroyActiveGridDispatchPlanBuffers) {
-      activeGridPlanState.destroyActiveGridDispatchPlanBuffers();
+    const cleanupTemporaryBuffers = () => {
+      if (!borrowedSourceStateBuffer) sourceStateBuffer.destroy?.();
+      if (nextThermoBufferMode === 'temporary-source-upload') nextThermoBuffer.destroy?.();
+      if (!borrowedSourceMechanicsBuffer) sourceMechanicsBuffer.destroy?.();
+      releaseCompactSummaryLeases(deferTemporaryCleanup
+        ? 'released-after-compact-summary-plan-submit'
+        : 'released-after-compact-summary-readback');
+      destroyResidentBufferWithLease(compactSummaryLeaseLedger, partialsResourceKey, () => {
+        partialsBuffer.destroy?.();
+      }, { reason: 'compact-summary-cleanup' });
+      destroyResidentBufferWithLease(compactSummaryLeaseLedger, summaryResourceKey, () => {
+        summaryBuffer.destroy?.();
+      }, { reason: 'compact-summary-cleanup' });
+      if (readbackResourceKey && readBuffer) {
+        destroyResidentBufferWithLease(compactSummaryLeaseLedger, readbackResourceKey, () => {
+          readBuffer.destroy?.();
+        }, { reason: 'compact-summary-cleanup' });
+      }
+      paramsBuffer.destroy?.();
+      activeGridPlanState?.planParamsBuffer?.destroy?.();
+      if (!compactSummaryResult && activeGridPlanState?.destroyActiveGridDispatchPlanBuffers) {
+        activeGridPlanState.destroyActiveGridDispatchPlanBuffers();
+      }
+    };
+    if (deferTemporaryCleanup) {
+      deferSubmittedSummaryCleanup(device, cleanupTemporaryBuffers);
+    } else {
+      cleanupTemporaryBuffers();
     }
     if (compactSummaryResult) {
       compactSummaryResult.residentBufferLeaseLedger = compactSummaryLeaseLedger;

@@ -1352,6 +1352,93 @@ test('MLS-MPM resident summary can emit GPU active-grid dispatch plan buffers', 
   assert.equal(summary.activeGridDispatchPlanMetadataBuffer.destroyed, true);
 });
 
+test('MLS-MPM resident summary can emit active-grid dispatch plan buffers without compact readback', async () => {
+  const particleCount = 4;
+  const gridNodeCount = 512;
+  const summaryValues = new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+  summaryValues[0] = particleCount;
+  summaryValues[1] = gridNodeCount;
+  summaryValues[15] = 2;
+  summaryValues[19] = 1;
+  summaryValues[44] = 1.25;
+  summaryValues[45] = 1.25;
+  summaryValues[46] = 1.25;
+  summaryValues[47] = 1.5;
+  summaryValues[48] = 1.5;
+  summaryValues[49] = 1.5;
+  summaryValues[51] = 1;
+  const device = fakeSummaryDevice(summaryValues);
+  const tracker = fakeBufferTracker();
+  const summary = await runMlsMpmResidentSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      state: new Float32Array(particleCount * 8)
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      mechanics: new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length)
+    },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo')
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics')
+    },
+    gridUpdate: {
+      gridNodeCount,
+      gridDims: [8, 8, 8],
+      gridShift: 4,
+      gridSpacingM: 0.25,
+      gpuResult: { updatedGridBuffer: tracker.buffer('updated-grid') }
+    },
+    g2pReconstruction: {
+      gridNodeCount,
+      gridDims: [8, 8, 8],
+      gridShift: 4,
+      gridSpacingM: 0.25,
+      stateBuffer: tracker.buffer('next-state'),
+      mechanicsBuffer: tracker.buffer('next-mechanics')
+    },
+    readCompactSummary: false,
+    activeGridDispatchPlan: {
+      requested: true,
+      dt: 0.001,
+      stepCount: 2,
+      gravityMPerS2: [0, -9.80665, 0],
+      safetyCells: 1
+    }
+  });
+
+  assert.equal(summary.status, 'compact-summary-plan-only-ready');
+  assert.equal(summary.readbackMode, 'no-compact-summary-readback');
+  assert.equal(summary.compactGpuSummaryAvailable, false);
+  assert.equal(summary.compactGpuSummaryStatus, 'not-read-no-compact-summary-readback');
+  assert.equal(summary.timing.mapAsyncWaitMs, null);
+  assert.equal(summary.timing.decodeMs, 0);
+  assert.equal(summary.timing.compactReadbackByteLength, 0);
+  assert.equal(summary.normalHotLoopReadbackFree, true);
+  assert.equal(summary.activeGridDispatchPlan.status, 'gpu-active-grid-summary-dispatch-plan-ready');
+  assert.equal(summary.activeGridDispatchPlan.source, 'compact-summary-gpu-sidecar');
+  assert.equal(summary.activeGridDispatchPlanBuffersRetained, true);
+  assert.equal(summary.activeGridDispatchPlanDispatchArgsBuffer.label, 'ulg-mls-mpm-active-grid-summary-dispatch-args');
+  assert.equal(summary.activeGridDispatchPlanMetadataBuffer.label, 'ulg-mls-mpm-active-grid-summary-dispatch-metadata');
+  assert.equal(summary.activeGridDispatchPlanDispatchArgsBuffer.destroyed, false);
+  assert.equal(summary.activeGridDispatchPlanMetadataBuffer.destroyed, false);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [16, 1, 1]);
+  assert.equal(device.bindGroups.length, 3);
+  assert.equal(device.copies.length, 0);
+  assert.equal(device.createdBuffers.some((buffer) => buffer.label === 'ulg-mls-mpm-resident-summary-readback'), false);
+  summary.destroyActiveGridDispatchPlanBuffers();
+  assert.equal(summary.activeGridDispatchPlanDispatchArgsBuffer.destroyed, true);
+  assert.equal(summary.activeGridDispatchPlanMetadataBuffer.destroyed, true);
+});
+
 test('MLS-MPM resident step shares retained stage buffers across WebGPU stages', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();
@@ -1924,14 +2011,22 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
   assert.equal(step.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 3);
   assert.equal(step.stageTiming.dispatchTopology.p2gFinalize.dispatchSubmissionMode, 'dispatchWorkgroupsIndirect');
   assert.equal(step.stageTiming.dispatchTopology.gridUpdate.indirectDispatchUsed, true);
-  assert.equal(device.dispatches.length, 2);
-  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1]);
+  assert.equal(step.stageTiming.compactSummaryRequested, false);
+  assert.equal(step.stageTiming.activeGridDispatchPlanOnlyRequested, true);
+  assert.equal(step.compactGpuSummary.status, 'compact-summary-plan-only-ready');
+  assert.equal(step.compactGpuSummary.readbackMode, 'no-compact-summary-readback');
+  assert.equal(step.compactGpuSummary.timing.mapAsyncWaitMs, null);
+  assert.equal(step.residentActiveGridDispatchPlanHint.status, 'active-grid-summary-dispatch-plan-hint-ready');
+  assert.equal(step.nextParticleUploads.activeGridDispatchPlanHint.status, 'active-grid-summary-dispatch-plan-hint-ready');
+  assert.equal(device.dispatches.length, 5);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1, 154, 1, 1]);
   assert.equal(device.indirectDispatches.length, 3);
   assert.deepEqual(
     device.indirectDispatches.map((entry) => entry.workgroupCountX),
     Array(3).fill(Math.ceil(activeGridDispatch.activeNodeCount / 64))
   );
   assert.ok(device.indirectDispatches[0].workgroupCountX < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
+  assert.equal(device.copies.length, 0);
   assert.equal(device.clears.length, 0);
   destroyMlsMpmResidentStepBuffers(step);
 });
@@ -5393,7 +5488,11 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequence, true);
   assert.equal(execution.finalStep.stageTiming.fusedResidentSequenceStepCount, 2);
   assert.equal(execution.finalStep.stageTiming.compactSummaryRequested, false);
-  assert.equal(execution.finalStep.stageTiming.stageMs.compactSummary, 0);
+  assert.equal(execution.finalStep.stageTiming.activeGridDispatchPlanOnlyRequested, true);
+  assert.equal(execution.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
+  assert.equal(execution.finalStep.compactGpuSummary.readbackMode, 'no-compact-summary-readback');
+  assert.equal(execution.finalStep.compactGpuSummary.timing.mapAsyncWaitMs, null);
+  assert.equal(Number.isFinite(execution.finalStep.stageTiming.stageMs.compactSummary), true);
   assert.equal(execution.finalStep.stageTiming.activeGridDispatch.useActiveGrid, true);
   assert.ok(queueFenceCount >= 1);
   assert.equal(execution.finalStep.stageTiming.queueFenceStatus.fusedMechanicsSequence, 'complete');
@@ -5403,11 +5502,12 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(execution.fusedResidentSequence.queueFenceStatus, 'complete');
   assert.equal(execution.stepSummaries[0].compactSummaryAvailable, false);
   assert.equal(execution.stepSummaries[1].compactSummaryAvailable, false);
-  assert.equal(device.submissions.length, 1);
+  assert.equal(device.submissions.length, 2);
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.dispatchMode, 'dispatchWorkgroupsIndirect');
   assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
-  assert.equal(device.dispatches.length, 4);
+  assert.equal(device.dispatches.length, 7);
   assert.equal(device.indirectDispatches.length, 6);
+  assert.equal(device.copies.length, 0);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
@@ -5700,7 +5800,14 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.dispatchPlanHintBorrowed, true);
   assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.ownsBuffer, false);
   assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.metadataBufferByteLength, 64);
-  assert.equal(second.nextSphParticleState.residentActiveGridDispatchPlanHint, null);
+  assert.equal(second.finalStep.stageTiming.activeGridDispatchPlanOnlyRequested, true);
+  assert.equal(second.finalStep.compactGpuSummary.status, 'compact-summary-plan-only-ready');
+  assert.equal(second.finalStep.compactGpuSummary.readbackMode, 'no-compact-summary-readback');
+  assert.equal(
+    second.nextSphParticleState.residentActiveGridDispatchPlanHint.status,
+    'active-grid-summary-dispatch-plan-hint-ready'
+  );
+  assert.equal(second.nextSphParticleState.residentActiveGridDispatchPlanHint.source, 'compact-summary-gpu-sidecar');
   assert.deepEqual(device.indirectDispatches.slice(-6).map((entry) => entry.buffer.label), [
     'summary-plan-args',
     'summary-plan-args',

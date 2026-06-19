@@ -3018,6 +3018,45 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         };
       }
       stageMs.compactSummary = Math.max(0, nowMs() - compactSummaryStartMs);
+    } else if (activeGridDispatch.useActiveGrid) {
+      const compactSummaryStartMs = nowMs();
+      try {
+        compactGpuSummary = await runMlsMpmResidentSummaryWebGpu({
+          device,
+          sphParticleState: finalSourceSphParticleState,
+          mlsMpmParticleState: finalSourceMlsMpmParticleState,
+          sphParticleUpload: finalSourceSphParticleUpload,
+          mlsMpmParticleUpload: finalSourceMlsMpmParticleUpload,
+          gridUpdate,
+          g2pReconstruction,
+          thermalStep: null,
+          reactionStep: null,
+          mechanicsRefreshStep: null,
+          cohortRanges,
+          summaryScope: compactSummaryScope,
+          readCompactSummary: false,
+          activeGridDispatchPlan: {
+            requested: true,
+            dt: dtSeconds,
+            stepCount: count,
+            gravityMPerS2: gravity,
+            safetyCells: activeGridDispatch.safetyCells ?? activeGridSafetyCells
+          }
+        });
+      } catch (error) {
+        compactGpuSummary = {
+          schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+          backend: 'webgpu',
+          status: 'compact-summary-plan-only-unavailable',
+          reason: error instanceof Error ? error.message : String(error),
+          compactGpuSummaryAvailable: false,
+          scientificValidation: false,
+          sphValidation: false,
+          phaseChangeValidation: false,
+          fullPhysicsValidation: false
+        };
+      }
+      stageMs.compactSummary = Math.max(0, nowMs() - compactSummaryStartMs);
     }
     const stageTiming = {
       schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
@@ -3042,6 +3081,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       requestedReadbackMode: NO_FULL_READBACK_MODE,
       preferWebGpu,
       compactSummaryRequested: typeof summaryRunner === 'function',
+      activeGridDispatchPlanOnlyRequested: typeof summaryRunner !== 'function' && activeGridDispatch.useActiveGrid,
       compactSummaryScope,
       thermalRequested: false,
       mechanicsRefreshRequested: false,
@@ -3536,14 +3576,23 @@ export function compactMlsMpmResidentStepDiagnostics({
       compactGpuSummaryAvailable: false,
       compactGpuSummaryStatus: compactGpuSummary?.status ?? 'not-run',
       compactGpuSummaryReason: compactGpuSummary?.reason ?? null,
+      compactGpuSummaryReadbackMode: compactGpuSummary?.readbackMode ?? null,
       compactSummaryScope: compactGpuSummary?.summaryScope ?? null,
       activeGridNodeCountAvailable: compactGpuSummary?.activeGridNodeCountAvailable ?? null,
       activeGridNodeSummaryStatus: compactGpuSummary?.activeGridNodeSummaryStatus ?? null,
       gridNodeScanCount: compactGpuSummary?.gridNodeScanCount ?? null,
       gridNodeScanSkipped: compactGpuSummary?.gridNodeScanSkipped === true,
+      compactReadbackByteLength: compactGpuSummary?.compactReadbackByteLength ?? 0,
+      compactSummaryReductionStrategy: compactGpuSummary?.reductionStrategy ?? null,
       compactSummaryTiming: compactGpuSummary?.timing ?? null,
       compactSummaryMapAsyncWaitMs: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
       compactSummaryQueueFenceAttribution: compactGpuSummary?.queueFenceAttribution ?? compactGpuSummary?.timing?.queueFenceAttribution ?? null,
+      activeGridDispatchPlanStatus: compactGpuSummary?.activeGridDispatchPlan?.status ?? null,
+      activeGridDispatchPlanSource: compactGpuSummary?.activeGridDispatchPlan?.source ?? null,
+      activeGridDispatchPlanDispatchArgsBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.dispatchArgsBufferRetained ?? false,
+      activeGridDispatchPlanDispatchArgsBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.dispatchArgsBufferByteLength ?? 0,
+      activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferRetained ?? false,
+      activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
       ...topologyDiagnostics,
       ...pressureInterfaceGridForce,
       ...wallBarrierContact,
@@ -3580,14 +3629,23 @@ export function compactMlsMpmResidentStepDiagnostics({
     compactGpuSummaryAvailable: false,
     compactGpuSummaryStatus: compactGpuSummary?.status ?? 'not-run',
     compactGpuSummaryReason: compactGpuSummary?.reason ?? null,
+    compactGpuSummaryReadbackMode: compactGpuSummary?.readbackMode ?? null,
     compactSummaryScope: compactGpuSummary?.summaryScope ?? null,
     activeGridNodeCountAvailable: compactGpuSummary?.activeGridNodeCountAvailable ?? null,
     activeGridNodeSummaryStatus: compactGpuSummary?.activeGridNodeSummaryStatus ?? null,
     gridNodeScanCount: compactGpuSummary?.gridNodeScanCount ?? null,
     gridNodeScanSkipped: compactGpuSummary?.gridNodeScanSkipped === true,
+    compactReadbackByteLength: compactGpuSummary?.compactReadbackByteLength ?? 0,
+    compactSummaryReductionStrategy: compactGpuSummary?.reductionStrategy ?? null,
     compactSummaryTiming: compactGpuSummary?.timing ?? null,
     compactSummaryMapAsyncWaitMs: compactGpuSummary?.mapAsyncWaitMs ?? compactGpuSummary?.timing?.mapAsyncWaitMs ?? null,
     compactSummaryQueueFenceAttribution: compactGpuSummary?.queueFenceAttribution ?? compactGpuSummary?.timing?.queueFenceAttribution ?? null,
+    activeGridDispatchPlanStatus: compactGpuSummary?.activeGridDispatchPlan?.status ?? null,
+    activeGridDispatchPlanSource: compactGpuSummary?.activeGridDispatchPlan?.source ?? null,
+    activeGridDispatchPlanDispatchArgsBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.dispatchArgsBufferRetained ?? false,
+    activeGridDispatchPlanDispatchArgsBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.dispatchArgsBufferByteLength ?? 0,
+    activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferRetained ?? false,
+    activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary?.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
     ...topologyDiagnostics,
     ...pressureInterfaceGridForce,
     ...wallBarrierContact,
@@ -11941,6 +11999,9 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
   const customSummaryRunner = summaryRunner && summaryRunner !== runMlsMpmResidentSummaryWebGpu;
   const compactSummaryRequested = requestedReadbackMode === NO_FULL_READBACK_MODE
     && typeof summaryRunner === 'function';
+  const activeGridDispatchPlanOnlyRequested = requestedReadbackMode === NO_FULL_READBACK_MODE
+    && !compactSummaryRequested
+    && fusedMechanics?.activeGridDispatch?.useActiveGrid === true;
   let compactGpuSummary = null;
   stageMs.compactSummary = 0;
   if (
@@ -11986,6 +12047,45 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         fullPhysicsValidation: false
       };
     }
+  } else if (activeGridDispatchPlanOnlyRequested && hasWebGpuLikeSummaryDevice) {
+    try {
+      compactGpuSummary = await timedStage('compactSummary', () => runMlsMpmResidentSummaryWebGpu({
+        device: resolvedDevice,
+        sphParticleState,
+        mlsMpmParticleState,
+        sphParticleUpload,
+        mlsMpmParticleUpload,
+        gridUpdate,
+        g2pReconstruction,
+        thermalStep,
+        reactionStep,
+        mechanicsRefreshStep,
+        cohortRanges,
+        summaryScope: resolvedCompactSummaryScope,
+        readCompactSummary: false,
+        activeGridDispatchPlan: {
+          requested: true,
+          dt: dtSeconds,
+          stepCount: 1,
+          gravityMPerS2: gravity,
+          safetyCells: fusedMechanics.activeGridDispatch.safetyCells
+            ?? fusedActiveGridSafetyCells
+            ?? activeGridSafetyCells
+        }
+      }));
+    } catch (error) {
+      compactGpuSummary = {
+        schema: ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
+        backend: 'webgpu',
+        status: 'compact-summary-plan-only-unavailable',
+        reason: error instanceof Error ? error.message : String(error),
+        compactGpuSummaryAvailable: false,
+        scientificValidation: false,
+        sphValidation: false,
+        phaseChangeValidation: false,
+        fullPhysicsValidation: false
+      };
+    }
   }
   const stageTiming = {
     schema: ULG_MLS_MPM_RESIDENT_STAGE_TIMING_SCHEMA,
@@ -12012,6 +12112,7 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     requestedReadbackMode,
     preferWebGpu,
     compactSummaryRequested,
+    activeGridDispatchPlanOnlyRequested,
     compactSummaryScope: resolvedCompactSummaryScope,
     thermalRequested: Boolean(thermalMaterialTable),
     mechanicsRefreshRequested: Boolean(thermalStep && mechanicsMaterialTable),

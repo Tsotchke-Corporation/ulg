@@ -894,7 +894,17 @@ async function runBrowserProbe({
             thermalPhaseSummaryAvailable: diagnostics.thermalPhaseSummaryAvailable ?? null,
             compactGpuSummaryAvailable: diagnostics.compactGpuSummaryAvailable ?? null,
             compactGpuSummaryStatus: diagnostics.compactGpuSummaryStatus ?? null,
+            compactGpuSummaryReadbackMode: diagnostics.compactGpuSummaryReadbackMode ?? null,
             compactSummaryScope: diagnostics.compactSummaryScope ?? null,
+            compactReadbackByteLength: diagnostics.compactReadbackByteLength ?? null,
+            compactSummaryMapAsyncWaitMs: finiteOrNull(diagnostics.compactSummaryMapAsyncWaitMs),
+            compactSummaryQueueFenceAttribution: diagnostics.compactSummaryQueueFenceAttribution ?? null,
+            activeGridDispatchPlanStatus: diagnostics.activeGridDispatchPlanStatus ?? null,
+            activeGridDispatchPlanSource: diagnostics.activeGridDispatchPlanSource ?? null,
+            activeGridDispatchPlanDispatchArgsBufferRetained: diagnostics.activeGridDispatchPlanDispatchArgsBufferRetained ?? null,
+            activeGridDispatchPlanDispatchArgsBufferByteLength: diagnostics.activeGridDispatchPlanDispatchArgsBufferByteLength ?? null,
+            activeGridDispatchPlanMetadataBufferRetained: diagnostics.activeGridDispatchPlanMetadataBufferRetained ?? null,
+            activeGridDispatchPlanMetadataBufferByteLength: diagnostics.activeGridDispatchPlanMetadataBufferByteLength ?? null,
         readbackMode: diagnostics.readbackMode ?? null,
         internalPressureScale: finiteOrNull(diagnostics.internalPressureScale),
         pressureInterfaceForceRowCount: diagnostics.pressureInterfaceForceRowCount ?? null,
@@ -922,6 +932,7 @@ async function runBrowserProbe({
         } : null,
         requestedReadbackMode: stageTiming.requestedReadbackMode ?? null,
         compactSummaryRequested: stageTiming.compactSummaryRequested ?? null,
+        activeGridDispatchPlanOnlyRequested: stageTiming.activeGridDispatchPlanOnlyRequested ?? null,
         compactSummaryScope: stageTiming.compactSummaryScope ?? null,
         fusedResidentMechanics: stageTiming.fusedResidentMechanics ?? null,
         fusedResidentSequence: stageTiming.fusedResidentSequence ?? null,
@@ -936,6 +947,25 @@ async function runBrowserProbe({
         thermalRequested: stageTiming.thermalRequested ?? null,
         mechanicsRefreshRequested: stageTiming.mechanicsRefreshRequested ?? null,
         reactionRequested: stageTiming.reactionRequested ?? null
+      } : null;
+      const compactGpuSummaryResult = (summary) => summary ? {
+        schema: summary.schema ?? null,
+        backend: summary.backend ?? null,
+        status: summary.status ?? null,
+        reason: summary.reason ?? null,
+        readbackMode: summary.readbackMode ?? null,
+        compactGpuSummaryAvailable: summary.compactGpuSummaryAvailable ?? null,
+        compactGpuSummaryStatus: summary.compactGpuSummaryStatus ?? null,
+        compactReadbackByteLength: summary.compactReadbackByteLength ?? null,
+        activeGridDispatchPlan: summary.activeGridDispatchPlan
+          ? { ...summary.activeGridDispatchPlan }
+          : null,
+        timing: summary.timing ? {
+          ...summary.timing,
+          totalMs: finiteOrNull(summary.timing.totalMs),
+          mapAsyncWaitMs: finiteOrNull(summary.timing.mapAsyncWaitMs),
+          compactReadbackByteLength: finiteOrNull(summary.timing.compactReadbackByteLength)
+        } : null
       } : null;
       const finiteNumber = (value, fallback = 0) => {
         const number = Number(value);
@@ -1495,6 +1525,15 @@ async function runBrowserProbe({
             compactSummaryScope: steps.compactSummaryScope ?? null,
             continuedFromResidentState: steps.continuedFromResidentState ?? null,
             continuationAvailable: steps.continuationAvailable ?? null,
+            nextActiveGridDispatchPlanHintStatus: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.status ?? null,
+            nextActiveGridDispatchPlanHintSource: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.source ?? null,
+            nextActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
+            nextActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
+            nextUploadActiveGridDispatchPlanHintStatus: steps.nextParticleUploads?.activeGridDispatchPlanHint?.status ?? null,
+            nextUploadActiveGridDispatchPlanHintSource: steps.nextParticleUploads?.activeGridDispatchPlanHint?.source ?? null,
+            nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
+            nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
+            normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
             residentExecutionPolicy: steps.residentExecutionPolicy || overlay?.__mlsMpmResidentExecutionPolicy || null,
             fusedResidentSequence: steps.fusedResidentSequence ? {
               schema: steps.fusedResidentSequence.schema ?? null,
@@ -1527,6 +1566,7 @@ async function runBrowserProbe({
               nextTime: finiteOrNull(residentStep.particlePingPong.nextTime)
             } : null,
             stageTiming: compactStageTiming(residentStep.stageTiming || steps?.finalStep?.stageTiming),
+            compactGpuSummary: compactGpuSummaryResult(residentStep.compactGpuSummary || steps?.finalStep?.compactGpuSummary),
             diagnostics: compactDiagnostics(residentStep.diagnostics)
           } : null,
             renderState: renderState ? {
@@ -2345,7 +2385,17 @@ async function runDirectResidentProbe({
         thermalPhaseSummaryAvailable: diagnostics.thermalPhaseSummaryAvailable ?? null,
         compactGpuSummaryAvailable: diagnostics.compactGpuSummaryAvailable ?? null,
         compactGpuSummaryStatus: diagnostics.compactGpuSummaryStatus ?? null,
+        compactGpuSummaryReadbackMode: diagnostics.compactGpuSummaryReadbackMode ?? null,
         compactSummaryScope: diagnostics.compactSummaryScope ?? null,
+        compactReadbackByteLength: diagnostics.compactReadbackByteLength ?? null,
+        compactSummaryMapAsyncWaitMs: finiteOrNull(diagnostics.compactSummaryMapAsyncWaitMs),
+        compactSummaryQueueFenceAttribution: diagnostics.compactSummaryQueueFenceAttribution ?? null,
+        activeGridDispatchPlanStatus: diagnostics.activeGridDispatchPlanStatus ?? null,
+        activeGridDispatchPlanSource: diagnostics.activeGridDispatchPlanSource ?? null,
+        activeGridDispatchPlanDispatchArgsBufferRetained: diagnostics.activeGridDispatchPlanDispatchArgsBufferRetained ?? null,
+        activeGridDispatchPlanDispatchArgsBufferByteLength: diagnostics.activeGridDispatchPlanDispatchArgsBufferByteLength ?? null,
+        activeGridDispatchPlanMetadataBufferRetained: diagnostics.activeGridDispatchPlanMetadataBufferRetained ?? null,
+        activeGridDispatchPlanMetadataBufferByteLength: diagnostics.activeGridDispatchPlanMetadataBufferByteLength ?? null,
         readbackMode: diagnostics.readbackMode ?? null,
         internalPressureScale: finiteOrNull(diagnostics.internalPressureScale),
         pressureInterfaceForceRowCount: diagnostics.pressureInterfaceForceRowCount ?? null,
@@ -2756,6 +2806,7 @@ async function runDirectResidentProbe({
           } : null,
           requestedReadbackMode: step.stageTiming.requestedReadbackMode ?? null,
           compactSummaryRequested: step.stageTiming.compactSummaryRequested ?? null,
+          activeGridDispatchPlanOnlyRequested: step.stageTiming.activeGridDispatchPlanOnlyRequested ?? null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null,
           fusedResidentMechanics: step.stageTiming.fusedResidentMechanics ?? null,
           fusedResidentSequence: step.stageTiming.fusedResidentSequence ?? null,
@@ -2770,6 +2821,25 @@ async function runDirectResidentProbe({
           thermalRequested: step.stageTiming.thermalRequested ?? null,
           mechanicsRefreshRequested: step.stageTiming.mechanicsRefreshRequested ?? null,
           reactionRequested: step.stageTiming.reactionRequested ?? null
+        } : null,
+        compactGpuSummary: step.compactGpuSummary ? {
+          schema: step.compactGpuSummary.schema ?? null,
+          backend: step.compactGpuSummary.backend ?? null,
+          status: step.compactGpuSummary.status ?? null,
+          reason: step.compactGpuSummary.reason ?? null,
+          readbackMode: step.compactGpuSummary.readbackMode ?? null,
+          compactGpuSummaryAvailable: step.compactGpuSummary.compactGpuSummaryAvailable ?? null,
+          compactGpuSummaryStatus: step.compactGpuSummary.compactGpuSummaryStatus ?? null,
+          compactReadbackByteLength: step.compactGpuSummary.compactReadbackByteLength ?? null,
+          activeGridDispatchPlan: step.compactGpuSummary.activeGridDispatchPlan
+            ? { ...step.compactGpuSummary.activeGridDispatchPlan }
+            : null,
+          timing: step.compactGpuSummary.timing ? {
+            ...step.compactGpuSummary.timing,
+            totalMs: finiteOrNull(step.compactGpuSummary.timing.totalMs),
+            mapAsyncWaitMs: finiteOrNull(step.compactGpuSummary.timing.mapAsyncWaitMs),
+            compactReadbackByteLength: finiteOrNull(step.compactGpuSummary.timing.compactReadbackByteLength)
+          } : null
         } : null,
         g2pDebug: summarizeG2p(step.g2pReconstruction),
         thermalMechanicsRefreshStatus: step.thermalMechanicsRefreshStatus ?? null,

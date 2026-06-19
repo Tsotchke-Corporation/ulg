@@ -3624,17 +3624,25 @@ struct SurfaceVertexParams {
   surface_count: u32,
   max_vertex_rows: u32,
   total_field_cells: u32,
-  _pad0: u32,
+  emission_mode: u32,
   field_padding: f32,
   ref_edge_m: f32,
   isolation_scale: f32,
   _pad1: f32,
 };
 
+struct SurfaceVertexCounter {
+  vertex_count: atomic<u32>,
+  overflow_count: atomic<u32>,
+  _pad0: u32,
+  _pad1: u32,
+};
+
 @group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> render_field_cells: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> surface_vertices: array<vec4<f32>>;
 @group(0) @binding(3) var<uniform> params: SurfaceVertexParams;
+@group(0) @binding(4) var<storage, read_write> surface_vertex_counter: SurfaceVertexCounter;
 
 fn sv_surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -3787,10 +3795,20 @@ fn sv_emit_triangle(
     vc = b;
     normal = sv_triangle_normal(va, vb, vc);
   }
-  let triangle_index = (base_vertex_row + local_vertex_offset) / 3u;
-  sv_write_vertex(base_vertex_row + local_vertex_offset, surface_index, material_id, phase_id, triangle_index, 0u, va, normal, optical_state_id, isolation, isolation, source_voxel_index);
-  sv_write_vertex(base_vertex_row + local_vertex_offset + 1u, surface_index, material_id, phase_id, triangle_index, 1u, vb, normal, optical_state_id, isolation, isolation, source_voxel_index);
-  sv_write_vertex(base_vertex_row + local_vertex_offset + 2u, surface_index, material_id, phase_id, triangle_index, 2u, vc, normal, optical_state_id, isolation, isolation, source_voxel_index);
+  var write_base = base_vertex_row + local_vertex_offset;
+  if (params.emission_mode == 1u) {
+    write_base = atomicAdd(&surface_vertex_counter.vertex_count, 3u);
+  }
+  if (write_base + 2u >= params.max_vertex_rows) {
+    if (params.emission_mode == 1u) {
+      atomicAdd(&surface_vertex_counter.overflow_count, 3u);
+    }
+    return local_vertex_offset + 3u;
+  }
+  let triangle_index = write_base / 3u;
+  sv_write_vertex(write_base, surface_index, material_id, phase_id, triangle_index, 0u, va, normal, optical_state_id, isolation, isolation, source_voxel_index);
+  sv_write_vertex(write_base + 1u, surface_index, material_id, phase_id, triangle_index, 1u, vb, normal, optical_state_id, isolation, isolation, source_voxel_index);
+  sv_write_vertex(write_base + 2u, surface_index, material_id, phase_id, triangle_index, 2u, vc, normal, optical_state_id, isolation, isolation, source_voxel_index);
   return local_vertex_offset + 3u;
 }
 

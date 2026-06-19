@@ -1900,7 +1900,7 @@ test('SPH render surface vertices optional WebGPU accepts parity-passing runner'
 
 test('SPH render surface vertices retained buffer uses lease guarded cleanup', async () => {
   const field = twoSurfaceRenderField();
-  const { device } = fakeSurfaceDrawDevice({
+  const { device, shaderModules, bindGroups, createdBuffers } = fakeSurfaceDrawDevice({
     drawRows: new Float32Array(),
     compactedVertexRows: new Float32Array()
   });
@@ -1909,14 +1909,26 @@ test('SPH render surface vertices retained buffer uses lease guarded cleanup', a
     device,
     renderField: field,
     readbackMode: 'no-full-readback',
-    retainVertexRowsBuffer: true
+    retainVertexRowsBuffer: true,
+    maxVertexRows: 4098
   });
 
+  assert.equal(result.status, 'surface-vertices-resident-atomic-compact');
+  assert.equal(result.compactionMode, 'webgpu-atomic-compact');
+  assert.equal(result.surfaceVertexEmissionMode, 'atomic-compact');
+  assert.equal(result.surfaceVertexBudgetCapped, true);
+  assert.equal(result.maxVertexRows, 4098);
+  assert.ok(result.maxVertexRows < result.requiredVertexRows);
+  assert.equal(result.fixedSlotVertexRowsByteLength, 4098 * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
   assert.equal(result.residentBufferLeaseResourceCount, 1);
   assert.equal(result.residentBufferLeaseActiveLeaseCount, 1);
   assert.equal(result.queueCompletionStatus, 'queue-work-completed');
   assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.match(shaderModules[0].code, /surface_vertex_counter|atomicAdd/);
+  assert.equal(bindGroups[0].entries.length, 5);
+  assert.equal(bindGroups[0].entries[4].resource.buffer.label, 'ulg-sph-surface-vertex-counter');
+  assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-surface-vertex-counter'));
   result.destroySurfaceVertexBuffers();
   assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 1);
   assert.equal(result.vertexRowsBuffer.destroyed, false);

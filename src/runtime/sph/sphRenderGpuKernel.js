@@ -102,12 +102,15 @@ export const SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS = SPH_GPU_RENDER_SURFACE_VERTE
 export const SPH_MATERIAL_INTERFACE_CANDIDATE_FLOATS = SPH_MATERIAL_INTERFACE_CANDIDATE_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_ELEMENT_FLOATS = SPH_MATERIAL_INTERFACE_ELEMENT_ROW_LAYOUT.length;
 export const SPH_MATERIAL_INTERFACE_CANDIDATE_READBACK_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
+export const SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT = 64 * 1024 * 1024;
 
 const RENDER_SCOPE = 'sph-resident-render-row-extraction';
 const RENDER_FIELD_SCOPE = 'sph-resident-render-field-splat';
 const MATERIAL_INTERFACE_SOURCE_FIELD_SCOPE = 'sph-resident-material-interface-source-field-splat';
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
+const SURFACE_VERTEX_EMISSION_FIXED_CELL_SLOTS = 'fixed-cell-slots';
+const SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT = 'atomic-compact';
 const PHASE_NAMES_BY_ID = Object.freeze(Object.fromEntries(
   Object.entries(GPU_PHASE_IDS).map(([name, id]) => [id, name])
 ));
@@ -138,6 +141,55 @@ function finiteNumber(value, fallback = 0) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeSurfaceVertexEmissionMode(value, { noFullReadback = false } = {}) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (
+    normalized === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+    || normalized === 'webgpu-atomic-compact'
+    || normalized === 'compact'
+  ) {
+    return SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT;
+  }
+  if (
+    normalized === SURFACE_VERTEX_EMISSION_FIXED_CELL_SLOTS
+    || normalized === 'webgpu-fixed-cell-slots'
+    || normalized === 'fixed'
+  ) {
+    return SURFACE_VERTEX_EMISSION_FIXED_CELL_SLOTS;
+  }
+  return noFullReadback
+    ? SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+    : SURFACE_VERTEX_EMISSION_FIXED_CELL_SLOTS;
+}
+
+function surfaceVertexEmissionModeId(mode) {
+  return mode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT ? 1 : 0;
+}
+
+function resolveSurfaceVertexRowBudget({
+  requiredVertexRows = 0,
+  requestedMaxVertexRows = null,
+  emissionMode = SURFACE_VERTEX_EMISSION_FIXED_CELL_SLOTS,
+  compactByteBudget = SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT
+} = {}) {
+  const requiredRows = Math.max(0, Math.round(finiteNumber(requiredVertexRows, 0)));
+  const requestedRows = requestedMaxVertexRows != null && requestedMaxVertexRows !== ''
+    && Number.isFinite(Number(requestedMaxVertexRows))
+    ? Math.max(0, Math.round(Number(requestedMaxVertexRows)))
+    : null;
+  if (emissionMode !== SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT) {
+    return Math.max(requiredRows, requestedRows ?? requiredRows);
+  }
+  const rowByteLength = SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+  const budgetRows = Math.max(0, Math.floor(
+    Math.max(rowByteLength, finiteNumber(compactByteBudget, SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT))
+      / rowByteLength
+  ));
+  const requestedOrBudgetRows = requestedRows ?? budgetRows;
+  const cappedRows = Math.min(requiredRows, requestedOrBudgetRows);
+  return requiredRows > 0 ? Math.max(3, cappedRows - (cappedRows % 3)) : 0;
 }
 
 function phaseNameForId(phaseId) {
@@ -605,6 +657,7 @@ function createSurfaceVerticesParamsArray({
   surfaceCount,
   totalFieldCells,
   maxVertexRows,
+  emissionModeId = 0,
   fieldPadding,
   refEdgeM,
   isolationScale
@@ -614,7 +667,7 @@ function createSurfaceVerticesParamsArray({
   view.setUint32(0, surfaceCount, true);
   view.setUint32(4, maxVertexRows, true);
   view.setUint32(8, totalFieldCells, true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, emissionModeId, true);
   view.setFloat32(16, fieldPadding, true);
   view.setFloat32(20, refEdgeM, true);
   view.setFloat32(24, isolationScale, true);
@@ -3322,6 +3375,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   readbackMode = FULL_READBACK_MODE,
   retainVertexRowsBuffer = false,
   maxVertexRows = null,
+  surfaceVertexEmissionMode = null,
+  compactByteBudget = SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT,
   onProgress = null,
   waitForQueueCompletion = true,
   deferCleanup = true,
@@ -3342,14 +3397,20 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   const surfaceCount = renderField.surfaceTable?.surfaceCount ?? renderField.surfaceCount ?? 0;
   const totalFieldCells = renderField.totalFieldCells ?? 0;
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const emissionMode = normalizeSurfaceVertexEmissionMode(surfaceVertexEmissionMode, { noFullReadback });
+  const emissionModeId = surfaceVertexEmissionModeId(emissionMode);
   const requiredVertexRows = totalFieldCells * MARCHING_CUBE_MAX_VERTICES_PER_CELL;
-  const resolvedMaxVertexRows = Math.max(requiredVertexRows, Math.round(finiteNumber(
-    maxVertexRows,
-    requiredVertexRows
-  )));
+  const resolvedMaxVertexRows = resolveSurfaceVertexRowBudget({
+    requiredVertexRows,
+    requestedMaxVertexRows: maxVertexRows,
+    emissionMode,
+    compactByteBudget
+  });
   const fixedSlotVertexRowsByteLength = resolvedMaxVertexRows
     * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS
     * Float32Array.BYTES_PER_ELEMENT;
+  const surfaceVertexBudgetCapped = Boolean(emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+    && resolvedMaxVertexRows < requiredVertexRows);
   const markProgress = typeof onProgress === 'function'
     ? (status, extra = {}) => {
       try {
@@ -3362,6 +3423,9 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
           requiredVertexRows,
           maxVertexRows: resolvedMaxVertexRows,
           fixedSlotVertexRowsByteLength,
+          surfaceVertexEmissionMode: emissionMode,
+          surfaceVertexBudgetCapped,
+          compactByteBudget,
           readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
           ...extra
         });
@@ -3411,11 +3475,20 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     surfaceCount,
     totalFieldCells,
     maxVertexRows: resolvedMaxVertexRows,
+    emissionModeId,
     fieldPadding: finiteNumber(renderField.fieldPadding, 0.22),
     refEdgeM: finiteNumber(renderField.refEdgeM, 10),
     isolationScale: finiteNumber(isolationScale, 1)
   }));
   markProgress('surface-vertices-params-buffer-complete');
+  markProgress('surface-vertices-counter-buffer-started');
+  const counterBuffer = device.createBuffer({
+    label: 'ulg-sph-surface-vertex-counter',
+    size: 16,
+    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  });
+  device.queue.writeBuffer(counterBuffer, 0, new Uint32Array(4));
+  markProgress('surface-vertices-counter-buffer-complete');
 
   markProgress('surface-vertices-shader-module-started');
   const module = device.createShaderModule({ label: 'ulg-sph-surface-vertices', code: sphRenderSurfaceVerticesWgsl });
@@ -3429,7 +3502,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       computeBufferBinding(0, 'read-only-storage'),
       computeBufferBinding(1, 'read-only-storage'),
       computeBufferBinding(2, 'storage'),
-      computeBufferBinding(3, 'uniform')
+      computeBufferBinding(3, 'uniform'),
+      computeBufferBinding(4, 'storage')
     ]
   });
   markProgress('surface-vertices-pipeline-complete');
@@ -3440,7 +3514,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       { binding: 0, resource: { buffer: sourceSurfaceBuffer } },
       { binding: 1, resource: { buffer: sourceFieldRowsBuffer } },
       { binding: 2, resource: { buffer: vertexRowsBuffer } },
-      { binding: 3, resource: { buffer: paramsBuffer } }
+      { binding: 3, resource: { buffer: paramsBuffer } },
+      { binding: 4, resource: { buffer: counterBuffer } }
     ]
   });
   markProgress('surface-vertices-bind-group-complete');
@@ -3537,6 +3612,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
     if (!retainVertexRowsBuffer) vertexRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
+    counterBuffer.destroy?.();
   };
   if (deferNoFullCleanup) {
     markProgress('surface-vertices-cleanup-deferred', { queueCompletionStatus, queueCompletionMethod });
@@ -3582,6 +3658,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       byteLength: fixedSlotVertexRowsByteLength,
       rowCount: resolvedMaxVertexRows,
       bufferLabel: vertexRowsBuffer?.label,
+      emissionMode,
       expectedConsumers: ['surface-draw-metadata']
     });
     const lease = addResidentBufferLease(surfaceVertexLeaseLedger, {
@@ -3626,17 +3703,34 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   const result = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
     backend: 'webgpu',
-    status: noFullReadback ? 'surface-vertices-resident-fixed-slots' : ((triangleCount || 0) > 0 ? 'surface-vertices-ready' : 'surface-vertices-empty'),
+    status: noFullReadback
+      ? (emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+        ? 'surface-vertices-resident-atomic-compact'
+        : 'surface-vertices-resident-fixed-slots')
+      : ((triangleCount || 0) > 0 ? 'surface-vertices-ready' : 'surface-vertices-empty'),
     sourceRenderFieldSchema: renderField.schema,
     sourceRenderFieldBackend: renderField.backend,
     surfaceExtractionMethod: 'tetrahedralized-render-field-cubes',
-    compactionMode: noFullReadback ? 'webgpu-fixed-cell-slots' : 'webgpu-fixed-cell-slots-debug-compacted',
+    compactionMode: noFullReadback
+      ? (emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+        ? 'webgpu-atomic-compact'
+        : 'webgpu-fixed-cell-slots')
+      : 'webgpu-fixed-cell-slots-debug-compacted',
+    surfaceVertexEmissionMode: emissionMode,
+    surfaceVertexEmissionModeId: emissionModeId,
+    surfaceVertexBudgetCapped,
+    surfaceVertexCompactByteBudget: emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+      ? Math.max(0, Math.round(finiteNumber(compactByteBudget, SPH_SURFACE_VERTEX_COMPACT_BYTE_BUDGET_DEFAULT)))
+      : null,
+    requiredVertexRows,
     surfaceCount,
     totalFieldCells,
     activeCellCount: null,
     triangleCount,
     vertexCount,
-    overflowCount,
+    overflowCount: noFullReadback && emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+      ? null
+      : overflowCount,
     maxTrianglesPerCell: MARCHING_CUBE_MAX_TRIANGLES_PER_CELL,
     maxVerticesPerCell: MARCHING_CUBE_MAX_VERTICES_PER_CELL,
     maxVertexRows: resolvedMaxVertexRows,

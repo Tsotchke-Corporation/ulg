@@ -2,6 +2,16 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: retained native MC compact surface vertex
+buffers now include `GPUBufferUsage.VERTEX`. This is a direct renderer
+integration preflight, not a fallback optimization: the extension-translated
+`ulg-sph-extension-surface-vertices` buffer and the in-repo compact
+`ulg-sph-surface-draw-compacted-vertices` buffer are both valid WebGPU vertex
+sources for the engine-owned Three WebGPU external-buffer bridge when that
+presentation gate is enabled and pixel-validated. Unit coverage now asserts
+the `VERTEX` usage bit so the same-device direct consumer cannot regress back
+to storage-only buffers.
+
 Current checkpoint, 2026-06-18 AKDT: the no-summary render-field path now calls
 the sibling `webgpu-marching-cubes` buffer-volume extractor and routes the
 result back through ULG's engine-owned resident surface-draw bridge. The fix

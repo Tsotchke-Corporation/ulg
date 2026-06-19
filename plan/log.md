@@ -28082,3 +28082,37 @@ Remaining:
   engine-owned WebGPU renderer consumer and pixel checks. Until that lands,
   this slice fixes extraction geometry and buffer handoff correctness, not the
   full no-readback visible renderer.
+
+## 2026-06-18 22:55 AKDT - Direct Renderer Vertex-Usage Preflight
+
+Status:
+
+- Added `GPUBufferUsage.VERTEX` to retained compact surface vertex buffers that
+  can be consumed by the engine-owned Three WebGPU external-buffer bridge:
+  `ulg-sph-extension-surface-vertices` from the sibling native MC translation
+  path and `ulg-sph-surface-draw-compacted-vertices` from the in-repo
+  surface-draw metadata path.
+- Added fallback `GPU_BUFFER_USAGE.VERTEX` constants in both runtime modules so
+  Node/fake-device tests and browser execution use the same usage contract.
+- Extended unit coverage to assert the vertex-usage bit on both retained buffer
+  families. This catches the WebGPU validation class where a storage-only buffer
+  is later bound through Three as a vertex source.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check src/runtime/sph/sphRenderGpuKernel.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --check tests/sphRenderGpuKernel.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  reported `62/62`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `54/54`.
+- PASS: focused Playwright native MC/no-summary pair against
+  `https://127.0.0.1:5173` reported `2/2`.
+- PASS: `git diff --check`.
+
+Remaining:
+
+- The Three WebGPU external-buffer presentation gate still needs browser
+  console and pixel validation before it can be enabled by default. This slice
+  removes a concrete WebGPU buffer-usage blocker for that path.

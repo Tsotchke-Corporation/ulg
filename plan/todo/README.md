@@ -84,6 +84,13 @@ tetrahedralized fallback remains blocked. The next renderer todo is therefore
 the same-device engine-owned WebGPU surface consumer and pixel validation, not
 another extraction adapter or overlay.
 
+Current routing note, 2026-06-18 AKDT: retained native MC compact vertex
+buffers now carry `GPUBufferUsage.VERTEX`, so the direct Three WebGPU
+external-buffer bridge is no longer blocked by storage-only buffer usage. The
+browser/pixel validation gate still remains: do not enable
+`three-webgpu-surface-buffers` by default until it passes console-clean
+same-device presentation on the engine-owned renderer.
+
 Current routing note, 2026-06-18 AKDT: the interim Three render-row bridge now
 reports when it forces CPU render-row readback for fresh Three geometry, and it
 can retain the previous Three bridge on later explicit no-full refreshes. Treat

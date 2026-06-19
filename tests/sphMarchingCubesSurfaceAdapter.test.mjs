@@ -33,6 +33,8 @@ import {
   webGpuMarchingCubesExtensionSurfaceRowsWgsl
 } from '../src/runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 
+const GPU_BUFFER_USAGE_VERTEX = 32;
+
 function extensionExecution({
   status = 'surface-ready',
   ok = true,
@@ -814,6 +816,11 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.surfaceVertices.surfaceVertexReadback, false);
   assert.equal(result.surfaceVertices.vertexRows.length, 0);
   assert.equal(result.surfaceVertices.surfaces[0].surfaceIndex, 5);
+  assert.equal(
+    (createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-vertices')?.usage
+      & GPU_BUFFER_USAGE_VERTEX),
+    GPU_BUFFER_USAGE_VERTEX
+  );
 
   assert.equal(result.surfaceDraw.schema, ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA);
   assert.equal(result.surfaceDraw.backend, 'webgpu');

@@ -72,6 +72,8 @@ import {
   summarizeSphRenderFieldSurfacesWithOptionalWebGpu
 } from '../src/runtime/sph/sphRenderGpuKernel.js';
 
+const GPU_BUFFER_USAGE_VERTEX = 32;
+
 const materialProperties = {
   Au: {
     molarMassKgPerMol: 0.19696657,
@@ -2143,6 +2145,10 @@ test('SPH render surface draw WebGPU builder returns compact vertex draw source'
   assert.equal(bindGroups[0].entries[5].resource.buffer.label, 'ulg-sph-surface-draw-indirect');
   assert.equal(bindGroups[0].entries[6].resource.buffer.label, 'ulg-sph-surface-draw-source-vertex-counter');
   assert.equal(bindGroups[0].entries[7].resource.buffer.label, 'ulg-sph-surface-draw-aggregate-indirect');
+  assert.equal(
+    (result.compactedVertexRowsBuffer.usage & GPU_BUFFER_USAGE_VERTEX),
+    GPU_BUFFER_USAGE_VERTEX
+  );
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [vertices.surfaceCount]);
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawRows.byteLength));
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawIndirectRows.byteLength));

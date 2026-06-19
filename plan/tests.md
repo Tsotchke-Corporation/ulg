@@ -10310,3 +10310,25 @@ Native MC buffer-volume extraction and coordinate handoff, 2026-06-18 22:45 AKDT
   - Passed: `2/2`.
   - Browser coverage verifies the native-MC/no-summary path and the transform
     shader path against the live HTTPS Vite server.
+
+Direct renderer vertex-usage preflight, 2026-06-18 22:55 AKDT:
+
+- `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  - Passed.
+- `node --check src/runtime/sph/sphRenderGpuKernel.js`
+  - Passed.
+- `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed.
+- `node --check tests/sphRenderGpuKernel.test.mjs`
+  - Passed.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphRenderGpuKernel.test.mjs`
+  - Passed: `62/62`.
+  - Coverage asserts `GPUBufferUsage.VERTEX` on retained extension-native MC
+    surface vertices and in-repo compact surface-draw vertex buffers.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `54/54`.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH WebGPU extension surface translation maps MC grid positions|SPH phase no-full render refresh can skip compact surface summary readback"`
+  - Passed: `2/2`.
+- `git diff --check`
+  - Passed.

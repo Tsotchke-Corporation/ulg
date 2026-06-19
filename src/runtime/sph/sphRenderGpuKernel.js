@@ -119,6 +119,7 @@ const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  VERTEX: globalThis.GPUBufferUsage?.VERTEX ?? 32,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64,
   INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256
@@ -4075,7 +4076,10 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   const compactedVertexRowsBuffer = device.createBuffer({
     label: 'ulg-sph-surface-draw-compacted-vertices',
     size: Math.max(4, compactedVertexRowsByteLength),
-    usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    usage: GPU_BUFFER_USAGE.STORAGE
+      | GPU_BUFFER_USAGE.VERTEX
+      | GPU_BUFFER_USAGE.COPY_SRC
+      | GPU_BUFFER_USAGE.COPY_DST
   });
   if (compactedVertexRowsByteLength > 0) {
     device.queue.writeBuffer(

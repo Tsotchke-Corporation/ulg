@@ -146,6 +146,14 @@ promote this route until a browser run is console-clean and pixel-validated;
 use it as failure evidence while building the proper direct GPU/native
 marching-cubes consumer.
 
+Current routing note, 2026-06-18 AKDT: direct-consumer handoff telemetry now
+separates compact `surface-draw-buffers` from lower-level
+`render-field-buffers`. The current no-summary MLS-MPM route is the latter:
+it is a valid no-readback resident GPU handoff, but it explicitly requires
+native marching-cubes surface extraction before visible draw rows exist. Treat
+`requiresSurfaceExtraction=true` as the next implementation target, not as a
+reason to fall back to CPU geometry or an overlay.
+
 Current routing note, 2026-06-18 AKDT: the sibling WebGPU marching-cubes
 adapter now exposes a renderer-free preflight/capability contract, and ULG's
 wrapper consumes it before extraction. Future extension surface failures should

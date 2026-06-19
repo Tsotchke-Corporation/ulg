@@ -127,6 +127,13 @@ Tactical status, 2026-06-18 AKDT:
   zero browser console/page errors and `residentSurfaceBufferHandoffSampleCount=0`
   because the mounted path still fell back visibly instead of exercising the
   direct consumer.
+- The no-summary render-field route now publishes the direct-consumer handoff
+  as `handoffKind=render-field-buffers` with
+  `requiresSurfaceExtraction=true`. This is the right pre-native-marching-cubes
+  state: retained field buffers are resident and console-clean, but visible
+  compact vertex/draw rows still need GPU extraction. Do not treat this as a
+  completed renderer until that extraction and engine-owned draw submission are
+  browser-console and pixel validated.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

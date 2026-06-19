@@ -27903,3 +27903,55 @@ Remaining:
   no-readback path must either fix this renderer lifetime problem with console
   and pixel evidence or bypass it with a direct engine-owned WebGPU/native
   marching-cubes consumer.
+
+## 2026-06-18 21:56 AKDT - Render-Field Handoff Contract Routed Through Direct Consumer Resolver
+
+Status:
+
+- Extended `resolveResidentSurfaceBufferHandoff()` so the no-readback direct
+  consumer contract accepts two explicit shapes:
+  `surface-draw-buffers` for compact draw/indirect/vertex rows and
+  `render-field-buffers` for retained render-field rows plus the render-field
+  surface metadata buffer.
+- The no-summary resident render-field path now uses that shared resolver
+  instead of hardcoded readiness flags. Browser diagnostics and probe artifacts
+  publish `surfaceDrawGpuBufferHandoffKind`,
+  `surfaceDrawGpuBufferHandoffInputSchema`, and
+  `surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction`, making it clear that
+  render-field handoff still needs native marching-cubes extraction before it
+  can produce visible triangles.
+- `scripts/sph-performance-benchmark.mjs` now treats render-field buffer
+  handoffs as valid resident handoffs without requiring compact vertex draw
+  ranges that do not exist yet. This avoids misclassifying the architecture
+  path as invalid while still reporting `requiresSurfaceExtraction=true`.
+- The sibling `/home/cos/projects/webgpu-marching-cubes` repo now has local
+  commit `4efe868` (`Accept borrowed surface descriptors in Three WebGPU mesh`),
+  which lets its Three WebGPU mesh consume structured surface descriptors and
+  preserve borrowed engine-owned buffers.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `53/53`.
+- PASS: focused Playwright no-summary render-field handoff test passed `1/1`
+  against the live HTTPS Vite server on `https://127.0.0.1:5173`.
+- PASS with expected no-visual-motion classification:
+  `artifacts/sph-probe-render-field-handoff-contract-1.json` completed with
+  `browserConsoleIssueCount=0`,
+  `surfaceDrawGpuBufferHandoffKind=render-field-buffers`,
+  `surfaceDrawGpuBufferHandoffInputSchema=peercompute.ulg.sph-gpu-render-field.v0`,
+  `surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction=true`,
+  retained render-field rows `16777216` bytes, and retained render-field
+  surface buffer `256` bytes.
+
+Remaining:
+
+- The direct consumer still needs to turn retained render-field buffers into
+  compact vertex/draw buffers on GPU and submit them through an engine-owned
+  renderer/native marching-cubes path. The current contract deliberately
+  exposes that remaining surface-extraction step instead of hiding it behind a
+  fallback renderer.

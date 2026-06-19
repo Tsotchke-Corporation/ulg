@@ -14,6 +14,20 @@ mounted MLS-MPM runs fail-closed on Three WebGPU presentation and continue the
 real throughput work on the direct engine-owned GPU/native marching-cubes
 surface consumer.
 
+Current checkpoint, 2026-06-18 AKDT: the resident direct-consumer handoff now
+distinguishes compact surface-draw buffers from lower-level render-field
+buffers. The no-summary render path reports
+`surfaceDrawGpuBufferHandoffKind=render-field-buffers`,
+`surfaceDrawGpuBufferHandoffInputSchema=peercompute.ulg.sph-gpu-render-field.v0`,
+and `surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction=true` through the
+same resolver used by compact surface-draw handoffs. Probe evidence
+`artifacts/sph-probe-render-field-handoff-contract-1.json` is browser-console
+clean and retains the render-field rows/surface buffers; its expected
+remaining gap is native marching-cubes extraction into visible GPU draw rows.
+The sibling marching-cubes repo also has commit `4efe868`, allowing its Three
+WebGPU mesh adapter to consume structured descriptors and preserve borrowed
+engine-owned buffers.
+
 Current checkpoint, 2026-06-18 AKDT: no-full extension surface routing now keeps
 resident GPU buffers as the default when the visible same-device Three WebGPU
 consumer is unavailable. The bridge planner reports

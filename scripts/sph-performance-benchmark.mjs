@@ -307,6 +307,19 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.gpuBufferHandoffReason
     ?? surfaceDraw?.surfaceDrawGpuBufferHandoffReason
     ?? null;
+  const surfaceDrawGpuBufferHandoffKind = renderState?.surfaceDrawGpuBufferHandoffKind
+    ?? surfaceDraw?.gpuBufferHandoffKind
+    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffKind
+    ?? null;
+  const surfaceDrawGpuBufferHandoffInputSchema = renderState?.surfaceDrawGpuBufferHandoffInputSchema
+    ?? surfaceDraw?.gpuBufferHandoffInputSchema
+    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffInputSchema
+    ?? null;
+  const surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction = Boolean(
+    renderState?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction
+    ?? surfaceDraw?.gpuBufferHandoffRequiresSurfaceExtraction
+    ?? surfaceDraw?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction
+  );
   const surfaceDrawGpuBufferHandoffUpperBoundVertexCount = numberOrNull(
     renderState?.surfaceDrawGpuBufferHandoffUpperBoundVertexCount
       ?? surfaceDraw?.gpuBufferHandoffUpperBoundVertexCount
@@ -330,6 +343,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   );
   const surfaceDrawCompactedVertexRowsBufferByteLength = numberOrNull(
     renderState?.surfaceDrawCompactedVertexRowsBufferByteLength ?? surfaceDraw?.compactedVertexRowsBufferByteLength
+  );
+  const surfaceDrawRenderFieldRowsBufferByteLength = numberOrNull(
+    renderState?.surfaceDrawRenderFieldRowsBufferByteLength ?? surfaceDraw?.renderFieldRowsBufferByteLength
+  );
+  const surfaceDrawRenderFieldSurfaceBufferByteLength = numberOrNull(
+    renderState?.surfaceDrawRenderFieldSurfaceBufferByteLength ?? surfaceDraw?.renderFieldSurfaceBufferByteLength
   );
   const surfaceDrawThreeGeometryByteLength = numberOrNull(
     renderState?.surfaceDrawRenderBridgeThreeGeometryByteLength
@@ -369,9 +388,19 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
   const validResidentSurfaceBufferHandoff = (
     surfaceDrawGpuBufferHandoffReady
     && surfaceDrawStatus !== 'resident-render-row-three-bridge-retained-no-full-readback'
-    && Number(surfaceDrawCompactedVertexRowsBufferByteLength ?? 0) > 0
-    && Number(surfaceDrawIndirectRowsBufferByteLength ?? 0) > 0
-    && Number(surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? 0) >= 3
+    && (
+      (
+        surfaceDrawGpuBufferHandoffKind === 'surface-draw-buffers'
+        && Number(surfaceDrawCompactedVertexRowsBufferByteLength ?? 0) > 0
+        && Number(surfaceDrawIndirectRowsBufferByteLength ?? 0) > 0
+        && Number(surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? 0) >= 3
+      )
+      || (
+        surfaceDrawGpuBufferHandoffKind === 'render-field-buffers'
+        && Number(surfaceDrawRenderFieldRowsBufferByteLength ?? 0) > 0
+        && Number(surfaceDrawRenderFieldSurfaceBufferByteLength ?? 0) > 0
+      )
+    )
   );
   const activeGridDispatch = residentStageTiming?.activeGridDispatch ?? null;
   const performanceGate = scenarioPerformanceGate({
@@ -465,6 +494,9 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawGpuBufferHandoffReady,
     surfaceDrawGpuBufferHandoffStatus,
     surfaceDrawGpuBufferHandoffReason,
+    surfaceDrawGpuBufferHandoffKind,
+    surfaceDrawGpuBufferHandoffInputSchema,
+    surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction,
     surfaceDrawGpuBufferHandoffUpperBoundVertexCount,
     validResidentSurfaceBufferHandoff,
     surfaceDrawRequestedDiagnosticMode,
@@ -479,6 +511,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawRowsBufferByteLength,
     surfaceDrawIndirectRowsBufferByteLength,
     surfaceDrawCompactedVertexRowsBufferByteLength,
+    surfaceDrawRenderFieldRowsBufferByteLength,
+    surfaceDrawRenderFieldSurfaceBufferByteLength,
     estimatedReadbackBytesPerBatch,
     estimatedReadbackBytesPerStep,
     copyBudget: {

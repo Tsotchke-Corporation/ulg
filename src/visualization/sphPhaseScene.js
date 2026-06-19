@@ -611,6 +611,16 @@ export function resolveResidentSurfaceBufferHandoff({
   const compactedRowsFromBytes = Math.floor(
     compactedVertexRowsBufferByteLength / (SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT)
   );
+  const renderFieldRowsBufferRetained = Boolean(surfaceDraw?.renderFieldRowsBufferRetained);
+  const renderFieldRowsBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.renderFieldRowsBufferByteLength) || 0)
+  );
+  const renderFieldSurfaceBufferRetained = Boolean(surfaceDraw?.renderFieldSurfaceBufferRetained);
+  const renderFieldSurfaceBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.renderFieldSurfaceBufferByteLength) || 0)
+  );
   const upperBoundVertexCount = Math.max(
     0,
     Math.floor(Number(surfaceDraw?.surfaceDrawGpuOnlyUpperBoundVertexCount) || 0),
@@ -637,9 +647,14 @@ export function resolveResidentSurfaceBufferHandoff({
     && drawIndirectRowsBufferByteLength > 0
     && compactedVertexRowsBufferRetained
     && compactedVertexRowsBufferByteLength > 0;
+  const hasRetainedRenderFieldBuffers = renderFieldRowsBufferRetained
+    && renderFieldRowsBufferByteLength > 0
+    && renderFieldSurfaceBufferRetained
+    && renderFieldSurfaceBufferByteLength > 0;
   const hasDrawableRange = alignedUpperBoundVertexCount >= 3 && upperBoundTriangleCount > 0;
   let status = 'resident-surface-buffer-direct-consumer-blocked-unavailable';
   let reason = 'resident surface draw buffers are unavailable';
+  let handoffKind = null;
   if (!surfaceDraw) {
     status = 'resident-surface-buffer-direct-consumer-blocked-missing-surface-draw';
     reason = 'surface draw metadata is missing';
@@ -650,20 +665,34 @@ export function resolveResidentSurfaceBufferHandoff({
     status = 'resident-surface-buffer-direct-consumer-blocked-summary-readback';
     reason = 'surface draw summary readback was used; this is diagnostic/parity mode, not the direct hot path';
   } else if (!hasRetainedBuffers) {
-    status = 'resident-surface-buffer-direct-consumer-blocked-missing-retained-buffers';
-    reason = 'retained draw, indirect, and compact vertex GPU buffers are required';
+    if (hasRetainedRenderFieldBuffers) {
+      status = 'resident-render-field-buffer-direct-consumer-ready';
+      reason = null;
+      handoffKind = 'render-field-buffers';
+    } else {
+      status = 'resident-surface-buffer-direct-consumer-blocked-missing-retained-buffers';
+      reason = 'retained draw/indirect/compact-vertex buffers or retained render-field/surface buffers are required';
+    }
   } else if (!hasDrawableRange) {
     status = 'resident-surface-buffer-direct-consumer-blocked-empty-draw-range';
     reason = 'retained surface buffers do not expose a non-empty conservative draw range';
   } else {
     status = 'resident-surface-buffer-direct-consumer-ready';
     reason = null;
+    handoffKind = 'surface-draw-buffers';
   }
+  const ready = status === 'resident-surface-buffer-direct-consumer-ready'
+    || status === 'resident-render-field-buffer-direct-consumer-ready';
   return {
     schema: 'peercompute.ulg.sph-resident-surface-buffer-handoff.v0',
     status,
     reason,
-    ready: status === 'resident-surface-buffer-direct-consumer-ready',
+    ready,
+    handoffKind,
+    directConsumerInputSchema: handoffKind === 'render-field-buffers'
+      ? (surfaceDraw?.sourceRenderFieldSchema ?? surfaceDraw?.renderFieldExecution?.schema ?? null)
+      : (surfaceDraw?.surfaceDrawSchema ?? surfaceDraw?.schema ?? null),
+    requiresSurfaceExtraction: handoffKind === 'render-field-buffers',
     readbackMode: normalizedReadbackMode,
     noFullReadback,
     noSummaryReadback,
@@ -675,6 +704,10 @@ export function resolveResidentSurfaceBufferHandoff({
     drawAggregateIndirectRowsBufferByteLength,
     compactedVertexRowsBufferRetained,
     compactedVertexRowsBufferByteLength,
+    renderFieldRowsBufferRetained,
+    renderFieldRowsBufferByteLength,
+    renderFieldSurfaceBufferRetained,
+    renderFieldSurfaceBufferByteLength,
     sourceVertexRowCount,
     sourceVertexCounterMode,
     sourceVertexCounterBufferBound,
@@ -12567,17 +12600,30 @@ export function createSphPhaseScene(container, {
             nextResidentSurfaceDraw.surfaceDrawSummaryReadback = false;
             nextResidentSurfaceDraw.surfaceDrawSummarySkipped = true;
             nextResidentSurfaceDraw.surfaceDrawSummaryReadbackByteLength = 0;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReady = true;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffStatus =
-              'resident-render-field-buffer-direct-consumer-ready';
+            const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
+              surfaceDraw: nextResidentSurfaceDraw,
+              readbackMode: RESIDENT_NO_FULL_READBACK_MODE
+            });
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSchema = gpuBufferHandoff.schema;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReady = gpuBufferHandoff.ready;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffStatus = gpuBufferHandoff.status;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReason =
-              'retained render-field and surface buffers are ready for the engine-owned marching-cubes/direct-consumer path';
+              gpuBufferHandoff.reason
+              || 'retained render-field and surface buffers are ready for the engine-owned marching-cubes/direct-consumer path';
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffKind = gpuBufferHandoff.handoffKind;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffInputSchema =
+              gpuBufferHandoff.directConsumerInputSchema;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction =
+              gpuBufferHandoff.requiresSurfaceExtraction;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReadbackMode = RESIDENT_NO_FULL_READBACK_MODE;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffNoFullReadback = true;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffNoSummaryReadback = true;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundVertexCount = null;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount = null;
-            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange = false;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffNoFullReadback = gpuBufferHandoff.noFullReadback;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffNoSummaryReadback = gpuBufferHandoff.noSummaryReadback;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundVertexCount =
+              gpuBufferHandoff.upperBoundVertexCount;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundTriangleCount =
+              gpuBufferHandoff.upperBoundTriangleCount;
+            nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange =
+              gpuBufferHandoff.conservativeDrawRange;
             nextResidentSurfaceDraw.fullSurfaceDrawReadback = false;
             nextResidentSurfaceDraw.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
             nextResidentSurfaceDraw.renderBridgeStatus = 'resident-render-field-buffers-retained-no-overlay';
@@ -13010,6 +13056,12 @@ export function createSphPhaseScene(container, {
         surfaceDrawGpuBufferHandoffReady: Boolean(sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReady),
         surfaceDrawGpuBufferHandoffStatus: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffStatus ?? null,
         surfaceDrawGpuBufferHandoffReason: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReason ?? null,
+        surfaceDrawGpuBufferHandoffKind: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffKind ?? null,
+        surfaceDrawGpuBufferHandoffInputSchema:
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffInputSchema ?? null,
+        surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction: Boolean(
+          sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction
+        ),
         surfaceDrawGpuBufferHandoffReadbackMode: sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
         surfaceDrawGpuBufferHandoffNoFullReadback: Boolean(
           sphResidentSurfaceDraw?.surfaceDrawGpuBufferHandoffNoFullReadback

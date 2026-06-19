@@ -10257,3 +10257,34 @@ Three WebGPU unsafe presentation diagnostic gate, 2026-06-18 21:34 AKDT:
   - Browser evidence still contains one page error:
     `Instance dropped in popErrorScope`, so this path remains blocked for
     normal mounted rendering.
+
+Render-field direct-consumer handoff contract, 2026-06-18 21:56 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `53/53`.
+  - New coverage proves the resident handoff resolver accepts both compact
+    `surface-draw-buffers` and lower-level `render-field-buffers`, and marks
+    the latter as `requiresSurfaceExtraction=true`.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase no-full render refresh can skip compact surface summary readback"`
+  - Passed: `1/1`.
+- Browser probe:
+  `artifacts/sph-probe-render-field-handoff-contract-1.json`
+  - Completed with `browserConsoleIssueCount=0`.
+  - Expected analysis status remains `bad` for no visible/motion evidence.
+  - Contract evidence:
+    `surfaceDrawGpuBufferHandoffKind=render-field-buffers`,
+    `surfaceDrawGpuBufferHandoffInputSchema=peercompute.ulg.sph-gpu-render-field.v0`,
+    `surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction=true`,
+    retained render-field rows `16777216` bytes, and retained surface buffer
+    `256` bytes.

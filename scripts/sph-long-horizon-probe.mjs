@@ -1683,6 +1683,10 @@ async function runBrowserProbe({
             surfaceDrawGpuBufferHandoffReady: renderState.surfaceDrawGpuBufferHandoffReady ?? null,
             surfaceDrawGpuBufferHandoffStatus: renderState.surfaceDrawGpuBufferHandoffStatus ?? null,
             surfaceDrawGpuBufferHandoffReason: renderState.surfaceDrawGpuBufferHandoffReason ?? null,
+            surfaceDrawGpuBufferHandoffKind: renderState.surfaceDrawGpuBufferHandoffKind ?? null,
+            surfaceDrawGpuBufferHandoffInputSchema: renderState.surfaceDrawGpuBufferHandoffInputSchema ?? null,
+            surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction:
+              renderState.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction ?? null,
             surfaceDrawGpuBufferHandoffReadbackMode: renderState.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
             surfaceDrawGpuBufferHandoffNoFullReadback: renderState.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
             surfaceDrawGpuBufferHandoffNoSummaryReadback:
@@ -1749,6 +1753,10 @@ async function runBrowserProbe({
             gpuBufferHandoffReady: surfaceDraw.surfaceDrawGpuBufferHandoffReady ?? null,
             gpuBufferHandoffStatus: surfaceDraw.surfaceDrawGpuBufferHandoffStatus ?? null,
             gpuBufferHandoffReason: surfaceDraw.surfaceDrawGpuBufferHandoffReason ?? null,
+            gpuBufferHandoffKind: surfaceDraw.surfaceDrawGpuBufferHandoffKind ?? null,
+            gpuBufferHandoffInputSchema: surfaceDraw.surfaceDrawGpuBufferHandoffInputSchema ?? null,
+            gpuBufferHandoffRequiresSurfaceExtraction:
+              surfaceDraw.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction ?? null,
             gpuBufferHandoffReadbackMode: surfaceDraw.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
             gpuBufferHandoffUpperBoundVertexCount:
               surfaceDraw.surfaceDrawGpuBufferHandoffUpperBoundVertexCount ?? null,

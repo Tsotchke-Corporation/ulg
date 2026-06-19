@@ -1661,7 +1661,7 @@ test('SPH Three WebGPU surface buffers can use conservative aggregate draw recor
   assert.equal(records.records[0].phase, 'liquid');
 });
 
-test('SPH resident surface buffer handoff requires retained no-readback draw buffers', () => {
+test('SPH resident surface buffer handoff accepts retained no-readback draw or render-field buffers', () => {
   const ready = resolveResidentSurfaceBufferHandoff({
     surfaceDraw: {
       readbackMode: 'no-full-readback',
@@ -1690,6 +1690,8 @@ test('SPH resident surface buffer handoff requires retained no-readback draw buf
 
   assert.equal(ready.status, 'resident-surface-buffer-direct-consumer-ready');
   assert.equal(ready.ready, true);
+  assert.equal(ready.handoffKind, 'surface-draw-buffers');
+  assert.equal(ready.requiresSurfaceExtraction, false);
   assert.equal(ready.noFullReadback, true);
   assert.equal(ready.noSummaryReadback, true);
   assert.equal(ready.upperBoundVertexCount, 18);
@@ -1710,6 +1712,34 @@ test('SPH resident surface buffer handoff requires retained no-readback draw buf
   });
   assert.equal(readback.ready, false);
   assert.equal(readback.status, 'resident-surface-buffer-direct-consumer-blocked-readback-mode');
+
+  const renderFieldReady = resolveResidentSurfaceBufferHandoff({
+    readbackMode: 'no-full-readback',
+    surfaceDraw: {
+      sourceRenderFieldSchema: 'peercompute.ulg.sph-gpu-render-field.v0',
+      surfaceDrawReadback: false,
+      surfaceDrawSummaryReadback: false,
+      fullSurfaceDrawReadback: false,
+      drawRowsBufferRetained: false,
+      drawIndirectRowsBufferRetained: false,
+      compactedVertexRowsBufferRetained: false,
+      renderFieldRowsBufferRetained: true,
+      renderFieldRowsBufferByteLength: 2048,
+      renderFieldSurfaceBufferRetained: true,
+      renderFieldSurfaceBufferByteLength: 512
+    }
+  });
+  assert.equal(renderFieldReady.status, 'resident-render-field-buffer-direct-consumer-ready');
+  assert.equal(renderFieldReady.ready, true);
+  assert.equal(renderFieldReady.handoffKind, 'render-field-buffers');
+  assert.equal(renderFieldReady.directConsumerInputSchema, 'peercompute.ulg.sph-gpu-render-field.v0');
+  assert.equal(renderFieldReady.requiresSurfaceExtraction, true);
+  assert.equal(renderFieldReady.renderFieldRowsBufferRetained, true);
+  assert.equal(renderFieldReady.renderFieldRowsBufferByteLength, 2048);
+  assert.equal(renderFieldReady.renderFieldSurfaceBufferRetained, true);
+  assert.equal(renderFieldReady.renderFieldSurfaceBufferByteLength, 512);
+  assert.equal(renderFieldReady.upperBoundVertexCount, 0);
+  assert.equal(renderFieldReady.upperBoundTriangleCount, 0);
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

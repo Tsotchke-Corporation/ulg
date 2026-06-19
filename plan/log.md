@@ -27585,3 +27585,35 @@ Remaining:
   scans. The next real throughput slice is either GPU-side per-surface counts /
   prefix offsets or the true same-device renderer path that consumes the
   retained draw/indirect/vertex buffers without falling back to CPU geometry.
+
+## 2026-06-18 19:27 AKDT - Aggregate Indirect Surface Draw Handoff
+
+Status:
+
+- Committed `c76c85c Expose aggregate indirect surface draw range`.
+  The no-full surface-draw metadata pass now writes and retains a 16-byte
+  aggregate indirect row from the resident emitted-vertex counter.
+- This gives the future same-device renderer an exact GPU-resident aggregate
+  draw range without compact-summary readback. Per-surface draw rows still
+  exist for material/PBR ordering, but the engine now has a single retained
+  indirect count for direct all-vertex consumers.
+
+Validation:
+
+- PASS: `node --test tests/sphRenderGpuKernel.test.mjs` reported `48/48`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "surface buffer handoff|extension surface|surface draw|renderer backend|render-row|pressure interface"`
+  reported `52/52`.
+- PASS: browser probe
+  `artifacts/sph-probe-aggregate-indirect-surface-draw-1.json` classified
+  `good` with `browserConsoleIssueCount=0`,
+  `surfaceDrawAggregateIndirectRowsBufferRetained=true`,
+  `surfaceDrawAggregateIndirectRowsBufferByteLength=16`,
+  `surfaceDrawGpuOnlyAggregateIndirectReady=true`, and
+  `surfaceDrawGpuOnlyAggregateDrawRangeExact=true`.
+
+Remaining:
+
+- Per-surface prefix counts are still built by bounded scans. The next draw
+  metadata throughput slice should replace those scans with GPU-side
+  per-surface counters/prefix offsets or move the direct renderer to the
+  aggregate material-id-in-vertex path.

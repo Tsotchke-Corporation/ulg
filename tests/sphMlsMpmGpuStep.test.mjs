@@ -613,6 +613,7 @@ function fakeSummaryDevice(summaryValues) {
   const createdBuffers = [];
   const bindGroups = [];
   const dispatches = [];
+  const indirectDispatches = [];
   const shaderModules = [];
   const copies = [];
   const clears = [];
@@ -622,6 +623,7 @@ function fakeSummaryDevice(summaryValues) {
     createdBuffers,
     bindGroups,
     dispatches,
+    indirectDispatches,
     shaderModules,
     copies,
     clears,
@@ -629,7 +631,11 @@ function fakeSummaryDevice(summaryValues) {
     writes,
     queue: {
       writeBuffer(buffer, offset, data) {
-        writes.push({ label: buffer.label, offset, byteLength: data.byteLength });
+        const copy = data?.buffer
+          ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+          : null;
+        buffer.lastWrite = copy;
+        writes.push({ label: buffer.label, offset, byteLength: data.byteLength, data: copy });
       },
       async onSubmittedWorkDone() {},
       submit(commands) {
@@ -690,6 +696,18 @@ function fakeSummaryDevice(summaryValues) {
             dispatchWorkgroups(count) {
               dispatches.push({ count, pipeline: this.pipeline, bindGroup: this.bindGroup?.bindGroup });
             },
+            dispatchWorkgroupsIndirect(buffer, offset) {
+              const data = buffer.lastWrite ? new Uint32Array(buffer.lastWrite) : new Uint32Array();
+              indirectDispatches.push({
+                buffer,
+                offset,
+                workgroupCountX: data[0] ?? null,
+                workgroupCountY: data[1] ?? null,
+                workgroupCountZ: data[2] ?? null,
+                pipeline: this.pipeline,
+                bindGroup: this.bindGroup?.bindGroup
+              });
+            },
             end() {
               this.ended = true;
             }
@@ -702,7 +720,12 @@ function fakeSummaryDevice(summaryValues) {
           clears.push({ buffer, offset, size });
         },
         finish() {
-          return { dispatches: [...dispatches], copies: [...copies], clears: [...clears] };
+          return {
+            dispatches: [...dispatches],
+            indirectDispatches: [...indirectDispatches],
+            copies: [...copies],
+            clears: [...clears]
+          };
         }
       };
     }
@@ -1805,13 +1828,19 @@ test('MLS-MPM resident step can active-grid fused no-full mechanics dispatch', a
     Math.ceil(activeGridDispatch.activeNodeCount / 64)
   );
   assert.equal(step.stageTiming.dispatchTopology.totalDispatches, 5);
-  assert.equal(device.dispatches.length, 5);
-  assert.equal(device.dispatches[0].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
-  assert.equal(device.dispatches[1].count, 1);
-  assert.equal(device.dispatches[2].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
-  assert.equal(device.dispatches[3].count, Math.ceil(activeGridDispatch.activeNodeCount / 64));
-  assert.equal(device.dispatches[4].count, 1);
-  assert.ok(device.dispatches[0].count < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
+  assert.equal(step.stageTiming.activeGridIndirectDispatch.status, 'cpu-seeded-active-grid-indirect-dispatch-ready');
+  assert.equal(step.stageTiming.activeGridIndirectDispatch.dispatchMode, 'dispatchWorkgroupsIndirect');
+  assert.equal(step.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 3);
+  assert.equal(step.stageTiming.dispatchTopology.p2gFinalize.dispatchSubmissionMode, 'dispatchWorkgroupsIndirect');
+  assert.equal(step.stageTiming.dispatchTopology.gridUpdate.indirectDispatchUsed, true);
+  assert.equal(device.dispatches.length, 2);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1]);
+  assert.equal(device.indirectDispatches.length, 3);
+  assert.deepEqual(
+    device.indirectDispatches.map((entry) => entry.workgroupCountX),
+    Array(3).fill(Math.ceil(activeGridDispatch.activeNodeCount / 64))
+  );
+  assert.ok(device.indirectDispatches[0].workgroupCountX < Math.ceil(activeGridDispatch.fullGridNodeCount / 64));
   assert.equal(device.clears.length, 0);
   destroyMlsMpmResidentStepBuffers(step);
 });
@@ -5284,7 +5313,10 @@ test('MLS-MPM fused resident sequence can run active-grid with compactSummaryMod
   assert.equal(execution.stepSummaries[0].compactSummaryAvailable, false);
   assert.equal(execution.stepSummaries[1].compactSummaryAvailable, false);
   assert.equal(device.submissions.length, 1);
-  assert.equal(device.dispatches.length, 10);
+  assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.dispatchMode, 'dispatchWorkgroupsIndirect');
+  assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
+  assert.equal(device.dispatches.length, 4);
+  assert.equal(device.indirectDispatches.length, 6);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 
@@ -5497,6 +5529,13 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.equal(execution.finalStep.stageTiming.dispatchTopology.gridUpdate.dispatchAxis, 'active-grid-node');
   assert.equal(execution.finalStep.fusedResidentSequence.dispatchTopology.totalDispatches, 10);
   assert.equal(execution.finalStep.fusedResidentSequence.dispatchCount, 10);
+  assert.equal(
+    execution.finalStep.stageTiming.activeGridIndirectDispatch.status,
+    'cpu-seeded-active-grid-indirect-dispatch-ready'
+  );
+  assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.dispatchMode, 'dispatchWorkgroupsIndirect');
+  assert.equal(execution.finalStep.stageTiming.activeGridIndirectDispatch.indirectDispatchUseCount, 6);
+  assert.equal(execution.finalStep.stageTiming.dispatchTopology.gridUpdate.dispatchSubmissionMode, 'dispatchWorkgroupsIndirect');
   assert.equal(execution.stepSummaries[0].diagnostics.dispatchTopologyStatus, 'resident-dispatch-topology-ready');
   assert.equal(execution.stepSummaries[0].diagnostics.cpuParticleLoopInHotPath, false);
   assert.equal(execution.finalStep.residentPositionBoundsSource, 'compact-gpu-summary-next-bounds');
@@ -5505,7 +5544,8 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.max, [1.375, 1.4, 1.425]);
   assert.equal(execution.nextSphParticleState.residentMaxSpeedMPerS, 0);
   assert.equal(device.clears.length, 0);
-  assert.deepEqual(device.dispatches.map((entry) => entry.count), [4, 1, 4, 4, 1, 4, 1, 4, 4, 1]);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1, 1, 1]);
+  assert.deepEqual(device.indirectDispatches.map((entry) => entry.workgroupCountX), [4, 4, 4, 4, 4, 4]);
   destroyMlsMpmResidentStepsBuffers(execution);
 });
 

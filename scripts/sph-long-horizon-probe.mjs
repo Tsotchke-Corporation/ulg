@@ -814,7 +814,12 @@ async function runBrowserProbe({
         gridWriteMode: stage.gridWriteMode ?? null,
         gridReadMode: stage.gridReadMode ?? null,
         activeGridEnabled: stage.activeGridEnabled ?? null,
-        bufferClearMode: stage.bufferClearMode ?? null
+        bufferClearMode: stage.bufferClearMode ?? null,
+        dispatchSubmissionMode: stage.dispatchSubmissionMode ?? null,
+        indirectDispatchReady: stage.indirectDispatchReady ?? null,
+        indirectDispatchUsed: stage.indirectDispatchUsed ?? null,
+        indirectDispatchArgsBufferByteLength: stage.indirectDispatchArgsBufferByteLength ?? null,
+        indirectDispatchWorkgroupCountX: stage.indirectDispatchWorkgroupCountX ?? null
       } : null;
       const compactDispatchTopology = (topology) => topology ? {
         schema: topology.schema ?? null,
@@ -832,6 +837,9 @@ async function runBrowserProbe({
         totalDispatches: topology.totalDispatches ?? null,
         workgroupsPerSubstep: topology.workgroupsPerSubstep ?? null,
         totalWorkgroups: topology.totalWorkgroups ?? null,
+        activeGridIndirectDispatch: topology.activeGridIndirectDispatch
+          ? { ...topology.activeGridIndirectDispatch }
+          : null,
         p2g: compactDispatchStageTopology(topology.p2g),
         p2gAccumulatorClear: compactDispatchStageTopology(topology.p2gAccumulatorClear),
         p2gFinalize: compactDispatchStageTopology(topology.p2gFinalize),
@@ -915,6 +923,9 @@ async function runBrowserProbe({
         dispatchTopology: compactDispatchTopology(stageTiming.dispatchTopology),
         activeGridDispatch: stageTiming.activeGridDispatch
           ? { ...stageTiming.activeGridDispatch }
+          : null,
+        activeGridIndirectDispatch: stageTiming.activeGridIndirectDispatch
+          ? { ...stageTiming.activeGridIndirectDispatch }
           : null,
         thermalRequested: stageTiming.thermalRequested ?? null,
         mechanicsRefreshRequested: stageTiming.mechanicsRefreshRequested ?? null,
@@ -1487,6 +1498,9 @@ async function runBrowserProbe({
               dispatchTopology: compactDispatchTopology(steps.fusedResidentSequence.dispatchTopology),
               activeGridDispatch: steps.fusedResidentSequence.activeGridDispatch
                 ? { ...steps.fusedResidentSequence.activeGridDispatch }
+                : null,
+              activeGridIndirectDispatch: steps.fusedResidentSequence.activeGridIndirectDispatch
+                ? { ...steps.fusedResidentSequence.activeGridIndirectDispatch }
                 : null
             } : null,
             finalStepStageTiming: compactStageTiming(steps.finalStep?.stageTiming),
@@ -2663,6 +2677,9 @@ async function runDirectResidentProbe({
           dispatchTopology: compactDispatchTopology(steps.fusedResidentSequence.dispatchTopology),
           activeGridDispatch: steps.fusedResidentSequence.activeGridDispatch
             ? { ...steps.fusedResidentSequence.activeGridDispatch }
+            : null,
+          activeGridIndirectDispatch: steps.fusedResidentSequence.activeGridIndirectDispatch
+            ? { ...steps.fusedResidentSequence.activeGridIndirectDispatch }
             : null
         } : null
       } : null;
@@ -2712,6 +2729,9 @@ async function runDirectResidentProbe({
           dispatchTopology: compactDispatchTopology(step.stageTiming.dispatchTopology),
           activeGridDispatch: step.stageTiming.activeGridDispatch
             ? { ...step.stageTiming.activeGridDispatch }
+            : null,
+          activeGridIndirectDispatch: step.stageTiming.activeGridIndirectDispatch
+            ? { ...step.stageTiming.activeGridIndirectDispatch }
             : null,
           thermalRequested: step.stageTiming.thermalRequested ?? null,
           mechanicsRefreshRequested: step.stageTiming.mechanicsRefreshRequested ?? null,

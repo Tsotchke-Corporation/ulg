@@ -202,6 +202,7 @@ const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
@@ -209,6 +210,7 @@ const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
 };
 const DEFAULT_FUSED_ACTIVE_GRID_SAFETY_CELLS = 3;
+const COMPUTE_DISPATCH_INDIRECT_UINTS = 3;
 const MECHANICS_STAGE_ORDER = Object.freeze(['p2g', 'gridUpdate', 'g2p']);
 const SPATIAL_GAS_LEDGER_PRODUCER_STAGE_ID = 'spatialGasLedgerProducer';
 const GAS_CELL_EOS_PRODUCER_STAGE_ID = 'gasCellEosProducer';
@@ -680,6 +682,97 @@ function writeGpuBuffer(device, label, data, usage = GPU_BUFFER_USAGE.STORAGE | 
   const buffer = device.createBuffer({ label, size: byteLength, usage });
   if (data?.byteLength > 0) device.queue.writeBuffer(buffer, 0, data);
   return buffer;
+}
+
+function createComputeDispatchIndirectArgs(workgroupCountX, workgroupCountY = 1, workgroupCountZ = 1) {
+  const args = new Uint32Array(COMPUTE_DISPATCH_INDIRECT_UINTS);
+  args[0] = Math.max(1, Math.floor(finiteNumber(workgroupCountX, 1)));
+  args[1] = Math.max(1, Math.floor(finiteNumber(workgroupCountY, 1)));
+  args[2] = Math.max(1, Math.floor(finiteNumber(workgroupCountZ, 1)));
+  return args;
+}
+
+function createActiveGridComputeDispatchArgsBuffer(device, activeGridDispatch, workgroupCountX) {
+  if (activeGridDispatch?.useActiveGrid !== true) return null;
+  const args = createComputeDispatchIndirectArgs(workgroupCountX);
+  const buffer = writeGpuBuffer(
+    device,
+    'ulg-mls-mpm-active-grid-dispatch-indirect-args',
+    args,
+    GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+  );
+  return {
+    schema: 'peercompute.ulg.mls-mpm-active-grid-compute-dispatch-indirect.v0',
+    status: 'cpu-seeded-active-grid-indirect-dispatch-ready',
+    source: 'active-grid-dispatch-cpu-metadata',
+    buffer,
+    bufferByteLength: args.byteLength,
+    offsetBytes: 0,
+    workgroupCountX: args[0],
+    workgroupCountY: args[1],
+    workgroupCountZ: args[2],
+    workgroupSize: 64,
+    activeGridNodeCount: Math.max(0, Math.floor(finiteNumber(activeGridDispatch.activeNodeCount, 0))),
+    fullGridNodeCount: Math.max(0, Math.floor(finiteNumber(activeGridDispatch.fullGridNodeCount, 0))),
+    indirectDispatchUsed: false,
+    indirectDispatchUseCount: 0,
+    directDispatchFallbackCount: 0,
+    dispatchMode: 'pending'
+  };
+}
+
+function dispatchActiveGridComputePass(pass, directWorkgroupCount, indirectDispatchArgs) {
+  if (indirectDispatchArgs?.buffer && typeof pass.dispatchWorkgroupsIndirect === 'function') {
+    pass.dispatchWorkgroupsIndirect(indirectDispatchArgs.buffer, indirectDispatchArgs.offsetBytes);
+    indirectDispatchArgs.indirectDispatchUsed = true;
+    indirectDispatchArgs.indirectDispatchUseCount += 1;
+    indirectDispatchArgs.dispatchMode = 'dispatchWorkgroupsIndirect';
+    return 'dispatchWorkgroupsIndirect';
+  }
+  pass.dispatchWorkgroups(directWorkgroupCount);
+  if (indirectDispatchArgs) {
+    indirectDispatchArgs.directDispatchFallbackCount += 1;
+    if (indirectDispatchArgs.dispatchMode === 'pending') {
+      indirectDispatchArgs.dispatchMode = 'dispatchWorkgroups';
+    }
+  }
+  return 'dispatchWorkgroups';
+}
+
+function activeGridIndirectDispatchDescriptor(indirectDispatchArgs) {
+  if (!indirectDispatchArgs) return null;
+  return {
+    schema: indirectDispatchArgs.schema,
+    status: indirectDispatchArgs.status,
+    source: indirectDispatchArgs.source,
+    bufferByteLength: indirectDispatchArgs.bufferByteLength,
+    offsetBytes: indirectDispatchArgs.offsetBytes,
+    workgroupCountX: indirectDispatchArgs.workgroupCountX,
+    workgroupCountY: indirectDispatchArgs.workgroupCountY,
+    workgroupCountZ: indirectDispatchArgs.workgroupCountZ,
+    workgroupSize: indirectDispatchArgs.workgroupSize,
+    activeGridNodeCount: indirectDispatchArgs.activeGridNodeCount,
+    fullGridNodeCount: indirectDispatchArgs.fullGridNodeCount,
+    indirectDispatchUsed: indirectDispatchArgs.indirectDispatchUsed,
+    indirectDispatchUseCount: indirectDispatchArgs.indirectDispatchUseCount,
+    directDispatchFallbackCount: indirectDispatchArgs.directDispatchFallbackCount,
+    dispatchMode: indirectDispatchArgs.dispatchMode
+  };
+}
+
+function attachActiveGridIndirectDispatchTopology(dispatchTopology, indirectDispatchArgs) {
+  if (!dispatchTopology || !indirectDispatchArgs) return dispatchTopology;
+  const descriptor = activeGridIndirectDispatchDescriptor(indirectDispatchArgs);
+  dispatchTopology.activeGridIndirectDispatch = descriptor;
+  for (const stageId of ['p2gAccumulatorClear', 'p2gFinalize', 'gridUpdate']) {
+    if (!dispatchTopology[stageId]) continue;
+    dispatchTopology[stageId].dispatchSubmissionMode = descriptor.dispatchMode;
+    dispatchTopology[stageId].indirectDispatchReady = true;
+    dispatchTopology[stageId].indirectDispatchUsed = descriptor.indirectDispatchUsed;
+    dispatchTopology[stageId].indirectDispatchArgsBufferByteLength = descriptor.bufferByteLength;
+    dispatchTopology[stageId].indirectDispatchWorkgroupCountX = descriptor.workgroupCountX;
+  }
+  return dispatchTopology;
 }
 
 async function readGpuBuffer(device, sourceBuffer, byteLength, label) {
@@ -1697,6 +1790,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
+  const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
+    device,
+    activeGridDispatch,
+    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64))
+  );
   const dispatchTopology = createResidentDispatchTopology({
     particleCount,
     gridSpec,
@@ -1786,7 +1884,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     new Float32Array(SPH_PRESSURE_INTERFACE_FORCE_FLOATS),
     GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
   );
-  const tempBuffers = [p2gAccumulatorBuffer, p2gParamsBuffer, gridUpdateParamsBuffer, g2pParamsBuffer, productEventBuffer, pressureRowsBuffer];
+  const tempBuffers = [
+    p2gAccumulatorBuffer,
+    p2gParamsBuffer,
+    gridUpdateParamsBuffer,
+    g2pParamsBuffer,
+    productEventBuffer,
+    pressureRowsBuffer,
+    ...(activeGridIndirectDispatchArgs ? [activeGridIndirectDispatchArgs.buffer] : [])
+  ];
   let retained = false;
   try {
     const p2gBindings = [
@@ -1912,7 +2018,11 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       const accumulatorClearPass = encoder.beginComputePass();
       accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
       accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
-      accumulatorClearPass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
+      dispatchActiveGridComputePass(
+        accumulatorClearPass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
       accumulatorClearPass.end();
     } else {
       encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
@@ -1925,12 +2035,20 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     const p2gFinalizePass = encoder.beginComputePass();
     p2gFinalizePass.setPipeline(p2gFinalizePipeline);
     p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
-    p2gFinalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
+    dispatchActiveGridComputePass(
+      p2gFinalizePass,
+      Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+      activeGridIndirectDispatchArgs
+    );
     p2gFinalizePass.end();
     const gridUpdatePass = encoder.beginComputePass();
     gridUpdatePass.setPipeline(gridUpdatePipeline);
     gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
-    gridUpdatePass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
+    dispatchActiveGridComputePass(
+      gridUpdatePass,
+      Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+      activeGridIndirectDispatchArgs
+    );
     gridUpdatePass.end();
     const g2pPass = encoder.beginComputePass();
     g2pPass.setPipeline(g2pPipeline);
@@ -1938,6 +2056,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     g2pPass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 64)));
     g2pPass.end();
     device.queue.submit([encoder.finish()]);
+    attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
+    const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     retained = true;
     const webgpuStatus = {
       status: 'webgpu-executed-no-full-readback',
@@ -1971,7 +2091,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       dispatchTopology: dispatchTopology.p2g,
       residentDispatchTopology: dispatchTopology,
       fusedResidentMechanics: true,
-      activeGridDispatch
+      activeGridDispatch,
+      activeGridIndirectDispatch
     };
     const gridUpdate = {
       schema: ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -2005,7 +2126,8 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
       dispatchTopology: dispatchTopology.gridUpdate,
       residentDispatchTopology: dispatchTopology,
       fusedResidentMechanics: true,
-      activeGridDispatch
+      activeGridDispatch,
+      activeGridIndirectDispatch
     };
     const g2pReconstruction = {
       schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
@@ -2056,13 +2178,15 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
         outMechanicsBuffer.destroy?.();
       },
       fusedResidentMechanics: true,
-      activeGridDispatch
+      activeGridDispatch,
+      activeGridIndirectDispatch
     };
     return {
       schema: 'peercompute.ulg.mls-mpm-fused-mechanics-step.v0',
       backend: 'webgpu',
       status: 'fused-mechanics-webgpu-executed-no-full-readback',
       activeGridDispatch,
+      activeGridIndirectDispatch,
       dispatchTopology,
       p2gGridProjection,
       gridUpdate,
@@ -2128,6 +2252,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
+  const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
+    device,
+    activeGridDispatch,
+    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64))
+  );
   const dispatchTopology = createResidentDispatchTopology({
     particleCount,
     gridSpec,
@@ -2254,7 +2383,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     gridUpdateParamsBuffer,
     g2pParamsBuffer,
     productEventBuffer,
-    pressureRowsBuffer
+    pressureRowsBuffer,
+    ...(activeGridIndirectDispatchArgs ? [activeGridIndirectDispatchArgs.buffer] : [])
   ];
   let finalStateBuffer = null;
   let finalMechanicsBuffer = null;
@@ -2395,7 +2525,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
         const accumulatorClearPass = encoder.beginComputePass();
         accumulatorClearPass.setPipeline(activeAccumulatorClearPipelineInfo.pipeline);
         accumulatorClearPass.setBindGroup(0, activeAccumulatorClearBindGroup);
-        accumulatorClearPass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
+        dispatchActiveGridComputePass(
+          accumulatorClearPass,
+          Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+          activeGridIndirectDispatchArgs
+        );
         accumulatorClearPass.end();
       } else {
         encoder.clearBuffer(p2gAccumulatorBuffer, 0, Math.max(4, p2gAccumulatorByteLength));
@@ -2408,7 +2542,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       const p2gFinalizePass = encoder.beginComputePass();
       p2gFinalizePass.setPipeline(p2gFinalizePipeline);
       p2gFinalizePass.setBindGroup(0, p2gFinalizeBindGroup);
-      p2gFinalizePass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
+      dispatchActiveGridComputePass(
+        p2gFinalizePass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
       p2gFinalizePass.end();
 
       const gridUpdateBindGroup = device.createBindGroup({
@@ -2423,7 +2561,11 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       const gridUpdatePass = encoder.beginComputePass();
       gridUpdatePass.setPipeline(gridUpdatePipeline);
       gridUpdatePass.setBindGroup(0, gridUpdateBindGroup);
-      gridUpdatePass.dispatchWorkgroups(Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)));
+      dispatchActiveGridComputePass(
+        gridUpdatePass,
+        Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+        activeGridIndirectDispatchArgs
+      );
       gridUpdatePass.end();
 
       const g2pBindGroup = device.createBindGroup({
@@ -2449,6 +2591,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       finalMechanicsBuffer = outMechanicsBuffer;
     }
     device.queue.submit([encoder.finish()]);
+    attachActiveGridIndirectDispatchTopology(dispatchTopology, activeGridIndirectDispatchArgs);
+    const activeGridIndirectDispatch = activeGridIndirectDispatchDescriptor(activeGridIndirectDispatchArgs);
     stageMs.fusedMechanicsSequence = Math.max(0, nowMs() - sequenceEncodeStartMs);
     let fusedMechanicsSequenceQueueFenceMs = null;
     let fusedMechanicsSequenceQueueFenceStatus = measureQueueFence ? 'requested' : 'not-requested';
@@ -2498,7 +2642,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       residentDispatchTopology: dispatchTopology,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
-      activeGridDispatch
+      activeGridDispatch,
+      activeGridIndirectDispatch
     };
     const gridUpdate = {
       schema: ULG_MLS_MPM_GPU_GRID_UPDATE_EXECUTION_SCHEMA,
@@ -2534,7 +2679,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       residentDispatchTopology: dispatchTopology,
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
-      activeGridDispatch
+      activeGridDispatch,
+      activeGridIndirectDispatch
     };
     const g2pReconstruction = {
       schema: ULG_MLS_MPM_GPU_G2P_RECONSTRUCTION_EXECUTION_SCHEMA,
@@ -2586,7 +2732,8 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       },
       fusedResidentSequence: true,
       fusedResidentSequenceStepCount: count,
-      activeGridDispatch
+      activeGridDispatch,
+      activeGridIndirectDispatch
     };
     const sourceStep = finiteNumber(sphParticleState.step ?? mlsMpmParticleState.step, 0);
     const sourceTime = finiteNumber(sphParticleState.time ?? mlsMpmParticleState.time, 0);
@@ -2688,6 +2835,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
       fusedResidentSequenceStepCount: count,
       dispatchTopology,
       activeGridDispatch,
+      activeGridIndirectDispatch,
       requestedReadbackMode: NO_FULL_READBACK_MODE,
       preferWebGpu,
       compactSummaryRequested: typeof summaryRunner === 'function',
@@ -11627,6 +11775,10 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
     activeGridDispatch: fusedMechanics?.activeGridDispatch
       || gridUpdate?.activeGridDispatch
       || p2gGridProjection?.activeGridDispatch
+      || null,
+    activeGridIndirectDispatch: fusedMechanics?.activeGridIndirectDispatch
+      || gridUpdate?.activeGridIndirectDispatch
+      || p2gGridProjection?.activeGridIndirectDispatch
       || null,
     requestedReadbackMode,
     preferWebGpu,

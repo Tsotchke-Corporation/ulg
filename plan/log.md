@@ -1,5 +1,43 @@
 # ULG Implementation Log
 
+## 2026-06-19 AKDT - Resident Continuation Native MC Deferral
+
+Status:
+
+- Added resident GPU work tracking around single-step and multi-step MLS-MPM
+  resident continuations. Surface draw submits now wait before compute when a
+  fence exists, and direct native surface-consumer draws skip submit fencing so
+  the browser does not hit external-instance queue lifetime failures.
+- Updated native render-field refresh so `native-webgpu-surface-consumer` does
+  not force CPU queue fences or native marching-cubes extraction during
+  intermediate resident batches. The long-horizon probe passes
+  `allowNativeSurfaceExtraction=false` until the final render refresh.
+- Forwarded native marching-cubes extension diagnostics through the ULG wrapper
+  and resident render state, including error name/status/stage/stack. The
+  current final extraction blocker is now isolated to
+  `native-engine-extract-surface` in the sibling extension.
+- Hardened the sibling `/home/cos/projects/webgpu-marching-cubes` integration
+  path by making unavailable shader compilation info nonfatal by default,
+  replacing mapped-at-creation uploads with `queue.writeBuffer()`, tagging
+  adapter errors with stages, and removing explicit queue fences around the
+  extension's readback helpers.
+
+Validation:
+
+- PASS: ULG syntax/unit checks for the touched resident scene, probe, and MC
+  wrapper paths.
+- PASS: sibling `webgpu-marching-cubes` unit tests and Vite build.
+- PASS: browser render-every native MLS-MPM probe
+  `/tmp/ulg-browser-native-mlsmpm-render-every-2x1-extension-no-explicit-fences.json`
+  completed with zero browser console issues.
+
+Remaining:
+
+- Final native MC extraction still fails closed on the extension CPU counter
+  `mapAsync` in `MarchingCubes.computeActiveVoxels()`. The next todo is a
+  GPU-resident/no-readback extraction and draw contract, not fallback overlay
+  work.
+
 ## 2026-06-19 AKDT - Native WebGPU Surface Consumer Contract
 
 Status:

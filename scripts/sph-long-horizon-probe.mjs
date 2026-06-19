@@ -1866,6 +1866,20 @@ async function runBrowserProbe({
             surfaceDrawGpuBufferHandoffInputSchema: renderState.surfaceDrawGpuBufferHandoffInputSchema ?? null,
             surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction:
               renderState.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction ?? null,
+            surfaceDrawNativeMarchingCubesExtractionAllowed:
+              renderState.surfaceDrawNativeMarchingCubesExtractionAllowed ?? null,
+            surfaceDrawNativeMarchingCubesExtractionStatus:
+              renderState.surfaceDrawNativeMarchingCubesExtractionStatus ?? null,
+            surfaceDrawNativeMarchingCubesExtractionReason:
+              renderState.surfaceDrawNativeMarchingCubesExtractionReason ?? null,
+            surfaceDrawNativeMarchingCubesExtractionErrorName:
+              renderState.surfaceDrawNativeMarchingCubesExtractionErrorName ?? null,
+            surfaceDrawNativeMarchingCubesExtractionErrorStatus:
+              renderState.surfaceDrawNativeMarchingCubesExtractionErrorStatus ?? null,
+            surfaceDrawNativeMarchingCubesExtractionErrorStage:
+              renderState.surfaceDrawNativeMarchingCubesExtractionErrorStage ?? null,
+            surfaceDrawNativeMarchingCubesExtractionErrorStack:
+              renderState.surfaceDrawNativeMarchingCubesExtractionErrorStack ?? null,
             surfaceDrawGpuBufferHandoffReadbackMode: renderState.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
             surfaceDrawGpuBufferHandoffNoFullReadback: renderState.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
             surfaceDrawGpuBufferHandoffNoSummaryReadback:
@@ -2273,12 +2287,13 @@ async function runBrowserProbe({
               preferWebGpu: true,
               residentSteps: execution,
               renderFieldReadbackMode: requestedRenderReadbackMode,
-            renderRowsReadbackMode: requestedRenderRowsReadbackMode,
-            renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
-            surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
-            surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
-            surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
-            gasPressureSummary: overlay.__sphResidentGasPressureSummary || null
+              renderRowsReadbackMode: requestedRenderRowsReadbackMode,
+              renderFieldSurfaceSummaryMode: requestedRenderFieldSurfaceSummaryMode,
+              surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
+              surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
+              surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
+              gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
+              allowNativeSurfaceExtraction: batchIndex === requestedBatches
             });
             markProbeProgress('resident-render-refresh-completed', {
               batchIndex,
@@ -2324,7 +2339,8 @@ async function runBrowserProbe({
               surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
               surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
               surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
-              gasPressureSummary: overlay.__sphResidentGasPressureSummary || null
+              gasPressureSummary: overlay.__sphResidentGasPressureSummary || null,
+              allowNativeSurfaceExtraction: batchIndex === requestedBatches
             });
             if (requestedResidentBufferDebug && sceneApi.debugSphResidentParticleUpload) {
               overlay.__sphResidentParticleUploadDebug = await sceneApi.debugSphResidentParticleUpload({

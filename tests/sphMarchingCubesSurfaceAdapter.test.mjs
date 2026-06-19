@@ -612,6 +612,45 @@ test('ULG wrapper propagates extension same-device blockers before renderer inte
   assert.equal(execution.summary.reason, 'same-device-check-failed');
 });
 
+test('ULG wrapper forwards extension adapter error diagnostics', async () => {
+  const nativeError = {
+    name: 'OperationError',
+    status: 'error',
+    stage: 'native-engine-extract-surface',
+    message: 'A valid external Instance reference no longer exists.',
+    stack: 'OperationError: A valid external Instance reference no longer exists.'
+  };
+  const wrapper = createUlgWebGpuMarchingCubesExtensionAdapter({
+    device: { label: 'expected-device' },
+    volume: { label: 'resident-volume' },
+    adapter: {
+      schema: 'peercompute.webgpu-marching-cubes.surface-adapter.v0',
+      async extractSurface() {
+        return {
+          ...extensionExecution({ ok: false, status: 'surface-error', vertexCount: 0, bufferRetained: false }),
+          status: 'surface-error',
+          webgpuStatus: {
+            status: 'error',
+            reason: nativeError.message,
+            error: nativeError
+          },
+          errors: [nativeError]
+        };
+      }
+    }
+  });
+
+  const execution = await wrapper.extractSurface({ isovalue: 0.25 });
+
+  assert.equal(execution.status, 'extension-surface-execution-blocked');
+  assert.equal(execution.reason, nativeError.message);
+  assert.equal(execution.errors[0], nativeError);
+  assert.equal(execution.errorName, 'OperationError');
+  assert.equal(execution.errorStatus, 'error');
+  assert.equal(execution.errorStage, 'native-engine-extract-surface');
+  assert.equal(execution.summary.extensionErrorStack, nativeError.stack);
+});
+
 test('ULG translates extension compact position rows into native surface vertices and draw metadata', () => {
   const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
     extensionExecution: extensionExecution(),

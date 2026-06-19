@@ -50,6 +50,32 @@ The system is still not Ocean-style fast because:
   dynamics;
 - draw buffers are not yet fed to a fully GPU-resident Three/WebGPU render path.
 
+Tactical status, 2026-06-19 AKDT:
+
+- Resident MLS-MPM render-every continuation now avoids the native surface draw
+  / compute queue collision by tracking resident compute work, skipping draw
+  submits while resident GPU work is in flight, and deferring native
+  marching-cubes extraction until the final resident batch. Current browser
+  evidence at
+  `/tmp/ulg-browser-native-mlsmpm-render-every-2x1-extension-no-explicit-fences.json`
+  is timeline-complete with zero browser console issues. This keeps the
+  engine-owned `native-webgpu-surface-consumer` route alive without an overlay.
+- The sibling `webgpu-marching-cubes` adapter has had the immediate integration
+  blockers pushed back: shader `getCompilationInfo()` external-instance
+  failures are nonfatal by default, small `mappedAtCreation` uploads are
+  replaced with `queue.writeBuffer()`, and explicit `queue.onSubmittedWorkDone()`
+  fences were removed from marching-cubes/exclusive-scan readback helpers. ULG
+  now forwards native extension error name/status/stage/stack into resident
+  render diagnostics.
+- The remaining native MC blocker is the extension's CPU-visible counter
+  readback. Final extraction still fails closed at
+  `MarchingCubes.computeActiveVoxels()` when `counterReadback.mapAsync()` is
+  invoked on the shared resident device. The next no-readback renderer slice is
+  therefore a GPU-resident extraction contract: conservative compact draw
+  ranges, GPU-generated indirect draw args, or another same-device counter
+  handoff that never maps in the GUI loop. Do not replace this with an overlay
+  or more CPU geometry tuning.
+
 Tactical status, 2026-06-18 AKDT:
 
 - The live no-full resident scene path can now use `compactSummaryMode=none`,

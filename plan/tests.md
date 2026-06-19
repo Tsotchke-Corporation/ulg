@@ -1,5 +1,38 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Resident Continuation Native MC Deferral
+
+Resident MLS-MPM render-every continuation is now browser-console clean when
+native marching-cubes extraction is deferred until the final resident batch.
+The remaining native MC issue is isolated to the sibling extension's CPU
+counter readback, not the older WGSL, buffer-limit, or queue-fence failures.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `57/57`,
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `59/59`, and
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` passed `16/16`.
+- Sibling extension:
+  `/home/cos/projects/webgpu-marching-cubes` passed `npm test` `19/19` and
+  `npm run build`.
+- Browser diagnostics:
+  `/tmp/ulg-browser-native-mlsmpm-render-every-2x1-extension-no-explicit-fences.json`
+  completed with `browserConsoleIssueCount=0`. Intermediate render refreshes
+  deferred native extraction; final native extraction failed closed at
+  `native-engine-extract-surface` because the extension still calls
+  `counterReadback.mapAsync()` in `MarchingCubes.computeActiveVoxels()`.
+
+Known residual risk:
+
+- The next acceptance gate is GPU-resident/no-readback native extraction and
+  draw metadata with browser pixel validation. CPU summary/readback fallback
+  paths remain diagnostic only.
+
 ## Current Focused Result - 2026-06-19 Native WebGPU Validation Correction
 
 The native `native-webgpu-surface-consumer` route now binds an engine-owned

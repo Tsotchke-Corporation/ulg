@@ -35,6 +35,22 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: resident MLS-MPM render-every
+continuation is now console-clean on the native WebGPU surface-consumer route
+when native marching-cubes extraction is deferred until the final resident
+batch. The probe
+`/tmp/ulg-browser-native-mlsmpm-render-every-2x1-extension-no-explicit-fences.json`
+completed with zero browser console issues and preserved the engine-owned
+native surface consumer path without an overlay. This supersedes the older
+multi-batch timeout notes below for the immediate queue-lifetime failure class.
+The remaining P0 renderer blocker is narrower: final native extraction still
+fails closed inside the sibling `webgpu-marching-cubes` extension because
+`MarchingCubes.computeActiveVoxels()` performs a CPU `mapAsync` counter
+readback on the shared resident device. The next todo is a no-readback,
+GPU-resident native extraction/draw contract, likely conservative draw ranges
+or indirect draw metadata, with browser pixel validation. Do not spend more
+time optimizing CPU summary/readback fallback paths except as diagnostic gates.
+
 Current routing note, 2026-06-19 AKDT: the engine-owned
 `native-webgpu-surface-consumer` main-canvas path is wired, but the earlier
 `status=good` native/mobile artifacts are superseded false positives. Explicit

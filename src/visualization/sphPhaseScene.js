@@ -8635,6 +8635,32 @@ export function createSphPhaseScene(container, {
 
   function renderSphResidentSurfaceDrawOverlay() {
     const bridge = sphResidentSurfaceDrawRenderBridge;
+    if (bridge && residentGpuSubmissionPaused()) {
+      const status = 'resident-surface-draw-skipped-resident-gpu-work-in-flight';
+      bridge.lastRenderStatus = status;
+      bridge.lastRenderSkipReason = 'resident GPU compute is using the WebGPU queue';
+      scene.userData.sphResidentSurfaceDrawRenderSkip = {
+        schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
+        status,
+        reason: bridge.lastRenderSkipReason,
+        residentGpuRefreshInFlightCount,
+        residentGpuWorkInFlightCount,
+        rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+        updatedAtMs: nowMs(),
+        scientificValidation: false,
+        sphValidation: false,
+        fullPhysicsValidation: false
+      };
+      if (sphResidentSurfaceDraw) {
+        sphResidentSurfaceDraw.renderBridgeLastRenderStatus = status;
+        sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+      }
+      if (sphResidentRenderState) {
+        sphResidentRenderState.surfaceDrawRenderBridgeLastRenderStatus = status;
+        sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+      }
+      return;
+    }
     const rowDrawState = bridge?.renderRowDrawState;
     if (bridge?.device && bridge?.context && rowDrawState?.bindGroup && rowDrawState?.particleCount > 0) {
       try {
@@ -8665,6 +8691,12 @@ export function createSphPhaseScene(container, {
         pass.draw(6, rowDrawState.particleCount);
         pass.end();
         bridge.device.queue.submit([encoder.finish()]);
+        trackResidentSurfaceDrawSubmitFence(bridge, {
+          reason: 'resident-render-row-overlay-submit',
+          renderStatus: rowDrawState.mode === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
+            ? 'webgpu-render-row-spheres-rendered'
+            : 'webgpu-render-row-points-rendered'
+        });
         bridge.frameCount += 1;
         bridge.lastRenderStatus = rowDrawState.mode === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
           ? 'webgpu-render-row-spheres-rendered'
@@ -8709,6 +8741,8 @@ export function createSphPhaseScene(container, {
     try {
       resizeSphResidentSurfaceDrawOverlayCanvas(bridge);
       const depthView = ensureSphResidentSurfaceDrawDepthView(bridge);
+      camera.updateMatrixWorld?.();
+      camera.matrixWorldInverse?.copy?.(camera.matrixWorld)?.invert?.();
       const viewProjection = new Three.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
       bridge.device.queue.writeBuffer(bridge.cameraBuffer, 0, new Float32Array(viewProjection.elements));
       const encoder = bridge.device.createCommandEncoder({ label: 'ulg-sph-resident-surface-draw-overlay' });
@@ -8831,6 +8865,12 @@ export function createSphPhaseScene(container, {
         { drawCount: opaqueDraws.length + transparentDraws.length }
       );
       bridge.device.queue.submit([encoder.finish()]);
+      trackResidentSurfaceDrawSubmitFence(bridge, {
+        reason: 'resident-surface-draw-overlay-submit',
+        renderStatus: bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+          ? 'native-webgpu-surface-consumer-rendered'
+          : 'webgpu-overlay-rendered'
+      });
       completeNativePixelValidation?.();
       bridge.frameCount += 1;
       bridge.lastRenderStatus = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
@@ -9710,7 +9750,15 @@ export function createSphPhaseScene(container, {
     if (!force && pendingMlsMpmResidentStep?.signature === signature) {
       return pendingMlsMpmResidentStep.promise;
     }
+    const releaseResidentGpuWork = beginResidentGpuWork({
+      reason: 'mls-mpm-resident-step',
+      stage: 'mls-mpm-resident-step'
+    });
     const promise = (async () => {
+      await awaitResidentSurfaceDrawSubmitFence({
+        reason: 'mls-mpm-resident-step-before-compute',
+        stage: 'mls-mpm-resident-step'
+      });
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
         : deviceResult;
@@ -9853,7 +9901,7 @@ export function createSphPhaseScene(container, {
           reason: 'temporary-pressure-interface-force-rows-resident-step-cleanup'
         });
       }
-    })();
+    })().finally(releaseResidentGpuWork);
     pendingMlsMpmResidentStep = { signature, promise };
     try {
       return await promise;
@@ -10035,7 +10083,20 @@ export function createSphPhaseScene(container, {
       return pendingMlsMpmResidentSteps.promise;
     }
     markResidentStepsProgress('resident-steps-submitted');
+    const releaseResidentGpuWork = beginResidentGpuWork({
+      reason: 'mls-mpm-resident-steps',
+      stage: 'mls-mpm-resident-steps'
+    });
     const promise = (async () => {
+      markResidentStepsProgress('resident-steps-awaiting-surface-draw-queue-idle');
+      const surfaceDrawSubmitFenceStatus = await awaitResidentSurfaceDrawSubmitFence({
+        reason: 'mls-mpm-resident-steps-before-compute',
+        stage: 'mls-mpm-resident-steps'
+      });
+      markResidentStepsProgress('resident-steps-surface-draw-queue-idle', {
+        surfaceDrawSubmitFenceStatus: surfaceDrawSubmitFenceStatus?.status ?? null,
+        surfaceDrawSubmitFenceElapsedMs: surfaceDrawSubmitFenceStatus?.elapsedMs ?? null
+      });
       markResidentStepsProgress('resident-steps-requesting-device');
       const resolvedDeviceResult = preferWebGpu && !device && !deviceResult
         ? await requestCachedOpticalGpuDevice(overrideNavigatorRef)
@@ -10490,7 +10551,7 @@ export function createSphPhaseScene(container, {
           reason: 'temporary-pressure-interface-force-rows-resident-steps-cleanup'
         });
       }
-    })();
+    })().finally(releaseResidentGpuWork);
     pendingMlsMpmResidentSteps = { signature, promise };
     try {
       const execution = await promise;
@@ -12131,6 +12192,9 @@ export function createSphPhaseScene(container, {
       pbrPayload,
       ownsBuffer: true
     });
+    const extensionError = extensionExecution?.errors?.[0]
+      || extensionExecution?.webgpuStatus?.error
+      || null;
     return {
       schema: 'peercompute.ulg.sph-native-marching-cubes-extraction.v0',
       ok: extensionExecution?.extensionExecution?.ok === true,
@@ -12140,6 +12204,10 @@ export function createSphPhaseScene(container, {
       volumeSchema: volume.schema,
       volumeSourceType: volume.sourceType,
       volumeScalarLayoutName: volume.scalarLayoutName,
+      errorName: extensionError?.name ?? null,
+      errorStatus: extensionError?.status ?? null,
+      errorStage: extensionError?.stage ?? null,
+      errorStack: extensionError?.stack ?? null,
       extensionExecution
     };
   }
@@ -12262,7 +12330,6 @@ export function createSphPhaseScene(container, {
       const waitForSurfaceDrawMetadataQueueCompletion = Boolean(
         (
           useThreeWebGpuSurfaceBufferBridge
-          || useNativeWebGpuSurfaceConsumerBridge
           || useResidentSurfaceBufferHandoffBridge
         )
         && !rendererOwnedDevice
@@ -13185,8 +13252,10 @@ export function createSphPhaseScene(container, {
     pressureInterfaceGasCellFieldAdmission = null,
     pressureInterfaceGasCellFieldImport = currentPressureInterfaceGasCellFieldImport(),
     pressureInterfaceGasCellFieldImportStateKey = null,
-    skipPressureInterfaceRefresh = false
+    skipPressureInterfaceRefresh = false,
+    allowNativeSurfaceExtraction = true
   } = {}) {
+    const nativeSurfaceExtractionAllowed = allowNativeSurfaceExtraction !== false;
     const effectiveResidentAuthorityHost = resolveSceneResidentAuthorityHost(residentAuthorityHost);
     const previousResidentSurfaceDraw = sphResidentSurfaceDraw;
     const previousResidentRenderBridge = sphResidentSurfaceDrawRenderBridge;
@@ -13210,7 +13279,8 @@ export function createSphPhaseScene(container, {
       renderFieldReadbackMode,
       renderRowsReadbackMode,
       renderFieldSurfaceSummaryMode,
-      surfaceDrawDiagnosticMode
+      surfaceDrawDiagnosticMode,
+      nativeSurfaceExtractionAllowed
     });
     if (!nextSphParticleState?.schema || nextSphUpload?.status !== 'webgpu-uploaded') {
       sphResidentRenderState = {
@@ -13282,6 +13352,11 @@ export function createSphPhaseScene(container, {
       && rendererReady
       && resolvedDeviceResult.rendererOwnedDevice
     );
+    const fenceResidentRenderRefreshQueue = Boolean(
+      resolvedDeviceResult.device?.queue
+      && typeof resolvedDeviceResult.device.queue.onSubmittedWorkDone === 'function'
+      && pauseThreeWebGpuFramesForResidentRefresh
+    );
     if (pauseThreeWebGpuFramesForResidentRefresh) {
       residentGpuRefreshInFlightCount += 1;
       scene.userData.sphResidentGpuRefreshInFlight = {
@@ -13289,12 +13364,14 @@ export function createSphPhaseScene(container, {
         status: 'resident-gpu-refresh-in-flight',
         reason: 'pausing Three WebGPU presentation while resident compute uses the renderer-owned device',
         count: residentGpuRefreshInFlightCount,
-        rendererOwnedDevice: true,
+        rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+        nativeWebGpuRenderer: false,
         updatedAtMs: nowMs()
       };
       markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-started', {
         stage: 'renderer-owned-device-pause',
-        rendererOwnedDevice: true
+        rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+        nativeWebGpuRenderer: false
       });
       try {
         if (typeof globalThis.requestAnimationFrame === 'function') {
@@ -13309,7 +13386,8 @@ export function createSphPhaseScene(container, {
       }
       markSphResidentRenderProgress('resident-render-renderer-owned-device-pause-complete', {
         stage: 'renderer-owned-device-pause',
-        rendererOwnedDevice: true,
+        rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+        nativeWebGpuRenderer: false,
         queueFenceStatus: 'skipped',
         queueFenceMethod: 'requestAnimationFrame-presentation-drain'
       });
@@ -13801,7 +13879,7 @@ export function createSphPhaseScene(container, {
             retainFieldRowsBuffer: true,
             retainSurfaceBuffer: true,
             waitForQueueCompletion: visibleRenderFieldReadbackMode !== RESIDENT_NO_FULL_READBACK_MODE
-              || shouldRetainRenderFieldBufferHandoff,
+              || (shouldRetainRenderFieldBufferHandoff && !shouldUseNativeWebGpuSurfaceConsumerBridge),
             deferCleanup: visibleRenderFieldReadbackMode === RESIDENT_NO_FULL_READBACK_MODE,
             useQueueFenceForCleanup: false
           });
@@ -14301,7 +14379,8 @@ export function createSphPhaseScene(container, {
               ? renderFieldExecution?.surfaceTable?.metadata?.[nativeDescriptor.surfaceIndex]
               : null;
             const shouldAttemptNativeMarchingCubesRenderFieldExtraction = Boolean(
-              nativeDescriptor
+              nativeSurfaceExtractionAllowed
+              && nativeDescriptor
               && nativeSurfaceRecord
               && (
                 shouldUseNativeWebGpuSurfaceConsumerBridge
@@ -14316,15 +14395,19 @@ export function createSphPhaseScene(container, {
             ) {
               nextResidentSurfaceDraw.nativeMarchingCubesExtractionSchema =
                 'peercompute.ulg.sph-native-marching-cubes-extraction.v0';
+              nextResidentSurfaceDraw.nativeMarchingCubesExtractionAllowed = nativeSurfaceExtractionAllowed;
               nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus =
                 'native-marching-cubes-render-field-extraction-skipped';
               nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason =
-                requestedThreeWebGpuSurfaceBufferCapability?.reason
+                nativeSurfaceExtractionAllowed === false
+                  ? 'native marching-cubes extraction deferred while resident MLS-MPM continuation work is expected'
+                  : requestedThreeWebGpuSurfaceBufferCapability?.reason
                 || 'Three WebGPU surface-buffer presentation is not runtime validated; retaining render-field buffers for an engine direct consumer without invoking native marching cubes';
               markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-skipped', {
                 stage: 'native-marching-cubes',
                 surfaceIndex: nativeDescriptor.surfaceIndex,
                 surfaceKey: nativeDescriptor.surfaceKey,
+                nativeSurfaceExtractionAllowed,
                 reason: nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason
               });
             }
@@ -14384,7 +14467,7 @@ export function createSphPhaseScene(container, {
                         ? SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
                         : SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE),
                     materialProperties,
-                    waitForQueueCompletion: true
+                    waitForQueueCompletion: !shouldUseNativeWebGpuSurfaceConsumerBridge
                   });
                   nextResidentSurfaceDraw = {
                     ...nativeSurfaceDraw,
@@ -14405,6 +14488,7 @@ export function createSphPhaseScene(container, {
                     renderFieldBufferVolumeDescriptorNativeRequiredAdapter:
                       renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter,
                     renderFieldBufferVolumeDescriptors: renderFieldBufferVolumeDescriptorSummary.descriptors,
+                    nativeMarchingCubesExtractionAllowed: nativeSurfaceExtractionAllowed,
                     nativeMarchingCubesExtractionSchema: nativeExtraction.schema,
                     nativeMarchingCubesExtractionStatus: nativeExtraction.status,
                     nativeMarchingCubesVolumeSchema: nativeExtraction.volumeSchema,
@@ -14430,17 +14514,24 @@ export function createSphPhaseScene(container, {
                   });
                 } else {
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionSchema = nativeExtraction.schema;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionAllowed = nativeSurfaceExtractionAllowed;
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus = nativeExtraction.status;
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason =
                     nativeExtraction.reason || extensionExecution?.summary?.reason || null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorName = nativeExtraction.errorName ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStatus = nativeExtraction.errorStatus ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStage = nativeExtraction.errorStage ?? null;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStack = nativeExtraction.errorStack ?? null;
                   markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-blocked', {
                     stage: 'native-marching-cubes',
                     surfaceIndex: nativeDescriptor.surfaceIndex,
                     status: nativeExtraction.status,
-                    reason: nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason
+                    reason: nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason,
+                    errorStage: nextResidentSurfaceDraw.nativeMarchingCubesExtractionErrorStage
                   });
                 }
               } catch (error) {
+                nextResidentSurfaceDraw.nativeMarchingCubesExtractionAllowed = nativeSurfaceExtractionAllowed;
                 nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus =
                   'native-marching-cubes-render-field-extraction-error';
                 nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason =
@@ -14976,10 +15067,20 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptors || [],
         surfaceDrawNativeMarchingCubesExtractionSchema:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionSchema ?? null,
+        surfaceDrawNativeMarchingCubesExtractionAllowed:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionAllowed ?? null,
         surfaceDrawNativeMarchingCubesExtractionStatus:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionStatus ?? null,
         surfaceDrawNativeMarchingCubesExtractionReason:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionReason ?? null,
+        surfaceDrawNativeMarchingCubesExtractionErrorName:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionErrorName ?? null,
+        surfaceDrawNativeMarchingCubesExtractionErrorStatus:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionErrorStatus ?? null,
+        surfaceDrawNativeMarchingCubesExtractionErrorStage:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionErrorStage ?? null,
+        surfaceDrawNativeMarchingCubesExtractionErrorStack:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionErrorStack ?? null,
         surfaceDrawNativeMarchingCubesVolumeSchema:
           sphResidentSurfaceDraw?.nativeMarchingCubesVolumeSchema ?? null,
         surfaceDrawNativeMarchingCubesVolumeSourceType:
@@ -15317,6 +15418,34 @@ export function createSphPhaseScene(container, {
       });
       return sphResidentRenderState;
     } finally {
+      if (fenceResidentRenderRefreshQueue) {
+        const queueFenceStartedAtMs = nowMs();
+        markSphResidentRenderProgress('resident-render-queue-fence-started', {
+          stage: 'resident-render-refresh-queue-fence',
+          rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+          nativeWebGpuRenderer: false
+        });
+        try {
+          await resolvedDeviceResult.device.queue.onSubmittedWorkDone();
+          markSphResidentRenderProgress('resident-render-queue-fence-complete', {
+            stage: 'resident-render-refresh-queue-fence',
+            rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+            nativeWebGpuRenderer: false,
+            queueFenceStatus: 'resolved',
+            queueFenceMethod: 'queue.onSubmittedWorkDone',
+            queueFenceMs: Math.max(0, nowMs() - queueFenceStartedAtMs)
+          });
+        } catch (queueFenceError) {
+          markSphResidentRenderProgress('resident-render-queue-fence-error', {
+            stage: 'resident-render-refresh-queue-fence',
+            rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+            nativeWebGpuRenderer: false,
+            queueFenceStatus: 'error',
+            queueFenceMethod: 'queue.onSubmittedWorkDone',
+            reason: queueFenceError instanceof Error ? queueFenceError.message : String(queueFenceError)
+          });
+        }
+      }
       if (pauseThreeWebGpuFramesForResidentRefresh) {
         residentGpuRefreshInFlightCount = Math.max(0, residentGpuRefreshInFlightCount - 1);
         scene.userData.sphResidentGpuRefreshInFlight = {
@@ -15326,7 +15455,8 @@ export function createSphPhaseScene(container, {
             : 'resident-gpu-refresh-idle',
           reason: null,
           count: residentGpuRefreshInFlightCount,
-          rendererOwnedDevice: true,
+          rendererOwnedDevice: Boolean(resolvedDeviceResult.rendererOwnedDevice),
+          nativeWebGpuRenderer: false,
           updatedAtMs: nowMs()
         };
       }
@@ -15391,6 +15521,171 @@ export function createSphPhaseScene(container, {
 
   let running = true;
   let residentGpuRefreshInFlightCount = 0;
+  let residentGpuWorkInFlightCount = 0;
+  let residentSurfaceDrawSubmitFence = null;
+  let residentSurfaceDrawSubmitFenceSerial = 0;
+
+  function publishResidentGpuWorkInFlight(status, extra = {}) {
+    scene.userData.sphResidentGpuWorkInFlight = {
+      schema: 'peercompute.ulg.sph-resident-gpu-work-in-flight.v0',
+      status,
+      residentGpuRefreshInFlightCount,
+      residentGpuWorkInFlightCount,
+      rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false,
+      ...extra
+    };
+    return scene.userData.sphResidentGpuWorkInFlight;
+  }
+
+  function beginResidentGpuWork({
+    reason = 'resident-gpu-work',
+    stage = 'resident-compute'
+  } = {}) {
+    residentGpuWorkInFlightCount += 1;
+    let released = false;
+    publishResidentGpuWorkInFlight('resident-gpu-work-in-flight', {
+      reason,
+      stage
+    });
+    return () => {
+      if (released) return;
+      released = true;
+      residentGpuWorkInFlightCount = Math.max(0, residentGpuWorkInFlightCount - 1);
+      publishResidentGpuWorkInFlight(
+        residentGpuWorkInFlightCount > 0
+          ? 'resident-gpu-work-in-flight'
+          : 'resident-gpu-work-idle',
+        {
+          reason: null,
+          stage
+        }
+      );
+    };
+  }
+
+  function residentGpuSubmissionPaused() {
+    return residentGpuRefreshInFlightCount > 0 || residentGpuWorkInFlightCount > 0;
+  }
+
+  function publishResidentSurfaceDrawSubmitFence(status, extra = {}) {
+    scene.userData.sphResidentSurfaceDrawSubmitFence = {
+      schema: 'peercompute.ulg.sph-resident-surface-draw-submit-fence.v0',
+      status,
+      serial: residentSurfaceDrawSubmitFenceSerial,
+      residentGpuRefreshInFlightCount,
+      residentGpuWorkInFlightCount,
+      rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
+      updatedAtMs: nowMs(),
+      scientificValidation: false,
+      sphValidation: false,
+      fullPhysicsValidation: false,
+      ...extra
+    };
+    return scene.userData.sphResidentSurfaceDrawSubmitFence;
+  }
+
+  function trackResidentSurfaceDrawSubmitFence(bridge, {
+    reason = 'resident-surface-draw-submit',
+    renderStatus = bridge?.lastRenderStatus ?? null
+  } = {}) {
+    if (bridge?.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      bridge.lastSubmitFenceStatus = 'skipped-native-webgpu-surface-consumer';
+      publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-skipped-native-webgpu-surface-consumer', {
+        reason,
+        renderStatus
+      });
+      return null;
+    }
+    if (typeof bridge?.device?.queue?.onSubmittedWorkDone !== 'function') {
+      bridge.lastSubmitFenceStatus = 'unsupported';
+      publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-unsupported', {
+        reason,
+        renderStatus
+      });
+      return null;
+    }
+    const serial = residentSurfaceDrawSubmitFenceSerial + 1;
+    residentSurfaceDrawSubmitFenceSerial = serial;
+    const startedAtMs = nowMs();
+    bridge.lastSubmitFenceSerial = serial;
+    bridge.lastSubmitFenceStatus = 'pending';
+    publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-pending', {
+      reason,
+      renderStatus,
+      startedAtMs
+    });
+    const fence = bridge.device.queue.onSubmittedWorkDone()
+      .then(() => {
+        const elapsedMs = Math.max(0, nowMs() - startedAtMs);
+        bridge.lastSubmitFenceStatus = 'resolved';
+        bridge.lastSubmitFenceElapsedMs = elapsedMs;
+        if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
+        publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-resolved', {
+          reason,
+          renderStatus,
+          elapsedMs
+        });
+        return scene.userData.sphResidentSurfaceDrawSubmitFence;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        bridge.lastSubmitFenceStatus = 'error';
+        bridge.lastSubmitFenceReason = message;
+        if (residentSurfaceDrawSubmitFence === fence) residentSurfaceDrawSubmitFence = null;
+        return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-error', {
+          reason,
+          renderStatus,
+          error: message
+        });
+      });
+    residentSurfaceDrawSubmitFence = fence;
+    bridge.lastSubmitFence = fence;
+    return fence;
+  }
+
+  async function awaitResidentSurfaceDrawSubmitFence({
+    reason = 'resident-gpu-work-before-compute',
+    stage = 'resident-compute'
+  } = {}) {
+    const fence = residentSurfaceDrawSubmitFence;
+    if (!fence) {
+      return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-skip-no-pending-submit', {
+        reason,
+        stage
+      });
+    }
+    const serial = residentSurfaceDrawSubmitFenceSerial;
+    const startedAtMs = nowMs();
+    publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-waiting', {
+      reason,
+      stage,
+      serial,
+      startedAtMs
+    });
+    try {
+      await fence;
+      return publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-awaited', {
+        reason,
+        stage,
+        serial,
+        elapsedMs: Math.max(0, nowMs() - startedAtMs)
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      publishResidentSurfaceDrawSubmitFence('resident-surface-draw-submit-fence-await-error', {
+        reason,
+        stage,
+        serial,
+        error: message
+      });
+      throw error;
+    }
+  }
+
   function renderSceneFrame({ reason = 'animation-frame' } = {}) {
     if (!rendererReady) {
       const presentationDisabled = renderer.isWebGPURenderer
@@ -15411,14 +15706,15 @@ export function createSphPhaseScene(container, {
       };
       return false;
     }
-    if (renderer.isWebGPURenderer && residentGpuRefreshInFlightCount > 0) {
+    if (renderer.isWebGPURenderer && residentGpuSubmissionPaused()) {
       scene.userData.sphRendererFrame = {
         schema: 'peercompute.ulg.sph-three-renderer-frame.v0',
-        status: 'renderer-frame-skipped-resident-gpu-refresh-in-flight',
+        status: 'renderer-frame-skipped-resident-gpu-work-in-flight',
         reason,
         rendererInitStatus,
         rendererBackend: scene.userData.sphRendererBackend ?? rendererBackendName(),
         residentGpuRefreshInFlightCount,
+        residentGpuWorkInFlightCount,
         updatedAtMs: nowMs(),
         scientificValidation: false,
         sphValidation: false,

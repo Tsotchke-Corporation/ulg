@@ -900,7 +900,12 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   const extensionVertexFormat = result?.vertexFormat ?? null;
   const extensionBufferRetained = positionRows.bufferRetained;
   const extensionResourceOwnershipStatus = positionRows.resourceOwnership?.status ?? null;
+  const extensionError = execution.errors?.[0]
+    || execution.webgpuStatus?.error
+    || result?.error
+    || null;
   const blockedReason = normalizeStatusReason(execution.webgpuStatus?.reason)
+    || normalizeStatusReason(extensionError?.message)
     || normalizeStatusReason(result?.reason)
     || normalizeStatusReason(execution.status);
   const readyCompactPositionBuffer = Boolean(
@@ -938,6 +943,10 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionSurfaceSchema,
     extensionStatus: execution.status ?? null,
     extensionOk,
+    extensionErrorName: extensionError?.name ?? null,
+    extensionErrorStatus: extensionError?.status ?? null,
+    extensionErrorStage: extensionError?.stage ?? null,
+    extensionErrorStack: extensionError?.stack ?? null,
     extensionBackend: execution.backend ?? null,
     extensionAdapterId: execution.adapterId ?? null,
     extensionOwnsDevice: execution.ownsDevice ?? null,
@@ -1136,6 +1145,7 @@ export function createUlgWebGpuMarchingCubesExtensionAdapter({
       return {
         schema: ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
         status: summary.status,
+        reason: summary.reason,
         backend,
         adapterSchema: wrapper.schema,
         extensionAdapterSchema: resolvedAdapter?.schema ?? null,
@@ -1144,6 +1154,12 @@ export function createUlgWebGpuMarchingCubesExtensionAdapter({
         preflight,
         summary,
         extensionExecution,
+        webgpuStatus: extensionExecution?.webgpuStatus ?? null,
+        errors: extensionExecution?.errors || [],
+        errorName: summary.extensionErrorName,
+        errorStatus: summary.extensionErrorStatus,
+        errorStage: summary.extensionErrorStage,
+        errorStack: summary.extensionErrorStack,
         surfaceVertexSchema: summary.surfaceVertexSchema,
         surfaceDrawSchema: summary.surfaceDrawSchema,
         surfaceDrawIndirectSchema: summary.surfaceDrawIndirectSchema,

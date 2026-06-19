@@ -15650,6 +15650,16 @@ export function createSphPhaseScene(container, {
         extensionSurfaceRawVertexCount: rawExtensionExecution?.result?.vertexCount ?? null,
         extensionSurfacePositionTransformStatus: translation.positionTransformStatus ?? null,
         extensionSurfacePositionTransform: translation.positionTransform ?? null,
+        extensionSurfaceTranslationPipelineCacheStatus:
+          translation.translationPipelineCacheStatus
+          ?? surfaceDrawExecution.translationPipelineCacheStatus
+          ?? surfaceVerticesExecution.translationPipelineCacheStatus
+          ?? null,
+        extensionSurfaceVertexRowsBufferClearStatus:
+          translation.vertexRowsBufferClearStatus
+          ?? surfaceDrawExecution.vertexRowsBufferClearStatus
+          ?? surfaceVerticesExecution.vertexRowsBufferClearStatus
+          ?? null,
         extensionSurfaceTranslationElapsedMs,
         extensionSurfaceRenderBridgeBuildElapsedMs,
         extensionSurfaceRefreshElapsedMs,
@@ -17834,6 +17844,10 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.extensionSurfacePositionTransformStatus ?? null,
         surfaceDrawExtensionSurfacePositionTransform:
           sphResidentSurfaceDraw?.extensionSurfacePositionTransform ?? null,
+        surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus:
+          sphResidentSurfaceDraw?.extensionSurfaceTranslationPipelineCacheStatus ?? null,
+        surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus:
+          sphResidentSurfaceDraw?.extensionSurfaceVertexRowsBufferClearStatus ?? null,
         surfaceDrawExtensionSurfaceTranslationElapsedMs:
           sphResidentSurfaceDraw?.extensionSurfaceTranslationElapsedMs ?? null,
         surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs:

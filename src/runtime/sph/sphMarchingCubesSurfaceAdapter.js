@@ -8,7 +8,7 @@ import {
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
-import { computeBufferBinding, createExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
+import { computeBufferBinding, createCachedExplicitComputePipeline, deferSubmittedWorkCleanup } from '../webgpuComputeLayout.js';
 import {
   addResidentBufferLease,
   createResidentBufferLeaseLedger,
@@ -1606,7 +1606,10 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       | GPU_BUFFER_USAGE.COPY_SRC
       | GPU_BUFFER_USAGE.COPY_DST
   });
-  if (vertexRowsByteLength > 0) {
+  const vertexRowsBufferClearStatus = noFullReadback
+    ? 'skipped-no-full-readback-indirect-draw'
+    : 'cleared-for-readback';
+  if (!noFullReadback && vertexRowsByteLength > 0) {
     device.queue.writeBuffer(
       vertexRowsBuffer,
       0,
@@ -1660,13 +1663,10 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   }));
   markProgress('extension-surface-translation-buffers-ready');
 
-  const module = device.createShaderModule({
+  const translationPipeline = createCachedExplicitComputePipeline(device, {
+    cacheKey: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation:v1',
     label: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation',
-    code: webGpuMarchingCubesExtensionSurfaceRowsWgsl
-  });
-  const { pipeline, bindGroupLayout } = createExplicitComputePipeline(device, {
-    label: 'ulg-sph-webgpu-marching-cubes-extension-surface-translation',
-    module,
+    code: webGpuMarchingCubesExtensionSurfaceRowsWgsl,
     entryPoint: 'main',
     bindings: [
       computeBufferBinding(0, 'read-only-storage'),
@@ -1677,6 +1677,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       computeBufferBinding(5, 'read-only-storage')
     ]
   });
+  const { pipeline, bindGroupLayout } = translationPipeline;
   const bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
@@ -1845,6 +1846,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceVertexRowsBufferBound: true,
     sourceVertexFormat: summary.extensionVertexFormat,
     sourceVertexStrideFloats: sourceStrideFloats,
+    vertexRowsBufferClearStatus,
+    translationPipelineCacheStatus: translationPipeline.cacheStatus ?? null,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,
@@ -1873,6 +1876,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceVertexCounterBufferBound: Boolean(sourceVertexCounterBuffer),
     sourceVertexCounterBufferRetained,
     sourceVertexCounterBufferByteLength,
+    vertexRowsBufferClearStatus,
+    translationPipelineCacheStatus: translationPipeline.cacheStatus ?? null,
     triangleCount,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length,
@@ -1997,6 +2002,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceVertexStrideFloats: sourceStrideFloats,
     surfaceVertices,
     surfaceDraw,
+    vertexRowsBufferClearStatus,
+    translationPipelineCacheStatus: translationPipeline.cacheStatus ?? null,
     positionTransform: resolvedPositionTransform,
     positionTransformStatus: resolvedPositionTransform.status,
     positionClamp: resolvedPositionClamp,

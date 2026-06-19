@@ -916,6 +916,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.hotLoopGpuTranslationRequired, false);
   assert.equal(result.positionTransformStatus, 'position-transform-disabled');
   assert.equal(result.positionClampStatus, 'position-clamp-ready');
+  assert.equal(result.translationPipelineCacheStatus, 'pipeline-cache-miss');
+  assert.equal(result.vertexRowsBufferClearStatus, 'skipped-no-full-readback-indirect-draw');
 
   assert.equal(result.surfaceVertices.schema, ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA);
   assert.equal(result.surfaceVertices.backend, 'webgpu');
@@ -926,6 +928,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.surfaceVertices.vertexRowsBufferByteLength, 3 * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length * 4);
   assert.equal(result.surfaceVertices.surfaceVertexReadback, false);
   assert.equal(result.surfaceVertices.vertexRows.length, 0);
+  assert.equal(result.surfaceVertices.translationPipelineCacheStatus, 'pipeline-cache-miss');
+  assert.equal(result.surfaceVertices.vertexRowsBufferClearStatus, 'skipped-no-full-readback-indirect-draw');
   assert.equal(result.surfaceVertices.surfaces[0].surfaceIndex, 5);
   assert.equal(result.surfaceVertices.surfaces[0].vertexOffset, 0);
   assert.equal(result.surfaceVertices.surfaces[0].vertexCount, 3);
@@ -949,6 +953,8 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.surfaceDraw.drawIndirectRowsByteLength, SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length * 4);
   assert.equal(result.surfaceDraw.surfaceDrawReadback, false);
   assert.equal(result.surfaceDraw.compactedVertexRowsBuffer, result.surfaceVertices.vertexRowsBuffer);
+  assert.equal(result.surfaceDraw.translationPipelineCacheStatus, 'pipeline-cache-miss');
+  assert.equal(result.surfaceDraw.vertexRowsBufferClearStatus, 'skipped-no-full-readback-indirect-draw');
   assert.equal(result.surfaceDraw.surfaces[0].status, 'surface-draw-summary-not-read');
   assert.equal(result.surfaceDraw.surfaces[0].vertexOffset, 0);
   assert.equal(result.surfaceDraw.surfaces[0].vertexCount, 3);
@@ -969,6 +975,7 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'));
   assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 144));
+  assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
 
   const retainedBuffers = [
     result.surfaceVertices.vertexRowsBuffer,
@@ -985,8 +992,30 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(retainedBuffers.every((buffer) => buffer.destroyed === true), true);
 });
 
+test('ULG GPU builder reuses the extension surface translation pipeline on the same device', async () => {
+  const { device, shaderModules, queueWrites } = fakeExtensionSurfaceDevice();
+
+  const first = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: extensionExecution({ vertexCount: 3 }),
+    readbackMode: 'no-full-readback',
+    waitForQueueCompletion: false
+  });
+  const second = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: extensionExecution({ vertexCount: 6 }),
+    readbackMode: 'no-full-readback',
+    waitForQueueCompletion: false
+  });
+
+  assert.equal(first.translationPipelineCacheStatus, 'pipeline-cache-miss');
+  assert.equal(second.translationPipelineCacheStatus, 'pipeline-cache-hit');
+  assert.equal(shaderModules.length, 1);
+  assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), false);
+});
+
 test('ULG GPU builder exposes full-readback rows for the Three compact scene bridge', async () => {
-  const { device } = fakeExtensionSurfaceDevice();
+  const { device, queueWrites } = fakeExtensionSurfaceDevice();
   const result = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     device,
     extensionExecution: extensionExecution({ vertexCount: 3 }),
@@ -997,12 +1026,15 @@ test('ULG GPU builder exposes full-readback rows for the Three compact scene bri
   });
 
   assert.equal(result.surfaceVertices.surfaceVertexReadback, true);
+  assert.equal(result.vertexRowsBufferClearStatus, 'cleared-for-readback');
+  assert.equal(result.surfaceVertices.vertexRowsBufferClearStatus, 'cleared-for-readback');
   assert.equal(result.surfaceVertices.vertexRows.length, 3 * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length);
   assert.equal(result.surfaceDraw.surfaceDrawReadback, true);
   assert.equal(result.surfaceDraw.compactedVertexRows, result.surfaceVertices.vertexRows);
   assert.equal(result.surfaceDraw.compactedVertexRowsByteLength, result.surfaceVertices.vertexRows.byteLength);
   assert.equal(result.surfaceDraw.compactedVertexRowsBufferRetained, false);
   assert.equal(result.surfaceDraw.surfaces[0].status, 'surface-draw-ready');
+  assert.equal(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-vertices'), true);
 });
 
 test('ULG GPU builder rejects extension buffers reported on a different GPUDevice', async () => {

@@ -52,6 +52,18 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Extension-to-ULG native surface translation now uses cached compute pipeline
+  creation and skips the full upper-bound compact vertex-row clear in
+  no-full-readback indirect draw mode. Focused adapter coverage asserts
+  same-device pipeline cache reuse and no vertex clear upload on the resident
+  path, while full-readback diagnostics still clear the buffer before CPU row
+  validation. Fresh 10k-ish native benchmark evidence is `status=good`,
+  `probeStatus=good`, zero browser console issues, pipeline cache hit, skipped
+  no-full vertex clear, mean batch `129.55 ms`, resident stage `8.9 ms`,
+  extraction `1.7 ms`, translation `2.0 ms`, bridge build `0.9 ms`, and
+  surface refresh `3.4 ms`. This closes the first translation hotspot; the
+  remaining performance roadmap should prioritize resident mechanics/batch
+  cadence and any repeated native render-bridge setup over CPU readback work.
 - Native no-full surface extraction no longer spends the benchmark frame in
   adapter setup or render-field row allocation. ULG now caches the sibling
   marching-cubes adapter/volume wrapper by the retained render-field descriptor

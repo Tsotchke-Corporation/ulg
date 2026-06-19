@@ -10,10 +10,22 @@ consumer handoff. The 10k-ish native benchmark is now `status=good`,
 pool-reused, and visible-consumer ready: actual particles `9826`, mean batch
 `139.8 ms`, estimated visual refresh `7.15 Hz`, resident stage `12.1 ms`,
 surface total `24.1 ms`, extraction `1.4 ms`, extension execution `1.4 ms`,
-translation `21.5 ms`, and surface refresh `22.7 ms`. This supersedes the
-earlier extraction hotspot: the next no-readback performance slice should
-target GPU-side extension-to-ULG draw-buffer translation and render-bridge
-refresh, not CPU readback or adapter construction.
+translation `21.5 ms`, and surface refresh `22.7 ms`. This superseded the
+earlier extraction hotspot and identified GPU-side extension-to-ULG
+draw-buffer translation/render-bridge refresh as the next no-readback slice,
+not CPU readback or adapter construction.
+
+Current checkpoint, 2026-06-19 AKDT: extension-to-ULG surface translation now
+uses the shared cached compute-pipeline helper and skips the full upper-bound
+vertex-row zero upload in no-full-readback indirect draw mode. The focused
+adapter tests assert same-device pipeline reuse and no vertex clear upload for
+the resident path. Fresh native 10k-ish browser evidence is `status=good`,
+`probeStatus=good`, browser-console clean, `pipeline-cache-hit`, and
+`skipped-no-full-readback-indirect-draw`: actual particles `9826`, mean batch
+`129.55 ms`, resident stage `8.9 ms`, native extraction `1.7 ms`, translation
+`2.0 ms`, bridge build `0.9 ms`, and surface refresh `3.4 ms`. Surface
+translation is no longer the dominant cost; next work should target remaining
+resident mechanics/batch cadence and any repeated native render-bridge setup.
 
 Current checkpoint, 2026-06-19 AKDT: the performance benchmark now carries
 active-grid node counts from the resident dispatch/topology records when the

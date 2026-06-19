@@ -2172,6 +2172,10 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount ?? null,
             surfaceDrawExtensionSurfaceTranslationElapsedMs:
               renderState.surfaceDrawExtensionSurfaceTranslationElapsedMs ?? null,
+            surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus:
+              renderState.surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus ?? null,
+            surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus:
+              renderState.surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus ?? null,
             surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs:
               renderState.surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs ?? null,
             surfaceDrawExtensionSurfaceRefreshElapsedMs:

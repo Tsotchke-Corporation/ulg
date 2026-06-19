@@ -467,6 +467,16 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
       ?? surfaceDraw?.extensionSurfaceTranslationElapsedMs
       ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationElapsedMs
   );
+  const surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus =
+    renderState?.surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus
+      ?? surfaceDraw?.extensionSurfaceTranslationPipelineCacheStatus
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus
+      ?? null;
+  const surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus =
+    renderState?.surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus
+      ?? surfaceDraw?.extensionSurfaceVertexRowsBufferClearStatus
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus
+      ?? null;
   const surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs = numberOrNull(
     renderState?.surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs
       ?? surfaceDraw?.extensionSurfaceRenderBridgeBuildElapsedMs
@@ -731,6 +741,8 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawNativeMarchingCubesAdapterCacheMissCount,
     surfaceDrawNativeMarchingCubesAdapterCacheReleaseCount,
     surfaceDrawExtensionSurfaceTranslationElapsedMs,
+    surfaceDrawExtensionSurfaceTranslationPipelineCacheStatus,
+    surfaceDrawExtensionSurfaceVertexRowsBufferClearStatus,
     surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs,
     surfaceDrawExtensionSurfaceRefreshElapsedMs,
     surfaceDrawRequestedDiagnosticMode,

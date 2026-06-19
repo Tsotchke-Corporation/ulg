@@ -1,7 +1,9 @@
 import {
+  SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
+  ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
@@ -40,10 +42,15 @@ export const WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA =
   'peercompute.webgpu-marching-cubes.indirect-draw-rows.v0';
 export const ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA =
   'peercompute.ulg.sph-webgpu-marching-cubes-extension-translation.v0';
+export const ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA =
+  'peercompute.ulg.sph-webgpu-marching-cubes-buffer-volume-descriptor.v0';
 
 export const ULG_MARCHING_CUBES_EXTENSION_POSITION_VERTEX_FORMAT = 'float32x4-position';
 export const ULG_MARCHING_CUBES_REQUIRED_SURFACE_VERTEX_FORMAT =
   'peercompute.ulg.sph-gpu-render-surface-vertex-row.v0';
+export const WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE = 'scalar-buffer';
+export const WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME =
+  'peercompute.webgpu-marching-cubes.layout.scalar-field-f32.v0';
 
 const FULL_READBACK_MODE = 'full-parity-readback';
 const NO_FULL_READBACK_MODE = 'no-full-readback';
@@ -209,6 +216,185 @@ function triangleNormal(a, b, c, fallbackNormal) {
     ab[2] * ac[0] - ab[0] * ac[2],
     ab[0] * ac[1] - ab[1] * ac[0]
   ], fallbackNormal);
+}
+
+function renderFieldBufferVolumeBlocked(status, reason, extra = {}) {
+  return {
+    schema: ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA,
+    ok: false,
+    status,
+    reason,
+    sourceType: WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE,
+    scalarLayoutName: WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME,
+    scalarType: 'f32',
+    extensionDescriptorFactory: 'createBufferVolumeDescriptor',
+    ...extra
+  };
+}
+
+export function createUlgRenderFieldBufferVolumeDescriptor({
+  device = null,
+  renderField = null,
+  renderFieldExecution = null,
+  surface = null,
+  surfaceIndex = 0,
+  label = 'ulg-sph-render-field-density-volume',
+  source = 'ulg-render-field-density-storage-buffer'
+} = {}) {
+  const field = renderField || renderFieldExecution?.result || renderFieldExecution?.renderField || null;
+  if (!field) {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-missing-render-field',
+      'retained ULG render-field metadata is required before native marching-cubes buffer-volume extraction'
+    );
+  }
+  if (field.schema !== ULG_SPH_GPU_RENDER_FIELD_SCHEMA) {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-schema',
+      'ULG buffer-volume extraction requires peercompute.ulg.sph-gpu-render-field.v0 input',
+      { renderFieldSchema: field.schema ?? null }
+    );
+  }
+  const scalarBuffer = field.fieldRowsBuffer || renderFieldExecution?.fieldRowsBuffer || null;
+  if (!isObject(scalarBuffer)) {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-missing-buffer',
+      'retained fieldRowsBuffer is required for native webgpu-marching-cubes scalar-buffer input',
+      {
+        renderFieldSchema: field.schema,
+        fieldRowsBufferRetained: Boolean(field.fieldRowsBufferRetained),
+        fieldRowsBufferByteLength: field.fieldRowsBufferByteLength ?? 0
+      }
+    );
+  }
+  const surfaceTable = field.surfaceTable || renderFieldExecution?.surfaceTable || null;
+  const index = Math.max(0, Math.round(finiteNumber(surfaceIndex, 0)));
+  const surfaceRecord = surface || surfaceTable?.metadata?.[index] || null;
+  if (!surfaceRecord) {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-missing-surface',
+      'render-field surface metadata is required to locate the scalar sub-volume inside fieldRowsBuffer',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        surfaceCount: surfaceTable?.surfaceCount ?? field.surfaceCount ?? 0
+      }
+    );
+  }
+  const resolution = Math.max(1, Math.round(finiteNumber(surfaceRecord.resolution, 0)));
+  const rowStrideFloats = Math.max(
+    1,
+    Math.round(finiteNumber(field.rowStrideFloats, SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT.length))
+  );
+  const fieldOffset = Math.max(0, Math.round(finiteNumber(surfaceRecord.fieldOffset, 0)));
+  const scalarOffset = fieldOffset * rowStrideFloats;
+  const scalarStrides = [
+    rowStrideFloats,
+    rowStrideFloats * resolution,
+    rowStrideFloats * resolution * resolution
+  ];
+  const scalarRequiredFloats = scalarOffset
+    + Math.max(0, resolution - 1) * scalarStrides[0]
+    + Math.max(0, resolution - 1) * scalarStrides[1]
+    + Math.max(0, resolution - 1) * scalarStrides[2]
+    + 1;
+  const scalarOffsetBytes = scalarOffset * Float32Array.BYTES_PER_ELEMENT;
+  const scalarRequiredByteLength = scalarRequiredFloats * Float32Array.BYTES_PER_ELEMENT;
+  const fieldRowsBufferByteLength = Math.round(finiteNumber(field.fieldRowsBufferByteLength, 0));
+  const rawBufferByteLength = Math.round(finiteNumber(
+    scalarBuffer.size ?? scalarBuffer.byteLength ?? scalarBuffer.byteLengthBytes,
+    0
+  ));
+  const scalarBufferByteLength = Math.max(0, fieldRowsBufferByteLength > 0
+    ? fieldRowsBufferByteLength
+    : rawBufferByteLength);
+  const bufferDevice = scalarBuffer.device
+    || scalarBuffer.ownerDevice
+    || scalarBuffer.__webgpuDevice
+    || scalarBuffer.__webgpuMarchingCubesDevice
+    || null;
+  const sameDeviceStatus = device && bufferDevice
+    ? (device === bufferDevice ? 'same-device' : 'cross-device-resource')
+    : 'same-device-validation-deferred-to-extension';
+  const byteLengthValid = scalarBufferByteLength >= scalarRequiredByteLength;
+  if (sameDeviceStatus === 'cross-device-resource') {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-cross-device',
+      'fieldRowsBuffer is associated with a different GPUDevice than the native marching-cubes adapter',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        sameDeviceStatus,
+        scalarBuffer,
+        scalarBufferByteLength
+      }
+    );
+  }
+  if (!byteLengthValid) {
+    return renderFieldBufferVolumeBlocked(
+      'ulg-render-field-buffer-volume-blocked-undersized-buffer',
+      'fieldRowsBuffer is smaller than the selected render-field surface sub-volume',
+      {
+        renderFieldSchema: field.schema,
+        surfaceIndex: index,
+        scalarBuffer,
+        scalarBufferByteLength,
+        scalarRequiredByteLength
+      }
+    );
+  }
+  const dims = [resolution, resolution, resolution];
+  return {
+    schema: ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA,
+    ok: true,
+    status: 'ulg-render-field-buffer-volume-descriptor-ready',
+    reason: null,
+    extensionDescriptorFactory: 'createBufferVolumeDescriptor',
+    renderFieldSchema: field.schema,
+    renderFieldBackend: field.backend ?? renderFieldExecution?.backend ?? null,
+    source,
+    sourceType: WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE,
+    scalarLayoutName: WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME,
+    scalarType: 'f32',
+    scalarLane: 'density',
+    scalarLaneIndex: 0,
+    scalarBuffer,
+    storageBuffer: scalarBuffer,
+    buffer: scalarBuffer,
+    scalarBufferByteLength,
+    bufferByteLength: scalarBufferByteLength,
+    scalarRequiredByteLength,
+    scalarOffset,
+    scalarOffsetBytes,
+    scalarStrides,
+    rowStrideFloats: scalarStrides[1],
+    sliceStrideFloats: scalarStrides[2],
+    cellRowStrideFloats: rowStrideFloats,
+    dims,
+    surfaceIndex: index,
+    surfaceKey: surfaceRecord.surfaceKey ?? null,
+    material: surfaceRecord.material ?? null,
+    phase: surfaceRecord.phase ?? null,
+    renderKey: surfaceRecord.renderKey ?? null,
+    renderDomainId: surfaceRecord.renderDomainId ?? null,
+    renderDomainKey: surfaceRecord.renderDomainKey ?? null,
+    fieldOffset,
+    fieldCellCount: surfaceRecord.fieldCellCount ?? resolution ** 3,
+    isolation: surfaceRecord.isolation ?? null,
+    isovalue: surfaceRecord.isolation ?? null,
+    fieldPadding: field.fieldPadding ?? null,
+    refEdgeM: field.refEdgeM ?? null,
+    device,
+    sameDeviceRequired: true,
+    sameDeviceStatus,
+    label,
+    nativeConsumerKind: 'native-webgpu-marching-cubes-buffer-volume',
+    nativeRequiredAdapter: 'webgpu-marching-cubes.buffer-volume.v0',
+    scientificValidation: false,
+    sphValidation: false,
+    surfaceExtractionValidation: false,
+    fullPhysicsValidation: false
+  };
 }
 
 function writeSurfaceDrawRow(drawRows, offset, {

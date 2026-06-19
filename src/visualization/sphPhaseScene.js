@@ -4305,48 +4305,186 @@ export function createSphPhaseScene(container, {
     return hideRenderFieldSurfaceAfterGrace(surface, renderSource, options);
   }
 
-  function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup) {
+  function materialListOf(material) {
+    if (Array.isArray(material)) return material.filter(Boolean);
+    return material ? [material] : [];
+  }
+
+  function isOpticalGpuDrawTarget(node) {
+    if (!node?.material) return false;
+    const renderMode = node.userData?.renderMode;
+    return renderMode === SPH_PHASE_RENDER_MODE
+      || renderMode === SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
+      || renderMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+      || renderMode === 'resident-surface-draw-three-compact'
+      || renderMode === 'resident-surface-draw-three-webgpu-buffers';
+  }
+
+  function opticalGpuDrawDescriptorForNode(node, fallback = {}) {
+    const userData = node?.userData || {};
+    if (
+      !userData.materialKey
+      && !userData.renderKey
+      && !userData.phase
+      && !fallback.material
+      && !fallback.renderKey
+      && !fallback.phase
+    ) {
+      return null;
+    }
+    return renderDescriptorOf({
+      renderKey: userData.renderKey ?? fallback.renderKey ?? fallback.material,
+      material: userData.materialKey ?? fallback.material,
+      phase: userData.phase ?? fallback.phase,
+      opticalState: userData.opticalState ?? fallback.opticalState ?? null,
+      renderDomainId: userData.renderDomainId ?? fallback.renderDomainId ?? 0,
+      renderDomainKey: userData.renderDomainKey ?? fallback.renderDomainKey ?? null
+    });
+  }
+
+  function opticalGpuDrawTargetMatchesRow(node, row, surfaceKey) {
+    const userData = node?.userData || {};
+    if (surfaceKey && userData.surfaceKey === surfaceKey) return true;
+    const descriptor = opticalGpuDrawDescriptorForNode(node, row);
+    if (!descriptor) return false;
+    if (surfaceKey && descriptor.surfaceKey === surfaceKey) return true;
+    if (row.material && descriptor.material !== row.material) return false;
+    if (row.phase && descriptor.phase !== row.phase) return false;
+    const rowStateKey = stableOpticalStateKey(row.opticalState);
+    return (descriptor.opticalStateKey || 'default') === rowStateKey;
+  }
+
+  function collectOpticalGpuDrawTargetsForRow(row, surfaceKey) {
+    const targets = [];
+    const seen = new Set();
+    const addTarget = (node) => {
+      if (!isOpticalGpuDrawTarget(node) || seen.has(node.uuid)) return;
+      seen.add(node.uuid);
+      targets.push(node);
+    };
+    const surface = surfaceKey ? surfaces.get(surfaceKey) : null;
+    addTarget(surface?.mesh);
+    scene.traverse((node) => {
+      if (opticalGpuDrawTargetMatchesRow(node, row, surfaceKey)) addTarget(node);
+    });
+    return targets;
+  }
+
+  function currentOpticalGpuDrawTargetSignature() {
+    const entries = [];
+    scene.traverse((node) => {
+      if (!isOpticalGpuDrawTarget(node)) return;
+      const descriptor = opticalGpuDrawDescriptorForNode(node);
+      entries.push([
+        node.userData?.surfaceKey ?? descriptor?.surfaceKey ?? 'surface-unspecified',
+        node.userData?.renderMode ?? 'render-mode-unspecified',
+        node.userData?.renderSource ?? 'render-source-unspecified',
+        node.visible ? 1 : 0,
+        node.uuid
+      ].join(':'));
+    });
+    return entries.length > 0 ? entries.sort().join('|') : 'no-optical-gpu-draw-targets';
+  }
+
+  function applyOpticalGpuRowToDrawTarget(target, row, descriptor, backend) {
+    if (!target || !descriptor) return null;
+    const renderAlpha = renderAlphaFromOpticalResponse(row, descriptor);
+    for (const material of materialListOf(target.material)) {
+      if (material.color?.setRGB) {
+        material.color.setRGB(
+          clamp(row.baseColorLinear[0], 0, 1),
+          clamp(row.baseColorLinear[1], 0, 1),
+          clamp(row.baseColorLinear[2], 0, 1),
+          Three.LinearSRGBColorSpace
+        );
+      }
+      material.opacity = renderAlpha;
+      material.transparent = renderAlpha < 0.999;
+      material.depthWrite = renderDepthWriteFromOpticalResponse(row, descriptor);
+      if ('metalness' in material) material.metalness = clamp(row.metalness, 0, 1);
+      if ('roughness' in material) material.roughness = clamp(row.roughness, 0, 1);
+      if ('transmission' in material) material.transmission = clamp(row.transmission, 0, 1);
+      if ('ior' in material) material.ior = Math.max(1, row.ior || 1);
+      if ('vertexColors' in material) {
+        material.vertexColors = target.userData?.renderMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+          ? false
+          : row.vertexColorPolicyId === 2;
+      }
+      material.userData.optical = {
+        ...(material.userData.optical || {}),
+        ...row,
+        source: 'optical-gpu-lookup-output-row'
+      };
+      material.userData.opticalGpuLookupRow = { ...row };
+      material.needsUpdate = true;
+    }
+    const ordering = applySurfaceRenderOrdering(target, row, descriptor);
+    const primaryMaterial = materialListOf(target.material)[0] || null;
+    if (target.userData?.renderMode === SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE) {
+      stabilizeRenderRowSphereBridgeMaterial(primaryMaterial, { descriptor });
+    } else {
+      stabilizeSurfaceMeshMaterialForRenderer(primaryMaterial, {
+        descriptor,
+        rendererMaterialPolicy: resolveSceneSurfaceMaterialRenderPolicy(),
+        bridgeMode: target.userData?.renderMode || null
+      });
+    }
+    target.userData.surfaceKey = target.userData.surfaceKey || descriptor.surfaceKey;
+    target.userData.materialKey = target.userData.materialKey || descriptor.material;
+    target.userData.renderKey = target.userData.renderKey || descriptor.renderKey;
+    target.userData.phase = target.userData.phase || descriptor.phase;
+    target.userData.optical = primaryMaterial?.userData?.optical || { ...row };
+    target.userData.opticalGpuLookupOutput = { ...row, renderAlpha };
+    target.userData.opticalGpuExecutionBackend = backend;
+    return { target, row, ordering };
+  }
+
+  function applyOpticalGpuLookupExecution(execution, lookupState = opticalGpuLookup, {
+    targetSignature = currentOpticalGpuDrawTargetSignature()
+  } = {}) {
     if (!execution?.outputs) return [];
     const rows = decodeOpticalGpuLookupOutputRows(execution, lookupState.lookup);
     const applied = [];
     for (const row of rows) {
       const surfaceKey = lookupState.surfaceKeys?.[row.queryIndex];
-      const surface = surfaceKey ? surfaces.get(surfaceKey) : null;
-      if (!surface || row.status === 255 || row.recordIndex < 0) continue;
-      const { mesh } = surface;
-      const material = mesh.material;
-      const descriptor = surface.descriptor || row;
-      material.color.setRGB(
-        clamp(row.baseColorLinear[0], 0, 1),
-        clamp(row.baseColorLinear[1], 0, 1),
-        clamp(row.baseColorLinear[2], 0, 1),
-        Three.LinearSRGBColorSpace
-      );
-      const renderAlpha = renderAlphaFromOpticalResponse(row, descriptor);
-      material.opacity = renderAlpha;
-      material.transparent = renderAlpha < 0.999;
-      material.depthWrite = renderDepthWriteFromOpticalResponse(row, descriptor);
-      material.metalness = clamp(row.metalness, 0, 1);
-      material.roughness = clamp(row.roughness, 0, 1);
-      material.transmission = clamp(row.transmission, 0, 1);
-      material.ior = Math.max(1, row.ior || 1);
-      material.vertexColors = row.vertexColorPolicyId === 2;
-      const ordering = applySurfaceRenderOrdering(mesh, row, descriptor);
-      material.needsUpdate = true;
-      mesh.userData.opticalGpuLookupOutput = { ...row, renderAlpha };
-      mesh.userData.opticalGpuExecutionBackend = execution.backend;
-      applied.push({ surfaceKey, row, ordering });
+      if (row.status === 255 || row.recordIndex < 0) continue;
+      const targets = collectOpticalGpuDrawTargetsForRow(row, surfaceKey);
+      for (const target of targets) {
+        const descriptor = opticalGpuDrawDescriptorForNode(target, row);
+        const application = applyOpticalGpuRowToDrawTarget(target, row, descriptor, execution.backend);
+        if (application) applied.push({ surfaceKey, ...application });
+      }
     }
     scene.userData.opticalGpuLookupDrawState = {
       schema: 'peercompute.ulg.optical-gpu-draw-state.v0',
       sourceExecutionSchema: execution.schema,
+      sourceExecutionSignature: execution.signature || null,
       backend: execution.backend,
       appliedCount: applied.length,
+      targetSignature,
+      targetCount: targetSignature === 'no-optical-gpu-draw-targets'
+        ? 0
+        : targetSignature.split('|').length,
       rows,
       scientificValidation: false,
       fullPhysicsValidation: false
     };
     return applied;
+  }
+
+  function ensureOpticalGpuDrawStateCurrent() {
+    const execution = opticalGpuLookup?.execution;
+    if (!execution?.schema || !execution.outputs) return scene.userData.opticalGpuLookupDrawState;
+    const targetSignature = currentOpticalGpuDrawTargetSignature();
+    const drawState = scene.userData.opticalGpuLookupDrawState;
+    if (
+      drawState?.sourceExecutionSignature === (execution.signature || null)
+      && drawState?.targetSignature === targetSignature
+    ) {
+      return drawState;
+    }
+    applyOpticalGpuLookupExecution(execution, opticalGpuLookup, { targetSignature });
+    return scene.userData.opticalGpuLookupDrawState;
   }
 
   function rendererOwnedWebGpuDeviceResult() {
@@ -6148,6 +6286,7 @@ export function createSphPhaseScene(container, {
       mesh.visible = true;
       mesh.userData.renderMode = 'resident-surface-draw-three-compact';
       mesh.userData.renderSource = 'resident-surface-draw-three-compact-vertices';
+      mesh.userData.surfaceKey = descriptor.surfaceKey;
       mesh.userData.materialKey = descriptor.material;
       mesh.userData.renderKey = descriptor.renderKey;
       mesh.userData.phase = descriptor.phase;
@@ -7079,6 +7218,7 @@ export function createSphPhaseScene(container, {
       mesh.visible = true;
       mesh.userData.renderMode = 'resident-surface-draw-three-webgpu-buffers';
       mesh.userData.renderSource = 'resident-surface-draw-three-webgpu-external-buffer';
+      mesh.userData.surfaceKey = descriptor.surfaceKey;
       mesh.userData.materialKey = descriptor.material;
       mesh.userData.renderKey = descriptor.renderKey;
       mesh.userData.phase = descriptor.phase;
@@ -9315,6 +9455,7 @@ export function createSphPhaseScene(container, {
     mesh.frustumCulled = false;
     mesh.visible = false;
     mesh.userData.renderMode = SPH_PHASE_RENDER_MODE;
+    mesh.userData.surfaceKey = descriptor.surfaceKey;
     mesh.userData.materialKey = descriptor.material;
     mesh.userData.renderKey = descriptor.renderKey;
     mesh.userData.phase = descriptor.phase;
@@ -10264,6 +10405,7 @@ export function createSphPhaseScene(container, {
         wasVisible: Boolean(mesh.visible)
       });
       mesh.userData.optical = mesh.material.userData.optical;
+      mesh.userData.surfaceKey = descriptor.surfaceKey;
       mesh.userData.materialKey = descriptor.material;
       mesh.userData.renderKey = descriptor.renderKey;
       mesh.userData.phase = descriptor.phase;
@@ -13757,7 +13899,7 @@ export function createSphPhaseScene(container, {
       return sphReactionTable;
     },
     getOpticalGpuDrawState() {
-      return scene.userData.opticalGpuLookupDrawState;
+      return ensureOpticalGpuDrawStateCurrent();
     },
     getSphGpuParticleState() {
       return sphGpuParticleState;

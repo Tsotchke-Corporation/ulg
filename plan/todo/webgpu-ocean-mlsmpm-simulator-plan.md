@@ -134,6 +134,12 @@ Tactical status, 2026-06-18 AKDT:
   compact vertex/draw rows still need GPU extraction. Do not treat this as a
   completed renderer until that extraction and engine-owned draw submission are
   browser-console and pixel validated.
+- The sibling WebGPU marching-cubes adapter now supports buffer-backed scalar
+  volumes, and ULG can describe retained render-field density buffers through
+  `createUlgRenderFieldBufferVolumeDescriptor()`. The next implementation
+  target is no longer generic adapter work; it is binding that native
+  extraction result into ULG's engine-owned surface draw/render bridge without
+  CPU readback or overlays.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

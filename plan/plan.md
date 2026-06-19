@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the sibling
+`/home/cos/projects/webgpu-marching-cubes` adapter now has a buffer-backed
+scalar-volume path for native marching-cubes extraction, and ULG has a tested
+descriptor helper for that input. `createUlgRenderFieldBufferVolumeDescriptor()`
+maps a retained `peercompute.ulg.sph-gpu-render-field.v0` density buffer into
+the extension-facing `createBufferVolumeDescriptor` contract with dims,
+`scalarStrides`, scalar offset, byte-length checks, and same-device status.
+This moves the next native MC step from "adapter support missing" to "bind the
+runtime extraction result back into the engine-owned surface draw path." The
+same slice also fixed a reset/rendering regression where optical GPU lookup
+could finish before resident render objects existed, leaving PBR draw state
+stale with `appliedCount=0`; the scene now reapplies optical rows when the
+current render target set changes.
+
 Current checkpoint, 2026-06-18 AKDT: explicit compact vertex surface
 presentation is now fail-closed by default. The current in-repo WebGPU
 surface-vertex extractor emits tetrahedralized render-field cube triangles, not

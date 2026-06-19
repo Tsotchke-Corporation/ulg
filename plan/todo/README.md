@@ -169,6 +169,14 @@ native marching-cubes surface extraction before visible draw rows exist. Treat
 `requiresSurfaceExtraction=true` as the next implementation target, not as a
 reason to fall back to CPU geometry or an overlay.
 
+Current routing note, 2026-06-18 AKDT: the sibling
+`/home/cos/projects/webgpu-marching-cubes` adapter now supports buffer-backed
+scalar volumes, and ULG exposes
+`createUlgRenderFieldBufferVolumeDescriptor()` for retained render-field
+density buffers. The next native-MC slice should call the extension's
+`createBufferVolumeDescriptor`/surface extraction path from this descriptor and
+bind the resulting buffers into the engine-owned surface draw path.
+
 Current routing note, 2026-06-18 AKDT: the sibling WebGPU marching-cubes
 adapter now exposes a renderer-free preflight/capability contract, and ULG's
 wrapper consumes it before extraction. Future extension surface failures should

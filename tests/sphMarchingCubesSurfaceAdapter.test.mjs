@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT,
   SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT,
+  ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_DRAW_SCHEMA,
   ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA
@@ -13,6 +15,8 @@ import {
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_EXECUTION_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_PREFLIGHT_SCHEMA,
   ULG_SPH_WEBGPU_MARCHING_CUBES_EXTENSION_TRANSLATION_SCHEMA,
+  WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME,
+  WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE,
   WEBGPU_MARCHING_CUBES_COMPACT_POSITION_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_INDIRECT_DRAW_ROWS_SCHEMA,
   WEBGPU_MARCHING_CUBES_PREFLIGHT_SCHEMA,
@@ -22,6 +26,7 @@ import {
   WEBGPU_MARCHING_CUBES_SURFACE_ROW_METADATA_SCHEMA,
   WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
+  createUlgRenderFieldBufferVolumeDescriptor,
   createUlgWebGpuMarchingCubesExtensionAdapter,
   summarizeWebGpuMarchingCubesExtensionExecution,
   translateWebGpuMarchingCubesSurfaceToUlgRows,
@@ -255,6 +260,116 @@ function fakeExtensionSurfaceDevice() {
   };
   return { device, shaderModules, bindGroups, dispatches, copies, createdBuffers, queueWrites };
 }
+
+test('ULG exposes retained render-field buffers as native MC scalar-buffer volumes', () => {
+  const device = { label: 'ulg-render-device' };
+  const scalarBuffer = {
+    label: 'ulg-render-field-rows',
+    size: 4 * 4 * 8 * 8 * 8 * 2,
+    device
+  };
+  const surfaceTable = {
+    schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+    surfaceCount: 2,
+    metadata: [
+      {
+        surfaceKey: 'h2o|h2o|liquid|domain:base',
+        material: 'h2o',
+        phase: 'liquid',
+        renderKey: 'h2o',
+        renderDomainId: 1,
+        renderDomainKey: 'base',
+        resolution: 8,
+        fieldOffset: 0,
+        fieldCellCount: 8 ** 3,
+        isolation: 14
+      },
+      {
+        surfaceKey: 'h2o|h2o|liquid|domain:drop',
+        material: 'h2o',
+        phase: 'liquid',
+        renderKey: 'h2o',
+        renderDomainId: 2,
+        renderDomainKey: 'drop',
+        resolution: 8,
+        fieldOffset: 8 ** 3,
+        fieldCellCount: 8 ** 3,
+        isolation: 14
+      }
+    ]
+  };
+  const renderField = {
+    schema: ULG_SPH_GPU_RENDER_FIELD_SCHEMA,
+    backend: 'webgpu',
+    surfaceTable,
+    surfaceCount: 2,
+    rowLayout: [...SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT],
+    rowStrideFloats: SPH_GPU_RENDER_FIELD_CELL_ROW_LAYOUT.length,
+    totalFieldCells: 8 ** 3 * 2,
+    fieldRowsBufferRetained: true,
+    fieldRowsBuffer: scalarBuffer,
+    fieldRowsBufferByteLength: scalarBuffer.size,
+    fieldPadding: 0.22,
+    refEdgeM: 5
+  };
+
+  const descriptor = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField,
+    surfaceIndex: 1
+  });
+
+  assert.equal(descriptor.ok, true);
+  assert.equal(descriptor.status, 'ulg-render-field-buffer-volume-descriptor-ready');
+  assert.equal(descriptor.extensionDescriptorFactory, 'createBufferVolumeDescriptor');
+  assert.equal(descriptor.sourceType, WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_VOLUME_SOURCE);
+  assert.equal(descriptor.scalarLayoutName, WEBGPU_MARCHING_CUBES_SCALAR_BUFFER_LAYOUT_NAME);
+  assert.equal(descriptor.scalarBuffer, scalarBuffer);
+  assert.equal(descriptor.storageBuffer, scalarBuffer);
+  assert.equal(descriptor.buffer, scalarBuffer);
+  assert.deepEqual(descriptor.dims, [8, 8, 8]);
+  assert.deepEqual(descriptor.scalarStrides, [4, 32, 256]);
+  assert.equal(descriptor.scalarOffset, 8 ** 3 * 4);
+  assert.equal(descriptor.scalarOffsetBytes, 8 ** 3 * 4 * Float32Array.BYTES_PER_ELEMENT);
+  assert.equal(descriptor.scalarLane, 'density');
+  assert.equal(descriptor.scalarLaneIndex, 0);
+  assert.equal(descriptor.rowStrideFloats, 32);
+  assert.equal(descriptor.sliceStrideFloats, 256);
+  assert.equal(descriptor.cellRowStrideFloats, 4);
+  assert.equal(descriptor.isovalue, 14);
+  assert.equal(descriptor.sameDeviceStatus, 'same-device');
+  assert.equal(descriptor.nativeConsumerKind, 'native-webgpu-marching-cubes-buffer-volume');
+  assert.equal(descriptor.nativeRequiredAdapter, 'webgpu-marching-cubes.buffer-volume.v0');
+
+  const tooSmall = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField: {
+      ...renderField,
+      fieldRowsBuffer: { label: 'small-field', size: 16, device },
+      fieldRowsBufferByteLength: 16
+    },
+    surfaceIndex: 1
+  });
+  assert.equal(tooSmall.ok, false);
+  assert.equal(tooSmall.status, 'ulg-render-field-buffer-volume-blocked-undersized-buffer');
+  assert.equal(tooSmall.scalarRequiredByteLength > tooSmall.scalarBufferByteLength, true);
+
+  const crossDevice = createUlgRenderFieldBufferVolumeDescriptor({
+    device,
+    renderField: {
+      ...renderField,
+      fieldRowsBuffer: {
+        label: 'other-device-field',
+        size: scalarBuffer.size,
+        device: { label: 'other-device' }
+      }
+    },
+    surfaceIndex: 0
+  });
+  assert.equal(crossDevice.ok, false);
+  assert.equal(crossDevice.status, 'ulg-render-field-buffer-volume-blocked-cross-device');
+  assert.equal(crossDevice.sameDeviceStatus, 'cross-device-resource');
+});
 
 test('ULG summarizes extension compact position buffers as translation-ready but not direct row-compatible', () => {
   const summary = summarizeWebGpuMarchingCubesExtensionExecution(extensionExecution());

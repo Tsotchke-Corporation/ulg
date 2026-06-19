@@ -27955,3 +27955,49 @@ Remaining:
   renderer/native marching-cubes path. The current contract deliberately
   exposes that remaining surface-extraction step instead of hiding it behind a
   fallback renderer.
+
+## 2026-06-18 22:20 AKDT - Native MC Buffer-Volume Contract and Reset PBR Reapply
+
+Status:
+
+- Kept the bad compact marching-cubes presentation fail-closed and fixed a
+  renderer-state regression exposed by the reset flow: optical GPU lookup could
+  complete before resident render objects existed, leaving
+  `opticalGpuDrawState.appliedCount=0` even though WebGPU lookup had executed.
+  The scene now tracks the current optical draw target signature and reapplies
+  optical rows when continuous marching-cubes, render-row sphere/point, compact,
+  or Three WebGPU buffer meshes appear after lookup completion.
+- Added surface keys to all engine-owned resident surface mesh variants so PBR
+  and optical rows can address the active surface object regardless of whether
+  the visible path is classic Three MarchingCubes, render-row spheres, compact
+  surface rows, or Three WebGPU external-buffer meshes.
+- Added `createUlgRenderFieldBufferVolumeDescriptor()` to the ULG
+  marching-cubes adapter boundary. It maps retained
+  `peercompute.ulg.sph-gpu-render-field.v0` density rows into the sibling
+  WebGPU marching-cubes `createBufferVolumeDescriptor` shape using scalar-buffer
+  source type, dims, scalar strides, density scalar offset, byte-length checks,
+  same-device status, and isovalue metadata.
+- The sibling `/home/cos/projects/webgpu-marching-cubes` worker completed the
+  buffer-backed scalar-volume native path. ULG's remaining native-MC work is now
+  binding that extraction result into the engine-owned surface draw/render path,
+  not more fallback geometry or overlays.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check tests/sphMarchingCubesSurfaceAdapter.test.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `13/13`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  reported `67/67`.
+- PASS: focused Playwright reset/PBR and no-full render-field handoff tests
+  passed `2/2` against the live HTTPS Vite server on
+  `https://127.0.0.1:5173`.
+
+Remaining:
+
+- Bind the new buffer-volume descriptor into the runtime native MC extraction
+  call and route the resulting GPU-resident surface buffers into the engine
+  surface draw bridge. Do not spend time reviving the tetrahedral compact
+  fallback as the main renderer.

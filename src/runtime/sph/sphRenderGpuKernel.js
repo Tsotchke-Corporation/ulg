@@ -698,14 +698,15 @@ function createRenderFieldSurfaceSummaryParamsArray({
 function createSurfaceDrawParamsArray({
   surfaceCount,
   sourceVertexRowCount,
-  maxCompactVertexRows
+  maxCompactVertexRows,
+  sourceVertexCounterMode = 0
 }) {
   const buffer = new ArrayBuffer(16);
   const view = new DataView(buffer);
   view.setUint32(0, surfaceCount, true);
   view.setUint32(4, sourceVertexRowCount, true);
   view.setUint32(8, maxCompactVertexRows, true);
-  view.setUint32(12, 0, true);
+  view.setUint32(12, sourceVertexCounterMode, true);
   return buffer;
 }
 
@@ -3411,6 +3412,11 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     * Float32Array.BYTES_PER_ELEMENT;
   const surfaceVertexBudgetCapped = Boolean(emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
     && resolvedMaxVertexRows < requiredVertexRows);
+  const retainVertexCounterBuffer = Boolean(
+    noFullReadback
+    && retainVertexRowsBuffer
+    && emissionMode === SURFACE_VERTEX_EMISSION_ATOMIC_COMPACT
+  );
   const markProgress = typeof onProgress === 'function'
     ? (status, extra = {}) => {
       try {
@@ -3612,7 +3618,7 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
     if (!retainVertexRowsBuffer) vertexRowsBuffer.destroy?.();
     paramsBuffer.destroy?.();
-    counterBuffer.destroy?.();
+    if (!retainVertexCounterBuffer) counterBuffer.destroy?.();
   };
   if (deferNoFullCleanup) {
     markProgress('surface-vertices-cleanup-deferred', { queueCompletionStatus, queueCompletionMethod });
@@ -3645,6 +3651,8 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   });
   const surfaceVertexLeaseIds = [];
   const vertexRowsResourceKey = `surface-vertices:vertex-rows:${resolvedMaxVertexRows}:${fixedSlotVertexRowsByteLength}`;
+  const vertexCounterBufferByteLength = 16;
+  const vertexCounterResourceKey = `surface-vertices:vertex-counter:${resolvedMaxVertexRows}:${vertexCounterBufferByteLength}`;
   if (retainVertexRowsBuffer) {
     registerResidentBufferResource(surfaceVertexLeaseLedger, {
       resourceKey: vertexRowsResourceKey,
@@ -3667,6 +3675,29 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
       reason: 'retained-surface-vertex-buffer'
     });
     surfaceVertexLeaseIds.push(lease.leaseId);
+  }
+  if (retainVertexCounterBuffer) {
+    registerResidentBufferResource(surfaceVertexLeaseLedger, {
+      resourceKey: vertexCounterResourceKey,
+      resourceKind: 'surface-vertex-counter-buffer',
+      stateFamily: 'render-surface-vertices',
+      ownerStage: 'surface-vertex-builder',
+      producerStage: 'surface-vertex-builder',
+      source: 'buildSphRenderSurfaceVerticesWebGpu',
+      status: 'resident-surface-vertex-counter-retained',
+      retained: true,
+      byteLength: vertexCounterBufferByteLength,
+      rowCount: 1,
+      bufferLabel: counterBuffer?.label,
+      emissionMode,
+      expectedConsumers: ['surface-draw-metadata']
+    });
+    const counterLease = addResidentBufferLease(surfaceVertexLeaseLedger, {
+      resourceKey: vertexCounterResourceKey,
+      consumerStage: 'surface-draw-metadata',
+      reason: 'retained-surface-vertex-counter'
+    });
+    surfaceVertexLeaseIds.push(counterLease.leaseId);
   }
 
   const surfaces = vertexRows.length
@@ -3743,7 +3774,9 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
     vertexRowsBufferByteLength: retainVertexRowsBuffer ? fixedSlotVertexRowsByteLength : 0,
     vertexRowsBufferRowCount: retainVertexRowsBuffer ? resolvedMaxVertexRows : 0,
     vertexRowsBufferRetained: Boolean(retainVertexRowsBuffer),
-    counterBufferRetained: false,
+    vertexCounterBufferByteLength: retainVertexCounterBuffer ? vertexCounterBufferByteLength : 0,
+    vertexCounterBufferRetained: retainVertexCounterBuffer,
+    counterBufferRetained: retainVertexCounterBuffer,
     counterReadback: false,
     fieldRowsBufferBound: Boolean(borrowedFieldRowsBuffer),
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
@@ -3766,7 +3799,9 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
   };
   if (retainVertexRowsBuffer) {
     result.vertexRowsBuffer = vertexRowsBuffer;
+    if (retainVertexCounterBuffer) result.vertexCounterBuffer = counterBuffer;
     let surfaceVertexBufferDestroyed = false;
+    let surfaceVertexCounterBufferDestroyed = false;
     const refreshSurfaceVertexLeaseSummary = () => {
       result.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(surfaceVertexLeaseLedger);
       result.residentBufferLeaseLedgerStatus = result.residentBufferLeaseSummary.status;
@@ -3792,6 +3827,13 @@ export async function buildSphRenderSurfaceVerticesWebGpu({
         surfaceVertexBufferDestroyed = true;
         vertexRowsBuffer.destroy?.();
       }, { force, reason });
+      if (retainVertexCounterBuffer) {
+        destroyResidentBufferWithLease(surfaceVertexLeaseLedger, vertexCounterResourceKey, () => {
+          if (surfaceVertexCounterBufferDestroyed) return;
+          surfaceVertexCounterBufferDestroyed = true;
+          counterBuffer.destroy?.();
+        }, { force, reason });
+      }
       return refreshSurfaceVertexLeaseSummary();
     };
   }
@@ -3942,6 +3984,11 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     throw new TypeError('buildSphRenderSurfaceDrawMetadataWebGpu requires vertexRows or a retained vertexRowsBuffer');
   }
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
+  const hasBorrowedVertexCounterBuffer = Boolean(surfaceVertices.vertexCounterBuffer);
+  const sourceVertexCounterMode = hasBorrowedVertexCounterBuffer ? 1 : 0;
+  const sourceVertexCounterModeName = hasBorrowedVertexCounterBuffer
+    ? 'resident-vertex-counter'
+    : 'uniform-upper-bound';
   const sourceVertexRowCount = Math.max(0, Math.round(finiteNumber(
     hasBorrowedVertexBuffer
       ? (surfaceVertices.vertexRowsBufferRowCount || surfaceVertices.maxVertexRows || (
@@ -3976,6 +4023,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
           compactedVertexRowsByteLength,
           drawRowsByteLength,
           drawIndirectRowsByteLength,
+          sourceVertexCounterMode: sourceVertexCounterModeName,
+          sourceVertexCounterBufferBound: hasBorrowedVertexCounterBuffer,
           readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
           compactSummaryReadback: Boolean(compactSummaryReadback),
           ...extra
@@ -4004,9 +4053,20 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     'ulg-sph-surface-draw-surfaces',
     surfaceRecordsFromSurfaceVertexMetadata(surfaceVertices)
   );
+  const sourceVertexCounterBuffer = hasBorrowedVertexCounterBuffer
+    ? surfaceVertices.vertexCounterBuffer
+    : device.createBuffer({
+        label: 'ulg-sph-surface-draw-source-vertex-counter',
+        size: 16,
+        usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+      });
+  if (!hasBorrowedVertexCounterBuffer) {
+    device.queue.writeBuffer(sourceVertexCounterBuffer, 0, new Uint32Array([sourceVertexRowCount, 0, 0, 0]));
+  }
   markProgress('surface-draw-metadata-source-buffers-ready', {
     hasBorrowedVertexBuffer,
-    borrowedSurfaceBuffer: Boolean(borrowedSurfaceBuffer)
+    borrowedSurfaceBuffer: Boolean(borrowedSurfaceBuffer),
+    hasBorrowedVertexCounterBuffer
   });
   markProgress('surface-draw-metadata-output-buffers-started');
   const compactedVertexRowsBuffer = device.createBuffer({
@@ -4051,7 +4111,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   device.queue.writeBuffer(paramsBuffer, 0, createSurfaceDrawParamsArray({
     surfaceCount,
     sourceVertexRowCount,
-    maxCompactVertexRows: sourceVertexRowCount
+    maxCompactVertexRows: sourceVertexRowCount,
+    sourceVertexCounterMode
   }));
   markProgress('surface-draw-metadata-params-buffer-complete');
 
@@ -4069,7 +4130,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'storage'),
       computeBufferBinding(4, 'uniform'),
-      computeBufferBinding(5, 'storage')
+      computeBufferBinding(5, 'storage'),
+      computeBufferBinding(6, 'read-only-storage')
     ]
   });
   markProgress('surface-draw-metadata-pipeline-complete');
@@ -4082,7 +4144,8 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
       { binding: 2, resource: { buffer: compactedVertexRowsBuffer } },
       { binding: 3, resource: { buffer: drawRowsBuffer } },
       { binding: 4, resource: { buffer: paramsBuffer } },
-      { binding: 5, resource: { buffer: drawIndirectRowsBuffer } }
+      { binding: 5, resource: { buffer: drawIndirectRowsBuffer } },
+      { binding: 6, resource: { buffer: sourceVertexCounterBuffer } }
     ]
   });
   markProgress('surface-draw-metadata-bind-group-complete');
@@ -4269,6 +4332,7 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
   const cleanup = () => {
     if (!hasBorrowedVertexBuffer) sourceVertexRowsBuffer.destroy?.();
     if (!borrowedSurfaceBuffer) sourceSurfaceBuffer.destroy?.();
+    if (!hasBorrowedVertexCounterBuffer) sourceVertexCounterBuffer.destroy?.();
     paramsBuffer.destroy?.();
   };
   const keepDrawRowsBuffer = retainDrawRowsBuffer || noFullReadback;
@@ -4379,6 +4443,11 @@ export async function buildSphRenderSurfaceDrawMetadataWebGpu({
     compactedVertexRowsBufferRetained: keepCompactedVertexRowsBuffer,
     sourceVertexRowCount,
     sourceVertexRowsBufferBound: hasBorrowedVertexBuffer,
+    sourceVertexCounterMode: sourceVertexCounterModeName,
+    sourceVertexCounterBufferBound: hasBorrowedVertexCounterBuffer,
+    sourceVertexCounterBufferByteLength: hasBorrowedVertexCounterBuffer
+      ? Math.max(0, Math.round(finiteNumber(surfaceVertices.vertexCounterBufferByteLength, 16)))
+      : 0,
     surfaceBufferBound: Boolean(borrowedSurfaceBuffer),
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,

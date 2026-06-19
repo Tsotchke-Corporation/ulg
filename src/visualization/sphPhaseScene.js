@@ -533,6 +533,12 @@ export function resolveResidentSurfaceBufferHandoff({
     readbackMode ?? surfaceDraw?.readbackMode ?? SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT
   );
   const sourceVertexRowCount = Math.max(0, Math.floor(Number(surfaceDraw?.sourceVertexRowCount) || 0));
+  const sourceVertexCounterMode = surfaceDraw?.sourceVertexCounterMode ?? null;
+  const sourceVertexCounterBufferBound = Boolean(surfaceDraw?.sourceVertexCounterBufferBound);
+  const sourceVertexCounterBufferByteLength = Math.max(
+    0,
+    Math.round(Number(surfaceDraw?.sourceVertexCounterBufferByteLength) || 0)
+  );
   const drawRowsBufferByteLength = Math.max(0, Math.round(Number(surfaceDraw?.drawRowsBufferByteLength) || 0));
   const drawIndirectRowsBufferByteLength = Math.max(
     0,
@@ -607,6 +613,9 @@ export function resolveResidentSurfaceBufferHandoff({
     compactedVertexRowsBufferRetained,
     compactedVertexRowsBufferByteLength,
     sourceVertexRowCount,
+    sourceVertexCounterMode,
+    sourceVertexCounterBufferBound,
+    sourceVertexCounterBufferByteLength,
     upperBoundVertexCount: alignedUpperBoundVertexCount,
     upperBoundTriangleCount,
     conservativeDrawRange: Boolean(
@@ -10715,6 +10724,11 @@ export function createSphPhaseScene(container, {
 	          sourceVertexRowCount: surfaceVerticesExecution.vertexRowsBufferRowCount
 	            ?? surfaceVerticesExecution.maxVertexRows
 	            ?? 0,
+	          sourceVertexCounterMode: surfaceVerticesExecution.vertexCounterBufferRetained
+	            ? 'resident-vertex-counter'
+	            : null,
+	          sourceVertexCounterBufferBound: Boolean(surfaceVerticesExecution.vertexCounterBufferRetained),
+	          sourceVertexCounterBufferByteLength: surfaceVerticesExecution.vertexCounterBufferByteLength ?? 0,
 	          surfaceVertexRowsBufferRetained: Boolean(surfaceVerticesExecution.vertexRowsBufferRetained),
 	          surfaceVertexRowsBufferByteLength: surfaceVerticesExecution.vertexRowsBufferByteLength ?? 0,
 	          drawRowsBufferRetained: false,
@@ -10887,6 +10901,9 @@ export function createSphPhaseScene(container, {
         vertexCount: surfaceDrawExecution.vertexCount ?? null,
         triangleCount: surfaceDrawExecution.triangleCount ?? null,
         sourceVertexRowCount: surfaceDrawExecution.sourceVertexRowCount,
+        sourceVertexCounterMode: surfaceDrawExecution.sourceVertexCounterMode ?? null,
+        sourceVertexCounterBufferBound: Boolean(surfaceDrawExecution.sourceVertexCounterBufferBound),
+        sourceVertexCounterBufferByteLength: surfaceDrawExecution.sourceVertexCounterBufferByteLength ?? 0,
         drawRowsBufferRetained: Boolean(surfaceDrawExecution.drawRowsBufferRetained),
         drawRowsBufferByteLength: surfaceDrawExecution.drawRowsBufferByteLength ?? 0,
         drawIndirectSchema: surfaceDrawExecution.drawIndirectSchema ?? null,
@@ -11199,6 +11216,9 @@ export function createSphPhaseScene(container, {
         vertexCount: surfaceDrawExecution.vertexCount ?? null,
         triangleCount: surfaceDrawExecution.triangleCount ?? null,
         sourceVertexRowCount: surfaceDrawExecution.sourceVertexRowCount,
+        sourceVertexCounterMode: surfaceDrawExecution.sourceVertexCounterMode ?? null,
+        sourceVertexCounterBufferBound: Boolean(surfaceDrawExecution.sourceVertexCounterBufferBound),
+        sourceVertexCounterBufferByteLength: surfaceDrawExecution.sourceVertexCounterBufferByteLength ?? 0,
         surfaceVertexRowsBufferRetained: Boolean(surfaceVerticesExecution.vertexRowsBufferRetained),
         surfaceVertexRowsBufferByteLength: surfaceVerticesExecution.vertexRowsBufferByteLength ?? 0,
         drawRowsBufferRetained: Boolean(surfaceDrawExecution.drawRowsBufferRetained),
@@ -12750,6 +12770,10 @@ export function createSphPhaseScene(container, {
         surfaceDrawVertexCount: sphResidentSurfaceDraw?.vertexCount ?? null,
         surfaceDrawTriangleCount: sphResidentSurfaceDraw?.triangleCount ?? null,
         surfaceDrawSourceVertexRowCount: sphResidentSurfaceDraw?.sourceVertexRowCount ?? 0,
+        surfaceDrawSourceVertexCounterMode: sphResidentSurfaceDraw?.sourceVertexCounterMode ?? null,
+        surfaceDrawSourceVertexCounterBufferBound: Boolean(sphResidentSurfaceDraw?.sourceVertexCounterBufferBound),
+        surfaceDrawSourceVertexCounterBufferByteLength:
+          sphResidentSurfaceDraw?.sourceVertexCounterBufferByteLength ?? 0,
         surfaceDrawVertexRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.surfaceVertexRowsBufferRetained),
         surfaceDrawVertexRowsBufferByteLength: sphResidentSurfaceDraw?.surfaceVertexRowsBufferByteLength ?? 0,
         surfaceDrawRowsBufferRetained: Boolean(sphResidentSurfaceDraw?.drawRowsBufferRetained),

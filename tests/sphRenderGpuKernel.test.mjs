@@ -1921,24 +1921,31 @@ test('SPH render surface vertices retained buffer uses lease guarded cleanup', a
   assert.ok(result.maxVertexRows < result.requiredVertexRows);
   assert.equal(result.fixedSlotVertexRowsByteLength, 4098 * SPH_GPU_RENDER_SURFACE_VERTEX_FLOATS * Float32Array.BYTES_PER_ELEMENT);
   assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-active');
-  assert.equal(result.residentBufferLeaseResourceCount, 1);
-  assert.equal(result.residentBufferLeaseActiveLeaseCount, 1);
+  assert.equal(result.residentBufferLeaseResourceCount, 2);
+  assert.equal(result.residentBufferLeaseActiveLeaseCount, 2);
   assert.equal(result.queueCompletionStatus, 'queue-work-completed');
   assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
+  assert.equal(result.vertexCounterBufferRetained, true);
+  assert.equal(result.counterBufferRetained, true);
+  assert.equal(result.vertexCounterBufferByteLength, 16);
+  assert.equal(result.vertexCounterBuffer.label, 'ulg-sph-surface-vertex-counter');
   assert.match(shaderModules[0].code, /surface_vertex_counter|atomicAdd/);
   assert.equal(bindGroups[0].entries.length, 5);
   assert.equal(bindGroups[0].entries[4].resource.buffer.label, 'ulg-sph-surface-vertex-counter');
   assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-surface-vertex-counter'));
   result.destroySurfaceVertexBuffers();
-  assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 1);
+  assert.equal(result.residentBufferLeaseSummary.skippedDestroyCount, 2);
   assert.equal(result.vertexRowsBuffer.destroyed, false);
+  assert.equal(result.vertexCounterBuffer.destroyed, false);
   const released = result.releaseSurfaceVertexBufferLeases();
   assert.equal(released.activeLeaseCount, 0);
   result.destroySurfaceVertexBuffers();
   assert.equal(result.residentBufferLeaseLedgerStatus, 'resident-buffer-lease-ledger-cleaned');
   assert.equal(result.vertexRowsBuffer.destroyed, true);
+  assert.equal(result.vertexCounterBuffer.destroyed, true);
   result.destroySurfaceVertexBuffers();
   assert.equal(result.vertexRowsBuffer.destroyed, true);
+  assert.equal(result.vertexCounterBuffer.destroyed, true);
 });
 
 test('SPH render surface vertices can defer no-full queue fence for resident handoff', async () => {
@@ -2128,12 +2135,13 @@ test('SPH render surface draw WebGPU builder returns compact vertex draw source'
   assert.ok(result.drawIndirectRowsBuffer);
   assert.ok(result.compactedVertexRowsBuffer);
   assert.equal(shaderModules.length, 1);
-  assert.match(shaderModules[0].code, /sphRenderSurfaceDraw|SurfaceDrawParams|surface_draw_indirect_rows/);
+  assert.match(shaderModules[0].code, /sphRenderSurfaceDraw|SurfaceDrawParams|surface_draw_indirect_rows|source_vertex_counter/);
   assert.equal(bindGroups.length, 1);
-  assert.equal(bindGroups[0].entries.length, 6);
+  assert.equal(bindGroups[0].entries.length, 7);
   assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-surface-draw-compacted-vertices');
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-surface-draw-metadata');
   assert.equal(bindGroups[0].entries[5].resource.buffer.label, 'ulg-sph-surface-draw-indirect');
+  assert.equal(bindGroups[0].entries[6].resource.buffer.label, 'ulg-sph-surface-draw-source-vertex-counter');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [vertices.surfaceCount]);
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawRows.byteLength));
   assert.ok(copies.some((copy) => copy.size === cpuDraw.drawIndirectRows.byteLength));
@@ -2202,8 +2210,16 @@ test('SPH render surface draw no-full mode can read compact summary without vert
 test('SPH render surface draw no-full mode exposes GPU-only draw range without summary readback', async () => {
   const field = twoSurfaceRenderField();
   const vertices = deriveSphRenderSurfaceVerticesCpu(field);
+  const vertexCounterBuffer = { label: 'retained-surface-vertex-counter' };
+  const counterBackedVertices = {
+    ...vertices,
+    vertexCounterBuffer,
+    vertexCounterBufferRetained: true,
+    vertexCounterBufferByteLength: 16,
+    surfaceVertexEmissionMode: 'atomic-compact'
+  };
   const cpuDraw = deriveSphRenderSurfaceDrawMetadataCpu(vertices);
-  const { device, copies } = fakeSurfaceDrawDevice({
+  const { device, copies, shaderModules, bindGroups } = fakeSurfaceDrawDevice({
     drawRows: cpuDraw.drawRows,
     compactedVertexRows: vertices.vertexRows,
     drawIndirectRows: cpuDraw.drawIndirectRows
@@ -2211,7 +2227,7 @@ test('SPH render surface draw no-full mode exposes GPU-only draw range without s
 
   const result = await buildSphRenderSurfaceDrawMetadataWebGpu({
     device,
-    surfaceVertices: vertices,
+    surfaceVertices: counterBackedVertices,
     readbackMode: 'no-full-readback',
     compactSummaryReadback: false,
     retainDrawRowsBuffer: true,
@@ -2228,6 +2244,9 @@ test('SPH render surface draw no-full mode exposes GPU-only draw range without s
   assert.equal(result.fullSurfaceDrawReadback, false);
   assert.equal(result.surfaceDrawSummaryReadback, false);
   assert.equal(result.surfaceDrawSummaryReadbackByteLength, 0);
+  assert.equal(result.sourceVertexCounterMode, 'resident-vertex-counter');
+  assert.equal(result.sourceVertexCounterBufferBound, true);
+  assert.equal(result.sourceVertexCounterBufferByteLength, 16);
   assert.equal(result.surfaceDrawGpuOnlyHandoff, true);
   assert.equal(result.surfaceDrawGpuOnlyHandoffStatus, 'surface-draw-gpu-resident-draw-range-available');
   assert.equal(result.surfaceDrawGpuOnlyDrawRangeConservative, true);
@@ -2242,6 +2261,9 @@ test('SPH render surface draw no-full mode exposes GPU-only draw range without s
   assert.ok(result.drawRowsBufferRetained);
   assert.ok(result.drawIndirectRowsBufferRetained);
   assert.ok(result.compactedVertexRowsBufferRetained);
+  assert.match(shaderModules[0].code, /sd_source_vertex_row_count|source_vertex_counter/);
+  assert.equal(bindGroups[0].entries.length, 7);
+  assert.equal(bindGroups[0].entries[6].resource.buffer, vertexCounterBuffer);
   assert.equal(copies.length, 0);
 });
 

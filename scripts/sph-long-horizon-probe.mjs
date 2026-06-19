@@ -1579,6 +1579,11 @@ async function runBrowserProbe({
             surfaceDrawVertexCount: renderState.surfaceDrawVertexCount ?? null,
             surfaceDrawTriangleCount: renderState.surfaceDrawTriangleCount ?? null,
             surfaceDrawSourceVertexRowCount: renderState.surfaceDrawSourceVertexRowCount ?? null,
+            surfaceDrawSourceVertexCounterMode: renderState.surfaceDrawSourceVertexCounterMode ?? null,
+            surfaceDrawSourceVertexCounterBufferBound:
+              renderState.surfaceDrawSourceVertexCounterBufferBound ?? null,
+            surfaceDrawSourceVertexCounterBufferByteLength:
+              renderState.surfaceDrawSourceVertexCounterBufferByteLength ?? null,
             surfaceDrawRowsBufferRetained: renderState.surfaceDrawRowsBufferRetained ?? null,
             surfaceDrawRowsBufferByteLength: renderState.surfaceDrawRowsBufferByteLength ?? null,
             surfaceDrawIndirectRowsBufferRetained: renderState.surfaceDrawIndirectRowsBufferRetained ?? null,
@@ -1650,6 +1655,9 @@ async function runBrowserProbe({
             triangleCount: surfaceDraw.triangleCount ?? null,
             activeSurfaceCount: surfaceDraw.activeSurfaceCount ?? null,
             sourceVertexRowCount: surfaceDraw.sourceVertexRowCount ?? null,
+            sourceVertexCounterMode: surfaceDraw.sourceVertexCounterMode ?? null,
+            sourceVertexCounterBufferBound: surfaceDraw.sourceVertexCounterBufferBound ?? null,
+            sourceVertexCounterBufferByteLength: surfaceDraw.sourceVertexCounterBufferByteLength ?? null,
             drawRowsBufferRetained: surfaceDraw.drawRowsBufferRetained ?? null,
             drawRowsBufferByteLength: surfaceDraw.drawRowsBufferByteLength ?? null,
             drawIndirectRowsBufferRetained: surfaceDraw.drawIndirectRowsBufferRetained ?? null,

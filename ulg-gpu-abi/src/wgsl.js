@@ -3947,7 +3947,14 @@ struct SurfaceDrawParams {
   surface_count: u32,
   source_vertex_row_count: u32,
   max_compact_vertex_rows: u32,
+  source_vertex_counter_mode: u32,
+};
+
+struct SurfaceDrawVertexCounter {
+  vertex_count: u32,
+  overflow_count: u32,
   _pad0: u32,
+  _pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read> render_surfaces: array<vec4<f32>>;
@@ -3956,6 +3963,7 @@ struct SurfaceDrawParams {
 @group(0) @binding(3) var<storage, read_write> surface_draw_rows: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> params: SurfaceDrawParams;
 @group(0) @binding(5) var<storage, read_write> surface_draw_indirect_rows: array<vec4<u32>>;
+@group(0) @binding(6) var<storage, read> source_vertex_counter: SurfaceDrawVertexCounter;
 
 fn sd_surface_row0(surface_index: u32) -> vec4<f32> {
   return render_surfaces[surface_index * 4u];
@@ -3987,6 +3995,13 @@ fn sd_surface_index_from_row(row0: vec4<f32>) -> u32 {
 
 fn sd_is_active(row3: vec4<f32>) -> bool {
   return row3.w > 0.0;
+}
+
+fn sd_source_vertex_row_count() -> u32 {
+  if (params.source_vertex_counter_mode == 1u) {
+    return min(params.source_vertex_row_count, source_vertex_counter.vertex_count);
+  }
+  return params.source_vertex_row_count;
 }
 
 fn sd_transparency_class(phase_id: f32) -> f32 {
@@ -4075,8 +4090,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   let surface_row0 = sd_surface_row0(surface_index);
   let surface_row3 = sd_surface_row3(surface_index);
+  let source_vertex_row_count = sd_source_vertex_row_count();
   var prefix_vertex_count = 0u;
-  for (var row_index = 0u; row_index < params.source_vertex_row_count; row_index = row_index + 1u) {
+  for (var row_index = 0u; row_index < source_vertex_row_count; row_index = row_index + 1u) {
     let row0 = sd_vertex_row0(row_index);
     let row3 = sd_vertex_row3(row_index);
     let source_surface_index = sd_surface_index_from_row(row0);
@@ -4088,7 +4104,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   var vertex_count = 0u;
   var min_pos = vec3<f32>(1.0e30, 1.0e30, 1.0e30);
   var max_pos = vec3<f32>(-1.0e30, -1.0e30, -1.0e30);
-  for (var row_index = 0u; row_index < params.source_vertex_row_count; row_index = row_index + 1u) {
+  for (var row_index = 0u; row_index < source_vertex_row_count; row_index = row_index + 1u) {
     let row0 = sd_vertex_row0(row_index);
     let row1 = sd_vertex_row1(row_index);
     let row2 = sd_vertex_row2(row_index);

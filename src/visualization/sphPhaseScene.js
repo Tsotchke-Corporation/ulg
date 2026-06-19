@@ -3935,6 +3935,7 @@ export function createSphPhaseScene(container, {
   rendererWebGpuPresentation = SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED,
   rendererWebGpuResidentDevice = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED,
   rendererWebGpuPresentationUnsafe = false,
+  rendererWebGpuSurfaceBufferPresentation = SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED,
   rendererWebGpuDeviceResult = null,
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
@@ -3950,6 +3951,7 @@ export function createSphPhaseScene(container, {
   const requestedRendererBackend = normalizeSphRendererBackend(rendererBackend);
   const enableThreeWebGpuResidentDevice = Boolean(rendererWebGpuResidentDevice);
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
+  const requestedThreeWebGpuSurfaceBufferPresentation = Boolean(rendererWebGpuSurfaceBufferPresentation);
   const threeWebGpuRendererRequiredLimits = resolveThreeWebGpuRendererRequiredLimits({
     rendererWebGpuResidentDevice: enableThreeWebGpuResidentDevice
   });
@@ -3967,6 +3969,10 @@ export function createSphPhaseScene(container, {
   });
   const canUseThreeWebGpuRenderer = webGpuRendererAvailable && !threeWebGpuPresentationPolicy.blocked;
   const enableThreeWebGpuPresentation = threeWebGpuPresentationPolicy.enabled;
+  const enableThreeWebGpuSurfaceBufferPresentation = Boolean(
+    requestedThreeWebGpuSurfaceBufferPresentation
+    && canUseThreeWebGpuRenderer
+  );
   const Three = canUseThreeWebGpuRenderer ? THREE_WEBGPU : THREE;
   activeThreeNamespace = Three;
   let residentSurfaceDrawOverlayPolicy = null;
@@ -4036,6 +4042,8 @@ export function createSphPhaseScene(container, {
     sphWebGpuPresentationBlockReason: threeWebGpuPresentationPolicy.reason,
     sphWebGpuPresentationPolicy: threeWebGpuPresentationPolicy,
     sphWebGpuPresentationUnsafeDiagnosticOverride: Boolean(rendererWebGpuPresentationUnsafe),
+    sphThreeWebGpuSurfaceBufferPresentationRequested: requestedThreeWebGpuSurfaceBufferPresentation,
+    sphThreeWebGpuSurfaceBufferPresentationEnabled: enableThreeWebGpuSurfaceBufferPresentation,
     sphWebGpuDeviceSource: threeWebGpuRendererDeviceSource,
     sphWebGpuDevicePreflight: rendererWebGpuDeviceResult
       ? {
@@ -4095,6 +4103,12 @@ export function createSphPhaseScene(container, {
       rendererPresentationPolicy: renderer.userData?.sphWebGpuPresentationPolicy || null,
       rendererPresentationUnsafeDiagnosticOverride: Boolean(
         renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
+      ),
+      rendererSurfaceBufferPresentationRequested: Boolean(
+        renderer.userData?.sphThreeWebGpuSurfaceBufferPresentationRequested
+      ),
+      rendererSurfaceBufferPresentationEnabled: Boolean(
+        renderer.userData?.sphThreeWebGpuSurfaceBufferPresentationEnabled
       ),
       rendererDeviceSource: renderer.userData?.sphWebGpuDeviceSource || null,
       rendererDevicePreflight: renderer.userData?.sphWebGpuDevicePreflight || null,

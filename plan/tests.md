@@ -10356,3 +10356,26 @@ Native MC clamp and exact no-readback draw ranges, 2026-06-18 23:16 AKDT:
   - Browser coverage now asserts native MC no-summary handoff reports
     `position-clamp-ready`, exact retained vertex/triangle ranges, and
     conservative `[2.5,2.5,2.5]`/box-diagonal bounds for the 5m test box.
+
+Three WebGPU surface-buffer diagnostic flag, 2026-06-18 23:25 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `54/54`.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase records surface-buffer presentation opt-in without enabling WebGL external buffers" --reporter=line`
+  - Passed: `1/1`.
+  - Confirms `surfaceBufferPresentation=1` survives URL sync and is recorded
+    as requested while WebGL correctly keeps external GPUBuffer presentation
+    disabled/blocked.
+- Manual unsafe diagnostic, not a passing acceptance gate:
+  `renderer=webgpu&rendererPresentation=1&rendererResidentDevice=1&rendererPresentationUnsafe=1&surfaceBufferPresentation=1&surfaceDraw=three-webgpu-surface-buffers`
+  - Same-device capability reached `same-device-gpu-buffer-geometry-supported`.
+  - Page error: `Instance dropped in popErrorScope`.
+  - Surface draw fell back to `resident-surface-draw-unavailable` before the
+    external-buffer mesh bridge could bind retained MC rows.

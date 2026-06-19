@@ -226,6 +226,17 @@ This targets the weird/perspective-dependent native MC mesh artifact without
 adding an overlay or CPU geometry fallback. Remaining work is still the
 engine-owned same-device WebGPU renderer consumer and pixel validation.
 
+Current routing note, 2026-06-18 AKDT: the direct Three WebGPU surface-buffer
+consumer now has an explicit unsafe diagnostic flag:
+`renderer=webgpu&rendererPresentation=1&rendererResidentDevice=1&rendererPresentationUnsafe=1&surfaceBufferPresentation=1&surfaceDraw=three-webgpu-surface-buffers`.
+The safe default remains fail-closed. Manual console-harness evidence shows
+the flag makes same-device capability report `same-device-gpu-buffer-geometry-supported`,
+but the render refresh still fails before mesh binding with page error
+`Instance dropped in popErrorScope` during the shared renderer-owned GPUDevice
+surface-draw metadata queue wait. Treat this as the current direct-renderer
+blocker: solve Three WebGPU error-scope/lifetime sequencing on the shared
+device before promoting external surface buffers or pixel-validating them.
+
 Current routing note, 2026-06-18 AKDT: explicit native/extension
 `three-webgpu-surface-buffers` requests now preserve the no-full-readback
 resident surface-buffer handoff instead of forcing compact Three geometry

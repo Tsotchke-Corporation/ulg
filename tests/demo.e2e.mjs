@@ -5568,6 +5568,42 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.fullSurfaceDrawReadback).toBe(false);
 });
 
+test('SPH phase records surface-buffer presentation opt-in without enabling WebGL external buffers', async ({ page }) => {
+  await page.goto('/?renderer=webgl&surfaceBufferPresentation=1&residentAuto=0');
+  if (await page.locator('#sph-phase-overlay').count() === 0) {
+    await page.locator('#run-sph-phase').click();
+  }
+  await expect(page.locator('#sph-phase-overlay')).toBeVisible();
+  const result = await page.evaluate(() => {
+    const overlay = document.querySelector('#sph-phase-overlay');
+    const scene = overlay?.__sphScene;
+    const rendererInit = scene?.scene?.userData?.sphRendererInit || null;
+    const capability = scene?.scene?.userData?.sphResidentExtensionSurfaceRendererCapability || null;
+    return {
+      hash: window.location.hash,
+      rendererBackend: rendererInit?.rendererBackend ?? null,
+      rendererSurfaceBufferPresentationRequested:
+        rendererInit?.rendererSurfaceBufferPresentationRequested ?? null,
+      rendererSurfaceBufferPresentationEnabled:
+        rendererInit?.rendererSurfaceBufferPresentationEnabled ?? null,
+      capabilityRendererBackend: capability?.rendererBackend ?? null,
+      capabilityStatus: capability?.status ?? null,
+      capabilityExternalBufferPresentationEnabled:
+        capability?.externalBufferPresentationEnabled ?? null,
+      capabilityVisibleNoReadbackSupported: capability?.visibleNoReadbackSupported ?? null
+    };
+  });
+
+  expect(result.hash).toContain('surfaceBufferPresentation=1');
+  expect(result.rendererBackend).toBe('three-webgl');
+  expect(result.rendererSurfaceBufferPresentationRequested).toBe(true);
+  expect(result.rendererSurfaceBufferPresentationEnabled).toBe(false);
+  expect(result.capabilityRendererBackend).toBe('three-webgl');
+  expect(result.capabilityStatus).toBe('same-device-gpu-buffer-geometry-blocked-webgl-renderer');
+  expect(result.capabilityExternalBufferPresentationEnabled).toBe(false);
+  expect(result.capabilityVisibleNoReadbackSupported).toBe(false);
+});
+
 test('SPH WebGPU extension surface translation maps MC grid positions into ULG world meters', async ({ page }) => {
   await page.goto('/');
   const result = await page.evaluate(async () => {

@@ -5796,3 +5796,23 @@ Still open:
 
 - The visible performance/correctness gate is the same-device WebGPU renderer
   consumer plus console-clean pixel validation, especially on mobile.
+
+## 2026-06-18 Status Update - Three WebGPU Surface Buffer Diagnostic Flag
+
+Current state:
+
+- Added an explicit `surfaceBufferPresentation=1` opt-in for the direct Three
+  WebGPU external surface-buffer bridge. It is diagnostic-only; defaults remain
+  fail-closed and no overlay is introduced.
+- Renderer telemetry distinguishes requested versus enabled surface-buffer
+  presentation. WebGL fallback can record the request without claiming external
+  GPUBuffer presentation is enabled.
+- Unsafe manual evidence shows same-device capability can become supported, but
+  resident surface draw fails before mesh binding with
+  `Instance dropped in popErrorScope` on the shared renderer-owned GPUDevice.
+
+Still open:
+
+- Fix Three WebGPU error-scope/lifetime sequencing for the renderer-owned
+  GPUDevice before promoting or pixel-validating the direct external-buffer
+  surface consumer.

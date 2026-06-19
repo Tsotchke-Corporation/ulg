@@ -28161,3 +28161,42 @@ Remaining:
   vertex-bindable. The remaining visible-renderer gate is still the same-device
   engine-owned WebGPU consumer plus console-clean pixel validation across
   desktop and mobile.
+
+## 2026-06-18 23:25 AKDT - Three WebGPU Surface Buffer Diagnostic Flag
+
+Status:
+
+- Added an explicit URL/scene opt-in for the direct Three WebGPU external
+  surface-buffer bridge: `surfaceBufferPresentation=1`. It is separate from
+  `rendererPresentationUnsafe=1` so normal WebGL/mobile and no-overlay paths
+  stay fail-closed.
+- Renderer init telemetry now reports
+  `rendererSurfaceBufferPresentationRequested` and
+  `rendererSurfaceBufferPresentationEnabled`. The enabled flag only turns true
+  when the scene is actually using Three WebGPU, so WebGL fallback telemetry
+  remains honest.
+- Manual unsafe diagnostic route:
+  `renderer=webgpu&rendererPresentation=1&rendererResidentDevice=1&rendererPresentationUnsafe=1&surfaceBufferPresentation=1&surfaceDraw=three-webgpu-surface-buffers`.
+  In Chromium with unsafe WebGPU, same-device capability reached
+  `same-device-gpu-buffer-geometry-supported`, but the surface-draw bridge
+  still failed before external mesh binding. The page emitted
+  `Instance dropped in popErrorScope` during the renderer-owned GPUDevice
+  surface-draw metadata queue wait, and the resident surface draw fell back to
+  unavailable.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `54/54`.
+- PASS: focused Playwright
+  `SPH phase records surface-buffer presentation opt-in without enabling WebGL external buffers`
+  reported `1/1`; browser output only included Node color-env warnings.
+
+Remaining:
+
+- The direct-renderer blocker is now narrower: fix Three WebGPU
+  error-scope/lifetime sequencing while resident compute uses the
+  renderer-owned GPUDevice, then rerun the unsafe external-buffer diagnostic
+  and only promote it after console-clean pixel validation.

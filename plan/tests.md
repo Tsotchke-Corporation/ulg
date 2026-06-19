@@ -1,5 +1,41 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-18 No-Readback Render-Field Handoff
+
+No-summary/no-full resident render refresh now keeps the render-field rows and
+surface buffer resident as a no-overlay engine handoff instead of stopping at a
+summary-skipped diagnostic status. The current mounted route still needs the
+actual engine/marching-cubes/WebGPU consumer, but the CPU compact summary and
+surface-draw metadata readbacks are no longer required as the handoff boundary.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check tests/demo.e2e.mjs`, and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `52/52`, and
+  `node --test tests/sphMlsMpmGpuStep.test.mjs` passed `59/59`.
+- Browser coverage:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase no-full render refresh can skip compact surface summary readback"`
+  passed `1/1`.
+- Probe evidence:
+  `artifacts/sph-probe-no-summary-render-field-handoff-1.json` completed with
+  browser console `issueCount=0`, `warningCounts={}`,
+  `surfaceDrawStatus=resident-render-field-buffers-retained`,
+  `surfaceDrawVisibleRendererBridge=resident-surface-buffers-no-overlay`,
+  `surfaceDrawVisibleRenderSource=resident-render-field-buffers`,
+  `surfaceDrawGpuBufferHandoffReady=true`, and
+  `surfaceDrawGpuBufferHandoffStatus=resident-render-field-buffer-direct-consumer-ready`.
+
+Known residual risk:
+
+- The same probe still classifies `bad` for no-summary visual/motion evidence:
+  missing max-speed, missing positive displacement, and no visible surface
+  samples. That is now the expected next renderer-consumer task, not a WebGPU
+  console or compact-readback failure.
+
 ## Current Focused Result - 2026-06-18 Product-Event Device Identity Guard
 
 Retained product-event buffers and resident product-mass handles now carry

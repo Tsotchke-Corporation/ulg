@@ -27794,3 +27794,46 @@ Remaining:
 - Continue with same-device/no-readback surface rendering and fold
   thermal/reaction sidecars into the resident sequence before spending more
   time shaving this planner pass.
+
+## 2026-06-18 21:00 AKDT - No-Readback Render-Field Buffer Handoff
+
+Status:
+
+- The mounted no-summary/no-full render path now retains render-field rows and
+  render-field surface buffers as the direct engine handoff when compact surface
+  summary readback is skipped. This route publishes
+  `resident-render-field-buffers-retained`,
+  `resident-surface-buffers-no-overlay`,
+  `resident-render-field-buffer-direct-consumer-ready`, retained byte lengths,
+  and no-summary/no-full readback telemetry without constructing compact
+  surface-draw metadata buffers.
+- The attempted retained surface-draw metadata bridge stalled at queue work in
+  a no-summary probe, so `auto` no-summary mode now routes to the lower-level
+  render-field buffer handoff. That keeps the work aligned with the planned
+  proper engine/marching-cubes/WebGPU integration instead of adding an overlay.
+- The long-horizon probe now serializes the retained render-field handoff fields
+  and counts auto no-summary handoff samples as resident surface-buffer handoff
+  evidence.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `git diff --check -- src/visualization/sphPhaseScene.js tests/demo.e2e.mjs scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `52/52`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `59/59`.
+- PASS: focused Playwright no-summary render test passed `1/1` against the live
+  HTTPS Vite server on `https://127.0.0.1:5173`.
+- PASS with expected no-summary visual evidence gaps: browser probe
+  `artifacts/sph-probe-no-summary-render-field-handoff-1.json` completed with
+  zero browser console issues/warnings, `residentSurfaceBufferHandoffSampleCount=4`,
+  `surfaceDrawStatus=resident-render-field-buffers-retained`,
+  `surfaceDrawVisibleRendererBridge=resident-surface-buffers-no-overlay`, and
+  `surfaceDrawGpuBufferHandoffReady=true`.
+
+Remaining:
+
+- Bind the retained render-field/surface buffers to the real engine-owned
+  marching-cubes/WebGPU renderer consumer so mounted no-summary MLS-MPM scenes
+  produce fresh visible surfaces without CPU readback or overlays.

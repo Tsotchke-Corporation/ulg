@@ -2309,6 +2309,14 @@ physics work:
   - 2026-06-12 slice: retained render-field and surface-vertex buffers now use
     lease ledgers and guarded destroy; the scene bridge releases them after
     surface-draw metadata production.
+  - 2026-06-18 slice: no-summary/no-full resident render refresh can now retain
+    render-field rows and surface buffers as a no-overlay engine handoff. The
+    handoff publishes retained buffer byte lengths, no-summary/no-full status,
+    and `engine-resident-render-field-buffer-handoff-no-overlay` integration
+    telemetry so the next marching-cubes/WebGPU renderer consumer can bind the
+    same-device buffers without a compact summary readback. The attempted
+    surface-draw metadata route stalled behind queue work and is deferred behind
+    the direct render-field consumer.
   - 2026-06-12 slice: compact summary temporary GPU buffers now publish a
     cleaned diagnostics-only lease ledger after readback.
   - 2026-06-12 slice: grid-update, render-field, surface-vertex, surface-draw,

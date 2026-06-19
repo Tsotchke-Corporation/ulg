@@ -2159,12 +2159,22 @@ as non-strict evidence. Strict visual correctness, anomaly escalation, and
 future default mounted playback still need either readback or the retained GPU
 draw/summary lane.
 
+2026-06-18 21:00 status: the no-summary route no longer has to stop at
+`resident-surface-draw-summary-skipped`. When no-full resident render refreshes
+skip compact surface summaries, the scene can retain render-field rows and
+surface buffers as an engine-owned, no-overlay GPU handoff and publish
+`resident-render-field-buffer-direct-consumer-ready`. Focused Playwright and
+browser probe evidence are console-clean; visibility is still blocked on the
+real engine/marching-cubes/WebGPU consumer binding, not another overlay or
+compact readback fallback.
+
 Updated immediate priority after the no-full summary-skip slice:
 
-1. Fix mounted Na/H2O reaction/product orchestration without disabling the
+1. Bind the retained render-field/surface buffers to the proper engine
+   marching-cubes/WebGPU renderer consumer so no-full visual correctness updates
+   fresh surfaces without readback.
+2. Fix mounted Na/H2O reaction/product orchestration without disabling the
    reaction law.
-2. Continue the retained GPU visual diagnostic lane so no-full visual
-   correctness can update fresh surfaces without readback.
 3. Continue explicit surface-tension/free-surface behavior and longer
    settled-liquid visual horizons.
 4. Move the accepted SPH/MLS-MPM law DAG into a ComputeManager/GPUHub resident

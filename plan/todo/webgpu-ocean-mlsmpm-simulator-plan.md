@@ -235,6 +235,21 @@ Tactical status, 2026-06-18 AKDT:
   out of the compact-summary map fence; remaining throughput work is the
   no-readback surface renderer/consumer, thermal/reaction sidecar fusion, and
   Ocean-style sparse P2G/grid optimizations.
+- No-summary mounted render now has a direct no-overlay render-field buffer
+  handoff for the future engine consumer. In `auto` surface-draw mode with
+  `renderFieldSurfaceSummaryMode=skip` and no-full render rows, ULG retains the
+  render-field rows and surface buffers, fences submitted work with
+  `queue.onSubmittedWorkDone()`, and reports
+  `resident-render-field-buffers-retained`,
+  `resident-surface-buffers-no-overlay`,
+  `resident-render-field-buffer-direct-consumer-ready`, and retained byte
+  lengths without creating compact surface-draw metadata/readback buffers. The
+  focused Playwright no-summary test passes, and
+  `artifacts/sph-probe-no-summary-render-field-handoff-1.json` completed with
+  zero browser console issues/warnings and
+  `residentSurfaceBufferHandoffSampleCount=4`. The probe still classifies
+  visually `bad` because the actual engine/marching-cubes consumer is not bound
+  yet; that binding is now the next visible-render milestone.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

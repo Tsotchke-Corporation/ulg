@@ -1610,6 +1610,14 @@ async function runBrowserProbe({
             surfaceDrawDiagnosticsSkipped: renderState.surfaceDrawDiagnosticsSkipped ?? null,
             surfaceDrawDiagnosticsSkipReason: renderState.surfaceDrawDiagnosticsSkipReason ?? null,
             surfaceDrawDiagnosticFieldCellCount: renderState.surfaceDrawDiagnosticFieldCellCount ?? null,
+            surfaceDrawRenderFieldRowsBufferRetained:
+              renderState.surfaceDrawRenderFieldRowsBufferRetained ?? null,
+            surfaceDrawRenderFieldRowsBufferByteLength:
+              renderState.surfaceDrawRenderFieldRowsBufferByteLength ?? null,
+            surfaceDrawRenderFieldSurfaceBufferRetained:
+              renderState.surfaceDrawRenderFieldSurfaceBufferRetained ?? null,
+            surfaceDrawRenderFieldSurfaceBufferByteLength:
+              renderState.surfaceDrawRenderFieldSurfaceBufferByteLength ?? null,
             renderRowsReadback: renderState.renderRowsReadback ?? null,
             renderRowsReadbackMode: renderState.renderRowsReadbackMode ?? null,
             renderRowsReadbackRequestedMode: renderState.renderRowsReadbackRequestedMode ?? null,
@@ -1734,6 +1742,10 @@ async function runBrowserProbe({
             drawAggregateIndirectRowsBufferByteLength: surfaceDraw.drawAggregateIndirectRowsBufferByteLength ?? null,
             compactedVertexRowsBufferRetained: surfaceDraw.compactedVertexRowsBufferRetained ?? null,
             compactedVertexRowsBufferByteLength: surfaceDraw.compactedVertexRowsBufferByteLength ?? null,
+            renderFieldRowsBufferRetained: surfaceDraw.renderFieldRowsBufferRetained ?? null,
+            renderFieldRowsBufferByteLength: surfaceDraw.renderFieldRowsBufferByteLength ?? null,
+            renderFieldSurfaceBufferRetained: surfaceDraw.renderFieldSurfaceBufferRetained ?? null,
+            renderFieldSurfaceBufferByteLength: surfaceDraw.renderFieldSurfaceBufferByteLength ?? null,
             gpuBufferHandoffReady: surfaceDraw.surfaceDrawGpuBufferHandoffReady ?? null,
             gpuBufferHandoffStatus: surfaceDraw.surfaceDrawGpuBufferHandoffStatus ?? null,
             gpuBufferHandoffReason: surfaceDraw.surfaceDrawGpuBufferHandoffReason ?? null,
@@ -2013,8 +2025,7 @@ async function runBrowserProbe({
             }
             overlay.__sphResidentSurfaceDraw = sceneApi.getSphResidentSurfaceDraw?.() || null;
             const skipNoOverlayHandoffViewportRefresh = Boolean(
-              requestedSurfaceDrawDiagnosticMode === 'three-webgpu-surface-buffers'
-              && overlay.__sphResidentRenderState?.surfaceDrawVisibleRendererBridge === 'resident-surface-buffers-no-overlay'
+              overlay.__sphResidentRenderState?.surfaceDrawVisibleRendererBridge === 'resident-surface-buffers-no-overlay'
               && overlay.__sphResidentRenderState?.surfaceDrawGpuBufferHandoffReady === true
             );
             if (skipNoOverlayHandoffViewportRefresh) {
@@ -3781,8 +3792,18 @@ function analyzeTimeline(timeline, {
   )).length;
   const requestedSurfaceDrawMode = String(timeline?.surfaceDrawDiagnosticMode || '').toLowerCase();
   const requestedRenderReadbackMode = String(timeline?.renderReadbackMode || '').toLowerCase();
+  const requestedRenderFieldSurfaceSummaryMode = String(
+    timeline?.renderFieldSurfaceSummaryMode || ''
+  ).toLowerCase();
   const residentSurfaceBufferHandoffProbe = Boolean(
-    requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+    (
+      requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+      || requestedSurfaceDrawMode === 'resident-surface-buffers-no-overlay'
+      || (
+        requestedSurfaceDrawMode === 'auto'
+        && requestedRenderFieldSurfaceSummaryMode === 'skip'
+      )
+    )
     && requestedRenderReadbackMode === 'no-full-readback'
   );
   const residentSurfaceBufferHandoffAccepted = Boolean(

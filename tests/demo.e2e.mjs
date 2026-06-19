@@ -5394,6 +5394,28 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       surfaceDrawStatus: renderState?.surfaceDrawStatus ?? null,
       surfaceDrawVisibleRendererBridge: renderState?.surfaceDrawVisibleRendererBridge ?? null,
       surfaceDrawVisibleRenderSource: renderState?.surfaceDrawVisibleRenderSource ?? null,
+      renderFieldBufferMode: renderState?.renderFieldBufferMode ?? null,
+      surfaceDrawRenderFieldRowsBufferRetained: renderState?.surfaceDrawRenderFieldRowsBufferRetained ?? null,
+      surfaceDrawRenderFieldRowsBufferByteLength: renderState?.surfaceDrawRenderFieldRowsBufferByteLength ?? null,
+      surfaceDrawRenderFieldSurfaceBufferRetained:
+        renderState?.surfaceDrawRenderFieldSurfaceBufferRetained ?? null,
+      surfaceDrawRenderFieldSurfaceBufferByteLength:
+        renderState?.surfaceDrawRenderFieldSurfaceBufferByteLength ?? null,
+      surfaceDrawRowsBufferRetained: renderState?.surfaceDrawRowsBufferRetained ?? null,
+      surfaceDrawRowsBufferByteLength: renderState?.surfaceDrawRowsBufferByteLength ?? null,
+      surfaceDrawIndirectRowsBufferRetained: renderState?.surfaceDrawIndirectRowsBufferRetained ?? null,
+      surfaceDrawIndirectRowsBufferByteLength: renderState?.surfaceDrawIndirectRowsBufferByteLength ?? null,
+      surfaceDrawCompactedVertexRowsBufferRetained:
+        renderState?.surfaceDrawCompactedVertexRowsBufferRetained ?? null,
+      surfaceDrawCompactedVertexRowsBufferByteLength:
+        renderState?.surfaceDrawCompactedVertexRowsBufferByteLength ?? null,
+      surfaceDrawGpuBufferHandoffReady: renderState?.surfaceDrawGpuBufferHandoffReady ?? null,
+      surfaceDrawGpuBufferHandoffStatus: renderState?.surfaceDrawGpuBufferHandoffStatus ?? null,
+      surfaceDrawGpuBufferHandoffNoFullReadback: renderState?.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
+      surfaceDrawGpuBufferHandoffNoSummaryReadback:
+        renderState?.surfaceDrawGpuBufferHandoffNoSummaryReadback ?? null,
+      surfaceDrawRenderBridgeStatus: renderState?.surfaceDrawRenderBridgeStatus ?? null,
+      surfaceDrawRenderBridgeEngineIntegration: renderState?.surfaceDrawRenderBridgeEngineIntegration ?? null,
       surfaceDrawSummaryReadback: renderState?.surfaceDrawSummaryReadback ?? null,
       fullSurfaceDrawReadback: renderState?.fullSurfaceDrawReadback ?? null
     };
@@ -5411,9 +5433,26 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.renderFieldSurfaceSummaryReadback).toBe(false);
   expect(result.renderFieldSurfaceSummaryByteLength).toBe(0);
   expect(result.renderFieldSurfaceSummarySkipReason).toContain('no compact surface-summary readback');
-  expect(result.surfaceDrawStatus).toBe('resident-surface-draw-summary-skipped');
-  expect(result.surfaceDrawVisibleRendererBridge).toBe('summary-skipped-no-overlay');
-  expect(result.surfaceDrawVisibleRenderSource).toBe('resident-render-field-summary-skipped');
+  expect(result.surfaceDrawStatus).toBe('resident-render-field-buffers-retained');
+  expect(result.surfaceDrawVisibleRendererBridge).toBe('resident-surface-buffers-no-overlay');
+  expect(result.surfaceDrawVisibleRenderSource).toBe('resident-render-field-buffers');
+  expect(result.renderFieldBufferMode).toBe('retained-render-field-buffers-no-summary');
+  expect(result.surfaceDrawRenderFieldRowsBufferRetained).toBe(true);
+  expect(result.surfaceDrawRenderFieldRowsBufferByteLength).toBeGreaterThan(0);
+  expect(result.surfaceDrawRenderFieldSurfaceBufferRetained).toBe(true);
+  expect(result.surfaceDrawRenderFieldSurfaceBufferByteLength).toBeGreaterThan(0);
+  expect(result.surfaceDrawRowsBufferRetained).toBe(false);
+  expect(result.surfaceDrawRowsBufferByteLength).toBe(0);
+  expect(result.surfaceDrawIndirectRowsBufferRetained).toBe(false);
+  expect(result.surfaceDrawIndirectRowsBufferByteLength).toBe(0);
+  expect(result.surfaceDrawCompactedVertexRowsBufferRetained).toBe(false);
+  expect(result.surfaceDrawCompactedVertexRowsBufferByteLength).toBe(0);
+  expect(result.surfaceDrawGpuBufferHandoffReady).toBe(true);
+  expect(result.surfaceDrawGpuBufferHandoffStatus).toBe('resident-render-field-buffer-direct-consumer-ready');
+  expect(result.surfaceDrawGpuBufferHandoffNoFullReadback).toBe(true);
+  expect(result.surfaceDrawGpuBufferHandoffNoSummaryReadback).toBe(true);
+  expect(result.surfaceDrawRenderBridgeStatus).toBe('resident-render-field-buffers-retained-no-overlay');
+  expect(result.surfaceDrawRenderBridgeEngineIntegration).toBe('engine-resident-render-field-buffer-handoff-no-overlay');
   expect(result.surfaceDrawSummaryReadback).toBe(false);
   expect(result.fullSurfaceDrawReadback).toBe(false);
 });

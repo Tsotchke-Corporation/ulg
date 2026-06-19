@@ -28305,6 +28305,63 @@ Remaining:
   renderer-owned GPUDevice, then rerun the unsafe external-buffer diagnostic
   and only promote it after console-clean pixel validation.
 
+## 2026-06-19 05:37 AKDT - Native WebGPU Main-Canvas Surface Consumer
+
+Status:
+
+- Added an engine-owned `native-webgpu` renderer backend that owns the main
+  canvas without creating a diagnostic overlay. Explicit
+  `surfaceDraw=native-webgpu-surface-consumer` now defaults to that backend
+  when no renderer is specified.
+- Bound the native surface consumer to the resident `GPUDevice`, configured the
+  main canvas WebGPU context, and wired retained native marching-cubes /
+  extension surface draw buffers into the same resident surface draw render
+  bridge used by WebGPU indirect draws.
+- Fixed native requests so they are not folded into the Three WebGPU fallback
+  handoff. Native mode now remains explicit through render-field retention,
+  native MC extraction, bridge creation, temporal retention, and visible GPU
+  consumer validation.
+- Added native bridge retention across later no-full render-row refreshes so a
+  valid rendered native surface is not overwritten by a transient
+  `pending-three-webgpu-binding` fallback state.
+- Extended the long-horizon probe analyzer so
+  `native-webgpu-surface-consumer` counts as resident visible GPU output only
+  after the native bridge is ready, the render pass submitted, the visible GPU
+  consumer is ready, and pixel validation reports `passed`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- PASS: `git diff --check`.
+- PASS: visual-only browser probe wrote
+  `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-visual-probe.json` with
+  `status=good`, `browserConsoleIssueCount=0`, `pageErrorCount=0`,
+  `visibleRendererBridge=native-webgpu-surface-consumer`,
+  `renderBridgeStatus=native-webgpu-surface-consumer-ready`,
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
+  `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
+  `surfaceDrawVisibleGpuConsumerPixelValidationStatus=passed`,
+  `visibleSurfaceSampleCount=2`, and `h2oVisibleSurfaceSampleCount=2`.
+- PASS: mobile-shaped visual-only browser probe wrote
+  `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-mobile-visual-probe.json` with
+  `status=good`, no browser console issues/warnings, no page errors,
+  `visibleRendererBridge=native-webgpu-surface-consumer`,
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
+  `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
+  and H2O visible samples counted through the native direct-consumer path.
+
+Remaining:
+
+- The short non-visual physics probe still reports `bad` when run for only four
+  substeps because motion diagnostics are intentionally unavailable in the
+  no-full/no-summary visual route. Treat that as physics-harness scope, not a
+  renderer-console failure. Mobile/device-scale native rendering now has a
+  browser-clean visual acceptance probe; deeper pixel evidence can still be
+  added if required.
+
 ## 2026-06-19 00:55 AKDT - Visible GPU Consumer Validation Gate
 
 Status:

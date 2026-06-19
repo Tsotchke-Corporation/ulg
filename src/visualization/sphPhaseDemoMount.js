@@ -194,6 +194,7 @@ const RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES = new Set([
   'three-render-row-points',
   'three-spheres',
   'three-render-row-spheres',
+  'native-webgpu-surface-consumer',
   'webgpu-points',
   'webgpu-render-row-points',
   'webgpu-spheres',
@@ -1664,14 +1665,23 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('surfaceOverlay')
       ?? SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT
   );
-  const initialSphRendererBackend = normalizeSphRendererBackend(
+  const rawResidentSurfaceDrawDiagnosticMode =
+    initialHash.get('surfaceDraw')
+    ?? initialQuery.get('surfaceDraw')
+    ?? initialHash.get('surfaceDrawDiagnostic')
+    ?? initialQuery.get('surfaceDrawDiagnostic');
+  const nativeSurfaceDrawRequested =
+    String(rawResidentSurfaceDrawDiagnosticMode || '').trim().toLowerCase()
+    === 'native-webgpu-surface-consumer';
+  const rawRendererBackend =
     initialHash.get('renderer')
-      ?? initialQuery.get('renderer')
-      ?? initialHash.get('sphRenderer')
-      ?? initialQuery.get('sphRenderer')
-      ?? initialHash.get('threeRenderer')
-      ?? initialQuery.get('threeRenderer')
-      ?? 'webgl'
+    ?? initialQuery.get('renderer')
+    ?? initialHash.get('sphRenderer')
+    ?? initialQuery.get('sphRenderer')
+    ?? initialHash.get('threeRenderer')
+    ?? initialQuery.get('threeRenderer');
+  const initialSphRendererBackend = normalizeSphRendererBackend(
+    rawRendererBackend ?? (nativeSurfaceDrawRequested ? 'native-webgpu' : 'webgl')
   );
   const initialThreeWebGpuRendererPresentationEnabled = booleanUrlParam(
     initialHash.get('rendererPresentation')
@@ -1745,10 +1755,7 @@ export async function mountSphPhaseDemoOverlay({
     ? 'three-render-row-spheres'
     : 'three-render-row-points';
   const residentSurfaceDrawDiagnosticMode = normalizeResidentSurfaceDrawDiagnosticMode(
-    initialHash.get('surfaceDraw')
-      ?? initialQuery.get('surfaceDraw')
-      ?? initialHash.get('surfaceDrawDiagnostic')
-      ?? initialQuery.get('surfaceDrawDiagnostic'),
+    rawResidentSurfaceDrawDiagnosticMode,
     residentSurfaceDrawOverlayMode === 'enabled' ? 'auto' : defaultThreeResidentSurfaceDrawMode
   );
   const useThreeCompactSurfaceDrawBridge = residentSurfaceDrawDiagnosticMode === 'three-compact-vertices'

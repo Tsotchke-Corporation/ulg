@@ -3840,7 +3840,24 @@ function analyzeTimeline(timeline, {
         || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'webgpu-render-row-spheres-rendered'
       )
       && vertexCount > 0;
-    return webGpuIndirectOverlayVisible || threeRenderRowPointsVisible || webGpuRenderRowOverlayVisible;
+    const nativeWebGpuSurfaceConsumerVisible = bridge === 'native-webgpu-surface-consumer'
+      && renderSource === 'resident-surface-draw-native-webgpu-consumer'
+      && (
+        status === 'resident-extension-surface-draw-buffers-retained'
+        || status === 'resident-surface-draw-buffers-retained'
+        || status === 'resident-surface-draw-built'
+      )
+      && (
+        renderBridgeStatus === 'native-webgpu-surface-consumer-ready'
+        || metric?.surfaceDraw?.renderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+        || metric?.renderState?.surfaceDrawRenderBridgeLastRenderStatus === 'native-webgpu-surface-consumer-rendered'
+      )
+      && residentSurfaceVisibleGpuConsumerReady(metric)
+      && (activeSurfaceCount > 0 || vertexCount > 0);
+    return webGpuIndirectOverlayVisible
+      || threeRenderRowPointsVisible
+      || webGpuRenderRowOverlayVisible
+      || nativeWebGpuSurfaceConsumerVisible;
   };
   const residentRenderFieldSummaryVisible = (metric) => (
     metric?.renderState?.source === 'resident-gpu-render-field'
@@ -3896,6 +3913,7 @@ function analyzeTimeline(timeline, {
   const residentSurfaceBufferHandoffProbe = Boolean(
     (
       requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+      || requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
       || requestedSurfaceDrawMode === 'resident-surface-buffers-no-overlay'
       || (
         requestedSurfaceDrawMode === 'auto'
@@ -4503,7 +4521,10 @@ function analyzeTimeline(timeline, {
     issues.push('resident-surface-buffer-handoff-missing');
   }
   if (
-    requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+    (
+      requestedSurfaceDrawMode === 'three-webgpu-surface-buffers'
+      || requestedSurfaceDrawMode === 'native-webgpu-surface-consumer'
+    )
     && residentSurfaceBufferHandoffSampleCount > 0
     && residentSurfaceVisibleGpuConsumerSampleCount === 0
   ) {

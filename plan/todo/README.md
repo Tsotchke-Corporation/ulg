@@ -35,7 +35,26 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
-Current routing note, 2026-06-19 AKDT: the native
+Current routing note, 2026-06-19 AKDT: the engine-owned
+`native-webgpu-surface-consumer` main-canvas path is now wired and browser
+accepted for the short MLS-MPM visual route. Explicit native surface draw
+requests default to `renderer=native-webgpu`, bind the main canvas WebGPU
+context to the resident `GPUDevice`, consume retained native MC / extension
+surface draw buffers without an overlay, retain the valid native bridge across
+later no-full refreshes, and pass the visible GPU consumer gate. Evidence:
+`/tmp/ulg-native-webgpu-main-canvas-mlsmpm-visual-probe.json` has
+`status=good`, `browserConsoleIssueCount=0`, `pageErrorCount=0`,
+`visibleRendererBridge=native-webgpu-surface-consumer`,
+`renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
+`surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
+and H2O visible samples. The automated mobile-shaped viewport/device-scale
+probe `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-mobile-visual-probe.json` is
+also `status=good` with zero console/page issues and the same native visible
+consumer ready state. The next renderer acceptance slice is real-phone
+confirmation and any required native-canvas framing fixes, not an overlay or
+CPU geometry fallback.
+
+Superseded routing note, 2026-06-19 AKDT: the native
 `native-webgpu-surface-consumer` contract now exists as the next renderer
 handoff target. It is intentionally fail-closed unless the engine owns the main
 canvas or provides a renderer-owned WebGPU texture view, uses the same
@@ -46,9 +65,10 @@ console-clean and retained resident render-field buffers, but still classified
 `bad` because the runtime has no engine-owned native consumer yet:
 `native-webgpu-surface-consumer-blocked-engine-integration` and
 `resident-surface-visible-gpu-consumer-blocked-surface-extraction-required`.
-The next renderer slice is the actual engine-owned main-canvas/render-target
-binding plus native MC/direct-consumer draw pass; do not spend this slice on
-Three material polish, fallback overlays, or CPU geometry rebuilds.
+The main-canvas binding and native MC/direct-consumer draw pass described here
+has since landed in the note above; keep this block only as historical evidence
+for why the native path was prioritized over Three material polish, fallback
+overlays, or CPU geometry rebuilds.
 
 Current routing note, 2026-06-19 AKDT: unsafe Three WebGPU diagnostics now
 separate renderer-owned resident-device probing from presentation-only probing,

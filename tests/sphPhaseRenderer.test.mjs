@@ -167,6 +167,8 @@ test('SPH scene viewport sizing clamps DPR and falls back from zero mobile layou
 test('SPH renderer backend option normalizes WebGPU as opt-in', () => {
   assert.equal(normalizeSphRendererBackend('webgpu'), 'webgpu');
   assert.equal(normalizeSphRendererBackend('three-webgpu'), 'webgpu');
+  assert.equal(normalizeSphRendererBackend('native-webgpu'), 'native-webgpu');
+  assert.equal(normalizeSphRendererBackend('webgpu-native'), 'native-webgpu');
   assert.equal(normalizeSphRendererBackend('webgl'), 'webgl');
   assert.equal(normalizeSphRendererBackend('bad-value'), 'webgl');
 });

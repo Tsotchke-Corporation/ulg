@@ -1,5 +1,48 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Native WebGPU Main-Canvas Consumer
+
+The native `native-webgpu-surface-consumer` route now binds an engine-owned
+main-canvas WebGPU context to the resident `GPUDevice`, consumes retained
+native marching-cubes / extension surface draw buffers without an overlay, and
+passes the visible GPU consumer gate in the browser harness.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check src/visualization/sphPhaseDemoMount.js`, and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `57/57`.
+- Whitespace:
+  `git diff --check` passed.
+- Browser diagnostics:
+  `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-visual-probe.json` completed with
+  `status=good`, browser console issues/warnings `0/0`, and page errors `0`.
+  Final evidence: `visibleRendererBridge=native-webgpu-surface-consumer`,
+  `renderBridgeStatus=native-webgpu-surface-consumer-ready`,
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
+  `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
+  `surfaceDrawVisibleGpuConsumerPixelValidationStatus=passed`,
+  `visibleSurfaceSampleCount=2`, and `h2oVisibleSurfaceSampleCount=2`.
+- Mobile-shaped browser diagnostics:
+  `/tmp/ulg-native-webgpu-main-canvas-mlsmpm-mobile-visual-probe.json`
+  completed with `status=good`, browser console issues/warnings `0/0`, page
+  errors `0`, `visibleRendererBridge=native-webgpu-surface-consumer`,
+  `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`,
+  `surfaceDrawVisibleGpuConsumerStatus=resident-surface-visible-gpu-consumer-ready`,
+  `surfaceDrawVisibleGpuConsumerPixelValidationStatus=passed`,
+  `visibleSurfaceSampleCount=2`, and `h2oVisibleSurfaceSampleCount=2`.
+
+Known residual risk:
+
+- The visual-only acceptance route is renderer-focused. A four-substep
+  non-visual probe can still report missing motion diagnostics because no-full
+  render-row/readback evidence is intentionally suppressed. Real-device mobile
+  WebGPU still needs manual browser confirmation, but the automated mobile
+  viewport/device-scale harness is passing.
+
 ## Current Focused Result - 2026-06-19 Native WebGPU Surface Consumer Contract
 
 The native `native-webgpu-surface-consumer` bridge is now represented as an

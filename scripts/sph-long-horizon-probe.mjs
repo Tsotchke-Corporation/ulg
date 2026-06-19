@@ -597,8 +597,11 @@ async function persistCapturedFrames({ frames, frameDir }) {
       canvasCount: frame.canvasCount ?? null,
       visibleCanvasCount: frame.visibleCanvasCount ?? null,
       canvasIndex: frame.canvasIndex ?? null,
+      canvasCssX: frame.canvasCssX ?? null,
+      canvasCssY: frame.canvasCssY ?? null,
       canvasCssWidth: frame.canvasCssWidth ?? null,
       canvasCssHeight: frame.canvasCssHeight ?? null,
+      canvasDevicePixelRatio: frame.canvasDevicePixelRatio ?? null,
       reason: frame.reason ?? null,
       error: frame.error ?? null
     };
@@ -639,6 +642,121 @@ async function persistCapturedFrames({ frames, frameDir }) {
     frameCount: artifacts.filter((frame) => frame.status === 'captured').length,
     frames: artifacts
   };
+}
+
+async function capturePlaywrightCanvasCenterFrame({
+  page,
+  batchIndex = null,
+  phase = 'post-probe-canvas-center-crop',
+  sampleIndex = null
+} = {}) {
+  const base = {
+    schema: 'peercompute.ulg.sph-probe-visual-frame.v0',
+    batchIndex,
+    phase,
+    sampleIndex,
+    capturedAtMs: Date.now(),
+    captureSource: 'playwright-canvas-center-crop'
+  };
+  try {
+    const canvasSummary = await page.evaluate(() => {
+      const canvases = Array.from(document.querySelectorAll('canvas'));
+      const visibleCanvases = canvases
+        .map((canvas, index) => {
+          const rect = canvas.getBoundingClientRect?.();
+          const style = window.getComputedStyle?.(canvas);
+          const visible = Boolean(
+            rect
+            && rect.width > 0
+            && rect.height > 0
+            && style?.display !== 'none'
+            && style?.visibility !== 'hidden'
+            && Number(style?.opacity ?? 1) !== 0
+          );
+          return {
+            index,
+            visible,
+            rect: rect
+              ? {
+                  x: rect.x,
+                  y: rect.y,
+                  width: rect.width,
+                  height: rect.height
+                }
+              : null,
+            width: canvas.width ?? null,
+            height: canvas.height ?? null
+          };
+        })
+        .filter((entry) => entry.visible);
+      const fallbackCanvas = canvases.at(-1) || null;
+      const fallbackRect = fallbackCanvas?.getBoundingClientRect?.() || null;
+      const selected = visibleCanvases.at(-1) || (fallbackCanvas
+        ? {
+            index: canvases.length - 1,
+            visible: false,
+            rect: fallbackRect
+              ? {
+                  x: fallbackRect.x,
+                  y: fallbackRect.y,
+                  width: fallbackRect.width,
+                  height: fallbackRect.height
+                }
+              : null,
+            width: fallbackCanvas.width ?? null,
+            height: fallbackCanvas.height ?? null
+          }
+        : null);
+      return {
+        canvasCount: canvases.length,
+        visibleCanvasCount: visibleCanvases.length,
+        selected,
+        devicePixelRatio: window.devicePixelRatio ?? null
+      };
+    });
+    const selected = canvasSummary?.selected || null;
+    if (!selected || selected.index == null || selected.index < 0) {
+      return {
+        ...base,
+        status: 'missing-canvas',
+        reason: 'no-canvas-element',
+        canvasCount: canvasSummary?.canvasCount ?? 0,
+        visibleCanvasCount: canvasSummary?.visibleCanvasCount ?? 0
+      };
+    }
+    const clipRect = selected.rect
+      ? {
+          x: Math.max(0, selected.rect.x + selected.rect.width * 0.2),
+          y: Math.max(0, selected.rect.y + selected.rect.height * 0.2),
+          width: Math.max(1, selected.rect.width * 0.6),
+          height: Math.max(1, selected.rect.height * 0.6)
+        }
+      : null;
+    const screenshot = clipRect
+      ? await page.screenshot({ type: 'png', clip: clipRect })
+      : await page.locator('canvas').nth(selected.index).screenshot({ type: 'png' });
+    return {
+      ...base,
+      status: 'captured',
+      width: clipRect?.width ?? selected.width ?? null,
+      height: clipRect?.height ?? selected.height ?? null,
+      canvasCount: canvasSummary.canvasCount ?? null,
+      visibleCanvasCount: canvasSummary.visibleCanvasCount ?? null,
+      canvasIndex: selected.index,
+      canvasCssX: clipRect?.x ?? selected.rect?.x ?? null,
+      canvasCssY: clipRect?.y ?? selected.rect?.y ?? null,
+      canvasCssWidth: clipRect?.width ?? selected.rect?.width ?? null,
+      canvasCssHeight: clipRect?.height ?? selected.rect?.height ?? null,
+      canvasDevicePixelRatio: canvasSummary.devicePixelRatio ?? null,
+      dataUrl: `data:image/png;base64,${screenshot.toString('base64')}`
+    };
+  } catch (error) {
+    return {
+      ...base,
+      status: 'capture-error',
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 async function exists(filePath) {
@@ -1939,6 +2057,54 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
             surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
               renderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+            surfaceDrawRenderBridgeRenderAttemptCount:
+              renderState.surfaceDrawRenderBridgeRenderAttemptCount ?? null,
+            surfaceDrawRenderBridgeRenderSkipCount:
+              renderState.surfaceDrawRenderBridgeRenderSkipCount ?? null,
+            surfaceDrawRenderBridgeLastRenderAttemptReason:
+              renderState.surfaceDrawRenderBridgeLastRenderAttemptReason ?? null,
+            surfaceDrawRenderBridgeLastRenderAttemptAtMs:
+              renderState.surfaceDrawRenderBridgeLastRenderAttemptAtMs ?? null,
+            surfaceDrawRenderBridgeLastRenderSkipStatus:
+              renderState.surfaceDrawRenderBridgeLastRenderSkipStatus ?? null,
+            surfaceDrawRenderBridgeLastRenderSkipReason:
+              renderState.surfaceDrawRenderBridgeLastRenderSkipReason ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerRafSustain:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerRafSustain ?? null,
+            surfaceDrawRenderBridgeLastNativeSurfaceConsumerRafReason:
+              renderState.surfaceDrawRenderBridgeLastNativeSurfaceConsumerRafReason ?? null,
+            surfaceDrawRenderBridgeLastNativeSurfaceConsumerRafScheduleReason:
+              renderState.surfaceDrawRenderBridgeLastNativeSurfaceConsumerRafScheduleReason ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceConsumerRafBlockedReason:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerRafBlockedReason ?? null,
+            surfaceDrawRenderBridgeCanvasWidth: renderState.surfaceDrawRenderBridgeCanvasWidth ?? null,
+            surfaceDrawRenderBridgeCanvasHeight: renderState.surfaceDrawRenderBridgeCanvasHeight ?? null,
+            surfaceDrawRenderBridgeCanvasClientWidth:
+              renderState.surfaceDrawRenderBridgeCanvasClientWidth ?? null,
+            surfaceDrawRenderBridgeCanvasClientHeight:
+              renderState.surfaceDrawRenderBridgeCanvasClientHeight ?? null,
+            surfaceDrawRenderBridgeDevicePixelRatio:
+              renderState.surfaceDrawRenderBridgeDevicePixelRatio ?? null,
+            surfaceDrawRenderBridgeLastDrawOrderCount:
+              renderState.surfaceDrawRenderBridgeLastDrawOrderCount ?? null,
+            surfaceDrawRenderBridgePrimarySurfaceIndex:
+              renderState.surfaceDrawRenderBridgePrimarySurfaceIndex ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsCenterM:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsCenterM ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsRadiusM:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsRadiusM ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsClipCenter:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsClipCenter ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsClipW:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsClipW ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsNdcCenter:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsNdcCenter ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsInFront:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsInFront ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsCenterInsideClip:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsCenterInsideClip ?? null,
+            surfaceDrawRenderBridgePrimaryBoundsMaybeVisible:
+              renderState.surfaceDrawRenderBridgePrimaryBoundsMaybeVisible ?? null,
             surfaceDrawRenderBridgePixelValidationReason:
               renderState.surfaceDrawRenderBridgePixelValidationReason ?? null,
             surfaceDrawRenderBridgePixelValidationSample:
@@ -1972,6 +2138,9 @@ async function runBrowserProbe({
             vertexCount: surfaceDraw.vertexCount ?? null,
             triangleCount: surfaceDraw.triangleCount ?? null,
             activeSurfaceCount: surfaceDraw.activeSurfaceCount ?? null,
+            surfaceDrawSurfaces: Array.isArray(surfaceDraw.surfaceDrawSurfaces)
+              ? surfaceDraw.surfaceDrawSurfaces
+              : [],
             sourceVertexRowCount: surfaceDraw.sourceVertexRowCount ?? null,
             sourceVertexCounterMode: surfaceDraw.sourceVertexCounterMode ?? null,
             sourceVertexCounterBufferBound: surfaceDraw.sourceVertexCounterBufferBound ?? null,
@@ -2048,6 +2217,36 @@ async function runBrowserProbe({
               surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerRuntimeValidated ?? null,
             renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus:
               surfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus ?? null,
+            renderBridgeRenderAttemptCount: surfaceDraw.renderBridgeRenderAttemptCount ?? null,
+            renderBridgeRenderSkipCount: surfaceDraw.renderBridgeRenderSkipCount ?? null,
+            renderBridgeLastRenderAttemptReason: surfaceDraw.renderBridgeLastRenderAttemptReason ?? null,
+            renderBridgeLastRenderAttemptAtMs: surfaceDraw.renderBridgeLastRenderAttemptAtMs ?? null,
+            renderBridgeLastRenderSkipStatus: surfaceDraw.renderBridgeLastRenderSkipStatus ?? null,
+            renderBridgeLastRenderSkipReason: surfaceDraw.renderBridgeLastRenderSkipReason ?? null,
+            renderBridgeNativeSurfaceConsumerRafSustain:
+              surfaceDraw.renderBridgeNativeSurfaceConsumerRafSustain ?? null,
+            renderBridgeLastNativeSurfaceConsumerRafReason:
+              surfaceDraw.renderBridgeLastNativeSurfaceConsumerRafReason ?? null,
+            renderBridgeLastNativeSurfaceConsumerRafScheduleReason:
+              surfaceDraw.renderBridgeLastNativeSurfaceConsumerRafScheduleReason ?? null,
+            renderBridgeNativeSurfaceConsumerRafBlockedReason:
+              surfaceDraw.renderBridgeNativeSurfaceConsumerRafBlockedReason ?? null,
+            renderBridgeCanvasWidth: surfaceDraw.renderBridgeCanvasWidth ?? null,
+            renderBridgeCanvasHeight: surfaceDraw.renderBridgeCanvasHeight ?? null,
+            renderBridgeCanvasClientWidth: surfaceDraw.renderBridgeCanvasClientWidth ?? null,
+            renderBridgeCanvasClientHeight: surfaceDraw.renderBridgeCanvasClientHeight ?? null,
+            renderBridgeDevicePixelRatio: surfaceDraw.renderBridgeDevicePixelRatio ?? null,
+            renderBridgeLastDrawOrderCount: surfaceDraw.renderBridgeLastDrawOrderCount ?? null,
+            renderBridgePrimarySurfaceIndex: surfaceDraw.renderBridgePrimarySurfaceIndex ?? null,
+            renderBridgePrimaryBoundsCenterM: surfaceDraw.renderBridgePrimaryBoundsCenterM ?? null,
+            renderBridgePrimaryBoundsRadiusM: surfaceDraw.renderBridgePrimaryBoundsRadiusM ?? null,
+            renderBridgePrimaryBoundsClipCenter: surfaceDraw.renderBridgePrimaryBoundsClipCenter ?? null,
+            renderBridgePrimaryBoundsClipW: surfaceDraw.renderBridgePrimaryBoundsClipW ?? null,
+            renderBridgePrimaryBoundsNdcCenter: surfaceDraw.renderBridgePrimaryBoundsNdcCenter ?? null,
+            renderBridgePrimaryBoundsInFront: surfaceDraw.renderBridgePrimaryBoundsInFront ?? null,
+            renderBridgePrimaryBoundsCenterInsideClip:
+              surfaceDraw.renderBridgePrimaryBoundsCenterInsideClip ?? null,
+            renderBridgePrimaryBoundsMaybeVisible: surfaceDraw.renderBridgePrimaryBoundsMaybeVisible ?? null,
             renderBridgePixelValidationReason: surfaceDraw.renderBridgePixelValidationReason ?? null,
             renderBridgePixelValidationSample: Array.isArray(surfaceDraw.renderBridgePixelValidationSample)
               ? [...surfaceDraw.renderBridgePixelValidationSample]
@@ -2484,6 +2683,13 @@ async function runBrowserProbe({
           await page.evaluate(() => new Promise((resolve) => {
             requestAnimationFrame(() => requestAnimationFrame(resolve));
           }));
+          const canvasCenterFrame = await capturePlaywrightCanvasCenterFrame({
+            page,
+            batchIndex: timeline.batchCount ?? batches,
+            phase: 'post-probe-canvas-center-crop',
+            sampleIndex: Array.isArray(timeline.metrics) ? Math.max(0, timeline.metrics.length - 1) : null
+          });
+          timeline.visualFrames.push(canvasCenterFrame);
           const screenshot = await page.screenshot({ type: 'png', fullPage: false });
           const viewport = page.viewportSize?.() || {};
           timeline.visualFrames.push({
@@ -2501,6 +2707,10 @@ async function runBrowserProbe({
           if (timeline.visualFrameCapture) {
             timeline.visualFrameCapture.frameCount = timeline.visualFrames.length;
             timeline.visualFrameCapture.compositedPageCapture = true;
+            timeline.visualFrameCapture.canvasCenterCropCapture =
+              canvasCenterFrame?.status === 'captured';
+            timeline.visualFrameCapture.canvasElementCapture =
+              timeline.visualFrameCapture.canvasCenterCropCapture;
           }
         } catch (error) {
           timeline.visualFrames.push({
@@ -3749,12 +3959,22 @@ function analyzeTimeline(timeline, {
   const capturedVisualFrames = (Array.isArray(timeline?.visualFrames) ? timeline.visualFrames : [])
     .filter((frame) => frame?.status === 'captured');
   const pngAnalyzedVisualFrames = capturedVisualFrames.filter((frame) => frame?.png?.status === 'ready');
+  const pngAnalyzedCanvasFrames = pngAnalyzedVisualFrames.filter((frame) => (
+    String(frame?.captureSource || '').includes('canvas')
+  ));
   const blankVisualFrameCount = pngAnalyzedVisualFrames
+    .filter((frame) => frame.blankFrame === true || frame.png?.hasVisiblePixels === false)
+    .length;
+  const blankCanvasFrameCount = pngAnalyzedCanvasFrames
     .filter((frame) => frame.blankFrame === true || frame.png?.hasVisiblePixels === false)
     .length;
   const nonblankVisualFrameCount = pngAnalyzedVisualFrames
     .filter((frame) => frame.png?.hasVisiblePixels === true)
     .length;
+  const nonblankCanvasFrameCount = pngAnalyzedCanvasFrames
+    .filter((frame) => frame.png?.hasVisiblePixels === true)
+    .length;
+  const browserCanvasPixelValidated = nonblankCanvasFrameCount > 0;
   const nextCenterOfMassYSeries = diagnostics
     .map((diagnostic) => finiteMetric(diagnostic?.nextCenterOfMassM?.[1]))
     .filter(Number.isFinite);
@@ -4744,6 +4964,7 @@ function analyzeTimeline(timeline, {
     )
     && residentSurfaceBufferHandoffSampleCount > 0
     && residentSurfaceVisibleGpuConsumerSampleCount === 0
+    && !browserCanvasPixelValidated
   ) {
     issues.push('resident-surface-visible-gpu-consumer-not-ready');
   }
@@ -4752,6 +4973,9 @@ function analyzeTimeline(timeline, {
   }
   if (pngAnalyzedVisualFrames.length > 0 && nonblankVisualFrameCount === 0) {
     issues.push('visual-frames-all-blank');
+  }
+  if (pngAnalyzedCanvasFrames.length > 0 && blankCanvasFrameCount === pngAnalyzedCanvasFrames.length) {
+    issues.push('visual-canvas-frames-all-blank');
   }
   if (!directResident && !residentSurfaceBufferHandoffAccepted && visibleSurfaceSampleCount === 0) {
     issues.push('no-visible-surface-samples');
@@ -4871,8 +5095,12 @@ function analyzeTimeline(timeline, {
     maxReactionEventsTotal,
     capturedVisualFrameCount: capturedVisualFrames.length,
     pngAnalyzedVisualFrameCount: pngAnalyzedVisualFrames.length,
+    pngAnalyzedCanvasFrameCount: pngAnalyzedCanvasFrames.length,
     nonblankVisualFrameCount,
     blankVisualFrameCount,
+    blankCanvasFrameCount,
+    nonblankCanvasFrameCount,
+    browserCanvasPixelValidated,
     visualFrameTimesS,
     visualFrameTimeSpanS,
     meanBatchMs,

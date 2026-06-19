@@ -28585,3 +28585,54 @@ Remaining:
   current browser evidence correctly reports retained `render-field-buffers`
   as input-ready while the visible consumer remains blocked on required surface
   extraction / WebGL renderer capability and has `pixelValidationStatus=not-run`.
+
+## 2026-06-19 10:27 AKDT - Native WebGPU Surface Bridge Diagnostics
+
+Status:
+
+- Added resident native-surface bridge diagnostics for render attempts, skip
+  reasons, canvas backing/client dimensions, DPR, draw-order counts, compact
+  surface rows, and projected primary-surface bounds. These fields are now
+  published through both resident surface-draw state and resident render state,
+  then serialized by the long-horizon probe.
+- Added a native WebGPU surface-consumer RAF sustain pump. The bridge now keeps
+  requesting frames after it is ready and after render attempts, instead of
+  depending on a sparse scene animation callback.
+- Reworked visual capture in the probe to include a center crop of the visible
+  canvas. The analyzer now distinguishes composited page screenshots from
+  direct canvas crops, reports canvas-frame blank/nonblank counts, and only
+  suppresses `resident-surface-visible-gpu-consumer-not-ready` when browser
+  canvas pixels validate.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `17/17`.
+- PASS: `git diff --check`.
+- PARTIAL: `/tmp/ulg-native-mlsmpm-native-renderer-diagnostics-probe.json`
+  completed with browser console issues/warnings `0/0`, native bridge rendered,
+  projected primary surface center `[2.5,2.5,2.5]`, clip/NDC inside the view,
+  and `renderBridgeLastRenderStatus=native-webgpu-surface-consumer-rendered`.
+  The direct canvas center crop was still transparent black.
+- PARTIAL: `/tmp/ulg-native-mlsmpm-native-renderer-raf2-probe.json` completed
+  with browser console issues/warnings `0/0` and
+  `renderBridgeNativeSurfaceConsumerRafSustain=true`. Last sampled metrics still
+  had only two bridge frames because the metric sample happened before the
+  pending native RAF fired.
+- LIMITATION: This headless Chromium/WebGPU environment is not trustworthy for
+  final surface-pixel acceptance right now. Native pixel validation and a tiny
+  standalone WebGPU clear smoke both hit
+  `A valid external Instance reference no longer exists`. Treat console-clean
+  native bridge evidence as integration progress, not proof that phone/desktop
+  visible pixels are fixed.
+
+Remaining:
+
+- Verify the native surface consumer in a non-headless browser and on the phone,
+  using the new projection/canvas diagnostics to separate camera/frustum,
+  presentation, and device-scale failures.
+- Continue the no-readback engine-owned renderer path. Do not add an overlay or
+  revert to full compact surface readback as the main MLS-MPM route.

@@ -10622,3 +10622,38 @@ Probe visible GPU consumer reporting, 2026-06-19 01:04 AKDT:
     input kind `render-field-buffers`; renderer capability
     `same-device-gpu-buffer-geometry-blocked-webgl-renderer`; pixel validation
     `not-run`.
+
+Native WebGPU surface bridge diagnostics, 2026-06-19 10:27 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `57/57`.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `17/17`.
+- `git diff --check`
+  - Passed.
+- Browser probe:
+  `/tmp/ulg-native-mlsmpm-native-renderer-diagnostics-probe.json`
+  - Expected bad status because browser canvas pixels did not validate.
+  - Browser console issues/warnings: `0/0`.
+  - Native bridge status:
+    `native-webgpu-surface-consumer-ready`.
+  - Last render status:
+    `native-webgpu-surface-consumer-rendered`.
+  - Primary surface projected through the camera with center `[2.5,2.5,2.5]`,
+    `inFront=true`, `centerInsideClip=true`, and `maybeVisible=true`.
+  - Direct canvas center crop was transparent black.
+- Browser probe:
+  `/tmp/ulg-native-mlsmpm-native-renderer-raf2-probe.json`
+  - Browser console issues/warnings: `0/0`.
+  - `renderBridgeNativeSurfaceConsumerRafSustain=true`.
+  - `renderBridgeLastNativeSurfaceConsumerRafScheduleReason=native-webgpu-surface-consumer-raf`.
+  - Last sampled `renderBridgeFrameCount=2`; the probe samples before the next
+    pending RAF has necessarily fired.
+- Headless WebGPU limitation:
+  native runtime pixel validation and a tiny standalone WebGPU clear smoke both
+  reported `A valid external Instance reference no longer exists`. Do not use
+  this headless run as final native surface-pixel acceptance.

@@ -2412,3 +2412,27 @@ Updated immediate priority after the diagnostic-budget guard:
    double-count prevention, and visible product/gas evidence.
 4. Move the accepted SPH/MLS-MPM law DAG into a ComputeManager/GPUHub resident
    lane with authority evidence after representative validation stabilizes.
+
+2026-06-19 10:27 status: the current native WebGPU surface work is still the
+top roadmap item. ULG now has an engine-owned native WebGPU surface consumer
+and direct resident buffer handoff, plus bridge diagnostics for canvas
+dimensions, DPR, draw attempts/skips, compact surface rows, and camera-projected
+surface bounds. The long-horizon probe now captures a visible-canvas center
+crop and distinguishes it from composited page screenshots. Current headless
+evidence is console-clean and shows the surface bounds are in the camera frustum,
+but direct canvas crops remain transparent black; headless WebGPU pixel
+readback/presentation is also failing with `A valid external Instance reference
+no longer exists`.
+
+Updated immediate priority after the native bridge diagnostics slice:
+
+1. Verify/fix the engine-owned native WebGPU surface consumer in a non-headless
+   browser and on the phone. Use the new projection/canvas diagnostics to
+   isolate presentation/device-scale failures.
+2. Continue the no-readback native renderer path and avoid overlay or full
+   compact surface-readback fallback as the main MLS-MPM route.
+3. Once visible native pixels are accepted, return to the resident continuation
+   hang and second-batch no-full mechanics failures.
+4. Continue material-size/PBR restoration, material property registry work,
+   and cubic-barrier/contact integration after the renderer path is not blocking
+   every MLS-MPM performance test.

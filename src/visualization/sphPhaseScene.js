@@ -1372,7 +1372,8 @@ const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64,
-  STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128
+  STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
+  INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256
 };
 const GPU_MAP_MODE = {
   READ: globalThis.GPUMapMode?.READ ?? 1
@@ -3485,6 +3486,177 @@ export function residentSurfaceDrawOrder(surfaces = [], {
 
 export function residentSurfaceDrawPipelineKey(draw = {}) {
   return Number(draw?.depthWriteFlag) > 0 ? 'opaque-depth-write' : 'transparent-depth-test';
+}
+
+function finiteNumberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function finiteVector3OrNull(value) {
+  if (!Array.isArray(value) || value.length < 3) return null;
+  const vector = value.slice(0, 3).map((entry) => Number(entry));
+  return vector.every(Number.isFinite) ? vector : null;
+}
+
+function compactResidentSurfaceDrawSurfaces(surfaces = [], limit = 8) {
+  if (!Array.isArray(surfaces)) return [];
+  return surfaces.slice(0, Math.max(0, Math.floor(Number(limit) || 0))).map((surface, index) => ({
+    surfaceIndex: Math.max(0, Math.round(Number(surface?.surfaceIndex ?? index) || 0)),
+    surfaceKey: surface?.surfaceKey ?? null,
+    material: surface?.material ?? null,
+    phase: surface?.phase ?? null,
+    renderKey: surface?.renderKey ?? null,
+    renderLayer: surface?.renderLayer ?? null,
+    vertexOffset: finiteNumberOrNull(surface?.vertexOffset),
+    vertexCount: finiteNumberOrNull(surface?.vertexCount),
+    triangleOffset: finiteNumberOrNull(surface?.triangleOffset),
+    triangleCount: finiteNumberOrNull(surface?.triangleCount),
+    renderOrder: finiteNumberOrNull(surface?.renderOrder),
+    transparencyClassId: finiteNumberOrNull(surface?.transparencyClassId),
+    depthWriteFlag: finiteNumberOrNull(surface?.depthWriteFlag),
+    boundsCenterM: finiteVector3OrNull(surface?.boundsCenterM),
+    boundsRadiusM: finiteNumberOrNull(surface?.boundsRadiusM),
+    status: surface?.status ?? null
+  }));
+}
+
+function projectResidentSurfaceDrawBounds({ surface = null, viewProjection = null } = {}) {
+  const center = finiteVector3OrNull(surface?.boundsCenterM);
+  const radius = finiteNumberOrNull(surface?.boundsRadiusM);
+  const elements = viewProjection?.elements;
+  if (!center || !elements || elements.length < 16) return null;
+  const [x, y, z] = center;
+  const clipX = elements[0] * x + elements[4] * y + elements[8] * z + elements[12];
+  const clipY = elements[1] * x + elements[5] * y + elements[9] * z + elements[13];
+  const clipZ = elements[2] * x + elements[6] * y + elements[10] * z + elements[14];
+  const clipW = elements[3] * x + elements[7] * y + elements[11] * z + elements[15];
+  const ndcCenter = Number.isFinite(clipW) && Math.abs(clipW) > 1e-9
+    ? [clipX / clipW, clipY / clipW, clipZ / clipW]
+    : null;
+  const centerInsideClip = Boolean(
+    ndcCenter
+    && ndcCenter[0] >= -1
+    && ndcCenter[0] <= 1
+    && ndcCenter[1] >= -1
+    && ndcCenter[1] <= 1
+    && ndcCenter[2] >= -1
+    && ndcCenter[2] <= 1
+  );
+  return {
+    boundsCenterM: center,
+    boundsRadiusM: Number.isFinite(radius) && radius > 0 ? radius : null,
+    clipCenter: [clipX, clipY, clipZ, clipW],
+    clipW,
+    ndcCenter,
+    inFront: Number.isFinite(clipW) && clipW > 0,
+    centerInsideClip,
+    maybeVisible: centerInsideClip
+  };
+}
+
+function updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
+  viewProjection = null,
+  drawOrder = [],
+  opaqueDraws = [],
+  transparentDraws = []
+} = {}) {
+  if (!bridge) return null;
+  const surfaces = Array.isArray(bridge.drawState?.surfaces) ? bridge.drawState.surfaces : [];
+  const primaryDraw = Array.isArray(drawOrder) && drawOrder.length ? drawOrder[0] : null;
+  const primarySurfaceIndex = Math.max(0, Math.round(Number(primaryDraw?.surfaceIndex ?? 0) || 0));
+  const primarySurface = surfaces.find((surface, index) => (
+    Math.max(0, Math.round(Number(surface?.surfaceIndex ?? index) || 0)) === primarySurfaceIndex
+  )) || surfaces[0] || null;
+  const projectedBounds = projectResidentSurfaceDrawBounds({
+    surface: primarySurface,
+    viewProjection
+  });
+  bridge.lastCanvasWidth = bridge.canvas?.width ?? null;
+  bridge.lastCanvasHeight = bridge.canvas?.height ?? null;
+  bridge.lastCanvasClientWidth = finiteNumberOrNull(bridge.canvas?.clientWidth);
+  bridge.lastCanvasClientHeight = finiteNumberOrNull(bridge.canvas?.clientHeight);
+  bridge.lastDevicePixelRatio = finiteNumberOrNull(globalThis.devicePixelRatio);
+  bridge.lastDrawOrderCount = Array.isArray(drawOrder) ? drawOrder.length : 0;
+  bridge.lastOpaqueDrawCount = Array.isArray(opaqueDraws) ? opaqueDraws.length : 0;
+  bridge.lastTransparentDrawCount = Array.isArray(transparentDraws) ? transparentDraws.length : 0;
+  bridge.primarySurfaceIndex = primarySurfaceIndex;
+  bridge.primarySurfaceBoundsCenterM = projectedBounds?.boundsCenterM ?? null;
+  bridge.primarySurfaceBoundsRadiusM = projectedBounds?.boundsRadiusM ?? null;
+  bridge.primarySurfaceBoundsClipCenter = projectedBounds?.clipCenter ?? null;
+  bridge.primarySurfaceBoundsClipW = projectedBounds?.clipW ?? null;
+  bridge.primarySurfaceBoundsNdcCenter = projectedBounds?.ndcCenter ?? null;
+  bridge.primarySurfaceBoundsInFront = projectedBounds?.inFront ?? null;
+  bridge.primarySurfaceBoundsCenterInsideClip = projectedBounds?.centerInsideClip ?? null;
+  bridge.primarySurfaceBoundsMaybeVisible = projectedBounds?.maybeVisible ?? null;
+  return projectedBounds;
+}
+
+function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
+  if (!target || !bridge) return target;
+  target.renderBridgeRenderAttemptCount = bridge.renderAttemptCount ?? null;
+  target.renderBridgeRenderSkipCount = bridge.renderSkipCount ?? null;
+  target.renderBridgeLastRenderAttemptReason = bridge.lastRenderAttemptReason ?? null;
+  target.renderBridgeLastRenderAttemptAtMs = bridge.lastRenderAttemptAtMs ?? null;
+  target.renderBridgeLastRenderSkipStatus = bridge.lastRenderSkipStatus ?? null;
+  target.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason ?? null;
+  target.renderBridgeNativeSurfaceConsumerRafSustain = Boolean(bridge.nativeSurfaceConsumerRafSustain);
+  target.renderBridgeLastNativeSurfaceConsumerRafReason = bridge.lastNativeSurfaceConsumerRafReason ?? null;
+  target.renderBridgeLastNativeSurfaceConsumerRafScheduleReason =
+    bridge.lastNativeSurfaceConsumerRafScheduleReason ?? null;
+  target.renderBridgeNativeSurfaceConsumerRafBlockedReason =
+    bridge.nativeSurfaceConsumerRafBlockedReason ?? null;
+  target.renderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
+  target.renderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
+  target.renderBridgeCanvasClientWidth = bridge.lastCanvasClientWidth ?? null;
+  target.renderBridgeCanvasClientHeight = bridge.lastCanvasClientHeight ?? null;
+  target.renderBridgeDevicePixelRatio = bridge.lastDevicePixelRatio ?? null;
+  target.renderBridgeLastDrawOrderCount = bridge.lastDrawOrderCount ?? null;
+  target.renderBridgePrimarySurfaceIndex = bridge.primarySurfaceIndex ?? null;
+  target.renderBridgePrimaryBoundsCenterM = bridge.primarySurfaceBoundsCenterM ?? null;
+  target.renderBridgePrimaryBoundsRadiusM = bridge.primarySurfaceBoundsRadiusM ?? null;
+  target.renderBridgePrimaryBoundsClipCenter = bridge.primarySurfaceBoundsClipCenter ?? null;
+  target.renderBridgePrimaryBoundsClipW = bridge.primarySurfaceBoundsClipW ?? null;
+  target.renderBridgePrimaryBoundsNdcCenter = bridge.primarySurfaceBoundsNdcCenter ?? null;
+  target.renderBridgePrimaryBoundsInFront = bridge.primarySurfaceBoundsInFront ?? null;
+  target.renderBridgePrimaryBoundsCenterInsideClip = bridge.primarySurfaceBoundsCenterInsideClip ?? null;
+  target.renderBridgePrimaryBoundsMaybeVisible = bridge.primarySurfaceBoundsMaybeVisible ?? null;
+  return target;
+}
+
+function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
+  if (!target || !bridge) return target;
+  target.surfaceDrawRenderBridgeRenderAttemptCount = bridge.renderAttemptCount ?? null;
+  target.surfaceDrawRenderBridgeRenderSkipCount = bridge.renderSkipCount ?? null;
+  target.surfaceDrawRenderBridgeLastRenderAttemptReason = bridge.lastRenderAttemptReason ?? null;
+  target.surfaceDrawRenderBridgeLastRenderAttemptAtMs = bridge.lastRenderAttemptAtMs ?? null;
+  target.surfaceDrawRenderBridgeLastRenderSkipStatus = bridge.lastRenderSkipStatus ?? null;
+  target.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerRafSustain =
+    Boolean(bridge.nativeSurfaceConsumerRafSustain);
+  target.surfaceDrawRenderBridgeLastNativeSurfaceConsumerRafReason =
+    bridge.lastNativeSurfaceConsumerRafReason ?? null;
+  target.surfaceDrawRenderBridgeLastNativeSurfaceConsumerRafScheduleReason =
+    bridge.lastNativeSurfaceConsumerRafScheduleReason ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceConsumerRafBlockedReason =
+    bridge.nativeSurfaceConsumerRafBlockedReason ?? null;
+  target.surfaceDrawRenderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
+  target.surfaceDrawRenderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
+  target.surfaceDrawRenderBridgeCanvasClientWidth = bridge.lastCanvasClientWidth ?? null;
+  target.surfaceDrawRenderBridgeCanvasClientHeight = bridge.lastCanvasClientHeight ?? null;
+  target.surfaceDrawRenderBridgeDevicePixelRatio = bridge.lastDevicePixelRatio ?? null;
+  target.surfaceDrawRenderBridgeLastDrawOrderCount = bridge.lastDrawOrderCount ?? null;
+  target.surfaceDrawRenderBridgePrimarySurfaceIndex = bridge.primarySurfaceIndex ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsCenterM = bridge.primarySurfaceBoundsCenterM ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsRadiusM = bridge.primarySurfaceBoundsRadiusM ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsClipCenter = bridge.primarySurfaceBoundsClipCenter ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsClipW = bridge.primarySurfaceBoundsClipW ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsNdcCenter = bridge.primarySurfaceBoundsNdcCenter ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsInFront = bridge.primarySurfaceBoundsInFront ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsCenterInsideClip =
+    bridge.primarySurfaceBoundsCenterInsideClip ?? null;
+  target.surfaceDrawRenderBridgePrimaryBoundsMaybeVisible = bridge.primarySurfaceBoundsMaybeVisible ?? null;
+  return target;
 }
 
 function makeSurfaceMaterial(descriptorOrKey, properties = null, opticsOverride = null) {
@@ -6511,6 +6683,7 @@ export function createSphPhaseScene(container, {
   }
 
   function clearSphResidentSurfaceDrawArtifacts({ clearOverlay = true, removeCanvas = false } = {}) {
+    cancelSphNativeWebGpuSurfaceConsumerFrame();
     releaseSphResidentSurfaceDrawResources({
       surfaceDraw: sphResidentSurfaceDraw,
       renderBridge: sphResidentSurfaceDrawRenderBridge,
@@ -8540,6 +8713,7 @@ export function createSphPhaseScene(container, {
       const drawOrder = residentSurfaceDrawOrder(surfaceDrawExecution.surfaces || [], {
         indirectStrideBytes
       });
+      const surfaceDrawSurfaces = compactResidentSurfaceDrawSurfaces(surfaceDrawExecution.surfaces || []);
       const bridge = {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0',
         status: useNativeConsumer
@@ -8600,6 +8774,7 @@ export function createSphPhaseScene(container, {
           drawIndirectRowsBuffer: surfaceDrawExecution.drawIndirectRowsBuffer,
           surfaceCount: surfaceDrawExecution.surfaceCount,
           sourceSurfaceCount: surfaceDrawExecution.surfaceCount,
+          surfaces: surfaceDrawSurfaces,
           drawOrder,
           drawOrderSurfaceIndices: drawOrder.map((row) => row.surfaceIndex),
           drawOrderIndirectOffsets: drawOrder.map((row) => row.indirectOffsetBytes),
@@ -8645,6 +8820,11 @@ export function createSphPhaseScene(container, {
       };
       sphResidentSurfaceDrawRenderBridge = bridge;
       scene.userData.sphResidentSurfaceDrawRenderBridge = bridge;
+      if (useNativeConsumer) {
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({
+          reason: 'native-webgpu-surface-consumer-bridge-ready'
+        });
+      }
       return bridge;
     } catch (error) {
       return {
@@ -8662,11 +8842,67 @@ export function createSphPhaseScene(container, {
     }
   }
 
-  function renderSphResidentSurfaceDrawOverlay() {
+  let nativeWebGpuSurfaceConsumerRaf = null;
+  let nativeWebGpuSurfaceConsumerRafHost = null;
+
+  function scheduleSphNativeWebGpuSurfaceConsumerFrame({
+    reason = 'native-webgpu-surface-consumer-raf'
+  } = {}) {
     const bridge = sphResidentSurfaceDrawRenderBridge;
+    const rafHost = container.ownerDocument?.defaultView || globalThis;
+    if (bridge) bridge.lastNativeSurfaceConsumerRafScheduleReason = reason;
+    if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+      if (bridge) bridge.nativeSurfaceConsumerRafBlockedReason = 'non-native-surface-consumer-bridge';
+      return;
+    }
+    if (
+      !running
+    ) {
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'scene-not-running';
+      return;
+    }
+    if (nativeWebGpuSurfaceConsumerRaf != null) {
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'raf-already-pending';
+      bridge.nativeSurfaceConsumerRafSustain = true;
+      return;
+    }
+    if (typeof rafHost?.requestAnimationFrame !== 'function') {
+      bridge.nativeSurfaceConsumerRafBlockedReason = 'request-animation-frame-unavailable';
+      return;
+    }
+    bridge.nativeSurfaceConsumerRafSustain = true;
+    bridge.nativeSurfaceConsumerRafBlockedReason = null;
+    bridge.lastNativeSurfaceConsumerRafReason = reason;
+    nativeWebGpuSurfaceConsumerRafHost = rafHost;
+    nativeWebGpuSurfaceConsumerRaf = rafHost.requestAnimationFrame(() => {
+      nativeWebGpuSurfaceConsumerRaf = null;
+      nativeWebGpuSurfaceConsumerRafHost = null;
+      if (!running || sphResidentSurfaceDrawRenderBridge !== bridge) return;
+      renderSphResidentSurfaceDrawOverlay({ reason });
+      scheduleSphNativeWebGpuSurfaceConsumerFrame({ reason });
+    });
+  }
+
+  function cancelSphNativeWebGpuSurfaceConsumerFrame() {
+    if (nativeWebGpuSurfaceConsumerRaf == null) return;
+    const rafHost = nativeWebGpuSurfaceConsumerRafHost || container.ownerDocument?.defaultView || globalThis;
+    rafHost.cancelAnimationFrame?.(nativeWebGpuSurfaceConsumerRaf);
+    nativeWebGpuSurfaceConsumerRaf = null;
+    nativeWebGpuSurfaceConsumerRafHost = null;
+  }
+
+  function renderSphResidentSurfaceDrawOverlay({ reason = 'animation-frame' } = {}) {
+    const bridge = sphResidentSurfaceDrawRenderBridge;
+    if (bridge) {
+      bridge.renderAttemptCount = Math.max(0, Math.round(Number(bridge.renderAttemptCount) || 0)) + 1;
+      bridge.lastRenderAttemptReason = reason;
+      bridge.lastRenderAttemptAtMs = nowMs();
+    }
     if (bridge && residentGpuSubmissionPaused()) {
       const status = 'resident-surface-draw-skipped-resident-gpu-work-in-flight';
       bridge.lastRenderStatus = status;
+      bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
+      bridge.lastRenderSkipStatus = status;
       bridge.lastRenderSkipReason = 'resident GPU compute is using the WebGPU queue';
       scene.userData.sphResidentSurfaceDrawRenderSkip = {
         schema: 'peercompute.ulg.sph-resident-surface-draw-render-skip.v0',
@@ -8683,10 +8919,17 @@ export function createSphPhaseScene(container, {
       if (sphResidentSurfaceDraw) {
         sphResidentSurfaceDraw.renderBridgeLastRenderStatus = status;
         sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+        publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
       }
       if (sphResidentRenderState) {
         sphResidentRenderState.surfaceDrawRenderBridgeLastRenderStatus = status;
         sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+        publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
+      }
+      if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+        scheduleSphNativeWebGpuSurfaceConsumerFrame({
+          reason: 'native-webgpu-surface-consumer-retry-after-gpu-work'
+        });
       }
       return;
     }
@@ -8766,7 +9009,31 @@ export function createSphPhaseScene(container, {
       return;
     }
     const drawState = bridge?.drawState;
-    if (!bridge?.device || !bridge?.context || !drawState?.bindGroup || !drawState?.drawIndirectRowsBuffer) return;
+    if (!bridge?.device || !bridge?.context || !drawState?.bindGroup || !drawState?.drawIndirectRowsBuffer) {
+      if (bridge) {
+        const status = 'resident-surface-draw-skipped-missing-draw-state';
+        bridge.renderSkipCount = Math.max(0, Math.round(Number(bridge.renderSkipCount) || 0)) + 1;
+        bridge.lastRenderSkipStatus = status;
+        bridge.lastRenderSkipReason = 'retained draw bind group or indirect buffer is unavailable';
+        bridge.lastRenderStatus = status;
+        if (sphResidentSurfaceDraw) {
+          sphResidentSurfaceDraw.renderBridgeLastRenderStatus = status;
+          sphResidentSurfaceDraw.renderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+          publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
+        }
+        if (sphResidentRenderState) {
+          sphResidentRenderState.surfaceDrawRenderBridgeLastRenderStatus = status;
+          sphResidentRenderState.surfaceDrawRenderBridgeLastRenderSkipReason = bridge.lastRenderSkipReason;
+          publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
+        }
+        if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+          scheduleSphNativeWebGpuSurfaceConsumerFrame({
+            reason: 'native-webgpu-surface-consumer-retry-after-missing-draw-state'
+          });
+        }
+      }
+      return;
+    }
     try {
       resizeSphResidentSurfaceDrawOverlayCanvas(bridge);
       const depthView = ensureSphResidentSurfaceDrawDepthView(bridge);
@@ -8785,6 +9052,14 @@ export function createSphPhaseScene(container, {
         );
       const opaqueDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) === 'opaque-depth-write');
       const transparentDraws = drawOrder.filter((draw) => residentSurfaceDrawPipelineKey(draw) !== 'opaque-depth-write');
+      updateResidentSurfaceDrawRenderBridgeDiagnostics(bridge, {
+        viewProjection,
+        drawOrder,
+        opaqueDraws,
+        transparentDraws
+      });
+      bridge.lastRenderSkipStatus = null;
+      bridge.lastRenderSkipReason = null;
       const opaquePass = encoder.beginRenderPass({
         colorAttachments: [{
           view: canvasView,
@@ -8908,8 +9183,6 @@ export function createSphPhaseScene(container, {
       bridge.lastRenderStatus = bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
         ? 'native-webgpu-surface-consumer-rendered'
         : 'webgpu-overlay-rendered';
-      bridge.lastOpaqueDrawCount = opaqueDraws.length;
-      bridge.lastTransparentDrawCount = transparentDraws.length;
       bridge.lastTransparentCompositeMode = transparentCompositeSubmitted ? 'weighted-blended-oit' : 'direct-alpha-depth-test';
       if (sphResidentSurfaceDraw) {
         sphResidentSurfaceDraw.renderBridgeFrameCount = bridge.frameCount;
@@ -8928,6 +9201,7 @@ export function createSphPhaseScene(container, {
         sphResidentSurfaceDraw.renderBridgePixelValidationStatus = bridge.pixelValidationStatus ?? 'not-run';
         sphResidentSurfaceDraw.renderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus =
           bridge.nativeWebGpuSurfaceConsumerPixelValidationStatus ?? null;
+        publishResidentSurfaceDrawRenderBridgeDiagnostics(sphResidentSurfaceDraw, bridge);
         if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
           const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
             surfaceDraw: sphResidentSurfaceDraw,
@@ -8971,6 +9245,7 @@ export function createSphPhaseScene(container, {
         sphResidentRenderState.surfaceDrawRenderBridgePixelValidationStatus = bridge.pixelValidationStatus ?? 'not-run';
         sphResidentRenderState.surfaceDrawRenderBridgeNativeWebGpuSurfaceConsumerPixelValidationStatus =
           bridge.nativeWebGpuSurfaceConsumerPixelValidationStatus ?? null;
+        publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(sphResidentRenderState, bridge);
         if (sphResidentSurfaceDraw) {
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerReady =
             Boolean(sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerReady);
@@ -8981,6 +9256,9 @@ export function createSphPhaseScene(container, {
           sphResidentRenderState.surfaceDrawVisibleGpuConsumerPixelValidationStatus =
             sphResidentSurfaceDraw.surfaceDrawVisibleGpuConsumerPixelValidationStatus ?? null;
         }
+      }
+      if (bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) {
+        scheduleSphNativeWebGpuSurfaceConsumerFrame();
       }
     } catch (error) {
       bridge.lastRenderStatus = 'webgpu-overlay-render-error';
@@ -12649,6 +12927,7 @@ export function createSphPhaseScene(container, {
         sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
         surfaceDrawBackend: surfaceDrawExecution.backend,
         surfaceCount: surfaceDrawExecution.surfaceCount,
+        surfaceDrawSurfaces: compactResidentSurfaceDrawSurfaces(surfaceDrawExecution.surfaces || []),
         activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? null,
         vertexCount: surfaceDrawExecution.vertexCount ?? null,
         triangleCount: surfaceDrawExecution.triangleCount ?? null,
@@ -12796,6 +13075,21 @@ export function createSphPhaseScene(container, {
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
         renderBridgeDrawOrderIndirectOffsets: [...(renderBridge?.drawOrderIndirectOffsets || [])],
+        renderBridgeCanvasWidth: renderBridge?.lastCanvasWidth ?? null,
+        renderBridgeCanvasHeight: renderBridge?.lastCanvasHeight ?? null,
+        renderBridgeCanvasClientWidth: renderBridge?.lastCanvasClientWidth ?? null,
+        renderBridgeCanvasClientHeight: renderBridge?.lastCanvasClientHeight ?? null,
+        renderBridgeDevicePixelRatio: renderBridge?.lastDevicePixelRatio ?? null,
+        renderBridgeLastDrawOrderCount: renderBridge?.lastDrawOrderCount ?? null,
+        renderBridgePrimarySurfaceIndex: renderBridge?.primarySurfaceIndex ?? null,
+        renderBridgePrimaryBoundsCenterM: renderBridge?.primarySurfaceBoundsCenterM ?? null,
+        renderBridgePrimaryBoundsRadiusM: renderBridge?.primarySurfaceBoundsRadiusM ?? null,
+        renderBridgePrimaryBoundsClipCenter: renderBridge?.primarySurfaceBoundsClipCenter ?? null,
+        renderBridgePrimaryBoundsClipW: renderBridge?.primarySurfaceBoundsClipW ?? null,
+        renderBridgePrimaryBoundsNdcCenter: renderBridge?.primarySurfaceBoundsNdcCenter ?? null,
+        renderBridgePrimaryBoundsInFront: renderBridge?.primarySurfaceBoundsInFront ?? null,
+        renderBridgePrimaryBoundsCenterInsideClip: renderBridge?.primarySurfaceBoundsCenterInsideClip ?? null,
+        renderBridgePrimaryBoundsMaybeVisible: renderBridge?.primarySurfaceBoundsMaybeVisible ?? null,
         renderBridgeDepthPolicy: renderBridge?.depthPolicy ?? null,
         renderBridgeDepthAttachmentFormat: renderBridge?.depthAttachmentFormat ?? null,
         renderBridgeDepthAttachmentReady: Boolean(renderBridge?.depthAttachmentReady),
@@ -13055,6 +13349,7 @@ export function createSphPhaseScene(container, {
         sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
         surfaceDrawBackend: surfaceDrawExecution.backend,
         surfaceCount: surfaceDrawExecution.surfaceCount,
+        surfaceDrawSurfaces: compactResidentSurfaceDrawSurfaces(surfaceDrawExecution.surfaces || []),
         activeSurfaceCount: surfaceDrawExecution.activeSurfaceCount ?? null,
         vertexCount: surfaceDrawExecution.vertexCount ?? null,
         triangleCount: surfaceDrawExecution.triangleCount ?? null,
@@ -13182,6 +13477,21 @@ export function createSphPhaseScene(container, {
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
         renderBridgeDrawOrderIndirectOffsets: [...(renderBridge?.drawOrderIndirectOffsets || [])],
+        renderBridgeCanvasWidth: renderBridge?.lastCanvasWidth ?? null,
+        renderBridgeCanvasHeight: renderBridge?.lastCanvasHeight ?? null,
+        renderBridgeCanvasClientWidth: renderBridge?.lastCanvasClientWidth ?? null,
+        renderBridgeCanvasClientHeight: renderBridge?.lastCanvasClientHeight ?? null,
+        renderBridgeDevicePixelRatio: renderBridge?.lastDevicePixelRatio ?? null,
+        renderBridgeLastDrawOrderCount: renderBridge?.lastDrawOrderCount ?? null,
+        renderBridgePrimarySurfaceIndex: renderBridge?.primarySurfaceIndex ?? null,
+        renderBridgePrimaryBoundsCenterM: renderBridge?.primarySurfaceBoundsCenterM ?? null,
+        renderBridgePrimaryBoundsRadiusM: renderBridge?.primarySurfaceBoundsRadiusM ?? null,
+        renderBridgePrimaryBoundsClipCenter: renderBridge?.primarySurfaceBoundsClipCenter ?? null,
+        renderBridgePrimaryBoundsClipW: renderBridge?.primarySurfaceBoundsClipW ?? null,
+        renderBridgePrimaryBoundsNdcCenter: renderBridge?.primarySurfaceBoundsNdcCenter ?? null,
+        renderBridgePrimaryBoundsInFront: renderBridge?.primarySurfaceBoundsInFront ?? null,
+        renderBridgePrimaryBoundsCenterInsideClip: renderBridge?.primarySurfaceBoundsCenterInsideClip ?? null,
+        renderBridgePrimaryBoundsMaybeVisible: renderBridge?.primarySurfaceBoundsMaybeVisible ?? null,
         renderBridgeDepthPolicy: renderBridge?.depthPolicy ?? null,
         renderBridgeDepthAttachmentFormat: renderBridge?.depthAttachmentFormat ?? null,
         renderBridgeDepthAttachmentReady: Boolean(renderBridge?.depthAttachmentReady),
@@ -15336,6 +15646,30 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeDrawOrderCount: sphResidentSurfaceDraw?.renderBridgeDrawOrderCount ?? 0,
         surfaceDrawRenderBridgeDrawOrderSurfaceIndices: [...(sphResidentSurfaceDraw?.renderBridgeDrawOrderSurfaceIndices || [])],
         surfaceDrawRenderBridgeDrawOrderIndirectOffsets: [...(sphResidentSurfaceDraw?.renderBridgeDrawOrderIndirectOffsets || [])],
+        surfaceDrawRenderBridgeCanvasWidth: sphResidentSurfaceDraw?.renderBridgeCanvasWidth ?? null,
+        surfaceDrawRenderBridgeCanvasHeight: sphResidentSurfaceDraw?.renderBridgeCanvasHeight ?? null,
+        surfaceDrawRenderBridgeCanvasClientWidth: sphResidentSurfaceDraw?.renderBridgeCanvasClientWidth ?? null,
+        surfaceDrawRenderBridgeCanvasClientHeight: sphResidentSurfaceDraw?.renderBridgeCanvasClientHeight ?? null,
+        surfaceDrawRenderBridgeDevicePixelRatio: sphResidentSurfaceDraw?.renderBridgeDevicePixelRatio ?? null,
+        surfaceDrawRenderBridgeLastDrawOrderCount: sphResidentSurfaceDraw?.renderBridgeLastDrawOrderCount ?? null,
+        surfaceDrawRenderBridgePrimarySurfaceIndex:
+          sphResidentSurfaceDraw?.renderBridgePrimarySurfaceIndex ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsCenterM:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsCenterM ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsRadiusM:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsRadiusM ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsClipCenter:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsClipCenter ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsClipW:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsClipW ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsNdcCenter:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsNdcCenter ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsInFront:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsInFront ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsCenterInsideClip:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsCenterInsideClip ?? null,
+        surfaceDrawRenderBridgePrimaryBoundsMaybeVisible:
+          sphResidentSurfaceDraw?.renderBridgePrimaryBoundsMaybeVisible ?? null,
         surfaceDrawRenderBridgeDepthPolicy: sphResidentSurfaceDraw?.renderBridgeDepthPolicy ?? null,
         surfaceDrawRenderBridgeDepthAttachmentFormat: sphResidentSurfaceDraw?.renderBridgeDepthAttachmentFormat ?? null,
         surfaceDrawRenderBridgeDepthAttachmentReady: Boolean(sphResidentSurfaceDraw?.renderBridgeDepthAttachmentReady),
@@ -15796,7 +16130,7 @@ export function createSphPhaseScene(container, {
     if (!running) return;
     controls.update();
     const rendered = renderSceneFrame({ reason: 'animation-frame' });
-    if (rendered) renderSphResidentSurfaceDrawOverlay();
+    if (rendered) renderSphResidentSurfaceDrawOverlay({ reason: 'animation-frame' });
     requestAnimationFrame(animate);
   }
   animate();
@@ -15843,7 +16177,7 @@ export function createSphPhaseScene(container, {
       const resizeStatus = resize({ reason });
       controls.update();
       const rendered = renderSceneFrame({ reason });
-      if (rendered) renderSphResidentSurfaceDrawOverlay();
+      if (rendered) renderSphResidentSurfaceDrawOverlay({ reason });
       const rect = renderer.domElement?.getBoundingClientRect?.();
       const drawingBufferSize = renderer.getDrawingBufferSize?.(new Three.Vector2());
       const status = {

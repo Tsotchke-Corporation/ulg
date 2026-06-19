@@ -2,6 +2,23 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: compact resident summaries can now emit a
+GPU-side active-grid dispatch planning sidecar. Commit `7206af4` adds
+`mlsMpmActiveGridDispatchFromSummaryWgsl`, which reads the compact summary's
+next-position bounds and writes retained 12-byte compute indirect args plus a
+64-byte metadata buffer for active-grid clear/finalize/update consumers. The
+planner is opt-in from fused active-grid MLS-MPM summaries, preserves the
+normal retained-buffer cleanup path, and surfaces diagnostics through the
+browser probe. Unit coverage now asserts the extra summary planner pass and
+retained args/metadata buffers. Browser harness evidence at
+`artifacts/sph-probe-active-grid-summary-planner-1.json` is console-clean with
+`activeGridDispatchPlanStatus=gpu-active-grid-summary-dispatch-plan-ready`,
+retained dispatch args `12` bytes, retained metadata `64` bytes, and active
+grid `54` nodes. The probe remains visually `bad` only because
+surface-summary/readback was intentionally skipped; this does not yet remove
+the compact-summary map fence or connect the generated args into the mechanics
+hot loop.
+
 Current checkpoint, 2026-06-18 AKDT: active-grid fused MLS-MPM mechanics now
 has a WebGPU compute indirect-dispatch contract. The existing CPU active-grid
 metadata seeds a 12-byte dispatch-args buffer, and active-grid accumulator

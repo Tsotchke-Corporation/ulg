@@ -189,6 +189,17 @@ Tactical status, 2026-06-18 AKDT:
   `1210/2197`, and no direct fallback. This is not the final Ocean-style
   sparse dispatch yet: the dispatch args are still CPU-seeded, so the next
   slice should generate active bounds and dispatch args on the GPU.
+- Compact resident summaries now have the first GPU-generated active-grid
+  dispatch sidecar. Commit `7206af4` adds a summary planner WGSL pass that
+  reads retained compact bounds and writes retained 12-byte compute indirect
+  args plus 64-byte metadata. The browser evidence
+  `artifacts/sph-probe-active-grid-summary-planner-1.json` is console-clean and
+  reports `activeGridDispatchPlanStatus=gpu-active-grid-summary-dispatch-plan-ready`,
+  retained args `12` bytes, retained metadata `64` bytes, and active grid
+  `54` nodes. This is still a sidecar on a compact-summary run, not the final
+  no-fence hot-loop path: next work is to consume these GPU-generated args in
+  active-grid mechanics and then move bounds generation out of readback-coupled
+  diagnostics.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

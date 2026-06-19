@@ -27658,3 +27658,46 @@ Remaining:
   metadata throughput slice should replace those scans with GPU-side
   per-surface counters/prefix offsets or move the direct renderer to the
   aggregate material-id-in-vertex path.
+
+## 2026-06-18 19:56 AKDT - Summary-Generated Active-Grid Dispatch Plan
+
+Status:
+
+- Committed `7206af4 Generate active-grid dispatch plans from summary`.
+  Compact resident summaries can now opt into a third GPU pass,
+  `mlsMpmActiveGridDispatchFromSummaryWgsl`, that reads compact next-position
+  bounds and writes retained compute indirect args plus metadata for active-grid
+  mechanics consumers.
+- Fused active-grid MLS-MPM summaries request the sidecar with step count,
+  `dt`, gravity, grid dims/shift/spacing, and safety cells. Diagnostics now
+  expose planner status/source plus retained dispatch-args and metadata buffer
+  byte lengths in both resident-step summaries and the long-horizon browser
+  probe.
+- This is still a sidecar produced during compact-summary execution. It proves
+  the GPU-generated dispatch contract and retained buffers, but the mechanics
+  hot loop still needs to consume this sidecar directly and then remove the
+  compact-summary map fence from the normal path.
+
+Validation:
+
+- PASS: `node --check ulg-gpu-abi/src/wgsl.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuSummary.js`.
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `58/58`.
+- PASS: browser probe
+  `artifacts/sph-probe-active-grid-summary-planner-1.json` had
+  `browserConsoleIssueCount=0`, `browserConsoleWarningCount=0`,
+  `activeGridDispatchPlanStatus=gpu-active-grid-summary-dispatch-plan-ready`,
+  retained dispatch args `12` bytes, retained metadata `64` bytes, and
+  `activeGridNodeCount=54`. It classified `bad` only because the run
+  intentionally skipped surface-summary/readback, so there were no visible
+  surface samples.
+
+Remaining:
+
+- Wire the retained GPU-generated dispatch args/metadata into the active-grid
+  mechanics dispatch path instead of only reporting them from compact summary.
+- Move active bounds/dispatch planning out of readback-coupled diagnostics so
+  the normal GUI route can stay no-full/no-summary-readback while still using
+  GPU-generated sparse dispatch metadata.

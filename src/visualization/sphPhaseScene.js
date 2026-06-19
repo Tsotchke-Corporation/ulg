@@ -352,6 +352,9 @@ const SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS = 'three-compact-surface-geometry-r
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE = 'three-webgpu-surface-buffers';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS = 'three-webgpu-surface-buffers-ready';
 const SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'resident-surface-buffers-no-overlay';
+const SPH_THREE_COMPACT_VERTEX_PRESENTATION_ENABLED = false;
+const SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON =
+  'three-compact-vertices disabled: current WebGPU surface extraction emits tetrahedralized render-field cubes and compact readback can stall; using the engine-managed marching-cubes/render-field path until webgpu-marching-cubes direct-buffer integration is pixel validated';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_PRESENTATION_ENABLED = false;
 const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE = 'three-render-row-points';
 const SPH_THREE_RENDER_ROW_POINTS_BRIDGE_STATUS = 'three-render-row-points-ready';
@@ -364,6 +367,46 @@ const SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE = 'webgpu-render-row-spheres';
 const SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_STATUS = 'webgpu-render-row-spheres-ready';
 const SPH_RENDER_ROW_WEBGPU_OVERLAY_CAMERA_FLOATS = 20;
 const SPH_WEBGPU_RENDER_ROW_OVERLAY_PRESENTATION_ENABLED = false;
+
+export function resolveSphSurfaceDrawDiagnosticPresentationMode({
+  requestedMode = 'auto',
+  compactVertexPresentationEnabled = SPH_THREE_COMPACT_VERTEX_PRESENTATION_ENABLED,
+  webGpuRenderRowOverlayRequestedButDisabled = false
+} = {}) {
+  const requested = String(requestedMode || 'auto').trim().toLowerCase() || 'auto';
+  if (requested === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE && !compactVertexPresentationEnabled) {
+    return {
+      schema: 'peercompute.ulg.sph-surface-draw-diagnostic-presentation-mode.v0',
+      requestedMode: requested,
+      effectiveMode: 'auto',
+      fallbackReason: SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON,
+      compactVertexPresentationBlocked: true,
+      webGpuRenderRowOverlayBlocked: false
+    };
+  }
+  if (webGpuRenderRowOverlayRequestedButDisabled && isWebGpuResidentRenderRowBridgeMode(requested)) {
+    const effectiveMode = requested === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
+      || requested === 'webgpu-spheres'
+      ? SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
+      : SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE;
+    return {
+      schema: 'peercompute.ulg.sph-surface-draw-diagnostic-presentation-mode.v0',
+      requestedMode: requested,
+      effectiveMode,
+      fallbackReason: 'webgpu-render-row-overlay-disabled-pending-pixel-validation',
+      compactVertexPresentationBlocked: false,
+      webGpuRenderRowOverlayBlocked: true
+    };
+  }
+  return {
+    schema: 'peercompute.ulg.sph-surface-draw-diagnostic-presentation-mode.v0',
+    requestedMode: requested,
+    effectiveMode: requested,
+    fallbackReason: null,
+    compactVertexPresentationBlocked: false,
+    webGpuRenderRowOverlayBlocked: false
+  };
+}
 
 export function resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
   renderer = null,
@@ -515,7 +558,8 @@ export function resolveResidentExtensionSurfaceRendererCapability({
 export function resolveExtensionSurfaceRenderBridgePlan({
   renderBridgeMode = null,
   readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
-  rendererCapability = null
+  rendererCapability = null,
+  compactVertexPresentationEnabled = SPH_THREE_COMPACT_VERTEX_PRESENTATION_ENABLED
 } = {}) {
   const requestedRenderBridgeMode = String(renderBridgeMode || '').trim().toLowerCase() || null;
   const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
@@ -526,8 +570,12 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     !requestedThreeCompactBridge
     && rendererCapability?.visibleNoReadbackSupported
   );
+  const compactBridgeBlocked = Boolean(requestedThreeCompactBridge && !compactVertexPresentationEnabled);
+  const compactBridgeBlockedReason = compactBridgeBlocked
+    ? SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON
+    : null;
   const retainResidentSurfaceBufferHandoff = Boolean(
-    !requestedThreeCompactBridge
+    (!requestedThreeCompactBridge || compactBridgeBlocked)
     && requestedReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
     && !canUseThreeWebGpuSurfaceBufferBridge
   );
@@ -536,7 +584,7 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     && !canUseThreeWebGpuSurfaceBufferBridge
     && !retainResidentSurfaceBufferHandoff
   );
-  const useThreeCompactBridge = requestedThreeCompactBridge || fallbackThreeCompactBridge;
+  const useThreeCompactBridge = Boolean((requestedThreeCompactBridge && !compactBridgeBlocked) || fallbackThreeCompactBridge);
   const useThreeWebGpuSurfaceBufferBridge = !useThreeCompactBridge && canUseThreeWebGpuSurfaceBufferBridge;
   const translationReadbackMode = useThreeCompactBridge
     ? RESIDENT_FULL_READBACK_MODE
@@ -550,7 +598,7 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     ? (rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; using engine-owned Three compact geometry readback')
     : null;
   const handoffReason = retainResidentSurfaceBufferHandoff
-    ? (rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; retaining resident GPU buffers for direct renderer handoff')
+    ? (compactBridgeBlockedReason || rendererCapability?.reason || 'same-device Three WebGPU surface buffers unavailable; retaining resident GPU buffers for direct renderer handoff')
     : null;
   return {
     schema: 'peercompute.ulg.sph-extension-surface-render-bridge-plan.v0',
@@ -573,6 +621,8 @@ export function resolveExtensionSurfaceRenderBridgePlan({
     useThreeWebGpuSurfaceBufferBridge,
     retainResidentSurfaceBufferHandoff,
     fallbackThreeCompactBridge,
+    compactBridgeBlocked,
+    compactBridgeBlockedReason,
     fallbackReason,
     handoffReason,
     rendererCapabilityStatus: rendererCapability?.status ?? null,
@@ -11763,14 +11813,11 @@ export function createSphPhaseScene(container, {
         !SPH_WEBGPU_RENDER_ROW_OVERLAY_PRESENTATION_ENABLED
         && isWebGpuResidentRenderRowBridgeMode(rawSurfaceDrawDiagnosticMode)
       );
-      const normalizedSurfaceDrawDiagnosticMode = webGpuRenderRowOverlayRequestedButDisabled
-        ? (
-          rawSurfaceDrawDiagnosticMode === SPH_WEBGPU_RENDER_ROW_SPHERES_BRIDGE_MODE
-            || rawSurfaceDrawDiagnosticMode === 'webgpu-spheres'
-            ? SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE
-            : SPH_THREE_RENDER_ROW_POINTS_BRIDGE_MODE
-        )
-        : rawSurfaceDrawDiagnosticMode;
+      const surfaceDrawDiagnosticPresentationMode = resolveSphSurfaceDrawDiagnosticPresentationMode({
+        requestedMode: rawSurfaceDrawDiagnosticMode,
+        webGpuRenderRowOverlayRequestedButDisabled
+      });
+      const normalizedSurfaceDrawDiagnosticMode = surfaceDrawDiagnosticPresentationMode.effectiveMode;
       const requestedThreeWebGpuSurfaceBufferBridge = normalizedSurfaceDrawDiagnosticMode
         === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE;
       const requestedThreeWebGpuSurfaceBufferCapability = requestedThreeWebGpuSurfaceBufferBridge
@@ -11789,9 +11836,8 @@ export function createSphPhaseScene(container, {
         && !requestedThreeWebGpuSurfaceBufferCapability?.visibleNoReadbackSupported
       );
       const requestedSurfaceDrawDiagnosticMode = normalizedSurfaceDrawDiagnosticMode;
-      const surfaceDrawDiagnosticFallbackReason = webGpuRenderRowOverlayRequestedButDisabled
-        ? 'webgpu-render-row-overlay-disabled-pending-pixel-validation'
-        : (threeWebGpuSurfaceBufferRetainResidentHandoff
+      const surfaceDrawDiagnosticFallbackReason = surfaceDrawDiagnosticPresentationMode.fallbackReason
+        || (threeWebGpuSurfaceBufferRetainResidentHandoff
           ? `three-webgpu-surface-buffers-retained-resident-handoff: ${requestedThreeWebGpuSurfaceBufferCapability?.reason ?? 'same-device GPUBuffer geometry unavailable'}`
           : null);
       const shouldUseWebGpuRenderRowOverlayBridge = isWebGpuResidentRenderRowBridgeMode(
@@ -12972,6 +13018,13 @@ export function createSphPhaseScene(container, {
         surfaceDrawDiagnosticMode: requestedSurfaceDrawDiagnosticMode,
         surfaceDrawRequestedDiagnosticMode: rawSurfaceDrawDiagnosticMode,
         surfaceDrawDiagnosticFallbackReason,
+        surfaceDrawDiagnosticPresentationModeSchema: surfaceDrawDiagnosticPresentationMode.schema,
+        surfaceDrawDiagnosticCompactVertexBlocked: Boolean(
+          surfaceDrawDiagnosticPresentationMode.compactVertexPresentationBlocked
+        ),
+        surfaceDrawDiagnosticWebGpuRenderRowOverlayBlocked: Boolean(
+          surfaceDrawDiagnosticPresentationMode.webGpuRenderRowOverlayBlocked
+        ),
         surfaceDrawDiagnosticMaxFieldCells: requestedSurfaceDrawDiagnosticMaxFieldCells,
         surfaceDrawDiagnosticMaxResolution: requestedSurfaceDrawDiagnosticMaxResolution,
         surfaceDrawDiagnosticSurfaceTableMaxResolution: diagnosticSurfaceTableMaxResolution,

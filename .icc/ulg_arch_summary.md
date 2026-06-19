@@ -4,7 +4,7 @@
 
 - repo root: `/home/cos/projects/ulg`
 - files indexed: `344`
-- total lines indexed: `213905`
+- total lines indexed: `213979`
 - languages: `{"markdown": 130, "javascript": 108, "text": 88, "json": 17, "c": 1}`
 
 ## Important Files
@@ -47,7 +47,7 @@
 ## Top Modules
 
 - `plan/done`: 93 files, 5295 lines, symbols=0, tests=0, languages={"markdown": 93}
-- `tests`: 75 files, 42456 lines, symbols=0, tests=75, languages={"text": 75}
+- `tests`: 75 files, 42477 lines, symbols=0, tests=75, languages={"text": 75}
 - `src/runtime`: 31 files, 18287 lines, symbols=400, tests=0, languages={"javascript": 31}
 - `src/runtime/sph`: 28 files, 37540 lines, symbols=835, tests=0, languages={"javascript": 28}
 - `plan/todo`: 21 files, 11418 lines, symbols=0, tests=0, languages={"markdown": 21}
@@ -60,7 +60,7 @@
 - `src/runtime/md`: 5 files, 481 lines, symbols=31, tests=0, languages={"javascript": 5}
 - `plan`: 5 files, 46908 lines, symbols=0, tests=0, languages={"markdown": 5}
 - `plan/moot`: 5 files, 1771 lines, symbols=0, tests=0, languages={"markdown": 5}
-- `src/visualization`: 4 files, 19466 lines, symbols=432, tests=0, languages={"javascript": 4}
+- `src/visualization`: 4 files, 19519 lines, symbols=433, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/src`: 4 files, 8535 lines, symbols=53, tests=0, languages={"javascript": 4}
 - `ulg-gpu-abi/examples`: 4 files, 184 lines, symbols=0, tests=0, languages={"json": 4}
 - `src`: 3 files, 684 lines, symbols=12, tests=0, languages={"javascript": 2, "text": 1}
@@ -78,7 +78,7 @@
 | Lines | Path | Language |
 |---:|---|---|
 | 27958 | `plan/log.md` | markdown |
-| 13716 | `src/visualization/sphPhaseScene.js` | javascript |
+| 13769 | `src/visualization/sphPhaseScene.js` | javascript |
 | 13291 | `src/runtime/sph/sphMlsMpmGpuStep.js` | javascript |
 | 10291 | `plan/tests.md` | markdown |
 | 7787 | `tests/demo.e2e.mjs` | text |
@@ -92,7 +92,7 @@
 | 4837 | `scripts/sph-long-horizon-probe.mjs` | text |
 | 3166 | `src/runtime/sphPhaseDemo.js` | javascript |
 | 2757 | `plan/plan.md` | markdown |
-| 2625 | `tests/sphPhaseRenderer.test.mjs` | text |
+| 2646 | `tests/sphPhaseRenderer.test.mjs` | text |
 | 2380 | `tests/sphRenderGpuKernel.test.mjs` | text |
 | 2246 | `plan/todo/README.md` | markdown |
 | 2172 | `src/runtime/sph/sphReactionGpuKernel.js` | javascript |

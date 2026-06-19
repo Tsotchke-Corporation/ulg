@@ -37,6 +37,7 @@ import {
   resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
   resolveExtensionSurfaceRenderBridgePlan,
+  resolveSphSurfaceDrawDiagnosticPresentationMode,
   resolveThreeWebGpuRendererRequiredLimits,
   resolveThreeWebGpuRendererOwnedResidentDevicePolicy,
   resolveResidentExtensionSurfaceRendererCapability,
@@ -378,6 +379,24 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(crossDevice.sameDeviceAsResident, false);
 });
 
+test('SPH surface draw presentation blocks compact tetrahedral geometry by default', () => {
+  const compact = resolveSphSurfaceDrawDiagnosticPresentationMode({
+    requestedMode: 'three-compact-vertices'
+  });
+  assert.equal(compact.requestedMode, 'three-compact-vertices');
+  assert.equal(compact.effectiveMode, 'auto');
+  assert.equal(compact.compactVertexPresentationBlocked, true);
+  assert.match(compact.fallbackReason, /tetrahedralized render-field cubes/);
+
+  const webgpuRows = resolveSphSurfaceDrawDiagnosticPresentationMode({
+    requestedMode: 'webgpu-render-row-spheres',
+    webGpuRenderRowOverlayRequestedButDisabled: true
+  });
+  assert.equal(webgpuRows.effectiveMode, 'three-render-row-spheres');
+  assert.equal(webgpuRows.webGpuRenderRowOverlayBlocked, true);
+  assert.equal(webgpuRows.compactVertexPresentationBlocked, false);
+});
+
 test('SPH extension surface bridge planner keeps no-full resident buffers by default', () => {
   const webglCapability = resolveResidentExtensionSurfaceRendererCapability({
     renderer: { isWebGLRenderer: true, domElement: {} },
@@ -465,10 +484,12 @@ test('SPH extension surface bridge planner keeps no-full resident buffers by def
     rendererCapability: webglCapability,
     readbackMode: 'no-full-readback'
   });
-  assert.equal(requestedCompactPlan.status, 'extension-surface-render-plan-three-compact-requested');
-  assert.equal(requestedCompactPlan.useThreeCompactBridge, true);
-  assert.equal(requestedCompactPlan.translationReadbackMode, 'full-parity-readback');
+  assert.equal(requestedCompactPlan.status, 'extension-surface-render-plan-resident-surface-buffer-handoff');
+  assert.equal(requestedCompactPlan.useThreeCompactBridge, false);
+  assert.equal(requestedCompactPlan.translationReadbackMode, 'no-full-readback');
   assert.equal(requestedCompactPlan.fallbackThreeCompactBridge, false);
+  assert.equal(requestedCompactPlan.compactBridgeBlocked, true);
+  assert.match(requestedCompactPlan.handoffReason, /tetrahedralized render-field cubes/);
 });
 
 test('SPH Three WebGPU external interleaved attributes bind retained GPU buffers', () => {

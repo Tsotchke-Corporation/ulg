@@ -2,6 +2,24 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: active-grid mechanics can now consume the
+compact-summary GPU dispatch-planner sidecar. Commit `3b438f7` carries retained
+12-byte dispatch args plus 64-byte metadata from the compact summary into the
+next resident state/upload handoff, borrows compatible planner buffers for
+`dispatchWorkgroupsIndirect()`, and preserves those buffers through resident
+cleanup and the mounted scene continuation path. The direct-resident browser
+probe `artifacts/sph-direct-active-grid-planner-borrowed-step1-1.json` is
+console-clean and shows batch 2 using
+`status=gpu-summary-active-grid-indirect-dispatch-ready`,
+`source=compact-summary-gpu-sidecar`, `dispatchPlanHintBorrowed=true`, and
+`metadataBufferByteLength=64`. The two-step/final-only evidence row
+`artifacts/sph-direct-active-grid-planner-step-summary-1.json` is also
+console-clean and shows the first step of batch 2 borrowing the sidecar while
+the final step correctly falls back after the no-summary intermediate clears
+the stale hint. Remaining work is to move planner generation out of
+compact-summary/readback-coupled diagnostics so every hot-loop step can get a
+fresh GPU-generated dispatch plan without a `mapAsync` fence.
+
 Current checkpoint, 2026-06-18 AKDT: compact resident summaries can now emit a
 GPU-side active-grid dispatch planning sidecar. Commit `7206af4` adds
 `mlsMpmActiveGridDispatchFromSummaryWgsl`, which reads the compact summary's

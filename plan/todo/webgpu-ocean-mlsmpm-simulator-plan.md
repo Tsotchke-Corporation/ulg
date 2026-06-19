@@ -200,6 +200,22 @@ Tactical status, 2026-06-18 AKDT:
   no-fence hot-loop path: next work is to consume these GPU-generated args in
   active-grid mechanics and then move bounds generation out of readback-coupled
   diagnostics.
+- Active-grid fused mechanics now consumes that compact-summary dispatch
+  sidecar when it is valid for the next step. Commit `3b438f7` carries the
+  planner hint through resident state/uploads, borrows compatible retained
+  dispatch args for `dispatchWorkgroupsIndirect()`, preserves the borrowed
+  buffers across cleanup, and reports structured compatibility reasons on
+  fallback. The direct-resident evidence
+  `artifacts/sph-direct-active-grid-planner-borrowed-step1-1.json` is
+  console-clean and shows batch 2 dispatching from
+  `source=compact-summary-gpu-sidecar` with
+  `dispatchPlanHintBorrowed=true` and `metadataBufferByteLength=64`.
+  The two-step/final-only evidence
+  `artifacts/sph-direct-active-grid-planner-step-summary-1.json` is also
+  console-clean and shows first-step borrowing followed by a correct stale-hint
+  clear before the final step. This proves the handoff contract, but it still
+  depends on compact-summary planning; the next throughput fix is a no-readback
+  GPU planner that can refresh sparse dispatch args every hot-loop step.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

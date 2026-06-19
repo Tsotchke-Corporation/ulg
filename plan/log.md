@@ -27701,3 +27701,46 @@ Remaining:
 - Move active bounds/dispatch planning out of readback-coupled diagnostics so
   the normal GUI route can stay no-full/no-summary-readback while still using
   GPU-generated sparse dispatch metadata.
+
+## 2026-06-18 20:22 AKDT - Active-Grid Planner Handoff Consumption
+
+Status:
+
+- Committed `3b438f7 Borrow active-grid dispatch args from summary plans`.
+  Resident compact summaries now wrap the GPU-generated active-grid dispatch
+  args/metadata sidecar as a planner hint, carry it through
+  `nextParticleUploads` and `nextSphParticleState`, and preserve those buffers
+  through resident cleanup plus mounted-scene continuation ownership.
+- Active-grid fused mechanics checks the planner hint against grid dims, shift,
+  spacing, node count, safety cells, step count, and `dt`. Compatible hints are
+  borrowed directly for `dispatchWorkgroupsIndirect()` without CPU-seeded args;
+  incompatible or missing hints fall back to the existing CPU-seeded indirect
+  args and report a structured compatibility reason.
+- Browser probe summaries now expose planner-hint carry fields and per-step
+  active-grid indirect dispatch summaries, so final-only multi-step batches no
+  longer hide first-step planner consumption.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `58/58`.
+- PASS: browser probe
+  `artifacts/sph-direct-active-grid-planner-borrowed-step1-1.json` classified
+  `good` with zero browser console issues/warnings; batch 2 reported
+  `gpu-summary-active-grid-indirect-dispatch-ready`,
+  `source=compact-summary-gpu-sidecar`, `dispatchPlanHintBorrowed=true`, and
+  retained planner metadata `64` bytes.
+- PASS: browser probe
+  `artifacts/sph-direct-active-grid-planner-step-summary-1.json` classified
+  `good` with zero browser console issues/warnings; the batch 2 step summary
+  shows step 0 borrowed the compact-summary sidecar and step 1 fell back after
+  the no-summary intermediate correctly cleared the stale hint.
+
+Remaining:
+
+- Generate active-grid bounds/dispatch plans from a no-readback GPU hot-loop
+  pass, not from compact-summary readback machinery, so final-only and
+  no-summary batches can keep every active-grid step on GPU-generated sparse
+  dispatch args without paying a `mapAsync` fence.

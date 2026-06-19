@@ -10657,3 +10657,33 @@ Native WebGPU surface bridge diagnostics, 2026-06-19 10:27 AKDT:
   native runtime pixel validation and a tiny standalone WebGPU clear smoke both
   reported `A valid external Instance reference no longer exists`. Do not use
   this headless run as final native surface-pixel acceptance.
+
+Native canvas sizing diagnostics, 2026-06-19 11:16 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native|visible GPU|surface draw|renderer backend"`
+  - Passed: `57/57`.
+- `git diff --check`
+  - Passed.
+- Browser probe:
+  `/tmp/ulg-native-mlsmpm-native-renderer-sizing-probe.json`
+  - Expected bad status because browser canvas pixels did not validate.
+  - Browser console issues/warnings: `0/0`.
+  - Native bridge rendered with CSS/backing canvas `1280x800`, DPR `1`, resize
+    pixel ratio `1`, primary surface in frustum, and direct canvas frames all
+    transparent black.
+- Mobile-shaped browser probe:
+  `/tmp/ulg-native-mlsmpm-native-renderer-mobile-sizing-probe.json`
+  - Expected bad status because browser canvas pixels did not validate.
+  - Browser console issues/warnings: `0/0`.
+  - Viewport `390x844`, device scale factor `3`, native bridge rendered with
+    CSS/client canvas about `397x860`, backing canvas `794x1720`, reported DPR
+    `3`, clamped resize pixel ratio `2`, and primary surface in frustum.
+- Standalone local-origin WebGPU clear smoke:
+  - Failed with `A valid external Instance reference no longer exists`.
+  - The screenshot was fully transparent black even for a simple green clear,
+    confirming the local headless browser cannot prove native WebGPU
+    presentation.

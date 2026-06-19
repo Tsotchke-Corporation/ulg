@@ -28636,3 +28636,46 @@ Remaining:
   presentation, and device-scale failures.
 - Continue the no-readback engine-owned renderer path. Do not add an overlay or
   revert to full compact surface readback as the main MLS-MPM route.
+
+## 2026-06-19 11:16 AKDT - Native Canvas Sizing Diagnostics
+
+Status:
+
+- Tightened native WebGPU canvas sizing so the surface consumer uses the actual
+  canvas CSS/client box and the canvas owner window DPR, with container size
+  only as fallback. This avoids carrying the overlay-canvas sizing assumption
+  into the engine-owned main canvas path.
+- Published resolved CSS width/height and clamped resize pixel ratio alongside
+  backing-store size, client size, and device DPR. Mobile probes can now show
+  whether the native canvas is mis-sized independently from camera projection
+  or surface extraction.
+- The native bridge remains no-overlay and continues to consume retained
+  surface draw buffers directly.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "native|visible GPU|surface draw|renderer backend"`
+  ran the focused renderer suite and reported `57/57`.
+- PASS: `git diff --check`.
+- PARTIAL: `/tmp/ulg-native-mlsmpm-native-renderer-sizing-probe.json`
+  completed with browser console issues/warnings `0/0`, native bridge rendered,
+  CSS/backing canvas `1280x800`, DPR `1`, and canvas resize pixel ratio `1`.
+  Direct canvas frames still captured transparent black.
+- PARTIAL: `/tmp/ulg-native-mlsmpm-native-renderer-mobile-sizing-probe.json`
+  completed with browser console issues/warnings `0/0`, native bridge rendered,
+  CSS/client canvas about `397x860`, backing canvas `794x1720`, browser DPR `3`,
+  and clamped resize pixel ratio `2`. The surface bounds still projected inside
+  the camera frustum. Direct canvas frames still captured transparent black.
+- LIMITATION: A standalone local-origin WebGPU clear smoke from the Vite origin
+  failed with `A valid external Instance reference no longer exists` before a
+  green clear could present; its screenshot was fully transparent black. That
+  confirms this headless Chromium path cannot be used as final native WebGPU
+  presentation acceptance.
+
+Remaining:
+
+- Use a real browser/device run for native WebGPU pixel acceptance. If the phone
+  is still blank, compare its reported CSS/backing/DPR fields against the new
+  mobile probe diagnostics before changing renderer logic.

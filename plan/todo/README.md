@@ -2436,3 +2436,21 @@ Updated immediate priority after the native bridge diagnostics slice:
 4. Continue material-size/PBR restoration, material property registry work,
    and cubic-barrier/contact integration after the renderer path is not blocking
    every MLS-MPM performance test.
+
+2026-06-19 11:16 status: native canvas sizing is now instrumented and less
+overlay-coupled. The engine-owned native surface consumer sizes from the actual
+canvas CSS/client box and owner-window DPR, then reports CSS size, backing size,
+browser DPR, and clamped resize pixel ratio. Desktop and mobile-shaped probes
+are console-clean and show the primary surface in frustum; both still capture
+transparent black because this headless Chromium WebGPU path also fails a
+standalone green-clear smoke with `A valid external Instance reference no longer
+exists`.
+
+Updated immediate priority after native canvas sizing:
+
+1. Get a real browser/phone native WebGPU acceptance signal using the new
+   CSS/backing/DPR/projection diagnostics.
+2. If real-device native presentation remains blank, debug device/context
+   presentation next; if it presents, return to the resident continuation hang.
+3. Keep the no-overlay, no-full-readback route as the primary MLS-MPM renderer
+   integration path.

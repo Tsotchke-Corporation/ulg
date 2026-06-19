@@ -2079,12 +2079,18 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeNativeSurfaceConsumerRafBlockedReason ?? null,
             surfaceDrawRenderBridgeCanvasWidth: renderState.surfaceDrawRenderBridgeCanvasWidth ?? null,
             surfaceDrawRenderBridgeCanvasHeight: renderState.surfaceDrawRenderBridgeCanvasHeight ?? null,
+            surfaceDrawRenderBridgeCanvasCssWidth:
+              renderState.surfaceDrawRenderBridgeCanvasCssWidth ?? null,
+            surfaceDrawRenderBridgeCanvasCssHeight:
+              renderState.surfaceDrawRenderBridgeCanvasCssHeight ?? null,
             surfaceDrawRenderBridgeCanvasClientWidth:
               renderState.surfaceDrawRenderBridgeCanvasClientWidth ?? null,
             surfaceDrawRenderBridgeCanvasClientHeight:
               renderState.surfaceDrawRenderBridgeCanvasClientHeight ?? null,
             surfaceDrawRenderBridgeDevicePixelRatio:
               renderState.surfaceDrawRenderBridgeDevicePixelRatio ?? null,
+            surfaceDrawRenderBridgeCanvasResizePixelRatio:
+              renderState.surfaceDrawRenderBridgeCanvasResizePixelRatio ?? null,
             surfaceDrawRenderBridgeLastDrawOrderCount:
               renderState.surfaceDrawRenderBridgeLastDrawOrderCount ?? null,
             surfaceDrawRenderBridgePrimarySurfaceIndex:
@@ -2233,9 +2239,12 @@ async function runBrowserProbe({
               surfaceDraw.renderBridgeNativeSurfaceConsumerRafBlockedReason ?? null,
             renderBridgeCanvasWidth: surfaceDraw.renderBridgeCanvasWidth ?? null,
             renderBridgeCanvasHeight: surfaceDraw.renderBridgeCanvasHeight ?? null,
+            renderBridgeCanvasCssWidth: surfaceDraw.renderBridgeCanvasCssWidth ?? null,
+            renderBridgeCanvasCssHeight: surfaceDraw.renderBridgeCanvasCssHeight ?? null,
             renderBridgeCanvasClientWidth: surfaceDraw.renderBridgeCanvasClientWidth ?? null,
             renderBridgeCanvasClientHeight: surfaceDraw.renderBridgeCanvasClientHeight ?? null,
             renderBridgeDevicePixelRatio: surfaceDraw.renderBridgeDevicePixelRatio ?? null,
+            renderBridgeCanvasResizePixelRatio: surfaceDraw.renderBridgeCanvasResizePixelRatio ?? null,
             renderBridgeLastDrawOrderCount: surfaceDraw.renderBridgeLastDrawOrderCount ?? null,
             renderBridgePrimarySurfaceIndex: surfaceDraw.renderBridgePrimarySurfaceIndex ?? null,
             renderBridgePrimaryBoundsCenterM: surfaceDraw.renderBridgePrimaryBoundsCenterM ?? null,

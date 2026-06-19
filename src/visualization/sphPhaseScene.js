@@ -3608,9 +3608,12 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
     bridge.nativeSurfaceConsumerRafBlockedReason ?? null;
   target.renderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.renderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
+  target.renderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
+  target.renderBridgeCanvasCssHeight = bridge.lastCanvasCssHeight ?? null;
   target.renderBridgeCanvasClientWidth = bridge.lastCanvasClientWidth ?? null;
   target.renderBridgeCanvasClientHeight = bridge.lastCanvasClientHeight ?? null;
   target.renderBridgeDevicePixelRatio = bridge.lastDevicePixelRatio ?? null;
+  target.renderBridgeCanvasResizePixelRatio = bridge.lastCanvasResizePixelRatio ?? null;
   target.renderBridgeLastDrawOrderCount = bridge.lastDrawOrderCount ?? null;
   target.renderBridgePrimarySurfaceIndex = bridge.primarySurfaceIndex ?? null;
   target.renderBridgePrimaryBoundsCenterM = bridge.primarySurfaceBoundsCenterM ?? null;
@@ -3642,9 +3645,12 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     bridge.nativeSurfaceConsumerRafBlockedReason ?? null;
   target.surfaceDrawRenderBridgeCanvasWidth = bridge.lastCanvasWidth ?? null;
   target.surfaceDrawRenderBridgeCanvasHeight = bridge.lastCanvasHeight ?? null;
+  target.surfaceDrawRenderBridgeCanvasCssWidth = bridge.lastCanvasCssWidth ?? null;
+  target.surfaceDrawRenderBridgeCanvasCssHeight = bridge.lastCanvasCssHeight ?? null;
   target.surfaceDrawRenderBridgeCanvasClientWidth = bridge.lastCanvasClientWidth ?? null;
   target.surfaceDrawRenderBridgeCanvasClientHeight = bridge.lastCanvasClientHeight ?? null;
   target.surfaceDrawRenderBridgeDevicePixelRatio = bridge.lastDevicePixelRatio ?? null;
+  target.surfaceDrawRenderBridgeCanvasResizePixelRatio = bridge.lastCanvasResizePixelRatio ?? null;
   target.surfaceDrawRenderBridgeLastDrawOrderCount = bridge.lastDrawOrderCount ?? null;
   target.surfaceDrawRenderBridgePrimarySurfaceIndex = bridge.primarySurfaceIndex ?? null;
   target.surfaceDrawRenderBridgePrimaryBoundsCenterM = bridge.primarySurfaceBoundsCenterM ?? null;
@@ -6762,14 +6768,38 @@ export function createSphPhaseScene(container, {
   }
 
   function resizeSphResidentSurfaceDrawOverlayCanvas(bridge = sphResidentSurfaceDrawRenderBridge) {
-    if (!bridge?.canvas) return;
-    const w = container.clientWidth || width;
-    const h = container.clientHeight || height;
-    const pixelRatio = Math.min(globalThis.devicePixelRatio || 1, 2);
+    const canvas = bridge?.canvas;
+    if (!canvas) return;
+    const ownerWindow = canvas.ownerDocument?.defaultView || container.ownerDocument?.defaultView || globalThis;
+    const rect = canvas.getBoundingClientRect?.();
+    const rectWidth = Number(rect?.width);
+    const rectHeight = Number(rect?.height);
+    const clientWidth = Number(canvas.clientWidth);
+    const clientHeight = Number(canvas.clientHeight);
+    const w = Math.max(1, Math.floor(
+      (Number.isFinite(rectWidth) && rectWidth > 0 ? rectWidth : 0)
+      || (Number.isFinite(clientWidth) && clientWidth > 0 ? clientWidth : 0)
+      || container.clientWidth
+      || width
+      || canvas.width
+      || 1
+    ));
+    const h = Math.max(1, Math.floor(
+      (Number.isFinite(rectHeight) && rectHeight > 0 ? rectHeight : 0)
+      || (Number.isFinite(clientHeight) && clientHeight > 0 ? clientHeight : 0)
+      || container.clientHeight
+      || height
+      || canvas.height
+      || 1
+    ));
+    const pixelRatio = resolveSphScenePixelRatio(ownerWindow.devicePixelRatio ?? globalThis.devicePixelRatio);
     const pixelWidth = Math.max(1, Math.floor(w * pixelRatio));
     const pixelHeight = Math.max(1, Math.floor(h * pixelRatio));
-    if (bridge.canvas.width !== pixelWidth) bridge.canvas.width = pixelWidth;
-    if (bridge.canvas.height !== pixelHeight) bridge.canvas.height = pixelHeight;
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    bridge.lastCanvasCssWidth = w;
+    bridge.lastCanvasCssHeight = h;
+    bridge.lastCanvasResizePixelRatio = pixelRatio;
   }
 
   function ensureSphNativeWebGpuSurfaceConsumer({ device } = {}) {
@@ -6801,7 +6831,9 @@ export function createSphPhaseScene(container, {
       const context = previous?.context || canvas.getContext('webgpu');
       if (!context) throw new Error('canvas.getContext("webgpu") returned null');
       const format = previous?.format || gpu.getPreferredCanvasFormat();
-      renderer.setPixelRatio(resolveSphScenePixelRatio(window.devicePixelRatio));
+      const ownerWindow = canvas.ownerDocument?.defaultView || container.ownerDocument?.defaultView || globalThis;
+      const pixelRatio = resolveSphScenePixelRatio(ownerWindow.devicePixelRatio ?? globalThis.devicePixelRatio);
+      renderer.setPixelRatio(pixelRatio);
       renderer.setSize(container.clientWidth || width, container.clientHeight || height, false);
       if (previous?.device !== device || previous?.format !== format || previous?.context !== context) {
         context.configure({
@@ -13077,9 +13109,12 @@ export function createSphPhaseScene(container, {
         renderBridgeDrawOrderIndirectOffsets: [...(renderBridge?.drawOrderIndirectOffsets || [])],
         renderBridgeCanvasWidth: renderBridge?.lastCanvasWidth ?? null,
         renderBridgeCanvasHeight: renderBridge?.lastCanvasHeight ?? null,
+        renderBridgeCanvasCssWidth: renderBridge?.lastCanvasCssWidth ?? null,
+        renderBridgeCanvasCssHeight: renderBridge?.lastCanvasCssHeight ?? null,
         renderBridgeCanvasClientWidth: renderBridge?.lastCanvasClientWidth ?? null,
         renderBridgeCanvasClientHeight: renderBridge?.lastCanvasClientHeight ?? null,
         renderBridgeDevicePixelRatio: renderBridge?.lastDevicePixelRatio ?? null,
+        renderBridgeCanvasResizePixelRatio: renderBridge?.lastCanvasResizePixelRatio ?? null,
         renderBridgeLastDrawOrderCount: renderBridge?.lastDrawOrderCount ?? null,
         renderBridgePrimarySurfaceIndex: renderBridge?.primarySurfaceIndex ?? null,
         renderBridgePrimaryBoundsCenterM: renderBridge?.primarySurfaceBoundsCenterM ?? null,
@@ -13479,9 +13514,12 @@ export function createSphPhaseScene(container, {
         renderBridgeDrawOrderIndirectOffsets: [...(renderBridge?.drawOrderIndirectOffsets || [])],
         renderBridgeCanvasWidth: renderBridge?.lastCanvasWidth ?? null,
         renderBridgeCanvasHeight: renderBridge?.lastCanvasHeight ?? null,
+        renderBridgeCanvasCssWidth: renderBridge?.lastCanvasCssWidth ?? null,
+        renderBridgeCanvasCssHeight: renderBridge?.lastCanvasCssHeight ?? null,
         renderBridgeCanvasClientWidth: renderBridge?.lastCanvasClientWidth ?? null,
         renderBridgeCanvasClientHeight: renderBridge?.lastCanvasClientHeight ?? null,
         renderBridgeDevicePixelRatio: renderBridge?.lastDevicePixelRatio ?? null,
+        renderBridgeCanvasResizePixelRatio: renderBridge?.lastCanvasResizePixelRatio ?? null,
         renderBridgeLastDrawOrderCount: renderBridge?.lastDrawOrderCount ?? null,
         renderBridgePrimarySurfaceIndex: renderBridge?.primarySurfaceIndex ?? null,
         renderBridgePrimaryBoundsCenterM: renderBridge?.primarySurfaceBoundsCenterM ?? null,
@@ -15648,9 +15686,13 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeDrawOrderIndirectOffsets: [...(sphResidentSurfaceDraw?.renderBridgeDrawOrderIndirectOffsets || [])],
         surfaceDrawRenderBridgeCanvasWidth: sphResidentSurfaceDraw?.renderBridgeCanvasWidth ?? null,
         surfaceDrawRenderBridgeCanvasHeight: sphResidentSurfaceDraw?.renderBridgeCanvasHeight ?? null,
+        surfaceDrawRenderBridgeCanvasCssWidth: sphResidentSurfaceDraw?.renderBridgeCanvasCssWidth ?? null,
+        surfaceDrawRenderBridgeCanvasCssHeight: sphResidentSurfaceDraw?.renderBridgeCanvasCssHeight ?? null,
         surfaceDrawRenderBridgeCanvasClientWidth: sphResidentSurfaceDraw?.renderBridgeCanvasClientWidth ?? null,
         surfaceDrawRenderBridgeCanvasClientHeight: sphResidentSurfaceDraw?.renderBridgeCanvasClientHeight ?? null,
         surfaceDrawRenderBridgeDevicePixelRatio: sphResidentSurfaceDraw?.renderBridgeDevicePixelRatio ?? null,
+        surfaceDrawRenderBridgeCanvasResizePixelRatio:
+          sphResidentSurfaceDraw?.renderBridgeCanvasResizePixelRatio ?? null,
         surfaceDrawRenderBridgeLastDrawOrderCount: sphResidentSurfaceDraw?.renderBridgeLastDrawOrderCount ?? null,
         surfaceDrawRenderBridgePrimarySurfaceIndex:
           sphResidentSurfaceDraw?.renderBridgePrimarySurfaceIndex ?? null,

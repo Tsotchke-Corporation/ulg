@@ -1261,6 +1261,97 @@ test('MLS-MPM resident summary can skip the active-grid scan for particle-visual
   assert.equal(device.createdBuffers.every((buffer) => buffer.destroyed), true);
 });
 
+test('MLS-MPM resident summary can emit GPU active-grid dispatch plan buffers', async () => {
+  const particleCount = 4;
+  const gridNodeCount = 512;
+  const summaryValues = new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS);
+  summaryValues[0] = particleCount;
+  summaryValues[1] = gridNodeCount;
+  summaryValues[15] = 2;
+  summaryValues[19] = 1;
+  summaryValues[44] = 1.25;
+  summaryValues[45] = 1.25;
+  summaryValues[46] = 1.25;
+  summaryValues[47] = 1.5;
+  summaryValues[48] = 1.5;
+  summaryValues[49] = 1.5;
+  summaryValues[51] = 1;
+  const device = fakeSummaryDevice(summaryValues);
+  const tracker = fakeBufferTracker();
+  const summary = await runMlsMpmResidentSummaryWebGpu({
+    device,
+    sphParticleState: {
+      schema: ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      state: new Float32Array(particleCount * 8)
+    },
+    mlsMpmParticleState: {
+      schema: ULG_MLS_MPM_GPU_PARTICLE_BUFFER_SCHEMA,
+      particleCount,
+      mechanics: new Float32Array(particleCount * MLS_MPM_GPU_PARTICLE_MECHANICS_ROW_LAYOUT.length)
+    },
+    sphParticleUpload: {
+      status: 'webgpu-uploaded',
+      stateBuffer: tracker.buffer('source-state'),
+      thermoBuffer: tracker.buffer('source-thermo')
+    },
+    mlsMpmParticleUpload: {
+      status: 'webgpu-uploaded',
+      mechanicsBuffer: tracker.buffer('source-mechanics')
+    },
+    gridUpdate: {
+      gridNodeCount,
+      gridDims: [8, 8, 8],
+      gridShift: 4,
+      gridSpacingM: 0.25,
+      gpuResult: { updatedGridBuffer: tracker.buffer('updated-grid') }
+    },
+    g2pReconstruction: {
+      gridNodeCount,
+      gridDims: [8, 8, 8],
+      gridShift: 4,
+      gridSpacingM: 0.25,
+      stateBuffer: tracker.buffer('next-state'),
+      mechanicsBuffer: tracker.buffer('next-mechanics')
+    },
+    activeGridDispatchPlan: {
+      requested: true,
+      dt: 0.001,
+      stepCount: 2,
+      gravityMPerS2: [0, -9.80665, 0],
+      safetyCells: 1
+    }
+  });
+
+  assert.equal(summary.status, 'compact-summary-ready');
+  assert.equal(summary.timing.summaryKernelDispatchCount, 3);
+  assert.equal(summary.timing.summaryWorkgroupCount, 18);
+  assert.deepEqual(device.dispatches.map((entry) => entry.count), [16, 1, 1]);
+  assert.equal(device.bindGroups.length, 3);
+  assert.match(device.shaderModules.at(-1).code, /ActiveGridDispatchFromSummaryParams|dispatch_args|dispatch_metadata/);
+  assert.equal(summary.activeGridDispatchPlan.status, 'gpu-active-grid-summary-dispatch-plan-ready');
+  assert.equal(summary.activeGridDispatchPlan.source, 'compact-summary-gpu-sidecar');
+  assert.equal(summary.activeGridDispatchPlan.dispatchArgsBufferRetained, true);
+  assert.equal(summary.activeGridDispatchPlan.dispatchArgsBufferByteLength, 12);
+  assert.equal(summary.activeGridDispatchPlan.metadataBufferRetained, true);
+  assert.equal(summary.activeGridDispatchPlan.metadataBufferByteLength, 64);
+  assert.deepEqual(summary.activeGridDispatchPlan.gridDims, [8, 8, 8]);
+  assert.equal(summary.activeGridDispatchPlan.gridShift, 4);
+  assert.equal(summary.activeGridDispatchPlan.gridSpacingM, 0.25);
+  assert.equal(summary.activeGridDispatchPlan.safetyCells, 1);
+  assert.equal(summary.activeGridDispatchPlan.stepCount, 2);
+  assert.equal(summary.activeGridDispatchPlan.normalHotLoopReadbackFree, true);
+  assert.equal(summary.activeGridDispatchPlanBuffersRetained, true);
+  assert.equal(summary.activeGridDispatchPlanDispatchArgsBuffer.label, 'ulg-mls-mpm-active-grid-summary-dispatch-args');
+  assert.equal(summary.activeGridDispatchPlanMetadataBuffer.label, 'ulg-mls-mpm-active-grid-summary-dispatch-metadata');
+  assert.equal(summary.activeGridDispatchPlanDispatchArgsBuffer.destroyed, false);
+  assert.equal(summary.activeGridDispatchPlanMetadataBuffer.destroyed, false);
+  assert.equal(device.createdBuffers.find((buffer) => buffer.label === 'ulg-mls-mpm-active-grid-summary-dispatch-params').destroyed, true);
+  summary.destroyActiveGridDispatchPlanBuffers();
+  assert.equal(summary.activeGridDispatchPlanDispatchArgsBuffer.destroyed, true);
+  assert.equal(summary.activeGridDispatchPlanMetadataBuffer.destroyed, true);
+});
+
 test('MLS-MPM resident step shares retained stage buffers across WebGPU stages', async () => {
   const buffers = manualBuffers();
   const tracker = fakeBufferTracker();

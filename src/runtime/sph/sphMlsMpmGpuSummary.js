@@ -6,6 +6,7 @@ import {
   ULG_SPH_GPU_PARTICLE_BUFFER_SCHEMA
 } from '../../../ulg-gpu-abi/src/index.js';
 import {
+  mlsMpmActiveGridDispatchFromSummaryWgsl,
   mlsMpmResidentSummaryFinalizeWgsl,
   mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl
@@ -28,6 +29,7 @@ import {
 export {
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_EXECUTION_SCHEMA,
   ULG_MLS_MPM_GPU_RESIDENT_SUMMARY_SCHEMA,
+  mlsMpmActiveGridDispatchFromSummaryWgsl,
   mlsMpmResidentSummaryFinalizeWgsl,
   mlsMpmResidentSummaryPartialsWgsl,
   mlsMpmResidentSummaryWgsl
@@ -42,6 +44,7 @@ const GPU_BUFFER_USAGE = {
   MAP_READ: globalThis.GPUBufferUsage?.MAP_READ ?? 1,
   COPY_SRC: globalThis.GPUBufferUsage?.COPY_SRC ?? 4,
   COPY_DST: globalThis.GPUBufferUsage?.COPY_DST ?? 8,
+  INDIRECT: globalThis.GPUBufferUsage?.INDIRECT ?? 256,
   STORAGE: globalThis.GPUBufferUsage?.STORAGE ?? 128,
   UNIFORM: globalThis.GPUBufferUsage?.UNIFORM ?? 64
 };
@@ -52,11 +55,30 @@ const GPU_MAP_MODE = {
 
 const SUMMARY_SCOPE = 'mls-mpm-resident-compact-gpu-summary';
 const SUMMARY_WORKGROUP_SIZE = 32;
+const ACTIVE_GRID_DISPATCH_ARGS_UINTS = 3;
+const ACTIVE_GRID_DISPATCH_METADATA_UINTS = 16;
+const ACTIVE_GRID_DISPATCH_WORKGROUP_SIZE = 64;
+const DEFAULT_ACTIVE_GRID_SAFETY_CELLS = 3;
+const DEFAULT_GRAVITY_M_PER_S2 = [0, -9.80665, 0];
 
 function nowMs() {
   return typeof globalThis.performance?.now === 'function'
     ? globalThis.performance.now()
     : Date.now();
+}
+
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function finiteVector3(value, fallback = DEFAULT_GRAVITY_M_PER_S2) {
+  const source = Array.isArray(value) ? value : fallback;
+  return [
+    finiteNumber(source?.[0], fallback[0]),
+    finiteNumber(source?.[1], fallback[1]),
+    finiteNumber(source?.[2], fallback[2])
+  ];
 }
 
 export function normalizeMlsMpmResidentSummaryScope(value) {
@@ -115,6 +137,87 @@ function createSummaryParamsArray({ particleCount, gridNodeCount, partialCount, 
   view.setUint32(20, drop.start, true);
   view.setUint32(24, drop.end, true);
   return buffer;
+}
+
+function createActiveGridDispatchPlanParamsArray({
+  gridDims,
+  gridShift,
+  gridNodeCount,
+  gridSpacingM,
+  dt = 0,
+  stepCount = 1,
+  gravityMPerS2 = DEFAULT_GRAVITY_M_PER_S2,
+  safetyCells = DEFAULT_ACTIVE_GRID_SAFETY_CELLS,
+  summaryStrideFloats = MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS
+} = {}) {
+  const buffer = new ArrayBuffer(64);
+  const view = new DataView(buffer);
+  const dims = Array.isArray(gridDims) && gridDims.length >= 3 ? gridDims : [1, 1, 1];
+  const gravity = finiteVector3(gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
+  view.setUint32(0, Math.max(1, Math.round(finiteNumber(dims[0], 1))), true);
+  view.setUint32(4, Math.max(1, Math.round(finiteNumber(dims[1], 1))), true);
+  view.setUint32(8, Math.max(1, Math.round(finiteNumber(dims[2], 1))), true);
+  view.setInt32(12, Math.round(finiteNumber(gridShift, 0)), true);
+  view.setUint32(16, Math.max(1, Math.round(finiteNumber(gridNodeCount, 1))), true);
+  view.setUint32(20, ACTIVE_GRID_DISPATCH_WORKGROUP_SIZE, true);
+  view.setUint32(24, Math.max(1, Math.round(finiteNumber(safetyCells, DEFAULT_ACTIVE_GRID_SAFETY_CELLS))), true);
+  view.setUint32(28, Math.max(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS, Math.round(finiteNumber(summaryStrideFloats, MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS))), true);
+  view.setFloat32(32, Math.max(0.000001, finiteNumber(gridSpacingM, 1)), true);
+  view.setFloat32(36, finiteNumber(dt, 0), true);
+  view.setUint32(40, Math.max(1, Math.round(finiteNumber(stepCount, 1))), true);
+  view.setUint32(44, 0, true);
+  view.setFloat32(48, gravity[0], true);
+  view.setFloat32(52, gravity[1], true);
+  view.setFloat32(56, gravity[2], true);
+  view.setFloat32(60, 0, true);
+  return buffer;
+}
+
+function activeGridDispatchPlanRequest(value) {
+  if (value === true) return { requested: true };
+  if (value && typeof value === 'object') return { requested: value.requested !== false, ...value };
+  return { requested: false };
+}
+
+function resolveActiveGridDispatchPlanGrid({ gridUpdate, g2pReconstruction, gridNodeCount }) {
+  const gridDims = Array.isArray(g2pReconstruction?.gridDims)
+    ? g2pReconstruction.gridDims
+    : (Array.isArray(gridUpdate?.gridDims) ? gridUpdate.gridDims : null);
+  const gridShift = g2pReconstruction?.gridShift ?? gridUpdate?.gridShift ?? null;
+  const gridSpacingM = g2pReconstruction?.gridSpacingM ?? gridUpdate?.gridSpacingM ?? null;
+  if (!Array.isArray(gridDims) || gridDims.length < 3) return null;
+  if (!Number.isFinite(Number(gridShift)) || !Number.isFinite(Number(gridSpacingM))) return null;
+  return {
+    gridDims: gridDims.slice(0, 3).map((value) => Math.max(1, Math.round(finiteNumber(value, 1)))),
+    gridShift: Math.round(finiteNumber(gridShift, 0)),
+    gridSpacingM: Math.max(0.000001, finiteNumber(gridSpacingM, 1)),
+    gridNodeCount: Math.max(1, Math.round(finiteNumber(gridNodeCount, 1)))
+  };
+}
+
+function activeGridDispatchPlanDescriptor(plan) {
+  if (!plan) return null;
+  return {
+    schema: 'peercompute.ulg.mls-mpm-active-grid-summary-dispatch-plan.v0',
+    status: plan.status,
+    reason: plan.reason ?? null,
+    source: plan.source ?? null,
+    dispatchArgsBufferRetained: Boolean(plan.dispatchArgsBuffer),
+    dispatchArgsBufferByteLength: plan.dispatchArgsBufferByteLength ?? 0,
+    metadataBufferRetained: Boolean(plan.metadataBuffer),
+    metadataBufferByteLength: plan.metadataBufferByteLength ?? 0,
+    metadataUintCount: ACTIVE_GRID_DISPATCH_METADATA_UINTS,
+    workgroupSize: ACTIVE_GRID_DISPATCH_WORKGROUP_SIZE,
+    gridDims: plan.gridDims ? [...plan.gridDims] : null,
+    gridShift: plan.gridShift ?? null,
+    gridNodeCount: plan.gridNodeCount ?? null,
+    gridSpacingM: plan.gridSpacingM ?? null,
+    safetyCells: plan.safetyCells ?? null,
+    stepCount: plan.stepCount ?? null,
+    dt: plan.dt ?? null,
+    gravityMPerS2: plan.gravityMPerS2 ? [...plan.gravityMPerS2] : null,
+    normalHotLoopReadbackFree: true
+  };
 }
 
 function outputBufferFromG2p(g2pReconstruction, key) {
@@ -319,7 +422,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
   thermalStep = null,
   reactionStep = null,
   cohortRanges = null,
-  summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL
+  summaryScope = MLS_MPM_RESIDENT_SUMMARY_SCOPE_FULL,
+  activeGridDispatchPlan = false
 } = {}) {
   const summaryTimingStartMs = nowMs();
   if (!device?.createBuffer || !device.queue?.writeBuffer) {
@@ -380,6 +484,71 @@ export async function runMlsMpmResidentSummaryWebGpu({
     size: 32,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  const activeGridPlanRequest = activeGridDispatchPlanRequest(activeGridDispatchPlan);
+  const activeGridPlanGrid = activeGridPlanRequest.requested
+    ? resolveActiveGridDispatchPlanGrid({ gridUpdate, g2pReconstruction, gridNodeCount })
+    : null;
+  const activeGridPlanArgsByteLength = ACTIVE_GRID_DISPATCH_ARGS_UINTS * Uint32Array.BYTES_PER_ELEMENT;
+  const activeGridPlanMetadataByteLength = ACTIVE_GRID_DISPATCH_METADATA_UINTS * Uint32Array.BYTES_PER_ELEMENT;
+  let activeGridPlanState = activeGridPlanRequest.requested
+    ? {
+      status: 'active-grid-summary-dispatch-plan-unavailable',
+      reason: activeGridPlanGrid ? null : 'grid-dims-shift-or-spacing-unavailable',
+      source: 'compact-summary-gpu-sidecar'
+    }
+    : null;
+  if (activeGridPlanRequest.requested && activeGridPlanGrid) {
+    const gravity = finiteVector3(activeGridPlanRequest.gravityMPerS2, DEFAULT_GRAVITY_M_PER_S2);
+    const safetyCells = Math.max(1, Math.round(finiteNumber(activeGridPlanRequest.safetyCells, DEFAULT_ACTIVE_GRID_SAFETY_CELLS)));
+    const stepCount = Math.max(1, Math.round(finiteNumber(activeGridPlanRequest.stepCount, 1)));
+    const dtSeconds = finiteNumber(activeGridPlanRequest.dt, 0);
+    const dispatchArgsBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-active-grid-summary-dispatch-args',
+      size: activeGridPlanArgsByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.INDIRECT | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const metadataBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-active-grid-summary-dispatch-metadata',
+      size: activeGridPlanMetadataByteLength,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_SRC | GPU_BUFFER_USAGE.COPY_DST
+    });
+    const planParamsBuffer = device.createBuffer({
+      label: 'ulg-mls-mpm-active-grid-summary-dispatch-params',
+      size: 64,
+      usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
+    });
+    device.queue.writeBuffer(planParamsBuffer, 0, createActiveGridDispatchPlanParamsArray({
+      ...activeGridPlanGrid,
+      dt: dtSeconds,
+      stepCount,
+      gravityMPerS2: gravity,
+      safetyCells
+    }));
+    activeGridPlanState = {
+      status: 'gpu-active-grid-summary-dispatch-plan-ready',
+      source: 'compact-summary-gpu-sidecar',
+      dispatchArgsBuffer,
+      metadataBuffer,
+      planParamsBuffer,
+      dispatchArgsBufferByteLength: activeGridPlanArgsByteLength,
+      metadataBufferByteLength: activeGridPlanMetadataByteLength,
+      gridDims: [...activeGridPlanGrid.gridDims],
+      gridShift: activeGridPlanGrid.gridShift,
+      gridNodeCount: activeGridPlanGrid.gridNodeCount,
+      gridSpacingM: activeGridPlanGrid.gridSpacingM,
+      safetyCells,
+      stepCount,
+      dt: dtSeconds,
+      gravityMPerS2: gravity,
+      destroyed: false,
+      destroyActiveGridDispatchPlanBuffers() {
+        if (this.destroyed) return;
+        this.destroyed = true;
+        this.dispatchArgsBuffer?.destroy?.();
+        this.metadataBuffer?.destroy?.();
+      }
+    };
+  }
   const compactSummaryLeaseLedger = createResidentBufferLeaseLedger({
     ledgerId: `mls-mpm-compact-summary:${particleCount}:${gridNodeCount}:${gridNodeScanCount}:${partialCount}:${resolvedSummaryScope}`,
     stateKey: 'mls-mpm-resident-compact-summary',
@@ -509,6 +678,32 @@ export async function runMlsMpmResidentSummaryWebGpu({
         { binding: 2, resource: { buffer: paramsBuffer } }
       ]
     });
+    let activeGridPlanPipeline = null;
+    let activeGridPlanBindGroup = null;
+    if (activeGridPlanState?.status === 'gpu-active-grid-summary-dispatch-plan-ready') {
+      const planPipelineInfo = createCachedExplicitComputePipeline(device, {
+        cacheKey: 'ulg-mls-mpm-active-grid-summary-dispatch-plan.v1',
+        label: 'ulg-mls-mpm-active-grid-summary-dispatch-plan',
+        code: mlsMpmActiveGridDispatchFromSummaryWgsl,
+        entryPoint: 'main',
+        bindings: [
+          computeBufferBinding(0, 'read-only-storage'),
+          computeBufferBinding(1, 'storage'),
+          computeBufferBinding(2, 'storage'),
+          computeBufferBinding(3, 'uniform')
+        ]
+      });
+      activeGridPlanPipeline = planPipelineInfo.pipeline;
+      activeGridPlanBindGroup = device.createBindGroup({
+        layout: planPipelineInfo.bindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: summaryBuffer } },
+          { binding: 1, resource: { buffer: activeGridPlanState.dispatchArgsBuffer } },
+          { binding: 2, resource: { buffer: activeGridPlanState.metadataBuffer } },
+          { binding: 3, resource: { buffer: activeGridPlanState.planParamsBuffer } }
+        ]
+      });
+    }
     const setupMs = Math.max(0, nowMs() - setupStartMs);
     const encodeStartMs = nowMs();
     const encoder = device.createCommandEncoder();
@@ -522,6 +717,13 @@ export async function runMlsMpmResidentSummaryWebGpu({
     finalizePass.setBindGroup(0, finalizeBindGroup);
     finalizePass.dispatchWorkgroups(1);
     finalizePass.end();
+    if (activeGridPlanPipeline && activeGridPlanBindGroup) {
+      const activeGridPlanPass = encoder.beginComputePass();
+      activeGridPlanPass.setPipeline(activeGridPlanPipeline);
+      activeGridPlanPass.setBindGroup(0, activeGridPlanBindGroup);
+      activeGridPlanPass.dispatchWorkgroups(1);
+      activeGridPlanPass.end();
+    }
     encoder.copyBufferToBuffer(summaryBuffer, 0, readBuffer, 0, summaryByteLength);
     const encodeMs = Math.max(0, nowMs() - encodeStartMs);
     const submitStartMs = nowMs();
@@ -543,8 +745,8 @@ export async function runMlsMpmResidentSummaryWebGpu({
       mapAsyncWaitMs,
       decodeMs,
       queueFenceAttribution: 'mapAsync(readback-buffer)-may-include-prior-queued-resident-work',
-      summaryKernelDispatchCount: 2,
-      summaryWorkgroupCount: partialCount + 1,
+      summaryKernelDispatchCount: activeGridPlanPipeline ? 3 : 2,
+      summaryWorkgroupCount: partialCount + 1 + (activeGridPlanPipeline ? 1 : 0),
       compactReadbackByteLength: summaryByteLength
     };
     compactSummaryResult = {
@@ -578,7 +780,16 @@ export async function runMlsMpmResidentSummaryWebGpu({
       sourceMechanicsBufferMode: borrowedSourceMechanicsBuffer ? 'borrowed-webgpu-upload' : 'temporary-source-upload',
       sourceStateStrideFloats: SPH_GPU_PARTICLE_STATE_FLOATS,
       thermoStrideFloats: SPH_GPU_PARTICLE_THERMO_FLOATS,
-      sourceMechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS
+      sourceMechanicsStrideFloats: MLS_MPM_GPU_PARTICLE_MECHANICS_FLOATS,
+      activeGridDispatchPlan: activeGridDispatchPlanDescriptor(activeGridPlanState),
+      activeGridDispatchPlanDispatchArgsBuffer: activeGridPlanState?.dispatchArgsBuffer ?? null,
+      activeGridDispatchPlanMetadataBuffer: activeGridPlanState?.metadataBuffer ?? null,
+      activeGridDispatchPlanDispatchArgsBufferByteLength: activeGridPlanState?.dispatchArgsBufferByteLength ?? 0,
+      activeGridDispatchPlanMetadataBufferByteLength: activeGridPlanState?.metadataBufferByteLength ?? 0,
+      activeGridDispatchPlanBuffersRetained: activeGridPlanState?.status === 'gpu-active-grid-summary-dispatch-plan-ready',
+      destroyActiveGridDispatchPlanBuffers: activeGridPlanState?.destroyActiveGridDispatchPlanBuffers
+        ? () => activeGridPlanState.destroyActiveGridDispatchPlanBuffers()
+        : null
     };
     return compactSummaryResult;
   } finally {
@@ -596,6 +807,10 @@ export async function runMlsMpmResidentSummaryWebGpu({
       readBuffer.destroy?.();
     }, { reason: 'compact-summary-cleanup' });
     paramsBuffer.destroy?.();
+    activeGridPlanState?.planParamsBuffer?.destroy?.();
+    if (!compactSummaryResult && activeGridPlanState?.destroyActiveGridDispatchPlanBuffers) {
+      activeGridPlanState.destroyActiveGridDispatchPlanBuffers();
+    }
     if (compactSummaryResult) {
       compactSummaryResult.residentBufferLeaseLedger = compactSummaryLeaseLedger;
       compactSummaryResult.residentBufferLeaseSummary = summarizeResidentBufferLeaseLedger(compactSummaryLeaseLedger);

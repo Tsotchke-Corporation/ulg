@@ -2799,7 +2799,16 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
           reactionStep: null,
           mechanicsRefreshStep: null,
           cohortRanges,
-          summaryScope: compactSummaryScope
+          summaryScope: compactSummaryScope,
+          activeGridDispatchPlan: activeGridDispatch.useActiveGrid
+            ? {
+              requested: true,
+              dt: dtSeconds,
+              stepCount: count,
+              gravityMPerS2: gravity,
+              safetyCells: activeGridDispatch.safetyCells ?? activeGridSafetyCells
+            }
+            : false
         });
       } catch (error) {
         compactGpuSummary = {
@@ -3283,6 +3292,12 @@ export function compactMlsMpmResidentStepDiagnostics({
       compactSummaryTiming: compactGpuSummary.timing ?? null,
       compactSummaryMapAsyncWaitMs: compactGpuSummary.mapAsyncWaitMs ?? compactGpuSummary.timing?.mapAsyncWaitMs ?? null,
       compactSummaryQueueFenceAttribution: compactGpuSummary.queueFenceAttribution ?? compactGpuSummary.timing?.queueFenceAttribution ?? null,
+      activeGridDispatchPlanStatus: compactGpuSummary.activeGridDispatchPlan?.status ?? null,
+      activeGridDispatchPlanSource: compactGpuSummary.activeGridDispatchPlan?.source ?? null,
+      activeGridDispatchPlanDispatchArgsBufferRetained: compactGpuSummary.activeGridDispatchPlan?.dispatchArgsBufferRetained ?? false,
+      activeGridDispatchPlanDispatchArgsBufferByteLength: compactGpuSummary.activeGridDispatchPlan?.dispatchArgsBufferByteLength ?? 0,
+      activeGridDispatchPlanMetadataBufferRetained: compactGpuSummary.activeGridDispatchPlan?.metadataBufferRetained ?? false,
+      activeGridDispatchPlanMetadataBufferByteLength: compactGpuSummary.activeGridDispatchPlan?.metadataBufferByteLength ?? 0,
       ...topologyDiagnostics,
       ...pressureInterfaceGridForce,
       ...wallBarrierContact,
@@ -11742,7 +11757,18 @@ export async function runMlsMpmResidentStepWithOptionalWebGpu({
         reactionStep,
         mechanicsRefreshStep,
         cohortRanges,
-        summaryScope: resolvedCompactSummaryScope
+        summaryScope: resolvedCompactSummaryScope,
+        activeGridDispatchPlan: fusedMechanics?.activeGridDispatch?.useActiveGrid === true
+          ? {
+            requested: true,
+            dt: dtSeconds,
+            stepCount: 1,
+            gravityMPerS2: gravity,
+            safetyCells: fusedMechanics.activeGridDispatch.safetyCells
+              ?? fusedActiveGridSafetyCells
+              ?? activeGridSafetyCells
+          }
+          : false
       }));
     } catch (error) {
       compactGpuSummary = {
@@ -12094,7 +12120,8 @@ export async function runMlsMpmMechanicsOnlyResidentStepWithOptionalWebGpu({
           reactionStep: null,
           mechanicsRefreshStep: null,
           cohortRanges,
-          summaryScope: resolvedCompactSummaryScope
+          summaryScope: resolvedCompactSummaryScope,
+          activeGridDispatchPlan: false
         }));
       } catch (error) {
         compactGpuSummary = {
@@ -12230,6 +12257,7 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     if (!upload || upload.ownsMechanicsBuffer === false) return;
     destroyUnlessPreserved(upload.mechanicsBuffer);
   };
+  step?.compactGpuSummary?.destroyActiveGridDispatchPlanBuffers?.();
   destroyUnlessPreserved(step?.p2gGridProjection?.gpuResult?.gridBuffer);
   destroyUnlessPreserved(step?.p2gGridProjection?.gridBuffer);
   destroyUnlessPreserved(step?.gridUpdate?.gpuResult?.updatedGridBuffer);

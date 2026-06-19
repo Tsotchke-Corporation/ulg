@@ -6217,3 +6217,101 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export const mlsMpmResidentSummaryWgsl = mlsMpmResidentSummaryPartialsWgsl;
+
+export const mlsMpmActiveGridDispatchFromSummaryWgsl = `
+struct ActiveGridDispatchFromSummaryParams {
+  grid_dim_x: u32,
+  grid_dim_y: u32,
+  grid_dim_z: u32,
+  grid_shift: i32,
+  grid_node_count: u32,
+  workgroup_size: u32,
+  safety_cells: u32,
+  summary_stride_floats: u32,
+  grid_spacing_m: f32,
+  dt_s: f32,
+  substep_count: u32,
+  pad0: u32,
+  gravity_m_per_s2: vec3<f32>,
+  pad1: f32,
+};
+
+@group(0) @binding(0) var<storage, read> resident_summary: array<f32>;
+@group(0) @binding(1) var<storage, read_write> dispatch_args: array<u32>;
+@group(0) @binding(2) var<storage, read_write> dispatch_metadata: array<u32>;
+@group(0) @binding(3) var<uniform> params: ActiveGridDispatchFromSummaryParams;
+
+fn ag_clamp_i32(value: i32, lo: i32, hi: i32) -> i32 {
+  return min(max(value, lo), hi);
+}
+
+fn ag_start_axis(bounds_min: f32, expansion_m: f32, dim: u32, dx: f32) -> u32 {
+  let raw_node_min = i32(floor((bounds_min - expansion_m) / dx - 0.5)) - 1;
+  return u32(ag_clamp_i32(raw_node_min + params.grid_shift, 0, i32(dim) - 1));
+}
+
+fn ag_end_axis(bounds_max: f32, expansion_m: f32, dim: u32, dx: f32, start: u32) -> u32 {
+  let raw_node_max = i32(floor((bounds_max + expansion_m) / dx - 0.5)) + 3;
+  return u32(ag_clamp_i32(raw_node_max + params.grid_shift, i32(start), i32(dim) - 1));
+}
+
+@compute @workgroup_size(1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+  if (global_id.x > 0u) {
+    return;
+  }
+
+  let dx = max(params.grid_spacing_m, 0.000001);
+  let workgroup_size = max(params.workgroup_size, 1u);
+  let full_grid_node_count = max(params.grid_node_count, 1u);
+  let next_bounds_status = resident_summary[51u];
+  let max_speed_m_per_s = max(resident_summary[15u], 0.0);
+  let horizon_s = abs(params.dt_s) * f32(max(params.substep_count, 1u));
+  let motion_m = vec3<f32>(
+    max_speed_m_per_s * horizon_s + 0.5 * abs(params.gravity_m_per_s2.x) * horizon_s * horizon_s,
+    max_speed_m_per_s * horizon_s + 0.5 * abs(params.gravity_m_per_s2.y) * horizon_s * horizon_s,
+    max_speed_m_per_s * horizon_s + 0.5 * abs(params.gravity_m_per_s2.z) * horizon_s * horizon_s
+  );
+  let safety_margin_m = f32(max(params.safety_cells, 1u)) * dx;
+  let expansion_m = motion_m + vec3<f32>(safety_margin_m);
+
+  let next_min = vec3<f32>(resident_summary[44u], resident_summary[45u], resident_summary[46u]);
+  let next_max = vec3<f32>(resident_summary[47u], resident_summary[48u], resident_summary[49u]);
+  let start_x = ag_start_axis(next_min.x, expansion_m.x, params.grid_dim_x, dx);
+  let start_y = ag_start_axis(next_min.y, expansion_m.y, params.grid_dim_y, dx);
+  let start_z = ag_start_axis(next_min.z, expansion_m.z, params.grid_dim_z, dx);
+  let end_x = ag_end_axis(next_max.x, expansion_m.x, params.grid_dim_x, dx, start_x);
+  let end_y = ag_end_axis(next_max.y, expansion_m.y, params.grid_dim_y, dx, start_y);
+  let end_z = ag_end_axis(next_max.z, expansion_m.z, params.grid_dim_z, dx, start_z);
+  let count_x = max(1u, end_x - start_x + 1u);
+  let count_y = max(1u, end_y - start_y + 1u);
+  let count_z = max(1u, end_z - start_z + 1u);
+  let active_node_count = count_x * count_y * count_z;
+  let bounds_ready = next_bounds_status > 0.0;
+  let use_active_grid = bounds_ready && active_node_count > 0u && active_node_count < full_grid_node_count;
+  let dispatch_node_count = select(full_grid_node_count, active_node_count, use_active_grid);
+  let workgroup_count_x = max(1u, (dispatch_node_count + workgroup_size - 1u) / workgroup_size);
+
+  dispatch_args[0u] = workgroup_count_x;
+  dispatch_args[1u] = 1u;
+  dispatch_args[2u] = 1u;
+
+  let status = select(select(2u, 3u, bounds_ready), 1u, use_active_grid);
+  dispatch_metadata[0u] = status;
+  dispatch_metadata[1u] = select(0u, 1u, use_active_grid);
+  dispatch_metadata[2u] = full_grid_node_count;
+  dispatch_metadata[3u] = dispatch_node_count;
+  dispatch_metadata[4u] = start_x;
+  dispatch_metadata[5u] = start_y;
+  dispatch_metadata[6u] = start_z;
+  dispatch_metadata[7u] = count_x;
+  dispatch_metadata[8u] = count_y;
+  dispatch_metadata[9u] = count_z;
+  dispatch_metadata[10u] = end_x;
+  dispatch_metadata[11u] = end_y;
+  dispatch_metadata[12u] = end_z;
+  dispatch_metadata[13u] = workgroup_count_x;
+  dispatch_metadata[14u] = params.safety_cells;
+  dispatch_metadata[15u] = select(0u, 1u, bounds_ready);
+}
+`;

@@ -2291,6 +2291,16 @@ async function runBrowserProbe({
               renderState.surfaceDrawRenderBridgeOffscreenValidationHeight ?? null,
             surfaceDrawRenderBridgeOffscreenValidationAttemptCount:
               renderState.surfaceDrawRenderBridgeOffscreenValidationAttemptCount ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceValidationCadenceReason:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceReason ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded ?? null,
+            surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded:
+              renderState.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded ?? null,
             surfaceDrawRenderBridgeRenderAttemptCount:
               renderState.surfaceDrawRenderBridgeRenderAttemptCount ?? null,
             surfaceDrawRenderBridgeRenderSkipCount:

@@ -52,6 +52,22 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Native WebGPU surface validation now has a cadence gate before validation
+  command-encoder creation. The render loop inspects readback-smoke and
+  offscreen validation pending/pass/retry-exhausted state and only starts GPU
+  validation work while one of those stages can still make progress. The probe
+  and benchmark harness now flatten cadence diagnostics. Fresh 10k-ish
+  three-batch native evidence is `status=good`, `probeStatus=good`, zero
+  browser console issues, zero readback bytes, visible native GPU consumer
+  ready, `surfaceDrawRenderBridgeReused=true`,
+  `surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus=native-webgpu-surface-validation-pending`,
+  `surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired=false`,
+  readback/offscreen needed `false`, actual particles `9826`, mean batch
+  `105.07 ms`, resident completed stage `6.8 ms`, surface total `8.0 ms`,
+  extraction `5.0 ms`, translation `1.5 ms`, and bridge refresh `3.0 ms`.
+  This removes another repeated validation-work loop while preserving the
+  same-device visible-consumer validation gate; remaining throughput work is
+  still resident sequencing/cadence and native extraction variability.
 - Native WebGPU surface presentation now reuses compatible main-canvas render
   bridges instead of rebuilding static shader modules, layouts, render
   pipelines, sampler, camera buffer, and optical lookup buffers on every

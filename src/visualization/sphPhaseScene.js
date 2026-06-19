@@ -587,6 +587,143 @@ function normalizeSphNativeWebGpuSurfaceConsumerDebugMode(value, fallback = 'non
   return SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_DEBUG_MODES.has(fallback) ? fallback : 'none';
 }
 
+function nativeSurfaceValidationAttemptCount(value) {
+  return Math.max(0, Math.round(Number(value) || 0));
+}
+
+export function resolveSphNativeWebGpuSurfaceValidationCadence({
+  bridge = null,
+  rendererBridge = null,
+  submittedDrawCount = 0,
+  bridgeFormat = null,
+  readbackSmokeValidationPending = null,
+  readbackSmokeValidationStatus = null,
+  readbackSmokeValidationFormat = null,
+  readbackSmokeValidationAttemptCount = null,
+  offscreenValidationPending = null,
+  offscreenValidationStatus = null,
+  offscreenValidationTextureFormat = null,
+  offscreenValidationAttemptCount = null,
+  maxAttempts = SPH_NATIVE_WEBGPU_SURFACE_OFFSCREEN_VALIDATION_MAX_ATTEMPTS
+} = {}) {
+  const normalizedRendererBridge = rendererBridge ?? bridge?.rendererBridge ?? null;
+  const nativeSurfaceConsumer =
+    normalizedRendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE;
+  const normalizedMaxAttempts = Math.max(0, Math.round(Number(maxAttempts) || 0));
+  const normalizedSubmittedDrawCount = Math.max(0, Math.round(Number(submittedDrawCount) || 0));
+  const normalizedBridgeFormat = bridgeFormat ?? bridge?.format ?? null;
+  const normalizedReadbackStatus = String(
+    readbackSmokeValidationStatus
+      ?? bridge?.readbackSmokeValidationStatus
+      ?? 'not-run'
+  );
+  const normalizedReadbackFormat =
+    readbackSmokeValidationFormat ?? bridge?.readbackSmokeValidationFormat ?? null;
+  const normalizedReadbackAttemptCount = nativeSurfaceValidationAttemptCount(
+    readbackSmokeValidationAttemptCount ?? bridge?.readbackSmokeValidationAttemptCount
+  );
+  const readbackPending = Boolean(
+    readbackSmokeValidationPending ?? bridge?.readbackSmokeValidationPending
+  );
+  const readbackPassedCurrentFormat = Boolean(
+    normalizedReadbackStatus === 'passed'
+    && normalizedReadbackFormat === SPH_NATIVE_WEBGPU_SURFACE_READBACK_SMOKE_FORMAT
+  );
+  const readbackAttemptsExhausted = Boolean(
+    normalizedReadbackAttemptCount >= normalizedMaxAttempts
+    && normalizedReadbackStatus
+    && normalizedReadbackStatus !== 'pending'
+  );
+  const readbackSmokeValidationNeeded = Boolean(
+    nativeSurfaceConsumer
+    && !readbackPending
+    && !readbackPassedCurrentFormat
+    && !readbackAttemptsExhausted
+  );
+
+  const normalizedOffscreenStatus = String(
+    offscreenValidationStatus
+      ?? bridge?.offscreenValidationStatus
+      ?? 'not-run'
+  );
+  const normalizedOffscreenTextureFormat =
+    offscreenValidationTextureFormat ?? bridge?.offscreenValidationTextureFormat ?? null;
+  const normalizedOffscreenAttemptCount = nativeSurfaceValidationAttemptCount(
+    offscreenValidationAttemptCount ?? bridge?.offscreenValidationAttemptCount
+  );
+  const offscreenPending = Boolean(
+    offscreenValidationPending ?? bridge?.offscreenValidationPending
+  );
+  const offscreenPassedCurrentFormat = Boolean(
+    normalizedOffscreenStatus === 'passed'
+    && normalizedOffscreenTextureFormat === normalizedBridgeFormat
+  );
+  const offscreenAttemptsExhausted = Boolean(
+    normalizedOffscreenAttemptCount >= normalizedMaxAttempts
+    && normalizedOffscreenStatus
+    && normalizedOffscreenStatus !== 'pending'
+  );
+  const offscreenValidationNeeded = Boolean(
+    nativeSurfaceConsumer
+    && !offscreenPending
+    && !offscreenPassedCurrentFormat
+    && !offscreenAttemptsExhausted
+  );
+  const validationEncoderRequired = Boolean(
+    nativeSurfaceConsumer
+    && (readbackSmokeValidationNeeded || offscreenValidationNeeded)
+  );
+  let status = 'native-webgpu-surface-validation-skipped-non-native-consumer';
+  let reason = 'native WebGPU surface validation only runs for the native surface consumer bridge';
+  if (nativeSurfaceConsumer && validationEncoderRequired) {
+    status = 'native-webgpu-surface-validation-needed';
+    reason = 'one or more native surface validation stages still need GPU work';
+  } else if (nativeSurfaceConsumer && (readbackPending || offscreenPending)) {
+    status = 'native-webgpu-surface-validation-pending';
+    reason = 'native surface validation readback is already pending';
+  } else if (
+    nativeSurfaceConsumer
+    && readbackPassedCurrentFormat
+    && offscreenPassedCurrentFormat
+  ) {
+    status = 'native-webgpu-surface-validation-passed';
+    reason = null;
+  } else if (
+    nativeSurfaceConsumer
+    && readbackAttemptsExhausted
+    && offscreenAttemptsExhausted
+  ) {
+    status = 'native-webgpu-surface-validation-attempts-exhausted';
+    reason = 'native surface validation attempts reached the retry budget';
+  } else if (nativeSurfaceConsumer) {
+    status = 'native-webgpu-surface-validation-idle';
+    reason = null;
+  }
+  return {
+    schema: 'peercompute.ulg.sph-native-webgpu-surface-validation-cadence.v0',
+    status,
+    reason,
+    nativeSurfaceConsumer,
+    validationEncoderRequired,
+    submittedDrawCount: normalizedSubmittedDrawCount,
+    maxAttempts: normalizedMaxAttempts,
+    readbackSmokeValidationNeeded,
+    readbackSmokeValidationPending: readbackPending,
+    readbackSmokeValidationStatus: normalizedReadbackStatus,
+    readbackSmokeValidationFormat: normalizedReadbackFormat,
+    readbackSmokeValidationAttemptCount: normalizedReadbackAttemptCount,
+    readbackSmokeValidationPassedCurrentFormat: readbackPassedCurrentFormat,
+    readbackSmokeValidationAttemptsExhausted: readbackAttemptsExhausted,
+    offscreenValidationNeeded,
+    offscreenValidationPending: offscreenPending,
+    offscreenValidationStatus: normalizedOffscreenStatus,
+    offscreenValidationTextureFormat: normalizedOffscreenTextureFormat,
+    offscreenValidationAttemptCount: normalizedOffscreenAttemptCount,
+    offscreenValidationPassedCurrentFormat: offscreenPassedCurrentFormat,
+    offscreenValidationAttemptsExhausted: offscreenAttemptsExhausted
+  };
+}
+
 function resolveSphNativeWebGpuSurfaceConsumerDebugMode({
   bridge = null,
   locationRef = globalThis.location
@@ -3938,6 +4075,16 @@ function publishResidentSurfaceDrawRenderBridgeDiagnostics(target, bridge) {
 	    : null;
 	  target.renderBridgeReadbackSmokeValidationAttemptCount =
 	    bridge.readbackSmokeValidationAttemptCount ?? null;
+	  target.renderBridgeNativeSurfaceValidationCadenceStatus =
+	    bridge.nativeSurfaceValidationCadenceStatus ?? null;
+	  target.renderBridgeNativeSurfaceValidationCadenceReason =
+	    bridge.nativeSurfaceValidationCadenceReason ?? null;
+	  target.renderBridgeNativeSurfaceValidationEncoderRequired =
+	    bridge.nativeSurfaceValidationEncoderRequired ?? null;
+	  target.renderBridgeNativeSurfaceReadbackSmokeValidationNeeded =
+	    bridge.nativeSurfaceReadbackSmokeValidationNeeded ?? null;
+	  target.renderBridgeNativeSurfaceOffscreenValidationNeeded =
+	    bridge.nativeSurfaceOffscreenValidationNeeded ?? null;
 	  target.renderBridgeOffscreenValidationNonzeroPixelCount =
 	    bridge.offscreenValidationNonzeroPixelCount ?? null;
 	  target.renderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
@@ -4024,6 +4171,16 @@ function publishResidentRenderStateSurfaceDrawRenderBridgeDiagnostics(target, br
     : null;
   target.surfaceDrawRenderBridgeReadbackSmokeValidationAttemptCount =
     bridge.readbackSmokeValidationAttemptCount ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus =
+    bridge.nativeSurfaceValidationCadenceStatus ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceReason =
+    bridge.nativeSurfaceValidationCadenceReason ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired =
+    bridge.nativeSurfaceValidationEncoderRequired ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded =
+    bridge.nativeSurfaceReadbackSmokeValidationNeeded ?? null;
+  target.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded =
+    bridge.nativeSurfaceOffscreenValidationNeeded ?? null;
   target.surfaceDrawRenderBridgeOffscreenValidationNonzeroPixelCount =
     bridge.offscreenValidationNonzeroPixelCount ?? null;
 	  target.surfaceDrawRenderBridgeOffscreenValidationPixelCount = bridge.offscreenValidationPixelCount ?? null;
@@ -10817,31 +10974,50 @@ export function createSphPhaseScene(container, {
 	      bridge.lastRenderSkipStatus = null;
 	      bridge.lastRenderSkipReason = null;
 	      const submittedDrawCount = nativeSurfaceClearOnly ? 0 : opaqueDraws.length + transparentDraws.length;
+	      const nativeSurfaceValidationCadence =
+	        resolveSphNativeWebGpuSurfaceValidationCadence({
+	          bridge,
+	          submittedDrawCount,
+	          bridgeFormat: bridge.format
+	        });
+	      bridge.nativeSurfaceValidationCadenceStatus = nativeSurfaceValidationCadence.status;
+	      bridge.nativeSurfaceValidationCadenceReason = nativeSurfaceValidationCadence.reason;
+	      bridge.nativeSurfaceValidationEncoderRequired =
+	        nativeSurfaceValidationCadence.validationEncoderRequired;
+	      bridge.nativeSurfaceReadbackSmokeValidationNeeded =
+	        nativeSurfaceValidationCadence.readbackSmokeValidationNeeded;
+	      bridge.nativeSurfaceOffscreenValidationNeeded =
+	        nativeSurfaceValidationCadence.offscreenValidationNeeded;
 	      if (
 	        !nativeSurfaceClearOnly
 	        && bridge.rendererBridge === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE
+	        && nativeSurfaceValidationCadence.validationEncoderRequired
 	      ) {
 	        const validationEncoder = bridge.device.createCommandEncoder({
 	          label: 'ulg-sph-native-webgpu-surface-draw-validation'
 	        });
 	        const validationCompletions = [];
-	        const completeNativeReadbackSmokeValidation =
-	          beginSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, validationEncoder);
-	        if (completeNativeReadbackSmokeValidation) {
-	          validationCompletions.push(completeNativeReadbackSmokeValidation);
+	        if (nativeSurfaceValidationCadence.readbackSmokeValidationNeeded) {
+	          const completeNativeReadbackSmokeValidation =
+	            beginSphNativeWebGpuSurfaceConsumerReadbackSmokeValidation(bridge, validationEncoder);
+	          if (completeNativeReadbackSmokeValidation) {
+	            validationCompletions.push(completeNativeReadbackSmokeValidation);
+	          }
 	        }
-	        const completeNativeOffscreenValidation =
-	          beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
-	            bridge,
-	            validationEncoder,
-	            {
-	              drawCount: submittedDrawCount,
-	              opaqueDraws,
-	              transparentDraws
-	            }
-	          );
-	        if (completeNativeOffscreenValidation) {
-	          validationCompletions.push(completeNativeOffscreenValidation);
+	        if (nativeSurfaceValidationCadence.offscreenValidationNeeded) {
+	          const completeNativeOffscreenValidation =
+	            beginSphNativeWebGpuSurfaceConsumerOffscreenValidation(
+	              bridge,
+	              validationEncoder,
+	              {
+	                drawCount: submittedDrawCount,
+	                opaqueDraws,
+	                transparentDraws
+	              }
+	            );
+	          if (completeNativeOffscreenValidation) {
+	            validationCompletions.push(completeNativeOffscreenValidation);
+	          }
 	        }
 	        if (validationCompletions.length > 0) {
 	          bridge.device.queue.submit([validationEncoder.finish()]);
@@ -18262,6 +18438,26 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.renderBridgeOffscreenValidationHeight ?? null,
         surfaceDrawRenderBridgeOffscreenValidationAttemptCount:
           sphResidentSurfaceDraw?.renderBridgeOffscreenValidationAttemptCount ?? null,
+        surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus:
+          sphResidentSurfaceDraw?.renderBridgeNativeSurfaceValidationCadenceStatus
+          ?? sphResidentSurfaceDrawRenderBridge?.nativeSurfaceValidationCadenceStatus
+          ?? null,
+        surfaceDrawRenderBridgeNativeSurfaceValidationCadenceReason:
+          sphResidentSurfaceDraw?.renderBridgeNativeSurfaceValidationCadenceReason
+          ?? sphResidentSurfaceDrawRenderBridge?.nativeSurfaceValidationCadenceReason
+          ?? null,
+        surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired:
+          sphResidentSurfaceDraw?.renderBridgeNativeSurfaceValidationEncoderRequired
+          ?? sphResidentSurfaceDrawRenderBridge?.nativeSurfaceValidationEncoderRequired
+          ?? null,
+        surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded:
+          sphResidentSurfaceDraw?.renderBridgeNativeSurfaceReadbackSmokeValidationNeeded
+          ?? sphResidentSurfaceDrawRenderBridge?.nativeSurfaceReadbackSmokeValidationNeeded
+          ?? null,
+        surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded:
+          sphResidentSurfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationNeeded
+          ?? sphResidentSurfaceDrawRenderBridge?.nativeSurfaceOffscreenValidationNeeded
+          ?? null,
         surfaceDrawRenderBridgeReused: Boolean(
           sphResidentSurfaceDraw?.renderBridgeReused
           || sphResidentSurfaceDrawRenderBridge?.threeRenderBridgeReused

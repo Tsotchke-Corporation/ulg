@@ -45,6 +45,7 @@ import {
   resolveResidentExtensionSurfaceRendererCapability,
   resolveResidentSurfaceBufferHandoff,
   resolveResidentSurfaceVisibleGpuConsumer,
+  resolveSphNativeWebGpuSurfaceValidationCadence,
   summarizeThreeWebGpuDeviceLimits,
   publishScenePressureInterfaceGasCellFieldImportSource,
   submitSceneSpatialGasLedgerProducerStageForPressureInterface,
@@ -2343,6 +2344,62 @@ test('SPH visible GPU surface consumer requires renderer and pixel validation', 
     renderFieldBlocked.status,
     'resident-surface-visible-gpu-consumer-blocked-surface-extraction-required'
   );
+});
+
+test('SPH native WebGPU surface validation cadence stops after pass or retry exhaustion', () => {
+  const initial = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 4,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'not-run',
+    readbackSmokeValidationAttemptCount: 0,
+    offscreenValidationStatus: 'not-run',
+    offscreenValidationAttemptCount: 0
+  });
+  assert.equal(initial.validationEncoderRequired, true);
+  assert.equal(initial.readbackSmokeValidationNeeded, true);
+  assert.equal(initial.offscreenValidationNeeded, true);
+  assert.equal(initial.status, 'native-webgpu-surface-validation-needed');
+
+  const passed = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 4,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'passed',
+    readbackSmokeValidationFormat: 'rgba8unorm',
+    offscreenValidationStatus: 'passed',
+    offscreenValidationTextureFormat: 'bgra8unorm'
+  });
+  assert.equal(passed.validationEncoderRequired, false);
+  assert.equal(passed.readbackSmokeValidationNeeded, false);
+  assert.equal(passed.offscreenValidationNeeded, false);
+  assert.equal(passed.status, 'native-webgpu-surface-validation-passed');
+
+  const exhausted = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 4,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'not-run',
+    readbackSmokeValidationAttemptCount: 3,
+    offscreenValidationStatus: 'error',
+    offscreenValidationAttemptCount: 3
+  });
+  assert.equal(exhausted.validationEncoderRequired, false);
+  assert.equal(exhausted.readbackSmokeValidationNeeded, false);
+  assert.equal(exhausted.offscreenValidationNeeded, false);
+  assert.equal(exhausted.status, 'native-webgpu-surface-validation-attempts-exhausted');
+
+  const pending = resolveSphNativeWebGpuSurfaceValidationCadence({
+    rendererBridge: 'native-webgpu-surface-consumer',
+    submittedDrawCount: 4,
+    bridgeFormat: 'bgra8unorm',
+    readbackSmokeValidationStatus: 'pending',
+    readbackSmokeValidationPending: true,
+    offscreenValidationStatus: 'pending',
+    offscreenValidationPending: true
+  });
+  assert.equal(pending.validationEncoderRequired, false);
+  assert.equal(pending.status, 'native-webgpu-surface-validation-pending');
 });
 
 test('SPH renderer depth policy separates transmissive glass from alpha transparency', () => {

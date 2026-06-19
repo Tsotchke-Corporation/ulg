@@ -2,6 +2,25 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-19 AKDT: native WebGPU surface validation now has
+an explicit cadence gate instead of blindly creating a validation command
+encoder every render frame. The gate tracks readback-smoke and offscreen
+validation status, current formats, pending state, and retry exhaustion; the
+render loop only submits validation work while one of those stages can still
+make progress. Scene/probe/benchmark diagnostics now expose
+`surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus`,
+`surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired`, and the
+per-stage needed flags. Fresh 10k-ish three-batch native evidence is
+`status=good`, `probeStatus=good`, zero browser console issues, zero readback
+bytes, visible native GPU consumer ready, bridge `reused=true`, cadence
+`native-webgpu-surface-validation-pending`,
+`validationEncoderRequired=false`, readback/offscreen needed `false`, actual
+particles `9826`, mean batch `105.07 ms`, resident completed stage `6.8 ms`,
+surface total `8.0 ms`, extraction `5.0 ms`, translation `1.5 ms`, and bridge
+refresh `3.0 ms`. This does not fix the remaining renderer/frame cadence by
+itself, but it closes another repeated validation-work loop while preserving
+the first-pass same-device visible-consumer checks.
+
 Current checkpoint, 2026-06-19 AKDT: native WebGPU surface presentation now
 reuses the existing main-canvas render bridge across compatible resident
 surface refreshes. The bridge compatibility check requires the same resident

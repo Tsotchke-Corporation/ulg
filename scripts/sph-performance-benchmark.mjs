@@ -407,6 +407,26 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.renderBridgeOffscreenValidationStatus
     ?? surfaceDraw?.surfaceDrawRenderBridgeOffscreenValidationStatus
     ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus
+    ?? surfaceDraw?.renderBridgeNativeSurfaceValidationCadenceStatus
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus
+    ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired
+    ?? surfaceDraw?.renderBridgeNativeSurfaceValidationEncoderRequired
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired
+    ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded
+    ?? surfaceDraw?.renderBridgeNativeSurfaceReadbackSmokeValidationNeeded
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded
+    ?? null;
+  const surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded =
+    renderState?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded
+    ?? surfaceDraw?.renderBridgeNativeSurfaceOffscreenValidationNeeded
+    ?? surfaceDraw?.surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded
+    ?? null;
   const surfaceDrawRenderBridgeLastRenderSkipReason =
     renderState?.surfaceDrawRenderBridgeLastRenderSkipReason
     ?? surfaceDraw?.renderBridgeLastRenderSkipReason
@@ -747,6 +767,10 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawRenderBridgeLastRenderStatus,
     surfaceDrawRenderBridgeReadbackSmokeValidationStatus,
     surfaceDrawRenderBridgeOffscreenValidationStatus,
+    surfaceDrawRenderBridgeNativeSurfaceValidationCadenceStatus,
+    surfaceDrawRenderBridgeNativeSurfaceValidationEncoderRequired,
+    surfaceDrawRenderBridgeNativeSurfaceReadbackSmokeValidationNeeded,
+    surfaceDrawRenderBridgeNativeSurfaceOffscreenValidationNeeded,
     surfaceDrawRenderBridgeLastRenderSkipReason,
     surfaceDrawRenderBridgeReused,
     surfaceDrawRenderBridgeUpdateCount,

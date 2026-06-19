@@ -1,5 +1,44 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Conservative Native MC No-Readback Counter Bridge
+
+Native marching-cubes extraction is no longer blocked on the sibling
+extension's CPU-visible counter readback. The current path requests
+`gpu-conservative-no-readback`, keeps the extension's actual vertex count in a
+retained GPU counter buffer, and lets ULG's translation shader clamp the
+conservative surface rows to that actual count.
+
+Focused checks:
+
+- Sibling extension:
+  `/home/cos/projects/webgpu-marching-cubes` passed `npm test` and
+  `npm run build` with the dense-voxel/no-readback extraction path.
+- Syntax:
+  `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`,
+  `node --check src/visualization/sphPhaseScene.js`, and
+  `node --check src/visualization/sphPhaseDemoMount.js` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` passed `17/17`
+  and proves ULG binds the extension-retained vertex counter instead of a
+  host constant for conservative outputs. `node --test
+  tests/sphPhaseRenderer.test.mjs` passed `57/57`.
+- Browser diagnostics:
+  `/tmp/ulg-browser-native-mlsmpm-native-renderer-pixel-validation-3.json`
+  completed with `browserConsoleIssueCount=0`, `consoleWarnings=0`, native
+  extraction status `extension-surface-ready-needs-ulg-row-translation`,
+  `sourceVertexCounterMode=extension-gpu-vertex-counter`, bridge status
+  `native-webgpu-surface-consumer-ready`, and last render status
+  `native-webgpu-surface-consumer-rendered`.
+
+Known residual risk:
+
+- Visible native pixels are still not proven. Runtime pixel validation reports
+  `not-run` because WebGPU `mapAsync` readback fails with
+  `A valid external Instance reference no longer exists`, and the direct native
+  canvas frames are blank while the composited page remains nonblank. The next
+  acceptance gate is main-canvas native WebGPU presentation/mobile visibility,
+  not another CPU extraction fallback.
+
 ## Current Focused Result - 2026-06-19 Resident Continuation Native MC Deferral
 
 Resident MLS-MPM render-every continuation is now browser-console clean when

@@ -46,7 +46,10 @@ function extensionExecution({
   resourceOwnershipStatus = 'same-device',
   includeRowMetadata = false,
   includeOutputDescriptors = false,
-  topLevelBuffer = true
+  topLevelBuffer = true,
+  vertexCountMode = null,
+  actualVertexCounterBuffer = null,
+  actualVertexCounterBufferByteLength = 0
 } = {}) {
   const buffer = bufferRetained ? { label: 'surface-buffer', size: vertexCount * vertexStrideFloats * 4 } : null;
   const resourceOwnership = {
@@ -155,6 +158,9 @@ function extensionExecution({
       schema: WEBGPU_MARCHING_CUBES_SURFACE_SCHEMA,
       status: ok ? 'surface-ready' : 'surface-device-check-failed',
       vertexCount,
+      vertexCountMode,
+      actualVertexCounterBuffer,
+      actualVertexCounterBufferByteLength,
       triangleCount: vertexCount / 3,
       vertexStrideFloats,
       vertexStrideBytes: vertexStrideFloats * Float32Array.BYTES_PER_ELEMENT,
@@ -482,6 +488,39 @@ test('ULG consumes extension output descriptors without row metadata or legacy t
   assert.equal(translated.surfaceDraw.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
   assert.equal(createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params')?.size, 144);
   assert.equal(bindGroups[0].entries[0].resource.buffer, descriptorBuffer);
+});
+
+test('ULG GPU builder binds extension retained vertex counter for conservative outputs', async () => {
+  const { device, bindGroups, createdBuffers } = fakeExtensionSurfaceDevice();
+  const actualVertexCounterBuffer = { label: 'extension-actual-vertex-counter', size: 4 };
+  const execution = extensionExecution({
+    vertexCount: 45,
+    vertexCountMode: 'conservative-upper-bound',
+    actualVertexCounterBuffer,
+    actualVertexCounterBufferByteLength: 4
+  });
+  const summary = summarizeWebGpuMarchingCubesExtensionExecution(execution);
+
+  assert.equal(summary.extensionVertexCountMode, 'conservative-upper-bound');
+  assert.equal(summary.extensionActualVertexCounterBufferRetained, true);
+
+  const translated = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+    device,
+    extensionExecution: execution,
+    readbackMode: 'no-full-readback'
+  });
+
+  assert.equal(translated.status, 'extension-surface-translated-resident-webgpu');
+  assert.equal(translated.surfaceVertices.vertexCountMode, 'conservative-upper-bound');
+  assert.equal(translated.surfaceVertices.sourceVertexCounterMode, 'extension-gpu-vertex-counter');
+  assert.equal(translated.surfaceVertices.sourceVertexCounterBufferBound, true);
+  assert.equal(translated.surfaceVertices.sourceVertexCounterBufferRetained, true);
+  assert.equal(translated.surfaceDraw.vertexCountMode, 'conservative-upper-bound');
+  assert.equal(translated.surfaceDraw.sourceVertexCounterMode, 'extension-gpu-vertex-counter');
+  assert.equal(translated.surfaceDraw.sourceVertexCounterBufferBound, true);
+  assert.equal(translated.surfaceDraw.sourceVertexCounterBufferRetained, true);
+  assert.equal(bindGroups[0].entries[5].resource.buffer, actualVertexCounterBuffer);
+  assert.equal(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-source-vertex-count'), false);
 });
 
 test('ULG wrapper preserves caller-owned device and adapter swapability', async () => {
@@ -921,11 +960,12 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(shaderModules[0].code, webGpuMarchingCubesExtensionSurfaceRowsWgsl);
   assert.match(shaderModules[0].code, /SurfaceTranslationParams|compact_position_rows|surface_draw_indirect_rows/);
   assert.equal(bindGroups.length, 1);
-  assert.equal(bindGroups[0].entries.length, 5);
+  assert.equal(bindGroups[0].entries.length, 6);
   assert.equal(bindGroups[0].entries[0].resource.buffer, execution.result.buffer);
   assert.equal(bindGroups[0].entries[1].resource.buffer.label, 'ulg-sph-extension-surface-vertices');
   assert.equal(bindGroups[0].entries[2].resource.buffer.label, 'ulg-sph-extension-surface-draw');
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-draw-indirect');
+  assert.equal(bindGroups[0].entries[5].resource.buffer.label, 'ulg-sph-extension-surface-source-vertex-count');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'));
   assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 144));

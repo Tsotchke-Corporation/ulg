@@ -35,6 +35,23 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: the sibling native marching-cubes
+extension now has a conservative no-readback extraction mode and ULG binds the
+retained GPU vertex counter into the surface-row translation pass. This
+replaces the older final-extraction blocker where
+`MarchingCubes.computeActiveVoxels()` mapped a CPU-visible counter on the
+resident device. Current evidence:
+`/tmp/ulg-browser-native-mlsmpm-native-renderer-pixel-validation-3.json`
+completed with zero browser console issues/warnings, native extraction status
+`extension-surface-ready-needs-ulg-row-translation`, ULG source vertex counter
+mode `extension-gpu-vertex-counter`, bridge status
+`native-webgpu-surface-consumer-ready`, and render status
+`native-webgpu-surface-consumer-rendered`. It still classified `bad` because
+runtime pixel readback is unavailable in this browser and direct canvas frame
+captures remain blank. The remaining P0 is therefore main-canvas native WebGPU
+visibility/presentation and mobile rendering, not extension counter readback,
+overlay fallback, or CPU mesh optimization.
+
 Current routing note, 2026-06-19 AKDT: resident MLS-MPM render-every
 continuation is now console-clean on the native WebGPU surface-consumer route
 when native marching-cubes extraction is deferred until the final resident
@@ -43,13 +60,10 @@ batch. The probe
 completed with zero browser console issues and preserved the engine-owned
 native surface consumer path without an overlay. This supersedes the older
 multi-batch timeout notes below for the immediate queue-lifetime failure class.
-The remaining P0 renderer blocker is narrower: final native extraction still
-fails closed inside the sibling `webgpu-marching-cubes` extension because
-`MarchingCubes.computeActiveVoxels()` performs a CPU `mapAsync` counter
-readback on the shared resident device. The next todo is a no-readback,
-GPU-resident native extraction/draw contract, likely conservative draw ranges
-or indirect draw metadata, with browser pixel validation. Do not spend more
-time optimizing CPU summary/readback fallback paths except as diagnostic gates.
+This block is now superseded for the extension counter-readback failure class:
+the next todo is native WebGPU canvas visibility/pixel evidence over the
+GPU-counter surface rows. Do not spend more time optimizing CPU summary/readback
+fallback paths except as diagnostic gates.
 
 Current routing note, 2026-06-19 AKDT: the engine-owned
 `native-webgpu-surface-consumer` main-canvas path is wired, but the earlier

@@ -4391,6 +4391,7 @@ export function createSphPhaseScene(container, {
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
   residentSurfaceDrawDiagnosticMode = 'auto',
+  nativeSurfacePixelValidation = false,
   residentAuthorityHost = null,
   navigatorRef = globalThis.navigator
 } = {}) {
@@ -4401,6 +4402,7 @@ export function createSphPhaseScene(container, {
   const useResidentThreeSurfaceBridgeByDefault = isThreeResidentSurfaceBridgeMode(residentSurfaceDrawDiagnosticModeDefault);
   const requestedRendererBackend = normalizeSphRendererBackend(rendererBackend);
   const useNativeWebGpuRenderer = requestedRendererBackend === 'native-webgpu';
+  const enableNativeSurfacePixelValidation = Boolean(nativeSurfacePixelValidation);
   const enableThreeWebGpuResidentDevice = Boolean(rendererWebGpuResidentDevice);
   const requestedThreeWebGpuPresentation = Boolean(rendererWebGpuPresentation);
   const requestedThreeWebGpuSurfaceBufferPresentation = Boolean(rendererWebGpuSurfaceBufferPresentation);
@@ -6632,7 +6634,7 @@ export function createSphPhaseScene(container, {
         context.configure({
           device,
           format,
-          usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
+          usage: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT | GPU_TEXTURE_USAGE.COPY_SRC,
           alphaMode: 'opaque'
         });
       }
@@ -6845,7 +6847,11 @@ export function createSphPhaseScene(container, {
   function beginSphNativeWebGpuSurfaceConsumerPixelValidation(
     bridge,
     encoder,
-    { drawCount = 0 } = {}
+    {
+      drawCount = 0,
+      sourceTexture = null,
+      sourceOrigin = null
+    } = {}
   ) {
     if (bridge?.rendererBridge !== SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_MODE) return null;
     if (!(drawCount > 0)) {
@@ -6869,17 +6875,27 @@ export function createSphPhaseScene(container, {
     ) {
       return null;
     }
-    const validationTexture = ensureSphNativeWebGpuSurfacePixelValidationTexture(bridge);
-    if (!bridge.device?.createBuffer || !encoder?.copyTextureToBuffer || !validationTexture) {
+    const validationTexture = sourceTexture ? null : ensureSphNativeWebGpuSurfacePixelValidationTexture(bridge);
+    const copyTexture = sourceTexture || validationTexture;
+    if (!bridge.device?.createBuffer || !encoder?.copyTextureToBuffer || !copyTexture) {
       publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
         status: 'error',
-        reason: 'native WebGPU surface consumer pixel validation lacks offscreen texture-copy support'
+        reason: 'native WebGPU surface consumer pixel validation lacks canvas or offscreen texture-copy support'
       });
       return null;
     }
 
     const readbackBytesPerRow = 256;
     const readbackSizeBytes = readbackBytesPerRow;
+    const origin = sourceOrigin || (
+      sourceTexture
+        ? {
+            x: Math.max(0, Math.floor(((bridge.canvas?.width || 1) - 1) / 2)),
+            y: Math.max(0, Math.floor(((bridge.canvas?.height || 1) - 1) / 2)),
+            z: 0
+          }
+        : { x: 0, y: 0, z: 0 }
+    );
     try {
       if (!bridge.pixelValidationReadbackBuffer) {
         bridge.pixelValidationReadbackBuffer = bridge.device.createBuffer({
@@ -6898,19 +6914,21 @@ export function createSphPhaseScene(container, {
         status: 'pending',
         reason: 'native WebGPU surface consumer pixel validation readback is pending'
       });
-      const validationPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: validationTexture.createView(),
-          clearValue: bridge.backgroundClearValue || { r: 0.094, g: 0.133, b: 0.169, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store'
-        }]
-      });
-      validationPass.end();
+      if (!sourceTexture) {
+        const validationPass = encoder.beginRenderPass({
+          colorAttachments: [{
+            view: validationTexture.createView(),
+            clearValue: bridge.backgroundClearValue || { r: 0.094, g: 0.133, b: 0.169, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store'
+          }]
+        });
+        validationPass.end();
+      }
       encoder.copyTextureToBuffer(
         {
-          texture: validationTexture,
-          origin: { x: 0, y: 0, z: 0 }
+          texture: copyTexture,
+          origin
         },
         {
           buffer: bridge.pixelValidationReadbackBuffer,
@@ -6925,11 +6943,7 @@ export function createSphPhaseScene(container, {
       );
       return () => {
         const readbackBuffer = bridge.pixelValidationReadbackBuffer;
-        const queueFence = typeof bridge.device?.queue?.onSubmittedWorkDone === 'function'
-          ? bridge.device.queue.onSubmittedWorkDone()
-          : Promise.resolve();
-        queueFence
-          .then(() => readbackBuffer.mapAsync(GPU_MAP_MODE.READ))
+        readbackBuffer.mapAsync(GPU_MAP_MODE.READ)
           .then(() => {
             if (bridge.pixelValidationSerial !== serial) {
               readbackBuffer.unmap();
@@ -6940,20 +6954,31 @@ export function createSphPhaseScene(container, {
             readbackBuffer.unmap();
             bridge.pixelValidationPending = false;
             const nonzero = sample.some((channel) => channel > 0);
+            const source = sourceTexture
+              ? 'native canvas current texture'
+              : 'offscreen validation texture';
             publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
               status: nonzero ? 'passed' : 'failed',
               reason: nonzero
-                ? 'same-device native WebGPU validation render target readback observed nonzero pixels after surface draw submission'
-                : 'same-device native WebGPU validation render target readback returned transparent black after surface draw submission',
+                ? `same-device ${source} readback observed nonzero pixels after surface draw submission`
+                : `same-device ${source} readback returned transparent black after surface draw submission`,
               sample
             });
           })
           .catch((error) => {
             if (bridge.pixelValidationSerial !== serial) return;
             bridge.pixelValidationPending = false;
+            const message = error instanceof Error ? error.message : String(error);
+            if (/external Instance reference no longer exists|mapAsync/i.test(message)) {
+              publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
+                status: 'not-run',
+                reason: `native WebGPU surface consumer pixel validation readback unavailable in this browser: ${message}`
+              });
+              return;
+            }
             publishSphNativeWebGpuSurfaceConsumerPixelValidation(bridge, {
               status: 'error',
-              reason: error instanceof Error ? error.message : String(error)
+              reason: message
             });
           });
       };
@@ -8555,6 +8580,10 @@ export function createSphPhaseScene(container, {
         nativeWebGpuSurfaceConsumerPixelValidationStatus:
           nativeConsumer?.pixelValidationStatus || 'not-run',
         pixelValidationStatus: nativeConsumer?.pixelValidationStatus || 'not-run',
+        enableRuntimePixelReadback: enableNativeSurfacePixelValidation,
+        pixelValidationReadbackSource: enableNativeSurfacePixelValidation
+          ? 'native-canvas-current-texture'
+          : 'disabled',
         backgroundClearValue: useNativeConsumer
           ? { r: 0.094, g: 0.133, b: 0.169, a: 1 }
           : { r: 0, g: 0, b: 0, a: 0 },
@@ -8862,7 +8891,10 @@ export function createSphPhaseScene(container, {
       const completeNativePixelValidation = beginSphNativeWebGpuSurfaceConsumerPixelValidation(
         bridge,
         encoder,
-        { drawCount: opaqueDraws.length + transparentDraws.length }
+        {
+          drawCount: opaqueDraws.length + transparentDraws.length,
+          sourceTexture: canvasTexture
+        }
       );
       bridge.device.queue.submit([encoder.finish()]);
       trackResidentSurfaceDrawSubmitFence(bridge, {
@@ -12160,7 +12192,8 @@ export function createSphPhaseScene(container, {
     descriptor,
     isovalue = null,
     materialPayload = null,
-    pbrPayload = null
+    pbrPayload = null,
+    readbackMode = 'gpu-conservative-no-readback'
   } = {}) {
     if (!descriptor?.ok) {
       return {
@@ -12190,7 +12223,8 @@ export function createSphPhaseScene(container, {
       isovalue: isovalue ?? descriptor.isovalue ?? 0,
       materialPayload,
       pbrPayload,
-      ownsBuffer: true
+      ownsBuffer: true,
+      readbackMode
     });
     const extensionError = extensionExecution?.errors?.[0]
       || extensionExecution?.webgpuStatus?.error

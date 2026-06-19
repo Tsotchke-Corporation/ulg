@@ -114,6 +114,7 @@ struct SurfaceTranslationParams {
 @group(0) @binding(2) var<storage, read_write> surface_draw_rows: array<f32>;
 @group(0) @binding(3) var<storage, read_write> surface_draw_indirect_rows: array<u32>;
 @group(0) @binding(4) var<uniform> params: SurfaceTranslationParams;
+@group(0) @binding(5) var<storage, read> source_vertex_count_rows: array<u32>;
 
 fn compact_position(vertex_index: u32) -> vec3<f32> {
   let offset = vertex_index * params.source_stride_floats;
@@ -186,25 +187,33 @@ fn write_vertex(vertex_index: u32, triangle_index: u32, p: vec3<f32>, normal: ve
   surface_vertex_rows[offset + 15u] = 1.0;
 }
 
-fn write_draw_metadata() {
+fn actual_vertex_count() -> u32 {
+  return min(params.vertex_count, source_vertex_count_rows[0u]);
+}
+
+fn actual_triangle_count() -> u32 {
+  return actual_vertex_count() / 3u;
+}
+
+fn write_draw_metadata(triangle_count: u32) {
   surface_draw_rows[0u] = f32(params.surface_index);
   surface_draw_rows[1u] = params.material_id;
   surface_draw_rows[2u] = params.phase_id;
   surface_draw_rows[3u] = params.optical_state_id;
   surface_draw_rows[4u] = 0.0;
-  surface_draw_rows[5u] = f32(params.triangle_count * 3u);
+  surface_draw_rows[5u] = f32(triangle_count * 3u);
   surface_draw_rows[6u] = 0.0;
-  surface_draw_rows[7u] = f32(params.triangle_count);
+  surface_draw_rows[7u] = f32(triangle_count);
   surface_draw_rows[8u] = params.render_order;
   surface_draw_rows[9u] = params.transparency_class_id;
   surface_draw_rows[10u] = params.depth_write_flag;
-  surface_draw_rows[11u] = select(0.0, 1.0, params.triangle_count > 0u);
+  surface_draw_rows[11u] = select(0.0, 1.0, triangle_count > 0u);
   surface_draw_rows[12u] = params.bounds_center_x_m;
   surface_draw_rows[13u] = params.bounds_center_y_m;
   surface_draw_rows[14u] = params.bounds_center_z_m;
   surface_draw_rows[15u] = params.bounds_radius_m;
-  surface_draw_indirect_rows[0u] = params.triangle_count * 3u;
-  surface_draw_indirect_rows[1u] = select(0u, 1u, params.triangle_count > 0u);
+  surface_draw_indirect_rows[0u] = triangle_count * 3u;
+  surface_draw_indirect_rows[1u] = select(0u, 1u, triangle_count > 0u);
   surface_draw_indirect_rows[2u] = 0u;
   surface_draw_indirect_rows[3u] = params.surface_index;
 }
@@ -212,7 +221,8 @@ fn write_draw_metadata() {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let triangle_index = id.x;
-  if (triangle_index >= params.triangle_count) {
+  let triangle_count = actual_triangle_count();
+  if (triangle_index >= triangle_count) {
     return;
   }
   let vertex_base = triangle_index * 3u;
@@ -224,7 +234,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   write_vertex(vertex_base + 1u, triangle_index, p1, normal);
   write_vertex(vertex_base + 2u, triangle_index, p2, normal);
   if (triangle_index == 0u) {
-    write_draw_metadata();
+    write_draw_metadata(triangle_count);
   }
 }
 `;
@@ -886,6 +896,19 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
   const extensionSurfaceSchema = result?.schema ?? null;
   const extensionOk = execution.ok === true;
   const extensionVertexCount = Math.max(0, Math.round(finiteNumber(result?.vertexCount, 0)));
+  const extensionVertexCountMode = result?.vertexCountMode ?? null;
+  const extensionActualVertexCounterBuffer = result?.actualVertexCounterBuffer
+    || result?.vertexCounterBuffer
+    || null;
+  const extensionActualVertexCounterBufferByteLength = Math.max(
+    0,
+    Math.round(finiteNumber(
+      result?.actualVertexCounterBufferByteLength
+        ?? result?.vertexCounterBufferByteLength
+        ?? extensionActualVertexCounterBuffer?.size,
+      0
+    ))
+  );
   const extensionTriangleCount = Math.max(0, finiteNumber(result?.triangleCount, 0));
   const extensionVertexStrideFloats = positionRows.rowStrideFloats > 0
     ? positionRows.rowStrideFloats
@@ -956,6 +979,9 @@ export function summarizeWebGpuMarchingCubesExtensionExecution(execution) {
     extensionVertexStrideFloats,
     extensionVertexStrideBytes,
     extensionVertexCount,
+    extensionVertexCountMode,
+    extensionActualVertexCounterBufferRetained: Boolean(extensionActualVertexCounterBuffer),
+    extensionActualVertexCounterBufferByteLength,
     extensionTriangleCount,
     extensionBufferRetained,
     extensionBufferByteLength: positionRows.bufferByteLength,
@@ -1497,6 +1523,22 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   const noFullReadback = readbackMode === NO_FULL_READBACK_MODE;
   const sourceStrideFloats = Math.max(3, Math.round(finiteNumber(summary.extensionVertexStrideFloats, 4)));
   const sourceVertexCount = Math.max(0, Math.round(finiteNumber(summary.extensionVertexCount, 0)));
+  const sourceVertexCountMode = summary.extensionVertexCountMode ?? null;
+  const extensionResult = extensionExecution?.result || null;
+  const extensionActualVertexCounterBuffer = extensionResult?.actualVertexCounterBuffer
+    || extensionResult?.vertexCounterBuffer
+    || null;
+  const extensionActualVertexCounterBufferByteLength = Math.max(
+    0,
+    Math.round(finiteNumber(
+      extensionResult?.actualVertexCounterBufferByteLength
+        ?? extensionResult?.vertexCounterBufferByteLength
+        ?? extensionActualVertexCounterBuffer?.size,
+      0
+    ))
+  );
+  let sourceVertexCounterBuffer = extensionActualVertexCounterBuffer;
+  let ownsSourceVertexCounterBuffer = false;
   const triangleCount = Math.floor(sourceVertexCount / 3);
   const translatedVertexCount = triangleCount * 3;
   const resolvedSurfaceIndex = Math.max(0, Math.round(finiteNumber(surfaceIndex, 0)));
@@ -1539,6 +1581,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
           status,
           stage: 'webgpu-marching-cubes-extension-surface-translation',
           sourceVertexCount,
+          sourceVertexCountMode,
           translatedVertexCount,
           triangleCount,
           vertexRowsByteLength,
@@ -1587,6 +1630,15 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     size: 144,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
+  if (!sourceVertexCounterBuffer) {
+    sourceVertexCounterBuffer = device.createBuffer({
+      label: 'ulg-sph-extension-surface-source-vertex-count',
+      size: 4,
+      usage: GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST
+    });
+    device.queue.writeBuffer(sourceVertexCounterBuffer, 0, new Uint32Array([sourceVertexCount]));
+    ownsSourceVertexCounterBuffer = true;
+  }
   device.queue.writeBuffer(paramsBuffer, 0, createExtensionSurfaceTranslationParamsArray({
     vertexCount: sourceVertexCount,
     sourceStrideFloats,
@@ -1621,7 +1673,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       computeBufferBinding(1, 'storage'),
       computeBufferBinding(2, 'storage'),
       computeBufferBinding(3, 'storage'),
-      computeBufferBinding(4, 'uniform')
+      computeBufferBinding(4, 'uniform'),
+      computeBufferBinding(5, 'read-only-storage')
     ]
   });
   const bindGroup = device.createBindGroup({
@@ -1631,7 +1684,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
       { binding: 1, resource: { buffer: vertexRowsBuffer } },
       { binding: 2, resource: { buffer: drawRowsBuffer } },
       { binding: 3, resource: { buffer: drawIndirectRowsBuffer } },
-      { binding: 4, resource: { buffer: paramsBuffer } }
+      { binding: 4, resource: { buffer: paramsBuffer } },
+      { binding: 5, resource: { buffer: sourceVertexCounterBuffer } }
     ]
   });
   const encoder = device.createCommandEncoder();
@@ -1712,6 +1766,9 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
 
   const cleanup = () => {
     paramsBuffer.destroy?.();
+    if (ownsSourceVertexCounterBuffer) {
+      sourceVertexCounterBuffer?.destroy?.();
+    }
   };
   const keepVertexRowsBuffer = retainVertexRowsBuffer || noFullReadback;
   const keepDrawRowsBuffer = retainDrawRowsBuffer || noFullReadback;
@@ -1746,6 +1803,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     boundsCenterM: resolvedSurfaceBounds?.centerM ?? null,
     boundsRadiusM: resolvedSurfaceBounds?.radiusM ?? null
   });
+  const sourceVertexCounterMode = extensionActualVertexCounterBuffer
+    ? 'extension-gpu-vertex-counter'
+    : 'host-constant-vertex-count';
+  const sourceVertexCounterBufferRetained = Boolean(extensionActualVertexCounterBuffer);
+  const sourceVertexCounterBufferByteLength = extensionActualVertexCounterBuffer
+    ? extensionActualVertexCounterBufferByteLength
+    : 4;
   const surfaceVertices = {
     schema: ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA,
     backend: 'webgpu',
@@ -1764,12 +1828,18 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     vertexRows,
     vertexRowsByteLength: vertexRows.byteLength,
     vertexCount: translatedVertexCount,
+    vertexCountMode: sourceVertexCountMode,
     triangleCount,
     maxVertexRows: translatedVertexCount,
     vertexRowsBufferByteLength: keepVertexRowsBuffer ? vertexRowsByteLength : 0,
     vertexRowsBufferRowCount: keepVertexRowsBuffer ? translatedVertexCount : 0,
     vertexRowsBufferRetained: keepVertexRowsBuffer,
     sourceVertexCount,
+    sourceVertexCountMode,
+    sourceVertexCounterMode,
+    sourceVertexCounterBufferBound: Boolean(sourceVertexCounterBuffer),
+    sourceVertexCounterBufferRetained,
+    sourceVertexCounterBufferByteLength,
     translatedVertexCount,
     ignoredTrailingVertexCount: sourceVertexCount - translatedVertexCount,
     sourceVertexRowsBufferBound: true,
@@ -1796,6 +1866,13 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     surfaceCount: 1,
     activeSurfaceCount: triangleCount > 0 ? 1 : 0,
     vertexCount: translatedVertexCount,
+    vertexCountMode: sourceVertexCountMode,
+    sourceVertexCount,
+    sourceVertexCountMode,
+    sourceVertexCounterMode,
+    sourceVertexCounterBufferBound: Boolean(sourceVertexCounterBuffer),
+    sourceVertexCounterBufferRetained,
+    sourceVertexCounterBufferByteLength,
     triangleCount,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_DRAW_ROW_LAYOUT.length,

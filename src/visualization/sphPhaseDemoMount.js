@@ -180,6 +180,7 @@ export const SPH_PHASE_URL_PARAM_KEYS = Object.freeze([
   'surfaceBufferPresentation',
   'surfaceDraw',
   'surfaceDrawDiagnostic',
+  'nativeSurfacePixelValidation',
   'surfaceOverlay'
 ]);
 
@@ -1723,6 +1724,15 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('externalBufferPresentation'),
     false
   );
+  const nativeSurfacePixelValidationEnabled = booleanUrlParam(
+    initialHash.get('nativeSurfacePixelValidation')
+      ?? initialQuery.get('nativeSurfacePixelValidation')
+      ?? initialHash.get('nativeWebGpuSurfacePixelValidation')
+      ?? initialQuery.get('nativeWebGpuSurfacePixelValidation')
+      ?? initialHash.get('surfacePixelValidation')
+      ?? initialQuery.get('surfacePixelValidation'),
+    false
+  );
   const acquireInitialRendererWebGpuDevice = Boolean(
     initialSphRendererBackend === 'webgpu'
     && initialThreeWebGpuRendererPresentationEnabled
@@ -1781,6 +1791,7 @@ export async function mountSphPhaseDemoOverlay({
     if (initialThreeWebGpuRendererResidentDeviceEnabled) q.set('rendererResidentDevice', '1');
     if (initialThreeWebGpuRendererPresentationUnsafe) q.set('rendererPresentationUnsafe', '1');
     if (initialThreeWebGpuSurfaceBufferPresentationEnabled) q.set('surfaceBufferPresentation', '1');
+    if (nativeSurfacePixelValidationEnabled) q.set('nativeSurfacePixelValidation', '1');
     q.set('surfaceDraw', residentSurfaceDrawDiagnosticMode);
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
@@ -2720,6 +2731,7 @@ export async function mountSphPhaseDemoOverlay({
     rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode,
+    nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
     residentAuthorityHost: currentResidentAuthorityHostForScene()
   });
   overlay.__sphScene = scene;
@@ -4335,6 +4347,7 @@ export async function mountSphPhaseDemoOverlay({
       rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode,
+      nativeSurfacePixelValidation: nativeSurfacePixelValidationEnabled,
       residentAuthorityHost: currentResidentAuthorityHostForScene()
     });
     overlay.__sphScene = scene;

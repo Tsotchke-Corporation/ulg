@@ -1,5 +1,50 @@
 # ULG Implementation Log
 
+## 2026-06-19 AKDT - Conservative Native MC No-Readback Counter Bridge
+
+Status:
+
+- Added a conservative no-readback extraction contract to the sibling
+  `/home/cos/projects/webgpu-marching-cubes` extension. It fills dense voxel IDs
+  on GPU, allocates a conservative upper-bound vertex buffer, retains the
+  actual vertex counter and draw-indirect metadata on GPU, and skips CPU
+  `mapAsync`/explicit queue fences in the GUI extraction path.
+- Updated ULG's WebGPU marching-cubes surface-row translator to bind the
+  extension-retained vertex counter as read-only storage and write surface draw
+  metadata from the actual GPU-side count rather than the conservative upper
+  bound.
+- Added `nativeSurfacePixelValidation=1` routing for explicit native canvas
+  readback attempts, copied from the current canvas texture when possible, and
+  converted browser external-instance readback failures into `not-run`
+  diagnostics instead of console errors.
+
+Validation:
+
+- PASS: sibling extension `npm test` and `npm run build` passed before this
+  ULG commit slice.
+- PASS: ULG syntax checks for
+  `src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`,
+  `src/visualization/sphPhaseScene.js`, and
+  `src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `17/17`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- PASS: browser native MLS-MPM probe
+  `/tmp/ulg-browser-native-mlsmpm-native-renderer-pixel-validation-3.json`
+  completed with zero browser console issues/warnings. It reached native
+  extraction status `extension-surface-ready-needs-ulg-row-translation`, bound
+  the extension GPU vertex counter, and rendered through
+  `native-webgpu-surface-consumer-rendered`.
+
+Remaining:
+
+- The probe still classified `bad` because runtime WebGPU pixel readback from
+  this browser reports `A valid external Instance reference no longer exists`,
+  so pixel validation is `not-run`; direct native canvas PNG captures are still
+  blank while the composited page is nonblank. The next P0 is main-canvas
+  native WebGPU visibility/presentation and mobile rendering evidence, not
+  more CPU readback fallback work.
+
 ## 2026-06-19 AKDT - Resident Continuation Native MC Deferral
 
 Status:

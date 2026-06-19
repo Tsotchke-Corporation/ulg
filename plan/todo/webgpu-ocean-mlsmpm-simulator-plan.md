@@ -52,6 +52,19 @@ The system is still not Ocean-style fast because:
 
 Tactical status, 2026-06-19 AKDT:
 
+- Native marching-cubes extraction now has a conservative no-readback mode in
+  the sibling extension and ULG consumes its retained GPU vertex counter when
+  translating compact MC vertices into ULG surface rows. The extension can fill
+  dense voxel IDs on GPU, compute conservative upper-bound vertex buffers, copy
+  the actual vertex count into retained GPU counter/indirect buffers, and skip
+  `mapAsync`/`queue.onSubmittedWorkDone()` in the GUI path. ULG forwards the
+  `gpu-conservative-no-readback` request, binds the retained counter as a
+  read-only storage buffer in the translation shader, and writes draw metadata
+  from that actual GPU-side count. Current native renderer probe evidence is
+  console-clean with the bridge submitting, but visible canvas pixels are still
+  not proven. The next simulator/rendering slice is therefore main-canvas
+  native WebGPU visibility/presentation and mobile validation, not another
+  CPU counter-readback workaround.
 - Resident MLS-MPM render-every continuation now avoids the native surface draw
   / compute queue collision by tracking resident compute work, skipping draw
   submits while resident GPU work is in flight, and deferring native
@@ -67,14 +80,9 @@ Tactical status, 2026-06-19 AKDT:
   fences were removed from marching-cubes/exclusive-scan readback helpers. ULG
   now forwards native extension error name/status/stage/stack into resident
   render diagnostics.
-- The remaining native MC blocker is the extension's CPU-visible counter
-  readback. Final extraction still fails closed at
-  `MarchingCubes.computeActiveVoxels()` when `counterReadback.mapAsync()` is
-  invoked on the shared resident device. The next no-readback renderer slice is
-  therefore a GPU-resident extraction contract: conservative compact draw
-  ranges, GPU-generated indirect draw args, or another same-device counter
-  handoff that never maps in the GUI loop. Do not replace this with an overlay
-  or more CPU geometry tuning.
+- This older extraction blocker is now superseded by the conservative
+  no-readback extension contract above. Keep the CPU-readable counter path only
+  for diagnostics/parity; it is not the GUI hot-loop acceptance path.
 
 Tactical status, 2026-06-18 AKDT:
 

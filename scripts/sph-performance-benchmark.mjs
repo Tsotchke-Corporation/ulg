@@ -357,6 +357,36 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     ?? surfaceDraw?.visibleGpuConsumerPixelValidationStatus
     ?? surfaceDraw?.surfaceDrawVisibleGpuConsumerPixelValidationStatus
     ?? null;
+  const surfaceDrawNativeMarchingCubesExtractionElapsedMs = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesExtractionElapsedMs
+      ?? surfaceDraw?.nativeMarchingCubesExtractionElapsedMs
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesExtractionElapsedMs
+  );
+  const surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs
+      ?? surfaceDraw?.nativeMarchingCubesExtensionExecutionElapsedMs
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs
+  );
+  const surfaceDrawNativeMarchingCubesTotalElapsedMs = numberOrNull(
+    renderState?.surfaceDrawNativeMarchingCubesTotalElapsedMs
+      ?? surfaceDraw?.nativeMarchingCubesTotalElapsedMs
+      ?? surfaceDraw?.surfaceDrawNativeMarchingCubesTotalElapsedMs
+  );
+  const surfaceDrawExtensionSurfaceTranslationElapsedMs = numberOrNull(
+    renderState?.surfaceDrawExtensionSurfaceTranslationElapsedMs
+      ?? surfaceDraw?.extensionSurfaceTranslationElapsedMs
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceTranslationElapsedMs
+  );
+  const surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs = numberOrNull(
+    renderState?.surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs
+      ?? surfaceDraw?.extensionSurfaceRenderBridgeBuildElapsedMs
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs
+  );
+  const surfaceDrawExtensionSurfaceRefreshElapsedMs = numberOrNull(
+    renderState?.surfaceDrawExtensionSurfaceRefreshElapsedMs
+      ?? surfaceDraw?.extensionSurfaceRefreshElapsedMs
+      ?? surfaceDraw?.surfaceDrawExtensionSurfaceRefreshElapsedMs
+  );
   const surfaceDrawRequestedDiagnosticMode = renderState?.surfaceDrawRequestedDiagnosticMode
     ?? surfaceDraw?.requestedDiagnosticMode
     ?? null;
@@ -565,6 +595,12 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     surfaceDrawVisibleGpuConsumerInputKind,
     surfaceDrawVisibleGpuConsumerRuntimeReady,
     surfaceDrawVisibleGpuConsumerPixelValidationStatus,
+    surfaceDrawNativeMarchingCubesExtractionElapsedMs,
+    surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs,
+    surfaceDrawNativeMarchingCubesTotalElapsedMs,
+    surfaceDrawExtensionSurfaceTranslationElapsedMs,
+    surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs,
+    surfaceDrawExtensionSurfaceRefreshElapsedMs,
     surfaceDrawRequestedDiagnosticMode,
     surfaceDrawDiagnosticFallbackReason,
     surfaceDrawSource: renderState?.surfaceDrawVisibleRenderSource ?? surfaceDraw?.visibleRenderSource ?? null,

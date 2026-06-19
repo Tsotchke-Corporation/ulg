@@ -2049,6 +2049,12 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesExtractionStatus ?? null,
             surfaceDrawNativeMarchingCubesExtractionReason:
               renderState.surfaceDrawNativeMarchingCubesExtractionReason ?? null,
+            surfaceDrawNativeMarchingCubesExtractionElapsedMs:
+              renderState.surfaceDrawNativeMarchingCubesExtractionElapsedMs ?? null,
+            surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs:
+              renderState.surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs ?? null,
+            surfaceDrawNativeMarchingCubesTotalElapsedMs:
+              renderState.surfaceDrawNativeMarchingCubesTotalElapsedMs ?? null,
             surfaceDrawNativeMarchingCubesExtractionErrorName:
               renderState.surfaceDrawNativeMarchingCubesExtractionErrorName ?? null,
             surfaceDrawNativeMarchingCubesExtractionErrorStatus:
@@ -2057,6 +2063,12 @@ async function runBrowserProbe({
               renderState.surfaceDrawNativeMarchingCubesExtractionErrorStage ?? null,
             surfaceDrawNativeMarchingCubesExtractionErrorStack:
               renderState.surfaceDrawNativeMarchingCubesExtractionErrorStack ?? null,
+            surfaceDrawExtensionSurfaceTranslationElapsedMs:
+              renderState.surfaceDrawExtensionSurfaceTranslationElapsedMs ?? null,
+            surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs:
+              renderState.surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs ?? null,
+            surfaceDrawExtensionSurfaceRefreshElapsedMs:
+              renderState.surfaceDrawExtensionSurfaceRefreshElapsedMs ?? null,
             surfaceDrawGpuBufferHandoffReadbackMode: renderState.surfaceDrawGpuBufferHandoffReadbackMode ?? null,
             surfaceDrawGpuBufferHandoffNoFullReadback: renderState.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
             surfaceDrawGpuBufferHandoffNoSummaryReadback:

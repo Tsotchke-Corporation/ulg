@@ -29036,3 +29036,38 @@ Remaining:
 
 - Broaden the benchmark rows to larger particle counts and keep separating
   scene/render costs from direct resident mechanics timing.
+
+## 2026-06-19 15:25 AKDT - Native Surface Extraction Timing Split
+
+Status:
+
+- Added timing diagnostics for native marching-cubes extraction, extension
+  execution, ULG surface-row translation, render-bridge construction, and total
+  native surface refresh.
+- Wired the new timing fields through the long-horizon probe sampler and SPH
+  performance benchmark summary.
+- Confirmed the 10k-ish native no-full scene bottleneck is not resident
+  MLS-MPM physics, ULG translation, render bridge construction, or CPU
+  readback. The stall is inside the native marching-cubes extension extraction
+  call.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `git diff --check -- src/visualization/sphPhaseScene.js scripts/sph-performance-benchmark.mjs scripts/sph-long-horizon-probe.mjs`.
+- PASS: `/tmp/ulg-bench-native-10k-surface-timing-fixed.json` completed
+  `status=good` with browser console issues `0`, native bridge
+  `native-webgpu-surface-consumer`, `actualParticleCount=9826`,
+  `estimatedReadbackBytesPerStep=0`, `residentStageMs=9.2`,
+  `surfaceDrawNativeMarchingCubesExtractionElapsedMs=3762.6`,
+  `surfaceDrawExtensionSurfaceTranslationElapsedMs=1.2`,
+  `surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs=0.6`, and
+  `surfaceDrawNativeMarchingCubesTotalElapsedMs=3765.6`.
+
+Remaining:
+
+- Optimize or replace the sibling native marching-cubes extraction path. ULG's
+  resident physics and translation stages are no longer the measured 10k scene
+  bottleneck.

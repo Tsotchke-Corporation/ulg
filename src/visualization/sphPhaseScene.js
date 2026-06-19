@@ -14090,6 +14090,7 @@ export function createSphPhaseScene(container, {
         });
       }
     });
+    const extractionStartedMs = nowMs();
     const extensionExecution = await wrapper.extractSurface({
       volume,
       isovalue: isovalue ?? descriptor.isovalue ?? 0,
@@ -14098,6 +14099,7 @@ export function createSphPhaseScene(container, {
       ownsBuffer: true,
       readbackMode
     });
+    const extractionElapsedMs = Math.max(0, nowMs() - extractionStartedMs);
     const extensionError = extensionExecution?.errors?.[0]
       || extensionExecution?.webgpuStatus?.error
       || null;
@@ -14110,6 +14112,8 @@ export function createSphPhaseScene(container, {
       volumeSchema: volume.schema,
       volumeSourceType: volume.sourceType,
       volumeScalarLayoutName: volume.scalarLayoutName,
+      elapsedMs: extractionElapsedMs,
+      extensionExecutionElapsedMs: extractionElapsedMs,
       errorName: extensionError?.name ?? null,
       errorStatus: extensionError?.status ?? null,
       errorStage: extensionError?.stage ?? null,
@@ -14883,6 +14887,7 @@ export function createSphPhaseScene(container, {
     }
     let translation = null;
     try {
+      const surfaceDrawRefreshStartedMs = nowMs();
       const wrappedExtensionExecution = extensionExecution?.extensionExecution
         ? extensionExecution
         : null;
@@ -14916,6 +14921,7 @@ export function createSphPhaseScene(container, {
       const translationReadbackMode = renderBridgePlan.translationReadbackMode;
       scene.userData.sphResidentExtensionSurfaceRendererCapability = rendererCapability;
       scene.userData.sphResidentExtensionSurfaceRenderBridgePlan = renderBridgePlan;
+      const translationStartedMs = nowMs();
       translation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         device: resolvedDeviceResult.device,
         extensionExecution: rawExtensionExecution,
@@ -14954,8 +14960,10 @@ export function createSphPhaseScene(container, {
           });
         }
       });
+      const extensionSurfaceTranslationElapsedMs = Math.max(0, nowMs() - translationStartedMs);
       const surfaceVerticesExecution = translation.surfaceVertices;
       const surfaceDrawExecution = translation.surfaceDraw;
+      const renderBridgeBuildStartedMs = nowMs();
       const renderBridge = renderBridgePlan.useThreeCompactBridge
         ? createSphResidentSurfaceDrawThreeCompactBridge({
           surfaceDrawExecution,
@@ -14973,6 +14981,8 @@ export function createSphPhaseScene(container, {
               rendererCapability
             })
           : null));
+      const extensionSurfaceRenderBridgeBuildElapsedMs = Math.max(0, nowMs() - renderBridgeBuildStartedMs);
+      const extensionSurfaceRefreshElapsedMs = Math.max(0, nowMs() - surfaceDrawRefreshStartedMs);
       const renderBridgeReady = renderBridge?.status === SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS
         || renderBridge?.status === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS
         || renderBridge?.status === SPH_NATIVE_WEBGPU_SURFACE_CONSUMER_BRIDGE_STATUS;
@@ -15204,6 +15214,9 @@ export function createSphPhaseScene(container, {
         extensionSurfaceRawVertexCount: rawExtensionExecution?.result?.vertexCount ?? null,
         extensionSurfacePositionTransformStatus: translation.positionTransformStatus ?? null,
         extensionSurfacePositionTransform: translation.positionTransform ?? null,
+        extensionSurfaceTranslationElapsedMs,
+        extensionSurfaceRenderBridgeBuildElapsedMs,
+        extensionSurfaceRefreshElapsedMs,
         extensionSurfaceTranslation: translation,
         surfaceVertices: surfaceVerticesExecution,
         surfaceDraw: surfaceDrawExecution,
@@ -15238,6 +15251,9 @@ export function createSphPhaseScene(container, {
         renderBridgePlanEffectiveMode: residentDraw.renderBridgePlanEffectiveMode,
         renderBridgePlanFallbackThreeCompact: residentDraw.renderBridgePlanFallbackThreeCompact,
         renderBridgePlanFallbackReason: residentDraw.renderBridgePlanFallbackReason,
+        translationElapsedMs: residentDraw.extensionSurfaceTranslationElapsedMs,
+        renderBridgeBuildElapsedMs: residentDraw.extensionSurfaceRenderBridgeBuildElapsedMs,
+        refreshElapsedMs: residentDraw.extensionSurfaceRefreshElapsedMs,
         translationReadbackMode: residentDraw.readbackMode
       });
       return residentDraw;
@@ -16582,6 +16598,14 @@ export function createSphPhaseScene(container, {
                     nativeMarchingCubesExtractionAllowed: nativeSurfaceExtractionAllowed,
                     nativeMarchingCubesExtractionSchema: nativeExtraction.schema,
                     nativeMarchingCubesExtractionStatus: nativeExtraction.status,
+                    nativeMarchingCubesExtractionElapsedMs: nativeExtraction.elapsedMs ?? null,
+                    nativeMarchingCubesExtensionExecutionElapsedMs:
+                      nativeExtraction.extensionExecutionElapsedMs ?? null,
+                    nativeMarchingCubesTotalElapsedMs: finiteNumberOrNull(nativeExtraction.elapsedMs)
+                      != null && finiteNumberOrNull(nativeSurfaceDraw.extensionSurfaceRefreshElapsedMs) != null
+                      ? finiteNumberOrNull(nativeExtraction.elapsedMs)
+                        + finiteNumberOrNull(nativeSurfaceDraw.extensionSurfaceRefreshElapsedMs)
+                      : null,
                     nativeMarchingCubesVolumeSchema: nativeExtraction.volumeSchema,
                     nativeMarchingCubesVolumeSourceType: nativeExtraction.volumeSourceType,
                     nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName
@@ -16601,7 +16625,10 @@ export function createSphPhaseScene(container, {
                     sourceVertexRowCount: nativeSurfaceDraw.sourceVertexRowCount ?? null,
                     compactedVertexRowsBufferRetained: nativeSurfaceDraw.compactedVertexRowsBufferRetained,
                     drawRowsBufferRetained: nativeSurfaceDraw.drawRowsBufferRetained,
-                    drawIndirectRowsBufferRetained: nativeSurfaceDraw.drawIndirectRowsBufferRetained
+                    drawIndirectRowsBufferRetained: nativeSurfaceDraw.drawIndirectRowsBufferRetained,
+                    extractionElapsedMs: nativeExtraction.elapsedMs ?? null,
+                    translationElapsedMs: nativeSurfaceDraw.extensionSurfaceTranslationElapsedMs ?? null,
+                    surfaceDrawRefreshElapsedMs: nativeSurfaceDraw.extensionSurfaceRefreshElapsedMs ?? null
                   });
                 } else {
                   nextResidentSurfaceDraw.nativeMarchingCubesExtractionSchema = nativeExtraction.schema;
@@ -17223,6 +17250,12 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionStatus ?? null,
         surfaceDrawNativeMarchingCubesExtractionReason:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionReason ?? null,
+        surfaceDrawNativeMarchingCubesExtractionElapsedMs:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionElapsedMs ?? null,
+        surfaceDrawNativeMarchingCubesExtensionExecutionElapsedMs:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtensionExecutionElapsedMs ?? null,
+        surfaceDrawNativeMarchingCubesTotalElapsedMs:
+          sphResidentSurfaceDraw?.nativeMarchingCubesTotalElapsedMs ?? null,
         surfaceDrawNativeMarchingCubesExtractionErrorName:
           sphResidentSurfaceDraw?.nativeMarchingCubesExtractionErrorName ?? null,
         surfaceDrawNativeMarchingCubesExtractionErrorStatus:
@@ -17247,6 +17280,12 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.extensionSurfacePositionTransformStatus ?? null,
         surfaceDrawExtensionSurfacePositionTransform:
           sphResidentSurfaceDraw?.extensionSurfacePositionTransform ?? null,
+        surfaceDrawExtensionSurfaceTranslationElapsedMs:
+          sphResidentSurfaceDraw?.extensionSurfaceTranslationElapsedMs ?? null,
+        surfaceDrawExtensionSurfaceRenderBridgeBuildElapsedMs:
+          sphResidentSurfaceDraw?.extensionSurfaceRenderBridgeBuildElapsedMs ?? null,
+        surfaceDrawExtensionSurfaceRefreshElapsedMs:
+          sphResidentSurfaceDraw?.extensionSurfaceRefreshElapsedMs ?? null,
         surfaceDrawOverlayPolicyStatus: sphResidentSurfaceDraw?.overlayPolicyStatus
           ?? surfaceOverlayPolicy.status
           ?? null,

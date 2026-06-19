@@ -10958,6 +10958,22 @@ Benchmark active-grid telemetry repair, 2026-06-19 14:55 AKDT:
   - Copy/readback telemetry stayed clean:
     `renderRowsReadback=false`, `surfaceDrawReadback=false`, and
     `estimatedReadbackBytesPerStep=0`.
+
+Native surface extraction timing split, 2026-06-19 15:25 AKDT:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check scripts/sph-performance-benchmark.mjs` passed.
+- `git diff --check -- src/visualization/sphPhaseScene.js scripts/sph-performance-benchmark.mjs scripts/sph-long-horizon-probe.mjs`
+  - Passed.
+- Native no-full 10k-ish scene benchmark:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=10000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1 ULG_BENCH_OUTPUT=/tmp/ulg-bench-native-10k-surface-timing-fixed.json ULG_BENCH_PORT=5226 ULG_BENCH_TIMEOUT_MS=240000 npm run bench:sph-performance`
+  - Passed with scenario `status=good`, browser console issues `0`, and
+    `estimatedReadbackBytesPerStep=0`.
+  - Timing split: resident physics `9.2 ms`, native MC extraction
+    `3762.6 ms`, ULG translation `1.2 ms`, render bridge build `0.6 ms`,
+    total native surface refresh `3765.6 ms`.
 - Browser mobile-shaped native probe:
   `/tmp/ulg-native-depth-remap-mobile-probe.json`
   - Passed with `status=good`.

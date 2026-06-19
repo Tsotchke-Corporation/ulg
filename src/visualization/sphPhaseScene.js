@@ -145,6 +145,7 @@ const SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED = false;
 const SPH_THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED = false;
 const SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED = false;
 const SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_RUNTIME_VALIDATED = false;
+const SPH_THREE_WEBGPU_SURFACE_BUFFER_INDIRECT_RUNTIME_VALIDATED = false;
 let activeThreeNamespace = THREE;
 
 function nowMs() {
@@ -205,26 +206,37 @@ export function resolveThreeWebGpuPresentationPolicy({
     available
     && requested
     && !runtimeValidated
+    && !unsafeOverride
   );
   const blockedByResidentDevice = Boolean(
     available
     && requested
     && !blockedByRuntime
+    && !unsafeOverride
     && !rendererWebGpuResidentDevice
   );
   const blocked = Boolean(blockedByRuntime || blockedByResidentDevice);
+  const unsafeRuntimeBypass = Boolean(available && requested && unsafeOverride && !runtimeValidated);
   const enabled = Boolean(available && requested && !blocked);
   const reason = blocked
     ? (blockedByRuntime
       ? 'Three WebGPU presentation is blocked because the current renderer path still fails WebGPU error-scope validation; falling back to WebGL engine rendering while preserving WebGPU compute'
       : 'Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering')
-    : null;
+    : (unsafeRuntimeBypass
+      ? (rendererWebGpuResidentDevice
+        ? 'Three WebGPU presentation is enabled only for the explicit unsafe diagnostic route; browser console and pixel validation must pass before promotion'
+        : 'Three WebGPU presentation is enabled only for the explicit unsafe presentation-only diagnostic route; resident compute uses its separate GPUDevice and this cannot validate same-device no-readback surface buffers')
+      : null);
+  const enabledUnsafeDiagnostic = Boolean(enabled && unsafeRuntimeBypass);
+  const enabledStatus = enabledUnsafeDiagnostic
+    ? 'three-webgpu-presentation-enabled-unsafe-diagnostic'
+    : 'three-webgpu-presentation-enabled';
   const status = !available
     ? 'three-webgpu-presentation-unavailable'
     : (!requested
       ? 'three-webgpu-presentation-not-requested'
       : (enabled
-        ? 'three-webgpu-presentation-enabled'
+        ? enabledStatus
         : (blockedByRuntime
           ? 'three-webgpu-presentation-blocked-runtime-validation'
           : 'three-webgpu-presentation-blocked-resident-device')));
@@ -237,6 +249,8 @@ export function resolveThreeWebGpuPresentationPolicy({
     rendererWebGpuResidentDevice: Boolean(rendererWebGpuResidentDevice),
     runtimeValidated: Boolean(runtimeValidated),
     unsafeDiagnosticOverride: unsafeOverride,
+    unsafeRuntimeBypass,
+    enabledUnsafeDiagnostic,
     blocked,
     blockedByRuntime,
     blockedByResidentDevice,
@@ -436,7 +450,8 @@ export function resolveSphSurfaceDrawDiagnosticPresentationMode({
 export function resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
   renderer = null,
   requested = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED,
-  runtimeValidated = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_RUNTIME_VALIDATED
+  runtimeValidated = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_RUNTIME_VALIDATED,
+  unsafeDiagnosticOverride = false
 } = {}) {
   const rendererIsWebGPU = Boolean(renderer?.isWebGPURenderer);
   const rendererPresentationEnabled = renderer?.userData?.sphWebGpuPresentationEnabled !== false;
@@ -447,6 +462,16 @@ export function resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
   );
   const requestedUse = Boolean(requested);
   const rendererOwnedRuntimeValidated = Boolean(runtimeValidated);
+  const unsafeOverride = Boolean(unsafeDiagnosticOverride);
+  const unsafeRuntimeBypass = Boolean(
+    requestedUse
+    && unsafeOverride
+    && !rendererOwnedRuntimeValidated
+    && rendererIsWebGPU
+    && rendererPresentationEnabled
+    && rendererBackendDeviceReady
+    && rendererBackendBufferBindingAvailable
+  );
   let status = 'renderer-owned-resident-device-disabled';
   let reason = 'renderer-owned Three WebGPU presentation device is reserved for presentation/same-device bridge capability; resident compute uses its own GPUDevice';
   if (!rendererIsWebGPU) {
@@ -461,9 +486,12 @@ export function resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
   } else if (!rendererBackendBufferBindingAvailable) {
     status = 'renderer-owned-resident-device-blocked-backend-api';
     reason = 'Three WebGPU renderer did not expose backend buffer binding API';
-  } else if (requestedUse && !rendererOwnedRuntimeValidated) {
+  } else if (requestedUse && !rendererOwnedRuntimeValidated && !unsafeRuntimeBypass) {
     status = 'renderer-owned-resident-device-blocked-runtime-validation';
     reason = 'Three WebGPU renderer-owned resident device sharing still fails renderer error-scope validation; resident compute uses a separate WebGPU device until the shared-device path is validated';
+  } else if (requestedUse && unsafeRuntimeBypass) {
+    status = 'renderer-owned-resident-device-enabled-unsafe-diagnostic';
+    reason = 'using Three WebGPU renderer-owned device only for the explicit unsafe diagnostic route';
   } else if (requestedUse) {
     status = 'renderer-owned-resident-device-enabled';
     reason = 'using Three WebGPU renderer-owned device for same-device resident compute/render buffers';
@@ -478,7 +506,10 @@ export function resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
     rendererBackendDeviceReady,
     rendererBackendBufferBindingAvailable,
     runtimeValidated: rendererOwnedRuntimeValidated,
+    unsafeDiagnosticOverride: unsafeOverride,
+    unsafeRuntimeBypass,
     rendererOwnedDeviceAllowed: status === 'renderer-owned-resident-device-enabled'
+      || status === 'renderer-owned-resident-device-enabled-unsafe-diagnostic'
   };
 }
 
@@ -516,9 +547,19 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     surfaceBufferPresentationEnabled
     || renderer?.userData?.sphThreeWebGpuSurfaceBufferPresentationEnabled === true
   );
+  const externalBufferPipelineUnsafeDiagnosticOverride = Boolean(
+    externalBufferPresentationEnabled
+    && renderer?.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride === true
+  );
   const externalBufferPipelineRuntimeValidated = Boolean(
     SPH_THREE_WEBGPU_EXTERNAL_BUFFER_PIPELINE_RUNTIME_VALIDATED
+    || externalBufferPipelineUnsafeDiagnosticOverride
   );
+  const externalBufferPipelineRuntimeValidationSource = externalBufferPipelineRuntimeValidated
+    ? (SPH_THREE_WEBGPU_EXTERNAL_BUFFER_PIPELINE_RUNTIME_VALIDATED
+      ? 'runtime-validated'
+      : 'unsafe-diagnostic-override')
+    : 'unvalidated';
   const sameDeviceGpuBufferGeometryAvailable = Boolean(
     rendererBackend === 'three-webgpu'
     && backendBufferBindingAvailable
@@ -585,7 +626,9 @@ export function resolveResidentExtensionSurfaceRendererCapability({
     sameDeviceGpuBufferGeometryAvailable,
     sameDeviceGpuBufferGeometrySupported,
     externalBufferPresentationEnabled,
+    externalBufferPipelineUnsafeDiagnosticOverride,
     externalBufferPipelineRuntimeValidated,
+    externalBufferPipelineRuntimeValidationSource,
     visibleNoReadbackSupported,
     requestedRenderBridgeMode: mode,
     requestedThreeCompactReadbackBridge,
@@ -3373,6 +3416,46 @@ function averageRenderRowColorSrgb(colorsRgb, indices = [], descriptor = {}) {
   return srgbLuminance(color) > 0.025 ? color : fallbackBridgeColorSrgbForDescriptor(descriptor);
 }
 
+export function createThreeWebGpuResidentBridgeMaterialProxy(material, {
+  descriptor = null,
+  fallbackColorSrgb = null,
+  bridgeMode = null,
+  proxyReason = 'three-webgpu-resident-bridge-basic-material-pipeline-proxy'
+} = {}) {
+  if (!material) return material;
+  const Three = activeThreeNamespace || THREE;
+  const MaterialCtor = Three.MeshBasicMaterial;
+  if (typeof MaterialCtor !== 'function') return material;
+  const fallbackColor = Array.isArray(fallbackColorSrgb)
+    ? fallbackColorSrgb
+    : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
+  const color = material.color?.clone?.() || new Three.Color().setRGB(
+    clamp(fallbackColor[0], 0, 1),
+    clamp(fallbackColor[1], 0, 1),
+    clamp(fallbackColor[2], 0, 1),
+    Three.SRGBColorSpace
+  );
+  const opacity = Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1;
+  const proxy = new MaterialCtor({
+    color,
+    side: Three.DoubleSide,
+    transparent: Boolean(material.transparent) || opacity < 0.999,
+    opacity,
+    depthWrite: material.depthWrite !== false,
+    depthTest: material.depthTest !== false
+  });
+  proxy.name = `${material.name || material.type || 'surface'}-three-webgpu-resident-bridge-proxy`;
+  proxy.userData = {
+    ...(material.userData || {}),
+    surfaceMaterialRendererProxy: true,
+    surfaceMaterialRendererProxyReason: proxyReason,
+    surfaceMaterialRendererBridgeMode: bridgeMode || material.userData?.surfaceMaterialRendererBridgeMode || null,
+    surfaceMaterialOriginalType: material.type || null,
+    surfaceMaterialFallbackColor: [...fallbackColor]
+  };
+  return proxy;
+}
+
 export function stabilizeSurfaceMeshMaterialForRenderer(material, {
   descriptor = null,
   fallbackColorSrgb = null,
@@ -3463,44 +3546,35 @@ function createThreeWebGpuSurfaceBufferMaterialProxy(material, {
 } = {}) {
   if (!material) return material;
   const Three = activeThreeNamespace || THREE;
-  const MaterialCtor = typeof Three.MeshStandardMaterial === 'function'
-    ? Three.MeshStandardMaterial
-    : Three.MeshBasicMaterial;
-  if (typeof MaterialCtor !== 'function') return material;
-  const fallbackColor = Array.isArray(fallbackColorSrgb)
-    ? fallbackColorSrgb
-    : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
-  const color = material.color?.clone?.() || new Three.Color().setRGB(
-    clamp(fallbackColor[0], 0, 1),
-    clamp(fallbackColor[1], 0, 1),
-    clamp(fallbackColor[2], 0, 1),
-    Three.SRGBColorSpace
-  );
-  const proxyParams = {
-    color,
-    side: Three.DoubleSide,
-    transparent: Boolean(material.transparent),
-    opacity: Number.isFinite(Number(material.opacity)) ? Number(material.opacity) : 1,
-    depthWrite: Boolean(material.depthWrite),
-    depthTest: material.depthTest !== false
-  };
-  if (MaterialCtor === Three.MeshStandardMaterial) {
-    proxyParams.metalness = Number.isFinite(Number(material.metalness)) ? Number(material.metalness) : 0;
-    proxyParams.roughness = Number.isFinite(Number(material.roughness)) ? Number(material.roughness) : 0.45;
-    proxyParams.envMapIntensity = Math.max(Number(material.envMapIntensity) || 0, 0.75);
+  if (typeof Three.MeshNormalMaterial === 'function') {
+    const fallbackColor = Array.isArray(fallbackColorSrgb)
+      ? fallbackColorSrgb
+      : fallbackBridgeColorSrgbForDescriptor(descriptor || material.userData?.renderDescriptor || {});
+    const proxy = new Three.MeshNormalMaterial({
+      flatShading: true,
+      side: Three.DoubleSide,
+      transparent: false,
+      opacity: 1,
+      depthWrite: material.depthWrite !== false,
+      depthTest: material.depthTest !== false
+    });
+    proxy.name = `${material.name || material.type || 'surface'}-three-webgpu-surface-buffer-normal-proxy`;
+    proxy.userData = {
+      ...(material.userData || {}),
+      surfaceMaterialRendererProxy: true,
+      surfaceMaterialRendererProxyReason: 'three-webgpu-external-buffer-normal-material-pipeline-proxy',
+      surfaceMaterialRendererBridgeMode: SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
+      surfaceMaterialOriginalType: material.type || null,
+      surfaceMaterialFallbackColor: [...fallbackColor]
+    };
+    return proxy;
   }
-  const proxy = new MaterialCtor(proxyParams);
-  proxy.name = `${material.name || material.type || 'surface'}-three-webgpu-buffer-proxy`;
-  proxy.userData = {
-    ...(material.userData || {}),
-    surfaceMaterialRendererProxy: true,
-    surfaceMaterialRendererProxyReason: MaterialCtor === Three.MeshStandardMaterial
-      ? 'three-webgpu-external-buffer-standard-material-pipeline-proxy'
-      : 'three-webgpu-external-buffer-basic-material-pipeline-proxy',
-    surfaceMaterialOriginalType: material.type || null,
-    surfaceMaterialFallbackColor: [...fallbackColor]
-  };
-  return proxy;
+  return createThreeWebGpuResidentBridgeMaterialProxy(material, {
+    descriptor,
+    fallbackColorSrgb,
+    bridgeMode: SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE,
+    proxyReason: 'three-webgpu-external-buffer-basic-material-pipeline-proxy'
+  });
 }
 
 export function stabilizeRenderRowSphereBridgeMaterial(material, {
@@ -4282,7 +4356,8 @@ export function createSphPhaseScene(container, {
     rendererInitStatus = status;
     const rendererOwnedResidentDevicePolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
       renderer,
-      requested: enableThreeWebGpuResidentDevice
+      requested: enableThreeWebGpuResidentDevice,
+      unsafeDiagnosticOverride: renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
     });
     scene.userData.sphThreeWebGpuRendererOwnedResidentDevicePolicy = rendererOwnedResidentDevicePolicy;
     scene.userData.sphRendererBackend = rendererBackendName();
@@ -4711,7 +4786,8 @@ export function createSphPhaseScene(container, {
   function rendererOwnedWebGpuDeviceResult() {
     const policy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
       renderer,
-      requested: enableThreeWebGpuResidentDevice
+      requested: enableThreeWebGpuResidentDevice,
+      unsafeDiagnosticOverride: renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
     });
     scene.userData.sphThreeWebGpuRendererOwnedResidentDevicePolicy = policy;
     if (!policy.rendererOwnedDeviceAllowed) {
@@ -4754,7 +4830,8 @@ export function createSphPhaseScene(container, {
         result.rendererOwnedResidentDevicePolicy = scene.userData.sphThreeWebGpuRendererOwnedResidentDevicePolicy
           || resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
             renderer,
-            requested: enableThreeWebGpuResidentDevice
+            requested: enableThreeWebGpuResidentDevice,
+            unsafeDiagnosticOverride: renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
           });
         if (result.device?.lost?.then) {
           result.device.lost.finally(() => {
@@ -4773,7 +4850,8 @@ export function createSphPhaseScene(container, {
           rendererOwnedResidentDevicePolicy: scene.userData.sphThreeWebGpuRendererOwnedResidentDevicePolicy
             || resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
               renderer,
-              requested: enableThreeWebGpuResidentDevice
+              requested: enableThreeWebGpuResidentDevice,
+              unsafeDiagnosticOverride: renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
             })
         };
       });
@@ -6653,6 +6731,10 @@ export function createSphPhaseScene(container, {
     let maxParticleRadiusM = null;
     let sphereBridgeTransmissionProxyCount = 0;
     let sphereBridgeFallbackColorCount = 0;
+    let sphereBridgeMaterialRendererProxyCount = 0;
+    let sphereBridgeGeometryProxyCount = 0;
+    const materialRenderPolicy = resolveSceneSurfaceMaterialRenderPolicy();
+    const useThreeWebGpuResidentBridgeMaterialProxy = Boolean(materialRenderPolicy.rendererIsWebGPU);
     const previousBridge = sphResidentSurfaceDrawRenderBridge;
 
     if (useSphereBridge) {
@@ -6717,6 +6799,34 @@ export function createSphPhaseScene(container, {
         const cachedOptics = opticalParamsFromGpuTableRecord(opticalGpuTable, descriptor);
         const nextOptics = cachedOptics || opticalRenderParams(opticalQueryForDescriptor(descriptor, properties));
         const nextMaterialSignature = opticalSignatureForMaterial(nextOptics);
+        const bridgeFallbackColorSrgb = averageRenderRowColorSrgb(colorsRgb, indices, descriptor);
+        const prepareSphereMaterial = (sourceMaterial) => {
+          if (!sourceMaterial) return sourceMaterial;
+          sourceMaterial.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
+          stabilizeRenderRowSphereBridgeMaterial(sourceMaterial, {
+            descriptor,
+            fallbackColorSrgb: bridgeFallbackColorSrgb
+          });
+          if (!useThreeWebGpuResidentBridgeMaterialProxy) return sourceMaterial;
+          if (
+            sourceMaterial.userData.surfaceMaterialRendererProxyReason
+            === 'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+          ) {
+            sphereBridgeMaterialRendererProxyCount += 1;
+            return sourceMaterial;
+          }
+          const proxyMaterial = createThreeWebGpuResidentBridgeMaterialProxy(sourceMaterial, {
+            descriptor,
+            fallbackColorSrgb: bridgeFallbackColorSrgb,
+            bridgeMode: SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE,
+            proxyReason: 'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+          });
+          proxyMaterial.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
+          if (proxyMaterial.userData.surfaceMaterialRendererProxy) {
+            sphereBridgeMaterialRendererProxyCount += 1;
+          }
+          return proxyMaterial;
+        };
         let mesh = previousMeshesBySurfaceKey.get(surfaceKey) || null;
         previousMeshesBySurfaceKey.delete(surfaceKey);
         const instanceCapacity = Math.max(0, Math.round(Number(mesh?.instanceMatrix?.count) || Number(mesh?.count) || 0));
@@ -6728,9 +6838,17 @@ export function createSphPhaseScene(container, {
         );
         if (!canReuseMesh) {
           if (mesh) disposeSphereMesh(mesh);
-          const sphereGeometry = new Three.SphereGeometry(1, 8, 6);
-          const material = makeSurfaceMaterial(descriptor, properties, nextOptics);
-          material.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
+          const sphereGeometry = useThreeWebGpuResidentBridgeMaterialProxy
+            && typeof Three.OctahedronGeometry === 'function'
+            ? new Three.OctahedronGeometry(1, 0)
+            : new Three.SphereGeometry(1, 8, 6);
+          if (useThreeWebGpuResidentBridgeMaterialProxy) {
+            sphereGeometry.userData.threeWebGpuMappedBufferSafeProxy = true;
+            sphereBridgeGeometryProxyCount += 1;
+          }
+          const sourceMaterial = makeSurfaceMaterial(descriptor, properties, nextOptics);
+          const material = prepareSphereMaterial(sourceMaterial);
+          if (material !== sourceMaterial) sourceMaterial.dispose?.();
           mesh = new Three.InstancedMesh(sphereGeometry, material, indices.length);
           mesh.name = `ulg-sph-three-render-row-spheres-${surfaceKey}`;
           mesh.frustumCulled = false;
@@ -6743,14 +6861,22 @@ export function createSphPhaseScene(container, {
         const previousMaterialSignature = material?.userData?.renderRowSphereMaterialSignature
           || opticalSignatureForMaterial(material?.userData?.optical);
         if (previousMaterialSignature !== nextMaterialSignature) {
-          const replacementMaterial = makeSurfaceMaterial(descriptor, properties, nextOptics);
-          replacementMaterial.userData.renderRowSphereMaterialSignature = nextMaterialSignature;
+          const sourceReplacementMaterial = makeSurfaceMaterial(descriptor, properties, nextOptics);
+          const replacementMaterial = prepareSphereMaterial(sourceReplacementMaterial);
           const oldMaterial = mesh.material;
           mesh.material = replacementMaterial;
           disposeSphereMaterial(oldMaterial);
+          if (replacementMaterial !== sourceReplacementMaterial) sourceReplacementMaterial.dispose?.();
           material = replacementMaterial;
+        } else {
+          const preparedMaterial = prepareSphereMaterial(material);
+          if (preparedMaterial !== material) {
+            const oldMaterial = mesh.material;
+            mesh.material = preparedMaterial;
+            disposeSphereMaterial(oldMaterial);
+            material = preparedMaterial;
+          }
         }
-        const bridgeFallbackColorSrgb = averageRenderRowColorSrgb(colorsRgb, indices, descriptor);
         const emissive = decoded?.emissiveByMaterial?.[descriptor.material]
           ?? decoded?.emissiveByMaterial?.[descriptor.renderKey]
           ?? null;
@@ -6759,10 +6885,6 @@ export function createSphPhaseScene(container, {
           material.emissiveIntensity = 1.8;
         }
         applySurfaceRenderOrdering(mesh, material.userData.optical, descriptor);
-        stabilizeRenderRowSphereBridgeMaterial(material, {
-          descriptor,
-          fallbackColorSrgb: bridgeFallbackColorSrgb
-        });
         mesh.count = indices.length;
         mesh.userData.renderMode = SPH_THREE_RENDER_ROW_SPHERES_BRIDGE_MODE;
         mesh.userData.renderSource = visibleRenderSource;
@@ -6778,6 +6900,9 @@ export function createSphPhaseScene(container, {
         mesh.userData.renderDomainKey = descriptor.renderDomainKey;
         mesh.userData.renderRowSphereTransmissionProxy = Boolean(material.userData.renderRowSphereTransmissionProxy);
         mesh.userData.renderRowSphereFallbackColor = material.userData.renderRowSphereFallbackColor || null;
+        mesh.userData.surfaceMaterialRendererProxy = Boolean(material.userData.surfaceMaterialRendererProxy);
+        mesh.userData.surfaceMaterialRendererProxyReason = material.userData.surfaceMaterialRendererProxyReason || null;
+        mesh.userData.renderRowSphereGeometryProxy = Boolean(mesh.geometry?.userData?.threeWebGpuMappedBufferSafeProxy);
         if (material.userData.renderRowSphereTransmissionProxy) sphereBridgeTransmissionProxyCount += 1;
         if (material.userData.renderRowSphereFallbackColor) sphereBridgeFallbackColorCount += 1;
         let groupMinRadius = Number.POSITIVE_INFINITY;
@@ -6825,6 +6950,8 @@ export function createSphPhaseScene(container, {
       drawOrderingPolicy = 'three-instanced-spheres-material-pbr-depth-policy';
       group.userData.sphereBridgeTransmissionProxyCount = sphereBridgeTransmissionProxyCount;
       group.userData.sphereBridgeFallbackColorCount = sphereBridgeFallbackColorCount;
+      group.userData.sphereBridgeMaterialRendererProxyCount = sphereBridgeMaterialRendererProxyCount;
+      group.userData.sphereBridgeGeometryProxyCount = sphereBridgeGeometryProxyCount;
       group.userData.sphereBridgeReusedMeshCount = reusedSphereMeshCount;
       group.userData.sphereBridgeCreatedMeshCount = createdSphereMeshCount;
       group.userData.sphereBridgeDisposedMeshCount = disposedSphereMeshCount;
@@ -6950,11 +7077,16 @@ export function createSphPhaseScene(container, {
       oitTargetsReady: false,
       lastOpaqueDrawCount,
       lastTransparentDrawCount,
-      opticalRenderSource: useSphereBridge ? 'render-row-material-pbr' : 'render-row-vertex-colors',
+      opticalRenderSource: useSphereBridge
+        ? (useThreeWebGpuResidentBridgeMaterialProxy
+          ? 'render-row-material-webgpu-basic-proxy'
+          : 'render-row-material-pbr')
+        : 'render-row-vertex-colors',
       opticalRecordCount: opticalGpuTable?.recordCount ?? 0,
       opticalRecordStrideFloats: opticalGpuTable?.recordStrideFloats ?? 0,
       opticalSpectralSampleCount: opticalGpuTable?.spectralSampleCount ?? 0,
       opticalSpectralSampleStrideFloats: opticalGpuTable?.spectralSampleStrideFloats ?? 0,
+      materialRenderPolicy,
       temporalSwapPolicy: null,
       retainedPreviousOverlay: false,
       vertexCount: pointCount,
@@ -6966,6 +7098,8 @@ export function createSphPhaseScene(container, {
       sphereBridgeMaterialKeys: bridgeMaterialKeys,
       sphereBridgeTransmissionProxyCount,
       sphereBridgeFallbackColorCount,
+      sphereBridgeMaterialRendererProxyCount,
+      sphereBridgeGeometryProxyCount,
       sphereBridgeReusedMeshCount: useSphereBridge
         ? (group?.userData?.sphereBridgeReusedMeshCount ?? 0)
         : 0,
@@ -7362,15 +7496,16 @@ export function createSphPhaseScene(container, {
       offset: SPH_SURFACE_VERTEX_ROW_INDEX.positionXM,
       name: 'position'
     });
-    const normalBinding = {
+    const useExternalNormalAttribute = false;
+    const normalBinding = useExternalNormalAttribute ? {
       attribute: new Three.InterleavedBufferAttribute(
         positionBinding.interleavedBuffer,
         3,
         SPH_SURFACE_VERTEX_ROW_INDEX.normalX,
         false
       )
-    };
-    normalBinding.attribute.name = 'normal';
+    } : null;
+    if (normalBinding) normalBinding.attribute.name = 'normal';
 
     const drawRecords = resolveThreeWebGpuSurfaceBufferDrawRecords({
       surfaceDrawExecution,
@@ -7378,6 +7513,8 @@ export function createSphPhaseScene(container, {
     });
     const aggregateIndirectBuffer = surfaceDrawExecution?.drawAggregateIndirectRowsBuffer || null;
     const aggregateIndirectBinding = (
+      SPH_THREE_WEBGPU_SURFACE_BUFFER_INDIRECT_RUNTIME_VALIDATED
+      &&
       drawRecords.conservativeNoReadbackDrawRange
       && surfaceDrawExecution?.drawAggregateIndirectRowsBufferRetained
       && surfaceDrawExecution?.surfaceDrawGpuOnlyAggregateIndirectReady
@@ -7421,7 +7558,7 @@ export function createSphPhaseScene(container, {
       const properties = materialPropertiesForSurfaceDescriptor(descriptor, materialProperties);
       const geometry = new Three.BufferGeometry();
       geometry.setAttribute('position', positionBinding.attribute);
-      geometry.setAttribute('normal', normalBinding.attribute);
+      if (normalBinding) geometry.setAttribute('normal', normalBinding.attribute);
       if (aggregateIndirectBinding && drawRecords.conservativeNoReadbackDrawRange) {
         geometry.setIndirect(aggregateIndirectBinding.attribute, 0);
       }
@@ -7512,7 +7649,15 @@ export function createSphPhaseScene(container, {
       externalGpuBufferGeometry: true,
       externalGpuBufferByteLength: vertexRowsBufferByteLength,
       externalGpuBufferVertexRowStrideFloats: rowStride,
+      externalGpuBufferNormalAttribute: Boolean(normalBinding),
+      externalGpuBufferNormalAttributeDisabledReason: normalBinding
+        ? null
+        : 'Three WebGPU surface-buffer diagnostic uses unlit basic material and omits external normals until pipeline validation passes',
       externalGpuBufferIndirect: Boolean(aggregateIndirectBinding),
+      externalGpuBufferIndirectRuntimeValidated: SPH_THREE_WEBGPU_SURFACE_BUFFER_INDIRECT_RUNTIME_VALIDATED,
+      externalGpuBufferIndirectDisabledReason: SPH_THREE_WEBGPU_SURFACE_BUFFER_INDIRECT_RUNTIME_VALIDATED
+        ? null
+        : 'Three WebGPU indirect storage draw binding is disabled until browser console and pixel validation pass',
       externalGpuBufferIndirectByteLength: aggregateIndirectBinding
         ? (surfaceDrawExecution?.drawAggregateIndirectRowsBufferByteLength ?? 0)
         : 0,
@@ -11671,7 +11816,7 @@ export function createSphPhaseScene(container, {
         renderBridgeMode: renderBridge?.rendererBridge ?? null,
         overlayPolicyStatus: overlayPolicy?.status ?? null
       });
-      return {
+      const residentDraw = {
         schema: 'peercompute.ulg.sph-resident-surface-draw.v0',
         status: surfaceDrawExecution.status === 'surface-draw-resident'
           ? 'resident-surface-draw-buffers-retained'
@@ -11819,6 +11964,15 @@ export function createSphPhaseScene(container, {
             : (renderBridgeReady
             ? 'three-renderer-owned-scene-object-no-overlay'
             : null)),
+        renderBridgeExternalGpuBufferGeometry: Boolean(renderBridge?.externalGpuBufferGeometry),
+        renderBridgeExternalGpuBufferNormalAttribute: Boolean(renderBridge?.externalGpuBufferNormalAttribute),
+        renderBridgeExternalGpuBufferNormalAttributeDisabledReason:
+          renderBridge?.externalGpuBufferNormalAttributeDisabledReason ?? null,
+        renderBridgeExternalGpuBufferIndirect: Boolean(renderBridge?.externalGpuBufferIndirect),
+        renderBridgeExternalGpuBufferIndirectRuntimeValidated:
+          Boolean(renderBridge?.externalGpuBufferIndirectRuntimeValidated),
+        renderBridgeExternalGpuBufferIndirectDisabledReason:
+          renderBridge?.externalGpuBufferIndirectDisabledReason ?? null,
         renderBridgeDrawOrderingPolicy: renderBridge?.drawOrderingPolicy ?? null,
         renderBridgeDrawOrderCount: renderBridge?.drawOrderCount ?? 0,
         renderBridgeDrawOrderSurfaceIndices: [...(renderBridge?.drawOrderSurfaceIndices || [])],
@@ -11840,6 +11994,8 @@ export function createSphPhaseScene(container, {
         renderBridgeSphereMaterialKeys: [...(renderBridge?.sphereBridgeMaterialKeys || [])],
         renderBridgeSphereTransmissionProxyCount: renderBridge?.sphereBridgeTransmissionProxyCount ?? 0,
         renderBridgeSphereFallbackColorCount: renderBridge?.sphereBridgeFallbackColorCount ?? 0,
+        renderBridgeSphereMaterialRendererProxyCount: renderBridge?.sphereBridgeMaterialRendererProxyCount ?? 0,
+        renderBridgeSphereGeometryProxyCount: renderBridge?.sphereBridgeGeometryProxyCount ?? 0,
         renderBridgeSphereReusedMeshCount: renderBridge?.sphereBridgeReusedMeshCount ?? 0,
         renderBridgeSphereCreatedMeshCount: renderBridge?.sphereBridgeCreatedMeshCount ?? 0,
         renderBridgeSphereDisposedMeshCount: renderBridge?.sphereBridgeDisposedMeshCount ?? 0,
@@ -11853,6 +12009,21 @@ export function createSphPhaseScene(container, {
         surfaceExtractionValidation: false,
         fullPhysicsValidation: false
       };
+      const surfaceDrawRendererCapability = rendererCapability || {
+        status: residentDraw.renderBridgeCapabilityStatus,
+        reason: residentDraw.renderBridgeCapabilityReason,
+        rendererBackend: residentDraw.renderBridgeRendererBackend,
+        visibleNoReadbackSupported: Boolean(residentDraw.renderBridgeVisibleNoReadbackSupported)
+      };
+      const visibleGpuConsumer = resolveResidentSurfaceVisibleGpuConsumer({
+        handoff: gpuBufferHandoff,
+        rendererCapability: surfaceDrawRendererCapability,
+        renderBridgeMode: residentDraw.visibleRendererBridge,
+        renderBridgeStatus: residentDraw.renderBridgeStatus,
+        pixelValidationStatus: renderBridge?.pixelValidationStatus ?? 'not-run'
+      });
+      assignResidentSurfaceVisibleGpuConsumer(residentDraw, visibleGpuConsumer);
+      return residentDraw;
     } catch (error) {
       markSphResidentRenderProgress('surface-draw-bridge-error', {
         stage: 'surface-draw-bridge',
@@ -13301,6 +13472,9 @@ export function createSphPhaseScene(container, {
           nextResidentSurfaceDraw.renderBridgeSphereMaterialKeys = [...(renderBridge?.sphereBridgeMaterialKeys || [])];
           nextResidentSurfaceDraw.renderBridgeSphereTransmissionProxyCount = renderBridge?.sphereBridgeTransmissionProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereFallbackColorCount = renderBridge?.sphereBridgeFallbackColorCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereMaterialRendererProxyCount =
+            renderBridge?.sphereBridgeMaterialRendererProxyCount ?? 0;
+          nextResidentSurfaceDraw.renderBridgeSphereGeometryProxyCount = renderBridge?.sphereBridgeGeometryProxyCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereReusedMeshCount = renderBridge?.sphereBridgeReusedMeshCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereCreatedMeshCount = renderBridge?.sphereBridgeCreatedMeshCount ?? 0;
           nextResidentSurfaceDraw.renderBridgeSphereDisposedMeshCount = renderBridge?.sphereBridgeDisposedMeshCount ?? 0;
@@ -14186,6 +14360,18 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeEngineIntegration: sphResidentSurfaceDraw?.renderBridgeEngineIntegration
           ?? sphResidentSurfaceDrawRenderBridge?.engineIntegration
           ?? null,
+        surfaceDrawRenderBridgeExternalGpuBufferGeometry:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferGeometry),
+        surfaceDrawRenderBridgeExternalGpuBufferNormalAttribute:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferNormalAttribute),
+        surfaceDrawRenderBridgeExternalGpuBufferNormalAttributeDisabledReason:
+          sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferNormalAttributeDisabledReason ?? null,
+        surfaceDrawRenderBridgeExternalGpuBufferIndirect:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirect),
+        surfaceDrawRenderBridgeExternalGpuBufferIndirectRuntimeValidated:
+          Boolean(sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirectRuntimeValidated),
+        surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason:
+          sphResidentSurfaceDraw?.renderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
         surfaceDrawRenderBridgeReused: Boolean(
           sphResidentSurfaceDraw?.renderBridgeReused
           || sphResidentSurfaceDrawRenderBridge?.threeRenderBridgeReused
@@ -14218,6 +14404,9 @@ export function createSphPhaseScene(container, {
         surfaceDrawRenderBridgeSphereMaterialKeys: [...(sphResidentSurfaceDraw?.renderBridgeSphereMaterialKeys || [])],
         surfaceDrawRenderBridgeSphereTransmissionProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereTransmissionProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereFallbackColorCount: sphResidentSurfaceDraw?.renderBridgeSphereFallbackColorCount ?? 0,
+        surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:
+          sphResidentSurfaceDraw?.renderBridgeSphereMaterialRendererProxyCount ?? 0,
+        surfaceDrawRenderBridgeSphereGeometryProxyCount: sphResidentSurfaceDraw?.renderBridgeSphereGeometryProxyCount ?? 0,
         surfaceDrawRenderBridgeSphereReusedMeshCount: sphResidentSurfaceDraw?.renderBridgeSphereReusedMeshCount ?? 0,
         surfaceDrawRenderBridgeSphereCreatedMeshCount: sphResidentSurfaceDraw?.renderBridgeSphereCreatedMeshCount ?? 0,
         surfaceDrawRenderBridgeSphereDisposedMeshCount: sphResidentSurfaceDraw?.renderBridgeSphereDisposedMeshCount ?? 0,

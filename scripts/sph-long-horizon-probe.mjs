@@ -1726,8 +1726,24 @@ async function runBrowserProbe({
             surfaceDrawRenderBridgeThreeMeshCount: renderState.surfaceDrawRenderBridgeThreeMeshCount ?? null,
             surfaceDrawRenderBridgeThreeGeometryByteLength: renderState.surfaceDrawRenderBridgeThreeGeometryByteLength ?? null,
             surfaceDrawRenderBridgeEngineIntegration: renderState.surfaceDrawRenderBridgeEngineIntegration ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferGeometry:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferGeometry ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferNormalAttribute:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferNormalAttribute ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferNormalAttributeDisabledReason:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferNormalAttributeDisabledReason ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferIndirect:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferIndirect ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferIndirectRuntimeValidated:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferIndirectRuntimeValidated ?? null,
+            surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason:
+              renderState.surfaceDrawRenderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
             surfaceDrawRenderBridgeReused: renderState.surfaceDrawRenderBridgeReused ?? null,
             surfaceDrawRenderBridgeUpdateCount: renderState.surfaceDrawRenderBridgeUpdateCount ?? null,
+            surfaceDrawRenderBridgeSphereMaterialRendererProxyCount:
+              renderState.surfaceDrawRenderBridgeSphereMaterialRendererProxyCount ?? null,
+            surfaceDrawRenderBridgeSphereGeometryProxyCount:
+              renderState.surfaceDrawRenderBridgeSphereGeometryProxyCount ?? null,
             surfaceDrawRenderBridgeSphereReusedMeshCount: renderState.surfaceDrawRenderBridgeSphereReusedMeshCount ?? null,
             surfaceDrawRenderBridgeSphereCreatedMeshCount: renderState.surfaceDrawRenderBridgeSphereCreatedMeshCount ?? null,
             surfaceDrawRenderBridgeSphereDisposedMeshCount: renderState.surfaceDrawRenderBridgeSphereDisposedMeshCount ?? null,
@@ -1807,6 +1823,16 @@ async function runBrowserProbe({
             renderBridgeThreeMeshCount: surfaceDraw.renderBridgeThreeMeshCount ?? null,
             renderBridgeThreeGeometryByteLength: surfaceDraw.renderBridgeThreeGeometryByteLength ?? null,
             renderBridgeEngineIntegration: surfaceDraw.renderBridgeEngineIntegration ?? null,
+            renderBridgeExternalGpuBufferGeometry: surfaceDraw.renderBridgeExternalGpuBufferGeometry ?? null,
+            renderBridgeExternalGpuBufferNormalAttribute:
+              surfaceDraw.renderBridgeExternalGpuBufferNormalAttribute ?? null,
+            renderBridgeExternalGpuBufferNormalAttributeDisabledReason:
+              surfaceDraw.renderBridgeExternalGpuBufferNormalAttributeDisabledReason ?? null,
+            renderBridgeExternalGpuBufferIndirect: surfaceDraw.renderBridgeExternalGpuBufferIndirect ?? null,
+            renderBridgeExternalGpuBufferIndirectRuntimeValidated:
+              surfaceDraw.renderBridgeExternalGpuBufferIndirectRuntimeValidated ?? null,
+            renderBridgeExternalGpuBufferIndirectDisabledReason:
+              surfaceDraw.renderBridgeExternalGpuBufferIndirectDisabledReason ?? null,
             renderBridgeReused: surfaceDraw.renderBridgeReused ?? null,
             renderBridgeUpdateCount: surfaceDraw.renderBridgeUpdateCount ?? null,
             renderBridgeSphereMaterialKeys: Array.isArray(surfaceDraw.renderBridgeSphereMaterialKeys)
@@ -1814,6 +1840,9 @@ async function runBrowserProbe({
               : [],
             renderBridgeSphereTransmissionProxyCount: surfaceDraw.renderBridgeSphereTransmissionProxyCount ?? null,
             renderBridgeSphereFallbackColorCount: surfaceDraw.renderBridgeSphereFallbackColorCount ?? null,
+            renderBridgeSphereMaterialRendererProxyCount:
+              surfaceDraw.renderBridgeSphereMaterialRendererProxyCount ?? null,
+            renderBridgeSphereGeometryProxyCount: surfaceDraw.renderBridgeSphereGeometryProxyCount ?? null,
             renderBridgeSphereReusedMeshCount: surfaceDraw.renderBridgeSphereReusedMeshCount ?? null,
             renderBridgeSphereCreatedMeshCount: surfaceDraw.renderBridgeSphereCreatedMeshCount ?? null,
             renderBridgeSphereDisposedMeshCount: surfaceDraw.renderBridgeSphereDisposedMeshCount ?? null,

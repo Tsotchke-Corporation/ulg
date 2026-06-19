@@ -69,7 +69,8 @@ import {
   surfaceObjectRenderOrder,
   stableSurfaceRenderOrder,
   stabilizeRenderRowSphereBridgeMaterial,
-  stabilizeSurfaceMeshMaterialForRenderer
+  stabilizeSurfaceMeshMaterialForRenderer,
+  createThreeWebGpuResidentBridgeMaterialProxy
 } from '../src/visualization/sphPhaseScene.js';
 import {
   GPU_PHASE_IDS,
@@ -212,17 +213,31 @@ test('SPH Three WebGPU presentation policy is fail-closed with unsafe diagnostic
     rendererWebGpuResidentDevice: true,
     unsafeDiagnosticOverride: true
   });
-  assert.equal(unsafePolicy.status, 'three-webgpu-presentation-blocked-runtime-validation');
-  assert.equal(unsafePolicy.enabled, false);
+  assert.equal(unsafePolicy.status, 'three-webgpu-presentation-enabled-unsafe-diagnostic');
+  assert.equal(unsafePolicy.enabled, true);
   assert.equal(unsafePolicy.unsafeDiagnosticOverride, true);
-  assert.equal(unsafePolicy.blockedByRuntime, true);
+  assert.equal(unsafePolicy.unsafeRuntimeBypass, true);
+  assert.equal(unsafePolicy.enabledUnsafeDiagnostic, true);
+  assert.equal(unsafePolicy.blockedByRuntime, false);
+
+  const unsafePresentationOnlyPolicy = resolveThreeWebGpuPresentationPolicy({
+    webGpuRendererAvailable: true,
+    requestedPresentation: true,
+    rendererWebGpuResidentDevice: false,
+    unsafeDiagnosticOverride: true
+  });
+  assert.equal(unsafePresentationOnlyPolicy.status, 'three-webgpu-presentation-enabled-unsafe-diagnostic');
+  assert.equal(unsafePresentationOnlyPolicy.enabled, true);
+  assert.equal(unsafePresentationOnlyPolicy.blockedByResidentDevice, false);
+  assert.equal(unsafePresentationOnlyPolicy.rendererWebGpuResidentDevice, false);
+  assert.match(unsafePresentationOnlyPolicy.reason, /presentation-only diagnostic/);
 
   const missingResidentDevicePolicy = resolveThreeWebGpuPresentationPolicy({
     webGpuRendererAvailable: true,
     requestedPresentation: true,
     rendererWebGpuResidentDevice: false,
     runtimeValidated: true,
-    unsafeDiagnosticOverride: true
+    unsafeDiagnosticOverride: false
   });
   assert.equal(missingResidentDevicePolicy.status, 'three-webgpu-presentation-blocked-resident-device');
   assert.equal(missingResidentDevicePolicy.enabled, false);
@@ -265,6 +280,22 @@ test('SPH Three WebGPU renderer-owned resident device is explicit opt-in', () =>
   assert.equal(blockedRuntimePolicy.status, 'renderer-owned-resident-device-blocked-runtime-validation');
   assert.equal(blockedRuntimePolicy.rendererOwnedDeviceAllowed, false);
   assert.equal(blockedRuntimePolicy.runtimeValidated, false);
+
+  const unsafePolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
+    renderer: {
+      ...readyRenderer,
+      userData: {
+        sphWebGpuPresentationEnabled: true,
+        sphWebGpuPresentationUnsafeDiagnosticOverride: true
+      }
+    },
+    requested: true,
+    unsafeDiagnosticOverride: true
+  });
+  assert.equal(unsafePolicy.status, 'renderer-owned-resident-device-enabled-unsafe-diagnostic');
+  assert.equal(unsafePolicy.rendererOwnedDeviceAllowed, true);
+  assert.equal(unsafePolicy.unsafeRuntimeBypass, true);
+  assert.equal(unsafePolicy.runtimeValidated, false);
 
   const enabledPolicy = resolveThreeWebGpuRendererOwnedResidentDevicePolicy({
     renderer: readyRenderer,
@@ -350,6 +381,31 @@ test('SPH extension surface renderer capability blocks no-readback GPU buffers o
   assert.equal(webgpuOptIn.externalBufferPresentationEnabled, true);
   assert.equal(webgpuOptIn.externalBufferPipelineRuntimeValidated, false);
   assert.equal(webgpuOptIn.visibleNoReadbackSupported, false);
+
+  const webgpuUnsafeDiagnostic = resolveResidentExtensionSurfaceRendererCapability({
+    renderer: {
+      isWebGPURenderer: true,
+      backend: {
+        device: supportedDevice,
+        get() { return { buffer: {} }; }
+      },
+      userData: {
+        sphThreeWebGpuSurfaceBufferPresentationEnabled: true,
+        sphWebGpuPresentationUnsafeDiagnosticOverride: true
+      },
+      domElement: {}
+    },
+    readbackMode: 'no-full-readback',
+    device: supportedDevice
+  });
+  assert.equal(webgpuUnsafeDiagnostic.status, 'same-device-gpu-buffer-geometry-supported');
+  assert.equal(webgpuUnsafeDiagnostic.sameDeviceGpuBufferGeometrySupported, true);
+  assert.equal(webgpuUnsafeDiagnostic.visibleNoReadbackSupported, true);
+  assert.equal(webgpuUnsafeDiagnostic.externalBufferPipelineUnsafeDiagnosticOverride, true);
+  assert.equal(
+    webgpuUnsafeDiagnostic.externalBufferPipelineRuntimeValidationSource,
+    'unsafe-diagnostic-override'
+  );
 
   const presentationDisabled = resolveResidentExtensionSurfaceRendererCapability({
     renderer: {
@@ -1714,6 +1770,40 @@ test('SPH surface mesh material proxies transmissive PBR for Three WebGPU presen
   assert.equal(material.thickness, 0);
   assert.equal(material.userData.surfaceMaterialRendererProxy, true);
   assert.equal(material.userData.surfaceMaterialRendererProxyReason, 'three-webgpu-transmissive-surface-proxy');
+});
+
+test('SPH Three WebGPU resident bridge material proxy uses a basic pipeline material', () => {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.2, 0.4, 0.7),
+    transmission: 0.82,
+    thickness: 0.4,
+    transparent: true,
+    opacity: 0.72,
+    depthWrite: false
+  });
+  material.userData.optical = { transmission: 0.82, alpha: 0.72 };
+  material.userData.renderDescriptor = { material: 'h2o', renderKey: 'h2o', phase: 'liquid' };
+
+  const proxy = createThreeWebGpuResidentBridgeMaterialProxy(material, {
+    descriptor: { material: 'h2o', renderKey: 'h2o', phase: 'liquid' },
+    fallbackColorSrgb: [0.44, 0.76, 0.91],
+    bridgeMode: 'three-render-row-spheres',
+    proxyReason: 'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+  });
+
+  assert.equal(proxy.type, 'MeshBasicMaterial');
+  assert.equal(proxy.transparent, true);
+  assert.equal(proxy.opacity, 0.72);
+  assert.equal(proxy.depthWrite, false);
+  assert.equal(proxy.userData.surfaceMaterialRendererProxy, true);
+  assert.equal(
+    proxy.userData.surfaceMaterialRendererProxyReason,
+    'three-webgpu-render-row-spheres-basic-material-pipeline-proxy'
+  );
+  assert.equal(proxy.userData.surfaceMaterialOriginalType, 'MeshPhysicalMaterial');
+  assert.equal(proxy.userData.surfaceMaterialRendererBridgeMode, 'three-render-row-spheres');
+  assert.deepEqual(proxy.userData.surfaceMaterialFallbackColor, [0.44, 0.76, 0.91]);
+  assert.equal(proxy.userData.optical, material.userData.optical);
 });
 
 test('SPH Three WebGPU surface buffers can use conservative aggregate draw records without summary readback', () => {

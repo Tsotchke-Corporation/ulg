@@ -1,5 +1,49 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Unsafe Three WebGPU Surface Diagnostics
+
+The explicit unsafe Three WebGPU route now exposes two diagnostic shapes:
+renderer-owned resident-device probing and presentation-only probing. Resident
+diagnostic meshes use a basic material proxy and low-poly geometry proxy under
+Three WebGPU, and external surface-buffer diagnostics now disable unvalidated
+Three indirect draw and external normal attributes while using a
+`MeshNormalMaterial`-style proxy. The browser harness can distinguish material
+complexity from renderer/device lifetime failures. The path is still not
+production-ready.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseScene.js`,
+  `node --check scripts/sph-long-horizon-probe.mjs`, and
+  `node --check tests/sphPhaseRenderer.test.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs` passed `57/57`, including the
+  unsafe presentation-only policy and Three WebGPU resident material proxy.
+- Browser diagnostics:
+  `/tmp/ulg-three-webgpu-render-row-lowpoly-proxy-diagnostic.json` still
+  classified `bad` with one `browser-page-error`; Three WebGPU reported
+  `createBuffer failed, size (288) is too large for the implementation when mappedAtCreation == true`
+  and page error `Instance dropped in popErrorScope`.
+- Browser diagnostics:
+  `/tmp/ulg-three-webgpu-render-row-presentation-only-diagnostic.json`
+  classified `bad`, timed out before metrics/frames, and reported the same
+  page error.
+- Browser diagnostics:
+  `/tmp/ulg-three-webgpu-surface-buffers-normal-material-diagnostic.json`
+  retained the same-device surface buffers and reached
+  `three-webgpu-surface-buffers-ready` with position-only external geometry,
+  no Three indirect draw, and no external normal attribute. It still classified
+  `bad` with three `browser-page-error` entries from
+  `WebGPUPipelineUtils.createRenderPipeline -> Instance dropped in popErrorScope`.
+
+Known residual risk:
+
+- This proves the current Three WebGPU route is not merely failing on
+  transmissive PBR, normals, Three indirect draw, or marching-cubes extraction.
+  Do not count retained GPU buffers as visible rendering until a same-device
+  consumer passes browser console and pixel validation.
+
 ## Current Focused Result - 2026-06-18 No-Readback Render-Field Handoff
 
 No-summary/no-full resident render refresh now keeps the render-field rows and

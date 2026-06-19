@@ -35,6 +35,23 @@ physics loop is incoherent.
 
 ## Active Priority Order
 
+Current routing note, 2026-06-19 AKDT: unsafe Three WebGPU diagnostics now
+separate renderer-owned resident-device probing from presentation-only probing,
+and resident diagnostic meshes can force basic materials plus low-poly geometry.
+Both browser routes still fail with `Instance dropped in popErrorScope`; the
+renderer-owned render-row route reaches resident spheres but then fails Three's
+mapped buffer creation, while presentation-only times out before metrics. The
+external surface-buffer route now gets as far as a position-only,
+no-indirect, no-normal, `MeshNormalMaterial`-style bridge and still fails in
+`WebGPUPipelineUtils.createRenderPipeline`. Treat this as evidence that the
+current Three WebGPU adapter path is blocked at renderer
+error-scope/device-lifetime or external-buffer pipeline validation, not at PBR
+material choice, normals, indirect draw, or marching-cubes extraction alone. Do
+not promote `three-webgpu-surface-buffers` or spend the next slice on material
+polish; either fix the Three WebGPU presentation/device lifetime directly or
+build the native engine-owned WebGPU surface consumer that can bind retained
+buffers without an overlay and then pixel-validate it.
+
 Current routing note, 2026-06-19 AKDT: probe and benchmark harnesses now
 surface `surfaceDrawVisibleGpuConsumer*` separately from
 `surfaceDrawGpuBufferHandoff*`. Explicit `three-webgpu-surface-buffers` probes

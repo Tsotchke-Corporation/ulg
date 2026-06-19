@@ -1,5 +1,66 @@
 # ULG Implementation Log
 
+## 2026-06-19 AKDT - Unsafe Three WebGPU Surface Diagnostics Still Blocked
+
+Status:
+
+- Split the explicit unsafe Three WebGPU diagnostic route so presentation-only
+  probing can run without forcing resident compute onto the renderer-owned
+  `GPUDevice`. Production Three WebGPU presentation remains fail-closed.
+- Added Three WebGPU diagnostic material proxies: render-row resident meshes
+  use `MeshBasicMaterial`, while external surface-buffer meshes use the sibling
+  adapter's `MeshNormalMaterial`-style proxy. This is diagnostic-only;
+  closure-derived PBR/transmission remains the target after the renderer path
+  is console-clean.
+- Added a WebGPU-only low-poly render-row sphere diagnostic geometry and exposed
+  resident bridge material/geometry proxy counts through the surface-draw and
+  probe samplers.
+- Disabled unvalidated Three WebGPU indirect drawing and external normal
+  attributes for the surface-buffer diagnostic path. The external surface mesh
+  now uses position-only retained `GPUBuffer` geometry with the sibling
+  adapter's `MeshNormalMaterial`-style proxy while browser validation is
+  pending.
+- Confirmed with browser evidence that the current Three WebGPU presentation
+  path is still blocked before it can validate visible no-readback rendering.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- Browser diagnostic:
+  `/tmp/ulg-three-webgpu-render-row-lowpoly-proxy-diagnostic.json` still
+  completed `status=bad` with browser console issue
+  `browser-page-error`. It reached `resident-render-row-spheres-built`, but
+  Three WebGPU rendered no frame after
+  `createBuffer failed, size (288) is too large for the implementation when mappedAtCreation == true`
+  and page error `Instance dropped in popErrorScope`.
+- Browser diagnostic:
+  `/tmp/ulg-three-webgpu-render-row-presentation-only-diagnostic.json` ran with
+  `rendererResidentDevice=0`; it produced no metrics/frames and timed out after
+  180s with the same page error `Instance dropped in popErrorScope`.
+- Browser diagnostic:
+  `/tmp/ulg-three-webgpu-surface-buffers-normal-material-diagnostic.json`
+  retained same-device surface buffers and reached
+  `three-webgpu-surface-buffers-ready` with one external-buffer mesh,
+  `renderBridgeExternalGpuBufferIndirect=false`, and
+  `renderBridgeExternalGpuBufferNormalAttribute=false`. It still classified
+  `bad` with three `browser-page-error` entries from
+  `WebGPUPipelineUtils.createRenderPipeline -> Instance dropped in popErrorScope`.
+
+Open:
+
+- The failure follows even a basic-material/low-poly resident mesh and also
+  appears in presentation-only mode. It also remains after reducing the
+  external surface-buffer bridge to position-only, no-indirect, normal-material
+  shape. Do not spend the next slice tuning PBR, mesh density, normals, or
+  Three indirect drawing for this path. The next renderer item is either a real
+  Three/WebGPU error-scope/device-lifetime fix or a native engine-owned WebGPU
+  render pass that consumes retained surface buffers without an overlay.
+- `three-webgpu-surface-buffers` must remain explicitly unsafe/diagnostic until
+  a browser run is console-clean and pixel-validated.
+
 ## 2026-06-18 AKDT - Active-Grid Indirect Dispatch Args
 
 Status:

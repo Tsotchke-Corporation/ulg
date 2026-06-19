@@ -216,6 +216,32 @@ function normalizeResidentSurfaceDrawDiagnosticMode(value, fallback = 'three-ren
   return RESIDENT_SURFACE_DRAW_DIAGNOSTIC_MODES.has(normalized) ? normalized : fallback;
 }
 
+function residentSurfaceDrawParticleRenderMode(mode) {
+  const normalized = normalizeResidentSurfaceDrawDiagnosticMode(mode, 'auto');
+  if (
+    normalized === 'three-render-row-spheres'
+    || normalized === 'three-spheres'
+    || normalized === 'webgpu-render-row-spheres'
+    || normalized === 'webgpu-spheres'
+  ) {
+    return 'variable-size-spheres';
+  }
+  if (
+    normalized === 'three-render-row-points'
+    || normalized === 'three-points'
+    || normalized === 'webgpu-render-row-points'
+    || normalized === 'webgpu-points'
+    || normalized === 'three'
+  ) {
+    return 'points';
+  }
+  return null;
+}
+
+function residentSurfaceDrawModeUsesParticleBridge(mode) {
+  return residentSurfaceDrawParticleRenderMode(mode) != null;
+}
+
 function residentSurfaceDrawModeUsesCompactBridge(mode) {
   const normalized = normalizeResidentSurfaceDrawDiagnosticMode(mode, 'auto');
   return normalized === 'three-compact-vertices'
@@ -1811,15 +1837,16 @@ export async function mountSphPhaseDemoOverlay({
   }
   function publishRenderModeSelection(status = 'render-mode-selected', extra = {}) {
     const mode = currentResidentSurfaceDrawDiagnosticMode();
+    const particleRenderMode = residentSurfaceDrawParticleRenderMode(mode);
     overlay.__sphRenderModeSelection = {
       schema: 'peercompute.ulg.sph-demo-render-mode-selection.v0',
       status,
       requestedMode: mode,
-      particleMode: mode === 'three-render-row-spheres' || mode === 'three-render-row-points',
-      particleRenderMode: mode === 'three-render-row-spheres'
-        ? 'variable-size-spheres'
-        : (mode === 'three-render-row-points' ? 'points' : null),
-      variableSizeSphereMode: mode === 'three-render-row-spheres',
+      particleMode: particleRenderMode != null,
+      particleRenderMode,
+      variableSizeSphereMode: particleRenderMode === 'variable-size-spheres',
+      requiresLivePhysicsRefresh: particleRenderMode != null,
+      requiresFreshPhysicsReadback: particleRenderMode != null,
       selectedByUrl: rawResidentSurfaceDrawDiagnosticMode != null,
       updatedAtMs: performance.now(),
       ...extra
@@ -1834,9 +1861,6 @@ export async function mountSphPhaseDemoOverlay({
     if (renderModeSelect.value !== mode) renderModeSelect.value = mode;
     residentSurfaceDrawDiagnosticMode = mode;
     return mode;
-  }
-  function currentUseThreeCompactSurfaceDrawBridge() {
-    return residentSurfaceDrawModeUsesCompactBridge(currentResidentSurfaceDrawDiagnosticMode());
   }
   publishRenderModeSelection('render-mode-initialized');
   const residentAutoStartEnabled = Boolean(autoStart && initialResidentAutoEnabled);
@@ -4129,6 +4153,11 @@ export async function mountSphPhaseDemoOverlay({
         && generation === particleSyncGeneration
       );
       if (execution?.backend === 'webgpu') {
+        const selectedSurfaceDrawDiagnosticMode = currentResidentSurfaceDrawDiagnosticMode();
+        const selectedParticleRenderMode = residentSurfaceDrawParticleRenderMode(selectedSurfaceDrawDiagnosticMode);
+        const forceParticleRenderModeRefresh = residentSurfaceDrawModeUsesParticleBridge(
+          selectedSurfaceDrawDiagnosticMode
+        );
         const hasResidentRenderState = Boolean(scene.getSphResidentRenderState?.()?.schema);
         const forceInitialRenderStateRefresh = !hasResidentRenderState;
         const forceMotionProvenRefresh = renderMotion.status === 'motion-proven';
@@ -4142,13 +4171,16 @@ export async function mountSphPhaseDemoOverlay({
           ? 'resident-batch-motion-estimate-visual-refresh'
           : forceAccumulatedMotionRefresh
           ? 'resident-accumulated-motion-visual-refresh'
+          : forceParticleRenderModeRefresh
+          ? 'resident-particle-render-mode-live-physics-refresh'
           : 'playback-initial-visual-refresh';
         const cadence = residentRenderReadbackDecision({
           continueFromResidentState,
           forceDue: forceInitialRenderStateRefresh
             || forceMotionProvenRefresh
             || forceBatchMotionEstimateRefresh
-            || forceAccumulatedMotionRefresh,
+            || forceAccumulatedMotionRefresh
+            || forceParticleRenderModeRefresh,
           forceReason: forceResidentRenderRefreshReason,
           suppressDue: suppressSubvisiblePlaybackRender,
           suppressReason: 'resident-motion-below-visible-threshold'
@@ -4162,6 +4194,9 @@ export async function mountSphPhaseDemoOverlay({
         cadence.accumulatedSubvisibleMotionM = accumulatedMotion.accumulatedSubvisibleMotionM;
         cadence.subvisibleMotionBurstCount = accumulatedMotion.subvisibleMotionBurstCount;
         cadence.accumulatedMotionVisible = accumulatedMotion.accumulatedMotionVisible;
+        cadence.particleRenderModeRefresh = forceParticleRenderModeRefresh;
+        cadence.particleRenderMode = selectedParticleRenderMode;
+        cadence.surfaceDrawDiagnosticMode = selectedSurfaceDrawDiagnosticMode;
         try {
           if (cadence.due) {
             const renderStartMs = performance.now();
@@ -4176,8 +4211,10 @@ export async function mountSphPhaseDemoOverlay({
               pressureInterfaceGasCellFieldImport: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldImport || null,
               pressureInterfaceGasCellFieldAdmission: scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
               pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
-              renderFieldSurfaceSummaryMode: currentUseThreeCompactSurfaceDrawBridge() ? 'skip' : 'auto',
-              surfaceDrawDiagnosticMode: currentResidentSurfaceDrawDiagnosticMode()
+              renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(selectedSurfaceDrawDiagnosticMode)
+                ? 'skip'
+                : 'auto',
+              surfaceDrawDiagnosticMode: selectedSurfaceDrawDiagnosticMode
             });
             overlay.__sphResidentSurfaceDraw = scene.getSphResidentSurfaceDraw?.() || null;
             overlay.__sphResidentSurfaceDrawOverlayPolicy = scene.getSphResidentSurfaceDrawOverlayPolicy?.() || null;
@@ -4334,7 +4371,7 @@ export async function mountSphPhaseDemoOverlay({
         pressureInterfaceGasCellFieldAdmission:
           scene.getSphResidentPressureInterfaceState?.()?.pressureInterfaceGasCellFieldAdmission || null,
         pressureInterfaceGasCellFieldImportStateKey: execution?.computeManagerTask?.stateKey || null,
-        renderFieldSurfaceSummaryMode: currentUseThreeCompactSurfaceDrawBridge() ? 'skip' : 'auto',
+        renderFieldSurfaceSummaryMode: residentSurfaceDrawModeUsesCompactBridge(mode) ? 'skip' : 'auto',
         surfaceDrawDiagnosticMode: mode
       });
       if (token !== renderModeRefreshToken) return renderState;

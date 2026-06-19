@@ -543,6 +543,40 @@ export function resolveRenderRowSphereBridgeContract({
   };
 }
 
+export function resolveResidentRenderRowBridgeReadbackPlan({
+  requestedRenderRowsReadbackMode = null,
+  useThreeRenderRowBridge = false,
+  useWebGpuRenderRowOverlayBridge = false,
+  previousThreeRenderRowBridgeVisible = false
+} = {}) {
+  const requestedRenderRowsReadbackModeFromCaller =
+    requestedRenderRowsReadbackMode === RESIDENT_FULL_READBACK_MODE
+    || requestedRenderRowsReadbackMode === RESIDENT_NO_FULL_READBACK_MODE
+      ? requestedRenderRowsReadbackMode
+      : SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT;
+  const threeBridge = Boolean(useThreeRenderRowBridge);
+  const webGpuOverlayBridge = Boolean(useWebGpuRenderRowOverlayBridge);
+  const requestedRenderRowsReadbackModeResolved = webGpuOverlayBridge
+    ? RESIDENT_NO_FULL_READBACK_MODE
+    : (threeBridge
+      ? RESIDENT_FULL_READBACK_MODE
+      : requestedRenderRowsReadbackModeFromCaller);
+  const renderRowsReadbackModeCoercionReason = threeBridge
+    && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
+    ? 'three-render-row-bridge-requires-fresh-physics-readback'
+    : null;
+  return {
+    schema: 'peercompute.ulg.sph-resident-render-row-bridge-readback-plan.v0',
+    requestedRenderRowsReadbackModeFromCaller,
+    requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeResolved,
+    renderRowsReadbackModeCoercionReason,
+    retainPreviousThreeRenderRowBridgeNoFull: false,
+    previousThreeRenderRowBridgeVisible: Boolean(previousThreeRenderRowBridgeVisible),
+    freshPhysicsReadbackRequired: threeBridge,
+    webGpuOverlayNoFullReadback: webGpuOverlayBridge
+  };
+}
+
 function normalizeSphNativeWebGpuSurfaceConsumerDebugMode(value, fallback = 'none') {
   if ((value == null || String(value).trim() === '') && fallback === '') return '';
   const normalized = String(value ?? fallback).trim().toLowerCase();
@@ -15386,27 +15420,17 @@ export function createSphPhaseScene(container, {
         )
         && hasVisibleResidentSurfaceDrawBridge(previousResidentRenderBridge)
       );
-      const retainPreviousThreeRenderRowBridgeNoFull = Boolean(
-        shouldUseThreeRenderRowPointsBridge
-        && requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
-        && previousThreeRenderRowBridgeVisible
-      );
-      const requestedRenderRowsReadbackMode = shouldUseWebGpuRenderRowOverlayBridge
-        ? RESIDENT_NO_FULL_READBACK_MODE
-        : (shouldUseThreeRenderRowPointsBridge
-          ? (retainPreviousThreeRenderRowBridgeNoFull ? RESIDENT_NO_FULL_READBACK_MODE : RESIDENT_FULL_READBACK_MODE)
-          : requestedRenderRowsReadbackModeFromCaller);
-      const renderRowsReadbackModeCoercionReason = shouldUseThreeRenderRowPointsBridge
-        ? (
-          retainPreviousThreeRenderRowBridgeNoFull
-            ? 'three-render-row-bridge-retains-previous-scene-object-for-explicit-no-full-readback'
-            : (
-              requestedRenderRowsReadbackModeFromCaller === RESIDENT_NO_FULL_READBACK_MODE
-                ? 'three-render-row-bridge-requires-cpu-decoded-rows-for-fresh-geometry'
-                : null
-            )
-        )
-        : null;
+      const renderRowReadbackPlan = resolveResidentRenderRowBridgeReadbackPlan({
+        requestedRenderRowsReadbackMode: requestedRenderRowsReadbackModeFromCaller,
+        useThreeRenderRowBridge: shouldUseThreeRenderRowPointsBridge,
+        useWebGpuRenderRowOverlayBridge: shouldUseWebGpuRenderRowOverlayBridge,
+        previousThreeRenderRowBridgeVisible
+      });
+      const {
+        requestedRenderRowsReadbackMode,
+        renderRowsReadbackModeCoercionReason,
+        retainPreviousThreeRenderRowBridgeNoFull
+      } = renderRowReadbackPlan;
       const requestedSurfaceDrawDiagnosticMaxFieldCells = Math.max(
         1,
         Math.round(Number(surfaceDrawDiagnosticMaxFieldCells) || SPH_SURFACE_DRAW_DIAGNOSTIC_MAX_FIELD_CELLS_DEFAULT)

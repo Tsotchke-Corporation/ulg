@@ -1,5 +1,43 @@
 # ULG Test Plan
 
+## Current Focused Result - 2026-06-19 Particle Render Modes Use Live Physics Rows
+
+Explicit Three particle render modes now use current resident physics render
+rows instead of retaining stale scene geometry. When the selected mode is
+`three-render-row-points`, `three-points`, `three-render-row-spheres`,
+`three-spheres`, or `three`, the demo forces a live render refresh each
+resident batch, and the scene coerces the row extraction to
+`full-parity-readback` for fresh CPU-owned Three geometry.
+
+Focused checks:
+
+- Syntax:
+  `node --check src/visualization/sphPhaseDemoMount.js`,
+  `node --check src/visualization/sphPhaseScene.js`, and
+  `node --check scripts/sph-long-horizon-probe.mjs` passed.
+- Runtime/unit coverage:
+  `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row sphere|render-row particle|visible GPU|surface draw|renderer backend|mobile"`
+  passed `59/59`, including the readback plan regression that keeps Three
+  particles fresh while preserving the no-full WebGPU overlay contract.
+- Whitespace:
+  `git diff --check -- src/visualization/sphPhaseDemoMount.js src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs`
+  passed.
+- Browser diagnostics:
+  `/tmp/ulg-render-mode-spheres-live-probe.json` completed `good` with browser
+  console issues `0`, `visibleRendererBridge=three-render-row-spheres`,
+  `renderBridgeParticleRenderMode=variable-size-spheres`,
+  `renderBridgeSpherePbrMaterialSource=closure-derived-pbr`,
+  `renderRowsReadbackEffectiveMode=full-parity-readback`,
+  `renderRowsReadbackForcedForThreeBridge=true`,
+  `renderRowsReadbackRetainedPreviousBridge=false`, bridge update count `4`,
+  and decoded render-row displacement `0.005600690841674805m`.
+
+Known residual risk:
+
+- This is still an interim Three readback bridge. It fixes stale rendering for
+  explicit particle modes, but the performance roadmap still needs the
+  same-device no-readback renderer path to remove the CPU row-readback cost.
+
 ## Current Focused Result - 2026-06-19 Native Surface Readback Fallback Validation
 
 The native `native-webgpu-surface-consumer` bridge now separates local

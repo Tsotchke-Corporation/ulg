@@ -1,5 +1,41 @@
 # ULG Implementation Log
 
+## 2026-06-19 12:52 AKDT - Particle Render Modes Use Live Physics Rows
+
+Status:
+
+- Fixed the explicit Three particle render modes so they no longer retain a
+  previous resident render-row bridge when the caller requests no-full readback.
+  Three point/sphere particle modes now coerce render-row extraction to
+  `full-parity-readback` and rebuild from the current resident physics rows.
+- Added a scene-level readback-plan helper and diagnostics showing when a Three
+  particle bridge forced fresh physics readback versus the future WebGPU
+  render-row overlay path that can remain no-full.
+- Updated resident playback cadence so selected particle modes force a live
+  render refresh every resident physics batch instead of being suppressed by
+  subvisible-motion cadence.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `git diff --check -- src/visualization/sphPhaseDemoMount.js src/visualization/sphPhaseScene.js tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs --test-name-pattern "render-row sphere|render-row particle|visible GPU|surface draw|renderer backend|mobile"`
+  reported `59/59`.
+- PASS: `/tmp/ulg-render-mode-spheres-live-probe.json` completed with status
+  `good`, browser console issues `0`, bridge `three-render-row-spheres`,
+  particle mode `variable-size-spheres`, PBR source `closure-derived-pbr`,
+  forced render rows mode `full-parity-readback`, retained previous bridge
+  `false`, bridge update count `4`, and decoded render-row motion
+  `0.005600690841674805m`.
+
+Remaining:
+
+- This fixes correctness for the current Three particle bridge. It still pays
+  CPU render-row readback by design; the throughput fix remains the same-device
+  no-readback renderer path.
+
 ## 2026-06-19 12:22 AKDT - Native Surface Readback Fallback Validation
 
 Status:

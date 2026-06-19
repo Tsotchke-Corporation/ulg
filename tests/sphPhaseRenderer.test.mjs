@@ -56,6 +56,7 @@ import {
   renderLayerFromOpticalResponse,
   renderOrderFromOpticalResponse,
   resolveSphSurfaceRendererMaterialPolicy,
+  resolveResidentRenderRowBridgeReadbackPlan,
   resolveRenderRowSphereBridgeContract,
   normalizeSurfaceRadiusForRenderField,
   renderDescriptorForSurfaceRecord,
@@ -1554,6 +1555,32 @@ test('SPH render-row sphere bridge contract uses variable-size closure PBR', () 
   assert.equal(pointContract.sphereBridgeSizingMode, null);
   assert.equal(pointContract.sphereBridgePbrMaterialSource, null);
   assert.equal(pointContract.pointsVertexColorOnly, true);
+});
+
+test('SPH Three render-row particle modes force fresh physics readback', () => {
+  const plan = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useThreeRenderRowBridge: true,
+    previousThreeRenderRowBridgeVisible: true
+  });
+
+  assert.equal(plan.requestedRenderRowsReadbackModeFromCaller, 'no-full-readback');
+  assert.equal(plan.requestedRenderRowsReadbackMode, 'full-parity-readback');
+  assert.equal(plan.retainPreviousThreeRenderRowBridgeNoFull, false);
+  assert.equal(plan.freshPhysicsReadbackRequired, true);
+  assert.equal(
+    plan.renderRowsReadbackModeCoercionReason,
+    'three-render-row-bridge-requires-fresh-physics-readback'
+  );
+
+  const webgpu = resolveResidentRenderRowBridgeReadbackPlan({
+    requestedRenderRowsReadbackMode: 'no-full-readback',
+    useWebGpuRenderRowOverlayBridge: true
+  });
+
+  assert.equal(webgpu.requestedRenderRowsReadbackMode, 'no-full-readback');
+  assert.equal(webgpu.webGpuOverlayNoFullReadback, true);
+  assert.equal(webgpu.retainPreviousThreeRenderRowBridgeNoFull, false);
 });
 
 test('SPH resident overlay policy chooses no-full-readback only when overlay is available', () => {

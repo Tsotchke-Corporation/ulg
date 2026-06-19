@@ -435,6 +435,31 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     )
   );
   const activeGridDispatch = residentStageTiming?.activeGridDispatch ?? null;
+  const activeGridNodeCountFromDiagnostics = numberOrNull(residentDiagnostics?.activeGridNodeCount);
+  const activeGridNodeCount = activeGridNodeCountFromDiagnostics
+    ?? numberOrNull(activeGridDispatch?.activeNodeCount)
+    ?? numberOrNull(dispatchTopology?.activeGridNodeCount)
+    ?? numberOrNull(dispatchTopology?.activeGridIndirectDispatch?.activeGridNodeCount);
+  const gridNodeCount = numberOrNull(residentDiagnostics?.gridNodeCount)
+    ?? numberOrNull(activeGridDispatch?.fullGridNodeCount)
+    ?? numberOrNull(dispatchTopology?.fullGridNodeCount)
+    ?? numberOrNull(dispatchTopology?.activeGridIndirectDispatch?.fullGridNodeCount);
+  const activeGridNodeCountAvailable = activeGridNodeCount !== null
+    ? true
+    : (residentDiagnostics?.activeGridNodeCountAvailable ?? null);
+  const activeGridNodeCountSource = activeGridNodeCountFromDiagnostics !== null
+    ? 'resident-diagnostics'
+    : (numberOrNull(activeGridDispatch?.activeNodeCount) !== null
+        ? 'active-grid-dispatch'
+        : (numberOrNull(dispatchTopology?.activeGridNodeCount) !== null
+            ? 'dispatch-topology'
+            : (numberOrNull(dispatchTopology?.activeGridIndirectDispatch?.activeGridNodeCount) !== null
+                ? 'active-grid-indirect-dispatch'
+                : null)));
+  const activeGridRatio = numberOrNull(activeGridDispatch?.activeGridRatio)
+    ?? (activeGridNodeCount !== null && gridNodeCount !== null && gridNodeCount > 0
+      ? activeGridNodeCount / gridNodeCount
+      : null);
   const performanceGate = scenarioPerformanceGate({
     residentGpuCompletedStageMs,
     residentStageStepsPerSecond,
@@ -508,9 +533,11 @@ function summarizeProbeResult({ targetParticleCount, scenario, result, exit }) {
     fusedResidentSequenceStepCount: residentStageTiming?.fusedResidentSequenceStepCount ?? null,
     fusedResidentSequenceRequested: fuseResidentMechanicsSequence,
     fusedResidentActiveGridRequested: fuseResidentMechanicsActiveGrid,
-    gridNodeCount: numberOrNull(residentDiagnostics?.gridNodeCount),
-    activeGridNodeCount: numberOrNull(residentDiagnostics?.activeGridNodeCount),
-    activeGridNodeCountAvailable: residentDiagnostics?.activeGridNodeCountAvailable ?? null,
+    gridNodeCount,
+    activeGridNodeCount,
+    activeGridNodeCountAvailable,
+    activeGridNodeCountSource,
+    activeGridRatio,
     activeGridDispatch,
     visualRefreshHzEstimate,
     compactSummaryMeanBatchShare: analysis.compactSummaryMeanBatchShare ?? null,

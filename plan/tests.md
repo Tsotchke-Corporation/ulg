@@ -10943,6 +10943,21 @@ Native surface clip-depth mapping, 2026-06-19 14:30 AKDT:
     `residentRenderSourceStepDelta=4`,
     `residentRenderSourceTimeDeltaS=0.002`, and
     `residentNoReadbackRenderSourceEvidenceAvailable=true`.
+
+Benchmark active-grid telemetry repair, 2026-06-19 14:55 AKDT:
+
+- `node --check scripts/sph-performance-benchmark.mjs`
+  - Passed.
+- Native no-full scene benchmark:
+  `PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 ULG_BENCH_PROFILE=smoke ULG_BENCH_PARTICLE_COUNTS=1000 ULG_BENCH_BATCHES=2 ULG_BENCH_BATCH_STEPS=4 ULG_BENCH_SURFACE_DRAW_MODE=native-webgpu-surface-consumer ULG_BENCH_MEASURE_GPU_QUEUE_FENCE=1 ULG_BENCH_OUTPUT=/tmp/ulg-bench-native-active-grid-telemetry-fixed.json ULG_BENCH_PORT=5222 ULG_BENCH_TIMEOUT_MS=180000 npm run bench:sph-performance`
+  - Passed with scenario `status=good` and browser console issues `0`.
+  - Benchmark now reports `activeGridNodeCount=6156`,
+    `activeGridNodeCountAvailable=true`,
+    `activeGridNodeCountSource=active-grid-dispatch`,
+    `activeGridRatio=0.06755555555555555`, and `gridNodeCount=91125`.
+  - Copy/readback telemetry stayed clean:
+    `renderRowsReadback=false`, `surfaceDrawReadback=false`, and
+    `estimatedReadbackBytesPerStep=0`.
 - Browser mobile-shaped native probe:
   `/tmp/ulg-native-depth-remap-mobile-probe.json`
   - Passed with `status=good`.

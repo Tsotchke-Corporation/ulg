@@ -2,6 +2,13 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-19 AKDT: the performance benchmark now carries
+active-grid node counts from the resident dispatch/topology records when the
+older diagnostics slot is null. Native no-full scene benchmarking reports the
+active-grid source, active node count, full grid node count, active ratio, and
+zero readback bytes together, so upcoming 10k/50k/100k rows can distinguish
+actual sparse GPU dispatch from missing telemetry.
+
 Current checkpoint, 2026-06-19 AKDT: the native WebGPU surface consumer now
 uses WebGPU clip-depth mapping for resident MLS-MPM surface rows. The surface
 vertex shader now mirrors the particle WebGPU path by remapping Three's

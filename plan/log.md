@@ -29007,3 +29007,32 @@ Remaining:
 - Continue the P0 native/marching-cubes renderer path with pixel evidence and
   performance work. Local headless WebGPU canvas pixel readback still remains
   unreliable, so probe status is based on pipeline/render-source evidence.
+
+## 2026-06-19 14:55 AKDT - Benchmark Active-Grid Telemetry Repair
+
+Status:
+
+- Updated `scripts/sph-performance-benchmark.mjs` so scene benchmark summaries
+  fall back to active-grid dispatch/topology records when resident diagnostics
+  do not populate `activeGridNodeCount`.
+- Added `activeGridNodeCountSource` and `activeGridRatio` to the benchmark
+  scenario output. This keeps sparse-dispatch evidence visible for native
+  no-readback rows.
+- Confirmed the current native no-full scene route has no render-row or
+  surface-summary readback in the measured path.
+
+Validation:
+
+- PASS: `node --check scripts/sph-performance-benchmark.mjs`.
+- PASS: `/tmp/ulg-bench-native-active-grid-telemetry-fixed.json` completed
+  `status=good` with browser console issues `0`, native bridge
+  `native-webgpu-surface-consumer`, `activeGridNodeCount=6156`,
+  `activeGridNodeCountSource=active-grid-dispatch`,
+  `activeGridRatio=0.06755555555555555`,
+  `gridNodeCount=91125`, `renderRowsReadback=false`,
+  `surfaceDrawReadback=false`, and `estimatedReadbackBytesPerStep=0`.
+
+Remaining:
+
+- Broaden the benchmark rows to larger particle counts and keep separating
+  scene/render costs from direct resident mechanics timing.

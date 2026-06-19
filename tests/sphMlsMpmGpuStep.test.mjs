@@ -5518,6 +5518,9 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   const buffers = manualBuffers({ velocity: [0, 0, 0] });
   const tracker = fakeBufferTracker();
   const device = fakeSummaryDevice(new Float32Array(MLS_MPM_GPU_RESIDENT_SUMMARY_FLOATS));
+  const summaryPlanArgsBuffer = tracker.buffer('summary-plan-args');
+  summaryPlanArgsBuffer.lastWrite = new Uint32Array([4, 1, 1]).buffer;
+  const summaryPlanMetadataBuffer = tracker.buffer('summary-plan-metadata');
   const execution = await runMlsMpmResidentStepsWithOptionalWebGpu({
     ...buffers,
     sphParticleUpload: {
@@ -5581,6 +5584,35 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
         phaseMassTotalKg: 8,
         thermalPhaseSummaryAvailable: true,
         compactReadbackByteLength: MLS_MPM_GPU_RESIDENT_SUMMARY_BYTES,
+        activeGridDispatchPlan: {
+          schema: 'peercompute.ulg.mls-mpm-active-grid-summary-dispatch-plan.v0',
+          status: 'gpu-active-grid-summary-dispatch-plan-ready',
+          source: 'compact-summary-gpu-sidecar',
+          dispatchArgsBufferRetained: true,
+          dispatchArgsBufferByteLength: 12,
+          metadataBufferRetained: true,
+          metadataBufferByteLength: 64,
+          metadataUintCount: 16,
+          workgroupSize: 64,
+          gridDims: [...gridUpdate.gridDims],
+          gridShift: gridUpdate.gridShift,
+          gridNodeCount: gridUpdate.gridNodeCount,
+          gridSpacingM: gridUpdate.gridSpacingM,
+          safetyCells: 1,
+          stepCount: 2,
+          dt: buffers.mlsMpmParticleState.mechanicsDtS,
+          gravityMPerS2: [0, 0, 0],
+          normalHotLoopReadbackFree: true
+        },
+        activeGridDispatchPlanDispatchArgsBuffer: summaryPlanArgsBuffer,
+        activeGridDispatchPlanMetadataBuffer: summaryPlanMetadataBuffer,
+        activeGridDispatchPlanDispatchArgsBufferByteLength: 12,
+        activeGridDispatchPlanMetadataBufferByteLength: 64,
+        activeGridDispatchPlanBuffersRetained: true,
+        destroyActiveGridDispatchPlanBuffers() {
+          summaryPlanArgsBuffer.destroy();
+          summaryPlanMetadataBuffer.destroy();
+        },
         timing: {
           schema: 'peercompute.ulg.mls-mpm-resident-summary-timing.v0',
           totalMs: 0,
@@ -5634,10 +5666,51 @@ test('MLS-MPM resident fused mechanics sequence can opt into active-grid dispatc
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.min, [1.125, 1.2, 1.175]);
   assert.deepEqual(execution.nextSphParticleState.residentPositionBoundsM.max, [1.375, 1.4, 1.425]);
   assert.equal(execution.nextSphParticleState.residentMaxSpeedMPerS, 0);
+  assert.equal(
+    execution.nextSphParticleState.residentActiveGridDispatchPlanHint.status,
+    'active-grid-summary-dispatch-plan-hint-ready'
+  );
+  assert.equal(execution.nextSphParticleState.residentActiveGridDispatchPlanHint.dispatchArgsBuffer, summaryPlanArgsBuffer);
+  assert.equal(execution.nextParticleUploads.activeGridDispatchPlanHint.metadataBuffer, summaryPlanMetadataBuffer);
   assert.equal(device.clears.length, 0);
   assert.deepEqual(device.dispatches.map((entry) => entry.count), [1, 1, 1, 1]);
   assert.deepEqual(device.indirectDispatches.map((entry) => entry.workgroupCountX), [4, 4, 4, 4, 4, 4]);
+  const second = await runMlsMpmResidentStepsWithOptionalWebGpu({
+    ...buffers,
+    sphParticleState: execution.nextSphParticleState,
+    mlsMpmParticleState: execution.nextMlsMpmParticleState,
+    sphParticleUpload: execution.nextParticleUploads.sphParticleUpload,
+    mlsMpmParticleUpload: execution.nextParticleUploads.mlsMpmParticleUpload,
+    stepCount: 2,
+    preferWebGpu: true,
+    device,
+    boxDimsM: [3, 3, 3],
+    gravityMPerS2: [0, 0, 0],
+    readbackMode: 'no-full-readback',
+    compactSummaryMode: 'none',
+    fuseNoFullResidentMechanicsSequence: true,
+    fuseNoFullResidentMechanicsActiveGrid: true,
+    activeGridSafetyCells: 1
+  });
+  assert.equal(
+    second.finalStep.stageTiming.activeGridIndirectDispatch.status,
+    'gpu-summary-active-grid-indirect-dispatch-ready'
+  );
+  assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.source, 'compact-summary-gpu-sidecar');
+  assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.dispatchPlanHintBorrowed, true);
+  assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.ownsBuffer, false);
+  assert.equal(second.finalStep.stageTiming.activeGridIndirectDispatch.metadataBufferByteLength, 64);
+  assert.equal(second.nextSphParticleState.residentActiveGridDispatchPlanHint, null);
+  assert.deepEqual(device.indirectDispatches.slice(-6).map((entry) => entry.buffer.label), [
+    'summary-plan-args',
+    'summary-plan-args',
+    'summary-plan-args',
+    'summary-plan-args',
+    'summary-plan-args',
+    'summary-plan-args'
+  ]);
   destroyMlsMpmResidentStepsBuffers(execution);
+  destroyMlsMpmResidentStepsBuffers(second);
 });
 
 test('MLS-MPM resident fused mechanics sequence carries active-grid bounds across unread batches', async () => {

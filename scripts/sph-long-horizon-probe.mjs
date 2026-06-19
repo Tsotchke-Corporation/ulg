@@ -2674,6 +2674,14 @@ async function runDirectResidentProbe({
         continuationAvailable: Boolean(steps.nextParticleUploads),
         nextStep: steps.nextSphParticleState?.step ?? null,
         nextTime: finiteOrNull(steps.nextSphParticleState?.time),
+        nextActiveGridDispatchPlanHintStatus: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.status ?? null,
+        nextActiveGridDispatchPlanHintSource: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.source ?? null,
+        nextActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
+        nextActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextSphParticleState?.residentActiveGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
+        nextUploadActiveGridDispatchPlanHintStatus: steps.nextParticleUploads?.activeGridDispatchPlanHint?.status ?? null,
+        nextUploadActiveGridDispatchPlanHintSource: steps.nextParticleUploads?.activeGridDispatchPlanHint?.source ?? null,
+        nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
+        nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: steps.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
         nextParticleBufferMode: steps.nextParticleBufferMode ?? null,
         normalHotLoopReadbackFree: steps.normalHotLoopReadbackFree === true,
         renderStateReadbackAvailable: steps.renderStateReadbackAvailable ?? null,
@@ -2681,6 +2689,20 @@ async function runDirectResidentProbe({
         residentAuthorityFamilyOwners: steps.residentAuthorityFamilyOwners || null,
         residentAuthorityWarnings: [...(steps.residentAuthorityWarnings || [])],
         residentAuthorityBlockers: [...(steps.residentAuthorityBlockers || [])],
+        stepSummaries: Array.isArray(steps.stepSummaries)
+          ? steps.stepSummaries.map((summary) => ({
+            index: summary.index ?? null,
+            status: summary.status ?? null,
+            backend: summary.backend ?? null,
+            compactSummaryAvailable: summary.compactSummaryAvailable ?? null,
+            activeGridIndirectDispatch: summary.stageTiming?.activeGridIndirectDispatch
+              ? { ...summary.stageTiming.activeGridIndirectDispatch }
+              : null,
+            activeGridDispatch: summary.stageTiming?.activeGridDispatch
+              ? { ...summary.stageTiming.activeGridDispatch }
+              : null
+          }))
+          : [],
         fusedResidentSequence: steps.fusedResidentSequence ? {
           schema: steps.fusedResidentSequence.schema ?? null,
           status: steps.fusedResidentSequence.status ?? null,
@@ -2751,6 +2773,14 @@ async function runDirectResidentProbe({
         } : null,
         g2pDebug: summarizeG2p(step.g2pReconstruction),
         thermalMechanicsRefreshStatus: step.thermalMechanicsRefreshStatus ?? null,
+        residentActiveGridDispatchPlanHintStatus: step.residentActiveGridDispatchPlanHintStatus ?? null,
+        residentActiveGridDispatchPlanHintSource: step.residentActiveGridDispatchPlanHintSource ?? null,
+        residentActiveGridDispatchPlanHintDispatchArgsBufferByteLength: step.residentActiveGridDispatchPlanHintDispatchArgsBufferByteLength ?? 0,
+        residentActiveGridDispatchPlanHintMetadataBufferByteLength: step.residentActiveGridDispatchPlanHintMetadataBufferByteLength ?? 0,
+        nextUploadActiveGridDispatchPlanHintStatus: step.nextParticleUploads?.activeGridDispatchPlanHint?.status ?? null,
+        nextUploadActiveGridDispatchPlanHintSource: step.nextParticleUploads?.activeGridDispatchPlanHint?.source ?? null,
+        nextUploadActiveGridDispatchPlanHintDispatchArgsBufferByteLength: step.nextParticleUploads?.activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
+        nextUploadActiveGridDispatchPlanHintMetadataBufferByteLength: step.nextParticleUploads?.activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
         pressureInterfaceForceSolverSchema: step.pressureInterfaceForceSolverSchema ?? null,
         pressureInterfaceForceRowsBufferStatus: step.pressureInterfaceForceRowsBufferStatus ?? null
       } : null;
@@ -3136,11 +3166,17 @@ async function runDirectResidentProbe({
             sphParticleUpload = execution.nextParticleUploads?.sphParticleUpload ?? null;
             mlsMpmParticleUpload = execution.nextParticleUploads?.mlsMpmParticleUpload ?? null;
             if (previousExecution) {
+              const activeGridPlanBuffers = (hint = null) => [
+                hint?.dispatchArgsBuffer,
+                hint?.metadataBuffer
+              ].filter(Boolean);
               destroyMlsMpmResidentStepsBuffers(previousExecution, {
                 preserveBuffers: [
                   sphParticleUpload?.stateBuffer,
                   sphParticleUpload?.thermoBuffer,
-                  mlsMpmParticleUpload?.mechanicsBuffer
+                  mlsMpmParticleUpload?.mechanicsBuffer,
+                  ...activeGridPlanBuffers(execution.nextParticleUploads?.activeGridDispatchPlanHint),
+                  ...activeGridPlanBuffers(execution.nextSphParticleState?.residentActiveGridDispatchPlanHint)
                 ].filter(Boolean)
               });
             }

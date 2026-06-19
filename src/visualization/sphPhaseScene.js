@@ -5501,13 +5501,21 @@ export function createSphPhaseScene(container, {
   }
 
   function residentContinuationBuffersFromExecution(execution = null) {
+    const activeGridPlanBuffers = (hint = null) => [
+      hint?.dispatchArgsBuffer,
+      hint?.metadataBuffer
+    ].filter(Boolean);
     return [
       execution?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
       execution?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
       execution?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
+      ...activeGridPlanBuffers(execution?.nextParticleUploads?.activeGridDispatchPlanHint),
+      ...activeGridPlanBuffers(execution?.nextSphParticleState?.residentActiveGridDispatchPlanHint),
       execution?.finalStep?.nextParticleUploads?.sphParticleUpload?.stateBuffer,
       execution?.finalStep?.nextParticleUploads?.sphParticleUpload?.thermoBuffer,
-      execution?.finalStep?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+      execution?.finalStep?.nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
+      ...activeGridPlanBuffers(execution?.finalStep?.nextParticleUploads?.activeGridDispatchPlanHint),
+      ...activeGridPlanBuffers(execution?.finalStep?.residentActiveGridDispatchPlanHint)
     ].filter(Boolean);
   }
 

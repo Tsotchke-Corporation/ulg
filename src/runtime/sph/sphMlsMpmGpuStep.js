@@ -692,8 +692,173 @@ function createComputeDispatchIndirectArgs(workgroupCountX, workgroupCountY = 1,
   return args;
 }
 
-function createActiveGridComputeDispatchArgsBuffer(device, activeGridDispatch, workgroupCountX) {
+function activeGridDispatchPlanBuffers(planHint = null) {
+  return [
+    planHint?.dispatchArgsBuffer,
+    planHint?.metadataBuffer
+  ].filter(Boolean);
+}
+
+function activeGridDispatchPlanHintFromCompactSummary(compactGpuSummary = null) {
+  const plan = compactGpuSummary?.activeGridDispatchPlan;
+  const dispatchArgsBuffer = compactGpuSummary?.activeGridDispatchPlanDispatchArgsBuffer ?? null;
+  const metadataBuffer = compactGpuSummary?.activeGridDispatchPlanMetadataBuffer ?? null;
+  if (
+    plan?.status !== 'gpu-active-grid-summary-dispatch-plan-ready'
+    || !dispatchArgsBuffer
+    || !metadataBuffer
+  ) {
+    return null;
+  }
+  const hint = {
+    schema: 'peercompute.ulg.mls-mpm-active-grid-summary-dispatch-plan-hint.v0',
+    status: 'active-grid-summary-dispatch-plan-hint-ready',
+    source: plan.source || 'compact-summary-gpu-sidecar',
+    plan: { ...plan },
+    dispatchArgsBuffer,
+    metadataBuffer,
+    dispatchArgsBufferByteLength: compactGpuSummary.activeGridDispatchPlanDispatchArgsBufferByteLength
+      ?? plan.dispatchArgsBufferByteLength
+      ?? 0,
+    metadataBufferByteLength: compactGpuSummary.activeGridDispatchPlanMetadataBufferByteLength
+      ?? plan.metadataBufferByteLength
+      ?? 0,
+    destroyed: false
+  };
+  hint.destroyActiveGridDispatchPlanBuffers = () => {
+    if (hint.destroyed) return;
+    hint.destroyed = true;
+    compactGpuSummary.destroyActiveGridDispatchPlanBuffers?.();
+  };
+  return hint;
+}
+
+function activeGridDispatchPlanHintCompatibility(planHint, {
+  activeGridDispatch,
+  gridSpec,
+  stepCount = 1,
+  dt = 0
+} = {}) {
+  const result = (compatible, reason, details = {}) => ({
+    compatible,
+    reason,
+    ...details
+  });
+  if (!planHint) {
+    return result(false, 'no-active-grid-dispatch-plan-hint');
+  }
+  if (planHint.status !== 'active-grid-summary-dispatch-plan-hint-ready') {
+    return result(false, 'active-grid-dispatch-plan-hint-status-not-ready', {
+      hintStatus: planHint.status ?? null
+    });
+  }
+  if (planHint.destroyed === true) {
+    return result(false, 'active-grid-dispatch-plan-hint-destroyed');
+  }
+  if (!planHint.dispatchArgsBuffer) {
+    return result(false, 'active-grid-dispatch-plan-hint-missing-dispatch-args-buffer');
+  }
+  if (activeGridDispatch?.useActiveGrid !== true) {
+    return result(false, 'active-grid-dispatch-disabled');
+  }
+  if (!gridSpec) {
+    return result(false, 'active-grid-dispatch-grid-spec-missing');
+  }
+  const plan = planHint.plan || {};
+  const planDims = Array.isArray(plan.gridDims) ? plan.gridDims : [];
+  if (planDims.length < 3 || planDims.some((value, axis) => Math.round(Number(value)) !== gridSpec.gridDims[axis])) {
+    return result(false, 'active-grid-dispatch-plan-grid-dims-mismatch', {
+      planGridDims: planDims.slice(0, 3),
+      expectedGridDims: [...gridSpec.gridDims]
+    });
+  }
+  if (Math.round(Number(plan.gridShift)) !== gridSpec.shift) {
+    return result(false, 'active-grid-dispatch-plan-grid-shift-mismatch', {
+      planGridShift: Math.round(Number(plan.gridShift)),
+      expectedGridShift: gridSpec.shift
+    });
+  }
+  if (Math.abs(finiteNumber(plan.gridSpacingM, Number.NaN) - gridSpec.gridSpacingM) > 1e-9) {
+    return result(false, 'active-grid-dispatch-plan-grid-spacing-mismatch', {
+      planGridSpacingM: finiteNumber(plan.gridSpacingM, Number.NaN),
+      expectedGridSpacingM: gridSpec.gridSpacingM
+    });
+  }
+  if (Math.round(Number(plan.gridNodeCount)) !== gridSpec.gridNodeCount) {
+    return result(false, 'active-grid-dispatch-plan-grid-node-count-mismatch', {
+      planGridNodeCount: Math.round(Number(plan.gridNodeCount)),
+      expectedGridNodeCount: gridSpec.gridNodeCount
+    });
+  }
+  if (Math.round(Number(plan.safetyCells)) !== Math.round(Number(activeGridDispatch.safetyCells))) {
+    return result(false, 'active-grid-dispatch-plan-safety-cells-mismatch', {
+      planSafetyCells: Math.round(Number(plan.safetyCells)),
+      expectedSafetyCells: Math.round(Number(activeGridDispatch.safetyCells))
+    });
+  }
+  const expectedStepCount = Math.max(1, Math.round(finiteNumber(stepCount, 1)));
+  if (Math.round(Number(plan.stepCount)) !== expectedStepCount) {
+    return result(false, 'active-grid-dispatch-plan-step-count-mismatch', {
+      planStepCount: Math.round(Number(plan.stepCount)),
+      expectedStepCount
+    });
+  }
+  if (Math.abs(finiteNumber(plan.dt, 0) - finiteNumber(dt, 0)) > 1e-9) {
+    return result(false, 'active-grid-dispatch-plan-dt-mismatch', {
+      planDt: finiteNumber(plan.dt, 0),
+      expectedDt: finiteNumber(dt, 0)
+    });
+  }
+  return result(true, 'active-grid-dispatch-plan-compatible', {
+    hintStatus: planHint.status,
+    hintSource: planHint.source ?? null
+  });
+}
+
+function activeGridDispatchPlanHintCompatible(planHint, options = {}) {
+  return activeGridDispatchPlanHintCompatibility(planHint, options).compatible === true;
+}
+
+function createActiveGridComputeDispatchArgsBuffer(
+  device,
+  activeGridDispatch,
+  workgroupCountX,
+  activeGridDispatchPlanHint = null,
+  planCompatibility = {}
+) {
   if (activeGridDispatch?.useActiveGrid !== true) return null;
+  const hintCompatibility = activeGridDispatchPlanHintCompatibility(activeGridDispatchPlanHint, {
+    activeGridDispatch,
+    ...planCompatibility
+  });
+  if (hintCompatibility.compatible) {
+    return {
+      schema: 'peercompute.ulg.mls-mpm-active-grid-compute-dispatch-indirect.v0',
+      status: 'gpu-summary-active-grid-indirect-dispatch-ready',
+      source: 'compact-summary-gpu-sidecar',
+      buffer: activeGridDispatchPlanHint.dispatchArgsBuffer,
+      metadataBuffer: activeGridDispatchPlanHint.metadataBuffer,
+      ownsBuffer: false,
+      bufferByteLength: activeGridDispatchPlanHint.dispatchArgsBufferByteLength,
+      metadataBufferByteLength: activeGridDispatchPlanHint.metadataBufferByteLength,
+      offsetBytes: 0,
+      workgroupCountX: Math.max(1, Math.floor(finiteNumber(workgroupCountX, 1))),
+      workgroupCountY: 1,
+      workgroupCountZ: 1,
+      workgroupSize: 64,
+      activeGridNodeCount: Math.max(0, Math.floor(finiteNumber(activeGridDispatch.activeNodeCount, 0))),
+      fullGridNodeCount: Math.max(0, Math.floor(finiteNumber(activeGridDispatch.fullGridNodeCount, 0))),
+      indirectDispatchUsed: false,
+      indirectDispatchUseCount: 0,
+      directDispatchFallbackCount: 0,
+      dispatchMode: 'pending',
+      dispatchPlanHintStatus: activeGridDispatchPlanHint.status,
+      dispatchPlanHintSource: activeGridDispatchPlanHint.source,
+      dispatchPlanHintBorrowed: true,
+      dispatchPlanHintCompatibilityReason: hintCompatibility.reason,
+      dispatchPlanHintCompatibility: hintCompatibility
+    };
+  }
   const args = createComputeDispatchIndirectArgs(workgroupCountX);
   const buffer = writeGpuBuffer(
     device,
@@ -706,6 +871,7 @@ function createActiveGridComputeDispatchArgsBuffer(device, activeGridDispatch, w
     status: 'cpu-seeded-active-grid-indirect-dispatch-ready',
     source: 'active-grid-dispatch-cpu-metadata',
     buffer,
+    ownsBuffer: true,
     bufferByteLength: args.byteLength,
     offsetBytes: 0,
     workgroupCountX: args[0],
@@ -717,7 +883,12 @@ function createActiveGridComputeDispatchArgsBuffer(device, activeGridDispatch, w
     indirectDispatchUsed: false,
     indirectDispatchUseCount: 0,
     directDispatchFallbackCount: 0,
-    dispatchMode: 'pending'
+    dispatchMode: 'pending',
+    dispatchPlanHintStatus: activeGridDispatchPlanHint?.status ?? null,
+    dispatchPlanHintSource: activeGridDispatchPlanHint?.source ?? null,
+    dispatchPlanHintBorrowed: false,
+    dispatchPlanHintCompatibilityReason: hintCompatibility.reason,
+    dispatchPlanHintCompatibility: hintCompatibility
   };
 }
 
@@ -746,6 +917,8 @@ function activeGridIndirectDispatchDescriptor(indirectDispatchArgs) {
     status: indirectDispatchArgs.status,
     source: indirectDispatchArgs.source,
     bufferByteLength: indirectDispatchArgs.bufferByteLength,
+    metadataBufferByteLength: indirectDispatchArgs.metadataBufferByteLength ?? 0,
+    ownsBuffer: indirectDispatchArgs.ownsBuffer !== false,
     offsetBytes: indirectDispatchArgs.offsetBytes,
     workgroupCountX: indirectDispatchArgs.workgroupCountX,
     workgroupCountY: indirectDispatchArgs.workgroupCountY,
@@ -756,7 +929,14 @@ function activeGridIndirectDispatchDescriptor(indirectDispatchArgs) {
     indirectDispatchUsed: indirectDispatchArgs.indirectDispatchUsed,
     indirectDispatchUseCount: indirectDispatchArgs.indirectDispatchUseCount,
     directDispatchFallbackCount: indirectDispatchArgs.directDispatchFallbackCount,
-    dispatchMode: indirectDispatchArgs.dispatchMode
+    dispatchMode: indirectDispatchArgs.dispatchMode,
+    dispatchPlanHintStatus: indirectDispatchArgs.dispatchPlanHintStatus ?? null,
+    dispatchPlanHintSource: indirectDispatchArgs.dispatchPlanHintSource ?? null,
+    dispatchPlanHintBorrowed: indirectDispatchArgs.dispatchPlanHintBorrowed === true,
+    dispatchPlanHintCompatibilityReason: indirectDispatchArgs.dispatchPlanHintCompatibilityReason ?? null,
+    dispatchPlanHintCompatibility: indirectDispatchArgs.dispatchPlanHintCompatibility
+      ? { ...indirectDispatchArgs.dispatchPlanHintCompatibility }
+      : null
   };
 }
 
@@ -1790,10 +1970,17 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
   const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
+  const activeGridDispatchPlanHint = sphParticleState?.residentActiveGridDispatchPlanHint ?? null;
   const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
     device,
     activeGridDispatch,
-    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64))
+    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+    activeGridDispatchPlanHint,
+    {
+      gridSpec,
+      stepCount: 1,
+      dt: dtSeconds
+    }
   );
   const dispatchTopology = createResidentDispatchTopology({
     particleCount,
@@ -1891,7 +2078,7 @@ async function runFusedNoFullMlsMpmMechanicsWebGpu({
     g2pParamsBuffer,
     productEventBuffer,
     pressureRowsBuffer,
-    ...(activeGridIndirectDispatchArgs ? [activeGridIndirectDispatchArgs.buffer] : [])
+    ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
   let retained = false;
   try {
@@ -2252,10 +2439,17 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
   const activeGridNodeDispatchCount = activeGridDispatch.useActiveGrid
     ? activeGridDispatch.activeNodeCount
     : gridSpec.gridNodeCount;
+  const activeGridDispatchPlanHint = sphParticleState?.residentActiveGridDispatchPlanHint ?? null;
   const activeGridIndirectDispatchArgs = createActiveGridComputeDispatchArgsBuffer(
     device,
     activeGridDispatch,
-    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64))
+    Math.max(1, Math.ceil(activeGridNodeDispatchCount / 64)),
+    activeGridDispatchPlanHint,
+    {
+      gridSpec,
+      stepCount: count,
+      dt: dtSeconds
+    }
   );
   const dispatchTopology = createResidentDispatchTopology({
     particleCount,
@@ -2384,7 +2578,7 @@ async function runFusedNoFullMlsMpmMechanicsSequenceWebGpu({
     g2pParamsBuffer,
     productEventBuffer,
     pressureRowsBuffer,
-    ...(activeGridIndirectDispatchArgs ? [activeGridIndirectDispatchArgs.buffer] : [])
+    ...(activeGridIndirectDispatchArgs?.ownsBuffer !== false ? [activeGridIndirectDispatchArgs?.buffer].filter(Boolean) : [])
   ];
   let finalStateBuffer = null;
   let finalMechanicsBuffer = null;
@@ -11112,6 +11306,10 @@ async function residentStepEnvelope({
     mergedResidentProductMass: residentProductMass,
     particlePingPong
   });
+  const activeGridDispatchPlanHint = activeGridDispatchPlanHintFromCompactSummary(compactGpuSummary);
+  if (nextParticleUploads && activeGridDispatchPlanHint) {
+    nextParticleUploads.activeGridDispatchPlanHint = activeGridDispatchPlanHint;
+  }
   const diagnostics = compactMlsMpmResidentStepDiagnostics({
     sphParticleState,
     mlsMpmParticleState,
@@ -11316,6 +11514,11 @@ async function residentStepEnvelope({
     thermalMechanicsRefreshStatus,
     residentBufferMode: residentBuffersRetained ? 'retained-stage-and-output-buffers' : 'cpu-artifact-fallback',
     particlePingPong,
+    residentActiveGridDispatchPlanHint: activeGridDispatchPlanHint,
+    residentActiveGridDispatchPlanHintStatus: activeGridDispatchPlanHint?.status ?? null,
+    residentActiveGridDispatchPlanHintSource: activeGridDispatchPlanHint?.source ?? null,
+    residentActiveGridDispatchPlanHintDispatchArgsBufferByteLength: activeGridDispatchPlanHint?.dispatchArgsBufferByteLength ?? 0,
+    residentActiveGridDispatchPlanHintMetadataBufferByteLength: activeGridDispatchPlanHint?.metadataBufferByteLength ?? 0,
     nextParticleUploads,
     nextParticleBufferMode: nextParticleUploads
       ? (nextUsesReactionState
@@ -12257,7 +12460,17 @@ export function destroyMlsMpmResidentStepBuffers(step, {
     if (!upload || upload.ownsMechanicsBuffer === false) return;
     destroyUnlessPreserved(upload.mechanicsBuffer);
   };
-  step?.compactGpuSummary?.destroyActiveGridDispatchPlanBuffers?.();
+  const activeGridPlanHint = step?.residentActiveGridDispatchPlanHint
+    || step?.nextParticleUploads?.activeGridDispatchPlanHint
+    || null;
+  const activeGridPlanBuffers = activeGridDispatchPlanBuffers(activeGridPlanHint);
+  if (!activeGridPlanBuffers.some((buffer) => preserved.has(buffer))) {
+    if (activeGridPlanHint?.destroyActiveGridDispatchPlanBuffers) {
+      activeGridPlanHint.destroyActiveGridDispatchPlanBuffers();
+    } else {
+      step?.compactGpuSummary?.destroyActiveGridDispatchPlanBuffers?.();
+    }
+  }
   destroyUnlessPreserved(step?.p2gGridProjection?.gpuResult?.gridBuffer);
   destroyUnlessPreserved(step?.p2gGridProjection?.gridBuffer);
   destroyUnlessPreserved(step?.gridUpdate?.gpuResult?.updatedGridBuffer);
@@ -12303,7 +12516,8 @@ function retainedContinuationBuffersFromUploads(nextParticleUploads = null) {
   return [
     nextParticleUploads?.sphParticleUpload?.stateBuffer,
     nextParticleUploads?.sphParticleUpload?.thermoBuffer,
-    nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer
+    nextParticleUploads?.mlsMpmParticleUpload?.mechanicsBuffer,
+    ...activeGridDispatchPlanBuffers(nextParticleUploads?.activeGridDispatchPlanHint)
   ].filter(Boolean);
 }
 
@@ -12335,6 +12549,9 @@ function cloneSphParticleStateForNext(source, step) {
     residentActiveGridDispatchHint: step.residentActiveGridDispatchHint
       || activeGridDispatch
       || source.residentActiveGridDispatchHint
+      || null,
+    residentActiveGridDispatchPlanHint: step.residentActiveGridDispatchPlanHint
+      || step.nextParticleUploads?.activeGridDispatchPlanHint
       || null
   };
 }
@@ -12400,6 +12617,8 @@ function summarizeResidentStepForSequence(step, index) {
           backend: step.stageTiming.backend || step.backend,
           readbackMode: step.stageTiming.readbackMode || step.readbackMode,
           dispatchTopology: step.stageTiming.dispatchTopology || step.dispatchTopology || null,
+          activeGridDispatch: step.stageTiming.activeGridDispatch || null,
+          activeGridIndirectDispatch: step.stageTiming.activeGridIndirectDispatch || null,
           compactSummaryScope: step.stageTiming.compactSummaryScope ?? null
         }
       : null,

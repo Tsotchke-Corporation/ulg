@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('.', import.meta.url));
 const peercomputeRoot = fileURLToPath(new URL('../peercompute/peercompute', import.meta.url));
+const webGpuMarchingCubesRoot = fileURLToPath(new URL('../webgpu-marching-cubes', import.meta.url));
 const HASHED_BUILD_ASSET_PATH = /^\/assets\/.+-[A-Za-z0-9_-]{8,}\.[^/]+$/;
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 const STABLE_ASSET_CACHE = 'public, max-age=86400, stale-while-revalidate=604800';
@@ -58,7 +59,8 @@ export default defineConfig({
     fs: {
       allow: [
         repoRoot,
-        peercomputeRoot
+        peercomputeRoot,
+        webGpuMarchingCubesRoot
       ]
     }
   }

@@ -5444,6 +5444,24 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
       surfaceDrawGpuBufferHandoffNoFullReadback: renderState?.surfaceDrawGpuBufferHandoffNoFullReadback ?? null,
       surfaceDrawGpuBufferHandoffNoSummaryReadback:
         renderState?.surfaceDrawGpuBufferHandoffNoSummaryReadback ?? null,
+      surfaceDrawNativeMarchingCubesExtractionStatus:
+        renderState?.surfaceDrawNativeMarchingCubesExtractionStatus ?? null,
+      surfaceDrawNativeMarchingCubesExtractionReason:
+        renderState?.surfaceDrawNativeMarchingCubesExtractionReason ?? null,
+      surfaceDrawNativeMarchingCubesVolumeSourceType:
+        renderState?.surfaceDrawNativeMarchingCubesVolumeSourceType ?? null,
+      surfaceDrawNativeMarchingCubesVolumeScalarLayoutName:
+        renderState?.surfaceDrawNativeMarchingCubesVolumeScalarLayoutName ?? null,
+      surfaceDrawExtensionSurfaceAdapterExecutionStatus:
+        renderState?.surfaceDrawExtensionSurfaceAdapterExecutionStatus ?? null,
+      surfaceDrawExtensionSurfaceRawExecutionStatus:
+        renderState?.surfaceDrawExtensionSurfaceRawExecutionStatus ?? null,
+      surfaceDrawExtensionSurfaceRawVertexCount:
+        renderState?.surfaceDrawExtensionSurfaceRawVertexCount ?? null,
+      surfaceDrawExtensionSurfacePositionTransformStatus:
+        renderState?.surfaceDrawExtensionSurfacePositionTransformStatus ?? null,
+      surfaceDrawExtensionSurfacePositionTransform:
+        renderState?.surfaceDrawExtensionSurfacePositionTransform ?? null,
       surfaceDrawRenderBridgeStatus: renderState?.surfaceDrawRenderBridgeStatus ?? null,
       surfaceDrawRenderBridgeEngineIntegration: renderState?.surfaceDrawRenderBridgeEngineIntegration ?? null,
       surfaceDrawSummaryReadback: renderState?.surfaceDrawSummaryReadback ?? null,
@@ -5463,14 +5481,14 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.renderFieldSurfaceSummaryReadback).toBe(false);
   expect(result.renderFieldSurfaceSummaryByteLength).toBe(0);
   expect(result.renderFieldSurfaceSummarySkipReason).toContain('no compact surface-summary readback');
-  expect(result.surfaceDrawStatus).toBe('resident-render-field-buffers-retained');
-  expect(result.surfaceDrawVisibleRendererBridge).toBe('resident-surface-buffers-no-overlay');
-  expect(result.surfaceDrawVisibleRenderSource).toBe('resident-render-field-buffers');
-  expect(result.renderFieldBufferMode).toBe('retained-render-field-buffers-no-summary');
-  expect(result.surfaceDrawRenderFieldRowsBufferRetained).toBe(true);
-  expect(result.surfaceDrawRenderFieldRowsBufferByteLength).toBeGreaterThan(0);
-  expect(result.surfaceDrawRenderFieldSurfaceBufferRetained).toBe(true);
-  expect(result.surfaceDrawRenderFieldSurfaceBufferByteLength).toBeGreaterThan(0);
+  expect(result.surfaceDrawStatus).toBe('resident-extension-surface-draw-buffers-retained');
+  expect(result.surfaceDrawVisibleRendererBridge).toBe('extension-resident-surface-buffers-no-overlay');
+  expect(result.surfaceDrawVisibleRenderSource).toBe('webgpu-marching-cubes-extension-same-device-surface');
+  expect(result.renderFieldBufferMode).toBe('native-marching-cubes-buffer-volume-extracted');
+  expect(result.surfaceDrawRenderFieldRowsBufferRetained).toBe(false);
+  expect(result.surfaceDrawRenderFieldRowsBufferByteLength).toBe(0);
+  expect(result.surfaceDrawRenderFieldSurfaceBufferRetained).toBe(false);
+  expect(result.surfaceDrawRenderFieldSurfaceBufferByteLength).toBe(0);
   expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorSchema)
     .toBe('peercompute.ulg.sph-render-field-buffer-volume-descriptors.v0');
   expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorStatus)
@@ -5486,34 +5504,128 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.scalarLayoutName)
     .toBe('peercompute.webgpu-marching-cubes.layout.scalar-field-f32.v0');
   expect(result.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.scalarStrides?.length).toBe(3);
-  expect(result.surfaceDrawRowsBufferRetained).toBe(false);
-  expect(result.surfaceDrawRowsBufferByteLength).toBe(0);
-  expect(result.surfaceDrawIndirectRowsBufferRetained).toBe(false);
-  expect(result.surfaceDrawIndirectRowsBufferByteLength).toBe(0);
-  expect(result.surfaceDrawCompactedVertexRowsBufferRetained).toBe(false);
-  expect(result.surfaceDrawCompactedVertexRowsBufferByteLength).toBe(0);
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.positionTransformStatus)
+    .toBe('ulg-render-field-grid-to-world-transform-ready');
+  expect(result.surfaceDrawRowsBufferRetained).toBe(true);
+  expect(result.surfaceDrawRowsBufferByteLength).toBeGreaterThan(0);
+  expect(result.surfaceDrawIndirectRowsBufferRetained).toBe(true);
+  expect(result.surfaceDrawIndirectRowsBufferByteLength).toBeGreaterThan(0);
+  expect(result.surfaceDrawCompactedVertexRowsBufferRetained).toBe(true);
+  expect(result.surfaceDrawCompactedVertexRowsBufferByteLength).toBeGreaterThan(0);
   expect(result.surfaceDrawGpuBufferHandoffReady).toBe(true);
-  expect(result.surfaceDrawGpuBufferHandoffStatus).toBe('resident-render-field-buffer-direct-consumer-ready');
-  expect(result.surfaceDrawGpuBufferHandoffKind).toBe('render-field-buffers');
-  expect(result.surfaceDrawGpuBufferHandoffInputSchema).toBe('peercompute.ulg.sph-gpu-render-field.v0');
-  expect(result.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction).toBe(true);
-  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind).toBe('render-field-density-storage-buffer');
+  expect(result.surfaceDrawGpuBufferHandoffStatus).toBe('resident-surface-buffer-direct-consumer-ready');
+  expect(result.surfaceDrawGpuBufferHandoffKind).toBe('surface-draw-buffers');
+  expect(result.surfaceDrawGpuBufferHandoffInputSchema).toBe('peercompute.ulg.sph-gpu-render-surface-draw.v0');
+  expect(result.surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction).toBe(false);
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionInputKind).toBe('surface-draw-compact-vertex-buffer');
   expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionInputLayout)
-    .toBe('peercompute.ulg.sph-gpu-render-field-cell-row.density-x-f32.v0');
+    .toBe('peercompute.ulg.sph-gpu-render-surface-vertex-row.v0');
   expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionConsumerKind)
-    .toBe('native-webgpu-marching-cubes-buffer-volume');
-  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter)
-    .toBe('webgpu-marching-cubes.buffer-volume.v0');
+    .toBe('direct-gpu-draw-consumer');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionRequiredAdapter).toBe(null);
   expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeStatus)
-    .toBe('requires-buffer-native-marching-cubes-adapter');
-  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason)
-    .toContain('storage-buffer scalar fields');
+    .toBe('surface-extraction-not-required');
+  expect(result.surfaceDrawGpuBufferHandoffSurfaceExtractionBridgeReason).toBe(null);
   expect(result.surfaceDrawGpuBufferHandoffNoFullReadback).toBe(true);
   expect(result.surfaceDrawGpuBufferHandoffNoSummaryReadback).toBe(true);
-  expect(result.surfaceDrawRenderBridgeStatus).toBe('resident-render-field-buffers-retained-no-overlay');
-  expect(result.surfaceDrawRenderBridgeEngineIntegration).toBe('engine-resident-render-field-buffer-handoff-no-overlay');
+  expect(result.surfaceDrawNativeMarchingCubesExtractionStatus)
+    .toBe('extension-surface-ready-needs-ulg-row-translation');
+  expect(result.surfaceDrawNativeMarchingCubesExtractionReason).toBe(null);
+  expect(result.surfaceDrawNativeMarchingCubesVolumeSourceType).toBe('scalar-buffer');
+  expect(result.surfaceDrawNativeMarchingCubesVolumeScalarLayoutName)
+    .toBe('peercompute.webgpu-marching-cubes.layout.scalar-field-f32.v0');
+  expect(result.surfaceDrawExtensionSurfaceAdapterExecutionStatus)
+    .toBe('extension-surface-ready-needs-ulg-row-translation');
+  expect(result.surfaceDrawExtensionSurfaceRawExecutionStatus).toBe('surface-ready');
+  expect(result.surfaceDrawExtensionSurfaceRawVertexCount).toBeGreaterThan(0);
+  expect(result.surfaceDrawExtensionSurfacePositionTransformStatus)
+    .toBe('ulg-render-field-grid-to-world-transform-ready');
+  expect(result.surfaceDrawExtensionSurfacePositionTransform?.enabled).toBe(true);
+  expect(result.surfaceDrawRenderBridgeStatus).toBe('extension-surface-buffers-retained-no-overlay');
+  expect(result.surfaceDrawRenderBridgeEngineIntegration).toBe('three-renderer-owned-scene-state-no-overlay');
   expect(result.surfaceDrawSummaryReadback).toBe(false);
   expect(result.fullSurfaceDrawReadback).toBe(false);
+});
+
+test('SPH WebGPU extension surface translation maps MC grid positions into ULG world meters', async ({ page }) => {
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    const {
+      buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu
+    } = await import('/src/runtime/sph/sphMarchingCubesSurfaceAdapter.js');
+    if (!navigator.gpu) return { status: 'webgpu-unavailable', reason: 'navigator.gpu unavailable' };
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { status: 'webgpu-unavailable', reason: 'requestAdapter returned null' };
+    const device = await adapter.requestDevice();
+    const rows = new Float32Array([
+      0.5, 0.5, 0.5, 1,
+      1.5, 0.5, 0.5, 1,
+      0.5, 1.5, 0.5, 1
+    ]);
+    const buffer = device.createBuffer({
+      label: 'ulg-test-extension-compact-position-rows',
+      size: rows.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+    });
+    device.queue.writeBuffer(buffer, 0, rows);
+    const extensionExecution = {
+      schema: 'peercompute.webgpu-marching-cubes.surface-execution.v0',
+      adapterId: 'test-webgpu-marching-cubes',
+      backend: 'webgpu',
+      status: 'surface-ready',
+      ok: true,
+      ownsDevice: false,
+      result: {
+        schema: 'peercompute.webgpu-marching-cubes.surface.v0',
+        status: 'surface-ready',
+        vertexCount: 3,
+        triangleCount: 1,
+        vertexStrideFloats: 4,
+        vertexStrideBytes: 16,
+        vertexFormat: 'float32x4-position',
+        buffer,
+        bufferByteLength: rows.byteLength,
+        bufferRetained: true,
+        resourceOwnership: { ok: true, status: 'same-device' }
+      }
+    };
+    const translated = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
+      device,
+      extensionExecution,
+      readbackMode: 'full-parity-readback',
+      positionTransformResolution: 8,
+      fieldPadding: 0.22,
+      refEdgeM: 5,
+      waitForQueueCompletion: true,
+      retainVertexRowsBuffer: false,
+      retainDrawRowsBuffer: false,
+      retainDrawIndirectRowsBuffer: false
+    });
+    buffer.destroy?.();
+    return {
+      status: translated.status,
+      transformStatus: translated.positionTransformStatus,
+      vertexRows: Array.from(translated.surfaceVertices.vertexRows.slice(0, 3 * 16)),
+      drawIndirectRows: Array.from(translated.surfaceDraw.drawIndirectRows)
+    };
+  });
+
+  test.skip(result.status === 'webgpu-unavailable', result.reason || 'WebGPU adapter unavailable');
+  expect(result.status).toBe('extension-surface-translated-to-ulg-rows');
+  expect(result.transformStatus).toBe('ulg-render-field-grid-to-world-transform-ready');
+  const span = 1 - 2 * 0.22;
+  const scaleM = 5 / (span * 8);
+  const originM = -0.22 * 5 / span;
+  expect(result.vertexRows[5]).toBeCloseTo(originM, 5);
+  expect(result.vertexRows[6]).toBeCloseTo(originM, 5);
+  expect(result.vertexRows[7]).toBeCloseTo(originM, 5);
+  expect(result.vertexRows[21]).toBeCloseTo(originM + scaleM, 5);
+  expect(result.vertexRows[22]).toBeCloseTo(originM, 5);
+  expect(result.vertexRows[23]).toBeCloseTo(originM, 5);
+  expect(result.vertexRows[37]).toBeCloseTo(originM, 5);
+  expect(result.vertexRows[38]).toBeCloseTo(originM + scaleM, 5);
+  expect(result.vertexRows[39]).toBeCloseTo(originM, 5);
+  expect(result.drawIndirectRows).toEqual([3, 1, 0, 0]);
 });
 
 test('SPH phase no-full retained surface draw diagnostics build under budget without overlay', async ({ page }) => {

@@ -336,6 +336,16 @@ test('ULG exposes retained render-field buffers as native MC scalar-buffer volum
   assert.equal(descriptor.rowStrideFloats, 32);
   assert.equal(descriptor.sliceStrideFloats, 256);
   assert.equal(descriptor.cellRowStrideFloats, 4);
+  assert.equal(descriptor.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
+  assert.equal(descriptor.positionTransform.enabled, true);
+  assert.equal(descriptor.positionTransform.resolution, 8);
+  assert.equal(descriptor.positionTransform.gridBias, -0.5);
+  assertApprox(descriptor.positionTransform.scaleM, 5 / ((1 - 2 * 0.22) * 8));
+  assert.deepEqual(descriptor.positionTransform.originM, [
+    -0.22 * 5 / (1 - 2 * 0.22),
+    -0.22 * 5 / (1 - 2 * 0.22),
+    -0.22 * 5 / (1 - 2 * 0.22)
+  ]);
   assert.equal(descriptor.isovalue, 14);
   assert.equal(descriptor.sameDeviceStatus, 'same-device');
   assert.equal(descriptor.nativeConsumerKind, 'native-webgpu-marching-cubes-buffer-volume');
@@ -426,7 +436,7 @@ test('ULG consumes extension compact position row metadata without legacy top-le
 });
 
 test('ULG consumes extension output descriptors without row metadata or legacy top-level buffers', async () => {
-  const { device, bindGroups } = fakeExtensionSurfaceDevice();
+  const { device, bindGroups, createdBuffers } = fakeExtensionSurfaceDevice();
   const execution = extensionExecution({
     includeOutputDescriptors: true,
     includeRowMetadata: false,
@@ -458,10 +468,17 @@ test('ULG consumes extension output descriptors without row metadata or legacy t
   const translated = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     device,
     extensionExecution: execution,
+    positionTransformResolution: 8,
+    fieldPadding: 0.22,
+    refEdgeM: 5,
     readbackMode: 'no-full-readback'
   });
 
   assert.equal(translated.status, 'extension-surface-translated-resident-webgpu');
+  assert.equal(translated.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
+  assert.equal(translated.surfaceVertices.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
+  assert.equal(translated.surfaceDraw.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
+  assert.equal(createdBuffers.find((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params')?.size, 96);
   assert.equal(bindGroups[0].entries[0].resource.buffer, descriptorBuffer);
 });
 
@@ -693,6 +710,38 @@ test('ULG translates extension compact position rows into native surface vertice
   assert.deepEqual([...draw.drawIndirectRows], [3, 1, 0, 2]);
 });
 
+test('ULG maps extension grid-local compact positions into render-field world meters', () => {
+  const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
+    extensionExecution: extensionExecution(),
+    positionRows: new Float32Array([
+      0.5, 0.5, 0.5, 1,
+      1.5, 0.5, 0.5, 1,
+      0.5, 1.5, 0.5, 1
+    ]),
+    positionTransformResolution: 8,
+    fieldPadding: 0.22,
+    refEdgeM: 5
+  });
+
+  const span = 1 - 2 * 0.22;
+  const scaleM = 5 / (span * 8);
+  const originM = -0.22 * 5 / span;
+  const rowStride = SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length;
+  const firstVertexPosition = [...translation.surfaceVertices.vertexRows.slice(5, 8)];
+  const secondVertexPosition = [...translation.surfaceVertices.vertexRows.slice(rowStride + 5, rowStride + 8)];
+  const thirdVertexPosition = [...translation.surfaceVertices.vertexRows.slice(rowStride * 2 + 5, rowStride * 2 + 8)];
+
+  assert.equal(translation.positionTransformStatus, 'ulg-render-field-grid-to-world-transform-ready');
+  for (const value of firstVertexPosition) assertApprox(value, originM);
+  assertApprox(secondVertexPosition[0], originM + scaleM);
+  assertApprox(secondVertexPosition[1], originM);
+  assertApprox(secondVertexPosition[2], originM);
+  assertApprox(thirdVertexPosition[0], originM);
+  assertApprox(thirdVertexPosition[1], originM + scaleM);
+  assertApprox(thirdVertexPosition[2], originM);
+  assert.deepEqual([...translation.surfaceDraw.drawIndirectRows], [3, 1, 0, 0]);
+});
+
 test('ULG reports retained extension buffers need a GPU translation kernel when CPU positions are absent', () => {
   const translation = translateWebGpuMarchingCubesSurfaceToUlgRows({
     extensionExecution: extensionExecution()
@@ -755,6 +804,7 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(result.queueCompletionStatus, 'queue-work-completed');
   assert.equal(result.queueCompletionMethod, 'queue.onSubmittedWorkDone');
   assert.equal(result.hotLoopGpuTranslationRequired, false);
+  assert.equal(result.positionTransformStatus, 'position-transform-disabled');
 
   assert.equal(result.surfaceVertices.schema, ULG_SPH_GPU_RENDER_SURFACE_VERTICES_SCHEMA);
   assert.equal(result.surfaceVertices.backend, 'webgpu');
@@ -790,7 +840,7 @@ test('ULG GPU builder translates retained extension compact positions into resid
   assert.equal(bindGroups[0].entries[3].resource.buffer.label, 'ulg-sph-extension-surface-draw-indirect');
   assert.deepEqual(dispatches.map((dispatch) => dispatch.count), [1]);
   assert.ok(createdBuffers.some((buffer) => buffer.label === 'ulg-sph-extension-surface-translation-params'));
-  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 64));
+  assert.ok(queueWrites.some((write) => write.buffer.label === 'ulg-sph-extension-surface-translation-params' && write.byteLength === 96));
 
   const retainedBuffers = [
     result.surfaceVertices.vertexRowsBuffer,

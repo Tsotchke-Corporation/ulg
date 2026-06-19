@@ -86,6 +86,14 @@ struct SurfaceTranslationParams {
   fallback_normal_x: f32,
   fallback_normal_y: f32,
   fallback_normal_z: f32,
+  position_scale_m: f32,
+  position_origin_x_m: f32,
+  position_origin_y_m: f32,
+  position_origin_z_m: f32,
+  position_grid_bias: f32,
+  position_transform_enabled: f32,
+  position_transform_pad0: f32,
+  position_transform_pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> compact_position_rows: array<f32>;
@@ -101,6 +109,17 @@ fn compact_position(vertex_index: u32) -> vec3<f32> {
     compact_position_rows[offset + 1u],
     compact_position_rows[offset + 2u]
   );
+}
+
+fn ulg_world_position(p: vec3<f32>) -> vec3<f32> {
+  if (params.position_transform_enabled <= 0.5) {
+    return p;
+  }
+  return vec3<f32>(
+    params.position_origin_x_m,
+    params.position_origin_y_m,
+    params.position_origin_z_m
+  ) + (p + vec3<f32>(params.position_grid_bias)) * params.position_scale_m;
 }
 
 fn normalize_or_fallback(v: vec3<f32>) -> vec3<f32> {
@@ -165,9 +184,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
   let vertex_base = triangle_index * 3u;
-  let p0 = compact_position(vertex_base + 0u);
-  let p1 = compact_position(vertex_base + 1u);
-  let p2 = compact_position(vertex_base + 2u);
+  let p0 = ulg_world_position(compact_position(vertex_base + 0u));
+  let p1 = ulg_world_position(compact_position(vertex_base + 1u));
+  let p2 = ulg_world_position(compact_position(vertex_base + 2u));
   let normal = normalize_or_fallback(cross(p1 - p0, p2 - p0));
   write_vertex(vertex_base + 0u, triangle_index, p0, normal);
   write_vertex(vertex_base + 1u, triangle_index, p1, normal);
@@ -206,6 +225,61 @@ function normalizeVector3(value, fallback = [0, 1, 0]) {
   const length = Math.hypot(v[0], v[1], v[2]);
   if (!(length > 1e-12)) return [...fallback];
   return [v[0] / length, v[1] / length, v[2] / length];
+}
+
+function createUlgRenderFieldPositionTransform({
+  resolution = null,
+  fieldPadding = null,
+  refEdgeM = null,
+  positionGridBias = -0.5
+} = {}) {
+  const resolvedResolution = Math.max(0, Math.round(finiteNumber(resolution, 0)));
+  const resolvedFieldPadding = finiteNumber(fieldPadding, NaN);
+  const resolvedRefEdgeM = finiteNumber(refEdgeM, NaN);
+  const span = 1 - 2 * resolvedFieldPadding;
+  const enabled = Boolean(
+    resolvedResolution > 0
+    && Number.isFinite(resolvedFieldPadding)
+    && Number.isFinite(resolvedRefEdgeM)
+    && resolvedRefEdgeM > 0
+    && span > 1e-12
+  );
+  if (!enabled) {
+    return {
+      enabled: false,
+      status: 'position-transform-disabled',
+      resolution: resolvedResolution || null,
+      fieldPadding: Number.isFinite(resolvedFieldPadding) ? resolvedFieldPadding : null,
+      refEdgeM: Number.isFinite(resolvedRefEdgeM) ? resolvedRefEdgeM : null,
+      scaleM: 1,
+      originM: [0, 0, 0],
+      gridBias: 0
+    };
+  }
+  const scaleM = resolvedRefEdgeM / (span * resolvedResolution);
+  const origin = -resolvedFieldPadding * resolvedRefEdgeM / span;
+  return {
+    enabled: true,
+    status: 'ulg-render-field-grid-to-world-transform-ready',
+    resolution: resolvedResolution,
+    fieldPadding: resolvedFieldPadding,
+    refEdgeM: resolvedRefEdgeM,
+    scaleM,
+    originM: [origin, origin, origin],
+    gridBias: finiteNumber(positionGridBias, -0.5)
+  };
+}
+
+function transformCompactPositionToUlgWorld(position, transform) {
+  if (!transform?.enabled) return [...position];
+  const scaleM = finiteNumber(transform.scaleM, 1);
+  const gridBias = finiteNumber(transform.gridBias, 0);
+  const originM = vector3(transform.originM, [0, 0, 0]);
+  return [
+    originM[0] + (position[0] + gridBias) * scaleM,
+    originM[1] + (position[1] + gridBias) * scaleM,
+    originM[2] + (position[2] + gridBias) * scaleM
+  ];
 }
 
 function triangleNormal(a, b, c, fallbackNormal) {
@@ -344,6 +418,11 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     );
   }
   const dims = [resolution, resolution, resolution];
+  const positionTransform = createUlgRenderFieldPositionTransform({
+    resolution,
+    fieldPadding: field.fieldPadding,
+    refEdgeM: field.refEdgeM
+  });
   return {
     schema: ULG_SPH_WEBGPU_MARCHING_CUBES_BUFFER_VOLUME_DESCRIPTOR_SCHEMA,
     ok: true,
@@ -384,6 +463,11 @@ export function createUlgRenderFieldBufferVolumeDescriptor({
     isovalue: surfaceRecord.isolation ?? null,
     fieldPadding: field.fieldPadding ?? null,
     refEdgeM: field.refEdgeM ?? null,
+    positionTransform,
+    positionTransformStatus: positionTransform.status,
+    positionTransformGridBias: positionTransform.gridBias,
+    positionTransformScaleM: positionTransform.scaleM,
+    positionTransformOriginM: [...positionTransform.originM],
     device,
     sameDeviceRequired: true,
     sameDeviceStatus,
@@ -461,10 +545,15 @@ function createExtensionSurfaceTranslationParamsArray({
   transparencyClassId,
   depthWriteFlag,
   renderOrder,
-  fallbackNormal
+  fallbackNormal,
+  positionTransform = null
 }) {
-  const buffer = new ArrayBuffer(64);
+  const buffer = new ArrayBuffer(96);
   const view = new DataView(buffer);
+  const resolvedTransform = positionTransform?.enabled
+    ? positionTransform
+    : null;
+  const originM = vector3(resolvedTransform?.originM, [0, 0, 0]);
   view.setUint32(0, Math.max(0, Math.round(finiteNumber(vertexCount, 0))), true);
   view.setUint32(4, Math.max(1, Math.round(finiteNumber(sourceStrideFloats, 4))), true);
   view.setUint32(8, Math.max(0, Math.round(finiteNumber(surfaceIndex, 0))), true);
@@ -481,6 +570,14 @@ function createExtensionSurfaceTranslationParamsArray({
   view.setFloat32(52, fallbackNormal[0], true);
   view.setFloat32(56, fallbackNormal[1], true);
   view.setFloat32(60, fallbackNormal[2], true);
+  view.setFloat32(64, finiteNumber(resolvedTransform?.scaleM, 1), true);
+  view.setFloat32(68, originM[0], true);
+  view.setFloat32(72, originM[1], true);
+  view.setFloat32(76, originM[2], true);
+  view.setFloat32(80, finiteNumber(resolvedTransform?.gridBias, 0), true);
+  view.setFloat32(84, resolvedTransform ? 1 : 0, true);
+  view.setFloat32(88, 0, true);
+  view.setFloat32(92, 0, true);
   return buffer;
 }
 
@@ -951,7 +1048,12 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
   fallbackNormal = [0, 1, 0],
   transparencyClassId = 0,
   depthWriteFlag = 1,
-  renderOrder = null
+  renderOrder = null,
+  positionTransform = null,
+  positionTransformResolution = null,
+  fieldPadding = null,
+  refEdgeM = null,
+  positionGridBias = -0.5
 } = {}) {
   const summary = summarizeWebGpuMarchingCubesExtensionExecution(extensionExecution);
   if (summary.extensionOk !== true) {
@@ -1022,6 +1124,12 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     ? finiteNumber(extensionExecution?.result?.isovalue ?? extensionExecution?.isovalue, 0)
     : finiteNumber(isolation, 0);
   const resolvedFallbackNormal = normalizeVector3(fallbackNormal);
+  const resolvedPositionTransform = positionTransform || createUlgRenderFieldPositionTransform({
+    resolution: positionTransformResolution,
+    fieldPadding,
+    refEdgeM,
+    positionGridBias
+  });
   const triangleCount = Math.floor(vertexCount / 3);
   const alignedVertexCount = triangleCount * 3;
   const vertexRows = new Float32Array(alignedVertexCount * SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length);
@@ -1030,11 +1138,12 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
   const max = [-Infinity, -Infinity, -Infinity];
   for (let index = 0; index < alignedVertexCount; index += 1) {
     const sourceOffset = index * sourceStride;
-    const p = [
+    const sourcePosition = [
       finiteNumber(sourceRows[sourceOffset], 0),
       finiteNumber(sourceRows[sourceOffset + 1], 0),
       finiteNumber(sourceRows[sourceOffset + 2], 0)
     ];
+    const p = transformCompactPositionToUlgWorld(sourcePosition, resolvedPositionTransform);
     positions.push(p);
     for (let axis = 0; axis < 3; axis += 1) {
       min[axis] = Math.min(min[axis], p[axis]);
@@ -1119,6 +1228,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     sourceSurfaceSchema: summary.extensionSurfaceSchema,
     surfaceExtractionMethod: 'webgpu-marching-cubes-extension-compact-position-translation',
     compactionMode: 'extension-compact-position-to-ulg-rows',
+    positionTransform: resolvedPositionTransform,
+    positionTransformStatus: resolvedPositionTransform.status,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length,
     vertexRows,
@@ -1151,6 +1262,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
     drawIndirectRows,
     drawIndirectRowsByteLength: drawIndirectRows.byteLength,
     compactionMode: 'extension-compact-position-to-ulg-draw-metadata',
+    positionTransform: resolvedPositionTransform,
+    positionTransformStatus: resolvedPositionTransform.status,
     surfaces: [surface],
     scientificValidation: false,
     sphValidation: false,
@@ -1166,6 +1279,8 @@ export function translateWebGpuMarchingCubesSurfaceToUlgRows({
       ? 'extension vertexCount was not divisible by 3; trailing vertices were ignored'
       : null,
     summary,
+    positionTransform: resolvedPositionTransform,
+    positionTransformStatus: resolvedPositionTransform.status,
     sourceVertexCount: vertexCount,
     translatedVertexCount: alignedVertexCount,
     ignoredTrailingVertexCount: vertexCount - alignedVertexCount,
@@ -1193,6 +1308,11 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   transparencyClassId = 0,
   depthWriteFlag = 1,
   renderOrder = null,
+  positionTransform = null,
+  positionTransformResolution = null,
+  fieldPadding = null,
+  refEdgeM = null,
+  positionGridBias = -0.5,
   readbackMode = NO_FULL_READBACK_MODE,
   compactSummaryReadback = false,
   retainVertexRowsBuffer = true,
@@ -1228,6 +1348,12 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     ? finiteNumber(extensionExecution?.result?.isovalue ?? extensionExecution?.isovalue, 0)
     : finiteNumber(isolation, 0);
   const resolvedFallbackNormal = normalizeVector3(fallbackNormal);
+  const resolvedPositionTransform = positionTransform || createUlgRenderFieldPositionTransform({
+    resolution: positionTransformResolution,
+    fieldPadding,
+    refEdgeM,
+    positionGridBias
+  });
   const resolvedRenderOrder = renderOrder == null
     ? resolvedSurfaceIndex
     : finiteNumber(renderOrder, resolvedSurfaceIndex);
@@ -1287,7 +1413,7 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
   device.queue.writeBuffer(drawIndirectRowsBuffer, 0, new Uint32Array(SPH_GPU_RENDER_SURFACE_DRAW_INDIRECT_ROW_LAYOUT.length));
   const paramsBuffer = device.createBuffer({
     label: 'ulg-sph-extension-surface-translation-params',
-    size: 64,
+    size: 96,
     usage: GPU_BUFFER_USAGE.UNIFORM | GPU_BUFFER_USAGE.COPY_DST
   });
   device.queue.writeBuffer(paramsBuffer, 0, createExtensionSurfaceTranslationParamsArray({
@@ -1304,7 +1430,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     transparencyClassId: resolvedTransparencyClassId,
     depthWriteFlag: resolvedDepthWriteFlag,
     renderOrder: resolvedRenderOrder,
-    fallbackNormal: resolvedFallbackNormal
+    fallbackNormal: resolvedFallbackNormal,
+    positionTransform: resolvedPositionTransform
   }));
   markProgress('extension-surface-translation-buffers-ready');
 
@@ -1452,6 +1579,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceSurfaceSchema: summary.extensionSurfaceSchema,
     surfaceExtractionMethod: 'webgpu-marching-cubes-extension-compact-position-gpu-translation',
     compactionMode: 'webgpu-extension-compact-position-to-ulg-rows',
+    positionTransform: resolvedPositionTransform,
+    positionTransformStatus: resolvedPositionTransform.status,
     surfaceCount: 1,
     rowLayout: [...SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT],
     rowStrideFloats: SPH_GPU_RENDER_SURFACE_VERTEX_ROW_LAYOUT.length,
@@ -1518,6 +1647,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     surfaceDrawSummaryReadbackByteLength: summaryReadbackByteLength,
     fullSurfaceDrawReadback: !noFullReadback,
     compactionMode: 'webgpu-extension-compact-position-to-ulg-draw-metadata',
+    positionTransform: resolvedPositionTransform,
+    positionTransformStatus: resolvedPositionTransform.status,
     surfaces: [surface],
     scientificValidation: false,
     sphValidation: false,
@@ -1610,6 +1741,8 @@ export async function buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
     sourceVertexStrideFloats: sourceStrideFloats,
     surfaceVertices,
     surfaceDraw,
+    positionTransform: resolvedPositionTransform,
+    positionTransformStatus: resolvedPositionTransform.status,
     readbackMode: noFullReadback ? NO_FULL_READBACK_MODE : FULL_READBACK_MODE,
     queueCompletionStatus,
     queueCompletionMethod,

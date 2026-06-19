@@ -10288,3 +10288,25 @@ Render-field direct-consumer handoff contract, 2026-06-18 21:56 AKDT:
     `surfaceDrawGpuBufferHandoffRequiresSurfaceExtraction=true`,
     retained render-field rows `16777216` bytes, and retained surface buffer
     `256` bytes.
+
+Native MC buffer-volume extraction and coordinate handoff, 2026-06-18 22:45 AKDT:
+
+- `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`
+  - Passed: `68/68`.
+  - Coverage proves the extension compact positions are translated from
+    grid-local MC coordinates into ULG render-field world meters and that the
+    resident surface-draw handoff still preserves renderer capability and
+    fallback contracts.
+- `git diff --check`
+  - Passed.
+- Focused Playwright:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH WebGPU extension surface translation maps MC grid positions|SPH phase no-full render refresh can skip compact surface summary readback"`
+  - Passed: `2/2`.
+  - Browser coverage verifies the native-MC/no-summary path and the transform
+    shader path against the live HTTPS Vite server.

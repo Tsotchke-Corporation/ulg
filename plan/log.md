@@ -28033,3 +28033,52 @@ Remaining:
   these descriptors and bind the resulting GPU-resident surface buffers into
   the engine-owned surface draw bridge. Do not use an overlay and do not make
   the old tetrahedral compact fallback the primary renderer.
+
+## 2026-06-18 22:45 AKDT - Native MC Buffer-Volume Extraction and Coordinate Handoff
+
+Status:
+
+- Wired the retained no-summary render-field descriptor path into the sibling
+  `webgpu-marching-cubes` scalar-buffer volume extractor. ULG now creates the
+  extension volume descriptor, runs the native MC adapter, and feeds the
+  resulting compact position buffer through the resident surface-draw
+  translation path.
+- Fixed the visual coordinate mismatch that made native marching-cubes output
+  render incorrectly: extension compact vertices are grid-local MC positions,
+  while ULG surface rows expect world meters. The ULG adapter now derives a
+  render-field grid-to-world transform from resolution, field padding, and
+  `refEdgeM`, applies a half-cell grid bias, and uses that transform in both
+  CPU and GPU translation paths.
+- Normalized wrapper-vs-raw extension execution handling so the resident draw
+  bridge passes the real extension execution into the GPU translator while
+  still preserving wrapper status diagnostics.
+- On native extraction success, ULG retains resident vertex, draw, indirect,
+  and compacted vertex buffers for the engine-owned direct-consumer path, then
+  releases the lower render-field buffers. On extraction failure, it falls back
+  to the retained render-field buffer handoff without manufacturing misleading
+  geometry.
+- Diagnostics now publish native extraction status, volume schema/source/layout,
+  raw extension status and vertex count, and position-transform readiness. This
+  keeps the old tetrahedral compact presentation fail-closed and keeps the
+  implementation inside the engine path with no overlay.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMarchingCubesSurfaceAdapter.js`.
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs tests/sphPhaseRenderer.test.mjs`
+  reported `68/68`.
+- PASS: `git diff --check`.
+- PASS: focused Playwright native MC/no-summary pair against the live HTTPS
+  Vite server on `https://127.0.0.1:5173` reported `2/2`:
+  `SPH phase no-full render refresh can skip compact surface summary readback`
+  and
+  `SPH WebGPU extension surface translation maps MC grid positions into ULG world meters`.
+
+Remaining:
+
+- The retained native MC surface-draw buffers still need the final same-device
+  engine-owned WebGPU renderer consumer and pixel checks. Until that lands,
+  this slice fixes extraction geometry and buffer handoff correctness, not the
+  full no-readback visible renderer.

@@ -8,6 +8,10 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
+  createBufferVolumeDescriptor as createWebGpuMarchingCubesBufferVolumeDescriptor,
+  createMarchingCubesSurfaceAdapter
+} from 'three-webgpu-marching-cubes';
+import {
   GPU_PHASE_IDS,
   OPTICAL_GPU_RECORD_LAYOUT,
   buildOpticalGpuLookupQueries,
@@ -82,6 +86,7 @@ import {
 } from '../runtime/sph/sphRenderGpuKernel.js';
 import {
   buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
+  createUlgWebGpuMarchingCubesExtensionAdapter,
   createUlgRenderFieldBufferVolumeDescriptor
 } from '../runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 import {
@@ -355,6 +360,7 @@ const SPH_THREE_COMPACT_VERTEX_BRIDGE_STATUS = 'three-compact-surface-geometry-r
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE = 'three-webgpu-surface-buffers';
 const SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_STATUS = 'three-webgpu-surface-buffers-ready';
 const SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'resident-surface-buffers-no-overlay';
+const SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE = 'extension-resident-surface-buffers-no-overlay';
 const SPH_THREE_COMPACT_VERTEX_PRESENTATION_ENABLED = false;
 const SPH_THREE_COMPACT_VERTEX_PRESENTATION_BLOCK_REASON =
   'three-compact-vertices disabled: current WebGPU surface extraction emits tetrahedralized render-field cubes and compact readback can stall; using the engine-managed marching-cubes/render-field path until webgpu-marching-cubes direct-buffer integration is pixel validated';
@@ -10925,41 +10931,122 @@ export function createSphPhaseScene(container, {
       fieldOffset: descriptor.fieldOffset ?? null,
       fieldCellCount: descriptor.fieldCellCount ?? null,
       isovalue: descriptor.isovalue ?? null,
+      fieldPadding: descriptor.fieldPadding ?? null,
+      refEdgeM: descriptor.refEdgeM ?? null,
+      positionTransformStatus: descriptor.positionTransformStatus ?? descriptor.positionTransform?.status ?? null,
+      positionTransformGridBias: descriptor.positionTransformGridBias ?? descriptor.positionTransform?.gridBias ?? null,
+      positionTransformScaleM: descriptor.positionTransformScaleM ?? descriptor.positionTransform?.scaleM ?? null,
+      positionTransformOriginM: Array.isArray(descriptor.positionTransformOriginM)
+        ? [...descriptor.positionTransformOriginM]
+        : (Array.isArray(descriptor.positionTransform?.originM) ? [...descriptor.positionTransform.originM] : null),
       sameDeviceStatus: descriptor.sameDeviceStatus ?? null,
       nativeConsumerKind: descriptor.nativeConsumerKind ?? null,
       nativeRequiredAdapter: descriptor.nativeRequiredAdapter ?? null
     };
   }
 
-  function createRenderFieldBufferVolumeDescriptorSummary({ device, renderFieldExecution } = {}) {
+  function createRenderFieldBufferVolumeDescriptors({ device, renderFieldExecution } = {}) {
     const surfaces = Array.isArray(renderFieldExecution?.surfaceTable?.metadata)
       ? renderFieldExecution.surfaceTable.metadata
       : [];
-    const descriptors = surfaces.map((surface, surfaceIndex) => summarizeRenderFieldBufferVolumeDescriptor(
-      createUlgRenderFieldBufferVolumeDescriptor({
-        device,
-        renderField: renderFieldExecution,
-        surface,
-        surfaceIndex
-      })
-    ));
-    const readyCount = descriptors.filter((descriptor) => descriptor.ok).length;
-    const blockedCount = descriptors.length - readyCount;
+    return surfaces.map((surface, surfaceIndex) => createUlgRenderFieldBufferVolumeDescriptor({
+      device,
+      renderField: renderFieldExecution,
+      surface,
+      surfaceIndex
+    }));
+  }
+
+  function summarizeRenderFieldBufferVolumeDescriptors(descriptors = []) {
+    const summarizedDescriptors = descriptors.map((descriptor) =>
+      summarizeRenderFieldBufferVolumeDescriptor(descriptor));
+    const readyCount = summarizedDescriptors.filter((descriptor) => descriptor.ok).length;
+    const blockedCount = summarizedDescriptors.length - readyCount;
     return {
       schema: 'peercompute.ulg.sph-render-field-buffer-volume-descriptors.v0',
-      status: descriptors.length === 0
+      status: summarizedDescriptors.length === 0
         ? 'render-field-buffer-volume-descriptors-empty'
         : (blockedCount > 0
           ? 'render-field-buffer-volume-descriptors-partial'
           : 'render-field-buffer-volume-descriptors-ready'),
-      descriptorSchema: descriptors[0]?.schema ?? null,
-      descriptorCount: descriptors.length,
+      descriptorSchema: summarizedDescriptors[0]?.schema ?? null,
+      descriptorCount: summarizedDescriptors.length,
       readyCount,
       blockedCount,
       extensionDescriptorFactory: 'createBufferVolumeDescriptor',
       nativeConsumerKind: 'native-webgpu-marching-cubes-buffer-volume',
       nativeRequiredAdapter: 'webgpu-marching-cubes.buffer-volume.v0',
-      descriptors
+      descriptors: summarizedDescriptors
+    };
+  }
+
+  function createRenderFieldBufferVolumeDescriptorSummary({ device, renderFieldExecution } = {}) {
+    return summarizeRenderFieldBufferVolumeDescriptors(
+      createRenderFieldBufferVolumeDescriptors({ device, renderFieldExecution })
+    );
+  }
+
+  function createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor) {
+    return createWebGpuMarchingCubesBufferVolumeDescriptor({
+      device: descriptor.device,
+      scalarBuffer: descriptor.scalarBuffer,
+      dims: descriptor.dims,
+      scalarStrides: descriptor.scalarStrides,
+      scalarOffset: descriptor.scalarOffset,
+      bufferByteLength: descriptor.scalarBufferByteLength,
+      scalarType: descriptor.scalarType || 'f32',
+      label: descriptor.label || `ulg-sph-native-mc-${descriptor.surfaceKey || descriptor.surfaceIndex || 0}`,
+      source: descriptor.source || 'ulg-render-field-density-storage-buffer'
+    });
+  }
+
+  async function extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
+    device,
+    descriptor,
+    isovalue = null,
+    materialPayload = null,
+    pbrPayload = null
+  } = {}) {
+    if (!descriptor?.ok) {
+      return {
+        schema: 'peercompute.ulg.sph-native-marching-cubes-extraction.v0',
+        ok: false,
+        status: 'native-marching-cubes-render-field-descriptor-blocked',
+        reason: descriptor?.reason || descriptor?.status || 'render-field buffer-volume descriptor is not ready',
+        descriptorStatus: descriptor?.status ?? null,
+        extensionExecution: null
+      };
+    }
+    const volume = createWebGpuMarchingCubesExtensionVolumeFromUlgDescriptor(descriptor);
+    const wrapper = createUlgWebGpuMarchingCubesExtensionAdapter({
+      device,
+      volume,
+      adapterId: 'webgpu-marching-cubes.buffer-volume.v0',
+      adapterFactory({ device: adapterDevice, volume: adapterVolume }) {
+        return createMarchingCubesSurfaceAdapter({
+          device: adapterDevice,
+          volume: adapterVolume,
+          adapterId: 'webgpu-marching-cubes.buffer-volume.v0'
+        });
+      }
+    });
+    const extensionExecution = await wrapper.extractSurface({
+      volume,
+      isovalue: isovalue ?? descriptor.isovalue ?? 0,
+      materialPayload,
+      pbrPayload,
+      ownsBuffer: true
+    });
+    return {
+      schema: 'peercompute.ulg.sph-native-marching-cubes-extraction.v0',
+      ok: extensionExecution?.extensionExecution?.ok === true,
+      status: extensionExecution?.status ?? 'native-marching-cubes-extraction-complete',
+      reason: extensionExecution?.reason ?? extensionExecution?.summary?.reason ?? null,
+      descriptorStatus: descriptor.status,
+      volumeSchema: volume.schema,
+      volumeSourceType: volume.sourceType,
+      volumeScalarLayoutName: volume.scalarLayoutName,
+      extensionExecution
     };
   }
 
@@ -11549,6 +11636,11 @@ export function createSphPhaseScene(container, {
     transparencyClassId = 0,
     depthWriteFlag = 1,
     renderOrder = null,
+    positionTransform = null,
+    positionTransformResolution = null,
+    fieldPadding = null,
+    refEdgeM = null,
+    positionGridBias = -0.5,
     readbackMode = SPH_PHASE_RESIDENT_READBACK_MODE_DEFAULT,
     renderBridgeMode = null,
     materialProperties = currentMaterialProperties,
@@ -11565,7 +11657,7 @@ export function createSphPhaseScene(container, {
         { overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy() }
       );
       unavailable.status = 'resident-extension-surface-draw-unavailable';
-      unavailable.visibleRendererBridge = 'extension-resident-surface-buffers-no-overlay';
+      unavailable.visibleRendererBridge = SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
       unavailable.visibleRenderSource = 'webgpu-marching-cubes-extension-unavailable';
       sphResidentSurfaceDraw = unavailable;
       scene.userData.sphResidentSurfaceDraw = unavailable;
@@ -11576,10 +11668,15 @@ export function createSphPhaseScene(container, {
     }
     let translation = null;
     try {
+      const wrappedExtensionExecution = extensionExecution?.extensionExecution
+        ? extensionExecution
+        : null;
+      const rawExtensionExecution = wrappedExtensionExecution?.extensionExecution || extensionExecution;
       markSphResidentRenderProgress('extension-surface-draw-translation-started', {
         stage: 'extension-surface-draw',
-        extensionStatus: extensionExecution?.status ?? null,
-        extensionVertexCount: extensionExecution?.result?.vertexCount ?? 0
+        extensionStatus: rawExtensionExecution?.status ?? null,
+        extensionWrapperStatus: wrappedExtensionExecution?.status ?? null,
+        extensionVertexCount: rawExtensionExecution?.result?.vertexCount ?? 0
       });
       const requestedThreeCompactBridge = renderBridgeMode === SPH_THREE_COMPACT_VERTEX_BRIDGE_MODE;
       const requestedReadbackMode = normalizeResidentReadbackMode(readbackMode);
@@ -11602,7 +11699,7 @@ export function createSphPhaseScene(container, {
       scene.userData.sphResidentExtensionSurfaceRenderBridgePlan = renderBridgePlan;
       translation = await buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu({
         device: resolvedDeviceResult.device,
-        extensionExecution,
+        extensionExecution: rawExtensionExecution,
         surfaceIndex,
         materialId,
         phaseId,
@@ -11618,6 +11715,11 @@ export function createSphPhaseScene(container, {
         transparencyClassId,
         depthWriteFlag,
         renderOrder,
+        positionTransform,
+        positionTransformResolution,
+        fieldPadding,
+        refEdgeM,
+        positionGridBias,
         readbackMode: translationReadbackMode,
         compactSummaryReadback: false,
         retainVertexRowsBuffer: true,
@@ -11755,7 +11857,7 @@ export function createSphPhaseScene(container, {
         renderBridgeRequestedThreeCompactReadbackBridge: rendererCapability.requestedThreeCompactReadbackBridge,
         visibleRendererBridge: renderBridgeReady
           ? renderBridge.rendererBridge
-          : 'extension-resident-surface-buffers-no-overlay',
+          : SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE,
         visibleRenderSource: renderBridgeReady
           ? renderBridge.visibleRenderSource
           : 'webgpu-marching-cubes-extension-same-device-surface',
@@ -11797,6 +11899,11 @@ export function createSphPhaseScene(container, {
         renderBridgeOpticalSpectralSampleStrideFloats: renderBridge?.opticalSpectralSampleStrideFloats ?? 0,
         renderBridgeTemporalSwapPolicy: renderBridge?.temporalSwapPolicy ?? null,
         renderBridgeRetainedPreviousOverlay: Boolean(renderBridge?.retainedPreviousOverlay),
+        extensionSurfaceAdapterExecutionStatus: wrappedExtensionExecution?.status ?? null,
+        extensionSurfaceRawExecutionStatus: rawExtensionExecution?.status ?? null,
+        extensionSurfaceRawVertexCount: rawExtensionExecution?.result?.vertexCount ?? null,
+        extensionSurfacePositionTransformStatus: translation.positionTransformStatus ?? null,
+        extensionSurfacePositionTransform: translation.positionTransform ?? null,
         extensionSurfaceTranslation: translation,
         surfaceVertices: surfaceVerticesExecution,
         surfaceDraw: surfaceDrawExecution,
@@ -11838,7 +11945,7 @@ export function createSphPhaseScene(container, {
         overlayPolicy: resolveSceneResidentSurfaceDrawOverlayPolicy()
       });
       unavailable.status = 'resident-extension-surface-draw-error';
-      unavailable.visibleRendererBridge = 'extension-resident-surface-buffers-no-overlay';
+      unavailable.visibleRendererBridge = SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
       unavailable.visibleRenderSource = 'webgpu-marching-cubes-extension-error';
       sphResidentSurfaceDraw = unavailable;
       scene.userData.sphResidentSurfaceDraw = unavailable;
@@ -12916,10 +13023,12 @@ export function createSphPhaseScene(container, {
             nextResidentSurfaceDraw.renderFieldRowsBufferByteLength = renderFieldExecution.fieldRowByteLength ?? 0;
             nextResidentSurfaceDraw.renderFieldSurfaceBufferRetained = true;
             nextResidentSurfaceDraw.renderFieldSurfaceBufferByteLength = renderFieldExecution.surfaceBufferByteLength ?? 0;
-            const renderFieldBufferVolumeDescriptorSummary = createRenderFieldBufferVolumeDescriptorSummary({
+            const renderFieldBufferVolumeDescriptors = createRenderFieldBufferVolumeDescriptors({
               device: resolvedDeviceResult.device,
               renderFieldExecution
             });
+            const renderFieldBufferVolumeDescriptorSummary =
+              summarizeRenderFieldBufferVolumeDescriptors(renderFieldBufferVolumeDescriptors);
             scene.userData.sphRenderFieldBufferVolumeDescriptorSummary = renderFieldBufferVolumeDescriptorSummary;
             nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorSchema =
               renderFieldBufferVolumeDescriptorSummary.schema;
@@ -12937,22 +13046,149 @@ export function createSphPhaseScene(container, {
               renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter;
             nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptors =
               renderFieldBufferVolumeDescriptorSummary.descriptors;
-            nextResidentSurfaceDraw.visibleRendererBridge = SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
-            nextResidentSurfaceDraw.visibleRenderSource = 'resident-render-field-buffers';
-            nextResidentSurfaceDraw.surfaceDrawReadback = false;
-            nextResidentSurfaceDraw.surfaceDrawSummaryReadback = false;
-            nextResidentSurfaceDraw.surfaceDrawSummarySkipped = true;
-            nextResidentSurfaceDraw.surfaceDrawSummaryReadbackByteLength = 0;
+            const nativeDescriptor = renderFieldBufferVolumeDescriptors.find((descriptor) => descriptor?.ok);
+            const nativeSurfaceRecord = nativeDescriptor
+              ? renderFieldExecution?.surfaceTable?.metadata?.[nativeDescriptor.surfaceIndex]
+              : null;
+            let nativeMarchingCubesSurfaceDrawReady = false;
+            if (nativeDescriptor && nativeSurfaceRecord) {
+              try {
+                markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-started', {
+                  stage: 'native-marching-cubes',
+                  surfaceIndex: nativeDescriptor.surfaceIndex,
+                  surfaceKey: nativeDescriptor.surfaceKey,
+                  dims: nativeDescriptor.dims,
+                  scalarLayoutName: nativeDescriptor.scalarLayoutName,
+                  isovalue: nativeDescriptor.isovalue
+                });
+                const nativeExtraction = await extractNativeMarchingCubesSurfaceForRenderFieldDescriptor({
+                  device: resolvedDeviceResult.device,
+                  descriptor: nativeDescriptor,
+                  isovalue: nativeDescriptor.isovalue,
+                  materialPayload: {
+                    material: nativeSurfaceRecord.material ?? null,
+                    phase: nativeSurfaceRecord.phase ?? null,
+                    renderKey: nativeSurfaceRecord.renderKey ?? null,
+                    surfaceKey: nativeSurfaceRecord.surfaceKey ?? null
+                  },
+                  pbrPayload: nativeSurfaceRecord.opticalState || null
+                });
+                const extensionExecution = nativeExtraction.extensionExecution;
+                if (extensionExecution?.extensionExecution?.ok === true) {
+                  const nativeSurfaceDraw = await refreshSphResidentSurfaceDrawFromExtension({
+                    extensionExecution,
+                    device: resolvedDeviceResult.device,
+                    surfaceIndex: nativeSurfaceRecord.index ?? nativeDescriptor.surfaceIndex,
+                    materialId: nativeSurfaceRecord.materialId ?? 0,
+                    phaseId: nativeSurfaceRecord.phaseId ?? 0,
+                    opticalStateId: nativeSurfaceRecord.opticalStateId ?? 0,
+                    material: nativeSurfaceRecord.material ?? null,
+                    phase: nativeSurfaceRecord.phase ?? null,
+                    renderKey: nativeSurfaceRecord.renderKey ?? null,
+                    surfaceKey: nativeSurfaceRecord.surfaceKey ?? nativeDescriptor.surfaceKey ?? null,
+                    density: nativeSurfaceRecord.strength ?? 0,
+                    isolation: nativeDescriptor.isovalue ?? nativeSurfaceRecord.isolation ?? null,
+                    sourceVoxelLinearIndex: nativeDescriptor.fieldOffset ?? 0,
+                    transparencyClassId: nativeSurfaceRecord.transparencyClassId ?? 0,
+                    depthWriteFlag: nativeSurfaceRecord.depthWriteFlag ?? 1,
+                    renderOrder: nativeSurfaceRecord.renderOrder ?? null,
+                    positionTransform: nativeDescriptor.positionTransform ?? null,
+                    positionTransformResolution: nativeDescriptor.dims?.[0] ?? nativeSurfaceRecord.resolution ?? null,
+                    fieldPadding: nativeDescriptor.fieldPadding ?? renderFieldExecution.fieldPadding ?? null,
+                    refEdgeM: nativeDescriptor.refEdgeM ?? renderFieldExecution.refEdgeM ?? null,
+                    positionGridBias: nativeDescriptor.positionTransformGridBias ?? -0.5,
+                    readbackMode: RESIDENT_NO_FULL_READBACK_MODE,
+                    renderBridgeMode: SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE,
+                    materialProperties,
+                    waitForQueueCompletion: true
+                  });
+                  nextResidentSurfaceDraw = {
+                    ...nativeSurfaceDraw,
+                    sourceRenderFieldSchema: renderFieldExecution.schema,
+                    sourceRenderFieldBackend: renderFieldExecution.backend ?? null,
+                    renderFieldBufferMode: 'native-marching-cubes-buffer-volume-extracted',
+                    renderFieldRowsBufferRetained: false,
+                    renderFieldRowsBufferByteLength: 0,
+                    renderFieldSurfaceBufferRetained: false,
+                    renderFieldSurfaceBufferByteLength: 0,
+                    renderFieldBufferVolumeDescriptorSchema: renderFieldBufferVolumeDescriptorSummary.schema,
+                    renderFieldBufferVolumeDescriptorStatus: renderFieldBufferVolumeDescriptorSummary.status,
+                    renderFieldBufferVolumeDescriptorCount: renderFieldBufferVolumeDescriptorSummary.descriptorCount,
+                    renderFieldBufferVolumeDescriptorReadyCount: renderFieldBufferVolumeDescriptorSummary.readyCount,
+                    renderFieldBufferVolumeDescriptorBlockedCount: renderFieldBufferVolumeDescriptorSummary.blockedCount,
+                    renderFieldBufferVolumeDescriptorNativeConsumerKind:
+                      renderFieldBufferVolumeDescriptorSummary.nativeConsumerKind,
+                    renderFieldBufferVolumeDescriptorNativeRequiredAdapter:
+                      renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter,
+                    renderFieldBufferVolumeDescriptors: renderFieldBufferVolumeDescriptorSummary.descriptors,
+                    nativeMarchingCubesExtractionSchema: nativeExtraction.schema,
+                    nativeMarchingCubesExtractionStatus: nativeExtraction.status,
+                    nativeMarchingCubesVolumeSchema: nativeExtraction.volumeSchema,
+                    nativeMarchingCubesVolumeSourceType: nativeExtraction.volumeSourceType,
+                    nativeMarchingCubesVolumeScalarLayoutName: nativeExtraction.volumeScalarLayoutName
+                  };
+                  nativeMarchingCubesSurfaceDrawReady = true;
+                  renderFieldExecution?.releaseRenderFieldBufferLeases?.({
+                    status: 'released-after-native-marching-cubes-buffer-volume-extraction'
+                  });
+                  renderFieldExecution?.destroyRenderFieldBuffers?.({
+                    releaseLeases: true,
+                    reason: 'native-marching-cubes-buffer-volume-extraction-complete'
+                  });
+                  markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-complete', {
+                    stage: 'native-marching-cubes',
+                    surfaceIndex: nativeDescriptor.surfaceIndex,
+                    status: nativeSurfaceDraw.status,
+                    sourceVertexRowCount: nativeSurfaceDraw.sourceVertexRowCount ?? null,
+                    compactedVertexRowsBufferRetained: nativeSurfaceDraw.compactedVertexRowsBufferRetained,
+                    drawRowsBufferRetained: nativeSurfaceDraw.drawRowsBufferRetained,
+                    drawIndirectRowsBufferRetained: nativeSurfaceDraw.drawIndirectRowsBufferRetained
+                  });
+                } else {
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionSchema = nativeExtraction.schema;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus = nativeExtraction.status;
+                  nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason =
+                    nativeExtraction.reason || extensionExecution?.summary?.reason || null;
+                  markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-blocked', {
+                    stage: 'native-marching-cubes',
+                    surfaceIndex: nativeDescriptor.surfaceIndex,
+                    status: nativeExtraction.status,
+                    reason: nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason
+                  });
+                }
+              } catch (error) {
+                nextResidentSurfaceDraw.nativeMarchingCubesExtractionStatus =
+                  'native-marching-cubes-render-field-extraction-error';
+                nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason =
+                  error instanceof Error ? error.message : String(error);
+                markSphResidentRenderProgress('native-marching-cubes-render-field-extraction-error', {
+                  stage: 'native-marching-cubes',
+                  surfaceIndex: nativeDescriptor.surfaceIndex,
+                  reason: nextResidentSurfaceDraw.nativeMarchingCubesExtractionReason
+                });
+              }
+            }
+            if (!nativeMarchingCubesSurfaceDrawReady) {
+              nextResidentSurfaceDraw.visibleRendererBridge = SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
+              nextResidentSurfaceDraw.visibleRenderSource = 'resident-render-field-buffers';
+              nextResidentSurfaceDraw.surfaceDrawReadback = false;
+              nextResidentSurfaceDraw.surfaceDrawSummaryReadback = false;
+              nextResidentSurfaceDraw.surfaceDrawSummarySkipped = true;
+              nextResidentSurfaceDraw.surfaceDrawSummaryReadbackByteLength = 0;
+            }
             const gpuBufferHandoff = resolveResidentSurfaceBufferHandoff({
               surfaceDraw: nextResidentSurfaceDraw,
               readbackMode: RESIDENT_NO_FULL_READBACK_MODE
             });
+            const gpuBufferHandoffDefaultReason = gpuBufferHandoff.handoffKind === 'surface-draw-buffers'
+              ? 'native marching-cubes extension produced retained ULG surface buffers for the engine-owned direct consumer path'
+              : 'retained render-field and surface buffers are ready for the engine-owned marching-cubes/direct-consumer path';
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffSchema = gpuBufferHandoff.schema;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReady = gpuBufferHandoff.ready;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffStatus = gpuBufferHandoff.status;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffReason =
               gpuBufferHandoff.reason
-              || 'retained render-field and surface buffers are ready for the engine-owned marching-cubes/direct-consumer path';
+              || gpuBufferHandoffDefaultReason;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffKind = gpuBufferHandoff.handoffKind;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffInputSchema =
               gpuBufferHandoff.directConsumerInputSchema;
@@ -12979,13 +13215,15 @@ export function createSphPhaseScene(container, {
               gpuBufferHandoff.upperBoundTriangleCount;
             nextResidentSurfaceDraw.surfaceDrawGpuBufferHandoffConservativeDrawRange =
               gpuBufferHandoff.conservativeDrawRange;
-            nextResidentSurfaceDraw.fullSurfaceDrawReadback = false;
-            nextResidentSurfaceDraw.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
-            nextResidentSurfaceDraw.renderBridgeStatus = 'resident-render-field-buffers-retained-no-overlay';
-            nextResidentSurfaceDraw.renderBridgeReason =
-              'engine direct-consumer integration will consume resident render-field buffers without overlay';
-            nextResidentSurfaceDraw.renderBridgeEngineIntegration =
-              'engine-resident-render-field-buffer-handoff-no-overlay';
+            if (!nativeMarchingCubesSurfaceDrawReady) {
+              nextResidentSurfaceDraw.fullSurfaceDrawReadback = false;
+              nextResidentSurfaceDraw.renderBridgeSchema = 'peercompute.ulg.sph-resident-surface-draw-render-bridge.v0';
+              nextResidentSurfaceDraw.renderBridgeStatus = 'resident-render-field-buffers-retained-no-overlay';
+              nextResidentSurfaceDraw.renderBridgeReason =
+                'engine direct-consumer integration will consume resident render-field buffers without overlay';
+              nextResidentSurfaceDraw.renderBridgeEngineIntegration =
+                'engine-resident-render-field-buffer-handoff-no-overlay';
+            }
           } else {
             renderFieldExecution?.releaseRenderFieldBufferLeases?.({
               status: renderFieldSurfaceSummarySkipped
@@ -13115,6 +13353,7 @@ export function createSphPhaseScene(container, {
               || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
               || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
               || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
+              || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
             ) {
               suppressThreeSurfaceMeshesForResidentOverlay(
                 nextResidentSurfaceDraw.visibleRendererBridge === 'three-compact-surface-geometry'
@@ -13155,6 +13394,7 @@ export function createSphPhaseScene(container, {
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-compact-surface-geometry'
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_THREE_WEBGPU_SURFACE_BUFFER_BRIDGE_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
+        || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_EXTENSION_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-points'
         || nextResidentSurfaceDraw?.visibleRendererBridge === 'three-render-row-spheres'
         || nextResidentSurfaceDraw?.visibleRendererBridge === SPH_WEBGPU_RENDER_ROW_POINTS_BRIDGE_MODE
@@ -13373,7 +13613,29 @@ export function createSphPhaseScene(container, {
           sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorNativeRequiredAdapter ?? null,
         surfaceDrawRenderFieldBufferVolumeDescriptors:
           sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptors || [],
-	        surfaceDrawOverlayPolicyStatus: sphResidentSurfaceDraw?.overlayPolicyStatus
+        surfaceDrawNativeMarchingCubesExtractionSchema:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionSchema ?? null,
+        surfaceDrawNativeMarchingCubesExtractionStatus:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionStatus ?? null,
+        surfaceDrawNativeMarchingCubesExtractionReason:
+          sphResidentSurfaceDraw?.nativeMarchingCubesExtractionReason ?? null,
+        surfaceDrawNativeMarchingCubesVolumeSchema:
+          sphResidentSurfaceDraw?.nativeMarchingCubesVolumeSchema ?? null,
+        surfaceDrawNativeMarchingCubesVolumeSourceType:
+          sphResidentSurfaceDraw?.nativeMarchingCubesVolumeSourceType ?? null,
+        surfaceDrawNativeMarchingCubesVolumeScalarLayoutName:
+          sphResidentSurfaceDraw?.nativeMarchingCubesVolumeScalarLayoutName ?? null,
+        surfaceDrawExtensionSurfaceAdapterExecutionStatus:
+          sphResidentSurfaceDraw?.extensionSurfaceAdapterExecutionStatus ?? null,
+        surfaceDrawExtensionSurfaceRawExecutionStatus:
+          sphResidentSurfaceDraw?.extensionSurfaceRawExecutionStatus ?? null,
+        surfaceDrawExtensionSurfaceRawVertexCount:
+          sphResidentSurfaceDraw?.extensionSurfaceRawVertexCount ?? null,
+        surfaceDrawExtensionSurfacePositionTransformStatus:
+          sphResidentSurfaceDraw?.extensionSurfacePositionTransformStatus ?? null,
+        surfaceDrawExtensionSurfacePositionTransform:
+          sphResidentSurfaceDraw?.extensionSurfacePositionTransform ?? null,
+        surfaceDrawOverlayPolicyStatus: sphResidentSurfaceDraw?.overlayPolicyStatus
           ?? surfaceOverlayPolicy.status
           ?? null,
         surfaceDrawOverlayPolicyMode: sphResidentSurfaceDraw?.overlayPolicyMode

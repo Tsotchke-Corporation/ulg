@@ -2,6 +2,20 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: the no-summary render-field path now calls
+the sibling `webgpu-marching-cubes` buffer-volume extractor and routes the
+result back through ULG's engine-owned resident surface-draw bridge. The fix
+for the "weird marching cubes" symptom is at the coordinate/geometry boundary:
+extension compact vertices are grid-local MC positions, so ULG now applies the
+render-field padding/ref-edge transform with a half-cell grid bias before
+building resident surface rows and indirect draw buffers. Browser diagnostics
+now report native extraction schema/status, volume schema/source/layout,
+extension raw execution status/counts, and transform readiness. This still is
+not a canvas overlay and it does not revive the old tetrahedral compact
+fallback; the remaining visible-renderer milestone is binding the retained
+surface-draw buffers into a same-device engine-owned WebGPU consumer with
+pixel evidence across desktop and mobile.
+
 Current checkpoint, 2026-06-18 AKDT: retained no-summary render-field handoffs
 now publish sanitized per-surface native marching-cubes buffer-volume
 descriptors through `sphResidentRenderState`. Browser diagnostics expose the

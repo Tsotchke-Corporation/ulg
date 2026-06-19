@@ -67,11 +67,15 @@ Tactical status, 2026-06-18 AKDT:
   `mapAsync` fence inside the batch timing. Diagnostic and parity runs can
   still request compact summaries explicitly.
 - The resident marching-cubes extension path now publishes retained translated
-  surface/draw buffers and a renderer-capability contract. Current mounted
-  scenes report `same-device-gpu-buffer-geometry-blocked-webgl-renderer`
-  because they are still Three WebGL-backed. The next no-readback visible
-  surface milestone is therefore an engine-owned Three WebGPU renderer path
-  plus a storage-buffer geometry bridge, not another canvas overlay.
+  surface/draw buffers and a renderer-capability contract. The no-summary
+  render-field path now calls the sibling `webgpu-marching-cubes`
+  buffer-volume extractor and translates grid-local MC compact positions into
+  ULG world-meter rows before retaining resident vertex, draw, indirect, and
+  compacted vertex buffers. Current mounted scenes still need a same-device
+  engine-owned WebGPU consumer for those buffers. The next no-readback visible
+  surface milestone is therefore an engine-owned Three/WebGPU renderer path
+  plus a storage-buffer geometry bridge and pixel evidence, not another canvas
+  overlay or extraction fallback.
 - The extension path now has a non-overlay WebGL/mobile fallback: when the
   no-readback same-device surface-buffer bridge is blocked, ULG falls back to
   engine-owned Three compact geometry with explicit

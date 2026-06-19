@@ -1,5 +1,46 @@
 # ULG Implementation Log
 
+## 2026-06-18 AKDT - Active-Grid Indirect Dispatch Args
+
+Status:
+
+- Active-grid fused MLS-MPM mechanics now seeds a 12-byte WebGPU compute
+  dispatch-args buffer for active-node stages and uses
+  `dispatchWorkgroupsIndirect()` when the browser/device exposes it.
+- The indirect path applies to active-grid accumulator clear, P2G finalize, and
+  grid update in both single-step fused mechanics and one-submit fused
+  mechanics sequences. Particle P2G/G2P dispatches remain direct
+  particle-parallel calls.
+- Resident stage timing and probe topology now expose
+  `activeGridIndirectDispatch`, per-stage `dispatchSubmissionMode`, indirect
+  use counts, direct fallback counts, and dispatch-args byte length. This is
+  still CPU-seeded metadata, but it creates the contract needed to replace the
+  source with GPU-generated active bounds/dispatch args.
+
+Validation:
+
+- PASS: `node --check src/runtime/sph/sphMlsMpmGpuStep.js`.
+- PASS: `node --check scripts/sph-long-horizon-probe.mjs`.
+- PASS: `node --test tests/sphMlsMpmGpuStep.test.mjs` reported `57/57`
+  pass, including active-grid direct/indirect dispatch split assertions.
+- PASS: `git diff --check`.
+- Browser harness:
+  `artifacts/sph-probe-active-grid-indirect-dispatch-1.json` completed with
+  browser console issue/warning counts `0/{}`. The active-grid stage timing
+  reported `dispatchMode=dispatchWorkgroupsIndirect`, `indirectDispatchUsed=true`,
+  `indirectDispatchUseCount=3`, active grid `1210/2197`, and
+  `directDispatchFallbackCount=0`.
+
+Open:
+
+- The browser artifact still classifies `bad` for visual reasons because that
+  run intentionally skipped surface-summary readback and produced no visible
+  surface samples. This checkpoint validates the WebGPU command path and
+  console cleanliness, not final MLS-MPM rendering.
+- Next throughput work should replace CPU-seeded active-grid args with
+  GPU-generated bounds/dispatch metadata and keep advancing the no-readback
+  renderer/surface consumer.
+
 ## 2026-06-18 AKDT - Retained Product-Event Device Identity Guard
 
 Status:

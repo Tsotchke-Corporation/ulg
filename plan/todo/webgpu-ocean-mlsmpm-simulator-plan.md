@@ -179,6 +179,16 @@ Tactical status, 2026-06-18 AKDT:
   `residentGpuCompletedStageMs=157.5`; next throughput work should target
   GPU-side bounds/sparse or indirect dispatch metadata and the no-readback
   renderer/surface consumer.
+- Active-grid fused mechanics now has the first indirect-dispatch contract.
+  The CPU active-grid metadata seeds a 12-byte compute dispatch-args buffer,
+  and active-grid accumulator clear, P2G finalize, and grid update use
+  `dispatchWorkgroupsIndirect()` when available. Unit tests assert the
+  direct particle dispatch plus indirect active-node split; the browser harness
+  artifact `artifacts/sph-probe-active-grid-indirect-dispatch-1.json` is
+  console-clean and reports `indirectDispatchUseCount=3`, active grid
+  `1210/2197`, and no direct fallback. This is not the final Ocean-style
+  sparse dispatch yet: the dispatch args are still CPU-seeded, so the next
+  slice should generate active bounds and dispatch args on the GPU.
 - Runtime MLS-MPM dispatch topology is now explicit in both the resident step
   diagnostics and browser probe output. The console-clean mobile scene artifact
   `artifacts/sph-long-probe-mobile-dispatch-topology-2.json` reports

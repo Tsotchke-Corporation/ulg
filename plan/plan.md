@@ -2,6 +2,22 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: active-grid fused MLS-MPM mechanics now
+has a WebGPU compute indirect-dispatch contract. The existing CPU active-grid
+metadata seeds a 12-byte dispatch-args buffer, and active-grid accumulator
+clear, P2G finalize, and grid update use `dispatchWorkgroupsIndirect()` when
+available while particle P2G/G2P stay direct particle-parallel dispatches.
+Telemetry now reports `activeGridIndirectDispatch`, per-stage
+`dispatchSubmissionMode`, indirect use counts, direct fallback counts, and args
+buffer size. Unit coverage asserts the direct/indirect dispatch split for
+single-step and two-substep fused paths. Browser harness evidence at
+`artifacts/sph-probe-active-grid-indirect-dispatch-1.json` is console-clean and
+reports `dispatchMode=dispatchWorkgroupsIndirect`, `indirectDispatchUseCount=3`,
+active grid `1210/2197`, and `directDispatchFallbackCount=0`. The artifact is
+still visually `bad` because that route skipped surface-summary readback and
+therefore produced no visible surface samples; next work remains GPU-generated
+active bounds/dispatch args plus the no-readback renderer/surface consumer.
+
 Current checkpoint, 2026-06-18 AKDT: retained product-event buffer device
 identity is now hardened before spatial gas ledger binding. WebGPU buffers and
 resident product-mass handles are tagged with global symbols plus hidden

@@ -10233,3 +10233,27 @@ Particle-radius render metadata, 2026-06-18 14:29 AKDT:
     carry matching `particleRadiiM` through the view state and that continuous
     surface batching consumes explicit per-particle radii instead of estimating
     radius from block bounds.
+
+Three WebGPU unsafe presentation diagnostic gate, 2026-06-18 21:34 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check src/visualization/sphPhaseDemoMount.js`
+  - Passed.
+- `node --check tests/sphPhaseRenderer.test.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `53/53`.
+  - New coverage proves the Three WebGPU presentation policy is fail-closed by
+    default, can be enabled only through an unsafe diagnostic override, and
+    still blocks when the renderer-owned resident-device path is not enabled.
+- Unsafe browser diagnostic:
+  `artifacts/sph-probe-three-webgpu-presentation-unsafe-diagnostic-1.json`
+  - Expected diagnostic failure: `status=bad`.
+  - Renderer reached `rendererBackend=three-webgpu`,
+    `rendererPresentationPolicy.status=three-webgpu-presentation-enabled-unsafe-diagnostic`,
+    `rendererDeviceSource=app-owned-resident-webgpu-device`, and
+    `rendererBackendDeviceReady=true`.
+  - Browser evidence still contains one page error:
+    `Instance dropped in popErrorScope`, so this path remains blocked for
+    normal mounted rendering.

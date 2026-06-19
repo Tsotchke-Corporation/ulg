@@ -27865,3 +27865,41 @@ Remaining:
 - The true visible-render fix is still the engine-owned direct consumer for
   retained render-field/extension surface buffers. This slice keeps no-full
   routing honest and avoids spending default-path work on readback geometry.
+
+## 2026-06-18 21:34 AKDT - Unsafe Three WebGPU Presentation Diagnostic Gate
+
+Status:
+
+- Added an explicit unsafe diagnostic opt-in for the engine-owned Three WebGPU
+  presentation path:
+  `rendererPresentationUnsafe=1` / `threeWebGpuPresentationUnsafe=1` /
+  `unsafeRendererPresentation=1`. The default policy remains fail-closed behind
+  runtime validation, so normal mounted runs still fall back to the stable
+  Three WebGL engine path while resident compute keeps using WebGPU.
+- Renderer diagnostics now publish the full
+  `peercompute.ulg.sph-three-webgpu-presentation-policy.v0` record and whether
+  the unsafe diagnostic override was used. The focused unit coverage proves the
+  default runtime block, unsafe diagnostic enablement, and missing
+  resident-device block.
+- The unsafe browser probe confirmed why this cannot be promoted yet:
+  `artifacts/sph-probe-three-webgpu-presentation-unsafe-diagnostic-1.json`
+  reached `three-webgpu-renderer-ready` with renderer-owned resident device
+  preflight ready, then emitted page error `Instance dropped in popErrorScope`.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check src/visualization/sphPhaseDemoMount.js`.
+- PASS: `node --check tests/sphPhaseRenderer.test.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `53/53`.
+- EXPECTED FAIL DIAGNOSTIC: unsafe browser probe
+  `artifacts/sph-probe-three-webgpu-presentation-unsafe-diagnostic-1.json`
+  reported `status=bad`, `browserConsoleIssueCount=1`, and
+  `browser-page-error: Instance dropped in popErrorScope`.
+
+Remaining:
+
+- Keep Three WebGPU presentation blocked by default. The next visible
+  no-readback path must either fix this renderer lifetime problem with console
+  and pixel evidence or bypass it with a direct engine-owned WebGPU/native
+  marching-cubes consumer.

@@ -165,6 +165,62 @@ export function resolveThreeWebGpuRendererRequiredLimits({
   return { ...requiredLimits };
 }
 
+export function resolveThreeWebGpuPresentationPolicy({
+  webGpuRendererAvailable = false,
+  requestedPresentation = SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED,
+  rendererWebGpuResidentDevice = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED,
+  runtimeValidated = SPH_THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED,
+  unsafeDiagnosticOverride = false
+} = {}) {
+  const requested = Boolean(requestedPresentation);
+  const available = Boolean(webGpuRendererAvailable);
+  const unsafeOverride = Boolean(unsafeDiagnosticOverride);
+  const blockedByRuntime = Boolean(
+    available
+    && requested
+    && !runtimeValidated
+    && !unsafeOverride
+  );
+  const blockedByResidentDevice = Boolean(
+    available
+    && requested
+    && !blockedByRuntime
+    && !rendererWebGpuResidentDevice
+  );
+  const blocked = Boolean(blockedByRuntime || blockedByResidentDevice);
+  const enabled = Boolean(available && requested && !blocked);
+  const reason = blocked
+    ? (blockedByRuntime
+      ? 'Three WebGPU presentation is blocked because the current renderer path still fails WebGPU error-scope validation; falling back to WebGL engine rendering while preserving WebGPU compute'
+      : 'Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering')
+    : null;
+  const status = !available
+    ? 'three-webgpu-presentation-unavailable'
+    : (!requested
+      ? 'three-webgpu-presentation-not-requested'
+      : (enabled
+        ? (unsafeOverride && !runtimeValidated
+          ? 'three-webgpu-presentation-enabled-unsafe-diagnostic'
+          : 'three-webgpu-presentation-enabled')
+        : (blockedByRuntime
+          ? 'three-webgpu-presentation-blocked-runtime-validation'
+          : 'three-webgpu-presentation-blocked-resident-device')));
+  return {
+    schema: 'peercompute.ulg.sph-three-webgpu-presentation-policy.v0',
+    status,
+    reason,
+    webGpuRendererAvailable: available,
+    requestedPresentation: requested,
+    rendererWebGpuResidentDevice: Boolean(rendererWebGpuResidentDevice),
+    runtimeValidated: Boolean(runtimeValidated),
+    unsafeDiagnosticOverride: unsafeOverride,
+    blocked,
+    blockedByRuntime,
+    blockedByResidentDevice,
+    enabled
+  };
+}
+
 export function summarizeThreeWebGpuDeviceLimits(device = null) {
   const limits = device?.limits || {};
   const summary = {};
@@ -3762,6 +3818,7 @@ export function createSphPhaseScene(container, {
   rendererBackend = 'webgl',
   rendererWebGpuPresentation = SPH_THREE_WEBGPU_RENDERER_PRESENTATION_ENABLED,
   rendererWebGpuResidentDevice = SPH_THREE_WEBGPU_RENDERER_OWNED_RESIDENT_DEVICE_ENABLED,
+  rendererWebGpuPresentationUnsafe = false,
   rendererWebGpuDeviceResult = null,
   preferWebGpuOpticalLookup = true,
   residentSurfaceDrawOverlay = SPH_RESIDENT_SURFACE_DRAW_OVERLAY_MODE_DEFAULT,
@@ -3786,28 +3843,14 @@ export function createSphPhaseScene(container, {
     : 'three-internal-webgpu-device';
   const webGpuRendererAvailable = requestedRendererBackend === 'webgpu'
     && Boolean(navigatorRef?.gpu || globalThis.navigator?.gpu);
-  const threeWebGpuPresentationBlockedByRuntime = Boolean(
-    webGpuRendererAvailable
-    && requestedThreeWebGpuPresentation
-    && !SPH_THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
-  );
-  const threeWebGpuPresentationBlockedByResidentDevice = Boolean(
-    webGpuRendererAvailable
-    && requestedThreeWebGpuPresentation
-    && !threeWebGpuPresentationBlockedByRuntime
-    && !enableThreeWebGpuResidentDevice
-  );
-  const threeWebGpuPresentationBlocked = Boolean(
-    threeWebGpuPresentationBlockedByRuntime
-    || threeWebGpuPresentationBlockedByResidentDevice
-  );
-  const threeWebGpuPresentationBlockReason = threeWebGpuPresentationBlocked
-    ? (threeWebGpuPresentationBlockedByRuntime
-      ? 'Three WebGPU presentation is blocked because the current renderer path still fails WebGPU error-scope validation; falling back to WebGL engine rendering while preserving WebGPU compute'
-      : 'Three WebGPU presentation is blocked until renderer-owned resident-device usage is explicitly enabled; falling back to WebGL engine rendering')
-    : null;
-  const canUseThreeWebGpuRenderer = webGpuRendererAvailable && !threeWebGpuPresentationBlocked;
-  const enableThreeWebGpuPresentation = canUseThreeWebGpuRenderer && requestedThreeWebGpuPresentation;
+  const threeWebGpuPresentationPolicy = resolveThreeWebGpuPresentationPolicy({
+    webGpuRendererAvailable,
+    requestedPresentation: requestedThreeWebGpuPresentation,
+    rendererWebGpuResidentDevice: enableThreeWebGpuResidentDevice,
+    unsafeDiagnosticOverride: rendererWebGpuPresentationUnsafe
+  });
+  const canUseThreeWebGpuRenderer = webGpuRendererAvailable && !threeWebGpuPresentationPolicy.blocked;
+  const enableThreeWebGpuPresentation = threeWebGpuPresentationPolicy.enabled;
   const Three = canUseThreeWebGpuRenderer ? THREE_WEBGPU : THREE;
   activeThreeNamespace = Three;
   let residentSurfaceDrawOverlayPolicy = null;
@@ -3873,8 +3916,10 @@ export function createSphPhaseScene(container, {
     sphThreeNamespace: Three,
     sphWebGpuPresentationRequested: requestedThreeWebGpuPresentation,
     sphWebGpuPresentationEnabled: canUseThreeWebGpuRenderer && enableThreeWebGpuPresentation,
-    sphWebGpuPresentationBlocked: threeWebGpuPresentationBlocked,
-    sphWebGpuPresentationBlockReason: threeWebGpuPresentationBlockReason,
+    sphWebGpuPresentationBlocked: threeWebGpuPresentationPolicy.blocked,
+    sphWebGpuPresentationBlockReason: threeWebGpuPresentationPolicy.reason,
+    sphWebGpuPresentationPolicy: threeWebGpuPresentationPolicy,
+    sphWebGpuPresentationUnsafeDiagnosticOverride: Boolean(rendererWebGpuPresentationUnsafe),
     sphWebGpuDeviceSource: threeWebGpuRendererDeviceSource,
     sphWebGpuDevicePreflight: rendererWebGpuDeviceResult
       ? {
@@ -3931,6 +3976,10 @@ export function createSphPhaseScene(container, {
       rendererPresentationEnabled: renderer.userData?.sphWebGpuPresentationEnabled !== false,
       rendererPresentationBlocked: Boolean(renderer.userData?.sphWebGpuPresentationBlocked),
       rendererPresentationBlockReason: renderer.userData?.sphWebGpuPresentationBlockReason || null,
+      rendererPresentationPolicy: renderer.userData?.sphWebGpuPresentationPolicy || null,
+      rendererPresentationUnsafeDiagnosticOverride: Boolean(
+        renderer.userData?.sphWebGpuPresentationUnsafeDiagnosticOverride
+      ),
       rendererDeviceSource: renderer.userData?.sphWebGpuDeviceSource || null,
       rendererDevicePreflight: renderer.userData?.sphWebGpuDevicePreflight || null,
       rendererBackendDeviceReady: Boolean(renderer.backend?.device),

@@ -137,6 +137,15 @@ or second canvas. Keep the next architecture work on resident MLS-MPM, native
 WebGPU marching-cubes surface extraction, and a direct engine-owned GPU buffer
 consumer that passes console plus pixel validation.
 
+Current routing note, 2026-06-18 AKDT: the unsafe Three WebGPU presentation
+diagnostic flag exists only to reproduce and inspect the blocked path. The
+probe `artifacts/sph-probe-three-webgpu-presentation-unsafe-diagnostic-1.json`
+gets as far as `three-webgpu-renderer-ready` with an app-owned resident WebGPU
+device, then throws page error `Instance dropped in popErrorScope`. Do not
+promote this route until a browser run is console-clean and pixel-validated;
+use it as failure evidence while building the proper direct GPU/native
+marching-cubes consumer.
+
 Current routing note, 2026-06-18 AKDT: the sibling WebGPU marching-cubes
 adapter now exposes a renderer-free preflight/capability contract, and ULG's
 wrapper consumes it before extraction. Future extension surface failures should

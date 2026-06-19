@@ -90,6 +90,12 @@ Tactical status, 2026-06-18 AKDT:
   because the current Three WebGPU renderer path still produces
   `Instance dropped in popErrorScope` under browser validation. WebGPU compute
   remains available through the resident compute device path.
+- An explicit unsafe diagnostic flag can force that blocked path for local
+  investigation, but current evidence still fails with page error
+  `Instance dropped in popErrorScope` after `three-webgpu-renderer-ready`.
+  Treat this as a diagnostic reproducer only; the roadmap still requires a
+  direct engine-owned GPU/native marching-cubes consumer with console and pixel
+  evidence before the no-readback renderer is considered viable.
 - Follow-up probes have wired `three-webgpu-surface-buffers` through the
   non-overlay `sphResidentSurfaceDraw` bridge, but normal mounted runs block
   that bridge and downgrade to the in-engine `three-render-row-spheres`

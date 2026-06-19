@@ -1688,11 +1688,23 @@ export async function mountSphPhaseDemoOverlay({
       ?? initialQuery.get('webgpuResidentDevice'),
     false
   );
+  const initialThreeWebGpuRendererPresentationUnsafe = booleanUrlParam(
+    initialHash.get('rendererPresentationUnsafe')
+      ?? initialQuery.get('rendererPresentationUnsafe')
+      ?? initialHash.get('threeWebGpuPresentationUnsafe')
+      ?? initialQuery.get('threeWebGpuPresentationUnsafe')
+      ?? initialHash.get('unsafeRendererPresentation')
+      ?? initialQuery.get('unsafeRendererPresentation'),
+    false
+  );
   const acquireInitialRendererWebGpuDevice = Boolean(
     initialSphRendererBackend === 'webgpu'
     && initialThreeWebGpuRendererPresentationEnabled
     && initialThreeWebGpuRendererResidentDeviceEnabled
-    && THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
+    && (
+      THREE_WEBGPU_RENDERER_PRESENTATION_RUNTIME_VALIDATED
+      || initialThreeWebGpuRendererPresentationUnsafe
+    )
   );
   let initialRendererWebGpuDeviceResult = null;
   if (acquireInitialRendererWebGpuDevice) {
@@ -1743,6 +1755,7 @@ export async function mountSphPhaseDemoOverlay({
     if (initialSphRendererBackend !== 'webgl') q.set('renderer', initialSphRendererBackend);
     if (initialThreeWebGpuRendererPresentationEnabled) q.set('rendererPresentation', '1');
     if (initialThreeWebGpuRendererResidentDeviceEnabled) q.set('rendererResidentDevice', '1');
+    if (initialThreeWebGpuRendererPresentationUnsafe) q.set('rendererPresentationUnsafe', '1');
     q.set('surfaceDraw', residentSurfaceDrawDiagnosticMode);
     if (initialResidentActiveGridEnabled) q.set('residentActiveGrid', '1');
     if (initialResidentActiveGridSafetyCells != null) q.set('residentActiveGridSafety', String(initialResidentActiveGridSafetyCells));
@@ -2677,6 +2690,7 @@ export async function mountSphPhaseDemoOverlay({
     rendererBackend: initialSphRendererBackend,
     rendererWebGpuPresentation: initialThreeWebGpuRendererPresentationEnabled,
     rendererWebGpuResidentDevice: initialThreeWebGpuRendererResidentDeviceEnabled,
+    rendererWebGpuPresentationUnsafe: initialThreeWebGpuRendererPresentationUnsafe,
     rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
     residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
     residentSurfaceDrawDiagnosticMode,
@@ -4290,6 +4304,7 @@ export async function mountSphPhaseDemoOverlay({
       rendererBackend: initialSphRendererBackend,
       rendererWebGpuPresentation: initialThreeWebGpuRendererPresentationEnabled,
       rendererWebGpuResidentDevice: initialThreeWebGpuRendererResidentDeviceEnabled,
+      rendererWebGpuPresentationUnsafe: initialThreeWebGpuRendererPresentationUnsafe,
       rendererWebGpuDeviceResult: initialRendererWebGpuDeviceResult,
       residentSurfaceDrawOverlay: residentSurfaceDrawOverlayMode,
       residentSurfaceDrawDiagnosticMode,

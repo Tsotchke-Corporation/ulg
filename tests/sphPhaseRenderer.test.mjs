@@ -34,6 +34,7 @@ import {
   mergeSameMaterialPhaseSurfaceBatchesForRenderField,
   normalizeResidentSurfaceDrawOverlayMode,
   normalizeSphRendererBackend,
+  resolveThreeWebGpuPresentationPolicy,
   createThreeWebGpuExternalInterleavedBufferAttribute,
   resolveExtensionSurfaceRenderBridgePlan,
   resolveThreeWebGpuRendererRequiredLimits,
@@ -190,6 +191,37 @@ test('SPH Three WebGPU renderer required limits are resident-mode opt-in', () =>
     maxBufferSize: 1024,
     maxStorageBufferBindingSize: 2048
   });
+});
+
+test('SPH Three WebGPU presentation policy is fail-closed with unsafe diagnostic opt-in', () => {
+  const defaultPolicy = resolveThreeWebGpuPresentationPolicy({
+    webGpuRendererAvailable: true,
+    requestedPresentation: true,
+    rendererWebGpuResidentDevice: true
+  });
+  assert.equal(defaultPolicy.status, 'three-webgpu-presentation-blocked-runtime-validation');
+  assert.equal(defaultPolicy.enabled, false);
+  assert.equal(defaultPolicy.blockedByRuntime, true);
+
+  const unsafePolicy = resolveThreeWebGpuPresentationPolicy({
+    webGpuRendererAvailable: true,
+    requestedPresentation: true,
+    rendererWebGpuResidentDevice: true,
+    unsafeDiagnosticOverride: true
+  });
+  assert.equal(unsafePolicy.status, 'three-webgpu-presentation-enabled-unsafe-diagnostic');
+  assert.equal(unsafePolicy.enabled, true);
+  assert.equal(unsafePolicy.unsafeDiagnosticOverride, true);
+
+  const missingResidentDevicePolicy = resolveThreeWebGpuPresentationPolicy({
+    webGpuRendererAvailable: true,
+    requestedPresentation: true,
+    rendererWebGpuResidentDevice: false,
+    unsafeDiagnosticOverride: true
+  });
+  assert.equal(missingResidentDevicePolicy.status, 'three-webgpu-presentation-blocked-resident-device');
+  assert.equal(missingResidentDevicePolicy.enabled, false);
+  assert.equal(missingResidentDevicePolicy.blockedByResidentDevice, true);
 });
 
 test('SPH Three WebGPU renderer-owned resident device is explicit opt-in', () => {

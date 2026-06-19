@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: Three WebGPU presentation now has an
+explicit unsafe diagnostic opt-in, but it is still not a production or default
+path. The policy helper records whether presentation was unavailable, not
+requested, runtime-blocked, resident-device-blocked, enabled, or
+unsafe-diagnostic-enabled. The unsafe browser probe
+`artifacts/sph-probe-three-webgpu-presentation-unsafe-diagnostic-1.json`
+reached `three-webgpu-renderer-ready` with an app-owned resident WebGPU device,
+then failed with page error `Instance dropped in popErrorScope`. Keep normal
+mounted MLS-MPM runs fail-closed on Three WebGPU presentation and continue the
+real throughput work on the direct engine-owned GPU/native marching-cubes
+surface consumer.
+
 Current checkpoint, 2026-06-18 AKDT: no-full extension surface routing now keeps
 resident GPU buffers as the default when the visible same-device Three WebGPU
 consumer is unavailable. The bridge planner reports

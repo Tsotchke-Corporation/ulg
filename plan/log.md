@@ -28679,3 +28679,39 @@ Remaining:
 - Use a real browser/device run for native WebGPU pixel acceptance. If the phone
   is still blank, compare its reported CSS/backing/DPR fields against the new
   mobile probe diagnostics before changing renderer logic.
+
+## 2026-06-19 10:50 AKDT - Reset Generation Fence And Render-Row Status Preservation
+
+Status:
+
+- Added a scene-local MLS-MPM resident execution generation. `setParticles()`
+  and particle reset advance it, clear pending resident promises, and publish
+  `peercompute.ulg.sph-scene-resident-execution-invalidation.v0` so stale
+  async resident steps cannot publish buffers after a reset.
+- Resident single-step and multi-step refreshes now join only pending work from
+  the current generation. If a reset races an in-flight execution, stale output
+  buffers are destroyed and the returned execution records the old and current
+  generation instead of becoming authoritative scene state.
+- Preserved submitted Three render-row bridge status when the generic WebGPU
+  surface draw render loop later observes resident GPU work in flight or a
+  missing retained draw state. Those conditions remain visible through
+  `lastRenderSkipStatus` / `lastRenderSkipReason`, but they no longer overwrite
+  engine-owned Three scene object success (`three-render-row-*-submitted`).
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs` reported `57/57`.
+- PASS: `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs` reported
+  `17/17`.
+- PASS: `git diff --check`.
+- PASS: focused browser reset harness
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default" --timeout=60000`
+  reported `1 passed`.
+
+Remaining:
+
+- Continue no-full resident visual work without overlays. Native WebGPU pixel
+  acceptance still needs a real browser/device check because the local headless
+  WebGPU presentation path remains unreliable for final canvas proof.

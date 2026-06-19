@@ -3630,6 +3630,9 @@ test('SPH phase demo runs derived material properties by default', async ({ page
       performanceTrace: overlay.__sphPerformanceTrace || null,
       setParticlesTiming: overlay.__sphSetParticlesTiming || null,
       resetStatus: overlay.__sphResetStatus || null,
+      residentExecutionGeneration: scene?.scene?.userData?.mlsMpmResidentExecutionGeneration ?? null,
+      residentExecutionInvalidation: scene?.scene?.userData?.mlsMpmResidentExecutionInvalidation ?? null,
+      residentStepsProgress: scene?.scene?.userData?.mlsMpmResidentStepsProgress ?? null,
       clearCacheButtonReady: Boolean(overlay.querySelector('#sph-clear-cache')),
       cpuClosureTask: overlay.__sphCpuClosureTask || null,
       opticalGpuTable: {
@@ -4176,6 +4179,11 @@ test('SPH phase demo runs derived material properties by default', async ({ page
   expect(derivedSummary.resetStatus?.schema).toBe('peercompute.ulg.sph-demo-reset-status.v0');
   expect(derivedSummary.resetStatus?.status).toBe('particle-state-resynced-after-reset');
   expect(derivedSummary.resetStatus?.generation).toBeGreaterThan(0);
+  expect(derivedSummary.residentExecutionInvalidation?.schema).toBe('peercompute.ulg.sph-scene-resident-execution-invalidation.v0');
+  expect(derivedSummary.residentExecutionInvalidation?.status).toBe('resident-execution-generation-advanced');
+  expect(derivedSummary.residentExecutionGeneration).toBeGreaterThan(0);
+  expect(derivedSummary.setParticlesTiming?.residentExecutionGeneration).toBe(derivedSummary.residentExecutionGeneration);
+  expect(derivedSummary.residentStepsProgress?.currentResidentExecutionGeneration).toBe(derivedSummary.residentExecutionGeneration);
   const usesThreeRenderRowBridge = SPH_THREE_RENDER_ROW_BRIDGES.includes(
     derivedSummary.sphResidentRenderState.surfaceDrawVisibleRendererBridge
   );

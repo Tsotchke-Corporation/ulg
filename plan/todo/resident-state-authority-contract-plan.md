@@ -430,6 +430,14 @@ granting mechanics child stages authoritative mutation yet.
   effect of visible render refresh. A material-interface source-field ABI now
   wraps the retained field buffers, but the source shader still reuses the
   existing splat kernel and candidate rows still read back for CPU compaction.
+- 2026-06-19: Scene-local resident execution generation now fences reset and
+  `setParticles()` against stale async MLS-MPM resident publications. Pending
+  single-step and multi-step resident promises are generation-tagged; reset
+  clears them, stale completions destroy their output buffers, and progress
+  diagnostics publish both the execution generation and current scene
+  generation. This is still scene-local authority, but it closes a practical
+  stale-buffer overwrite class before the full ComputeManager/GPUHub resident
+  lane owns the pass DAG.
 
 ## Acceptance Gates
 

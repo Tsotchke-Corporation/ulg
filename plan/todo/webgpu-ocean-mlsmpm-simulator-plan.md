@@ -727,6 +727,14 @@ Interim status, 2026-06-18 AKDT:
   per-substep workgroup counts. This confirms the next throughput target is
   resident surface/render generation and readback removal, not replacing the
   current P2G/G2P dispatch shape.
+- 2026-06-19 reset/render-row lifecycle update: scene reset and
+  `setParticles()` now advance a resident execution generation so in-flight
+  MLS-MPM resident promises cannot publish stale buffers after reset. The Three
+  render-row bridge also keeps its engine-owned submitted status when the
+  generic surface draw loop later skips because GPU work is in flight or a
+  retained WebGPU draw state is intentionally unavailable. Skip diagnostics stay
+  separate, which keeps the browser reset harness console-clean while avoiding
+  another overlay or full-readback renderer path.
 
 ## ULG-Specific Constraints
 

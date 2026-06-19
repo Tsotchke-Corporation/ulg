@@ -10687,3 +10687,28 @@ Native canvas sizing diagnostics, 2026-06-19 11:16 AKDT:
   - The screenshot was fully transparent black even for a simple green clear,
     confirming the local headless browser cannot prove native WebGPU
     presentation.
+
+Reset generation fence and render-row lifecycle, 2026-06-19 10:50 AKDT:
+
+- `node --check src/visualization/sphPhaseScene.js`
+  - Passed.
+- `node --check tests/demo.e2e.mjs`
+  - Passed.
+- `node --test tests/sphPhaseRenderer.test.mjs`
+  - Passed: `57/57`.
+- `node --test tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  - Passed: `17/17`.
+- `git diff --check`
+  - Passed.
+- Focused browser reset harness:
+  `PLAYWRIGHT_BASE_URL=https://127.0.0.1:5173 PLAYWRIGHT_SKIP_WEB_SERVER=1 PLAYWRIGHT_ENABLE_UNSAFE_WEBGPU=1 npx playwright test --config tests/playwright.config.mjs --grep "SPH phase demo runs derived material properties by default" --timeout=60000`
+  - Passed: `1/1`.
+  - The reset summary now verifies
+    `peercompute.ulg.sph-scene-resident-execution-invalidation.v0`, current
+    resident execution generation, and generation propagation into
+    `setParticles()` timing and resident steps progress.
+  - Three render-row bridge submission status remains
+    `three-render-row-points-submitted` or
+    `three-render-row-spheres-submitted` after later render-loop skip attempts;
+    skip status remains available separately for in-flight GPU work or missing
+    WebGPU draw state.

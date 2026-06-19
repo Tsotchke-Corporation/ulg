@@ -5401,6 +5401,20 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
         renderState?.surfaceDrawRenderFieldSurfaceBufferRetained ?? null,
       surfaceDrawRenderFieldSurfaceBufferByteLength:
         renderState?.surfaceDrawRenderFieldSurfaceBufferByteLength ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptorSchema:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptorSchema ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptorStatus:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptorStatus ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptorCount:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptorCount ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptorReadyCount:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptorReadyCount ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptorNativeConsumerKind:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptorNativeConsumerKind ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptorNativeRequiredAdapter:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptorNativeRequiredAdapter ?? null,
+      surfaceDrawRenderFieldBufferVolumeDescriptors:
+        renderState?.surfaceDrawRenderFieldBufferVolumeDescriptors ?? null,
       surfaceDrawRowsBufferRetained: renderState?.surfaceDrawRowsBufferRetained ?? null,
       surfaceDrawRowsBufferByteLength: renderState?.surfaceDrawRowsBufferByteLength ?? null,
       surfaceDrawIndirectRowsBufferRetained: renderState?.surfaceDrawIndirectRowsBufferRetained ?? null,
@@ -5457,6 +5471,21 @@ test('SPH phase no-full render refresh can skip compact surface summary readback
   expect(result.surfaceDrawRenderFieldRowsBufferByteLength).toBeGreaterThan(0);
   expect(result.surfaceDrawRenderFieldSurfaceBufferRetained).toBe(true);
   expect(result.surfaceDrawRenderFieldSurfaceBufferByteLength).toBeGreaterThan(0);
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorSchema)
+    .toBe('peercompute.ulg.sph-render-field-buffer-volume-descriptors.v0');
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorStatus)
+    .toBe('render-field-buffer-volume-descriptors-ready');
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorCount).toBeGreaterThan(0);
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorReadyCount)
+    .toBe(result.surfaceDrawRenderFieldBufferVolumeDescriptorCount);
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorNativeConsumerKind)
+    .toBe('native-webgpu-marching-cubes-buffer-volume');
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptorNativeRequiredAdapter)
+    .toBe('webgpu-marching-cubes.buffer-volume.v0');
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.sourceType).toBe('scalar-buffer');
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.scalarLayoutName)
+    .toBe('peercompute.webgpu-marching-cubes.layout.scalar-field-f32.v0');
+  expect(result.surfaceDrawRenderFieldBufferVolumeDescriptors?.[0]?.scalarStrides?.length).toBe(3);
   expect(result.surfaceDrawRowsBufferRetained).toBe(false);
   expect(result.surfaceDrawRowsBufferByteLength).toBe(0);
   expect(result.surfaceDrawIndirectRowsBufferRetained).toBe(false);

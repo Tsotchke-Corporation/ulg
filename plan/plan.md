@@ -2,6 +2,18 @@
 
 ## Current Target
 
+Current checkpoint, 2026-06-18 AKDT: retained no-summary render-field handoffs
+now publish sanitized per-surface native marching-cubes buffer-volume
+descriptors through `sphResidentRenderState`. Browser diagnostics expose the
+descriptor schema/status/counts, native consumer kind, required adapter, scalar
+buffer source type, scalar layout, dims, offsets, and strides. The focused
+Playwright no-summary path now fails if this contract is missing, empty, or not
+ready. This addresses the current "weird marching cubes" failure mode at the
+handoff boundary: native MC no longer has to infer the volume layout from a
+retained field buffer. Remaining visible work is to call the sibling
+`webgpu-marching-cubes` extraction path from those descriptors and bind the
+resulting buffers into the engine-owned surface draw path.
+
 Current checkpoint, 2026-06-18 AKDT: the sibling
 `/home/cos/projects/webgpu-marching-cubes` adapter now has a buffer-backed
 scalar-volume path for native marching-cubes extraction, and ULG has a tested

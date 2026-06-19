@@ -140,6 +140,12 @@ Tactical status, 2026-06-18 AKDT:
   target is no longer generic adapter work; it is binding that native
   extraction result into ULG's engine-owned surface draw/render bridge without
   CPU readback or overlays.
+- Retained no-summary render-field handoffs now also publish sanitized
+  per-surface buffer-volume descriptor summaries in the resident render state.
+  The browser contract test asserts a ready descriptor set with scalar-buffer
+  source type, the extension scalar-field layout name, and 3D scalar strides,
+  so native marching-cubes integration has a deterministic handoff instead of
+  guessing from retained buffers.
 - `scripts/sph-performance-benchmark.mjs` now records benchmark status
   separately from physics-probe status and reports resident final-step timing
   separately from probe-wall batch timing. Current smoke evidence is

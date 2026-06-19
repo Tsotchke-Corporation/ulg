@@ -177,6 +177,14 @@ density buffers. The next native-MC slice should call the extension's
 `createBufferVolumeDescriptor`/surface extraction path from this descriptor and
 bind the resulting buffers into the engine-owned surface draw path.
 
+Current routing note, 2026-06-18 AKDT: retained no-summary render-field
+handoffs now publish per-surface native MC buffer-volume descriptor summaries
+in `sphResidentRenderState`. The browser contract test asserts descriptor
+schema/status/counts plus scalar-buffer layout/stride metadata, so broken or
+ambiguous marching-cubes volume wiring should fail before a weird visible mesh
+is treated as evidence. Continue with the native extraction binding; do not
+revive the old tetrahedral compact fallback as the main renderer.
+
 Current routing note, 2026-06-18 AKDT: the sibling WebGPU marching-cubes
 adapter now exposes a renderer-free preflight/capability contract, and ULG's
 wrapper consumes it before extraction. Future extension surface failures should

@@ -28001,3 +28001,35 @@ Remaining:
   call and route the resulting GPU-resident surface buffers into the engine
   surface draw bridge. Do not spend time reviving the tetrahedral compact
   fallback as the main renderer.
+
+## 2026-06-18 22:45 AKDT - Resident Native MC Buffer-Volume Diagnostics
+
+Status:
+
+- Published sanitized per-surface native marching-cubes buffer-volume
+  descriptors from retained no-summary render-field handoffs into
+  `sphResidentRenderState`.
+- The resident state now reports descriptor schema/status/counts, ready/blocked
+  counts, native consumer kind, required adapter, scalar-buffer source type,
+  scalar layout name, byte lengths, offsets, dims, and scalar strides without
+  exposing raw GPUBuffer handles through browser diagnostics.
+- Extended the no-summary Playwright contract so the browser harness fails if
+  the native MC descriptor set is empty or ambiguous. This keeps the current
+  marching-cubes rendering issue at the adapter boundary instead of letting a
+  guessed volume layout render misleading geometry.
+
+Validation:
+
+- PASS: `node --check src/visualization/sphPhaseScene.js`.
+- PASS: `node --check tests/demo.e2e.mjs`.
+- PASS: `node --test tests/sphPhaseRenderer.test.mjs tests/sphMarchingCubesSurfaceAdapter.test.mjs`
+  reported `67/67`.
+- PASS: focused Playwright no-summary render-field handoff test passed `1/1`
+  against the live HTTPS Vite server on `https://127.0.0.1:5173`.
+
+Remaining:
+
+- Call the sibling `webgpu-marching-cubes` buffer-volume extraction path from
+  these descriptors and bind the resulting GPU-resident surface buffers into
+  the engine-owned surface draw bridge. Do not use an overlay and do not make
+  the old tetrahedral compact fallback the primary renderer.

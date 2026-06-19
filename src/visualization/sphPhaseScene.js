@@ -80,7 +80,10 @@ import {
   summarizeSphResidentParticleUploadWebGpu,
   summarizeSphRenderFieldSurfacesWebGpu
 } from '../runtime/sph/sphRenderGpuKernel.js';
-import { buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu } from '../runtime/sph/sphMarchingCubesSurfaceAdapter.js';
+import {
+  buildWebGpuMarchingCubesExtensionSurfaceRowsWebGpu,
+  createUlgRenderFieldBufferVolumeDescriptor
+} from '../runtime/sph/sphMarchingCubesSurfaceAdapter.js';
 import {
   gasPressureInterfaceCouplingSummary,
   gasPressureInterfaceForcePreview,
@@ -10896,6 +10899,70 @@ export function createSphPhaseScene(container, {
     return progress;
   }
 
+  function summarizeRenderFieldBufferVolumeDescriptor(descriptor = {}) {
+    return {
+      schema: descriptor.schema ?? null,
+      ok: Boolean(descriptor.ok),
+      status: descriptor.status ?? null,
+      reason: descriptor.reason ?? null,
+      extensionDescriptorFactory: descriptor.extensionDescriptorFactory ?? null,
+      sourceType: descriptor.sourceType ?? null,
+      scalarLayoutName: descriptor.scalarLayoutName ?? null,
+      scalarType: descriptor.scalarType ?? null,
+      scalarLane: descriptor.scalarLane ?? null,
+      scalarLaneIndex: descriptor.scalarLaneIndex ?? null,
+      scalarBufferByteLength: descriptor.scalarBufferByteLength ?? 0,
+      scalarRequiredByteLength: descriptor.scalarRequiredByteLength ?? 0,
+      scalarOffset: descriptor.scalarOffset ?? null,
+      scalarOffsetBytes: descriptor.scalarOffsetBytes ?? null,
+      scalarStrides: Array.isArray(descriptor.scalarStrides) ? [...descriptor.scalarStrides] : null,
+      dims: Array.isArray(descriptor.dims) ? [...descriptor.dims] : null,
+      surfaceIndex: descriptor.surfaceIndex ?? null,
+      surfaceKey: descriptor.surfaceKey ?? null,
+      material: descriptor.material ?? null,
+      phase: descriptor.phase ?? null,
+      renderKey: descriptor.renderKey ?? null,
+      fieldOffset: descriptor.fieldOffset ?? null,
+      fieldCellCount: descriptor.fieldCellCount ?? null,
+      isovalue: descriptor.isovalue ?? null,
+      sameDeviceStatus: descriptor.sameDeviceStatus ?? null,
+      nativeConsumerKind: descriptor.nativeConsumerKind ?? null,
+      nativeRequiredAdapter: descriptor.nativeRequiredAdapter ?? null
+    };
+  }
+
+  function createRenderFieldBufferVolumeDescriptorSummary({ device, renderFieldExecution } = {}) {
+    const surfaces = Array.isArray(renderFieldExecution?.surfaceTable?.metadata)
+      ? renderFieldExecution.surfaceTable.metadata
+      : [];
+    const descriptors = surfaces.map((surface, surfaceIndex) => summarizeRenderFieldBufferVolumeDescriptor(
+      createUlgRenderFieldBufferVolumeDescriptor({
+        device,
+        renderField: renderFieldExecution,
+        surface,
+        surfaceIndex
+      })
+    ));
+    const readyCount = descriptors.filter((descriptor) => descriptor.ok).length;
+    const blockedCount = descriptors.length - readyCount;
+    return {
+      schema: 'peercompute.ulg.sph-render-field-buffer-volume-descriptors.v0',
+      status: descriptors.length === 0
+        ? 'render-field-buffer-volume-descriptors-empty'
+        : (blockedCount > 0
+          ? 'render-field-buffer-volume-descriptors-partial'
+          : 'render-field-buffer-volume-descriptors-ready'),
+      descriptorSchema: descriptors[0]?.schema ?? null,
+      descriptorCount: descriptors.length,
+      readyCount,
+      blockedCount,
+      extensionDescriptorFactory: 'createBufferVolumeDescriptor',
+      nativeConsumerKind: 'native-webgpu-marching-cubes-buffer-volume',
+      nativeRequiredAdapter: 'webgpu-marching-cubes.buffer-volume.v0',
+      descriptors
+    };
+  }
+
 	  async function buildSphResidentSurfaceDrawBridge({
 	    device,
 	    renderFieldExecution,
@@ -10983,6 +11050,11 @@ export function createSphPhaseScene(container, {
       if (rendererCapability) {
         scene.userData.sphResidentExtensionSurfaceRendererCapability = rendererCapability;
       }
+      const renderFieldBufferVolumeDescriptorSummary = createRenderFieldBufferVolumeDescriptorSummary({
+        device,
+        renderFieldExecution
+      });
+      scene.userData.sphRenderFieldBufferVolumeDescriptorSummary = renderFieldBufferVolumeDescriptorSummary;
       const fallbackThreeWebGpuSurfaceBuffersToCompact = false;
       const useEffectiveThreeCompactVertexBridge = Boolean(
         useThreeCompactVertexBridge || fallbackThreeWebGpuSurfaceBuffersToCompact
@@ -11055,6 +11127,16 @@ export function createSphPhaseScene(container, {
 	          sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
 	          surfaceDrawSchema: null,
 	          sourceRenderFieldBackend: renderFieldExecution.backend,
+	          renderFieldBufferVolumeDescriptorSchema: renderFieldBufferVolumeDescriptorSummary.schema,
+	          renderFieldBufferVolumeDescriptorStatus: renderFieldBufferVolumeDescriptorSummary.status,
+	          renderFieldBufferVolumeDescriptorCount: renderFieldBufferVolumeDescriptorSummary.descriptorCount,
+	          renderFieldBufferVolumeDescriptorReadyCount: renderFieldBufferVolumeDescriptorSummary.readyCount,
+	          renderFieldBufferVolumeDescriptorBlockedCount: renderFieldBufferVolumeDescriptorSummary.blockedCount,
+	          renderFieldBufferVolumeDescriptorNativeConsumerKind:
+	            renderFieldBufferVolumeDescriptorSummary.nativeConsumerKind,
+	          renderFieldBufferVolumeDescriptorNativeRequiredAdapter:
+	            renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter,
+	          renderFieldBufferVolumeDescriptors: renderFieldBufferVolumeDescriptorSummary.descriptors,
 	          sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
 	          surfaceDrawBackend: null,
 	          surfaceCount: surfaceVerticesExecution.surfaceCount,
@@ -11236,6 +11318,16 @@ export function createSphPhaseScene(container, {
         sourceSurfaceVertexSchema: surfaceVerticesExecution.schema,
         surfaceDrawSchema: surfaceDrawExecution.schema,
         sourceRenderFieldBackend: renderFieldExecution.backend,
+        renderFieldBufferVolumeDescriptorSchema: renderFieldBufferVolumeDescriptorSummary.schema,
+        renderFieldBufferVolumeDescriptorStatus: renderFieldBufferVolumeDescriptorSummary.status,
+        renderFieldBufferVolumeDescriptorCount: renderFieldBufferVolumeDescriptorSummary.descriptorCount,
+        renderFieldBufferVolumeDescriptorReadyCount: renderFieldBufferVolumeDescriptorSummary.readyCount,
+        renderFieldBufferVolumeDescriptorBlockedCount: renderFieldBufferVolumeDescriptorSummary.blockedCount,
+        renderFieldBufferVolumeDescriptorNativeConsumerKind:
+          renderFieldBufferVolumeDescriptorSummary.nativeConsumerKind,
+        renderFieldBufferVolumeDescriptorNativeRequiredAdapter:
+          renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter,
+        renderFieldBufferVolumeDescriptors: renderFieldBufferVolumeDescriptorSummary.descriptors,
         sourceSurfaceVertexBackend: surfaceVerticesExecution.backend,
         surfaceDrawBackend: surfaceDrawExecution.backend,
         surfaceCount: surfaceDrawExecution.surfaceCount,
@@ -12824,6 +12916,27 @@ export function createSphPhaseScene(container, {
             nextResidentSurfaceDraw.renderFieldRowsBufferByteLength = renderFieldExecution.fieldRowByteLength ?? 0;
             nextResidentSurfaceDraw.renderFieldSurfaceBufferRetained = true;
             nextResidentSurfaceDraw.renderFieldSurfaceBufferByteLength = renderFieldExecution.surfaceBufferByteLength ?? 0;
+            const renderFieldBufferVolumeDescriptorSummary = createRenderFieldBufferVolumeDescriptorSummary({
+              device: resolvedDeviceResult.device,
+              renderFieldExecution
+            });
+            scene.userData.sphRenderFieldBufferVolumeDescriptorSummary = renderFieldBufferVolumeDescriptorSummary;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorSchema =
+              renderFieldBufferVolumeDescriptorSummary.schema;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorStatus =
+              renderFieldBufferVolumeDescriptorSummary.status;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorCount =
+              renderFieldBufferVolumeDescriptorSummary.descriptorCount;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorReadyCount =
+              renderFieldBufferVolumeDescriptorSummary.readyCount;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorBlockedCount =
+              renderFieldBufferVolumeDescriptorSummary.blockedCount;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorNativeConsumerKind =
+              renderFieldBufferVolumeDescriptorSummary.nativeConsumerKind;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptorNativeRequiredAdapter =
+              renderFieldBufferVolumeDescriptorSummary.nativeRequiredAdapter;
+            nextResidentSurfaceDraw.renderFieldBufferVolumeDescriptors =
+              renderFieldBufferVolumeDescriptorSummary.descriptors;
             nextResidentSurfaceDraw.visibleRendererBridge = SPH_RESIDENT_SURFACE_BUFFER_HANDOFF_MODE;
             nextResidentSurfaceDraw.visibleRenderSource = 'resident-render-field-buffers';
             nextResidentSurfaceDraw.surfaceDrawReadback = false;
@@ -13244,6 +13357,22 @@ export function createSphPhaseScene(container, {
 	        ),
 	        surfaceDrawRenderFieldSurfaceBufferByteLength:
 	          sphResidentSurfaceDraw?.renderFieldSurfaceBufferByteLength ?? 0,
+        surfaceDrawRenderFieldBufferVolumeDescriptorSchema:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorSchema ?? null,
+        surfaceDrawRenderFieldBufferVolumeDescriptorStatus:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorStatus ?? null,
+        surfaceDrawRenderFieldBufferVolumeDescriptorCount:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorCount ?? 0,
+        surfaceDrawRenderFieldBufferVolumeDescriptorReadyCount:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorReadyCount ?? 0,
+        surfaceDrawRenderFieldBufferVolumeDescriptorBlockedCount:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorBlockedCount ?? 0,
+        surfaceDrawRenderFieldBufferVolumeDescriptorNativeConsumerKind:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorNativeConsumerKind ?? null,
+        surfaceDrawRenderFieldBufferVolumeDescriptorNativeRequiredAdapter:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptorNativeRequiredAdapter ?? null,
+        surfaceDrawRenderFieldBufferVolumeDescriptors:
+          sphResidentSurfaceDraw?.renderFieldBufferVolumeDescriptors || [],
 	        surfaceDrawOverlayPolicyStatus: sphResidentSurfaceDraw?.overlayPolicyStatus
           ?? surfaceOverlayPolicy.status
           ?? null,
